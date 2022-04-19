@@ -1,5 +1,5 @@
 [package]
-name = "GrepTimeDB"
+name = "greptime"
 version = "0.1.0"
 edition = "2021"
 
