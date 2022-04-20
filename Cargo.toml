@@ -1,4 +1,10 @@
 [workspace]
 members = [
-    "src/common"
+    "src/common",
+    "src/datanode",
+    "src/datatypes",
+    "src/log-store",
+    "src/object-store",
+    "src/query",
+    "src/table",
 ]

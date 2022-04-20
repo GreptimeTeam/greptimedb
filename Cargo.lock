@@ -5,3 +5,27 @@ version = 3
 [[package]]
 name = "common"
 version = "0.1.0"
+
+[[package]]
+name = "datanode"
+version = "0.1.0"
+
+[[package]]
+name = "datatypes"
+version = "0.1.0"
+
+[[package]]
+name = "log-store"
+version = "0.1.0"
+
+[[package]]
+name = "object-store"
+version = "0.1.0"
+
+[[package]]
+name = "query"
+version = "0.1.0"
+
+[[package]]
+name = "table"
+version = "0.1.0"
