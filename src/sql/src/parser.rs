@@ -8,13 +8,15 @@ use crate::statements::component_show_kind::ShowKind;
 use crate::statements::statement_show_database::SqlShowDatabase;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
-pub(crate) struct GtParserContext<'a> {
+#[allow(dead_code)]
+pub struct GtParserContext<'a> {
     pub(crate) parser: Parser<'a>,
     pub(crate) sql: &'a str,
 }
 
 impl<'a> GtParserContext<'a> {
     /// Parses SQL with given dialect
+    #[allow(dead_code)]
     pub fn create_with_dialect(
         sql: &'a str,
         dialect: &dyn Dialect,
@@ -174,13 +176,86 @@ mod test {
     }
 
     #[test]
-    pub fn test_show_database() {
+    pub fn test_show_database_all() {
+        use std::assert_matches::assert_matches;
+
         use sqlparser::dialect::GenericDialect;
 
         use crate::parser::GtParserContext;
-
+        use crate::parser::GtStatement;
+        use crate::parser::ShowKind;
+        use crate::statements::statement_show_database::SqlShowDatabase;
         let sql = "SHOW DATABASES";
         let result = GtParserContext::create_with_dialect(sql, &GenericDialect {});
         println!("{:?}", result);
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        println!("{:?}", stmts[0]);
+
+        assert_matches!(
+            &stmts[0],
+            GtStatement::ShowDatabases(SqlShowDatabase {
+                kind: ShowKind::All
+            })
+        );
+    }
+
+    #[test]
+    pub fn test_show_database_like() {
+        use std::assert_matches::assert_matches;
+
+        use sqlparser::dialect::GenericDialect;
+
+        use crate::parser::GtParserContext;
+        use crate::parser::GtStatement;
+        use crate::parser::ShowKind;
+        use crate::statements::statement_show_database::SqlShowDatabase;
+
+        let sql = "SHOW DATABASES LIKE test_database";
+        let result = GtParserContext::create_with_dialect(sql, &GenericDialect {});
+        println!("{:?}", result);
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        println!("{:?}", stmts[0]);
+
+        assert_matches!(
+            &stmts[0],
+            GtStatement::ShowDatabases(SqlShowDatabase {
+                kind: ShowKind::Like(sqlparser::ast::Ident {
+                    value: _,
+                    quote_style: None,
+                })
+            })
+        );
+    }
+
+    #[test]
+    pub fn test_show_database_where() {
+        use std::assert_matches::assert_matches;
+
+        use sqlparser::dialect::GenericDialect;
+
+        use crate::parser::GtParserContext;
+        use crate::parser::GtStatement;
+        use crate::parser::ShowKind;
+        use crate::statements::statement_show_database::SqlShowDatabase;
+
+        let sql = "SHOW DATABASES WHERE Database LIKE '%whatever1%' OR Database LIKE '%whatever2%'";
+        let result = GtParserContext::create_with_dialect(sql, &GenericDialect {});
+        println!("{:?}", result);
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        println!("{:?}", stmts[0]);
+
+        assert_matches!(
+            &stmts[0],
+            GtStatement::ShowDatabases(SqlShowDatabase {
+                kind: ShowKind::Where(sqlparser::ast::Expr::BinaryOp {
+                    left: _,
+                    right: _,
+                    op: sqlparser::ast::BinaryOperator::Or,
+                })
+            })
+        );
     }
 }

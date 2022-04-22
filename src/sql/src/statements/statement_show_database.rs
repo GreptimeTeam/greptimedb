@@ -2,6 +2,7 @@ use crate::statements::component_show_kind::ShowKind;
 
 /// SQL structure for `SHOW DATABASES`.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub struct SqlShowDatabase {
     pub kind: ShowKind,
 }
