@@ -1,4 +1,4 @@
-mod executor;
-mod logical_optimizer;
-mod physical_optimizer;
-mod physical_planner;
+pub mod executor;
+pub mod logical_optimizer;
+pub mod physical_optimizer;
+pub mod physical_planner;
