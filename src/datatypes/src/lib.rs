@@ -1,1 +1,1 @@
-mod schema;
+pub mod schema;

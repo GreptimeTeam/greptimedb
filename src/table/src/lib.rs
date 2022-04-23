@@ -1,5 +1,4 @@
 mod engine;
+mod table;
 
-/// Table abstraction.
-#[async_trait::async_trait]
-pub trait Table: Send + Sync {}
+pub use table::Table;

@@ -6,3 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+datafusion = { git = "ssh://git@github.com/GrepTimeTeam/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
+tokio = "1.0"
+async-trait = "0.1"
+snafu = "0.7.0"
