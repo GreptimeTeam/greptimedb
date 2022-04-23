@@ -9,3 +9,4 @@ edition = "2021"
 arrow2 = "0.10"
 common-base = { path = "../common/base" }
 paste = "1.0"
+serde = "1.0.136"
