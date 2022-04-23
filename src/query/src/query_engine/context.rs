@@ -1,8 +1,3 @@
 /// Query engine execution context
+#[derive(Default, Debug)]
 pub struct QueryContext;
-
-impl QueryContext {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
