@@ -4,7 +4,7 @@ use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 
 /// Data type abstraction.
-pub trait DataType: std::fmt::Debug {
+pub trait DataType: std::fmt::Debug + Send + Sync {
     /// Name of this data type.
     fn name(&self) -> &str;
 

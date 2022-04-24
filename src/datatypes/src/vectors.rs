@@ -1,3 +1,4 @@
+pub mod binary;
 pub mod primitive;
 
 use std::any::Any;
@@ -8,6 +9,8 @@ use crate::data_type::DataTypeRef;
 /// Vector of data values.
 pub trait Vector: Send + Sync {
     /// Returns the data type of the vector.
+    ///
+    /// This may require heap allocation.
     fn data_type(&self) -> DataTypeRef;
 
     /// Returns the vector as [Any](std::any::Any) so that it can be

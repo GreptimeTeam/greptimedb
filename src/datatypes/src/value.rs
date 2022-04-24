@@ -1,4 +1,4 @@
-use common::{Bytes, StringBytes};
+use common::bytes::{Bytes, StringBytes};
 
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
 #[derive(Debug)]
@@ -57,3 +57,5 @@ impl_from!(Int32, i32);
 impl_from!(Int64, i64);
 impl_from!(Float32, f32);
 impl_from!(Float64, f64);
+impl_from!(String, StringBytes);
+impl_from!(Binary, Bytes);
