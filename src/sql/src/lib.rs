@@ -2,9 +2,10 @@
 
 extern crate core;
 
-mod ast;
-mod dialect;
-mod errors;
+pub mod ast;
+pub mod dialect;
+pub mod errors;
 pub mod parser;
-mod planner;
-mod statements;
+pub mod parsers;
+pub mod planner;
+pub mod statements;

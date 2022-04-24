@@ -1,3 +1,4 @@
+use crate::statements::statement_query::SqlQuery;
 use crate::statements::statement_show_database::SqlShowDatabase;
 
 /// Tokens parsed by `DFParser` are converted into these values.
@@ -5,6 +6,9 @@ use crate::statements::statement_show_database::SqlShowDatabase;
 pub enum Statement {
     // Databases.
     ShowDatabases(SqlShowDatabase),
+
+    // Query
+    Query(Box<SqlQuery>),
 }
 
 /// Comment hints from SQL.
