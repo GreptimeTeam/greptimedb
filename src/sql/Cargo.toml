@@ -7,5 +7,5 @@ edition = "2021"
 
 [dependencies]
 query = { path = "../query" }
-sqlparser = "0.16.0"
 snafu = "0.7.0"
+sqlparser = "0.16.0"
