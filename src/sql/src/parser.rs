@@ -162,7 +162,8 @@ impl<'a> ParserContext<'a> {
     }
 }
 
-mod test {
+#[cfg(test)]
+mod tests {
     #[test]
     pub fn test_show_database_all() {
         use std::assert_matches::assert_matches;
