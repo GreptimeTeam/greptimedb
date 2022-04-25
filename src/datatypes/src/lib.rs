@@ -2,7 +2,7 @@
 
 mod data_type;
 pub mod prelude;
-mod scalar;
+mod scalars;
 mod schema;
 pub mod type_id;
 mod types;

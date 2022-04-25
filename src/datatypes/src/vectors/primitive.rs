@@ -7,7 +7,7 @@ use arrow2::array::{MutablePrimitiveArray, PrimitiveArray};
 use arrow2::bitmap::utils::ZipValidity;
 
 use crate::data_type::DataTypeRef;
-use crate::scalar::{ScalarVector, ScalarVectorBuilder};
+use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::types::primitive_traits::Primitive;
 use crate::types::primitive_type::DataTypeBuilder;
 use crate::vectors::Vector;
