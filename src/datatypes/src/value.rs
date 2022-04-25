@@ -1,4 +1,4 @@
-use common::bytes::{Bytes, StringBytes};
+use base::bytes::{Bytes, StringBytes};
 
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
 #[derive(Debug)]

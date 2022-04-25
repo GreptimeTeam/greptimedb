@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use arrow2::datatypes::DataType as ArrowDataType;
-use common::bytes::StringBytes;
+use base::bytes::StringBytes;
 
 use crate::data_type::{DataType, DataTypeRef};
 use crate::type_id::LogicalTypeId;
