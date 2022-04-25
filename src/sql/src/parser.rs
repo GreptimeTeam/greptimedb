@@ -164,16 +164,14 @@ impl<'a> ParserContext<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
+    use sqlparser::dialect::GenericDialect;
+
+    use super::*;
+
     #[test]
     pub fn test_show_database_all() {
-        use std::assert_matches::assert_matches;
-
-        use sqlparser::dialect::GenericDialect;
-
-        use crate::parser::ParserContext;
-        use crate::parser::ShowKind;
-        use crate::parser::Statement;
-        use crate::statements::statement_show_database::SqlShowDatabase;
         let sql = "SHOW DATABASES";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
         let stmts = result.unwrap();
@@ -189,15 +187,6 @@ mod tests {
 
     #[test]
     pub fn test_show_database_like() {
-        use std::assert_matches::assert_matches;
-
-        use sqlparser::dialect::GenericDialect;
-
-        use crate::parser::ParserContext;
-        use crate::parser::ShowKind;
-        use crate::parser::Statement;
-        use crate::statements::statement_show_database::SqlShowDatabase;
-
         let sql = "SHOW DATABASES LIKE test_database";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
         let stmts = result.unwrap();
@@ -216,15 +205,6 @@ mod tests {
 
     #[test]
     pub fn test_show_database_where() {
-        use std::assert_matches::assert_matches;
-
-        use sqlparser::dialect::GenericDialect;
-
-        use crate::parser::ParserContext;
-        use crate::parser::ShowKind;
-        use crate::parser::Statement;
-        use crate::statements::statement_show_database::SqlShowDatabase;
-
         let sql = "SHOW DATABASES WHERE Database LIKE '%whatever1%' OR Database LIKE '%whatever2%'";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
         let stmts = result.unwrap();
