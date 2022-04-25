@@ -2,14 +2,12 @@ use std::any::Any;
 use std::slice::Iter;
 use std::sync::Arc;
 
-use arrow2::array::ArrayRef;
-use arrow2::array::{MutablePrimitiveArray, PrimitiveArray};
+use arrow2::array::{ArrayRef, MutablePrimitiveArray, PrimitiveArray};
 use arrow2::bitmap::utils::ZipValidity;
 
 use crate::data_type::DataTypeRef;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
-use crate::types::primitive_traits::Primitive;
-use crate::types::primitive_type::DataTypeBuilder;
+use crate::types::{DataTypeBuilder, Primitive};
 use crate::vectors::Vector;
 
 /// Vector for primitive data types.

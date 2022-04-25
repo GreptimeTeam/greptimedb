@@ -5,6 +5,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow2::array::ArrayRef;
+pub use binary::*;
+pub use primitive::*;
 
 use crate::data_type::DataTypeRef;
 

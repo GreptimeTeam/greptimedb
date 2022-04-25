@@ -7,7 +7,7 @@ use arrow2::bitmap::utils::ZipValidity;
 
 use crate::data_type::DataTypeRef;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
-use crate::types::binary_type::BinaryType;
+use crate::types::BinaryType;
 use crate::vectors::Vector;
 use crate::{LargeBinaryArray, MutableLargeBinaryArray};
 
