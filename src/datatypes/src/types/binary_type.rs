@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use arrow2::datatypes::DataType as ArrowDataType;
 use common::bytes::StringBytes;
 
 use crate::data_type::{DataType, DataTypeRef};
@@ -26,5 +27,9 @@ impl DataType for BinaryType {
 
     fn default_value(&self) -> Value {
         StringBytes::default().into()
+    }
+
+    fn as_arrow_type(&self) -> ArrowDataType {
+        ArrowDataType::LargeBinary
     }
 }

@@ -1,5 +1,7 @@
 use std::any::Any;
+use std::sync::Arc;
 
+use arrow2::array::ArrayRef;
 use arrow2::array::BinaryValueIter;
 use arrow2::bitmap::utils::ZipValidity;
 
@@ -26,6 +28,10 @@ impl Vector for BinaryVector {
 
     fn len(&self) -> usize {
         self.array.len()
+    }
+
+    fn to_arrow_array(&self) -> ArrayRef {
+        Arc::new(self.array.clone())
     }
 }
 

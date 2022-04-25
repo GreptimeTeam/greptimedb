@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use arrow2::datatypes::DataType as ArrowDataType;
+
 use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 
@@ -13,6 +15,9 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
 
     /// Returns the default value of this type.
     fn default_value(&self) -> Value;
+
+    /// Convert this type as [arrow2::datatypes::DataType].
+    fn as_arrow_type(&self) -> ArrowDataType;
 }
 
 pub type DataTypeRef = Arc<dyn DataType>;

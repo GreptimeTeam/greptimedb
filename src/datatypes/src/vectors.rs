@@ -4,6 +4,8 @@ pub mod primitive;
 use std::any::Any;
 use std::sync::Arc;
 
+use arrow2::array::ArrayRef;
+
 use crate::data_type::DataTypeRef;
 
 /// Vector of data values.
@@ -24,6 +26,9 @@ pub trait Vector: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Convert this vector to a new arrow [ArrayRef].
+    fn to_arrow_array(&self) -> ArrayRef;
 }
 
 pub type VectorRef = Arc<dyn Vector>;
