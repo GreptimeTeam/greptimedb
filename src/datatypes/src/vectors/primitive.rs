@@ -9,7 +9,7 @@ use arrow2::bitmap::utils::ZipValidity;
 use crate::data_type::DataTypeRef;
 use crate::scalar::{ScalarVector, ScalarVectorBuilder};
 use crate::types::primitive_traits::Primitive;
-use crate::types::primitive_type::CreateDataType;
+use crate::types::primitive_type::DataTypeBuilder;
 use crate::vectors::Vector;
 
 /// Vector for primitive data types.
@@ -23,9 +23,9 @@ impl<T: Primitive> PrimitiveVector<T> {
     }
 }
 
-impl<T: Primitive + CreateDataType> Vector for PrimitiveVector<T> {
+impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
     fn data_type(&self) -> DataTypeRef {
-        T::create_data_type()
+        T::build_data_type()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -41,7 +41,7 @@ impl<T: Primitive + CreateDataType> Vector for PrimitiveVector<T> {
     }
 }
 
-impl<T: Primitive + CreateDataType> ScalarVector for PrimitiveVector<T> {
+impl<T: Primitive + DataTypeBuilder> ScalarVector for PrimitiveVector<T> {
     type RefItem<'a> = T;
     type Iter<'a> = PrimitiveIter<'a, T>;
     type Builder = PrimitiveVectorBuilder<T>;
@@ -90,7 +90,7 @@ pub struct PrimitiveVectorBuilder<T: Primitive> {
     mutable_array: MutablePrimitiveArray<T>,
 }
 
-impl<T: Primitive + CreateDataType> ScalarVectorBuilder for PrimitiveVectorBuilder<T> {
+impl<T: Primitive + DataTypeBuilder> ScalarVectorBuilder for PrimitiveVectorBuilder<T> {
     type VectorType = PrimitiveVector<T>;
 
     fn with_capacity(capacity: usize) -> Self {

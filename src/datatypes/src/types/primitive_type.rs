@@ -21,15 +21,15 @@ impl<T: Primitive> PrimitiveType<T> {
 }
 
 /// Create a new [DataTypeRef] from a primitive type.
-pub trait CreateDataType {
-    fn create_data_type() -> DataTypeRef;
+pub trait DataTypeBuilder {
+    fn build_data_type() -> DataTypeRef;
 }
 
-macro_rules! impl_create_data_type {
+macro_rules! impl_build_data_type {
     ($Type:ident) => {
         paste::paste! {
-            impl CreateDataType for $Type {
-                fn create_data_type() -> DataTypeRef {
+            impl DataTypeBuilder for $Type {
+                fn build_data_type() -> DataTypeRef {
                     Arc::new(PrimitiveType::<$Type>::new())
                 }
             }
@@ -63,7 +63,7 @@ macro_rules! impl_numeric {
             }
         }
 
-        impl_create_data_type!($Type);
+        impl_build_data_type!($Type);
     };
 }
 
