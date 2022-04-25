@@ -1,3 +1,4 @@
+use crate::catalog::CatalogList;
 use crate::error::Result;
 use crate::plan::LogicalPlan;
 use std::sync::Arc;
@@ -18,10 +19,10 @@ pub struct QueryEngineFactory {
     query_engine: Arc<dyn QueryEngine>,
 }
 
-impl Default for QueryEngineFactory {
-    fn default() -> Self {
+impl QueryEngineFactory {
+    pub fn new(catalog_list: Arc<dyn CatalogList>) -> Self {
         Self {
-            query_engine: Arc::new(DatafusionQueryEngine::new()),
+            query_engine: Arc::new(DatafusionQueryEngine::new(catalog_list)),
         }
     }
 }

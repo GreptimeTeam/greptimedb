@@ -1,18 +1,15 @@
 [package]
-name = "table"
+name = "common-recordbatch"
 version = "0.1.0"
+license = "Apache-2.0"
+publish = false
 edition = "2021"
 
 [dependencies]
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
-common-query = {path = "../common/query" }
-common-recordbatch = {path = "../common/recordbatch" }
+futures = "0.3"
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
-datatypes = { path = "../datatypes" }
-futures = "0.3"
-serde = "1.0.136"
+datatypes = {path ="../../datatypes" }
 snafu = "0.7.0"
 
 [dependencies.arrow]

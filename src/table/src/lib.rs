@@ -1,4 +1,5 @@
 mod engine;
-mod table;
+pub mod error;
+pub mod table;
 
 pub use table::Table;

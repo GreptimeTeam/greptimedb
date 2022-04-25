@@ -1,6 +1,7 @@
 use crate::error::Result;
-use crate::plan::{ExecutionPlan, LogicalPlan};
+use crate::plan::{LogicalPlan, PhysicalPlan};
 use crate::query_engine::QueryContext;
+use std::sync::Arc;
 
 /// Physical query planner that converts a `LogicalPlan` to an
 /// `ExecutionPlan` suitable for execution.
@@ -11,5 +12,5 @@ pub trait PhysicalPlanner {
         &self,
         ctx: &mut QueryContext,
         logical_plan: &LogicalPlan,
-    ) -> Result<ExecutionPlan>;
+    ) -> Result<Arc<dyn PhysicalPlan>>;
 }

@@ -1,9 +1,10 @@
-use crate::{error::Result, plan::ExecutionPlan, query_engine::QueryContext};
+use crate::{error::Result, plan::PhysicalPlan, query_engine::QueryContext};
+use std::sync::Arc;
 
 pub trait PhysicalOptimizer {
     fn optimize_physical_plan(
         &self,
         ctx: &mut QueryContext,
-        plan: ExecutionPlan,
-    ) -> Result<ExecutionPlan>;
+        plan: Arc<dyn PhysicalPlan>,
+    ) -> Result<Arc<dyn PhysicalPlan>>;
 }

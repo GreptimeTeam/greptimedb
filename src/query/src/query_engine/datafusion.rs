@@ -1,24 +1,27 @@
+use self::plan::DfPhysicalPlan;
+use super::{context::QueryContext, state::QueryEngineState};
 use crate::{
+    catalog::CatalogList,
     error::{self, Result},
     executor::QueryExecutor,
     logical_optimizer::LogicalOptimizer,
     physical_optimizer::PhysicalOptimizer,
     physical_planner::PhysicalPlanner,
-    plan::{ExecutionPlan, LogicalPlan},
+    plan::{LogicalPlan, PhysicalPlan},
     query_engine::QueryEngine,
 };
-use snafu::prelude::*;
-
-use super::{context::QueryContext, state::QueryEngineState};
+use snafu::{OptionExt, ResultExt};
+use std::sync::Arc;
+mod plan;
 
 pub(crate) struct DatafusionQueryEngine {
     state: QueryEngineState,
 }
 
 impl DatafusionQueryEngine {
-    pub fn new() -> Self {
+    pub fn new(catalog_list: Arc<dyn CatalogList>) -> Self {
         Self {
-            state: QueryEngineState::new(),
+            state: QueryEngineState::new(catalog_list),
         }
     }
 }
@@ -64,7 +67,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         &self,
         _ctx: &mut QueryContext,
         logical_plan: &LogicalPlan,
-    ) -> Result<ExecutionPlan> {
+    ) -> Result<Arc<dyn PhysicalPlan>> {
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let physical_plan = self
@@ -74,7 +77,10 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                     .await
                     .context(error::DatafusionSnafu)?;
 
-                Ok(ExecutionPlan::DfPlan(physical_plan))
+                Ok(Arc::new(DfPhysicalPlan::new(
+                    Arc::new(physical_plan.schema().into()),
+                    physical_plan,
+                )))
             }
         }
     }
@@ -84,28 +90,34 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
     fn optimize_physical_plan(
         &self,
         _ctx: &mut QueryContext,
-        plan: ExecutionPlan,
-    ) -> Result<ExecutionPlan> {
+        plan: Arc<dyn PhysicalPlan>,
+    ) -> Result<Arc<dyn PhysicalPlan>> {
         let config = &self.state.df_context().state.lock().config;
         let optimizers = &config.physical_optimizers;
 
-        match plan {
-            ExecutionPlan::DfPlan(plan) => {
-                let mut new_plan = plan;
-                for optimizer in optimizers {
-                    new_plan = optimizer
-                        .optimize(new_plan, config)
-                        .context(error::DatafusionSnafu)?;
-                }
-                Ok(ExecutionPlan::DfPlan(new_plan))
-            }
+        let mut new_plan = plan
+            .as_any()
+            .downcast_ref::<DfPhysicalPlan>()
+            .context(error::PhysicalPlanDowncastSnafu)?
+            .df_plan()
+            .clone();
+
+        for optimizer in optimizers {
+            new_plan = optimizer
+                .optimize(new_plan, config)
+                .context(error::DatafusionSnafu)?;
         }
+        Ok(Arc::new(DfPhysicalPlan::new(plan.schema(), new_plan)))
     }
 }
 
 #[async_trait::async_trait]
 impl QueryExecutor for DatafusionQueryEngine {
-    async fn execute_stream(&self, _ctx: &QueryContext, _plan: &ExecutionPlan) -> Result<()> {
+    async fn execute_stream(
+        &self,
+        _ctx: &QueryContext,
+        _plan: &Arc<dyn PhysicalPlan>,
+    ) -> Result<()> {
         let _runtime = self.state.df_context().runtime_env();
         Ok(())
     }

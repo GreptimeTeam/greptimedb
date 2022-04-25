@@ -3,9 +3,18 @@ use snafu::Snafu;
 
 /// business error of query engine
 #[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Datafusion query engine error: {}", source), visibility(pub))]
+    #[snafu(display("Datafusion query engine error: {}", source))]
     Datafusion { source: DataFusionError },
+    #[snafu(display("PhysicalPlan downcast_ref failed"))]
+    PhysicalPlanDowncast,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Into<DataFusionError> for Error {
+    fn into(self) -> DataFusionError {
+        DataFusionError::External(Box::new(self))
+    }
+}
