@@ -8,7 +8,7 @@ pub struct SqlShowDatabase {
 
 impl SqlShowDatabase {
     /// Creates a statement for `SHOW DATABASES`
-    pub fn create(kind: ShowKind) -> Self {
+    pub fn new(kind: ShowKind) -> Self {
         SqlShowDatabase { kind }
     }
 }

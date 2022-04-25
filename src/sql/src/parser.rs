@@ -42,7 +42,7 @@ impl<'a> ParserContext<'a> {
                 break;
             }
             if expecting_statement_delimiter {
-                return parser_ctx.unsupported(parser_ctx.parser.peek_token().to_string());
+                return parser_ctx.unsupported();
             }
 
             let statement = parser_ctx.parse_statement()?;
@@ -78,19 +78,18 @@ impl<'a> ParserContext<'a> {
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
 
                     // todo(hl) support more statements.
-                    _ => self.unsupported(self.parser.peek_token().to_string()),
+                    _ => self.unsupported(),
                 }
             }
             Token::LParen => self.parse_query(),
-            unsupported => self.unsupported(unsupported.to_string()),
+            _ => self.unsupported(),
         }
     }
 
     /// Raises an "unsupported statement" error.
-    pub fn unsupported<T>(&self, token: String) -> Result<T, errors::ParserError> {
+    pub fn unsupported<T>(&self) -> Result<T, errors::ParserError> {
         Err(errors::ParserError::Unsupported {
             sql: self.sql.to_string(),
-            token,
         })
     }
 
@@ -100,7 +99,7 @@ impl<'a> ParserContext<'a> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             Ok(self.parse_show_databases()?)
         } else {
-            self.unsupported(self.parser.peek_token().to_string())
+            self.unsupported()
         }
     }
 
@@ -133,11 +132,11 @@ impl<'a> ParserContext<'a> {
     pub fn parse_show_databases(&mut self) -> Result<Statement, errors::ParserError> {
         let tok = self.parser.next_token();
         match &tok {
-            Token::EOF | Token::SemiColon => Ok(Statement::ShowDatabases(SqlShowDatabase::create(
+            Token::EOF | Token::SemiColon => Ok(Statement::ShowDatabases(SqlShowDatabase::new(
                 ShowKind::All,
             ))),
             Token::Word(w) => match w.keyword {
-                Keyword::LIKE => Ok(Statement::ShowDatabases(SqlShowDatabase::create(
+                Keyword::LIKE => Ok(Statement::ShowDatabases(SqlShowDatabase::new(
                     ShowKind::Like(
                         self.parser
                             .parse_identifier()
@@ -149,16 +148,16 @@ impl<'a> ParserContext<'a> {
                             .unwrap(),
                     ),
                 ))),
-                Keyword::WHERE => Ok(Statement::ShowDatabases(SqlShowDatabase::create(
+                Keyword::WHERE => Ok(Statement::ShowDatabases(SqlShowDatabase::new(
                     ShowKind::Where(self.parser.parse_expr().context(errors::UnexpectedSnafu {
                         sql: self.sql.to_string(),
                         expected: "some valid expression".to_string(),
                         actual: self.parser.peek_token().to_string(),
                     })?),
                 ))),
-                _ => self.unsupported(self.parser.peek_token().to_string()),
+                _ => self.unsupported(),
             },
-            unsupported => self.unsupported(unsupported.to_string()),
+            _ => self.unsupported(),
         }
     }
 }
