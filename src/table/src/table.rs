@@ -82,10 +82,7 @@ pub trait Table: Send + Sync {
         TableType::Base
     }
 
-    /// Create an ExecutionPlan that will scan the table.
-    /// The table provider will be usually responsible of grouping
-    /// the source data into partitions that can be efficiently
-    /// parallelized or distributed.
+    /// Scan the table and returns a SendableRecordBatchStream.
     async fn scan(
         &self,
         projection: &Option<Vec<usize>>,

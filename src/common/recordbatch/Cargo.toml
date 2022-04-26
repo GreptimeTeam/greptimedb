@@ -1,8 +1,6 @@
 [package]
 name = "common-recordbatch"
 version = "0.1.0"
-license = "Apache-2.0"
-publish = false
 edition = "2021"
 
 [dependencies.arrow]
@@ -11,8 +9,8 @@ version="0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute"]
 
 [dependencies]
-futures = "0.3"
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
 datatypes = {path ="../../datatypes" }
+futures = "0.3"
 snafu = "0.7.0"

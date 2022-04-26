@@ -46,9 +46,6 @@ impl Debug for ExecutionPlanAdapter {
     }
 }
 
-unsafe impl Send for ExecutionPlanAdapter {}
-unsafe impl Sync for ExecutionPlanAdapter {}
-
 #[async_trait::async_trait]
 impl ExecutionPlan for ExecutionPlanAdapter {
     fn as_any(&self) -> &dyn Any {
@@ -252,9 +249,6 @@ impl DfRecordBatchStream for DfRecordBatchStreamAdapter {
         self.stream.schema().arrow_schema().clone()
     }
 }
-
-unsafe impl Send for DfRecordBatchStreamAdapter {}
-unsafe impl Sync for DfRecordBatchStreamAdapter {}
 
 impl Stream for DfRecordBatchStreamAdapter {
     type Item = ArrowResult<DfRecordBatch>;

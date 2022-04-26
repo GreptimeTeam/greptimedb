@@ -8,15 +8,16 @@ use datafusion::catalog::{
 use datafusion::datasource::TableProvider as DfTableProvider;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
+use snafu::ResultExt;
 use table::{
     table::adapter::{DfTableProviderAdapter, TableAdapter},
     Table,
 };
 
-/// Query engine global state
 use crate::catalog::{schema::SchemaProvider, CatalogList, CatalogProvider};
-use crate::error::{Error as QueryError, Result};
+use crate::error::{self, Result};
 
+/// Query engine global state
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: ExecutionContext,
@@ -197,18 +198,24 @@ impl SchemaProvider for SchemaProviderAdapter {
         table: Arc<dyn Table>,
     ) -> Result<Option<Arc<dyn Table>>> {
         let table_provider = Arc::new(DfTableProviderAdapter::new(table));
-        match self.df_schema_provider.register_table(name, table_provider) {
-            Ok(Some(table)) => Ok(Some(Arc::new(TableAdapter::new(table)))),
-            Ok(None) => Ok(None),
-            Err(e) => Err(QueryError::Datafusion { source: e }),
+        match self
+            .df_schema_provider
+            .register_table(name, table_provider)
+            .context(error::DatafusionSnafu)?
+        {
+            Some(table) => Ok(Some(Arc::new(TableAdapter::new(table)))),
+            None => Ok(None),
         }
     }
 
     fn deregister_table(&self, name: &str) -> Result<Option<Arc<dyn Table>>> {
-        match self.df_schema_provider.deregister_table(name) {
-            Ok(Some(table)) => Ok(Some(Arc::new(TableAdapter::new(table)))),
-            Ok(None) => Ok(None),
-            Err(e) => Err(QueryError::Datafusion { source: e }),
+        match self
+            .df_schema_provider
+            .deregister_table(name)
+            .context(error::DatafusionSnafu)?
+        {
+            Some(table) => Ok(Some(Arc::new(TableAdapter::new(table)))),
+            None => Ok(None),
         }
     }
 
