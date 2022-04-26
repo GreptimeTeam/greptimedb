@@ -56,8 +56,8 @@ async fn test_datafusion_query_engine() -> Result<()> {
 }
 
 pub async fn collect(stream: SendableRecordBatchStream) -> Result<Vec<RecordBatch>> {
-    Ok(stream
+    stream
         .try_collect::<Vec<_>>()
         .await
-        .context(RecordBatchSnafu)?)
+        .context(RecordBatchSnafu)
 }
