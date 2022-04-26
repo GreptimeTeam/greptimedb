@@ -15,7 +15,7 @@ use snafu::ResultExt;
 use std::any::Any;
 use std::fmt::{self, Debug};
 use std::sync::Arc;
-use table::table::datafusion::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
+use table::table::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
 
 /// Datafusion ExecutionPlan -> greptime PhysicalPlan
 pub struct PhysicalPlanAdapter {

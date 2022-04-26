@@ -11,7 +11,7 @@ use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 use std::any::Any;
 use std::sync::Arc;
 use table::{
-    table::datafusion::{DfTableProviderAdapter, TableAdapter},
+    table::adapter::{DfTableProviderAdapter, TableAdapter},
     Table,
 };
 

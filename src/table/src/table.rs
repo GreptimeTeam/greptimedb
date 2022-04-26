@@ -8,7 +8,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub mod datafusion;
+pub mod adapter;
 pub mod memory;
 
 pub type TableId = u64;
