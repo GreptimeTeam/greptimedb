@@ -11,6 +11,6 @@ common-recordbatch = {path = "../common/recordbatch" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
 datatypes = {path = "../datatypes" }
 futures = "0.3"
+snafu = "0.7.0"
 table = { path = "../table" }
 tokio = "1.0"
-snafu = "0.7.0"

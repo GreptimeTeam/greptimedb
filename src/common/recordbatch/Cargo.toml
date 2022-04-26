@@ -5,14 +5,14 @@ license = "Apache-2.0"
 publish = false
 edition = "2021"
 
+[dependencies.arrow]
+package = "arrow2"
+version="0.10"
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute"]
+
 [dependencies]
 futures = "0.3"
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
 datatypes = {path ="../../datatypes" }
 snafu = "0.7.0"
-
-[dependencies.arrow]
-package = "arrow2"
-version="0.10"
-features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute"]

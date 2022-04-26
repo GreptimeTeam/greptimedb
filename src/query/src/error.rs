@@ -13,8 +13,8 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl Into<DataFusionError> for Error {
-    fn into(self) -> DataFusionError {
-        DataFusionError::External(Box::new(self))
+impl From<Error> for DataFusionError {
+    fn from(e: Error) -> DataFusionError {
+        DataFusionError::External(Box::new(e))
     }
 }

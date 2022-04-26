@@ -295,11 +295,10 @@ impl Stream for RecordBatchStreamAdapter {
     type Item = RecordBatchResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let schema = self.schema();
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(df_recordbatch)) => Poll::Ready(Some(Ok(RecordBatch {
-                schema: schema.clone(),
+                schema: self.schema(),
                 df_recordbatch: df_recordbatch.context(recordbatch_error::ArrowSnafu)?,
             }))),
             Poll::Ready(None) => Poll::Ready(None),
