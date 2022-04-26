@@ -6,6 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-base = { path = "../common/base" }
 arrow2 = "0.10"
+common-base = { path = "../common/base" }
 paste = "1.0"
