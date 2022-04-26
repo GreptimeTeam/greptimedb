@@ -1,7 +1,6 @@
 use std::any::Any;
-use std::sync::Arc;
 
-use table::Table;
+use table::TableRef;
 
 use crate::error::Result;
 
@@ -15,23 +14,17 @@ pub trait SchemaProvider: Sync + Send {
     fn table_names(&self) -> Vec<String>;
 
     /// Retrieves a specific table from the schema by name, provided it exists.
-    fn table(&self, name: &str) -> Option<Arc<dyn Table>>;
+    fn table(&self, name: &str) -> Option<TableRef>;
 
     /// If supported by the implementation, adds a new table to this schema.
     /// If a table of the same name existed before, it returns "Table already exists" error.
-    #[allow(unused_variables)]
-    fn register_table(
-        &self,
-        name: String,
-        table: Arc<dyn Table>,
-    ) -> Result<Option<Arc<dyn Table>>> {
+    fn register_table(&self, _name: String, _table: TableRef) -> Result<Option<TableRef>> {
         todo!();
     }
 
     /// If supported by the implementation, removes an existing table from this schema and returns it.
     /// If no table of that name exists, returns Ok(None).
-    #[allow(unused_variables)]
-    fn deregister_table(&self, name: &str) -> Result<Option<Arc<dyn Table>>> {
+    fn deregister_table(&self, _name: &str) -> Result<Option<TableRef>> {
         todo!();
     }
 

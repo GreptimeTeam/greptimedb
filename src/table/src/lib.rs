@@ -2,4 +2,4 @@ mod engine;
 pub mod error;
 pub mod table;
 
-pub use crate::table::Table;
+pub use crate::table::{Table, TableRef};

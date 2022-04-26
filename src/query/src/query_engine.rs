@@ -9,7 +9,7 @@ mod datafusion;
 mod state;
 pub use context::QueryContext;
 
-use self::datafusion::DatafusionQueryEngine;
+use crate::query_engine::datafusion::DatafusionQueryEngine;
 
 #[async_trait::async_trait]
 pub trait QueryEngine {

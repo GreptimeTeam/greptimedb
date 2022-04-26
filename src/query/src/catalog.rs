@@ -2,7 +2,7 @@ pub mod schema;
 use std::any::Any;
 use std::sync::Arc;
 
-use self::schema::SchemaProvider;
+use crate::catalog::schema::SchemaProvider;
 
 /// Represent a list of named catalogs
 pub trait CatalogList: Sync + Send {

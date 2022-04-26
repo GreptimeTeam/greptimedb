@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use snafu::{OptionExt, ResultExt};
 
-use self::adapter::PhysicalPlanAdapter;
 use super::{context::QueryContext, state::QueryEngineState};
 use crate::{
     catalog::CatalogList,
@@ -12,6 +11,7 @@ use crate::{
     physical_optimizer::PhysicalOptimizer,
     physical_planner::PhysicalPlanner,
     plan::{LogicalPlan, PhysicalPlan},
+    query_engine::datafusion::adapter::PhysicalPlanAdapter,
     query_engine::QueryEngine,
 };
 mod adapter;
