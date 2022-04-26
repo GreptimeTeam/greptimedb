@@ -1,4 +1,4 @@
-use self::plan::DfPhysicalPlan;
+use self::adapter::PhysicalPlanAdapter;
 use super::{context::QueryContext, state::QueryEngineState};
 use crate::{
     catalog::CatalogList,
@@ -12,7 +12,7 @@ use crate::{
 };
 use snafu::{OptionExt, ResultExt};
 use std::sync::Arc;
-mod plan;
+mod adapter;
 
 pub(crate) struct DatafusionQueryEngine {
     state: QueryEngineState,
@@ -77,7 +77,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                     .await
                     .context(error::DatafusionSnafu)?;
 
-                Ok(Arc::new(DfPhysicalPlan::new(
+                Ok(Arc::new(PhysicalPlanAdapter::new(
                     Arc::new(physical_plan.schema().into()),
                     physical_plan,
                 )))
@@ -97,7 +97,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
 
         let mut new_plan = plan
             .as_any()
-            .downcast_ref::<DfPhysicalPlan>()
+            .downcast_ref::<PhysicalPlanAdapter>()
             .context(error::PhysicalPlanDowncastSnafu)?
             .df_plan()
             .clone();
@@ -107,7 +107,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
                 .optimize(new_plan, config)
                 .context(error::DatafusionSnafu)?;
         }
-        Ok(Arc::new(DfPhysicalPlan::new(plan.schema(), new_plan)))
+        Ok(Arc::new(PhysicalPlanAdapter::new(plan.schema(), new_plan)))
     }
 }
 

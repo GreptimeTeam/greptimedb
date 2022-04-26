@@ -1,10 +1,9 @@
 use crate::error::Result;
-use common_recordbatch::RecordBatch;
+use common_recordbatch::SendableRecordBatchStream;
 use datafusion::logical_plan::LogicalPlan as DfLogicalPlan;
 use datatypes::schema::SchemaRef;
-use futures::stream::Stream;
+use std::any::Any;
 use std::sync::Arc;
-use std::{any::Any, pin::Pin};
 
 /// A LogicalPlan represents the different types of relational
 /// operators (such as Projection, Filter, etc) and can be created by
@@ -18,18 +17,6 @@ use std::{any::Any, pin::Pin};
 pub enum LogicalPlan {
     DfPlan(DfLogicalPlan),
 }
-
-/// Trait for types that stream [arrow::record_batch::RecordBatch]
-pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
-    /// Returns the schema of this `RecordBatchStream`.
-    ///
-    /// Implementation of this trait should guarantee that all `RecordBatch`'s returned by this
-    /// stream should have the same schema as returned from this method.
-    fn schema(&self) -> SchemaRef;
-}
-
-/// Trait for a stream of record batches.
-pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send>>;
 
 #[async_trait::async_trait]
 pub trait PhysicalPlan: Send + Sync + Any {
