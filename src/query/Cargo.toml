@@ -3,7 +3,10 @@ name = "query"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies.arrow]
+package = "arrow2"
+version="0.10"
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute"]
 
 [dependencies]
 async-trait = "0.1"
@@ -11,6 +14,11 @@ common-recordbatch = {path = "../common/recordbatch" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
 datatypes = {path = "../datatypes" }
 futures = "0.3"
+futures-util = "0.3.21"
 snafu = "0.7.0"
 table = { path = "../table" }
 tokio = "1.0"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["macros", "rt", "rt-multi-thread", "sync", "fs", "parking_lot"] }
+tokio-stream = "0.1"

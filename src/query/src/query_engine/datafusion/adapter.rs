@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
-use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
+use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::{
     error::Result as DfResult,
     physical_plan::{
-        expressions::PhysicalSortExpr, ExecutionPlan, Partitioning,
+        expressions::PhysicalSortExpr, ExecutionPlan, Partitioning as DfPartitioning,
         SendableRecordBatchStream as DfSendableRecordBatchStream, Statistics,
     },
 };
@@ -17,7 +17,8 @@ use snafu::ResultExt;
 use table::table::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
 
 use crate::error::{self, Result};
-use crate::plan::PhysicalPlan;
+use crate::executor::Runtime;
+use crate::plan::{Partitioning, PhysicalPlan};
 
 /// Datafusion ExecutionPlan -> greptime PhysicalPlan
 pub struct PhysicalPlanAdapter {
@@ -40,6 +41,11 @@ impl PhysicalPlanAdapter {
 impl PhysicalPlan for PhysicalPlanAdapter {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn output_partitioning(&self) -> Partitioning {
+        //FIXME(dennis)
+        Partitioning::UnknownPartitioning(1)
     }
 
     fn children(&self) -> Vec<Arc<dyn PhysicalPlan>> {
@@ -75,12 +81,14 @@ impl PhysicalPlan for PhysicalPlanAdapter {
         )))
     }
 
-    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
-        // FIXME(dennis) runtime
-        let runtime = RuntimeEnv::new(RuntimeConfig::default()).context(error::DatafusionSnafu)?;
+    async fn execute(
+        &self,
+        runtime: Runtime,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream> {
         let df_stream = self
             .plan
-            .execute(partition, Arc::new(runtime))
+            .execute(partition, runtime.into())
             .await
             .context(error::DatafusionSnafu)?;
 
@@ -118,9 +126,9 @@ impl ExecutionPlan for ExecutionPlanAdapter {
         self.schema.arrow_schema().clone()
     }
 
-    fn output_partitioning(&self) -> Partitioning {
+    fn output_partitioning(&self) -> DfPartitioning {
         // FIXME(dennis)
-        Partitioning::UnknownPartitioning(1)
+        DfPartitioning::UnknownPartitioning(1)
     }
 
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
@@ -156,9 +164,9 @@ impl ExecutionPlan for ExecutionPlanAdapter {
     async fn execute(
         &self,
         partition: usize,
-        _runtime: Arc<RuntimeEnv>,
+        runtime: Arc<RuntimeEnv>,
     ) -> DfResult<DfSendableRecordBatchStream> {
-        match self.plan.execute(partition).await {
+        match self.plan.execute(runtime.into(), partition).await {
             Ok(stream) => Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream))),
             Err(e) => Err(e.into()),
         }

@@ -1052,14 +1052,17 @@ dependencies = [
 name = "query"
 version = "0.1.0"
 dependencies = [
+ "arrow2",
  "async-trait",
  "common-recordbatch",
  "datafusion",
  "datatypes",
  "futures",
+ "futures-util",
  "snafu",
  "table",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

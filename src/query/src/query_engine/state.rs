@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::fmt;
 use std::sync::Arc;
 
 use datafusion::catalog::{
@@ -16,11 +17,19 @@ use table::{
 
 use crate::catalog::{schema::SchemaProvider, CatalogList, CatalogProvider};
 use crate::error::{self, Result};
+use crate::executor::Runtime;
 
 /// Query engine global state
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: ExecutionContext,
+}
+
+impl fmt::Debug for QueryEngineState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // TODO(dennis) better debug info
+        write!(f, "QueryEngineState: <datafusion context>")
+    }
 }
 
 impl QueryEngineState {
@@ -38,6 +47,11 @@ impl QueryEngineState {
     #[inline]
     pub(crate) fn df_context(&self) -> &ExecutionContext {
         &self.df_context
+    }
+
+    #[inline]
+    pub(crate) fn runtime(&self) -> Runtime {
+        self.df_context.runtime_env().into()
     }
 }
 
