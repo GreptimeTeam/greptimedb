@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "src/common/base",
-    "src/common",
     "src/common/query",
     "src/common/recordbatch",
     "src/datanode",
