@@ -6,7 +6,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
-use datatypes::schema::{Schema as TableSchema, SchemaRef as TableSchemaRef};
+use datatypes::schema::{Schema, SchemaRef};
 
 use crate::error::Result;
 
@@ -60,7 +60,7 @@ pub struct TableInfo {
 
 #[derive(Clone, Debug)]
 pub struct TableMeta {
-    pub schema: Arc<TableSchema>,
+    pub schema: Arc<Schema>,
     pub engine: String,
     pub engine_options: HashMap<String, String>,
     pub options: HashMap<String, String>,
@@ -75,7 +75,7 @@ pub trait Table: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
     /// Get a reference to the schema for this table
-    fn schema(&self) -> TableSchemaRef;
+    fn schema(&self) -> SchemaRef;
 
     /// Get the type of this table for metadata/catalog purposes.
     fn table_type(&self) -> TableType {
