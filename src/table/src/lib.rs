@@ -1,5 +1,5 @@
 mod engine;
+pub mod error;
+pub mod table;
 
-/// Table abstraction.
-#[async_trait::async_trait]
-pub trait Table: Send + Sync {}
+pub use crate::table::{Table, TableRef};
