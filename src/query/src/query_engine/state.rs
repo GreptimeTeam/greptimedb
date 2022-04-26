@@ -1,6 +1,6 @@
-/// Query engine global state
-use crate::catalog::{schema::SchemaProvider, CatalogList, CatalogProvider};
-use crate::error::{Error as QueryError, Result};
+use std::any::Any;
+use std::sync::Arc;
+
 use datafusion::catalog::{
     catalog::{CatalogList as DfCatalogList, CatalogProvider as DfCatalogProvider},
     schema::SchemaProvider as DfSchemaProvider,
@@ -8,12 +8,14 @@ use datafusion::catalog::{
 use datafusion::datasource::TableProvider as DfTableProvider;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
-use std::any::Any;
-use std::sync::Arc;
 use table::{
     table::adapter::{DfTableProviderAdapter, TableAdapter},
     Table,
 };
+
+/// Query engine global state
+use crate::catalog::{schema::SchemaProvider, CatalogList, CatalogProvider};
+use crate::error::{Error as QueryError, Result};
 
 #[derive(Clone)]
 pub struct QueryEngineState {

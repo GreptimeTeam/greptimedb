@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use snafu::{OptionExt, ResultExt};
+
 use self::adapter::PhysicalPlanAdapter;
 use super::{context::QueryContext, state::QueryEngineState};
 use crate::{
@@ -10,8 +14,6 @@ use crate::{
     plan::{LogicalPlan, PhysicalPlan},
     query_engine::QueryEngine,
 };
-use snafu::{OptionExt, ResultExt};
-use std::sync::Arc;
 mod adapter;
 
 pub(crate) struct DatafusionQueryEngine {

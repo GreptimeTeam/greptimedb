@@ -1,5 +1,6 @@
-use crate::{error::Result, plan::PhysicalPlan, query_engine::QueryContext};
 use std::sync::Arc;
+
+use crate::{error::Result, plan::PhysicalPlan, query_engine::QueryContext};
 
 /// Executor to run [ExecutionPlan].
 #[async_trait::async_trait]

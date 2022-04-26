@@ -1,11 +1,15 @@
-use super::{Table, TableProviderFilterPushDown, TableRef, TableType};
-use crate::error::{self, Result};
+use core::pin::Pin;
+use core::task::{Context, Poll};
+use std::any::Any;
+use std::fmt;
+use std::fmt::Debug;
+use std::mem;
+use std::sync::{Arc, Mutex};
+
 use arrow::error::{ArrowError, Result as ArrowResult};
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::{self as recordbatch_error, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use core::pin::Pin;
-use core::task::{Context, Poll};
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 ///  Datafusion table adpaters
 use datafusion::datasource::{
@@ -25,11 +29,9 @@ use datatypes::schema::SchemaRef as TableSchemaRef;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::Stream;
 use snafu::prelude::*;
-use std::any::Any;
-use std::fmt;
-use std::fmt::Debug;
-use std::mem;
-use std::sync::{Arc, Mutex};
+
+use super::{Table, TableProviderFilterPushDown, TableRef, TableType};
+use crate::error::{self, Result};
 
 /// Greptime SendableRecordBatchStream -> datafusion ExecutionPlan.
 struct ExecutionPlanAdapter {

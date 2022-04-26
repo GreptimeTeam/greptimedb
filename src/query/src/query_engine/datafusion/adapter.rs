@@ -1,5 +1,7 @@
-use crate::error::{self, Result};
-use crate::plan::PhysicalPlan;
+use std::any::Any;
+use std::fmt::{self, Debug};
+use std::sync::Arc;
+
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
@@ -12,10 +14,10 @@ use datafusion::{
 };
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
-use std::any::Any;
-use std::fmt::{self, Debug};
-use std::sync::Arc;
 use table::table::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
+
+use crate::error::{self, Result};
+use crate::plan::PhysicalPlan;
 
 /// Datafusion ExecutionPlan -> greptime PhysicalPlan
 pub struct PhysicalPlanAdapter {

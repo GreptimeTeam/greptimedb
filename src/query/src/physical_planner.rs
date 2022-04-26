@@ -1,7 +1,8 @@
+use std::sync::Arc;
+
 use crate::error::Result;
 use crate::plan::{LogicalPlan, PhysicalPlan};
 use crate::query_engine::QueryContext;
-use std::sync::Arc;
 
 /// Physical query planner that converts a `LogicalPlan` to an
 /// `ExecutionPlan` suitable for execution.

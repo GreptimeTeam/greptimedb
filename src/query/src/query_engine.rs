@@ -1,13 +1,15 @@
+use std::sync::Arc;
+
 use crate::catalog::CatalogList;
 use crate::error::Result;
 use crate::plan::LogicalPlan;
-use std::sync::Arc;
 
 mod context;
 mod datafusion;
 mod state;
-use self::datafusion::DatafusionQueryEngine;
 pub use context::QueryContext;
+
+use self::datafusion::DatafusionQueryEngine;
 
 #[async_trait::async_trait]
 pub trait QueryEngine {

@@ -1,12 +1,14 @@
-use crate::error::Result;
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use chrono::DateTime;
 use chrono::Utc;
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::{Schema as TableSchema, SchemaRef as TableSchemaRef};
-use std::any::Any;
-use std::collections::HashMap;
-use std::sync::Arc;
+
+use crate::error::Result;
 
 pub mod adapter;
 pub mod memory;

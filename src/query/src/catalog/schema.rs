@@ -1,7 +1,9 @@
-use crate::error::Result;
 use std::any::Any;
 use std::sync::Arc;
+
 use table::Table;
+
+use crate::error::Result;
 
 /// Represents a schema, comprising a number of named tables.
 pub trait SchemaProvider: Sync + Send {

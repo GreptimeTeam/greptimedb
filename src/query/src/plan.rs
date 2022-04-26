@@ -1,9 +1,11 @@
-use crate::error::Result;
+use std::any::Any;
+use std::sync::Arc;
+
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::logical_plan::LogicalPlan as DfLogicalPlan;
 use datatypes::schema::SchemaRef;
-use std::any::Any;
-use std::sync::Arc;
+
+use crate::error::Result;
 
 /// A LogicalPlan represents the different types of relational
 /// operators (such as Projection, Filter, etc) and can be created by

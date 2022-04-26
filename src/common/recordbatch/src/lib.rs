@@ -2,6 +2,7 @@ pub mod error;
 mod recordbatch;
 
 use core::pin::Pin;
+
 use datatypes::schema::SchemaRef;
 use error::Result;
 use futures::Stream;
