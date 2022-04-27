@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use snafu::{OptionExt, ResultExt};
 
 use super::{context::QueryContext, state::QueryEngineState};
@@ -33,8 +34,8 @@ impl QueryEngine for DatafusionQueryEngine {
     fn name(&self) -> &str {
         "datafusion"
     }
-    async fn execute(&self, plan: &LogicalPlan) -> Result<()> {
-        let mut ctx = QueryContext::default();
+    async fn execute(&self, plan: &LogicalPlan) -> Result<SendableRecordBatchStream> {
+        let mut ctx = QueryContext::new(self.state.clone());
         let logical_plan = self.optimize_logical_plan(&mut ctx, plan)?;
         let physical_plan = self.create_physical_plan(&mut ctx, &logical_plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
@@ -117,10 +118,15 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
 impl QueryExecutor for DatafusionQueryEngine {
     async fn execute_stream(
         &self,
-        _ctx: &QueryContext,
-        _plan: &Arc<dyn PhysicalPlan>,
-    ) -> Result<()> {
-        let _runtime = self.state.df_context().runtime_env();
-        Ok(())
+        ctx: &QueryContext,
+        plan: &Arc<dyn PhysicalPlan>,
+    ) -> Result<SendableRecordBatchStream> {
+        match plan.output_partitioning().partition_count() {
+            0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
+            1 => Ok(plan.execute(&ctx.state().runtime(), 0).await?),
+            _ => {
+                unimplemented!();
+            }
+        }
     }
 }

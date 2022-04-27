@@ -6,6 +6,7 @@ use datafusion::logical_plan::LogicalPlan as DfLogicalPlan;
 use datatypes::schema::SchemaRef;
 
 use crate::error::Result;
+use crate::executor::Runtime;
 
 /// A LogicalPlan represents the different types of relational
 /// operators (such as Projection, Filter, etc) and can be created by
@@ -20,10 +21,30 @@ pub enum LogicalPlan {
     DfPlan(DfLogicalPlan),
 }
 
+/// Partitioning schemes supported by operators.
+#[derive(Debug, Clone)]
+pub enum Partitioning {
+    /// Unknown partitioning scheme with a known number of partitions
+    UnknownPartitioning(usize),
+}
+
+impl Partitioning {
+    /// Returns the number of partitions in this partitioning scheme
+    pub fn partition_count(&self) -> usize {
+        use Partitioning::*;
+        match self {
+            UnknownPartitioning(n) => *n,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait PhysicalPlan: Send + Sync + Any {
     /// Get the schema for this execution plan
     fn schema(&self) -> SchemaRef;
+
+    /// Specifies the output partitioning scheme of this plan
+    fn output_partitioning(&self) -> Partitioning;
 
     /// Get a list of child execution plans that provide the input for this plan. The returned list
     /// will be empty for leaf nodes, will contain a single value for unary nodes, or two
@@ -38,7 +59,11 @@ pub trait PhysicalPlan: Send + Sync + Any {
     ) -> Result<Arc<dyn PhysicalPlan>>;
 
     /// creates an iterator
-    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream>;
+    async fn execute(
+        &self,
+        _runtime: &Runtime,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream>;
 
     fn as_any(&self) -> &dyn Any;
 }

@@ -1,3 +1,4 @@
+use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::error::DataFusionError;
 use snafu::Snafu;
 
@@ -9,6 +10,8 @@ pub enum Error {
     Datafusion { source: DataFusionError },
     #[snafu(display("PhysicalPlan downcast_ref failed"))]
     PhysicalPlanDowncast,
+    #[snafu(display("RecordBatch error: {}", source))]
+    RecordBatch { source: RecordBatchError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use common_recordbatch::SendableRecordBatchStream;
+
 use crate::catalog::CatalogList;
 use crate::error::Result;
 use crate::plan::LogicalPlan;
@@ -14,7 +16,7 @@ use crate::query_engine::datafusion::DatafusionQueryEngine;
 #[async_trait::async_trait]
 pub trait QueryEngine {
     fn name(&self) -> &str;
-    async fn execute(&self, plan: &LogicalPlan) -> Result<()>;
+    async fn execute(&self, plan: &LogicalPlan) -> Result<SendableRecordBatchStream>;
 }
 
 pub struct QueryEngineFactory {

@@ -17,7 +17,7 @@ use datafusion::datasource::{
     TableType as DfTableType,
 };
 use datafusion::error::{DataFusionError, Result as DfResult};
-use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
+use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::Expr as DfExpr;
 use datafusion::physical_plan::{
     expressions::PhysicalSortExpr, ExecutionPlan, Partitioning,
@@ -168,11 +168,15 @@ impl TableProvider for DfTableProviderAdapter {
 /// Datafusion TableProvider ->  greptime Table
 pub struct TableAdapter {
     table_provider: Arc<dyn TableProvider>,
+    runtime: Arc<RuntimeEnv>,
 }
 
 impl TableAdapter {
-    pub fn new(table_provider: Arc<dyn TableProvider>) -> Self {
-        Self { table_provider }
+    pub fn new(table_provider: Arc<dyn TableProvider>, runtime: Arc<RuntimeEnv>) -> Self {
+        Self {
+            table_provider,
+            runtime,
+        }
     }
 }
 
@@ -208,10 +212,9 @@ impl Table for TableAdapter {
             .await
             .context(error::DatafusionSnafu)?;
 
-        // FIXME(dennis) Partitioning and runtime
-        let runtime = RuntimeEnv::new(RuntimeConfig::default()).context(error::DatafusionSnafu)?;
+        // FIXME(dennis) Partitioning
         let df_stream = execution_plan
-            .execute(0, Arc::new(runtime))
+            .execute(0, self.runtime.clone())
             .await
             .context(error::DatafusionSnafu)?;
 

@@ -1,3 +1,4 @@
+pub mod memory;
 pub mod schema;
 use std::any::Any;
 use std::sync::Arc;
