@@ -4,26 +4,22 @@ use snafu::prelude::*;
 use crate::errors;
 use crate::parser::ParserContext;
 use crate::statements::statement::Statement;
-use crate::statements::statement_query::Select;
+use crate::statements::statement_query::Query;
 
 impl<'a> ParserContext<'a> {
     /// Parses select and it's variants.
     pub(crate) fn parse_query(&mut self) -> Result<Statement, ParserError> {
-        let spquery = self.parser.parse_query().context(errors::UnexpectedSnafu {
-            sql: self.sql,
-            expected: "EXPECT",
-            actual: "ACTUAL",
-        })?;
+        let spquery = self
+            .parser
+            .parse_query()
+            .context(errors::InnerSnafu { sql: self.sql })?;
 
-        Ok(Statement::Query(Box::new(Select::try_from(spquery)?)))
+        Ok(Statement::Query(Box::new(Query::try_from(spquery)?)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
-
-    use sqlparser::ast::SetExpr;
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
@@ -49,10 +45,7 @@ mod tests {
             Statement::ShowDatabases(_) => {
                 panic!("Not expected to be a show database statement")
             }
-            Statement::Query(q) => {
-                assert_eq!(1, q.projection.len());
-                assert_matches!(q.set_expr, SetExpr::Select(_))
-            }
+            Statement::Query(_) => {}
         }
     }
 }

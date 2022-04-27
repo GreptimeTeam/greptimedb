@@ -1,7 +1,7 @@
-use sqlparser::ast::{Query, Statement as SpStatement};
+use sqlparser::ast::Statement as SpStatement;
 use sqlparser::parser::ParserError::ParserError;
 
-use crate::statements::statement_query::Select;
+use crate::statements::statement_query::Query;
 use crate::statements::statement_show_database::SqlShowDatabase;
 
 /// Tokens parsed by `DFParser` are converted into these values.
@@ -11,7 +11,7 @@ pub enum Statement {
     ShowDatabases(SqlShowDatabase),
 
     // Query
-    Query(Box<Select>),
+    Query(Box<Query>),
 }
 
 /// Converts Statement to sqlparser statement
@@ -23,15 +23,7 @@ impl TryInto<SpStatement> for Statement {
             Statement::ShowDatabases(_) => Err(ParserError(
                 "sqlparser does not support SHOW DATABASE query.".to_string(),
             )),
-            Statement::Query(q) => Ok(SpStatement::Query(Box::new(Query {
-                with: q.with,
-                body: q.set_expr,
-                order_by: q.order_by,
-                limit: q.limit,
-                offset: q.offset,
-                fetch: q.fetch,
-                lock: None,
-            }))),
+            Statement::Query(s) => Ok(SpStatement::Query(Box::new(s.inner))),
         }
     }
 }
