@@ -8,6 +8,7 @@ use datafusion::catalog::{
 };
 use datafusion::datasource::TableProvider as DfTableProvider;
 use datafusion::error::Result as DataFusionResult;
+use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 use snafu::ResultExt;
 use table::{
@@ -39,6 +40,7 @@ impl QueryEngineState {
 
         df_context.state.lock().catalog_list = Arc::new(DfCatalogListAdapter {
             catalog_list: catalog_list.clone(),
+            runtime: df_context.runtime_env(),
         });
 
         Self { df_context }
@@ -57,6 +59,7 @@ impl QueryEngineState {
 
 /// Adapters between datafusion and greptime query engine.
 struct DfCatalogListAdapter {
+    runtime: Arc<RuntimeEnv>,
     catalog_list: Arc<dyn CatalogList>,
 }
 
@@ -72,9 +75,13 @@ impl DfCatalogList for DfCatalogListAdapter {
     ) -> Option<Arc<dyn DfCatalogProvider>> {
         let catalog_adapter = Arc::new(CatalogProviderAdapter {
             df_cataglog_provider: catalog,
+            runtime: self.runtime.clone(),
         });
         match self.catalog_list.register_catalog(name, catalog_adapter) {
-            Some(catalog_provider) => Some(Arc::new(DfCatalogProviderAdapter { catalog_provider })),
+            Some(catalog_provider) => Some(Arc::new(DfCatalogProviderAdapter {
+                catalog_provider,
+                runtime: self.runtime.clone(),
+            })),
             None => None,
         }
     }
@@ -85,7 +92,10 @@ impl DfCatalogList for DfCatalogListAdapter {
 
     fn catalog(&self, name: &str) -> Option<Arc<dyn DfCatalogProvider>> {
         match self.catalog_list.catalog(name) {
-            Some(catalog_provider) => Some(Arc::new(DfCatalogProviderAdapter { catalog_provider })),
+            Some(catalog_provider) => Some(Arc::new(DfCatalogProviderAdapter {
+                catalog_provider,
+                runtime: self.runtime.clone(),
+            })),
             None => None,
         }
     }
@@ -94,6 +104,7 @@ impl DfCatalogList for DfCatalogListAdapter {
 /// Datafusion's CatalogProvider ->  greptime CatalogProvider
 struct CatalogProviderAdapter {
     df_cataglog_provider: Arc<dyn DfCatalogProvider>,
+    runtime: Arc<RuntimeEnv>,
 }
 
 impl CatalogProvider for CatalogProviderAdapter {
@@ -107,9 +118,10 @@ impl CatalogProvider for CatalogProviderAdapter {
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
         match self.df_cataglog_provider.schema(name) {
-            Some(df_schema_provider) => {
-                Some(Arc::new(SchemaProviderAdapter { df_schema_provider }))
-            }
+            Some(df_schema_provider) => Some(Arc::new(SchemaProviderAdapter {
+                df_schema_provider,
+                runtime: self.runtime.clone(),
+            })),
             None => None,
         }
     }
@@ -118,6 +130,7 @@ impl CatalogProvider for CatalogProviderAdapter {
 ///Greptime CatalogProvider -> datafusion's CatalogProvider
 struct DfCatalogProviderAdapter {
     catalog_provider: Arc<dyn CatalogProvider>,
+    runtime: Arc<RuntimeEnv>,
 }
 
 impl DfCatalogProvider for DfCatalogProviderAdapter {
@@ -131,7 +144,10 @@ impl DfCatalogProvider for DfCatalogProviderAdapter {
 
     fn schema(&self, name: &str) -> Option<Arc<dyn DfSchemaProvider>> {
         match self.catalog_provider.schema(name) {
-            Some(schema_provider) => Some(Arc::new(DfSchemaProviderAdapter { schema_provider })),
+            Some(schema_provider) => Some(Arc::new(DfSchemaProviderAdapter {
+                schema_provider,
+                runtime: self.runtime.clone(),
+            })),
             None => None,
         }
     }
@@ -140,6 +156,7 @@ impl DfCatalogProvider for DfCatalogProviderAdapter {
 /// Greptime SchemaProvider -> datafusion SchemaProvider
 struct DfSchemaProviderAdapter {
     schema_provider: Arc<dyn SchemaProvider>,
+    runtime: Arc<RuntimeEnv>,
 }
 
 impl DfSchemaProvider for DfSchemaProviderAdapter {
@@ -163,7 +180,7 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
         name: String,
         table: Arc<dyn DfTableProvider>,
     ) -> DataFusionResult<Option<Arc<dyn DfTableProvider>>> {
-        let table = Arc::new(TableAdapter::new(table));
+        let table = Arc::new(TableAdapter::new(table, self.runtime.clone()));
         match self.schema_provider.register_table(name, table) {
             Ok(Some(p)) => Ok(Some(Arc::new(DfTableProviderAdapter::new(p)))),
             Ok(None) => Ok(None),
@@ -187,6 +204,7 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
 /// Datafuion SchemaProviderAdapter -> greptime SchemaProviderAdapter
 struct SchemaProviderAdapter {
     df_schema_provider: Arc<dyn DfSchemaProvider>,
+    runtime: Arc<RuntimeEnv>,
 }
 
 impl SchemaProvider for SchemaProviderAdapter {
@@ -201,7 +219,10 @@ impl SchemaProvider for SchemaProviderAdapter {
 
     fn table(&self, name: &str) -> Option<Arc<dyn Table>> {
         match self.df_schema_provider.table(name) {
-            Some(table_provider) => Some(Arc::new(TableAdapter::new(table_provider))),
+            Some(table_provider) => Some(Arc::new(TableAdapter::new(
+                table_provider,
+                self.runtime.clone(),
+            ))),
             None => None,
         }
     }
@@ -217,7 +238,10 @@ impl SchemaProvider for SchemaProviderAdapter {
             .register_table(name, table_provider)
             .context(error::DatafusionSnafu)?
         {
-            Some(table) => Ok(Some(Arc::new(TableAdapter::new(table)))),
+            Some(table) => Ok(Some(Arc::new(TableAdapter::new(
+                table,
+                self.runtime.clone(),
+            )))),
             None => Ok(None),
         }
     }
@@ -228,7 +252,10 @@ impl SchemaProvider for SchemaProviderAdapter {
             .deregister_table(name)
             .context(error::DatafusionSnafu)?
         {
-            Some(table) => Ok(Some(Arc::new(TableAdapter::new(table)))),
+            Some(table) => Ok(Some(Arc::new(TableAdapter::new(
+                table,
+                self.runtime.clone(),
+            )))),
             None => Ok(None),
         }
     }
