@@ -15,11 +15,11 @@ pub enum Statement {
 }
 
 /// Converts Statement to sqlparser statement
-impl TryInto<SpStatement> for Statement {
+impl TryFrom<Statement> for SpStatement {
     type Error = sqlparser::parser::ParserError;
 
-    fn try_into(self) -> Result<SpStatement, Self::Error> {
-        match self {
+    fn try_from(value: Statement) -> Result<Self, Self::Error> {
+        match value {
             Statement::ShowDatabases(_) => Err(ParserError(
                 "sqlparser does not support SHOW DATABASE query.".to_string(),
             )),

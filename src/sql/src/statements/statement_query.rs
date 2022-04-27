@@ -17,10 +17,10 @@ impl TryFrom<SpQuery> for Query {
     }
 }
 
-impl TryInto<SpQuery> for Query {
+impl TryFrom<Query> for SpQuery {
     type Error = ParserError;
 
-    fn try_into(self) -> Result<SpQuery, Self::Error> {
-        Ok(self.inner)
+    fn try_from(value: Query) -> Result<Self, Self::Error> {
+        Ok(value.inner)
     }
 }
