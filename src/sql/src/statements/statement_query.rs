@@ -1,12 +1,13 @@
 use sqlparser::ast::{
-    Expr, Fetch, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, TableWithJoins, With,
+    Expr, Fetch, Offset, OrderByExpr, Query, Select as SpSelect, SelectItem, SetExpr,
+    TableWithJoins, With,
 };
 
 use crate::errors::ParserError;
 
 /// Query statement instance.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SqlQuery {
+pub struct Select {
     // optional WITH
     pub with: Option<With>,
     // optional multiple table follows FROM and JOIN
@@ -31,11 +32,11 @@ pub struct SqlQuery {
     pub fetch: Option<Fetch>,
 }
 
-impl SqlQuery {
+impl Select {
     /// The body of SqlQuery now only supports `SELECT`
-    pub fn get_body(query: &Query) -> Result<&Select, ParserError> {
+    pub fn get_body(query: &Query) -> Result<&SpSelect, ParserError> {
         match &query.body {
-            SetExpr::Select(query) => Ok(query),
+            SetExpr::Select(query) => Ok(&query),
             other => Err(ParserError::Unsupported {
                 sql: query.to_string(),
                 keyword: other.to_string(),
@@ -45,7 +46,7 @@ impl SqlQuery {
 }
 
 /// Automatically converts from sqlparser Query instance to SqlQuery.
-impl TryFrom<sqlparser::ast::Query> for SqlQuery {
+impl TryFrom<sqlparser::ast::Query> for Select {
     type Error = ParserError;
 
     fn try_from(q: Query) -> Result<Self, Self::Error> {
@@ -99,7 +100,7 @@ impl TryFrom<sqlparser::ast::Query> for SqlQuery {
             });
         }
 
-        Ok(SqlQuery {
+        Ok(Select {
             with: Option::None,
             from: body.from.clone(),
             projection: body.projection.clone(),

@@ -5,11 +5,11 @@ use sqlparser::parser::ParserError as SpParserError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ParserError {
-    #[snafu(display("SQL statement is not supported: {sql}, keyword: {}"))]
+    #[snafu(display("SQL statement is not supported: {sql}, keyword: {keyword}"))]
     Unsupported { sql: String, keyword: String },
 
     #[snafu(display(
-        "Unexpected token while parsing SQL statement: {sql}, expected: {expected}, found: {actual}"
+        "Unexpected token while parsing SQL statement: {sql}, expected: {expected}, found: {actual}, source: {source}"
     ))]
     Unexpected {
         sql: String,
@@ -21,7 +21,7 @@ pub enum ParserError {
     #[snafu(display("SQL syntax error: {msg}"))]
     SyntaxError { msg: String },
 
-    #[snafu(display("Unknown inner parser error"))]
+    #[snafu(display("Unknown inner parser error, sql: {sql}, source: {source}"))]
     InnerError { sql: String, source: SpParserError },
 }
 

@@ -4,7 +4,7 @@ use snafu::prelude::*;
 use crate::errors;
 use crate::parser::ParserContext;
 use crate::statements::statement::Statement;
-use crate::statements::statement_query::SqlQuery;
+use crate::statements::statement_query::Select;
 
 impl<'a> ParserContext<'a> {
     /// Parses select and it's variants.
@@ -15,7 +15,7 @@ impl<'a> ParserContext<'a> {
             actual: "ACTUAL",
         })?;
 
-        Ok(Statement::Query(Box::new(SqlQuery::try_from(spquery)?)))
+        Ok(Statement::Query(Box::new(Select::try_from(spquery)?)))
     }
 }
 
@@ -36,8 +36,7 @@ mod tests {
            WHERE a > b AND b < 100 \
            ORDER BY a DESC, b";
 
-        let parser = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        println!("{:?}", parser);
+        let _ = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
     }
 
     #[test]
@@ -51,7 +50,6 @@ mod tests {
                 panic!("Not expected to be a show database statement")
             }
             Statement::Query(q) => {
-                println!("{:?}", q.projection);
                 assert_eq!(1, q.projection.len());
                 assert_matches!(q.set_expr, SetExpr::Select(_))
             }

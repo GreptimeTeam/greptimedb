@@ -1,7 +1,7 @@
 use sqlparser::ast::{Query, Statement as SpStatement};
 use sqlparser::parser::ParserError::ParserError;
 
-use crate::statements::statement_query::SqlQuery;
+use crate::statements::statement_query::Select;
 use crate::statements::statement_show_database::SqlShowDatabase;
 
 /// Tokens parsed by `DFParser` are converted into these values.
@@ -11,7 +11,7 @@ pub enum Statement {
     ShowDatabases(SqlShowDatabase),
 
     // Query
-    Query(Box<SqlQuery>),
+    Query(Box<Select>),
 }
 
 /// Converts Statement to sqlparser statement

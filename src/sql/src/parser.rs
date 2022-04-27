@@ -42,7 +42,7 @@ impl<'a> ParserContext<'a> {
                 break;
             }
             if expecting_statement_delimiter {
-                return parser_ctx.unsupported(parser_ctx.parser.peek_token().to_string());
+                return parser_ctx.unsupported(parser_ctx.peek_token_as_string());
             }
 
             let statement = parser_ctx.parse_statement()?;
@@ -78,7 +78,7 @@ impl<'a> ParserContext<'a> {
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
 
                     // todo(hl) support more statements.
-                    _ => self.unsupported(self.parser.peek_token().to_string()),
+                    _ => self.unsupported(self.peek_token_as_string()),
                 }
             }
             Token::LParen => self.parse_query(),
@@ -100,7 +100,7 @@ impl<'a> ParserContext<'a> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             Ok(self.parse_show_databases()?)
         } else {
-            self.unsupported(self.parser.peek_token().to_string())
+            self.unsupported(self.peek_token_as_string())
         }
     }
 
@@ -117,12 +117,17 @@ impl<'a> ParserContext<'a> {
     }
 
     pub fn consume_token(&mut self, expected: &str) -> bool {
-        if self.parser.peek_token().to_string().to_uppercase() == *expected.to_uppercase() {
+        if self.peek_token_as_string().to_uppercase() == *expected.to_uppercase() {
             self.parser.next_token();
             true
         } else {
             false
         }
+    }
+
+    #[inline]
+    fn peek_token_as_string(&self) -> String {
+        self.parser.peek_token().to_string()
     }
 
     /// Parses `SHOW DATABASES` statement.
@@ -149,12 +154,12 @@ impl<'a> ParserContext<'a> {
                     ShowKind::Where(self.parser.parse_expr().context(errors::UnexpectedSnafu {
                         sql: self.sql.to_string(),
                         expected: "some valid expression".to_string(),
-                        actual: self.parser.peek_token().to_string(),
+                        actual: self.peek_token_as_string(),
                     })?),
                 ))),
-                _ => self.unsupported(self.parser.peek_token().to_string()),
+                _ => self.unsupported(self.peek_token_as_string()),
             },
-            _ => self.unsupported(self.parser.peek_token().to_string()),
+            _ => self.unsupported(self.peek_token_as_string()),
         }
     }
 }
@@ -169,10 +174,6 @@ mod tests {
 
     #[test]
     pub fn test_show_database_all() {
-        use std::assert_matches::assert_matches;
-
-        use sqlparser::dialect::GenericDialect;
-
         let sql = "SHOW DATABASES";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
         let stmts = result.unwrap();
