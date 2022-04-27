@@ -1,5 +1,5 @@
 use sqlparser::ast::{
-    Expr, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, TableWithJoins,
+    Expr, Fetch, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, TableWithJoins, With,
 };
 
 use crate::errors::ParserError;
@@ -7,6 +7,9 @@ use crate::errors::ParserError;
 /// Query statement instance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SqlQuery {
+    // optional WITH
+    pub with: Option<With>,
+    // optional multiple table follows FROM and JOIN
     pub from: Vec<TableWithJoins>,
     // selected items
     pub projection: Vec<SelectItem>,
@@ -24,6 +27,8 @@ pub struct SqlQuery {
     pub offset: Option<Offset>,
     // query body (now only support SELECT variant)
     pub set_expr: SetExpr,
+    // optional fetch
+    pub fetch: Option<Fetch>,
 }
 
 impl SqlQuery {
@@ -95,6 +100,7 @@ impl TryFrom<sqlparser::ast::Query> for SqlQuery {
         }
 
         Ok(SqlQuery {
+            with: Option::None,
             from: body.from.clone(),
             projection: body.projection.clone(),
             selection: body.selection.clone(),
@@ -104,6 +110,7 @@ impl TryFrom<sqlparser::ast::Query> for SqlQuery {
             limit: q.limit.clone(),
             offset: q.offset.clone(),
             set_expr: q.body,
+            fetch: Option::None,
         })
     }
 }
