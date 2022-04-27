@@ -123,7 +123,7 @@ impl QueryExecutor for DatafusionQueryEngine {
     ) -> Result<SendableRecordBatchStream> {
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
-            1 => Ok(plan.execute(ctx.state().runtime(), 0).await?),
+            1 => Ok(plan.execute(&ctx.state().runtime(), 0).await?),
             _ => {
                 unimplemented!();
             }

@@ -61,7 +61,7 @@ pub trait PhysicalPlan: Send + Sync + Any {
     /// creates an iterator
     async fn execute(
         &self,
-        _runtime: Runtime,
+        _runtime: &Runtime,
         partition: usize,
     ) -> Result<SendableRecordBatchStream>;
 

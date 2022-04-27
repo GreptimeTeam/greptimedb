@@ -7,24 +7,10 @@ use crate::catalog::schema::SchemaProvider;
 use crate::catalog::{CatalogList, CatalogProvider};
 
 /// Simple in-memory list of catalogs
+#[derive(Default)]
 pub struct MemoryCatalogList {
     /// Collection of catalogs containing schemas and ultimately TableProviders
     pub catalogs: RwLock<HashMap<String, Arc<dyn CatalogProvider>>>,
-}
-
-impl MemoryCatalogList {
-    /// Instantiates a new `MemoryCatalogList` with an empty collection of catalogs
-    pub fn new() -> Self {
-        Self {
-            catalogs: RwLock::new(HashMap::new()),
-        }
-    }
-}
-
-impl Default for MemoryCatalogList {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl CatalogList for MemoryCatalogList {

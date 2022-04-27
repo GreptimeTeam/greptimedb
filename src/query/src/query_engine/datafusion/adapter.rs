@@ -83,7 +83,7 @@ impl PhysicalPlan for PhysicalPlanAdapter {
 
     async fn execute(
         &self,
-        runtime: Runtime,
+        runtime: &Runtime,
         partition: usize,
     ) -> Result<SendableRecordBatchStream> {
         let df_stream = self
@@ -166,7 +166,7 @@ impl ExecutionPlan for ExecutionPlanAdapter {
         partition: usize,
         runtime: Arc<RuntimeEnv>,
     ) -> DfResult<DfSendableRecordBatchStream> {
-        match self.plan.execute(runtime.into(), partition).await {
+        match self.plan.execute(&runtime.into(), partition).await {
             Ok(stream) => Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream))),
             Err(e) => Err(e.into()),
         }

@@ -1,6 +1,5 @@
 use std::any::Any;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
@@ -53,7 +52,7 @@ impl Table for NumbersTable {
         Ok(Box::pin(NumbersStream {
             limit: limit.unwrap_or(100) as u32,
             schema: self.schema.clone(),
-            already_run: AtomicBool::new(false),
+            already_run: false,
         }))
     }
 }
@@ -62,7 +61,7 @@ impl Table for NumbersTable {
 struct NumbersStream {
     limit: u32,
     schema: SchemaRef,
-    already_run: AtomicBool,
+    already_run: bool,
 }
 
 impl RecordBatchStream for NumbersStream {
@@ -74,30 +73,21 @@ impl RecordBatchStream for NumbersStream {
 impl Stream for NumbersStream {
     type Item = RecordBatchResult<RecordBatch>;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.already_run.load(Ordering::Relaxed) {
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.already_run {
             return Poll::Ready(None);
         }
+        self.already_run = true;
+        let numbers: Vec<u32> = (0..self.limit).collect();
+        let batch = DfRecordBatch::try_new(
+            self.schema.arrow_schema().clone(),
+            vec![Arc::new(UInt32Array::from_slice(&numbers))],
+        )
+        .unwrap();
 
-        if self
-            .already_run
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            let numbers: Vec<u32> = (0..self.limit).collect();
-            let batch = DfRecordBatch::try_new(
-                self.schema.arrow_schema().clone(),
-                vec![Arc::new(UInt32Array::from_slice(&numbers))],
-            )
-            .unwrap();
-
-            let result = Ok(RecordBatch {
-                schema: self.schema.clone(),
-                df_recordbatch: batch,
-            });
-            Poll::Ready(Some(result))
-        } else {
-            Poll::Ready(None)
-        }
+        Poll::Ready(Some(Ok(RecordBatch {
+            schema: self.schema.clone(),
+            df_recordbatch: batch,
+        })))
     }
 }

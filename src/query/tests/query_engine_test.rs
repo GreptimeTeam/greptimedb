@@ -34,11 +34,9 @@ async fn test_datafusion_query_engine() -> Result<()> {
 
     let ret = engine.execute(&plan).await;
 
-    assert!(ret.is_ok());
     let numbers = collect(ret.unwrap()).await.unwrap();
 
     assert_eq!(1, numbers.len());
-
     assert_eq!(numbers[0].df_recordbatch.num_columns(), 1);
     assert_eq!(1, numbers[0].schema.arrow_schema().fields().len());
     assert_eq!("number", numbers[0].schema.arrow_schema().field(0).name());
