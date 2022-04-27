@@ -42,7 +42,7 @@ impl<'a> ParserContext<'a> {
                 break;
             }
             if expecting_statement_delimiter {
-                return parser_ctx.unsupported();
+                return parser_ctx.unsupported(parser_ctx.peek_token_as_string());
             }
 
             let statement = parser_ctx.parse_statement()?;
@@ -78,18 +78,19 @@ impl<'a> ParserContext<'a> {
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
 
                     // todo(hl) support more statements.
-                    _ => self.unsupported(),
+                    _ => self.unsupported(self.peek_token_as_string()),
                 }
             }
             Token::LParen => self.parse_query(),
-            _ => self.unsupported(),
+            unexpected => self.unsupported(unexpected.to_string()),
         }
     }
 
     /// Raises an "unsupported statement" error.
-    pub fn unsupported<T>(&self) -> Result<T, errors::ParserError> {
+    pub fn unsupported<T>(&self, keyword: String) -> Result<T, errors::ParserError> {
         Err(errors::ParserError::Unsupported {
             sql: self.sql.to_string(),
+            keyword,
         })
     }
 
@@ -99,7 +100,7 @@ impl<'a> ParserContext<'a> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             Ok(self.parse_show_databases()?)
         } else {
-            self.unsupported()
+            self.unsupported(self.peek_token_as_string())
         }
     }
 
@@ -111,21 +112,22 @@ impl<'a> ParserContext<'a> {
         todo!()
     }
 
-    fn parse_query(&mut self) -> Result<Statement, errors::ParserError> {
-        todo!()
-    }
-
     fn parse_create(&mut self) -> Result<Statement, errors::ParserError> {
         todo!()
     }
 
     pub fn consume_token(&mut self, expected: &str) -> bool {
-        if self.parser.peek_token().to_string().to_uppercase() == *expected.to_uppercase() {
+        if self.peek_token_as_string().to_uppercase() == *expected.to_uppercase() {
             self.parser.next_token();
             true
         } else {
             false
         }
+    }
+
+    #[inline]
+    fn peek_token_as_string(&self) -> String {
+        self.parser.peek_token().to_string()
     }
 
     /// Parses `SHOW DATABASES` statement.
@@ -152,12 +154,12 @@ impl<'a> ParserContext<'a> {
                     ShowKind::Where(self.parser.parse_expr().context(errors::UnexpectedSnafu {
                         sql: self.sql.to_string(),
                         expected: "some valid expression".to_string(),
-                        actual: self.parser.peek_token().to_string(),
+                        actual: self.peek_token_as_string(),
                     })?),
                 ))),
-                _ => self.unsupported(),
+                _ => self.unsupported(self.peek_token_as_string()),
             },
-            _ => self.unsupported(),
+            _ => self.unsupported(self.peek_token_as_string()),
         }
     }
 }
