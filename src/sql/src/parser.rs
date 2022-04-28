@@ -108,10 +108,6 @@ impl<'a> ParserContext<'a> {
         todo!()
     }
 
-    fn parse_insert(&mut self) -> Result<Statement, errors::ParserError> {
-        todo!()
-    }
-
     fn parse_create(&mut self) -> Result<Statement, errors::ParserError> {
         todo!()
     }

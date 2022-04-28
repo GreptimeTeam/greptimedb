@@ -45,6 +45,9 @@ mod tests {
             Statement::ShowDatabases(_) => {
                 panic!("Not expected to be a show database statement")
             }
+            Statement::Insert(_) => {
+                panic!("Not expected to be a show database statement")
+            }
             Statement::Query(_) => {}
         }
     }
