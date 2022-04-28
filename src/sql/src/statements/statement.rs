@@ -1,8 +1,8 @@
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser::parser::ParserError::ParserError;
 
-use crate::statements::statement_query::Query;
-use crate::statements::statement_show_database::SqlShowDatabase;
+use crate::statements::query::Query;
+use crate::statements::show_database::SqlShowDatabase;
 
 /// Tokens parsed by `DFParser` are converted into these values.
 #[derive(Debug, Clone, PartialEq)]

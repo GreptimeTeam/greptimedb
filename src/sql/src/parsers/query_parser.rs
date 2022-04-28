@@ -3,8 +3,8 @@ use snafu::prelude::*;
 
 use crate::errors;
 use crate::parser::ParserContext;
+use crate::statements::query::Query;
 use crate::statements::statement::Statement;
-use crate::statements::statement_query::Query;
 
 impl<'a> ParserContext<'a> {
     /// Parses select and it's variants.

@@ -5,9 +5,9 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::errors;
+use crate::statements::show_database::SqlShowDatabase;
 use crate::statements::show_kind::ShowKind;
 use crate::statements::statement::Statement;
-use crate::statements::statement_show_database::SqlShowDatabase;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
