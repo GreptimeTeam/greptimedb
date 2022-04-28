@@ -12,6 +12,8 @@ pub enum Error {
     PhysicalPlanDowncast,
     #[snafu(display("RecordBatch error: {}", source))]
     RecordBatch { source: RecordBatchError },
+    #[snafu(display("Execution error: {}", message))]
+    Execution { message: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

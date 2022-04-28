@@ -36,3 +36,5 @@ impl QueryEngineFactory {
         &self.query_engine
     }
 }
+
+pub type QueryEngineRef = Arc<dyn QueryEngine>;

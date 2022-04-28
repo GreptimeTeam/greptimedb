@@ -8,3 +8,5 @@ pub mod physical_planner;
 pub mod plan;
 pub mod planner;
 pub mod query_engine;
+
+pub use crate::query_engine::{QueryContext, QueryEngine, QueryEngineFactory, QueryEngineRef};

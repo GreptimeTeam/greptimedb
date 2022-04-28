@@ -3,13 +3,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use table::TableRef;
+
 use crate::catalog::schema::SchemaProvider;
 use crate::catalog::{CatalogList, CatalogProvider};
+use crate::error::{ExecutionSnafu, Result};
 
 /// Simple in-memory list of catalogs
 #[derive(Default)]
 pub struct MemoryCatalogList {
-    /// Collection of catalogs containing schemas and ultimately TableProviders
+    /// Collection of catalogs containing schemas and ultimately Tables
     pub catalogs: RwLock<HashMap<String, Arc<dyn CatalogProvider>>>,
 }
 
@@ -80,5 +83,62 @@ impl CatalogProvider for MemoryCatalogProvider {
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
         let schemas = self.schemas.read().unwrap();
         schemas.get(name).cloned()
+    }
+}
+
+/// Simple in-memory implementation of a schema.
+pub struct MemorySchemaProvider {
+    tables: RwLock<HashMap<String, TableRef>>,
+}
+
+impl MemorySchemaProvider {
+    /// Instantiates a new MemorySchemaProvider with an empty collection of tables.
+    pub fn new() -> Self {
+        Self {
+            tables: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for MemorySchemaProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SchemaProvider for MemorySchemaProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn table_names(&self) -> Vec<String> {
+        let tables = self.tables.read().unwrap();
+        tables.keys().cloned().collect()
+    }
+
+    fn table(&self, name: &str) -> Option<TableRef> {
+        let tables = self.tables.read().unwrap();
+        tables.get(name).cloned()
+    }
+
+    fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
+        if self.table_exist(name.as_str()) {
+            return ExecutionSnafu {
+                message: format!("The table {} already exists", name),
+            }
+            .fail();
+        }
+        let mut tables = self.tables.write().unwrap();
+        Ok(tables.insert(name, table))
+    }
+
+    fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
+        let mut tables = self.tables.write().unwrap();
+        Ok(tables.remove(name))
+    }
+
+    fn table_exist(&self, name: &str) -> bool {
+        let tables = self.tables.read().unwrap();
+        tables.contains_key(name)
     }
 }
