@@ -11,7 +11,8 @@ use crate::catalog::{
     CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef, DEFAULT_CATALOG_NAME,
     DEFAULT_SCHEMA_NAME,
 };
-use crate::error::{ExecutionSnafu, Result};
+use crate::error::Result;
+use crate::query_engine::datafusion::error;
 
 /// Simple in-memory list of catalogs
 #[derive(Default)]
@@ -127,10 +128,11 @@ impl SchemaProvider for MemorySchemaProvider {
 
     fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
         if self.table_exist(name.as_str()) {
-            return ExecutionSnafu {
+            // FIXME(yingwen): Define another error.
+            return error::ExecutionSnafu {
                 message: format!("The table {} already exists", name),
             }
-            .fail();
+            .fail()?;
         }
         let mut tables = self.tables.write().unwrap();
         Ok(tables.insert(name, table))

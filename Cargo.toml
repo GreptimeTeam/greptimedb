@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "src/common/base",
+    "src/common/error",
     "src/common/query",
     "src/common/recordbatch",
     "src/cmd",

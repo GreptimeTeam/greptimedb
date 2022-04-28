@@ -16,12 +16,10 @@ use table::{
     Table,
 };
 
-use crate::catalog::{
-    schema::SchemaProvider, CatalogListRef, CatalogProvider, DEFAULT_CATALOG_NAME,
-    DEFAULT_SCHEMA_NAME,
-};
-use crate::error::{self, Result};
+use crate::catalog::{self, schema::SchemaProvider, CatalogListRef, CatalogProvider};
+use crate::error::Result;
 use crate::executor::Runtime;
+use crate::query_engine::datafusion::error;
 
 /// Query engine global state
 #[derive(Clone)]
@@ -39,8 +37,10 @@ impl fmt::Debug for QueryEngineState {
 
 impl QueryEngineState {
     pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
-        let config = ExecutionConfig::new()
-            .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let config = ExecutionConfig::new().with_default_catalog_and_schema(
+            catalog::DEFAULT_CATALOG_NAME,
+            catalog::DEFAULT_SCHEMA_NAME,
+        );
         let df_context = ExecutionContext::with_config(config);
 
         df_context.state.lock().catalog_list = Arc::new(DfCatalogListAdapter {
@@ -193,18 +193,16 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
         table: Arc<dyn DfTableProvider>,
     ) -> DataFusionResult<Option<Arc<dyn DfTableProvider>>> {
         let table = Arc::new(TableAdapter::new(table, self.runtime.clone()));
-        match self.schema_provider.register_table(name, table) {
-            Ok(Some(p)) => Ok(Some(Arc::new(DfTableProviderAdapter::new(p)))),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e.into()),
+        match self.schema_provider.register_table(name, table)? {
+            Some(p) => Ok(Some(Arc::new(DfTableProviderAdapter::new(p)))),
+            None => Ok(None),
         }
     }
 
     fn deregister_table(&self, name: &str) -> DataFusionResult<Option<Arc<dyn DfTableProvider>>> {
-        match self.schema_provider.deregister_table(name) {
-            Ok(Some(p)) => Ok(Some(Arc::new(DfTableProviderAdapter::new(p)))),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e.into()),
+        match self.schema_provider.deregister_table(name)? {
+            Some(p) => Ok(Some(Arc::new(DfTableProviderAdapter::new(p)))),
+            None => Ok(None),
         }
     }
 
@@ -244,7 +242,9 @@ impl SchemaProvider for SchemaProviderAdapter {
         Ok(self
             .df_schema_provider
             .register_table(name, table_provider)
-            .context(error::DatafusionSnafu)?
+            .context(error::DatafusionSnafu {
+                msg: "Fail to register table to datafusion",
+            })?
             .map(|table| (Arc::new(TableAdapter::new(table, self.runtime.clone())) as _)))
     }
 
@@ -252,7 +252,9 @@ impl SchemaProvider for SchemaProviderAdapter {
         Ok(self
             .df_schema_provider
             .deregister_table(name)
-            .context(error::DatafusionSnafu)?
+            .context(error::DatafusionSnafu {
+                msg: "Fail to deregister table from datafusion",
+            })?
             .map(|table| Arc::new(TableAdapter::new(table, self.runtime.clone())) as _))
     }
 

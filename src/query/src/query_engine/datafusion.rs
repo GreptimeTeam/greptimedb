@@ -1,4 +1,5 @@
 mod adapter;
+pub mod error;
 
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ use sql::{dialect::GenericDialect, parser::ParserContext};
 use super::{context::QueryContext, state::QueryEngineState};
 use crate::{
     catalog::CatalogListRef,
-    error::{self, ParseSqlSnafu, Result},
+    error::Result,
     executor::QueryExecutor,
     logical_optimizer::LogicalOptimizer,
     physical_optimizer::PhysicalOptimizer,
@@ -17,7 +18,7 @@ use crate::{
     plan::{LogicalPlan, PhysicalPlan},
     planner::{DfContextProviderAdapter, DfPlanner, Planner},
     query_engine::datafusion::adapter::PhysicalPlanAdapter,
-    query_engine::{Output, QueryEngine},
+    Output, QueryEngine,
 };
 
 pub(crate) struct DatafusionQueryEngine {
@@ -42,9 +43,7 @@ impl QueryEngine for DatafusionQueryEngine {
         let context_provider = DfContextProviderAdapter::new(self.state.catalog_list());
         let planner = DfPlanner::new(&context_provider);
         let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
-            .with_context(|_| ParseSqlSnafu {
-                sql: sql.to_string(),
-            })?;
+            .context(error::ParseSqlSnafu)?;
         // TODO(dennis): supports multi statement in one sql?
         assert!(1 == statement.len());
         planner.statement_to_plan(statement.remove(0))
@@ -70,11 +69,13 @@ impl LogicalOptimizer for DatafusionQueryEngine {
     ) -> Result<LogicalPlan> {
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
-                let optimized_plan = self
-                    .state
-                    .df_context()
-                    .optimize(df_plan)
-                    .context(error::DatafusionSnafu)?;
+                let optimized_plan =
+                    self.state
+                        .df_context()
+                        .optimize(df_plan)
+                        .context(error::DatafusionSnafu {
+                            msg: "Fail to optimize logical plan",
+                        })?;
 
                 Ok(LogicalPlan::DfPlan(optimized_plan))
             }
@@ -96,7 +97,9 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                     .df_context()
                     .create_physical_plan(df_plan)
                     .await
-                    .context(error::DatafusionSnafu)?;
+                    .context(error::DatafusionSnafu {
+                        msg: "Fail to create physical plan",
+                    })?;
 
                 Ok(Arc::new(PhysicalPlanAdapter::new(
                     Arc::new(physical_plan.schema().into()),
@@ -126,7 +129,9 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
         for optimizer in optimizers {
             new_plan = optimizer
                 .optimize(new_plan, config)
-                .context(error::DatafusionSnafu)?;
+                .context(error::DatafusionSnafu {
+                    msg: "Fail to optimize physical plan",
+                })?;
         }
         Ok(Arc::new(PhysicalPlanAdapter::new(plan.schema(), new_plan)))
     }

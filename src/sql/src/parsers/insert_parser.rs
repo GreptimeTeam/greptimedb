@@ -14,7 +14,7 @@ impl<'a> ParserContext<'a> {
         let spstatement = self
             .parser
             .parse_insert()
-            .context(errors::InnerSnafu { sql: self.sql })?;
+            .context(errors::SpSyntaxSnafu { sql: self.sql })?;
 
         match spstatement {
             SpStatement::Insert { .. } => {

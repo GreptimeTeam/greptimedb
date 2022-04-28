@@ -1,5 +1,5 @@
 mod context;
-mod datafusion;
+pub mod datafusion;
 mod state;
 
 use std::sync::Arc;

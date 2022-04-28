@@ -13,8 +13,9 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::{
     catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME},
-    error::{PlannerSnafu, Result},
+    error::Result,
     plan::LogicalPlan,
+    query_engine::datafusion::error,
 };
 
 pub trait Planner: Send + Sync {
@@ -39,7 +40,8 @@ impl<'a, S: ContextProvider + Send + Sync> DfPlanner<'a, S> {
         let result = self
             .sql_to_rel
             .query_to_plan(query.inner)
-            .context(PlannerSnafu { sql })?;
+            // FIXME(yingwen): Move DfPlanner to datafusion mod.
+            .context(error::PlannerSnafu { sql })?;
 
         Ok(LogicalPlan::DfPlan(result))
     }

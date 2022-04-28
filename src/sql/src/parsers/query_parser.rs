@@ -12,7 +12,7 @@ impl<'a> ParserContext<'a> {
         let spquery = self
             .parser
             .parse_query()
-            .context(errors::InnerSnafu { sql: self.sql })?;
+            .context(errors::SpSyntaxSnafu { sql: self.sql })?;
 
         Ok(Statement::Query(Box::new(Query::try_from(spquery)?)))
     }

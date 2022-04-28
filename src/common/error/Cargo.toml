@@ -1,5 +1,5 @@
 [package]
-name = "sql"
+name = "common-error"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,4 +7,3 @@ edition = "2021"
 
 [dependencies]
 snafu = { version = "0.7", features = ["backtraces"] }
-sqlparser = "0.15.0"
