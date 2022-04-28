@@ -1,3 +1,4 @@
+use datafusion::error::DataFusionError;
 use snafu::prelude::*;
 use sqlparser::parser::ParserError as SpParserError;
 
@@ -23,6 +24,16 @@ pub enum ParserError {
 
     #[snafu(display("Unknown inner parser error, sql: {sql}, source: {source}"))]
     InnerError { sql: String, source: SpParserError },
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum PlannerError {
+    #[snafu(display("Cannot plan SQL: {}", sql))]
+    DatafusionError {
+        sql: String,
+        source: DataFusionError,
+    },
 }
 
 #[cfg(test)]
