@@ -118,9 +118,6 @@ impl Debug for ExecutionPlanAdapter {
     }
 }
 
-unsafe impl Send for ExecutionPlanAdapter {}
-unsafe impl Sync for ExecutionPlanAdapter {}
-
 #[async_trait::async_trait]
 impl ExecutionPlan for ExecutionPlanAdapter {
     fn as_any(&self) -> &dyn Any {
