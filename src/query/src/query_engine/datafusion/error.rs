@@ -33,6 +33,7 @@ pub enum InnerError {
     Execution { message: String },
 }
 
+// TODO(yingwen): Implement status_code().
 impl ErrorExt for InnerError {
     fn backtrace_opt(&self) -> Option<&snafu::Backtrace> {
         ErrorCompat::backtrace(self)

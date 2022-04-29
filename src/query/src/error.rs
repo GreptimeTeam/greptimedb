@@ -1,4 +1,5 @@
 use datafusion::error::DataFusionError;
+use snafu::Snafu;
 
 common_error::define_opaque_error!(Error);
 

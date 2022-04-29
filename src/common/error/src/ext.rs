@@ -2,14 +2,15 @@ use crate::status_code::StatusCode;
 
 /// Extension to [`Error`](std::error::Error) in std.
 pub trait ErrorExt: std::error::Error {
-    /// Returns the [StatusCode] of this holder.
+    /// Map this error to [StatusCode].
     fn status_code(&self) -> StatusCode {
         StatusCode::Unknown
     }
 
-    /// Get the reference to the backtrace of this error.
-    // Add `_opt` suffix to avoid confusing with similar method in `std::error::Error`.
-    fn backtrace_opt(&self) -> Option<&snafu::Backtrace>;
+    /// Get the reference to the backtrace of this error, None if the backtrace is unavailable.
+    // Add `_opt` suffix to avoid confusing with similar method in `std::error::Error`, once backtrace
+    // in std is stable, we can deprecate this method.
+    fn backtrace_opt(&self) -> Option<&crate::snafu::Backtrace>;
 }
 
 /// A helper macro to define a opaque boxed error based on errors that implement [ErrorExt] trait.
@@ -25,7 +26,6 @@ macro_rules! define_opaque_error {
         }
 
         impl $Error {
-            /// Create a new error.
             pub fn new<E: $crate::ext::ErrorExt + Send + Sync + 'static>(err: E) -> Self {
                 Self {
                     inner: Box::new(err),
@@ -57,7 +57,13 @@ macro_rules! define_opaque_error {
                 self.inner.status_code()
             }
 
-            fn backtrace_opt(&self) -> Option<&snafu::Backtrace> {
+            fn backtrace_opt(&self) -> Option<&$crate::snafu::Backtrace> {
+                self.inner.backtrace_opt()
+            }
+        }
+
+        impl $crate::snafu::ErrorCompat for $Error {
+            fn backtrace(&self) -> Option<&$crate::snafu::Backtrace> {
                 self.inner.backtrace_opt()
             }
         }
@@ -68,7 +74,7 @@ macro_rules! define_opaque_error {
 mod tests {
     use std::error::Error as StdError;
 
-    use snafu::{prelude::*, Backtrace};
+    use snafu::{prelude::*, Backtrace, ErrorCompat};
 
     use super::*;
 
@@ -88,7 +94,7 @@ mod tests {
 
     impl ErrorExt for InnerError {
         fn backtrace_opt(&self) -> Option<&snafu::Backtrace> {
-            snafu::ErrorCompat::backtrace(self)
+            ErrorCompat::backtrace(self)
         }
     }
 
@@ -111,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn test_opaque_error() {
+    fn test_inner_error() {
         let leaf = throw_leaf().err().unwrap();
         assert!(leaf.backtrace_opt().is_some());
         assert!(leaf.source().is_none());
@@ -119,5 +125,19 @@ mod tests {
         let internal = throw_internal().err().unwrap();
         assert!(internal.backtrace_opt().is_some());
         assert!(internal.source().is_some());
+    }
+
+    #[test]
+    fn test_opaque_error() {
+        let err: Error = throw_leaf().map_err(Into::into).err().unwrap();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("\nBacktrace:\n"));
+        assert!(ErrorCompat::backtrace(&err).is_some());
+
+        let err: Error = throw_internal().map_err(Into::into).err().unwrap();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("\nBacktrace:\n"));
+        assert!(msg.contains("Caused by"));
+        assert!(ErrorCompat::backtrace(&err).is_some());
     }
 }

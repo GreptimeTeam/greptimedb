@@ -1,4 +1,5 @@
-use snafu::prelude::*;
+use common_error::prelude::*;
+use snafu::{prelude::*, ErrorCompat};
 use sqlparser::parser::ParserError as SpParserError;
 
 /// SQL parser errors.
@@ -27,6 +28,19 @@ pub enum ParserError {
     // Syntax error from sql parser.
     #[snafu(display("Syntax error, sql: {}, source: {}", sql, source))]
     SpSyntax { sql: String, source: SpParserError },
+}
+
+impl ErrorExt for ParserError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::Unsupported { .. } => StatusCode::Unsupported,
+            Self::Unexpected { .. } | Self::SpSyntax { .. } => StatusCode::InvalidSyntax,
+        }
+    }
+
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
 }
 
 #[cfg(test)]
