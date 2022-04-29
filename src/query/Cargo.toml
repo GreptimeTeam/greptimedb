@@ -18,6 +18,7 @@ futures-util = "0.3.21"
 snafu = "0.7.0"
 table = { path = "../table" }
 tokio = "1.0"
+sql = {path="../sql"}
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["macros", "rt", "rt-multi-thread", "sync", "fs", "parking_lot"] }

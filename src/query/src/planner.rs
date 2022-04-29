@@ -1,11 +1,11 @@
 use datafusion::sql::planner::{ContextProvider, SqlToRel};
-use query::plan::LogicalPlan;
 use snafu::ResultExt;
+use sql::statements::query::Query;
+use sql::statements::statement::Statement;
 
-use crate::errors;
-use crate::errors::PlannerError;
-use crate::statements::query::Query;
-use crate::statements::statement::Statement;
+use crate::error;
+use crate::error::PlannerError;
+use crate::plan::LogicalPlan;
 
 pub trait Planner {
     fn statement_to_plan(&self, statement: Statement) -> Result<LogicalPlan>;
@@ -30,7 +30,7 @@ impl<'a, S: ContextProvider> DfPlanner<'a, S> {
         let result = self
             .sql_to_rel
             .query_to_plan(query.inner)
-            .context(errors::DatafusionSnafu { sql })?;
+            .context(error::DfPlanSnafu { sql })?;
 
         Ok(LogicalPlan::DfPlan(result))
     }
@@ -51,20 +51,5 @@ where
                 todo!()
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use sqlparser::dialect::GenericDialect;
-
-    use super::*;
-    use crate::parser::ParserContext;
-
-    #[test]
-    pub fn test_plan_select() {
-        let sql = "SELECT * FROM table_1";
-        let statements = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        assert_eq!(1, statements.len());
     }
 }
