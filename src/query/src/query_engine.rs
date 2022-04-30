@@ -14,7 +14,7 @@ pub use context::QueryContext;
 use crate::query_engine::datafusion::DatafusionQueryEngine;
 
 #[async_trait::async_trait]
-pub trait QueryEngine {
+pub trait QueryEngine: Send + Sync {
     fn name(&self) -> &str;
     async fn execute(&self, plan: &LogicalPlan) -> Result<SendableRecordBatchStream>;
 }

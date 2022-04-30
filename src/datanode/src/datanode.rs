@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use query::catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use query::catalog::schema::{SchemaProvider, SchemaProviderRef};
-use query::catalog::{CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef};
-use query::QueryEngineRef;
+use query::catalog::schema::SchemaProviderRef;
+use query::catalog::CatalogListRef;
 use snafu::ResultExt;
 use table::table::numbers::NumbersTable;
 
@@ -15,7 +14,7 @@ use crate::server::Services;
 pub struct DataNode {
     services: Services,
     _catalog_list: CatalogListRef,
-    instance: InstanceRef,
+    _instance: InstanceRef,
 }
 
 impl DataNode {
@@ -45,9 +44,9 @@ impl DataNode {
         let instance = Arc::new(Instance::new(catalog_list.clone()));
 
         Ok(Self {
-            instance,
+            services: Services::new(instance.clone()),
             _catalog_list: catalog_list,
-            services: Services::new(),
+            _instance: instance,
         })
     }
 

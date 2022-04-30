@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::instance::InstanceRef;
 
 mod grpc;
 mod http;
@@ -11,9 +12,9 @@ pub struct Services {
 }
 
 impl Services {
-    pub fn new() -> Self {
+    pub fn new(instance: InstanceRef) -> Self {
         Self {
-            http_server: HttpServer {},
+            http_server: HttpServer::new(instance),
         }
     }
 

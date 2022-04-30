@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
 use query::catalog::CatalogListRef;
-use query::query_engine::{QueryEngine, QueryEngineFactory, QueryEngineRef};
+use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 
 use crate::error::Result;
 
@@ -31,7 +31,7 @@ impl Instance {
         }
     }
 
-    pub async fn execute_sql(&self, sql: &str) -> Result<Output> {
+    pub async fn execute_sql(&self, _sql: &str) -> Result<Output> {
         Ok(Output::AffectedRows(3))
     }
 }

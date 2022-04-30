@@ -5,7 +5,9 @@ use greptime_cmd::opts::{GrepTimeOpts, NodeType};
 async fn datanode_main(_opts: &GrepTimeOpts) {
     let data_node = DataNode::new().unwrap();
 
-    data_node.start().await;
+    if let Err(e) = data_node.start().await {
+        println!("Fail to start data node, error: {:?}", e);
+    }
 }
 
 #[tokio::main]

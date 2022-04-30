@@ -4,7 +4,7 @@ pub mod primitive;
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow2::array::ArrayRef;
+use arrow::array::ArrayRef;
 pub use binary::*;
 pub use primitive::*;
 

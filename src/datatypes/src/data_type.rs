@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow2::datatypes::DataType as ArrowDataType;
+use arrow::datatypes::DataType as ArrowDataType;
 
 use crate::type_id::LogicalTypeId;
 use crate::value::Value;

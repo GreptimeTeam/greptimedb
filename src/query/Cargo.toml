@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies.arrow]
 package = "arrow2"
 version="0.10"
-features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute"]
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
 
 [dependencies]
 async-trait = "0.1"
