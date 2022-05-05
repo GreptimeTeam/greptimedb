@@ -1,14 +1,14 @@
-use errors::ParserError;
 use snafu::prelude::*;
 
 use crate::errors;
 use crate::parser::ParserContext;
+use crate::parser::Result;
 use crate::statements::query::Query;
 use crate::statements::statement::Statement;
 
 impl<'a> ParserContext<'a> {
     /// Parses select and it's variants.
-    pub(crate) fn parse_query(&mut self) -> Result<Statement, ParserError> {
+    pub(crate) fn parse_query(&mut self) -> Result<Statement> {
         let spquery = self
             .parser
             .parse_query()

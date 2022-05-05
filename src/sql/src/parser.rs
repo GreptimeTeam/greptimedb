@@ -9,6 +9,8 @@ use crate::statements::show_database::SqlShowDatabase;
 use crate::statements::show_kind::ShowKind;
 use crate::statements::statement::Statement;
 
+pub type Result<T> = std::result::Result<T, errors::ParserError>;
+
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
     pub(crate) parser: Parser<'a>,
@@ -17,10 +19,7 @@ pub struct ParserContext<'a> {
 
 impl<'a> ParserContext<'a> {
     /// Parses SQL with given dialect
-    pub fn create_with_dialect(
-        sql: &'a str,
-        dialect: &dyn Dialect,
-    ) -> Result<Vec<Statement>, errors::ParserError> {
+    pub fn create_with_dialect(sql: &'a str, dialect: &dyn Dialect) -> Result<Vec<Statement>> {
         let mut stmts: Vec<Statement> = Vec::new();
         let mut tokenizer = Tokenizer::new(dialect, sql);
 
@@ -54,7 +53,7 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parses parser context to a set of statements.
-    pub fn parse_statement(&mut self) -> Result<Statement, errors::ParserError> {
+    pub fn parse_statement(&mut self) -> Result<Statement> {
         match self.parser.peek_token() {
             Token::Word(w) => {
                 match w.keyword {
@@ -87,7 +86,7 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Raises an "unsupported statement" error.
-    pub fn unsupported<T>(&self, keyword: String) -> Result<T, errors::ParserError> {
+    pub fn unsupported<T>(&self, keyword: String) -> Result<T> {
         Err(errors::ParserError::Unsupported {
             sql: self.sql.to_string(),
             keyword,
@@ -96,7 +95,7 @@ impl<'a> ParserContext<'a> {
 
     /// Parses SHOW statements
     /// todo(hl) support `show table`/`show settings`/`show create`/`show users` ect.
-    fn parse_show(&mut self) -> Result<Statement, errors::ParserError> {
+    fn parse_show(&mut self) -> Result<Statement> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             Ok(self.parse_show_databases()?)
         } else {
@@ -104,11 +103,11 @@ impl<'a> ParserContext<'a> {
         }
     }
 
-    fn parse_explain(&mut self) -> Result<Statement, errors::ParserError> {
+    fn parse_explain(&mut self) -> Result<Statement> {
         todo!()
     }
 
-    fn parse_create(&mut self) -> Result<Statement, errors::ParserError> {
+    fn parse_create(&mut self) -> Result<Statement> {
         todo!()
     }
 
@@ -127,7 +126,7 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parses `SHOW DATABASES` statement.
-    pub fn parse_show_databases(&mut self) -> Result<Statement, errors::ParserError> {
+    pub fn parse_show_databases(&mut self) -> Result<Statement> {
         let tok = self.parser.next_token();
         match &tok {
             Token::EOF | Token::SemiColon => Ok(Statement::ShowDatabases(SqlShowDatabase::new(

@@ -1,5 +1,5 @@
 use sqlparser::ast::Statement as SpStatement;
-use sqlparser::parser::ParserError::ParserError;
+use sqlparser::parser::ParserError;
 
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
@@ -24,7 +24,7 @@ impl TryFrom<Statement> for SpStatement {
 
     fn try_from(value: Statement) -> Result<Self, Self::Error> {
         match value {
-            Statement::ShowDatabases(_) => Err(ParserError(
+            Statement::ShowDatabases(_) => Err(ParserError::ParserError(
                 "sqlparser does not support SHOW DATABASE query.".to_string(),
             )),
             Statement::Query(s) => Ok(SpStatement::Query(Box::new(s.inner))),

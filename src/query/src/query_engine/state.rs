@@ -66,13 +66,9 @@ impl QueryEngineState {
 
     #[allow(dead_code)]
     pub(crate) fn schema(&self, schema_name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        match self.catalog_list.catalog(DEFAULT_CATALOG_NAME) {
-            None => None,
-            Some(catalog) => match catalog.schema(schema_name) {
-                None => None,
-                Some(s) => Option::Some(s),
-            },
-        }
+        self.catalog_list
+            .catalog(DEFAULT_CATALOG_NAME)
+            .and_then(|c| c.schema(schema_name))
     }
 }
 

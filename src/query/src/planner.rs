@@ -26,6 +26,7 @@ impl<'a, S: ContextProvider> DfPlanner<'a, S> {
 
     /// Converts QUERY statement to logical plan.
     pub fn query_to_plan(&self, query: Box<Query>) -> Result<LogicalPlan> {
+        // todo(hl): original SQL should be provided as an argument
         let sql = query.inner.to_string();
         let result = self
             .sql_to_rel
