@@ -22,15 +22,20 @@ pub async fn sql(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use query::catalog::memory;
-    use crate::instance::Instance;
     use std::sync::Arc;
+
+    use query::catalog::memory;
+
+    use super::*;
+    use crate::instance::Instance;
     use crate::server::http::JsonOutput;
 
     fn create_params() -> Query<HashMap<String, String>> {
         let mut map = HashMap::new();
-        map.insert("sql".to_string(), "select sum(number) from numbers limit 20".to_string());
+        map.insert(
+            "sql".to_string(),
+            "select sum(number) from numbers limit 20".to_string(),
+        );
         Query(map)
     }
 
@@ -50,7 +55,7 @@ mod tests {
         assert!(json.output.is_none());
     }
 
-     #[tokio::test]
+    #[tokio::test]
     async fn test_sql_output_rows() {
         let query = create_params();
         let extension = create_extension();
@@ -63,7 +68,7 @@ mod tests {
         match json.output.unwrap() {
             JsonOutput::Rows(rows) => {
                 assert_eq!(1, rows.len());
-            },
+            }
             _ => unreachable!(),
         }
     }

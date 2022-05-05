@@ -38,10 +38,11 @@ impl Instance {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use query::catalog::memory;
-    use common_recordbatch::util;
     use arrow::array::UInt64Array;
+    use common_recordbatch::util;
+    use query::catalog::memory;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_execute_sql() {
@@ -49,9 +50,12 @@ mod tests {
 
         let instance = Instance::new(catalog_list);
 
-        let output = instance.execute_sql("select sum(number) from numbers limit 20").await.unwrap();
+        let output = instance
+            .execute_sql("select sum(number) from numbers limit 20")
+            .await
+            .unwrap();
 
-  match output {
+        match output {
             Output::RecordBatch(recordbatch) => {
                 let numbers = util::collect(recordbatch).await.unwrap();
                 let columns = numbers[0].df_recordbatch.columns();
@@ -62,7 +66,7 @@ mod tests {
                     *columns[0].as_any().downcast_ref::<UInt64Array>().unwrap(),
                     UInt64Array::from_slice(&[4950])
                 );
-            },
+            }
             _ => unreachable!(),
         }
     }
