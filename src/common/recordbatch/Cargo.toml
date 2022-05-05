@@ -13,5 +13,6 @@ datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch =
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
 datatypes = {path ="../../datatypes" }
 futures = "0.3"
+paste = "1.0"
 serde = "1.0.136"
 snafu = "0.7.0"

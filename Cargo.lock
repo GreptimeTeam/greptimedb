@@ -440,6 +440,7 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
+ "paste",
  "serde",
  "snafu",
 ]

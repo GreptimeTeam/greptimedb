@@ -14,7 +14,7 @@ pub async fn sql(
     Query(params): Query<HashMap<String, String>>,
 ) -> JsonResponse {
     if let Some(sql) = params.get("sql") {
-        JsonResponse::from(instance.execute_sql(&sql).await).await
+        JsonResponse::from(instance.execute_sql(sql).await).await
     } else {
         JsonResponse::with_error(Some("sql parameter is required.".to_string()))
     }
