@@ -41,3 +41,6 @@ pub trait CatalogProvider: Sync + Send {
 
 pub type CatalogListRef = Arc<dyn CatalogList>;
 pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
+
+pub const DEFAULT_CATALOG_NAME: &str = "greptime";
+pub const DEFAULT_SCHEMA_NAME: &str = "public";

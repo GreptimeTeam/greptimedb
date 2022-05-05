@@ -1,15 +1,10 @@
 use std::sync::Arc;
 
-use common_recordbatch::SendableRecordBatchStream;
 use query::catalog::CatalogListRef;
-use query::query_engine::{QueryEngineFactory, QueryEngineRef};
+use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
+use snafu::ResultExt;
 
-use crate::error::Result;
-
-pub enum Output {
-    AffectedRows(usize),
-    RecordBatch(SendableRecordBatchStream),
-}
+use crate::error::{QuerySnafu, Result};
 
 // An abstraction to read/write services.
 pub struct Instance {
@@ -31,7 +26,12 @@ impl Instance {
         }
     }
 
-    pub async fn execute_sql(&self, _sql: &str) -> Result<Output> {
-        Ok(Output::AffectedRows(3))
+    pub async fn execute_sql(&self, sql: &str) -> Result<Output> {
+        let logical_plan = self.query_engine.sql_to_plan(sql).context(QuerySnafu)?;
+
+        self.query_engine
+            .execute(&logical_plan)
+            .await
+            .context(QuerySnafu)
     }
 }

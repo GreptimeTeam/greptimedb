@@ -13,10 +13,17 @@ pub use context::QueryContext;
 
 use crate::query_engine::datafusion::DatafusionQueryEngine;
 
+/// Sql output
+pub enum Output {
+    AffectedRows(usize),
+    RecordBatch(SendableRecordBatchStream),
+}
+
 #[async_trait::async_trait]
 pub trait QueryEngine: Send + Sync {
     fn name(&self) -> &str;
-    async fn execute(&self, plan: &LogicalPlan) -> Result<SendableRecordBatchStream>;
+    fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan>;
+    async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
 }
 
 pub struct QueryEngineFactory {
@@ -38,3 +45,19 @@ impl QueryEngineFactory {
 }
 
 pub type QueryEngineRef = Arc<dyn QueryEngine>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::memory;
+
+    #[test]
+    fn test_query_engine_factory() {
+        let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let factory = QueryEngineFactory::new(catalog_list);
+
+        let engine = factory.query_engine();
+
+        assert_eq!("datafusion", engine.name());
+    }
+}

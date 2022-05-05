@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
-use query::catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use query::catalog::schema::SchemaProviderRef;
+use query::catalog::memory;
 use query::catalog::CatalogListRef;
 use snafu::ResultExt;
-use table::table::numbers::NumbersTable;
 
 use crate::error::{QuerySnafu, Result};
 use crate::instance::{Instance, InstanceRef};
@@ -18,29 +16,9 @@ pub struct DataNode {
 }
 
 impl DataNode {
-    fn setup_test(
-        schema_provider: SchemaProviderRef,
-        catalog_provider: Arc<MemoryCatalogProvider>,
-        catalog_list: CatalogListRef,
-    ) -> Result<()> {
-        // Add numbers table for test
-        let table = Arc::new(NumbersTable::default());
-        schema_provider
-            .register_table("numbers".to_string(), table)
-            .context(QuerySnafu)?;
-        catalog_provider.register_schema("public", schema_provider);
-        catalog_list.register_catalog("greptime".to_string(), catalog_provider);
-
-        Ok(())
-    }
-
     pub fn new() -> Result<DataNode> {
-        let schema_provider = Arc::new(MemorySchemaProvider::new());
-        let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-        let catalog_list = Arc::new(MemoryCatalogList::default());
-
-        Self::setup_test(schema_provider, catalog_provider, catalog_list.clone())?;
-
+        // TODO(dennis): a momory catalog list for test
+        let catalog_list = memory::new_memory_catalog_list().context(QuerySnafu)?;
         let instance = Arc::new(Instance::new(catalog_list.clone()));
 
         Ok(Self {

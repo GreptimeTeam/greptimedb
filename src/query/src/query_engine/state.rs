@@ -16,18 +16,18 @@ use table::{
     Table,
 };
 
-use crate::catalog::{schema::SchemaProvider, CatalogList, CatalogProvider};
+use crate::catalog::{
+    schema::SchemaProvider, CatalogListRef, CatalogProvider, DEFAULT_CATALOG_NAME,
+    DEFAULT_SCHEMA_NAME,
+};
 use crate::error::{self, Result};
 use crate::executor::Runtime;
-
-const DEFAULT_CATALOG_NAME: &str = "greptime";
-const DEFAULT_SCHEMA_NAME: &str = "public";
 
 /// Query engine global state
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: ExecutionContext,
-    catalog_list: Arc<dyn CatalogList>,
+    catalog_list: CatalogListRef,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -38,7 +38,7 @@ impl fmt::Debug for QueryEngineState {
 }
 
 impl QueryEngineState {
-    pub(crate) fn new(catalog_list: Arc<dyn CatalogList>) -> Self {
+    pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
         let config = ExecutionConfig::new()
             .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         let df_context = ExecutionContext::with_config(config);
@@ -55,6 +55,11 @@ impl QueryEngineState {
     }
 
     #[inline]
+    pub(crate) fn catalog_list(&self) -> &CatalogListRef {
+        &self.catalog_list
+    }
+
+    #[inline]
     pub(crate) fn df_context(&self) -> &ExecutionContext {
         &self.df_context
     }
@@ -63,19 +68,12 @@ impl QueryEngineState {
     pub(crate) fn runtime(&self) -> Runtime {
         self.df_context.runtime_env().into()
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn schema(&self, schema_name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.catalog_list
-            .catalog(DEFAULT_CATALOG_NAME)
-            .and_then(|c| c.schema(schema_name))
-    }
 }
 
 /// Adapters between datafusion and greptime query engine.
 struct DfCatalogListAdapter {
     runtime: Arc<RuntimeEnv>,
-    catalog_list: Arc<dyn CatalogList>,
+    catalog_list: CatalogListRef,
 }
 
 impl DfCatalogList for DfCatalogListAdapter {

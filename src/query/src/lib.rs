@@ -9,4 +9,6 @@ pub mod plan;
 pub mod planner;
 pub mod query_engine;
 
-pub use crate::query_engine::{QueryContext, QueryEngine, QueryEngineFactory, QueryEngineRef};
+pub use crate::query_engine::{
+    Output, QueryContext, QueryEngine, QueryEngineFactory, QueryEngineRef,
+};

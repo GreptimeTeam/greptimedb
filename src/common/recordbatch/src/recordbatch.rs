@@ -1,12 +1,15 @@
 use std::sync::Arc;
 
-use arrow::array::{Utf8Array, UInt64Array, UInt32Array, UInt16Array, UInt8Array,Int64Array, Int32Array, Int16Array, Int8Array, Float32Array, Float64Array, BooleanArray};
+use arrow::array::{
+    BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    UInt16Array, UInt32Array, UInt64Array, UInt8Array, Utf8Array,
+};
 use arrow::datatypes::DataType;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::schema::Schema;
+use paste::paste;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
-use paste::paste;
 
 #[derive(Clone, Debug)]
 pub struct RecordBatch {
@@ -35,7 +38,7 @@ macro_rules! collect_columns {
 }
 
 #[derive(Serialize)]
-enum  Column<'a> {
+enum Column<'a> {
     Int64(&'a [i64]),
     Int32(&'a [i32]),
     Int16(&'a [i16]),
@@ -50,7 +53,6 @@ enum  Column<'a> {
     Utf8(&'a [u8]),
 }
 
-
 impl Serialize for RecordBatch {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -62,11 +64,10 @@ impl Serialize for RecordBatch {
         let df_columns = self.df_recordbatch.columns();
         let mut columns: Vec<Column> = Vec::with_capacity(df_columns.len());
         for array in df_columns {
-            collect_columns!(array, columns,
-                           Int64, Int32, Int16, Int8,
-                           UInt64, UInt32, UInt16, UInt8,
-                           Float64, Float32,
-                           Boolean);
+            collect_columns!(
+                array, columns, Int64, Int32, Int16, Int8, UInt64, UInt32, UInt16, UInt8, Float64,
+                Float32, Boolean
+            );
         }
         s.serialize_field("columns", &columns)?;
 

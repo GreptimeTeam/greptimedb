@@ -3,10 +3,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use table::table::numbers::NumbersTable;
 use table::TableRef;
 
 use crate::catalog::schema::SchemaProvider;
-use crate::catalog::{CatalogList, CatalogProvider};
+use crate::catalog::{
+    CatalogList, CatalogListRef, CatalogProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+};
 use crate::error::{ExecutionSnafu, Result};
 
 /// Simple in-memory list of catalogs
@@ -140,5 +143,58 @@ impl SchemaProvider for MemorySchemaProvider {
     fn table_exist(&self, name: &str) -> bool {
         let tables = self.tables.read().unwrap();
         tables.contains_key(name)
+    }
+}
+
+/// Craete a memory catalog list contains a numbers table for test
+pub fn new_memory_catalog_list() -> Result<CatalogListRef> {
+    let schema_provider = Arc::new(MemorySchemaProvider::new());
+    let catalog_provider = Arc::new(MemoryCatalogProvider::new());
+    let catalog_list = Arc::new(MemoryCatalogList::default());
+
+    // Add numbers table for test
+    let table = Arc::new(NumbersTable::default());
+    schema_provider.register_table("numbers".to_string(), table)?;
+    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);
+    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
+
+    Ok(catalog_list)
+}
+
+#[cfg(test)]
+mod tests {
+    use table::table::numbers::NumbersTable;
+
+    use super::*;
+
+    #[test]
+    fn test_new_memory_catalog_list() {
+        let catalog_list = new_memory_catalog_list().unwrap();
+
+        let catalog_provider = catalog_list.catalog(DEFAULT_CATALOG_NAME).unwrap();
+        let schema_provider = catalog_provider.schema(DEFAULT_SCHEMA_NAME).unwrap();
+
+        let table = schema_provider.table("numbers");
+        assert!(table.is_some());
+
+        assert!(schema_provider.table("not_exists").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mem_provider() {
+        let provider = MemorySchemaProvider::new();
+        let table_name = "numbers";
+        assert!(!provider.table_exist(table_name));
+        assert!(provider.deregister_table(table_name).unwrap().is_none());
+        let test_table = NumbersTable::default();
+        // register table successfully
+        assert!(provider
+            .register_table(table_name.to_string(), Arc::new(test_table))
+            .unwrap()
+            .is_none());
+        assert!(provider.table_exist(table_name));
+        let other_table = NumbersTable::default();
+        let result = provider.register_table(table_name.to_string(), Arc::new(other_table));
+        assert!(result.is_err());
     }
 }

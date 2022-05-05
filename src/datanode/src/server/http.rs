@@ -9,15 +9,15 @@ use axum::{
     BoxError, Extension, Router,
 };
 use common_recordbatch::{util, RecordBatch};
+use query::Output;
 use serde::Serialize;
 use snafu::ResultExt;
 use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
 use crate::error::{HyperSnafu, Result};
-use crate::instance::{InstanceRef, Output};
-
 mod handler;
+use crate::server::InstanceRef;
 
 /// Http server
 pub struct HttpServer {
@@ -91,7 +91,7 @@ impl HttpServer {
                 .layer(TimeoutLayer::new(Duration::from_secs(30))),
         );
 
-        let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+        let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
         println!("Datanode is listening on {}", addr);
         axum::Server::bind(&addr)
             .serve(app.into_make_service())
