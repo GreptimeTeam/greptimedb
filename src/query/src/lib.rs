@@ -6,4 +6,5 @@ pub mod logical_optimizer;
 pub mod physical_optimizer;
 pub mod physical_planner;
 pub mod plan;
+pub mod planner;
 pub mod query_engine;
