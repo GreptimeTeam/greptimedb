@@ -3,6 +3,7 @@ use clap::{ArgEnum, Parser};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ArgEnum)]
 pub enum NodeType {
+    /// Data node
     Data,
 }
 

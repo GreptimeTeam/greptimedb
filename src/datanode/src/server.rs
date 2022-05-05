@@ -21,8 +21,4 @@ impl Services {
     pub async fn start(&self) -> Result<()> {
         self.http_server.start().await
     }
-
-    pub async fn shutdown(&self) -> Result<()> {
-        unimplemented!()
-    }
 }

@@ -19,3 +19,52 @@ pub async fn sql(
         JsonResponse::with_error(Some("sql parameter is required.".to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use query::catalog::memory;
+    use crate::instance::Instance;
+    use std::sync::Arc;
+    use crate::server::http::JsonOutput;
+
+    fn create_params() -> Query<HashMap<String, String>> {
+        let mut map = HashMap::new();
+        map.insert("sql".to_string(), "select sum(number) from numbers limit 20".to_string());
+        Query(map)
+    }
+
+    fn create_extension() -> Extension<InstanceRef> {
+        let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let instance = Arc::new(Instance::new(catalog_list));
+        Extension(instance)
+    }
+
+    #[tokio::test]
+    async fn test_sql_not_provided() {
+        let extension = create_extension();
+
+        let json = sql(extension, Query(HashMap::default())).await;
+        assert!(!json.success);
+        assert_eq!(Some("sql parameter is required.".to_string()), json.error);
+        assert!(json.output.is_none());
+    }
+
+     #[tokio::test]
+    async fn test_sql_output_rows() {
+        let query = create_params();
+        let extension = create_extension();
+
+        let json = sql(extension, query).await;
+        assert!(json.success);
+        assert!(json.error.is_none());
+        assert!(json.output.is_some());
+
+        match json.output.unwrap() {
+            JsonOutput::Rows(rows) => {
+                assert_eq!(1, rows.len());
+            },
+            _ => unreachable!(),
+        }
+    }
+}

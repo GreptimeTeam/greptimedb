@@ -17,7 +17,6 @@ pub struct DataNode {
 
 impl DataNode {
     pub fn new() -> Result<DataNode> {
-        // TODO(dennis): a momory catalog list for test
         let catalog_list = memory::new_memory_catalog_list().context(QuerySnafu)?;
         let instance = Arc::new(Instance::new(catalog_list.clone()));
 
@@ -30,12 +29,5 @@ impl DataNode {
 
     pub async fn start(&self) -> Result<()> {
         self.services.start().await
-    }
-
-    /// Shutdown the datanode service gracefully.
-    pub async fn shutdown(&self) -> Result<()> {
-        self.services.shutdown().await?;
-
-        unimplemented!()
     }
 }

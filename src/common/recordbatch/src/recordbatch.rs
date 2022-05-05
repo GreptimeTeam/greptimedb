@@ -53,6 +53,7 @@ enum Column<'a> {
     Utf8(&'a [u8]),
 }
 
+/// TODO(dennis): should be implemented in datatypes
 impl Serialize for RecordBatch {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

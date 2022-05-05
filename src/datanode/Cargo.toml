@@ -18,3 +18,8 @@ table = { path = "../table" }
 tokio = { version = "1.18.0", features = ["full"] }
 tower = { version = "0.4.12", features = ["full"]}
 tower-http = { version ="0.3.2", features = ["full"]}
+
+[dev-dependencies.arrow]
+package = "arrow2"
+version="0.10"
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]

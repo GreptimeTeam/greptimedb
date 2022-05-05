@@ -25,7 +25,7 @@ pub struct HttpServer {
 }
 
 #[derive(Serialize)]
-enum JsonOutput {
+pub enum JsonOutput {
     AffectedRows(usize),
     Rows(Vec<RecordBatch>),
 }
@@ -76,6 +76,14 @@ impl JsonResponse {
     }
 }
 
+async fn shutdown_signal() {
+    // Wait for the CTRL+C signal
+    // It has an issue on chrome: https://github.com/sigp/lighthouse/issues/478
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install CTRL+C signal handler");
+}
+
 impl HttpServer {
     pub fn new(instance: InstanceRef) -> Self {
         Self { instance }
@@ -92,11 +100,12 @@ impl HttpServer {
         );
 
         let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-        println!("Datanode is listening on {}", addr);
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service())
-            .await
-            .context(HyperSnafu)?;
+        // TODO(dennis): log
+        println!("Datanode HTTP server is listening on {}", addr);
+        let server = axum::Server::bind(&addr).serve(app.into_make_service());
+        let graceful = server.with_graceful_shutdown(shutdown_signal());
+
+        graceful.await.context(HyperSnafu)?;
 
         Ok(())
     }

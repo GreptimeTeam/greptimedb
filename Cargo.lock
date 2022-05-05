@@ -607,6 +607,7 @@ dependencies = [
 name = "datanode"
 version = "0.1.0"
 dependencies = [
+ "arrow2",
  "axum",
  "axum-macros",
  "common-recordbatch",
