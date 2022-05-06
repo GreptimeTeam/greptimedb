@@ -1,16 +1,15 @@
+mod context;
+mod datafusion;
+mod state;
+
 use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
+pub use context::QueryContext;
 
 use crate::catalog::CatalogList;
 use crate::error::Result;
 use crate::plan::LogicalPlan;
-
-mod context;
-mod datafusion;
-mod state;
-pub use context::QueryContext;
-
 use crate::query_engine::datafusion::DatafusionQueryEngine;
 
 /// Sql output

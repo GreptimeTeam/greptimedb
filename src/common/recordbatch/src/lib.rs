@@ -1,5 +1,6 @@
 pub mod error;
 mod recordbatch;
+pub mod util;
 
 use std::pin::Pin;
 
@@ -7,7 +8,6 @@ use datatypes::schema::SchemaRef;
 use error::Result;
 use futures::task::{Context, Poll};
 use futures::Stream;
-pub mod util;
 pub use recordbatch::RecordBatch;
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {

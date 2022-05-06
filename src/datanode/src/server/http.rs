@@ -1,3 +1,5 @@
+mod handler;
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -16,7 +18,6 @@ use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
 use crate::error::{HyperSnafu, Result};
-mod handler;
 use crate::server::InstanceRef;
 
 /// Http server
@@ -62,7 +63,7 @@ impl JsonResponse {
     }
 
     /// Create a json response from query result
-    async fn from(output: Result<Output>) -> Self {
+    async fn from_output(output: Result<Output>) -> Self {
         match output {
             Ok(Output::AffectedRows(rows)) => {
                 Self::with_output(Some(JsonOutput::AffectedRows(rows)))

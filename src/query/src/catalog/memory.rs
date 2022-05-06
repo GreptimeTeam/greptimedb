@@ -8,7 +8,8 @@ use table::TableRef;
 
 use crate::catalog::schema::SchemaProvider;
 use crate::catalog::{
-    CatalogList, CatalogListRef, CatalogProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+    CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef, DEFAULT_CATALOG_NAME,
+    DEFAULT_SCHEMA_NAME,
 };
 use crate::error::{ExecutionSnafu, Result};
 
@@ -16,7 +17,7 @@ use crate::error::{ExecutionSnafu, Result};
 #[derive(Default)]
 pub struct MemoryCatalogList {
     /// Collection of catalogs containing schemas and ultimately Tables
-    pub catalogs: RwLock<HashMap<String, Arc<dyn CatalogProvider>>>,
+    pub catalogs: RwLock<HashMap<String, CatalogProviderRef>>,
 }
 
 impl CatalogList for MemoryCatalogList {
@@ -27,8 +28,8 @@ impl CatalogList for MemoryCatalogList {
     fn register_catalog(
         &self,
         name: String,
-        catalog: Arc<dyn CatalogProvider>,
-    ) -> Option<Arc<dyn CatalogProvider>> {
+        catalog: CatalogProviderRef,
+    ) -> Option<CatalogProviderRef> {
         let mut catalogs = self.catalogs.write().unwrap();
         catalogs.insert(name, catalog)
     }
@@ -38,7 +39,7 @@ impl CatalogList for MemoryCatalogList {
         catalogs.keys().map(|s| s.to_string()).collect()
     }
 
-    fn catalog(&self, name: &str) -> Option<Arc<dyn CatalogProvider>> {
+    fn catalog(&self, name: &str) -> Option<CatalogProviderRef> {
         let catalogs = self.catalogs.read().unwrap();
         catalogs.get(name).cloned()
     }
@@ -146,7 +147,7 @@ impl SchemaProvider for MemorySchemaProvider {
     }
 }
 
-/// Craete a memory catalog list contains a numbers table for test
+/// Create a memory catalog list contains a numbers table for test
 pub fn new_memory_catalog_list() -> Result<CatalogListRef> {
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());

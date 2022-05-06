@@ -1,10 +1,10 @@
-use crate::error::Result;
-use crate::instance::InstanceRef;
-
 mod grpc;
 mod http;
 
 use http::HttpServer;
+
+use crate::error::Result;
+use crate::instance::InstanceRef;
 
 /// All rpc services.
 pub struct Services {

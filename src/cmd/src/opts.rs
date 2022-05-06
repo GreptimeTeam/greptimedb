@@ -1,4 +1,4 @@
-/// greptime commandline options
+//! greptime commandline options
 use clap::{ArgEnum, Parser};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ArgEnum)]

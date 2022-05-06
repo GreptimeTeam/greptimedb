@@ -1,6 +1,6 @@
 use clap::Parser;
+use cmd::opts::{GrepTimeOpts, NodeType};
 use datanode::DataNode;
-use greptime_cmd::opts::{GrepTimeOpts, NodeType};
 
 async fn datanode_main(_opts: &GrepTimeOpts) {
     let data_node = DataNode::new().unwrap();

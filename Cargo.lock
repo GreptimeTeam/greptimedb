@@ -410,6 +410,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmd"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "datanode",
+ "tokio",
+]
+
+[[package]]
 name = "comfy-table"
 version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -807,15 +816,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "wasi 0.10.2+wasi-snapshot-preview1",
-]
-
-[[package]]
-name = "greptime_cmd"
-version = "0.1.0"
-dependencies = [
- "clap",
- "datanode",
- "tokio",
 ]
 
 [[package]]

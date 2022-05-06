@@ -1,3 +1,5 @@
+mod adapter;
+
 use std::sync::Arc;
 
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
@@ -17,7 +19,6 @@ use crate::{
     query_engine::datafusion::adapter::PhysicalPlanAdapter,
     query_engine::{Output, QueryEngine},
 };
-mod adapter;
 
 pub(crate) struct DatafusionQueryEngine {
     state: QueryEngineState,
@@ -171,8 +172,14 @@ mod tests {
 
         let plan = engine.sql_to_plan(sql).unwrap();
 
-        assert_eq!(format!("{:?}", plan),
-                   "DfPlan(Limit: 20\n  Projection: #SUM(numbers.number)\n    Aggregate: groupBy=[[]], aggr=[[SUM(#numbers.number)]]\n      TableScan: numbers projection=None)");
+        println!("{:?}", plan);
+        assert_eq!(
+            format!("{:?}", plan),
+            r#"DfPlan(Limit: 20
+  Projection: #SUM(numbers.number)
+    Aggregate: groupBy=[[]], aggr=[[SUM(#numbers.number)]]
+      TableScan: numbers projection=None)"#
+        );
     }
 
     #[tokio::test]
