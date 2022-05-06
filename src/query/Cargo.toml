@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies.arrow]
 package = "arrow2"
 version="0.10"
-features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute"]
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
 
 [dependencies]
 async-trait = "0.1"
@@ -21,5 +21,5 @@ tokio = "1.0"
 sql = { path = "../sql" }
 
 [dev-dependencies]
-tokio = { version = "1.0", features = ["macros", "rt", "rt-multi-thread", "sync", "fs", "parking_lot"] }
+tokio = { version = "1.0", features = ["full"] }
 tokio-stream = "0.1"

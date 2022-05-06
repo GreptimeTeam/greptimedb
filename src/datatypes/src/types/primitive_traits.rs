@@ -1,4 +1,4 @@
-use arrow2::types::NativeType;
+use arrow::types::NativeType;
 
 use crate::value::Value;
 

@@ -1,9 +1,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow2::array::ArrayRef;
-use arrow2::array::BinaryValueIter;
-use arrow2::bitmap::utils::ZipValidity;
+use arrow::array::ArrayRef;
+use arrow::array::BinaryValueIter;
+use arrow::bitmap::utils::ZipValidity;
 
 use crate::data_type::DataTypeRef;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};

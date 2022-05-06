@@ -3,8 +3,12 @@ name = "datatypes"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies.arrow]
+package = "arrow2"
+version="0.10"
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+
 [dependencies]
-arrow2 = "0.10"
 common-base = { path = "../common/base" }
 paste = "1.0"
 serde ={ version =  "1.0.136", features = ["derive"] }

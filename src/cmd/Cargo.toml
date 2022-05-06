@@ -1,0 +1,13 @@
+[package]
+name = "cmd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "greptime"
+path = "src/bin/greptime.rs"
+
+[dependencies]
+clap = { version = "3.1", features = ["derive"] }
+datanode = { path = "../datanode" }
+tokio = { version = "1.18.0", features = ["full"] }

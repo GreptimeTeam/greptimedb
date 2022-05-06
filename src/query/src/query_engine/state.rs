@@ -16,18 +16,18 @@ use table::{
     Table,
 };
 
-use crate::catalog::{schema::SchemaProvider, CatalogList, CatalogProvider};
+use crate::catalog::{
+    schema::SchemaProvider, CatalogListRef, CatalogProvider, DEFAULT_CATALOG_NAME,
+    DEFAULT_SCHEMA_NAME,
+};
 use crate::error::{self, Result};
 use crate::executor::Runtime;
-
-const DEFAULT_CATALOG_NAME: &str = "greptime";
-const DEFAULT_SCHEMA_NAME: &str = "public";
 
 /// Query engine global state
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: ExecutionContext,
-    catalog_list: Arc<dyn CatalogList>,
+    catalog_list: CatalogListRef,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -38,7 +38,7 @@ impl fmt::Debug for QueryEngineState {
 }
 
 impl QueryEngineState {
-    pub(crate) fn new(catalog_list: Arc<dyn CatalogList>) -> Self {
+    pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
         let config = ExecutionConfig::new()
             .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         let df_context = ExecutionContext::with_config(config);
@@ -55,6 +55,11 @@ impl QueryEngineState {
     }
 
     #[inline]
+    pub(crate) fn catalog_list(&self) -> &CatalogListRef {
+        &self.catalog_list
+    }
+
+    #[inline]
     pub(crate) fn df_context(&self) -> &ExecutionContext {
         &self.df_context
     }
@@ -63,19 +68,12 @@ impl QueryEngineState {
     pub(crate) fn runtime(&self) -> Runtime {
         self.df_context.runtime_env().into()
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn schema(&self, schema_name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.catalog_list
-            .catalog(DEFAULT_CATALOG_NAME)
-            .and_then(|c| c.schema(schema_name))
-    }
 }
 
 /// Adapters between datafusion and greptime query engine.
 struct DfCatalogListAdapter {
     runtime: Arc<RuntimeEnv>,
-    catalog_list: Arc<dyn CatalogList>,
+    catalog_list: CatalogListRef,
 }
 
 impl DfCatalogList for DfCatalogListAdapter {
@@ -92,13 +90,14 @@ impl DfCatalogList for DfCatalogListAdapter {
             df_cataglog_provider: catalog,
             runtime: self.runtime.clone(),
         });
-        match self.catalog_list.register_catalog(name, catalog_adapter) {
-            Some(catalog_provider) => Some(Arc::new(DfCatalogProviderAdapter {
-                catalog_provider,
-                runtime: self.runtime.clone(),
-            })),
-            None => None,
-        }
+        self.catalog_list
+            .register_catalog(name, catalog_adapter)
+            .map(|catalog_provider| {
+                Arc::new(DfCatalogProviderAdapter {
+                    catalog_provider,
+                    runtime: self.runtime.clone(),
+                }) as _
+            })
     }
 
     fn catalog_names(&self) -> Vec<String> {
@@ -106,13 +105,12 @@ impl DfCatalogList for DfCatalogListAdapter {
     }
 
     fn catalog(&self, name: &str) -> Option<Arc<dyn DfCatalogProvider>> {
-        match self.catalog_list.catalog(name) {
-            Some(catalog_provider) => Some(Arc::new(DfCatalogProviderAdapter {
+        self.catalog_list.catalog(name).map(|catalog_provider| {
+            Arc::new(DfCatalogProviderAdapter {
                 catalog_provider,
                 runtime: self.runtime.clone(),
-            })),
-            None => None,
-        }
+            }) as _
+        })
     }
 }
 
@@ -132,13 +130,14 @@ impl CatalogProvider for CatalogProviderAdapter {
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        match self.df_cataglog_provider.schema(name) {
-            Some(df_schema_provider) => Some(Arc::new(SchemaProviderAdapter {
-                df_schema_provider,
-                runtime: self.runtime.clone(),
-            })),
-            None => None,
-        }
+        self.df_cataglog_provider
+            .schema(name)
+            .map(|df_schema_provider| {
+                Arc::new(SchemaProviderAdapter {
+                    df_schema_provider,
+                    runtime: self.runtime.clone(),
+                }) as _
+            })
     }
 }
 
@@ -158,13 +157,12 @@ impl DfCatalogProvider for DfCatalogProviderAdapter {
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn DfSchemaProvider>> {
-        match self.catalog_provider.schema(name) {
-            Some(schema_provider) => Some(Arc::new(DfSchemaProviderAdapter {
+        self.catalog_provider.schema(name).map(|schema_provider| {
+            Arc::new(DfSchemaProviderAdapter {
                 schema_provider,
                 runtime: self.runtime.clone(),
-            })),
-            None => None,
-        }
+            }) as _
+        })
     }
 }
 
@@ -184,10 +182,9 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
     }
 
     fn table(&self, name: &str) -> Option<Arc<dyn DfTableProvider>> {
-        match self.schema_provider.table(name) {
-            Some(table) => Some(Arc::new(DfTableProviderAdapter::new(table))),
-            None => None,
-        }
+        self.schema_provider
+            .table(name)
+            .map(|table| Arc::new(DfTableProviderAdapter::new(table)) as _)
     }
 
     fn register_table(
@@ -233,13 +230,9 @@ impl SchemaProvider for SchemaProviderAdapter {
     }
 
     fn table(&self, name: &str) -> Option<Arc<dyn Table>> {
-        match self.df_schema_provider.table(name) {
-            Some(table_provider) => Some(Arc::new(TableAdapter::new(
-                table_provider,
-                self.runtime.clone(),
-            ))),
-            None => None,
-        }
+        self.df_schema_provider.table(name).map(|table_provider| {
+            Arc::new(TableAdapter::new(table_provider, self.runtime.clone())) as _
+        })
     }
 
     fn register_table(
@@ -248,31 +241,19 @@ impl SchemaProvider for SchemaProviderAdapter {
         table: Arc<dyn Table>,
     ) -> Result<Option<Arc<dyn Table>>> {
         let table_provider = Arc::new(DfTableProviderAdapter::new(table));
-        match self
+        Ok(self
             .df_schema_provider
             .register_table(name, table_provider)
             .context(error::DatafusionSnafu)?
-        {
-            Some(table) => Ok(Some(Arc::new(TableAdapter::new(
-                table,
-                self.runtime.clone(),
-            )))),
-            None => Ok(None),
-        }
+            .map(|table| (Arc::new(TableAdapter::new(table, self.runtime.clone())) as _)))
     }
 
     fn deregister_table(&self, name: &str) -> Result<Option<Arc<dyn Table>>> {
-        match self
+        Ok(self
             .df_schema_provider
             .deregister_table(name)
             .context(error::DatafusionSnafu)?
-        {
-            Some(table) => Ok(Some(Arc::new(TableAdapter::new(
-                table,
-                self.runtime.clone(),
-            )))),
-            None => Ok(None),
-        }
+            .map(|table| Arc::new(TableAdapter::new(table, self.runtime.clone())) as _))
     }
 
     fn table_exist(&self, name: &str) -> bool {

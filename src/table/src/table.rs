@@ -1,3 +1,6 @@
+pub mod adapter;
+pub mod numbers;
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,9 +12,6 @@ use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::{Schema, SchemaRef};
 
 use crate::error::Result;
-
-pub mod adapter;
-pub mod numbers;
 
 pub type TableId = u64;
 pub type TableVersion = u64;

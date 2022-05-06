@@ -16,6 +16,7 @@ use crate::error::Result;
 use crate::table::{Expr, Table};
 
 /// numbers table for test
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NumbersTable {
     schema: SchemaRef,
 }

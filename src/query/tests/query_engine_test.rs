@@ -1,22 +1,20 @@
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
-use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_recordbatch::util;
 use datafusion::field_util::FieldExt;
 use datafusion::field_util::SchemaExt;
 use datafusion::logical_plan::LogicalPlanBuilder;
-use futures_util::stream::TryStreamExt;
-use query::catalog::memory::MemoryCatalogList;
-use query::error::{RecordBatchSnafu, Result};
+use query::catalog::memory;
+use query::error::Result;
 use query::plan::LogicalPlan;
-use query::query_engine::QueryEngineFactory;
-use snafu::ResultExt;
+use query::query_engine::{Output, QueryEngineFactory};
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
 
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {
-    let catalog_list = Arc::new(MemoryCatalogList::default());
+    let catalog_list = memory::new_memory_catalog_list()?;
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
 
@@ -32,9 +30,14 @@ async fn test_datafusion_query_engine() -> Result<()> {
             .unwrap(),
     );
 
-    let ret = engine.execute(&plan).await;
+    let output = engine.execute(&plan).await?;
 
-    let numbers = collect(ret.unwrap()).await.unwrap();
+    let recordbatch = match output {
+        Output::RecordBatch(recordbach) => recordbach,
+        _ => unreachable!(),
+    };
+
+    let numbers = util::collect(recordbatch).await.unwrap();
 
     assert_eq!(1, numbers.len());
     assert_eq!(numbers[0].df_recordbatch.num_columns(), 1);
@@ -51,11 +54,4 @@ async fn test_datafusion_query_engine() -> Result<()> {
     );
 
     Ok(())
-}
-
-pub async fn collect(stream: SendableRecordBatchStream) -> Result<Vec<RecordBatch>> {
-    stream
-        .try_collect::<Vec<_>>()
-        .await
-        .context(RecordBatchSnafu)
 }

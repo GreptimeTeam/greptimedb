@@ -38,3 +38,9 @@ pub trait CatalogProvider: Sync + Send {
     /// Retrieves a specific schema from the catalog by name, provided it exists.
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>>;
 }
+
+pub type CatalogListRef = Arc<dyn CatalogList>;
+pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
+
+pub const DEFAULT_CATALOG_NAME: &str = "greptime";
+pub const DEFAULT_SCHEMA_NAME: &str = "public";
