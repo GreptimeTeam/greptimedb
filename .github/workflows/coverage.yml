@@ -1,0 +1,37 @@
+on: pull_request
+
+name: Code coverage
+
+env:
+  RUST_TOOLCHAIN: nightly-2022-04-03
+
+jobs:
+  grcov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          override: true
+          profile: minimal
+      - name: Execute tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --workspace
+        env:
+          CARGO_INCREMENTAL: 0
+          RUSTFLAGS: "-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Cpanic=abort -Zpanic_abort_tests"
+      - name: Gather coverage data
+        id: coverage
+        uses: actions-rs/grcov@v0.1
+      - name: Codecov upload
+        uses: codecov/codecov-action@v2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./lcov.info
+          flags: rust
+          fail_ci_if_error: true
+          verbose: true
