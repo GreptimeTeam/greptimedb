@@ -11,7 +11,7 @@ use paste::paste;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RecordBatch {
     pub schema: Arc<Schema>,
     pub df_recordbatch: DfRecordBatch,

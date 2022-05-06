@@ -443,6 +443,7 @@ dependencies = [
  "paste",
  "serde",
  "snafu",
+ "tokio",
 ]
 
 [[package]]
