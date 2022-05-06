@@ -1,0 +1,4 @@
+# codecov config
+coverage:
+  status:
+    patch: off # disable patch status
