@@ -22,7 +22,7 @@ pub enum InnerError {
     ParseSql { source: sql::errors::ParserError },
 
     #[snafu(display("Cannot plan SQL: {}, source: {}", sql, source))]
-    Planner {
+    PlanSql {
         sql: String,
         source: DataFusionError,
         backtrace: Backtrace,
@@ -35,7 +35,7 @@ impl ErrorExt for InnerError {
 
         match self {
             ParseSql { source, .. } => source.status_code(),
-            Datafusion { .. } | PhysicalPlanDowncast { .. } | Planner { .. } => {
+            Datafusion { .. } | PhysicalPlanDowncast { .. } | PlanSql { .. } => {
                 StatusCode::Internal
             }
         }

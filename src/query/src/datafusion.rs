@@ -1,5 +1,9 @@
-mod adapter;
-pub mod error;
+//! Planner, QueryEngine implementations based on DataFusion.
+
+mod catalog_adapter;
+mod error;
+mod plan_adapter;
+mod planner;
 
 use std::sync::Arc;
 
@@ -7,17 +11,19 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use snafu::{OptionExt, ResultExt};
 use sql::{dialect::GenericDialect, parser::ParserContext};
 
+pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 use crate::query_engine::{QueryContext, QueryEngineState};
 use crate::{
     catalog::CatalogListRef,
-    datafusion::adapter::PhysicalPlanAdapter,
+    datafusion::plan_adapter::PhysicalPlanAdapter,
+    datafusion::planner::{DfContextProviderAdapter, DfPlanner},
     error::Result,
     executor::QueryExecutor,
     logical_optimizer::LogicalOptimizer,
     physical_optimizer::PhysicalOptimizer,
     physical_planner::PhysicalPlanner,
     plan::{LogicalPlan, PhysicalPlan},
-    planner::{DfContextProviderAdapter, DfPlanner, Planner},
+    planner::Planner,
     Output, QueryEngine,
 };
 
