@@ -97,6 +97,10 @@ mod tests {
     }
 
     impl ErrorExt for InnerError {
+        fn status_code(&self) -> StatusCode {
+            StatusCode::Internal
+        }
+
         fn backtrace_opt(&self) -> Option<&snafu::Backtrace> {
             ErrorCompat::backtrace(self)
         }
@@ -133,19 +137,31 @@ mod tests {
 
     #[test]
     fn test_opaque_error() {
+        // Test leaf error.
         let err: Error = throw_leaf().map_err(Into::into).err().unwrap();
         let msg = format!("{:?}", err);
         assert!(msg.contains("\nBacktrace:\n"));
-        assert!(ErrorCompat::backtrace(&err).is_some());
+
         let fmt_msg = format!("{:?}", DebugFormat::new(&err));
         assert_eq!(msg, fmt_msg);
 
+        assert!(ErrorCompat::backtrace(&err).is_some());
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!("This is a leaf error, val: 10", err.to_string());
+        assert_eq!(StatusCode::Internal, err.status_code());
+
+        // Test internal error.
         let err: Error = throw_internal().map_err(Into::into).err().unwrap();
         let msg = format!("{:?}", err);
         assert!(msg.contains("\nBacktrace:\n"));
         assert!(msg.contains("Caused by"));
-        assert!(ErrorCompat::backtrace(&err).is_some());
+
         let fmt_msg = format!("{:?}", DebugFormat::new(&err));
         assert_eq!(msg, fmt_msg);
+
+        assert!(ErrorCompat::backtrace(&err).is_some());
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!("This is an internal error", err.to_string());
+        assert_eq!(StatusCode::Internal, err.status_code());
     }
 }

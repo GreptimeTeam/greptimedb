@@ -1,5 +1,5 @@
 /// Common status code for public API.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StatusCode {
     // ====== Begin of common status code ==============
     /// Unknown error.
