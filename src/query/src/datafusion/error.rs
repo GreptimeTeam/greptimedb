@@ -19,7 +19,7 @@ pub enum InnerError {
 
     // The sql error already contains the SQL.
     #[snafu(display("Cannot parse SQL, source: {}", source))]
-    ParseSql { source: sql::errors::ParserError },
+    ParseSql { source: sql::error::Error },
 
     #[snafu(display("Cannot plan SQL: {}, source: {}", sql, source))]
     PlanSql {

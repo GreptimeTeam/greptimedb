@@ -1,7 +1,7 @@
 use snafu::ResultExt;
 use sqlparser::ast::Statement as SpStatement;
 
-use crate::errors;
+use crate::error;
 use crate::parser::ParserContext;
 use crate::parser::Result;
 use crate::statements::insert::Insert;
@@ -14,13 +14,13 @@ impl<'a> ParserContext<'a> {
         let spstatement = self
             .parser
             .parse_insert()
-            .context(errors::SpSyntaxSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu { sql: self.sql })?;
 
         match spstatement {
             SpStatement::Insert { .. } => {
                 Ok(Statement::Insert(Box::new(Insert { inner: spstatement })))
             }
-            unexp => errors::UnsupportedSnafu {
+            unexp => error::UnsupportedSnafu {
                 sql: self.sql.to_string(),
                 keyword: unexp.to_string(),
             }

@@ -1,12 +1,12 @@
 use common_error::prelude::*;
-use sqlparser::parser::ParserError as SpParserError;
+use sqlparser::parser::ParserError;
 
 /// SQL parser errors.
 // Now the error in parser does not contains backtrace to avoid generating backtrace
 // every time the parser parses an invalid SQL.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum ParserError {
+pub enum Error {
     #[snafu(display("SQL statement is not supported: {}, keyword: {}", sql, keyword))]
     Unsupported { sql: String, keyword: String },
 
@@ -21,19 +21,21 @@ pub enum ParserError {
         sql: String,
         expected: String,
         actual: String,
-        source: SpParserError,
+        source: ParserError,
     },
 
     // Syntax error from sql parser.
     #[snafu(display("Syntax error, sql: {}, source: {}", sql, source))]
-    SpSyntax { sql: String, source: SpParserError },
+    Syntax { sql: String, source: ParserError },
 }
 
-impl ErrorExt for ParserError {
+impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
+        use Error::*;
+
         match self {
-            Self::Unsupported { .. } => StatusCode::Unsupported,
-            Self::Unexpected { .. } | Self::SpSyntax { .. } => StatusCode::InvalidSyntax,
+            Unsupported { .. } => StatusCode::Unsupported,
+            Unexpected { .. } | Syntax { .. } => StatusCode::InvalidSyntax,
         }
     }
 
@@ -48,21 +50,21 @@ mod tests {
 
     use super::*;
 
-    fn raise_sp_error() -> Result<(), SpParserError> {
-        Err(SpParserError::ParserError("parser error".to_string()))
+    fn raise_sp_error() -> Result<(), ParserError> {
+        Err(ParserError::ParserError("parser error".to_string()))
     }
 
     #[test]
     fn test_syntax_error() {
         let err = raise_sp_error()
-            .context(SpSyntaxSnafu { sql: "" })
+            .context(SyntaxSnafu { sql: "" })
             .err()
             .unwrap();
         assert_matches!(
             err,
-            ParserError::SpSyntax {
+            Error::Syntax {
                 sql: _,
-                source: SpParserError::ParserError { .. }
+                source: ParserError::ParserError { .. }
             }
         );
         assert_eq!(StatusCode::InvalidSyntax, err.status_code());
@@ -80,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_unsupported_error() {
-        let err = ParserError::Unsupported {
+        let err = Error::Unsupported {
             sql: "".to_string(),
             keyword: "".to_string(),
         };
