@@ -1,5 +1,5 @@
-mod grpc;
-mod http;
+pub mod grpc;
+pub mod http;
 
 use http::HttpServer;
 
