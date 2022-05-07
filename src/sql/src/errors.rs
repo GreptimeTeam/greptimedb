@@ -48,20 +48,42 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    pub fn test_error_conversion() {
-        pub fn raise_error() -> Result<(), SpParserError> {
-            Err(SpParserError::ParserError("parser error".to_string()))
-        }
+    fn raise_sp_error() -> Result<(), SpParserError> {
+        Err(SpParserError::ParserError("parser error".to_string()))
+    }
 
+    #[test]
+    fn test_syntax_error() {
+        let err = raise_sp_error()
+            .context(SpSyntaxSnafu { sql: "" })
+            .err()
+            .unwrap();
         assert_matches!(
-            raise_error().context(SpSyntaxSnafu {
-                sql: "".to_string(),
-            }),
-            Err(ParserError::SpSyntax {
+            err,
+            ParserError::SpSyntax {
                 sql: _,
                 source: SpParserError::ParserError { .. }
+            }
+        );
+        assert_eq!(StatusCode::InvalidSyntax, err.status_code());
+
+        let err = raise_sp_error()
+            .context(UnexpectedSnafu {
+                sql: "",
+                expected: "",
+                actual: "",
             })
-        )
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::InvalidSyntax, err.status_code());
+    }
+
+    #[test]
+    fn test_unsupported_error() {
+        let err = ParserError::Unsupported {
+            sql: "".to_string(),
+            keyword: "".to_string(),
+        };
+        assert_eq!(StatusCode::Unsupported, err.status_code());
     }
 }
