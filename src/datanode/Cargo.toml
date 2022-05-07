@@ -8,7 +8,8 @@ edition = "2021"
 [dependencies]
 axum = "0.5"
 axum-macros = "0.2"
-common-recordbatch = {path = "../common/recordbatch" }
+common-error = { path = "../common/error" }
+common-recordbatch = { path = "../common/recordbatch" }
 hyper = { version = "0.14", features = ["full"] }
 query = { path = "../query" }
 serde = "1.0"
@@ -23,4 +24,3 @@ tower-http = { version ="0.3", features = ["full"]}
 package = "arrow2"
 version="0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
-

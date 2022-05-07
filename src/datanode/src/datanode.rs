@@ -4,7 +4,7 @@ use query::catalog::memory;
 use query::catalog::CatalogListRef;
 use snafu::ResultExt;
 
-use crate::error::{QuerySnafu, Result};
+use crate::error::{NewCatalogSnafu, Result};
 use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
@@ -17,7 +17,7 @@ pub struct DataNode {
 
 impl DataNode {
     pub fn new() -> Result<DataNode> {
-        let catalog_list = memory::new_memory_catalog_list().context(QuerySnafu)?;
+        let catalog_list = memory::new_memory_catalog_list().context(NewCatalogSnafu)?;
         let instance = Arc::new(Instance::new(catalog_list.clone()));
 
         Ok(Self {

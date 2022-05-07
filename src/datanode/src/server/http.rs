@@ -17,7 +17,7 @@ use snafu::ResultExt;
 use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
-use crate::error::{HyperSnafu, Result};
+use crate::error::{Result, StartHttpSnafu};
 use crate::server::InstanceRef;
 
 /// Http server
@@ -106,7 +106,7 @@ impl HttpServer {
         let server = axum::Server::bind(&addr).serve(app.into_make_service());
         let graceful = server.with_graceful_shutdown(shutdown_signal());
 
-        graceful.await.context(HyperSnafu)?;
+        graceful.await.context(StartHttpSnafu)?;
 
         Ok(())
     }

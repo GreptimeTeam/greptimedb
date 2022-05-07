@@ -6,6 +6,8 @@ pub enum StatusCode {
     Unknown,
     /// Unsupported operation.
     Unsupported,
+    /// Internal server error.
+    Internal,
     // ====== End of common status code =============
 
     // ====== Begin of SQL related status code ======

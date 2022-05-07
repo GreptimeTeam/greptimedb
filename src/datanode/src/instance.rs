@@ -4,7 +4,7 @@ use query::catalog::CatalogListRef;
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::ResultExt;
 
-use crate::error::{QuerySnafu, Result};
+use crate::error::{ExecuteSqlSnafu, Result};
 
 // An abstraction to read/write services.
 pub struct Instance {
@@ -27,12 +27,15 @@ impl Instance {
     }
 
     pub async fn execute_sql(&self, sql: &str) -> Result<Output> {
-        let logical_plan = self.query_engine.sql_to_plan(sql).context(QuerySnafu)?;
+        let logical_plan = self
+            .query_engine
+            .sql_to_plan(sql)
+            .context(ExecuteSqlSnafu)?;
 
         self.query_engine
             .execute(&logical_plan)
             .await
-            .context(QuerySnafu)
+            .context(ExecuteSqlSnafu)
     }
 }
 

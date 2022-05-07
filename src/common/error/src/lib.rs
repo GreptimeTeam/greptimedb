@@ -3,7 +3,7 @@ pub mod format;
 pub mod status_code;
 
 pub mod prelude {
-    pub use snafu::Backtrace;
+    pub use snafu::{Backtrace, ErrorCompat};
 
     pub use crate::ext::ErrorExt;
     pub use crate::format::DebugFormat;

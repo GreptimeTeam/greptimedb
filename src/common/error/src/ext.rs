@@ -35,6 +35,7 @@ macro_rules! define_opaque_error {
 
         impl std::fmt::Debug for $Error {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                // Use the pretty debug format of inner error for opaque error.
                 let debug_format = $crate::format::DebugFormat::new(&*self.inner);
                 debug_format.fmt(f)
             }
@@ -62,6 +63,8 @@ macro_rules! define_opaque_error {
             }
         }
 
+        // Implement ErrorCompat for this opaque error so the backtrace is also available
+        // via `ErrorCompat::backtrace()`.
         impl $crate::snafu::ErrorCompat for $Error {
             fn backtrace(&self) -> Option<&$crate::snafu::Backtrace> {
                 self.inner.backtrace_opt()
@@ -77,6 +80,7 @@ mod tests {
     use snafu::{prelude::*, Backtrace, ErrorCompat};
 
     use super::*;
+    use crate::prelude::*;
 
     define_opaque_error!(Error);
 
@@ -133,11 +137,15 @@ mod tests {
         let msg = format!("{:?}", err);
         assert!(msg.contains("\nBacktrace:\n"));
         assert!(ErrorCompat::backtrace(&err).is_some());
+        let fmt_msg = format!("{:?}", DebugFormat::new(&err));
+        assert_eq!(msg, fmt_msg);
 
         let err: Error = throw_internal().map_err(Into::into).err().unwrap();
         let msg = format!("{:?}", err);
         assert!(msg.contains("\nBacktrace:\n"));
         assert!(msg.contains("Caused by"));
         assert!(ErrorCompat::backtrace(&err).is_some());
+        let fmt_msg = format!("{:?}", DebugFormat::new(&err));
+        assert_eq!(msg, fmt_msg);
     }
 }
