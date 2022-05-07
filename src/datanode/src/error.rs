@@ -1,5 +1,4 @@
 use common_error::prelude::*;
-use snafu::Snafu;
 
 /// Business error of datanode.
 #[derive(Debug, Snafu)]

@@ -1,6 +1,5 @@
 use common_error::prelude::*;
 use datafusion::error::DataFusionError;
-use snafu::{Backtrace, ErrorCompat, Snafu};
 
 use crate::error::Error;
 
@@ -28,14 +27,21 @@ pub enum InnerError {
         source: DataFusionError,
         backtrace: Backtrace,
     },
-
-    #[snafu(display("Execution error: {}", message))]
-    Execution { message: String },
 }
 
-// TODO(yingwen): Implement status_code().
 impl ErrorExt for InnerError {
-    fn backtrace_opt(&self) -> Option<&snafu::Backtrace> {
+    fn status_code(&self) -> StatusCode {
+        use InnerError::*;
+
+        match self {
+            ParseSql { source, .. } => source.status_code(),
+            Datafusion { .. } | PhysicalPlanDowncast { .. } | Planner { .. } => {
+                StatusCode::Internal
+            }
+        }
+    }
+
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
         ErrorCompat::backtrace(self)
     }
 }
