@@ -30,8 +30,8 @@ use datatypes::schema::{Schema, SchemaRef};
 use futures::Stream;
 use snafu::prelude::*;
 
-use super::{Table, TableProviderFilterPushDown, TableRef, TableType};
 use crate::error::{self, Result};
+use crate::table::{Table, TableProviderFilterPushDown, TableRef, TableType};
 
 /// Greptime SendableRecordBatchStream -> datafusion ExecutionPlan.
 struct ExecutionPlanAdapter {

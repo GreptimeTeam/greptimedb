@@ -16,10 +16,10 @@ use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 use table::table::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
 
+use crate::datafusion::error;
 use crate::error::Result;
 use crate::executor::Runtime;
 use crate::plan::{Partitioning, PhysicalPlan};
-use crate::query_engine::datafusion::error;
 
 /// Datafusion ExecutionPlan -> greptime PhysicalPlan
 pub struct PhysicalPlanAdapter {

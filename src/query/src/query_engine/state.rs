@@ -17,11 +17,14 @@ use table::{
 };
 
 use crate::catalog::{self, schema::SchemaProvider, CatalogListRef, CatalogProvider};
+use crate::datafusion::error;
 use crate::error::Result;
 use crate::executor::Runtime;
-use crate::query_engine::datafusion::error;
 
 /// Query engine global state
+// TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
+// which allows different implementation use different engine state. The state can also be an associated
+// type in QueryEngine trait.
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: ExecutionContext,

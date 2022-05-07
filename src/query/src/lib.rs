@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod database;
+mod datafusion;
 pub mod error;
 pub mod executor;
 pub mod logical_optimizer;

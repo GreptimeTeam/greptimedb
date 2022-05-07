@@ -1,16 +1,16 @@
 mod context;
-pub mod datafusion;
 mod state;
 
 use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
-pub use context::QueryContext;
 
 use crate::catalog::CatalogList;
+use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
 use crate::plan::LogicalPlan;
-use crate::query_engine::datafusion::DatafusionQueryEngine;
+pub use crate::query_engine::context::QueryContext;
+pub use crate::query_engine::state::QueryEngineState;
 
 /// Sql output
 pub enum Output {

@@ -13,9 +13,9 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::{
     catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME},
+    datafusion::error,
     error::Result,
     plan::LogicalPlan,
-    query_engine::datafusion::error,
 };
 
 pub trait Planner: Send + Sync {

@@ -7,9 +7,10 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use snafu::{OptionExt, ResultExt};
 use sql::{dialect::GenericDialect, parser::ParserContext};
 
-use super::{context::QueryContext, state::QueryEngineState};
+use crate::query_engine::{QueryContext, QueryEngineState};
 use crate::{
     catalog::CatalogListRef,
+    datafusion::adapter::PhysicalPlanAdapter,
     error::Result,
     executor::QueryExecutor,
     logical_optimizer::LogicalOptimizer,
@@ -17,7 +18,6 @@ use crate::{
     physical_planner::PhysicalPlanner,
     plan::{LogicalPlan, PhysicalPlan},
     planner::{DfContextProviderAdapter, DfPlanner, Planner},
-    query_engine::datafusion::adapter::PhysicalPlanAdapter,
     Output, QueryEngine,
 };
 
@@ -177,7 +177,6 @@ mod tests {
 
         let plan = engine.sql_to_plan(sql).unwrap();
 
-        println!("{:?}", plan);
         assert_eq!(
             format!("{:?}", plan),
             r#"DfPlan(Limit: 20
