@@ -26,7 +26,7 @@ pub enum InnerError {
 }
 
 impl ErrorExt for InnerError {
-    fn backtrace_opt(&self) -> Option<&snafu::Backtrace> {
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
         ErrorCompat::backtrace(self)
     }
 }
@@ -40,5 +40,29 @@ impl From<InnerError> for Error {
 impl From<InnerError> for DataFusionError {
     fn from(e: InnerError) -> DataFusionError {
         DataFusionError::External(Box::new(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raise_df_error() -> Result<()> {
+        Err(DataFusionError::NotImplemented("table test".to_string())).context(DatafusionSnafu)?
+    }
+
+    fn raise_repeatedly() -> Result<()> {
+        ExecuteRepeatedlySnafu {}.fail()?
+    }
+
+    #[test]
+    fn test_error() {
+        let err = raise_df_error().err().unwrap();
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::Unknown, err.status_code());
+
+        let err = raise_repeatedly().err().unwrap();
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::Unknown, err.status_code());
     }
 }

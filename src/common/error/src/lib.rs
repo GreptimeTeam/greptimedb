@@ -1,5 +1,6 @@
 pub mod ext;
 pub mod format;
+pub mod mock;
 pub mod status_code;
 
 pub mod prelude {

@@ -153,7 +153,6 @@ impl SchemaProvider for MemorySchemaProvider {
 
     fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
         if self.table_exist(name.as_str()) {
-            // FIXME(yingwen): Define another error.
             return TableExistsSnafu { table: name }.fail()?;
         }
         let mut tables = self.tables.write().unwrap();
@@ -220,6 +219,8 @@ mod tests {
         assert!(provider.table_exist(table_name));
         let other_table = NumbersTable::default();
         let result = provider.register_table(table_name.to_string(), Arc::new(other_table));
-        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
     }
 }

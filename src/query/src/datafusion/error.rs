@@ -19,7 +19,10 @@ pub enum InnerError {
 
     // The sql error already contains the SQL.
     #[snafu(display("Cannot parse SQL, source: {}", source))]
-    ParseSql { source: sql::error::Error },
+    ParseSql {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
 
     #[snafu(display("Cannot plan SQL: {}, source: {}", sql, source))]
     PlanSql {
@@ -49,5 +52,53 @@ impl ErrorExt for InnerError {
 impl From<InnerError> for Error {
     fn from(err: InnerError) -> Self {
         Self::new(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raise_df_error() -> Result<(), DataFusionError> {
+        Err(DataFusionError::NotImplemented("test".to_string()))
+    }
+
+    fn assert_internal_error(err: &InnerError) {
+        assert_eq!(StatusCode::Internal, err.status_code());
+        assert!(err.backtrace_opt().is_some());
+    }
+
+    #[test]
+    fn test_datafusion_as_source() {
+        let err = raise_df_error()
+            .context(DatafusionSnafu { msg: "test df" })
+            .err()
+            .unwrap();
+        assert_internal_error(&err);
+
+        let err = raise_df_error()
+            .context(PlanSqlSnafu { sql: "" })
+            .err()
+            .unwrap();
+        assert_internal_error(&err);
+
+        let res: Result<(), InnerError> = PhysicalPlanDowncastSnafu {}.fail();
+        let err = res.err().unwrap();
+        assert_internal_error(&err);
+    }
+
+    fn raise_sql_error() -> Result<(), sql::error::Error> {
+        Err(sql::error::Error::Unsupported {
+            sql: "".to_string(),
+            keyword: "".to_string(),
+        })
+    }
+
+    #[test]
+    fn test_parse_error() {
+        let err = raise_sql_error().context(ParseSqlSnafu).err().unwrap();
+        assert!(err.backtrace_opt().is_none());
+        let sql_err = raise_sql_error().err().unwrap();
+        assert_eq!(sql_err.status_code(), err.status_code());
     }
 }

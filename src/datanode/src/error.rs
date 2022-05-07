@@ -5,10 +5,16 @@ use common_error::prelude::*;
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Fail to execute sql, source: {}", source))]
-    ExecuteSql { source: query::error::Error },
+    ExecuteSql {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 
     #[snafu(display("Fail to create catalog list, source: {}", source))]
-    NewCatalog { source: query::error::Error },
+    NewCatalog {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 
     // The error source of http error is clear even without backtrace now so
     // a backtrace is not carried in this varaint.
@@ -29,5 +35,31 @@ impl ErrorExt for Error {
 
     fn backtrace_opt(&self) -> Option<&Backtrace> {
         ErrorCompat::backtrace(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::mock::MockError;
+
+    use super::*;
+
+    fn raise_query_error() -> std::result::Result<(), query::error::Error> {
+        Err(query::error::Error::new(MockError::with_backtrace(
+            StatusCode::Internal,
+        )))
+    }
+
+    fn assert_internal_error(err: &Error) {
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::Internal, err.status_code());
+    }
+
+    #[test]
+    fn test_error() {
+        let err = raise_query_error().context(ExecuteSqlSnafu).err().unwrap();
+        assert_internal_error(&err);
+        let err = raise_query_error().context(NewCatalogSnafu).err().unwrap();
+        assert_internal_error(&err);
     }
 }
