@@ -25,13 +25,13 @@ pub struct HttpServer {
     instance: InstanceRef,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub enum JsonOutput {
     AffectedRows(usize),
     Rows(Vec<RecordBatch>),
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct JsonResponse {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,15 +90,19 @@ impl HttpServer {
         Self { instance }
     }
 
-    pub async fn start(&self) -> Result<()> {
-        let app = Router::new().route("/sql", get(handler::sql)).layer(
+    pub fn make_app(&self) -> Router {
+        Router::new().route("/sql", get(handler::sql)).layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(handle_error))
                 .layer(TraceLayer::new_for_http())
                 .layer(Extension(self.instance.clone()))
                 // TODO configure timeout
                 .layer(TimeoutLayer::new(Duration::from_secs(30))),
-        );
+        )
+    }
+
+    pub async fn start(&self) -> Result<()> {
+        let app = self.make_app();
 
         let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
         // TODO(dennis): log
