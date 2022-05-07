@@ -1,5 +1,4 @@
 use common_error::prelude::*;
-use snafu::{prelude::*, ErrorCompat};
 use sqlparser::parser::ParserError as SpParserError;
 
 /// SQL parser errors.

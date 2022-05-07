@@ -1,4 +1,4 @@
-use common_error::ext::ErrorExt;
+use common_error::prelude::*;
 use datafusion::error::DataFusionError;
 use snafu::{Backtrace, ErrorCompat, Snafu};
 

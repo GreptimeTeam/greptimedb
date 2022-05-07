@@ -1,6 +1,5 @@
-use common_error::ext::ErrorExt;
+use common_error::prelude::*;
 use datafusion::error::DataFusionError;
-use snafu::{Backtrace, ErrorCompat, Snafu};
 
 common_error::define_opaque_error!(Error);
 
