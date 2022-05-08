@@ -42,3 +42,24 @@ pub struct Hint {
     pub comment: String,
     pub prefix: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use sqlparser::dialect::GenericDialect;
+
+    use super::*;
+    use crate::parser::ParserContext;
+
+    #[test]
+    pub fn test_statement_convert() {
+        let sql = "SELECT * FROM table_0";
+        let mut stmts = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, stmts.len());
+        let x = stmts.remove(0);
+        let statement = SpStatement::try_from(x).unwrap();
+
+        assert_matches!(statement, SpStatement::Query { .. });
+    }
+}

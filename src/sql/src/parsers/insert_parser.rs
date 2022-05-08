@@ -28,3 +28,30 @@ impl<'a> ParserContext<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use sqlparser::dialect::GenericDialect;
+
+    use super::*;
+
+    #[test]
+    pub fn test_parse_insert() {
+        let sql = r"INSERT INTO table_1 VALUES (
+            'test1',1,'true',
+            'test2',2,'false')
+         ";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, result.len());
+        assert_matches!(result[0], Statement::Insert { .. })
+    }
+
+    #[test]
+    pub fn test_parse_invalid_insert() {
+        let sql = r"INSERT INTO table_1 VALUES ("; // intentionally a bad sql
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result.is_err(), "result is: {:?}", result);
+    }
+}

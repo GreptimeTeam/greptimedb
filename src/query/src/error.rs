@@ -31,13 +31,3 @@ impl From<Error> for DataFusionError {
         DataFusionError::External(Box::new(e))
     }
 }
-
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum PlannerError {
-    #[snafu(display("Cannot plan SQL: {}, source: {}", sql, source))]
-    DfPlan {
-        sql: String,
-        source: DataFusionError,
-    },
-}
