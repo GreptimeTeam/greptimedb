@@ -64,12 +64,14 @@ impl Serialize for RecordBatch {
 
         let df_columns = self.df_recordbatch.columns();
         let mut columns: Vec<Column> = Vec::with_capacity(df_columns.len());
+
         for array in df_columns {
             collect_columns!(
                 array, columns, Int64, Int32, Int16, Int8, UInt64, UInt32, UInt16, UInt8, Float64,
                 Float32, Boolean
             );
         }
+
         s.serialize_field("columns", &columns)?;
 
         s.end()

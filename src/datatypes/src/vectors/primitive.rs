@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, MutablePrimitiveArray, PrimitiveArray};
 use arrow::bitmap::utils::ZipValidity;
+use serde_json::Value as JsonValue;
+use snafu::ResultExt;
 
 use crate::data_type::DataTypeRef;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
@@ -36,6 +38,14 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
 
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
+    }
+}
+
+impl<'a, T: Primitive> PrimitiveVector<T> {
+    /// implement iter for PrimitiveVector
+    #[inline]
+    pub fn iter(&'a self) -> std::slice::Iter<'a, T> {
+        self.array.values().iter()
     }
 }
 
@@ -107,3 +117,27 @@ impl<T: Primitive + DataTypeBuilder> ScalarVectorBuilder for PrimitiveVectorBuil
         }
     }
 }
+
+#[macro_export]
+macro_rules! impl_serializable {
+    ($ty: ident) => {
+        impl crate::serialize::Serializable for $ty {
+            fn serialize_to_json(&self) -> crate::errors::Result<Vec<JsonValue>> {
+                let result: Result<Vec<JsonValue>, serde_json::Error> =
+                    self.iter().map(|x| serde_json::to_value(x)).collect();
+                result.context(crate::errors::SerializeSnafu)
+            }
+        }
+    };
+}
+
+impl_serializable! { UInt8Vector }
+impl_serializable! { UInt16Vector }
+impl_serializable! { UInt32Vector }
+impl_serializable! { UInt64Vector }
+impl_serializable! { Int8Vector }
+impl_serializable! { Int16Vector }
+impl_serializable! { Int32Vector }
+impl_serializable! { Int64Vector }
+impl_serializable! { Float32Vector }
+impl_serializable! { Float64Vector }
