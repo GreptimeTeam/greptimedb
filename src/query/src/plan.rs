@@ -16,7 +16,7 @@ use crate::executor::Runtime;
 /// an output relation (table) with a (potentially) different
 /// schema. A plan represents a dataflow tree where data flows
 /// from leaves up to the root to produce the query result.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LogicalPlan {
     DfPlan(DfLogicalPlan),
 }

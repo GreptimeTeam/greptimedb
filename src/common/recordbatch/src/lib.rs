@@ -1,5 +1,6 @@
 pub mod error;
 mod recordbatch;
+pub mod util;
 
 use std::pin::Pin;
 

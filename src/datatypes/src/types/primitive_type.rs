@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use arrow2::datatypes::DataType as ArrowDataType;
+use arrow::datatypes::DataType as ArrowDataType;
 
 use crate::data_type::{DataType, DataTypeRef};
 use crate::type_id::LogicalTypeId;

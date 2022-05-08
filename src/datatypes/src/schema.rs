@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use arrow2::datatypes::Schema as ArrowSchema;
+use arrow::datatypes::Schema as ArrowSchema;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Schema {
     arrow_schema: Arc<ArrowSchema>,
 }

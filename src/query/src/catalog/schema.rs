@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::sync::Arc;
 
 use table::TableRef;
 
@@ -33,3 +34,5 @@ pub trait SchemaProvider: Sync + Send {
     /// Otherwise, return true.
     fn table_exist(&self, name: &str) -> bool;
 }
+
+pub type SchemaProviderRef = Arc<dyn SchemaProvider>;
