@@ -20,7 +20,7 @@ macro_rules! define_opaque_error {
         /// An error behaves like `Box<dyn Error>`.
         ///
         /// Define this error as a new type instead of using `Box<dyn Error>` directly so we can implement
-        /// more method or trait for it.
+        /// more methods or traits for it.
         pub struct $Error {
             inner: Box<dyn $crate::ext::ErrorExt + Send + Sync>,
         }

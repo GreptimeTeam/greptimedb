@@ -44,7 +44,7 @@ mod tests {
 
     use super::*;
 
-    fn raise_query_error() -> std::result::Result<(), query::error::Error> {
+    fn throw_query_error() -> std::result::Result<(), query::error::Error> {
         Err(query::error::Error::new(MockError::with_backtrace(
             StatusCode::Internal,
         )))
@@ -57,9 +57,9 @@ mod tests {
 
     #[test]
     fn test_error() {
-        let err = raise_query_error().context(ExecuteSqlSnafu).err().unwrap();
+        let err = throw_query_error().context(ExecuteSqlSnafu).err().unwrap();
         assert_internal_error(&err);
-        let err = raise_query_error().context(NewCatalogSnafu).err().unwrap();
+        let err = throw_query_error().context(NewCatalogSnafu).err().unwrap();
         assert_internal_error(&err);
     }
 }

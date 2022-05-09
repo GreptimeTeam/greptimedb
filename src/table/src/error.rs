@@ -47,21 +47,21 @@ impl From<InnerError> for DataFusionError {
 mod tests {
     use super::*;
 
-    fn raise_df_error() -> Result<()> {
+    fn throw_df_error() -> Result<()> {
         Err(DataFusionError::NotImplemented("table test".to_string())).context(DatafusionSnafu)?
     }
 
-    fn raise_repeatedly() -> Result<()> {
+    fn throw_repeatedly() -> Result<()> {
         ExecuteRepeatedlySnafu {}.fail()?
     }
 
     #[test]
     fn test_error() {
-        let err = raise_df_error().err().unwrap();
+        let err = throw_df_error().err().unwrap();
         assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::Unknown, err.status_code());
 
-        let err = raise_repeatedly().err().unwrap();
+        let err = throw_repeatedly().err().unwrap();
         assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::Unknown, err.status_code());
     }

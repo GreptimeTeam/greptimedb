@@ -50,13 +50,13 @@ mod tests {
 
     use super::*;
 
-    fn raise_sp_error() -> Result<(), ParserError> {
+    fn throw_sp_error() -> Result<(), ParserError> {
         Err(ParserError::ParserError("parser error".to_string()))
     }
 
     #[test]
     fn test_syntax_error() {
-        let err = raise_sp_error()
+        let err = throw_sp_error()
             .context(SyntaxSnafu { sql: "" })
             .err()
             .unwrap();
@@ -69,7 +69,7 @@ mod tests {
         );
         assert_eq!(StatusCode::InvalidSyntax, err.status_code());
 
-        let err = raise_sp_error()
+        let err = throw_sp_error()
             .context(UnexpectedSnafu {
                 sql: "",
                 expected: "",

@@ -37,10 +37,12 @@ impl ErrorExt for InnerError {
         use InnerError::*;
 
         match self {
+            // TODO(yingwen): Further categorize datafusion error.
+            Datafusion { .. } => StatusCode::EngineExecuteQuery,
+            // This downcast should not fail in usual case.
+            PhysicalPlanDowncast { .. } => StatusCode::Unexpected,
             ParseSql { source, .. } => source.status_code(),
-            Datafusion { .. } | PhysicalPlanDowncast { .. } | PlanSql { .. } => {
-                StatusCode::Internal
-            }
+            PlanSql { .. } => StatusCode::PlanQuery,
         }
     }
 
@@ -59,32 +61,32 @@ impl From<InnerError> for Error {
 mod tests {
     use super::*;
 
-    fn raise_df_error() -> Result<(), DataFusionError> {
+    fn throw_df_error() -> Result<(), DataFusionError> {
         Err(DataFusionError::NotImplemented("test".to_string()))
     }
 
-    fn assert_internal_error(err: &InnerError) {
-        assert_eq!(StatusCode::Internal, err.status_code());
+    fn assert_error(err: &InnerError, code: StatusCode) {
+        assert_eq!(code, err.status_code());
         assert!(err.backtrace_opt().is_some());
     }
 
     #[test]
     fn test_datafusion_as_source() {
-        let err = raise_df_error()
+        let err = throw_df_error()
             .context(DatafusionSnafu { msg: "test df" })
             .err()
             .unwrap();
-        assert_internal_error(&err);
+        assert_error(&err, StatusCode::EngineExecuteQuery);
 
-        let err = raise_df_error()
+        let err = throw_df_error()
             .context(PlanSqlSnafu { sql: "" })
             .err()
             .unwrap();
-        assert_internal_error(&err);
+        assert_error(&err, StatusCode::PlanQuery);
 
         let res: Result<(), InnerError> = PhysicalPlanDowncastSnafu {}.fail();
         let err = res.err().unwrap();
-        assert_internal_error(&err);
+        assert_error(&err, StatusCode::Unexpected);
     }
 
     fn raise_sql_error() -> Result<(), sql::error::Error> {

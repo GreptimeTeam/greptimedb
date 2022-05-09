@@ -33,7 +33,7 @@ impl MockError {
 
 impl fmt::Display for MockError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.code)
+        write!(f, "{}", self.code)
     }
 }
 
