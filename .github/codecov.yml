@@ -2,3 +2,7 @@
 coverage:
   status:
     patch: off # disable patch status
+    project:
+      default:
+        enable: yes
+        threshold: 1%
