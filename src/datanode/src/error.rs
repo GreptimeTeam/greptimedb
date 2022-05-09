@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use common_error::prelude::*;
 
 /// Business error of datanode.
@@ -35,6 +37,10 @@ impl ErrorExt for Error {
 
     fn backtrace_opt(&self) -> Option<&Backtrace> {
         ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use crate::status_code::StatusCode;
 
 /// Extension to [`Error`](std::error::Error) in std.
@@ -11,6 +13,10 @@ pub trait ErrorExt: std::error::Error {
     // Add `_opt` suffix to avoid confusing with similar method in `std::error::Error`, once backtrace
     // in std is stable, we can deprecate this method.
     fn backtrace_opt(&self) -> Option<&crate::snafu::Backtrace>;
+
+    /// Returns the error as [Any](std::any::Any) so that it can be
+    /// downcast to a specific implementation.
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// A helper macro to define a opaque boxed error based on errors that implement [ErrorExt] trait.
@@ -61,6 +67,10 @@ macro_rules! define_opaque_error {
             fn backtrace_opt(&self) -> Option<&$crate::snafu::Backtrace> {
                 self.inner.backtrace_opt()
             }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self.inner.as_any()
+            }
         }
 
         // Implement ErrorCompat for this opaque error so the backtrace is also available
@@ -103,6 +113,10 @@ mod tests {
 
         fn backtrace_opt(&self) -> Option<&snafu::Backtrace> {
             ErrorCompat::backtrace(self)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
         }
     }
 
@@ -150,6 +164,8 @@ mod tests {
         assert_eq!("This is a leaf error, val: 10", err.to_string());
         assert_eq!(StatusCode::Internal, err.status_code());
 
+        err.as_any().downcast_ref::<InnerError>().unwrap();
+
         // Test internal error.
         let err: Error = throw_internal().map_err(Into::into).err().unwrap();
         let msg = format!("{:?}", err);
@@ -163,5 +179,7 @@ mod tests {
         assert!(err.backtrace_opt().is_some());
         assert_eq!("This is an internal error", err.to_string());
         assert_eq!(StatusCode::Internal, err.status_code());
+
+        err.as_any().downcast_ref::<InnerError>().unwrap();
     }
 }

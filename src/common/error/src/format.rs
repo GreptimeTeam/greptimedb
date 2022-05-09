@@ -30,6 +30,8 @@ impl<'a, E: ErrorExt + ?Sized> fmt::Debug for DebugFormat<'a, E> {
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
+
     use snafu::{prelude::*, Backtrace, GenerateImplicitData};
 
     use super::*;
@@ -42,6 +44,10 @@ mod tests {
         fn backtrace_opt(&self) -> Option<&Backtrace> {
             None
         }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
     }
 
     #[derive(Debug, Snafu)]
@@ -53,6 +59,10 @@ mod tests {
     impl ErrorExt for LeafWithBacktrace {
         fn backtrace_opt(&self) -> Option<&Backtrace> {
             Some(&self.backtrace)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
         }
     }
 
@@ -67,6 +77,10 @@ mod tests {
     impl ErrorExt for Internal {
         fn backtrace_opt(&self) -> Option<&Backtrace> {
             Some(&self.backtrace)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
         }
     }
 

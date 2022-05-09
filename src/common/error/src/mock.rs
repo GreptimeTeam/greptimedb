@@ -1,5 +1,6 @@
 //! Utils for mock.
 
+use std::any::Any;
 use std::fmt;
 
 use snafu::GenerateImplicitData;
@@ -50,6 +51,10 @@ impl ErrorExt for MockError {
 
     fn backtrace_opt(&self) -> Option<&Backtrace> {
         self.backtrace.as_ref()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

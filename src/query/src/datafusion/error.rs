@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use common_error::prelude::*;
 use datafusion::error::DataFusionError;
 
@@ -48,6 +50,10 @@ impl ErrorExt for InnerError {
 
     fn backtrace_opt(&self) -> Option<&Backtrace> {
         ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
