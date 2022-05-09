@@ -4,7 +4,7 @@ use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
-use crate::error::{self, Error};
+use crate::error::{self, Error, TokenizerSnafu};
 use crate::statements::show_database::SqlShowDatabase;
 use crate::statements::show_kind::ShowKind;
 use crate::statements::statement::Statement;
@@ -23,7 +23,7 @@ impl<'a> ParserContext<'a> {
         let mut stmts: Vec<Statement> = Vec::new();
         let mut tokenizer = Tokenizer::new(dialect, sql);
 
-        let tokens: Vec<Token> = tokenizer.tokenize().unwrap();
+        let tokens: Vec<Token> = tokenizer.tokenize().context(TokenizerSnafu { sql })?;
 
         let mut parser_ctx = ParserContext {
             sql,
@@ -135,22 +135,21 @@ impl<'a> ParserContext<'a> {
             ))),
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => Ok(Statement::ShowDatabases(SqlShowDatabase::new(
-                    ShowKind::Like(
-                        self.parser
-                            .parse_identifier()
-                            .context(error::UnexpectedSnafu {
-                                sql: self.sql,
-                                expected: "LIKE",
-                                actual: tok.to_string(),
-                            })
-                            .unwrap(),
-                    ),
+                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "LIKE",
+                            actual: tok.to_string(),
+                        }
+                    })?),
                 ))),
                 Keyword::WHERE => Ok(Statement::ShowDatabases(SqlShowDatabase::new(
-                    ShowKind::Where(self.parser.parse_expr().context(error::UnexpectedSnafu {
-                        sql: self.sql.to_string(),
-                        expected: "some valid expression".to_string(),
-                        actual: self.peek_token_as_string(),
+                    ShowKind::Where(self.parser.parse_expr().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "some valid expression",
+                            actual: self.peek_token_as_string(),
+                        }
                     })?),
                 ))),
                 _ => self.unsupported(self.peek_token_as_string()),
