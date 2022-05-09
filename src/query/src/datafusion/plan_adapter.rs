@@ -16,7 +16,8 @@ use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 use table::table::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
 
-use crate::error::{self, Result};
+use crate::datafusion::error;
+use crate::error::Result;
 use crate::executor::Runtime;
 use crate::plan::{Partitioning, PhysicalPlan};
 
@@ -74,7 +75,9 @@ impl PhysicalPlan for PhysicalPlanAdapter {
         let plan = self
             .plan
             .with_new_children(df_children)
-            .context(error::DatafusionSnafu)?;
+            .context(error::DatafusionSnafu {
+                msg: "Fail to add children to plan",
+            })?;
         Ok(Arc::new(PhysicalPlanAdapter::new(
             self.schema.clone(),
             plan,
@@ -86,11 +89,13 @@ impl PhysicalPlan for PhysicalPlanAdapter {
         runtime: &Runtime,
         partition: usize,
     ) -> Result<SendableRecordBatchStream> {
-        let df_stream = self
-            .plan
-            .execute(partition, runtime.into())
-            .await
-            .context(error::DatafusionSnafu)?;
+        let df_stream =
+            self.plan
+                .execute(partition, runtime.into())
+                .await
+                .context(error::DatafusionSnafu {
+                    msg: "Fail to execute physical plan",
+                })?;
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(df_stream)))
     }
@@ -112,9 +117,6 @@ impl Debug for ExecutionPlanAdapter {
         write!(f, "ExecutionPlan(PlaceHolder)")
     }
 }
-
-unsafe impl Send for ExecutionPlanAdapter {}
-unsafe impl Sync for ExecutionPlanAdapter {}
 
 #[async_trait::async_trait]
 impl ExecutionPlan for ExecutionPlanAdapter {

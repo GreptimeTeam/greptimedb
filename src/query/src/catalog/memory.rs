@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use common_error::prelude::*;
 use table::table::numbers::NumbersTable;
 use table::TableRef;
 
@@ -11,7 +12,36 @@ use crate::catalog::{
     CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef, DEFAULT_CATALOG_NAME,
     DEFAULT_SCHEMA_NAME,
 };
-use crate::error::{ExecutionSnafu, Result};
+use crate::error::{Error, Result};
+
+/// Error implementation of memory catalog.
+#[derive(Debug, Snafu)]
+pub enum InnerError {
+    #[snafu(display("Table {} already exists", table))]
+    TableExists { table: String, backtrace: Backtrace },
+}
+
+impl ErrorExt for InnerError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            InnerError::TableExists { .. } => StatusCode::TableAlreadyExists,
+        }
+    }
+
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl From<InnerError> for Error {
+    fn from(err: InnerError) -> Self {
+        Self::new(err)
+    }
+}
 
 /// Simple in-memory list of catalogs
 #[derive(Default)]
@@ -127,10 +157,7 @@ impl SchemaProvider for MemorySchemaProvider {
 
     fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
         if self.table_exist(name.as_str()) {
-            return ExecutionSnafu {
-                message: format!("The table {} already exists", name),
-            }
-            .fail();
+            return TableExistsSnafu { table: name }.fail()?;
         }
         let mut tables = self.tables.write().unwrap();
         Ok(tables.insert(name, table))
@@ -196,6 +223,8 @@ mod tests {
         assert!(provider.table_exist(table_name));
         let other_table = NumbersTable::default();
         let result = provider.register_table(table_name.to_string(), Arc::new(other_table));
-        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
     }
 }

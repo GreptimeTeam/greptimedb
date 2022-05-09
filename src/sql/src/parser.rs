@@ -4,12 +4,12 @@ use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
-use crate::errors;
+use crate::error::{self, Error};
 use crate::statements::show_database::SqlShowDatabase;
 use crate::statements::show_kind::ShowKind;
 use crate::statements::statement::Statement;
 
-pub type Result<T> = std::result::Result<T, errors::ParserError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
@@ -87,10 +87,11 @@ impl<'a> ParserContext<'a> {
 
     /// Raises an "unsupported statement" error.
     pub fn unsupported<T>(&self, keyword: String) -> Result<T> {
-        Err(errors::ParserError::Unsupported {
-            sql: self.sql.to_string(),
+        error::UnsupportedSnafu {
+            sql: self.sql,
             keyword,
-        })
+        }
+        .fail()
     }
 
     /// Parses SHOW statements
@@ -137,7 +138,7 @@ impl<'a> ParserContext<'a> {
                     ShowKind::Like(
                         self.parser
                             .parse_identifier()
-                            .context(errors::UnexpectedSnafu {
+                            .context(error::UnexpectedSnafu {
                                 sql: self.sql,
                                 expected: "LIKE",
                                 actual: tok.to_string(),
@@ -146,7 +147,7 @@ impl<'a> ParserContext<'a> {
                     ),
                 ))),
                 Keyword::WHERE => Ok(Statement::ShowDatabases(SqlShowDatabase::new(
-                    ShowKind::Where(self.parser.parse_expr().context(errors::UnexpectedSnafu {
+                    ShowKind::Where(self.parser.parse_expr().context(error::UnexpectedSnafu {
                         sql: self.sql.to_string(),
                         expected: "some valid expression".to_string(),
                         actual: self.peek_token_as_string(),

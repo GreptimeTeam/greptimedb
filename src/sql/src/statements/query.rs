@@ -1,6 +1,6 @@
 use sqlparser::ast::Query as SpQuery;
 
-use crate::errors::ParserError;
+use crate::error::Error;
 
 /// Query statement instance.
 #[derive(Debug, Clone, PartialEq)]
@@ -10,7 +10,7 @@ pub struct Query {
 
 /// Automatically converts from sqlparser Query instance to SqlQuery.
 impl TryFrom<SpQuery> for Query {
-    type Error = ParserError;
+    type Error = Error;
 
     fn try_from(q: SpQuery) -> Result<Self, Self::Error> {
         Ok(Query { inner: q })
@@ -18,7 +18,7 @@ impl TryFrom<SpQuery> for Query {
 }
 
 impl TryFrom<Query> for SpQuery {
-    type Error = ParserError;
+    type Error = Error;
 
     fn try_from(value: Query) -> Result<Self, Self::Error> {
         Ok(value.inner)

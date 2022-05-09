@@ -16,7 +16,7 @@ use datafusion::datasource::{
     datasource::TableProviderFilterPushDown as DfTableProviderFilterPushDown, TableProvider,
     TableType as DfTableType,
 };
-use datafusion::error::{DataFusionError, Result as DfResult};
+use datafusion::error::Result as DfResult;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::Expr as DfExpr;
 use datafusion::physical_plan::{
@@ -30,8 +30,8 @@ use datatypes::schema::{Schema, SchemaRef};
 use futures::Stream;
 use snafu::prelude::*;
 
-use super::{Table, TableProviderFilterPushDown, TableRef, TableType};
 use crate::error::{self, Result};
+use crate::table::{Table, TableProviderFilterPushDown, TableRef, TableType};
 
 /// Greptime SendableRecordBatchStream -> datafusion ExecutionPlan.
 struct ExecutionPlanAdapter {
@@ -90,9 +90,7 @@ impl ExecutionPlan for ExecutionPlanAdapter {
             let stream = mem::replace(&mut *stream, None);
             Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream.unwrap())))
         } else {
-            error::ExecuteRepeatedlySnafu
-                .fail()
-                .map_err(|e| DataFusionError::External(Box::new(e)))
+            error::ExecuteRepeatedlySnafu.fail()?
         }
     }
 
@@ -139,28 +137,23 @@ impl TableProvider for DfTableProviderAdapter {
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Expr::new).collect();
 
-        match self.table.scan(projection, &filters, limit).await {
-            Ok(stream) => Ok(Arc::new(ExecutionPlanAdapter {
-                schema: stream.schema(),
-                stream: Mutex::new(Some(stream)),
-            })),
-            Err(e) => Err(e.into()),
-        }
+        let stream = self.table.scan(projection, &filters, limit).await?;
+        Ok(Arc::new(ExecutionPlanAdapter {
+            schema: stream.schema(),
+            stream: Mutex::new(Some(stream)),
+        }))
     }
 
     fn supports_filter_pushdown(&self, filter: &DfExpr) -> DfResult<DfTableProviderFilterPushDown> {
-        match self
+        let p = self
             .table
-            .supports_filter_pushdown(&Expr::new(filter.clone()))
-        {
-            Ok(p) => match p {
-                TableProviderFilterPushDown::Unsupported => {
-                    Ok(DfTableProviderFilterPushDown::Unsupported)
-                }
-                TableProviderFilterPushDown::Inexact => Ok(DfTableProviderFilterPushDown::Inexact),
-                TableProviderFilterPushDown::Exact => Ok(DfTableProviderFilterPushDown::Exact),
-            },
-            Err(e) => Err(e.into()),
+            .supports_filter_pushdown(&Expr::new(filter.clone()))?;
+        match p {
+            TableProviderFilterPushDown::Unsupported => {
+                Ok(DfTableProviderFilterPushDown::Unsupported)
+            }
+            TableProviderFilterPushDown::Inexact => Ok(DfTableProviderFilterPushDown::Inexact),
+            TableProviderFilterPushDown::Exact => Ok(DfTableProviderFilterPushDown::Exact),
         }
     }
 }

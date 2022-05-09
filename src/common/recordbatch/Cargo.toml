@@ -15,7 +15,7 @@ datatypes = {path ="../../datatypes" }
 futures = "0.3"
 paste = "1.0"
 serde = "1.0"
-snafu = "0.7"
+snafu = { version = "0.7", features = ["backtraces"] }
 
 [dev-dependencies.arrow]
 package = "arrow2"
@@ -24,3 +24,4 @@ features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc
 
 [dev-dependencies]
 tokio = { version = "1.18", features = ["full"] }
+

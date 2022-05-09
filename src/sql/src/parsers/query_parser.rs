@@ -1,6 +1,6 @@
 use snafu::prelude::*;
 
-use crate::errors;
+use crate::error;
 use crate::parser::ParserContext;
 use crate::parser::Result;
 use crate::statements::query::Query;
@@ -12,7 +12,7 @@ impl<'a> ParserContext<'a> {
         let spquery = self
             .parser
             .parse_query()
-            .context(errors::InnerSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu { sql: self.sql })?;
 
         Ok(Statement::Query(Box::new(Query::try_from(spquery)?)))
     }
