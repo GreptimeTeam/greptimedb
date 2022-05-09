@@ -1,7 +1,7 @@
-mod catalog;
+pub mod catalog;
 pub mod datanode;
-mod error;
-mod instance;
-mod server;
+pub mod error;
+pub mod instance;
+pub mod server;
 
 pub use crate::datanode::DataNode;
