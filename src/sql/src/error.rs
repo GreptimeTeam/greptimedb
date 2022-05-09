@@ -2,6 +2,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use sqlparser::parser::ParserError;
+use sqlparser::tokenizer::TokenizerError;
 
 /// SQL parser errors.
 // Now the error in parser does not contains backtrace to avoid generating backtrace
@@ -29,6 +30,9 @@ pub enum Error {
     // Syntax error from sql parser.
     #[snafu(display("Syntax error, sql: {}, source: {}", sql, source))]
     Syntax { sql: String, source: ParserError },
+
+    #[snafu(display("Tokenizer error, sql: {}, source: {}", sql, source))]
+    Tokenizer { sql: String, source: TokenizerError },
 }
 
 impl ErrorExt for Error {
@@ -37,7 +41,7 @@ impl ErrorExt for Error {
 
         match self {
             Unsupported { .. } => StatusCode::Unsupported,
-            Unexpected { .. } | Syntax { .. } => StatusCode::InvalidSyntax,
+            Unexpected { .. } | Syntax { .. } | Tokenizer { .. } => StatusCode::InvalidSyntax,
         }
     }
 
@@ -93,5 +97,19 @@ mod tests {
             keyword: "".to_string(),
         };
         assert_eq!(StatusCode::Unsupported, err.status_code());
+    }
+
+    #[test]
+    pub fn test_tokenizer_error() {
+        let err = Error::Tokenizer {
+            sql: "".to_string(),
+            source: sqlparser::tokenizer::TokenizerError {
+                message: "tokenizer error".to_string(),
+                col: 1,
+                line: 1,
+            },
+        };
+
+        assert_eq!(StatusCode::InvalidSyntax, err.status_code());
     }
 }
