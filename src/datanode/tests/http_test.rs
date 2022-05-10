@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
+use common_telemetry::logging;
 use datanode::{instance::Instance, server::http::HttpServer};
 use query::catalog::memory;
 
@@ -17,6 +18,7 @@ fn make_test_app() -> Router {
 
 #[tokio::test]
 async fn test_sql_api() {
+    logging::init_default_ut_tracing();
     let app = make_test_app();
     let client = TestClient::new(app);
     let res = client.get("/sql").send().await;

@@ -12,6 +12,7 @@ features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc
 async-trait = "0.1"
 common-error = { path = "../common/error" }
 common-recordbatch = {path = "../common/recordbatch" }
+common-telemetry = { path = "../common/telemetry" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
 datatypes = {path = "../datatypes" }
 futures = "0.3"

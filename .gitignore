@@ -15,3 +15,7 @@ debug/
 
 # JetBrains IDE config directory
 .idea/
+
+# Logs
+**/__unittest_logs
+logs/

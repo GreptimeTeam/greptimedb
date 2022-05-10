@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use arrow::array::UInt32Array;
 use common_recordbatch::util;
+use common_telemetry::logging;
 use datafusion::field_util::FieldExt;
 use datafusion::field_util::SchemaExt;
 use datafusion::logical_plan::LogicalPlanBuilder;
@@ -14,6 +15,7 @@ use table::table::numbers::NumbersTable;
 
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {
+    logging::init_default_ut_tracing();
     let catalog_list = memory::new_memory_catalog_list()?;
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();

@@ -11,6 +11,7 @@ use axum::{
     BoxError, Extension, Router,
 };
 use common_recordbatch::{util, RecordBatch};
+use common_telemetry::logging::info;
 use query::Output;
 use serde::Serialize;
 use snafu::ResultExt;
@@ -106,7 +107,7 @@ impl HttpServer {
 
         let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
         // TODO(dennis): log
-        println!("Datanode HTTP server is listening on {}", addr);
+        info!("Datanode HTTP server is listening on {}", addr);
         let server = axum::Server::bind(&addr).serve(app.into_make_service());
         let graceful = server.with_graceful_shutdown(shutdown_signal());
 
