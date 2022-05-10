@@ -7,6 +7,7 @@ use std::sync::Once;
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
+use tracing::Level;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::RollingFileAppender;
 use tracing_appender::rolling::Rotation;
@@ -21,12 +22,12 @@ use tracing_subscriber::Registry;
 
 /// Init tracing for unittest.
 /// Write logs to file `unittest`.
-pub fn init_default_ut_tracing() {
+pub fn init_default_ut_logging() {
     static START: Once = Once::new();
 
     START.call_once(|| {
         let mut g = GLOBAL_UT_LOG_GUARD.as_ref().lock().unwrap();
-        *g = Some(init_global_tracing(
+        *g = Some(init_global_logging(
             "unittest",
             "__unittest_logs",
             "DEBUG",
@@ -38,7 +39,7 @@ pub fn init_default_ut_tracing() {
 static GLOBAL_UT_LOG_GUARD: Lazy<Arc<Mutex<Option<Vec<WorkerGuard>>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
-pub fn init_global_tracing(
+pub fn init_global_logging(
     app_name: &str,
     dir: &str,
     level: &str,
@@ -67,11 +68,12 @@ pub fn init_global_tracing(
         // Only enable WARN and ERROR for 3rd-party crates
         .with_target("hyper", Level::WARN)
         .with_target("tower", Level::WARN)
+        .with_target("datafusion", Level::WARN)
         .with_target("reqwest", Level::WARN)
         .with_default(
             directives
                 .parse::<filter::LevelFilter>()
-                .expect("level string: debug, info etc."),
+                .expect("error parsing level string"),
         );
 
     let subscriber = Registry::default()
@@ -102,5 +104,3 @@ pub fn init_global_tracing(
 
     guards
 }
-
-pub use tracing::{debug, error, info, span, warn, Level};

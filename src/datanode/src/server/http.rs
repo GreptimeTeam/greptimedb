@@ -11,7 +11,7 @@ use axum::{
     BoxError, Extension, Router,
 };
 use common_recordbatch::{util, RecordBatch};
-use common_telemetry::logging::info;
+use common_telemetry::info;
 use query::Output;
 use serde::Serialize;
 use snafu::ResultExt;
