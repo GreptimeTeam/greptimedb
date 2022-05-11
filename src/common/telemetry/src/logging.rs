@@ -7,7 +7,7 @@ use std::sync::Once;
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
-use tracing::Level;
+pub use tracing::{debug, error, info, span, warn, Level};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::RollingFileAppender;
 use tracing_appender::rolling::Rotation;

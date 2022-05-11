@@ -1,5 +1,6 @@
 use std::backtrace::Backtrace;
 use std::panic;
+#[cfg(feature = "deadlock_detection")]
 use std::time::Duration;
 
 pub fn set_panic_hook() {

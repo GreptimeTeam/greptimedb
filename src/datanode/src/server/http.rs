@@ -11,7 +11,7 @@ use axum::{
     BoxError, Extension, Router,
 };
 use common_recordbatch::{util, RecordBatch};
-use common_telemetry::info;
+use common_telemetry::logging::info;
 use query::Output;
 use serde::Serialize;
 use snafu::ResultExt;
@@ -32,6 +32,14 @@ pub enum JsonOutput {
     Rows(Vec<RecordBatch>),
 }
 
+/// Http response
+#[derive(Serialize, Debug)]
+pub enum HttpResponse {
+    Json(JsonResponse),
+    Text(String),
+}
+
+/// Json response
 #[derive(Serialize, Debug)]
 pub struct JsonResponse {
     success: bool,
@@ -41,9 +49,12 @@ pub struct JsonResponse {
     output: Option<JsonOutput>,
 }
 
-impl IntoResponse for JsonResponse {
+impl IntoResponse for HttpResponse {
     fn into_response(self) -> Response {
-        Json(self).into_response()
+        match self {
+            HttpResponse::Json(json) => Json(json).into_response(),
+            HttpResponse::Text(text) => text.into_response(),
+        }
     }
 }
 
@@ -92,21 +103,25 @@ impl HttpServer {
     }
 
     pub fn make_app(&self) -> Router {
-        Router::new().route("/sql", get(handler::sql)).layer(
-            ServiceBuilder::new()
-                .layer(HandleErrorLayer::new(handle_error))
-                .layer(TraceLayer::new_for_http())
-                .layer(Extension(self.instance.clone()))
-                // TODO configure timeout
-                .layer(TimeoutLayer::new(Duration::from_secs(30))),
-        )
+        Router::new()
+            // handlers
+            .route("/sql", get(handler::sql))
+            .route("/metrics", get(handler::metrics))
+            // middlewares
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_error))
+                    .layer(TraceLayer::new_for_http())
+                    .layer(Extension(self.instance.clone()))
+                    // TODO configure timeout
+                    .layer(TimeoutLayer::new(Duration::from_secs(30))),
+            )
     }
 
     pub async fn start(&self) -> Result<()> {
         let app = self.make_app();
 
         let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-        // TODO(dennis): log
         info!("Datanode HTTP server is listening on {}", addr);
         let server = axum::Server::bind(&addr).serve(app.into_make_service());
         let graceful = server.with_graceful_shutdown(shutdown_signal());

@@ -1,6 +1,6 @@
 use clap::Parser;
 use cmd::opts::{GrepTimeOpts, NodeType};
-use common_telemetry::{self, error};
+use common_telemetry::{self, logging::error};
 use datanode::DataNode;
 
 async fn datanode_main(_opts: &GrepTimeOpts) {
