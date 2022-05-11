@@ -17,4 +17,4 @@ pub mod schema;
 pub mod deserialize;
 pub mod serialize;
 
-pub mod errors;
+pub mod error;

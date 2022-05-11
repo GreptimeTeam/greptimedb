@@ -118,14 +118,14 @@ impl<T: Primitive + DataTypeBuilder> ScalarVectorBuilder for PrimitiveVectorBuil
     }
 }
 
-#[macro_export]
 macro_rules! impl_serializable {
     ($ty: ident) => {
         impl crate::serialize::Serializable for $ty {
-            fn serialize_to_json(&self) -> crate::errors::Result<Vec<JsonValue>> {
-                let result: Result<Vec<JsonValue>, serde_json::Error> =
-                    self.iter().map(|x| serde_json::to_value(x)).collect();
-                result.context(crate::errors::SerializeSnafu)
+            fn serialize_to_json(&self) -> crate::error::Result<Vec<JsonValue>> {
+                self.iter()
+                    .map(|x| serde_json::to_value(x))
+                    .collect::<serde_json::Result<_>>()
+                    .context(crate::error::SerializeSnafu)
             }
         }
     };

@@ -7,8 +7,8 @@ use arrow::bitmap::utils::ZipValidity;
 use snafu::ResultExt;
 
 use crate::data_type::DataTypeRef;
-use crate::errors::Result;
-use crate::errors::SerializeSnafu;
+use crate::error::Result;
+use crate::error::SerializeSnafu;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::BinaryType;
@@ -83,62 +83,35 @@ impl ScalarVectorBuilder for BinaryVectorBuilder {
 
 impl Serializable for BinaryVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        let x: serde_json::Result<Vec<serde_json::Value>> = self
-            .array
+        self.array
             .iter()
             .map(|v| match v {
                 None => Ok(serde_json::Value::Null), // if binary vector not present, map to NULL
                 Some(vec) => serde_json::to_value(vec),
             })
-            .collect();
-        x.context(SerializeSnafu)
+            .collect::<serde_json::Result<_>>()
+            .context(SerializeSnafu)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use serde::ser::SerializeStruct;
     use serde::*;
 
     use super::BinaryVector;
     use crate::serialize::Serializable;
     use crate::LargeBinaryArray;
 
-    struct TestStruct {
-        name: String,
-        data: BinaryVector,
-    }
-
-    impl serde::Serialize for TestStruct {
-        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            let mut s = serializer.serialize_struct("testStruct", 2).unwrap();
-            s.serialize_field("name", &self.name).unwrap();
-            s.serialize_field("data", &self.data.serialize_to_json().unwrap())
-                .unwrap();
-            s.end()
-        }
-    }
-
-    /// test serialize a struct to JOSN
     #[test]
-    pub fn test_serialize_struct() {
-        let test_struct = TestStruct {
-            name: "some test".to_string(),
-            data: BinaryVector {
-                array: LargeBinaryArray::from_slice(&vec![vec![1, 2, 3], vec![1, 2, 3]]),
-            },
+    pub fn test_serialize_binary_vector_to_json() {
+        let vector = BinaryVector {
+            array: LargeBinaryArray::from_slice(&vec![vec![1, 2, 3], vec![1, 2, 3]]),
         };
 
+        let json_value = vector.serialize_to_json().unwrap();
         let mut output = vec![];
         let mut serializer = serde_json::ser::Serializer::new(&mut output);
-        test_struct.serialize(&mut serializer).unwrap();
-        let result_string = String::from_utf8_lossy(&output);
-        assert_eq!(
-            "{\"name\":\"some test\",\"data\":[[1,2,3],[1,2,3]]}".to_string(),
-            result_string
-        );
+        json_value.serialize(&mut serializer).unwrap();
+        assert_eq!("[[1,2,3],[1,2,3]]", String::from_utf8_lossy(&output));
     }
 }
