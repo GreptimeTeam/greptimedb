@@ -2047,6 +2047,7 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "metrics",
  "snafu",
  "sql",
  "table",

@@ -14,14 +14,13 @@ async fn datanode_main(_opts: &GrepTimeOpts) {
 #[tokio::main]
 async fn main() {
     let opts = GrepTimeOpts::parse();
-
     let node_type = opts.node_type;
-
     // TODO(dennis): 1. adds ip/port to app
     //                          2. config log dir
     let app = format!("{node_type:?}-node").to_lowercase();
 
     common_telemetry::set_panic_hook();
+    common_telemetry::init_default_metrics_recorder();
     let _guard = common_telemetry::init_global_logging(&app, "logs", "info", false);
 
     match node_type {

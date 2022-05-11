@@ -66,6 +66,7 @@ pub fn init_global_logging(
     let directives = env::var(EnvFilter::DEFAULT_ENV).unwrap_or_else(|_x| level.to_string());
     let filter = filter::Targets::new()
         // Only enable WARN and ERROR for 3rd-party crates
+        // TODO(dennis): configure them?
         .with_target("hyper", Level::WARN)
         .with_target("tower", Level::WARN)
         .with_target("datafusion", Level::WARN)
