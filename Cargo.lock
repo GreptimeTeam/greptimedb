@@ -711,8 +711,11 @@ version = "0.1.0"
 dependencies = [
  "arrow2",
  "common-base",
+ "common-error",
  "paste",
  "serde",
+ "serde_json",
+ "snafu",
 ]
 
 [[package]]

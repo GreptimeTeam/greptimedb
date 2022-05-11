@@ -4,9 +4,13 @@ use std::sync::Arc;
 use arrow::array::ArrayRef;
 use arrow::array::BinaryValueIter;
 use arrow::bitmap::utils::ZipValidity;
+use snafu::ResultExt;
 
 use crate::data_type::DataTypeRef;
+use crate::error::Result;
+use crate::error::SerializeSnafu;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
+use crate::serialize::Serializable;
 use crate::types::BinaryType;
 use crate::vectors::Vector;
 use crate::{LargeBinaryArray, MutableLargeBinaryArray};
@@ -74,5 +78,40 @@ impl ScalarVectorBuilder for BinaryVectorBuilder {
         BinaryVector {
             array: self.mutable_array.into(),
         }
+    }
+}
+
+impl Serializable for BinaryVector {
+    fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
+        self.array
+            .iter()
+            .map(|v| match v {
+                None => Ok(serde_json::Value::Null), // if binary vector not present, map to NULL
+                Some(vec) => serde_json::to_value(vec),
+            })
+            .collect::<serde_json::Result<_>>()
+            .context(SerializeSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::*;
+
+    use super::BinaryVector;
+    use crate::serialize::Serializable;
+    use crate::LargeBinaryArray;
+
+    #[test]
+    pub fn test_serialize_binary_vector_to_json() {
+        let vector = BinaryVector {
+            array: LargeBinaryArray::from_slice(&vec![vec![1, 2, 3], vec![1, 2, 3]]),
+        };
+
+        let json_value = vector.serialize_to_json().unwrap();
+        let mut output = vec![];
+        let mut serializer = serde_json::ser::Serializer::new(&mut output);
+        json_value.serialize(&mut serializer).unwrap();
+        assert_eq!("[[1,2,3],[1,2,3]]", String::from_utf8_lossy(&output));
     }
 }
