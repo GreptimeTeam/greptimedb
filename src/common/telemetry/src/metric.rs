@@ -75,7 +75,6 @@ mod tests {
         }
         let handle = try_handle().unwrap();
         let text = handle.render();
-        println!("{}", text);
         assert!(text.contains("test_elapsed_timer_a"));
         assert!(!text.contains("test_elapsed_timer_b"));
 

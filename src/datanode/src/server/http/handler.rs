@@ -6,7 +6,7 @@ use axum::extract::{Extension, Query};
 use common_telemetry::{elapsed_timer, metric};
 
 use crate::instance::InstanceRef;
-use crate::metric::METRIC_HANDLE_SQL_USEDTIME;
+use crate::metric::METRIC_HANDLE_SQL_ELAPSED;
 use crate::server::http::{HttpResponse, JsonResponse};
 
 /// Handler to execute sql
@@ -15,7 +15,7 @@ pub async fn sql(
     Extension(instance): Extension<InstanceRef>,
     Query(params): Query<HashMap<String, String>>,
 ) -> HttpResponse {
-    let _timer = elapsed_timer!(METRIC_HANDLE_SQL_USEDTIME);
+    let _timer = elapsed_timer!(METRIC_HANDLE_SQL_ELAPSED);
     if let Some(sql) = params.get("sql") {
         HttpResponse::Json(JsonResponse::from_output(instance.execute_sql(sql).await).await)
     } else {

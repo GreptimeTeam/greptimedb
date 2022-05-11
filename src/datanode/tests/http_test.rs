@@ -61,5 +61,5 @@ async fn test_metrics_api() {
     let res = client.get("/metrics").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.text().await;
-    assert!(body.contains("datanode_handle_sql_usedtime"));
+    assert!(body.contains("datanode_handle_sql_elapsed"));
 }
