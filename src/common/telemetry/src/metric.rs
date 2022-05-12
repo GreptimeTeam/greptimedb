@@ -34,6 +34,7 @@ pub fn try_handle() -> Option<PrometheusHandle> {
     PROMETHEUS_HANDLE.as_ref().read().unwrap().clone()
 }
 
+#[must_use = "Timer should be kept in a variable otherwise it cannot observe duration"]
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timer {
     start: Instant,
@@ -82,7 +83,7 @@ mod tests {
         assert!(text.contains("test_elapsed_timer_a"));
         assert!(!text.contains("test_elapsed_timer_b"));
 
-        timer!("test_elapsed_timer_b");
+        let _ = timer!("test_elapsed_timer_b");
         let text = handle.render();
         assert!(text.contains("test_elapsed_timer_a"));
         assert!(text.contains("test_elapsed_timer_b"));
