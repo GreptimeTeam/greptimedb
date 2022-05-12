@@ -544,6 +544,7 @@ dependencies = [
  "futures",
  "paste",
  "serde",
+ "serde_json",
  "snafu",
  "tokio",
 ]

@@ -2,12 +2,14 @@ use std::any::Any;
 use std::slice::Iter;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, MutablePrimitiveArray, PrimitiveArray};
+use arrow::array::{Array, ArrayRef, MutablePrimitiveArray, PrimitiveArray};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::DataTypeRef;
+use crate::error;
+use crate::error::ConversionSnafu;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::types::{DataTypeBuilder, Primitive};
 use crate::vectors::Vector;
@@ -46,6 +48,19 @@ impl<'a, T: Primitive> PrimitiveVector<T> {
     #[inline]
     pub fn iter(&'a self) -> std::slice::Iter<'a, T> {
         self.array.values().iter()
+    }
+
+    /// Convert an Arrow array to PrimitiveVector.
+    pub fn try_from_arrow_array(array: &dyn Array) -> Result<Self, error::Error> {
+        Ok(Self::new(
+            array
+                .as_any()
+                .downcast_ref::<PrimitiveArray<T>>()
+                .with_context(|| ConversionSnafu {
+                    from: format!("{:?}", array.data_type()),
+                })?
+                .clone(),
+        ))
     }
 }
 
