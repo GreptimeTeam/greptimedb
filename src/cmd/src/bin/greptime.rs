@@ -4,10 +4,14 @@ use common_telemetry::{self, logging::error};
 use datanode::DataNode;
 
 async fn datanode_main(_opts: &GrepTimeOpts) {
-    let data_node = DataNode::new().expect("error new data node");
+    match DataNode::new() {
+        Ok(data_node) => {
+            if let Err(e) = data_node.start().await {
+                error!("Fail to start data node, error: {:?}", e);
+            }
+        }
 
-    if let Err(e) = data_node.start().await {
-        error!("Fail to start data node, error: {:?}", e);
+        Err(e) => error!("Fail to new data node, error: {:?}", e),
     }
 }
 

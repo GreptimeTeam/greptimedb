@@ -1,7 +1,7 @@
 // metric stuffs, inspired by databend
 
 use std::sync::{Arc, Once, RwLock};
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 use metrics::histogram;
 use metrics_exporter_prometheus::PrometheusBuilder;

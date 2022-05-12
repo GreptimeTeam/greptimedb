@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Extension, Query};
-use common_telemetry::{timer, metric};
+use common_telemetry::{metric, timer};
 
 use crate::instance::InstanceRef;
 use crate::metric::METRIC_HANDLE_SQL_ELAPSED;
