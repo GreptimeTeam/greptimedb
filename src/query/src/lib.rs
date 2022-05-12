@@ -4,6 +4,7 @@ mod datafusion;
 pub mod error;
 pub mod executor;
 pub mod logical_optimizer;
+mod metric;
 pub mod physical_optimizer;
 pub mod physical_planner;
 pub mod plan;

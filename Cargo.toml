@@ -2,6 +2,7 @@
 members = [
     "src/common/base",
     "src/common/error",
+    "src/common/telemetry",
     "src/common/query",
     "src/common/recordbatch",
     "src/cmd",

@@ -14,6 +14,7 @@ use table::table::numbers::NumbersTable;
 
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
     let catalog_list = memory::new_memory_catalog_list()?;
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();

@@ -10,7 +10,9 @@ axum = "0.5"
 axum-macros = "0.2"
 common-error = { path = "../common/error" }
 common-recordbatch = { path = "../common/recordbatch" }
+common-telemetry = { path = "../common/telemetry" }
 hyper = { version = "0.14", features = ["full"] }
+metrics = "0.18"
 query = { path = "../query" }
 serde = "1.0"
 serde_json = "1.0"
