@@ -35,7 +35,7 @@ pub fn try_handle() -> Option<PrometheusHandle> {
 }
 
 #[must_use = "Timer should be kept in a variable otherwise it cannot observe duration"]
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug)]
 pub struct Timer {
     start: Instant,
     name: &'static str,
