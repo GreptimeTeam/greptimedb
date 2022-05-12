@@ -8,7 +8,7 @@ mod planner;
 use std::sync::Arc;
 
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
-use common_telemetry::elapsed_timer;
+use common_telemetry::timer;
 use snafu::{OptionExt, ResultExt};
 use sql::{dialect::GenericDialect, parser::ParserContext};
 
@@ -48,7 +48,7 @@ impl QueryEngine for DatafusionQueryEngine {
     }
 
     fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan> {
-        let _timer = elapsed_timer!(metric::METRIC_PARSE_SQL_ELAPSED);
+        let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
         let context_provider = DfContextProviderAdapter::new(self.state.catalog_list());
         let planner = DfPlanner::new(&context_provider);
         let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
@@ -76,7 +76,7 @@ impl LogicalOptimizer for DatafusionQueryEngine {
         _ctx: &mut QueryContext,
         plan: &LogicalPlan,
     ) -> Result<LogicalPlan> {
-        let _timer = elapsed_timer!(metric::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
+        let _timer = timer!(metric::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let optimized_plan =
@@ -100,7 +100,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         _ctx: &mut QueryContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = elapsed_timer!(metric::METRIC_CREATE_PHYSICAL_ELAPSED);
+        let _timer = timer!(metric::METRIC_CREATE_PHYSICAL_ELAPSED);
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let physical_plan = self
@@ -127,7 +127,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
         _ctx: &mut QueryContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = elapsed_timer!(metric::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
+        let _timer = timer!(metric::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
         let config = &self.state.df_context().state.lock().config;
         let optimizers = &config.physical_optimizers;
 
@@ -156,7 +156,7 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        let _timer = elapsed_timer!(metric::METRIC_EXEC_PLAN_ELAPSED);
+        let _timer = timer!(metric::METRIC_EXEC_PLAN_ELAPSED);
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan.execute(&ctx.state().runtime(), 0).await?),
