@@ -1,5 +1,3 @@
-#![feature(backtrace)]
-
 pub mod logging;
 pub mod metric;
 mod panic_hook;

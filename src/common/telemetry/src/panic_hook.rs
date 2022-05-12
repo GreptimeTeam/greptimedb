@@ -1,7 +1,8 @@
-use std::backtrace::Backtrace;
 use std::panic;
 #[cfg(feature = "deadlock_detection")]
 use std::time::Duration;
+
+use backtrace::Backtrace;
 
 pub fn set_panic_hook() {
     // Set a panic hook that records the panic as a `tracing` event at the
@@ -12,7 +13,7 @@ pub fn set_panic_hook() {
     // occurred to be recorded.
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic| {
-        let backtrace = Backtrace::force_capture();
+        let backtrace = Backtrace::new();
         let backtrace = format!("{:?}", backtrace);
         if let Some(location) = panic.location() {
             tracing::error!(

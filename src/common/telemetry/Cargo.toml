@@ -10,6 +10,7 @@ console = ["console-subscriber"]
 deadlock_detection=["parking_lot"]
 
 [dependencies]
+backtrace = "0.3"
 console-subscriber = { version = "0.1", optional = true }
 metrics = "0.18"
 metrics-exporter-prometheus = { version = "0.9", default-features = false }

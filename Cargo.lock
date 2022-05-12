@@ -539,6 +539,7 @@ dependencies = [
 name = "common-telemetry"
 version = "0.1.0"
 dependencies = [
+ "backtrace",
  "console-subscriber",
  "metrics",
  "metrics-exporter-prometheus",
