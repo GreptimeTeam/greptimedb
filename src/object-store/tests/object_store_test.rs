@@ -1,18 +1,11 @@
 use anyhow::Result;
-use object_store::{backend::fs, util, Object, ObjectMode, ObjectStore, ObjectStreamer};
+use object_store::{
+    backend::{fs, s3},
+    util, Object, ObjectMode, ObjectStore, ObjectStreamer,
+};
 use tempdir::TempDir;
 
-#[tokio::test]
-async fn test_fs_backend_object_crud() -> Result<()> {
-    let tmp_dir = TempDir::new("test_fs_backend_object_crud")?;
-    // Init store service
-    let store = ObjectStore::new(
-        fs::Backend::build()
-            .root(&tmp_dir.path().to_string_lossy())
-            .finish()
-            .await?,
-    );
-
+async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     // Create object handler.
     let object = store.object("test_file");
 
@@ -41,17 +34,7 @@ async fn test_fs_backend_object_crud() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn test_fs_backend_object_list() -> Result<()> {
-    let tmp_dir = TempDir::new("test_fs_backend_object_list")?;
-    // Init store service
-    let store = ObjectStore::new(
-        fs::Backend::build()
-            .root(&tmp_dir.path().to_string_lossy())
-            .finish()
-            .await?,
-    );
-
+async fn test_object_list(store: &ObjectStore) -> Result<()> {
     // Create  some object handlers.
     let o1 = store.object("test_file1");
     let o2 = store.object("test_file2");
@@ -85,6 +68,39 @@ async fn test_fs_backend_object_list() -> Result<()> {
 
     let objects = util::collect(o.list().await?).await?;
     assert!(objects.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fs_backend() -> Result<()> {
+    let tmp_dir = TempDir::new("test_fs_backend")?;
+    let store = ObjectStore::new(
+        fs::Backend::build()
+            .root(&tmp_dir.path().to_string_lossy())
+            .finish()
+            .await?,
+    );
+
+    test_object_crud(&store).await?;
+    test_object_list(&store).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_s3_backend() -> Result<()> {
+    let store = ObjectStore::new(
+        s3::Backend::build()
+            .access_key_id("AKIAUTMMSXBUHGQ5F5FS")
+            .secret_access_key("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")
+            .bucket("greptime.test")
+            .finish()
+            .await?,
+    );
+
+    test_object_crud(&store).await?;
+    test_object_list(&store).await?;
 
     Ok(())
 }
