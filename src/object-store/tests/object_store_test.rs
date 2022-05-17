@@ -1,3 +1,5 @@
+use std::env;
+
 use anyhow::Result;
 use object_store::{
     backend::{fs, s3},
@@ -90,17 +92,18 @@ async fn test_fs_backend() -> Result<()> {
 
 #[tokio::test]
 async fn test_s3_backend() -> Result<()> {
-    let store = ObjectStore::new(
-        s3::Backend::build()
-            .access_key_id("AKIAUTMMSXBUHGQ5F5FS")
-            .secret_access_key("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")
-            .bucket("greptime.test")
-            .finish()
-            .await?,
-    );
-
-    test_object_crud(&store).await?;
-    test_object_list(&store).await?;
+    if env::var("GT_S3_BUCKET").is_ok() {
+        let store = ObjectStore::new(
+            s3::Backend::build()
+                .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
+                .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
+                .bucket(&env::var("GT_S3_BUCKET")?)
+                .finish()
+                .await?,
+        );
+        test_object_crud(&store).await?;
+        test_object_list(&store).await?;
+    }
 
     Ok(())
 }
