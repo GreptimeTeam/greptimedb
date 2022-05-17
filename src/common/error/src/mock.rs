@@ -12,6 +12,7 @@ use crate::prelude::*;
 pub struct MockError {
     pub code: StatusCode,
     backtrace: Option<Backtrace>,
+    source: Option<Box<MockError>>,
 }
 
 impl MockError {
@@ -20,6 +21,7 @@ impl MockError {
         MockError {
             code,
             backtrace: None,
+            source: None,
         }
     }
 
@@ -28,6 +30,16 @@ impl MockError {
         MockError {
             code,
             backtrace: Some(Backtrace::generate()),
+            source: None,
+        }
+    }
+
+    /// Create a new [MockError] with source.
+    pub fn with_source(source: MockError) -> MockError {
+        MockError {
+            code: source.code,
+            backtrace: None,
+            source: Some(Box::new(source)),
         }
     }
 }
@@ -40,7 +52,7 @@ impl fmt::Display for MockError {
 
 impl std::error::Error for MockError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
+        self.source.as_ref().map(|e| e as _)
     }
 }
 
@@ -50,7 +62,9 @@ impl ErrorExt for MockError {
     }
 
     fn backtrace_opt(&self) -> Option<&Backtrace> {
-        self.backtrace.as_ref()
+        self.backtrace
+            .as_ref()
+            .or_else(|| self.source.as_ref().and_then(|err| err.backtrace_opt()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -66,6 +80,8 @@ impl ErrorCompat for MockError {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::*;
 
     #[test]
@@ -75,5 +91,9 @@ mod tests {
 
         let err = MockError::with_backtrace(StatusCode::Unknown);
         assert!(err.backtrace_opt().is_some());
+
+        let root_err = MockError::with_source(err);
+        assert!(root_err.source().is_some());
+        assert!(root_err.backtrace_opt().is_some());
     }
 }

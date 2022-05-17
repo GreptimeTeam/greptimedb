@@ -8,8 +8,6 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 pub use metrics_exporter_prometheus::PrometheusHandle;
 use once_cell::sync::Lazy;
 
-use crate::logging;
-
 static PROMETHEUS_HANDLE: Lazy<Arc<RwLock<Option<PrometheusHandle>>>> =
     Lazy::new(|| Arc::new(RwLock::new(None)));
 
@@ -26,7 +24,7 @@ fn init_prometheus_recorder() {
     metrics::clear_recorder();
     match metrics::set_boxed_recorder(Box::new(recorder)) {
         Ok(_) => (),
-        Err(err) => logging::warn!("Install prometheus recorder failed, cause: {}", err),
+        Err(err) => crate::warn!("Install prometheus recorder failed, cause: {}", err),
     };
 }
 

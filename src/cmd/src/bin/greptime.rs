@@ -7,11 +7,11 @@ async fn datanode_main(_opts: &GrepTimeOpts) {
     match DataNode::new() {
         Ok(data_node) => {
             if let Err(e) = data_node.start().await {
-                error!("Fail to start data node, error: {:?}", e);
+                error!(e; "Fail to start data node");
             }
         }
 
-        Err(e) => error!("Fail to new data node, error: {:?}", e),
+        Err(e) => error!(e; "Fail to new data node"),
     }
 }
 

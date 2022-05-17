@@ -7,7 +7,7 @@ use std::sync::Once;
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
-pub use tracing::{debug, error, info, span, warn, Level};
+pub use tracing::{event, span, Level};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::RollingFileAppender;
 use tracing_appender::rolling::Rotation;
@@ -19,6 +19,8 @@ use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Registry;
+
+pub use crate::{debug, error, info, log, trace, warn};
 
 /// Init tracing for unittest.
 /// Write logs to file `unittest`.
