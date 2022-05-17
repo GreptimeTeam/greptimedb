@@ -1,6 +1,7 @@
 use std::env;
 
 use anyhow::Result;
+use common_telemetry::logging;
 use object_store::{
     backend::{fs, s3},
     util, Object, ObjectMode, ObjectStore, ObjectStreamer,
@@ -92,7 +93,9 @@ async fn test_fs_backend() -> Result<()> {
 
 #[tokio::test]
 async fn test_s3_backend() -> Result<()> {
+    logging::init_default_ut_logging();
     if env::var("GT_S3_BUCKET").is_ok() {
+        logging::info!("Running s3 test.");
         let store = ObjectStore::new(
             s3::Backend::build()
                 .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
