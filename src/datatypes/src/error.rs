@@ -11,6 +11,9 @@ pub enum Error {
         source: serde_json::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to convert datafusion type: {}", from))]
+    Conversion { from: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
