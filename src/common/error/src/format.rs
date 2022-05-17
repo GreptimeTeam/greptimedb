@@ -5,7 +5,7 @@ use crate::ext::ErrorExt;
 /// Pretty debug format for error, also prints source and backtrace.
 pub struct DebugFormat<'a, E: ?Sized>(&'a E);
 
-impl<'a, E: ErrorExt + ?Sized> DebugFormat<'a, E> {
+impl<'a, E: ?Sized> DebugFormat<'a, E> {
     /// Create a new format struct from `err`.
     pub fn new(err: &'a E) -> Self {
         Self(err)

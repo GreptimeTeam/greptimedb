@@ -87,8 +87,6 @@ macro_rules! define_opaque_error {
 mod tests {
     use std::error::Error as StdError;
 
-    use snafu::{prelude::*, Backtrace, ErrorCompat};
-
     use super::*;
     use crate::prelude::*;
 
