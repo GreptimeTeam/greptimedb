@@ -13,5 +13,6 @@ members = [
     "src/object-store",
     "src/query",
     "src/sql",
+    "src/store-api",
     "src/table",
 ]
