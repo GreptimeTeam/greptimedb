@@ -1,5 +1,6 @@
 pub mod binary;
 pub mod primitive;
+mod string;
 
 use std::any::Any;
 use std::sync::Arc;
