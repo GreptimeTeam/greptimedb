@@ -6,13 +6,13 @@ use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value;
 use snafu::ResultExt;
 
+use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::DataTypeRef;
 use crate::error::SerializeSnafu;
 use crate::prelude::{ScalarVectorBuilder, Vector};
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
 use crate::types::StringType;
-use crate::{MutableStringArray, StringArray};
 
 /// String array wrapper
 #[derive(Clone)]

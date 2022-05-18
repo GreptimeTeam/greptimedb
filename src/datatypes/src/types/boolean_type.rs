@@ -1,35 +1,34 @@
 use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
-use common_base::bytes::StringBytes;
 
 use crate::data_type::{DataType, DataTypeRef};
 use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 
 #[derive(Debug, Default, Clone)]
-pub struct BinaryType;
+pub struct BooleanType;
 
-impl BinaryType {
+impl BooleanType {
     pub fn arc() -> DataTypeRef {
         Arc::new(Self)
     }
 }
 
-impl DataType for BinaryType {
+impl DataType for BooleanType {
     fn name(&self) -> &str {
-        "Binary"
+        "Boolean"
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {
-        LogicalTypeId::String
+        LogicalTypeId::Boolean
     }
 
     fn default_value(&self) -> Value {
-        StringBytes::default().into()
+        bool::default().into()
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::LargeBinary
+        ArrowDataType::Boolean
     }
 }

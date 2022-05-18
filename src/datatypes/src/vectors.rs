@@ -1,4 +1,6 @@
 pub mod binary;
+pub mod boolean;
+pub mod null;
 pub mod primitive;
 mod string;
 

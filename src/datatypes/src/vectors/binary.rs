@@ -6,6 +6,7 @@ use arrow::array::BinaryValueIter;
 use arrow::bitmap::utils::ZipValidity;
 use snafu::ResultExt;
 
+use crate::arrow_array::{LargeBinaryArray, MutableLargeBinaryArray};
 use crate::data_type::DataTypeRef;
 use crate::error::Result;
 use crate::error::SerializeSnafu;
@@ -13,7 +14,6 @@ use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::BinaryType;
 use crate::vectors::Vector;
-use crate::{LargeBinaryArray, MutableLargeBinaryArray};
 
 /// Vector of binary strings.
 #[derive(Debug)]
@@ -99,8 +99,8 @@ mod tests {
     use serde::*;
 
     use super::BinaryVector;
+    use crate::arrow_array::LargeBinaryArray;
     use crate::serialize::Serializable;
-    use crate::LargeBinaryArray;
 
     #[test]
     pub fn test_serialize_binary_vector_to_json() {
