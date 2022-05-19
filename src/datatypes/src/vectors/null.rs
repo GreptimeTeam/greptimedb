@@ -22,6 +22,12 @@ impl NullVector {
     }
 }
 
+impl From<NullArray> for NullVector {
+    fn from(array: NullArray) -> Self {
+        Self { array }
+    }
+}
+
 impl Vector for NullVector {
     fn data_type(&self) -> DataTypeRef {
         NullType::arc()

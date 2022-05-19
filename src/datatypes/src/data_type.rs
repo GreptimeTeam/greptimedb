@@ -5,7 +5,7 @@ use arrow::datatypes::DataType as ArrowDataType;
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
-    NullType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    NullType, StringType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 
@@ -14,7 +14,8 @@ use crate::value::Value;
 pub enum ConcretDataType {
     Null(NullType),
     Boolean(BooleanType),
-    Binary(BinaryType),
+
+    // Numeric types:
     Int8(Int8Type),
     Int16(Int16Type),
     Int32(Int32Type),
@@ -25,6 +26,10 @@ pub enum ConcretDataType {
     UInt64(UInt64Type),
     Float32(Float32Type),
     Float64(Float64Type),
+
+    // String types
+    Binary(BinaryType),
+    String(StringType),
 }
 
 impl ConcretDataType {
@@ -32,7 +37,9 @@ impl ConcretDataType {
         match dt {
             ArrowDataType::Null => ConcretDataType::Null(NullType::default()),
             ArrowDataType::Boolean => ConcretDataType::Boolean(BooleanType::default()),
-            ArrowDataType::Binary => ConcretDataType::Binary(BinaryType::default()),
+            ArrowDataType::Binary | ArrowDataType::LargeBinary => {
+                ConcretDataType::Binary(BinaryType::default())
+            }
             ArrowDataType::UInt8 => ConcretDataType::UInt8(UInt8Type::default()),
             ArrowDataType::UInt16 => ConcretDataType::UInt16(UInt16Type::default()),
             ArrowDataType::UInt32 => ConcretDataType::UInt32(UInt32Type::default()),
@@ -43,6 +50,9 @@ impl ConcretDataType {
             ArrowDataType::Int64 => ConcretDataType::Int64(Int64Type::default()),
             ArrowDataType::Float32 => ConcretDataType::Float32(Float32Type::default()),
             ArrowDataType::Float64 => ConcretDataType::Float64(Float64Type::default()),
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
+                ConcretDataType::String(StringType::default())
+            }
 
             // this is safe, because we define the datatype firstly
             _ => {
@@ -88,6 +98,10 @@ mod tests {
             ConcretDataType::Binary(_)
         ));
         assert!(matches!(
+            ConcretDataType::from_arrow_type(&ArrowDataType::LargeBinary),
+            ConcretDataType::Binary(_)
+        ));
+        assert!(matches!(
             ConcretDataType::from_arrow_type(&ArrowDataType::Int8),
             ConcretDataType::Int8(_)
         ));
@@ -126,6 +140,14 @@ mod tests {
         assert!(matches!(
             ConcretDataType::from_arrow_type(&ArrowDataType::Float64),
             ConcretDataType::Float64(_)
+        ));
+        assert!(matches!(
+            ConcretDataType::from_arrow_type(&ArrowDataType::Utf8),
+            ConcretDataType::String(_)
+        ));
+        assert!(matches!(
+            ConcretDataType::from_arrow_type(&ArrowDataType::LargeUtf8),
+            ConcretDataType::String(_)
         ));
     }
 }

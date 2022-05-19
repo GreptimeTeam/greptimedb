@@ -27,6 +27,12 @@ impl From<Vec<bool>> for BooleanVector {
     }
 }
 
+impl From<BooleanArray> for BooleanVector {
+    fn from(array: BooleanArray) -> Self {
+        Self { array }
+    }
+}
+
 impl From<Vec<Option<bool>>> for BooleanVector {
     fn from(data: Vec<Option<bool>>) -> Self {
         BooleanVector {
