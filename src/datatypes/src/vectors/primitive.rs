@@ -15,6 +15,7 @@ use crate::types::{DataTypeBuilder, Primitive};
 use crate::vectors::Vector;
 
 /// Vector for primitive data types.
+#[derive(Debug)]
 pub struct PrimitiveVector<T: Primitive> {
     array: PrimitiveArray<T>,
 }
@@ -81,6 +82,24 @@ impl<T: Primitive + DataTypeBuilder> ScalarVector for PrimitiveVector<T> {
         PrimitiveIter {
             iter: self.array.iter(),
         }
+    }
+}
+
+/// #Panics
+/// All arrow primitive types should have a corresponding PrimitiveVector
+/// todo(hl): DaysMsArray/MonthsDaysNsArray primitive type
+impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
+    fn from(arrow_array: PrimitiveArray<T>) -> Self {
+        Self::new(
+            arrow_array
+                .as_any()
+                .downcast_ref::<PrimitiveArray<T>>()
+                .with_context(|| ConversionSnafu {
+                    from: format!("{:?}", arrow_array.data_type()),
+                })
+                .unwrap()
+                .clone(),
+        )
     }
 }
 
@@ -156,3 +175,24 @@ impl_serializable! { Int32Vector }
 impl_serializable! { Int64Vector }
 impl_serializable! { Float32Vector }
 impl_serializable! { Float64Vector }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serialize::Serializable;
+
+    #[test]
+    pub fn test_from_arrow_array() {
+        let arrow_array = PrimitiveArray::from_slice(vec![1, 2, 3, 4]);
+        let vector = PrimitiveVector::from(arrow_array);
+        assert_eq!(
+            vec![
+                JsonValue::from(1),
+                JsonValue::from(2),
+                JsonValue::from(3),
+                JsonValue::from(4)
+            ],
+            vector.serialize_to_json().unwrap()
+        );
+    }
+}

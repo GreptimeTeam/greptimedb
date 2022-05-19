@@ -15,9 +15,15 @@ use crate::serialize::Serializable;
 use crate::types::StringType;
 
 /// String array wrapper
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct StringVector {
     array: StringArray,
+}
+
+impl From<StringArray> for StringVector {
+    fn from(array: StringArray) -> Self {
+        Self { array }
+    }
 }
 
 impl Vector for StringVector {
@@ -115,5 +121,20 @@ mod tests {
         let mut serializer = serde_json::Serializer::new(&mut output);
         val.serialize(&mut serializer).unwrap();
         String::from_utf8_lossy(&output).into()
+    }
+
+    #[test]
+    pub fn test_from_arrow_array() {
+        let mut builder = MutableStringArray::new();
+        builder.push(Some("A"));
+        builder.push(Some("B"));
+        builder.push::<&str>(None);
+        builder.push(Some("D"));
+        let string_array: StringArray = builder.into();
+        let vector = StringVector::from(string_array);
+        assert_eq!(
+            r#"["A","B",null,"D"]"#,
+            serialize_to_json_string(vector.serialize_to_json().unwrap())
+        );
     }
 }

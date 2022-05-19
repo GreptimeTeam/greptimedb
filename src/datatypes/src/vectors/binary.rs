@@ -1,8 +1,8 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
 use arrow::array::BinaryValueIter;
+use arrow::array::{ArrayRef, BinaryArray};
 use arrow::bitmap::utils::ZipValidity;
 use snafu::ResultExt;
 
@@ -19,6 +19,12 @@ use crate::vectors::Vector;
 #[derive(Debug)]
 pub struct BinaryVector {
     array: LargeBinaryArray,
+}
+
+impl From<BinaryArray<i64>> for BinaryVector {
+    fn from(array: BinaryArray<i64>) -> Self {
+        Self { array }
+    }
 }
 
 impl Vector for BinaryVector {
@@ -113,5 +119,13 @@ mod tests {
         let mut serializer = serde_json::ser::Serializer::new(&mut output);
         json_value.serialize(&mut serializer).unwrap();
         assert_eq!("[[1,2,3],[1,2,3]]", String::from_utf8_lossy(&output));
+    }
+
+    #[test]
+    pub fn test_from_arrow_array() {
+        let arrow_array = LargeBinaryArray::from_slice(&vec![vec![1, 2, 3], vec![1, 2, 3]]);
+        let original = arrow_array.clone();
+        let vector = BinaryVector::from(arrow_array);
+        assert_eq!(original, vector.array);
     }
 }
