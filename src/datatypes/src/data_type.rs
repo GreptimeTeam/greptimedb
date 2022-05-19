@@ -33,6 +33,10 @@ pub enum ConcretDataType {
 }
 
 impl ConcretDataType {
+    /// Convert arrow data type to [ConcretDataType].
+    ///
+    /// # Panics
+    /// Panic if given arrow data type is not supported.
     pub fn from_arrow_type(dt: &ArrowDataType) -> Self {
         match dt {
             ArrowDataType::Null => ConcretDataType::Null(NullType::default()),
@@ -54,7 +58,6 @@ impl ConcretDataType {
                 ConcretDataType::String(StringType::default())
             }
 
-            // this is safe, because we define the datatype firstly
             _ => {
                 unimplemented!("arrow data_type: {:?}", dt)
             }
