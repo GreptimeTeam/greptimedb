@@ -22,8 +22,8 @@ pub struct BinaryVector {
 }
 
 impl From<BinaryArray<i64>> for BinaryVector {
-    fn from(arrow_array: BinaryArray<i64>) -> Self {
-        Self { array: arrow_array }
+    fn from(array: BinaryArray<i64>) -> Self {
+        Self { array }
     }
 }
 

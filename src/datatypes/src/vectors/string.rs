@@ -21,8 +21,8 @@ pub struct StringVector {
 }
 
 impl From<StringArray> for StringVector {
-    fn from(arrow_array: StringArray) -> Self {
-        Self { array: arrow_array }
+    fn from(array: StringArray) -> Self {
+        Self { array }
     }
 }
 

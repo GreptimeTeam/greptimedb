@@ -85,6 +85,9 @@ impl<T: Primitive + DataTypeBuilder> ScalarVector for PrimitiveVector<T> {
     }
 }
 
+/// #Panics
+/// All arrow primitive types should have a corresponding PrimitiveVector
+/// todo(hl): DaysMsArray/MonthsDaysNsArray primitive type
 impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
     fn from(arrow_array: PrimitiveArray<T>) -> Self {
         Self::new(
@@ -182,7 +185,6 @@ mod tests {
     pub fn test_from_arrow_array() {
         let arrow_array = PrimitiveArray::from_slice(vec![1, 2, 3, 4]);
         let vector = PrimitiveVector::from(arrow_array);
-        println!("{:?}", vector);
         assert_eq!(
             vec![
                 JsonValue::from(1),
