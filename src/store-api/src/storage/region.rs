@@ -1,5 +1,5 @@
 //! Region holds chunks of rows stored in the storage engine, but does not require that
-//! rows must have continuous primary key range, which is implementation sepecific.
+//! rows must have continuous primary key range, which is implementation specific.
 //!
 //! Regions support operations like PUT/DELETE/SCAN that most key-value stores provide.
 //! However, unlike key-value store, data stored in region has data model like:
@@ -14,9 +14,9 @@
 //! - has a version column
 //! - has 0 ~ n value column
 //!
-//! Each row is identify by (value of key columns, timestamp, version), which forms
+//! Each row is identified by (value of key columns, timestamp, version), which forms
 //! a row key. Note that the implementation may allow multiple rows have same row
-//! key (like ClickHouse), which is useful is analytic scenario.
+//! key (like ClickHouse), which is useful in analytic scenario.
 
 use common_error::ext::ErrorExt;
 
