@@ -209,6 +209,19 @@ impl<T: Primitive + DataTypeBuilder> PrimitiveVectorBuilder<T> {
     }
 }
 
+pub type UInt8VectorBuilder = PrimitiveVectorBuilder<u8>;
+pub type UInt16VectorBuilder = PrimitiveVectorBuilder<u16>;
+pub type UInt32VectorBuilder = PrimitiveVectorBuilder<u32>;
+pub type UInt64VectorBuilder = PrimitiveVectorBuilder<u64>;
+
+pub type Int8VectorBuilder = PrimitiveVectorBuilder<i8>;
+pub type Int16VectorBuilder = PrimitiveVectorBuilder<i16>;
+pub type Int32VectorBuilder = PrimitiveVectorBuilder<i32>;
+pub type Int64VectorBuilder = PrimitiveVectorBuilder<i64>;
+
+pub type Float32VectorBuilder = PrimitiveVectorBuilder<f32>;
+pub type Float64VectorBuilder = PrimitiveVectorBuilder<f64>;
+
 impl<T: Primitive + DataTypeBuilder> MutableVector for PrimitiveVectorBuilder<T> {
     fn data_type(&self) -> ConcreteDataType {
         T::build_data_type()

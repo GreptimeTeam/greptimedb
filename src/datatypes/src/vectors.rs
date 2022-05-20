@@ -1,5 +1,6 @@
 pub mod binary;
 pub mod boolean;
+mod builder;
 pub mod constant;
 mod helper;
 pub mod mutable;
@@ -14,6 +15,7 @@ use arrow::array::ArrayRef;
 use arrow::bitmap::Bitmap;
 pub use binary::*;
 pub use boolean::*;
+pub use builder::VectorBuilder;
 pub use constant::*;
 pub use helper::Helper;
 pub use mutable::MutableVector;
@@ -26,11 +28,6 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{BadArrayAccessSnafu, Result};
 use crate::serialize::Serializable;
 use crate::value::Value;
-pub use crate::vectors::{
-    BinaryVector, BooleanVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector,
-    Int64Vector, Int8Vector, NullVector, StringVector, UInt16Vector, UInt32Vector, UInt64Vector,
-    UInt8Vector,
-};
 
 #[derive(Debug, PartialEq)]
 pub enum Validity<'a> {

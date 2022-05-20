@@ -20,14 +20,63 @@ pub trait Memtable: Send + Sync {
     /// Write key/values to the memtable.
     ///
     /// # Panics
-    /// Panic if the schema of key/value differs from memtable's schema.
+    /// Panics if the schema of key/value differs from memtable's schema.
     fn write(&self, kvs: &KeyValues) -> Result<()>;
+
+    /// Iterators the memtable.
+    // TODO(yingwen): Consider passing a projector (does column projection).
+    fn iter(&self, ctx: IterContext) -> Result<BatchIteratorPtr>;
 
     /// Returns the estimated bytes allocated by this memtable from heap.
     fn bytes_allocated(&self) -> usize;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
+
+/// Context for iterating memtable.
+#[derive(Debug)]
+pub struct IterContext {
+    /// The suggested batch size of the iterator.
+    pub batch_size: usize,
+}
+
+impl Default for IterContext {
+    fn default() -> Self {
+        Self { batch_size: 256 }
+    }
+}
+
+/// The ordering of the iterator output.
+#[derive(Debug)]
+pub enum RowOrdering {
+    /// The output rows are unordered.
+    Unordered,
+
+    /// The output rows are ordered by key.
+    Key,
+}
+
+pub struct Batch {
+    pub keys: Vec<VectorRef>,
+    pub values: Vec<VectorRef>,
+}
+
+/// Iterator of memtable.
+pub trait BatchIterator: Send {
+    /// Returns the schema of this iterator.
+    fn schema(&self) -> &MemtableSchema;
+
+    /// Returns the ordering of the output rows from this iterator.
+    fn ordering(&self) -> RowOrdering;
+
+    /// Fetch next batch from the memtable.
+    ///
+    /// # Panics
+    /// Panics if the iterator has already been exhausted.
+    fn next(&mut self) -> Result<Option<Batch>>;
+}
+
+pub type BatchIteratorPtr = Box<dyn BatchIterator>;
 
 pub trait MemtableBuilder: Send + Sync {
     fn build(&self, schema: MemtableSchema) -> MemtableRef;
@@ -54,9 +103,7 @@ impl KeyValues {
         self.keys.clear();
         self.values.clear();
     }
-}
 
-impl KeyValues {
     pub fn len(&self) -> usize {
         self.keys.first().map(|v| v.len()).unwrap_or_default()
     }

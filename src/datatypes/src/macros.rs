@@ -40,7 +40,7 @@ macro_rules! for_all_primitive_types{
 
 #[macro_export]
 macro_rules! with_match_primitive_type_id {
-    ($key_type:expr, | $_:tt $T:ident | $body:tt,  $nbody:tt) => {{
+    ($key_type:expr, | $_:tt $T:ident | $body:tt, $nbody:tt) => {{
         macro_rules! __with_ty__ {
             ( $_ $T:ident ) => {
                 $body

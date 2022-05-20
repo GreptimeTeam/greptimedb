@@ -1,6 +1,8 @@
 use common_base::bytes::{Bytes, StringBytes};
-use ordered_float::OrderedFloat;
+pub use ordered_float::OrderedFloat;
 use serde::{Serialize, Serializer};
+
+use crate::data_type::ConcreteDataType;
 
 pub type OrderedF32 = OrderedFloat<f32>;
 pub type OrderedF64 = OrderedFloat<f64>;
@@ -34,6 +36,38 @@ pub enum Value {
     // Date & Time types:
     Date(i32),
     DateTime(i64),
+}
+
+impl Value {
+    /// Returns data type of the value.
+    ///
+    /// # Panics
+    /// Panics if the data type is not supported.
+    pub fn data_type(&self) -> ConcreteDataType {
+        match self {
+            Value::Null => ConcreteDataType::null_datatype(),
+            Value::Boolean(_) => ConcreteDataType::boolean_datatype(),
+            Value::UInt8(_) => ConcreteDataType::uint8_datatype(),
+            Value::UInt16(_) => ConcreteDataType::uint16_datatype(),
+            Value::UInt32(_) => ConcreteDataType::uint32_datatype(),
+            Value::UInt64(_) => ConcreteDataType::uint64_datatype(),
+            Value::Int8(_) => ConcreteDataType::int8_datatype(),
+            Value::Int16(_) => ConcreteDataType::int16_datatype(),
+            Value::Int32(_) => ConcreteDataType::int32_datatype(),
+            Value::Int64(_) => ConcreteDataType::int64_datatype(),
+            Value::Float32(_) => ConcreteDataType::float32_datatype(),
+            Value::Float64(_) => ConcreteDataType::float64_datatype(),
+            Value::String(_) => ConcreteDataType::string_datatype(),
+            Value::Binary(_) => ConcreteDataType::binary_datatype(),
+            Value::Date(_) | Value::DateTime(_) => {
+                unimplemented!("Unsupported data type of value {:?}", self)
+            }
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
 }
 
 macro_rules! impl_from {
