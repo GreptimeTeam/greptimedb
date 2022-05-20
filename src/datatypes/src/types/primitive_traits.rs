@@ -3,7 +3,9 @@ use arrow::types::NativeType;
 use crate::value::Value;
 
 /// Primitive type.
-pub trait Primitive: PartialOrd + Default + Clone + Copy + Into<Value> + NativeType {
+pub trait Primitive:
+    PartialOrd + Default + Clone + Copy + Into<Value> + NativeType + serde::Serialize
+{
     /// Largest numeric type this primitive type can be cast to.
     type LargestType: Primitive;
 }

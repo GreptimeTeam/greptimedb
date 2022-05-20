@@ -14,6 +14,7 @@ common-error = { path = "../common/error" }
 common-recordbatch = {path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2" }
 datatypes = {path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"

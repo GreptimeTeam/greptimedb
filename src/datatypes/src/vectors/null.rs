@@ -5,8 +5,11 @@ use std::sync::Arc;
 use arrow::array::ArrayRef;
 use arrow::array::{Array, NullArray};
 use arrow::datatypes::DataType as ArrowDataType;
+use snafu::OptionExt;
 
-use crate::data_type::DataTypeRef;
+use crate::data_type::ConcreteDataType;
+use crate::impl_try_from_arrow_array_for_vector;
+use crate::serialize::Serializable;
 use crate::types::NullType;
 use crate::vectors::Vector;
 
@@ -29,8 +32,8 @@ impl From<NullArray> for NullVector {
 }
 
 impl Vector for NullVector {
-    fn data_type(&self) -> DataTypeRef {
-        NullType::arc()
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::Null(NullType::default())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -51,6 +54,10 @@ impl fmt::Debug for NullVector {
         write!(f, "NullVector({})", self.len())
     }
 }
+
+impl Serializable for NullVector {}
+
+impl_try_from_arrow_array_for_vector!(NullArray, NullVector);
 
 #[cfg(test)]
 mod tests {

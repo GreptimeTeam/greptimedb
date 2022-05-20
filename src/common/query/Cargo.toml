@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
+datatypes = { path = "../../datatypes"}

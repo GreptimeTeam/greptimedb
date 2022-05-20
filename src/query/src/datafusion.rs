@@ -49,7 +49,7 @@ impl QueryEngine for DatafusionQueryEngine {
 
     fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
-        let context_provider = DfContextProviderAdapter::new(self.state.catalog_list());
+        let context_provider = DfContextProviderAdapter::new(self.state.df_context().clone());
         let planner = DfPlanner::new(&context_provider);
         let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
             .context(error::ParseSqlSnafu)?;

@@ -1,11 +1,14 @@
 use std::fmt;
 use std::sync::Arc;
 
-use datafusion::prelude::{ExecutionConfig, ExecutionContext};
+use arrow::datatypes::DataType as ArrowDataType;
+use datafusion::physical_plan::functions::{make_scalar_function, Volatility};
+use datafusion::prelude::{create_udf, ExecutionConfig, ExecutionContext};
 
 use crate::catalog::{self, CatalogListRef};
 use crate::datafusion::DfCatalogListAdapter;
 use crate::executor::Runtime;
+use crate::function::pow;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -30,12 +33,26 @@ impl QueryEngineState {
             catalog::DEFAULT_CATALOG_NAME,
             catalog::DEFAULT_SCHEMA_NAME,
         );
-        let df_context = ExecutionContext::with_config(config);
+        let mut df_context = ExecutionContext::with_config(config);
 
         df_context.state.lock().catalog_list = Arc::new(DfCatalogListAdapter::new(
             df_context.runtime_env(),
             catalog_list.clone(),
         ));
+
+        let pow = make_scalar_function(pow);
+
+        let pow = create_udf(
+            "pow",
+            // expects two f64
+            vec![ArrowDataType::Float64, ArrowDataType::Float64],
+            // returns f64
+            Arc::new(ArrowDataType::Float64),
+            Volatility::Immutable,
+            pow,
+        );
+
+        df_context.register_udf(pow);
 
         Self {
             df_context,
@@ -44,7 +61,7 @@ impl QueryEngineState {
     }
 
     #[inline]
-    pub(crate) fn catalog_list(&self) -> &CatalogListRef {
+    pub fn catalog_list(&self) -> &CatalogListRef {
         &self.catalog_list
     }
 

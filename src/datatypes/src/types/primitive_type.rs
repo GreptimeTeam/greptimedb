@@ -1,10 +1,9 @@
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
 use paste::paste;
 
-use crate::data_type::{DataType, DataTypeRef};
+use crate::data_type::{ConcreteDataType, DataType};
 use crate::type_id::LogicalTypeId;
 use crate::types::primitive_traits::Primitive;
 use crate::value::Value;
@@ -14,17 +13,17 @@ pub struct PrimitiveType<T: Primitive> {
     _phantom: PhantomData<T>,
 }
 
-/// Create a new [DataTypeRef] from a primitive type.
+/// Create a new [ConcreteDataType] from a primitive type.
 pub trait DataTypeBuilder {
-    fn build_data_type() -> DataTypeRef;
+    fn build_data_type() -> ConcreteDataType;
 }
 
 macro_rules! impl_build_data_type {
-    ($Type:ident) => {
+    ($Type:ident, $TypeId:ident) => {
         paste::paste! {
             impl DataTypeBuilder for $Type {
-                fn build_data_type() -> DataTypeRef {
-                    Arc::new(PrimitiveType::<$Type>::default())
+                fn build_data_type() -> ConcreteDataType {
+                    ConcreteDataType::$TypeId(PrimitiveType::<$Type>::default())
                 }
             }
         }
@@ -65,7 +64,7 @@ macro_rules! impl_numeric {
             }
         }
 
-        impl_build_data_type!($Type);
+        impl_build_data_type!($Type, $TypeId);
 
         paste! {
             pub type [<$TypeId Type>]=PrimitiveType<$Type>;

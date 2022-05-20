@@ -531,6 +531,8 @@ name = "common-query"
 version = "0.1.0"
 dependencies = [
  "datafusion",
+ "datafusion-common",
+ "datatypes",
 ]
 
 [[package]]
@@ -2297,6 +2299,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "datafusion",
+ "datafusion-common",
  "datatypes",
  "futures",
  "futures-util",

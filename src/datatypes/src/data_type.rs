@@ -11,7 +11,7 @@ use crate::value::Value;
 
 #[derive(Clone, Debug)]
 #[enum_dispatch::enum_dispatch(DataType)]
-pub enum ConcretDataType {
+pub enum ConcreteDataType {
     Null(NullType),
     Boolean(BooleanType),
 
@@ -32,30 +32,30 @@ pub enum ConcretDataType {
     String(StringType),
 }
 
-impl ConcretDataType {
-    /// Convert arrow data type to [ConcretDataType].
+impl ConcreteDataType {
+    /// Convert arrow data type to [ConcreteDataType].
     ///
     /// # Panics
     /// Panic if given arrow data type is not supported.
     pub fn from_arrow_type(dt: &ArrowDataType) -> Self {
         match dt {
-            ArrowDataType::Null => ConcretDataType::Null(NullType::default()),
-            ArrowDataType::Boolean => ConcretDataType::Boolean(BooleanType::default()),
+            ArrowDataType::Null => ConcreteDataType::Null(NullType::default()),
+            ArrowDataType::Boolean => ConcreteDataType::Boolean(BooleanType::default()),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => {
-                ConcretDataType::Binary(BinaryType::default())
+                ConcreteDataType::Binary(BinaryType::default())
             }
-            ArrowDataType::UInt8 => ConcretDataType::UInt8(UInt8Type::default()),
-            ArrowDataType::UInt16 => ConcretDataType::UInt16(UInt16Type::default()),
-            ArrowDataType::UInt32 => ConcretDataType::UInt32(UInt32Type::default()),
-            ArrowDataType::UInt64 => ConcretDataType::UInt64(UInt64Type::default()),
-            ArrowDataType::Int8 => ConcretDataType::Int8(Int8Type::default()),
-            ArrowDataType::Int16 => ConcretDataType::Int16(Int16Type::default()),
-            ArrowDataType::Int32 => ConcretDataType::Int32(Int32Type::default()),
-            ArrowDataType::Int64 => ConcretDataType::Int64(Int64Type::default()),
-            ArrowDataType::Float32 => ConcretDataType::Float32(Float32Type::default()),
-            ArrowDataType::Float64 => ConcretDataType::Float64(Float64Type::default()),
+            ArrowDataType::UInt8 => ConcreteDataType::UInt8(UInt8Type::default()),
+            ArrowDataType::UInt16 => ConcreteDataType::UInt16(UInt16Type::default()),
+            ArrowDataType::UInt32 => ConcreteDataType::UInt32(UInt32Type::default()),
+            ArrowDataType::UInt64 => ConcreteDataType::UInt64(UInt64Type::default()),
+            ArrowDataType::Int8 => ConcreteDataType::Int8(Int8Type::default()),
+            ArrowDataType::Int16 => ConcreteDataType::Int16(Int16Type::default()),
+            ArrowDataType::Int32 => ConcreteDataType::Int32(Int32Type::default()),
+            ArrowDataType::Int64 => ConcreteDataType::Int64(Int64Type::default()),
+            ArrowDataType::Float32 => ConcreteDataType::Float32(Float32Type::default()),
+            ArrowDataType::Float64 => ConcreteDataType::Float64(Float64Type::default()),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
-                ConcretDataType::String(StringType::default())
+                ConcreteDataType::String(StringType::default())
             }
 
             _ => {
@@ -66,6 +66,7 @@ impl ConcretDataType {
 }
 
 /// Data type abstraction.
+#[enum_dispatch::enum_dispatch]
 pub trait DataType: std::fmt::Debug + Send + Sync {
     /// Name of this data type.
     fn name(&self) -> &str;
@@ -89,68 +90,68 @@ mod tests {
     #[test]
     fn test_from_arrow_type() {
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::Null),
-            ConcretDataType::Null(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Null),
+            ConcreteDataType::Null(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::Boolean),
-            ConcretDataType::Boolean(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Boolean),
+            ConcreteDataType::Boolean(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::Binary),
-            ConcretDataType::Binary(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Binary),
+            ConcreteDataType::Binary(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::LargeBinary),
-            ConcretDataType::Binary(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::LargeBinary),
+            ConcreteDataType::Binary(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::Int8),
-            ConcretDataType::Int8(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Int8),
+            ConcreteDataType::Int8(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::Int16),
-            ConcretDataType::Int16(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Int16),
+            ConcreteDataType::Int16(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::Int32),
-            ConcretDataType::Int32(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Int32),
+            ConcreteDataType::Int32(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::Int64),
-            ConcretDataType::Int64(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Int64),
+            ConcreteDataType::Int64(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::UInt8),
-            ConcretDataType::UInt8(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt8),
+            ConcreteDataType::UInt8(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::UInt16),
-            ConcretDataType::UInt16(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt16),
+            ConcreteDataType::UInt16(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::UInt32),
-            ConcretDataType::UInt32(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt32),
+            ConcreteDataType::UInt32(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::UInt64),
-            ConcretDataType::UInt64(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt64),
+            ConcreteDataType::UInt64(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::Float32),
-            ConcretDataType::Float32(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Float32),
+            ConcreteDataType::Float32(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::Float64),
-            ConcretDataType::Float64(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Float64),
+            ConcreteDataType::Float64(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::Utf8),
-            ConcretDataType::String(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
+            ConcreteDataType::String(_)
         ));
         assert!(matches!(
-            ConcretDataType::from_arrow_type(&ArrowDataType::LargeUtf8),
-            ConcretDataType::String(_)
+            ConcreteDataType::from_arrow_type(&ArrowDataType::LargeUtf8),
+            ConcreteDataType::String(_)
         ));
     }
 }

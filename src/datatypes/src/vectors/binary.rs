@@ -4,12 +4,14 @@ use std::sync::Arc;
 use arrow::array::BinaryValueIter;
 use arrow::array::{ArrayRef, BinaryArray};
 use arrow::bitmap::utils::ZipValidity;
+use snafu::OptionExt;
 use snafu::ResultExt;
 
 use crate::arrow_array::{LargeBinaryArray, MutableLargeBinaryArray};
-use crate::data_type::DataTypeRef;
+use crate::data_type::ConcreteDataType;
 use crate::error::Result;
 use crate::error::SerializeSnafu;
+use crate::impl_try_from_arrow_array_for_vector;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::BinaryType;
@@ -28,8 +30,8 @@ impl From<BinaryArray<i64>> for BinaryVector {
 }
 
 impl Vector for BinaryVector {
-    fn data_type(&self) -> DataTypeRef {
-        BinaryType::arc()
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::Binary(BinaryType::default())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -99,6 +101,8 @@ impl Serializable for BinaryVector {
             .context(SerializeSnafu)
     }
 }
+
+impl_try_from_arrow_array_for_vector!(LargeBinaryArray, BinaryVector);
 
 #[cfg(test)]
 mod tests {

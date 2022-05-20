@@ -2,15 +2,16 @@ use std::any::Any;
 use std::slice::Iter;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, MutablePrimitiveArray, PrimitiveArray};
+use arrow::array::{ArrayRef, MutablePrimitiveArray, PrimitiveArray};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
 use snafu::{OptionExt, ResultExt};
 
-use crate::data_type::DataTypeRef;
-use crate::error;
+use crate::data_type::ConcreteDataType;
 use crate::error::ConversionSnafu;
+use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
+use crate::serialize::Serializable;
 use crate::types::{DataTypeBuilder, Primitive};
 use crate::vectors::Vector;
 
@@ -24,10 +25,21 @@ impl<T: Primitive> PrimitiveVector<T> {
     pub fn new(array: PrimitiveArray<T>) -> Self {
         Self { array }
     }
+    pub fn try_from_arrow_array(array: ArrayRef) -> Result<Self> {
+        Ok(Self::new(
+            array
+                .as_any()
+                .downcast_ref::<PrimitiveArray<T>>()
+                .with_context(|| ConversionSnafu {
+                    from: format!("{:?}", array.data_type()),
+                })?
+                .clone(),
+        ))
+    }
 }
 
 impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
-    fn data_type(&self) -> DataTypeRef {
+    fn data_type(&self) -> ConcreteDataType {
         T::build_data_type()
     }
 
@@ -44,24 +56,17 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
     }
 }
 
+impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
+    fn from(array: PrimitiveArray<T>) -> Self {
+        Self { array }
+    }
+}
+
 impl<'a, T: Primitive> PrimitiveVector<T> {
     /// implement iter for PrimitiveVector
     #[inline]
     pub fn iter(&'a self) -> std::slice::Iter<'a, T> {
         self.array.values().iter()
-    }
-
-    /// Convert an Arrow array to PrimitiveVector.
-    pub fn try_from_arrow_array(array: &dyn Array) -> Result<Self, error::Error> {
-        Ok(Self::new(
-            array
-                .as_any()
-                .downcast_ref::<PrimitiveArray<T>>()
-                .with_context(|| ConversionSnafu {
-                    from: format!("{:?}", array.data_type()),
-                })?
-                .clone(),
-        ))
     }
 }
 
@@ -82,24 +87,6 @@ impl<T: Primitive + DataTypeBuilder> ScalarVector for PrimitiveVector<T> {
         PrimitiveIter {
             iter: self.array.iter(),
         }
-    }
-}
-
-/// #Panics
-/// All arrow primitive types should have a corresponding PrimitiveVector
-/// todo(hl): DaysMsArray/MonthsDaysNsArray primitive type
-impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
-    fn from(arrow_array: PrimitiveArray<T>) -> Self {
-        Self::new(
-            arrow_array
-                .as_any()
-                .downcast_ref::<PrimitiveArray<T>>()
-                .with_context(|| ConversionSnafu {
-                    from: format!("{:?}", arrow_array.data_type()),
-                })
-                .unwrap()
-                .clone(),
-        )
     }
 }
 
@@ -152,29 +139,14 @@ impl<T: Primitive + DataTypeBuilder> ScalarVectorBuilder for PrimitiveVectorBuil
     }
 }
 
-macro_rules! impl_serializable {
-    ($ty: ident) => {
-        impl crate::serialize::Serializable for $ty {
-            fn serialize_to_json(&self) -> crate::error::Result<Vec<JsonValue>> {
-                self.iter()
-                    .map(|x| serde_json::to_value(x))
-                    .collect::<serde_json::Result<_>>()
-                    .context(crate::error::SerializeSnafu)
-            }
-        }
-    };
+impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
+    fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
+        self.iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<_>>()
+            .context(SerializeSnafu)
+    }
 }
-
-impl_serializable! { UInt8Vector }
-impl_serializable! { UInt16Vector }
-impl_serializable! { UInt32Vector }
-impl_serializable! { UInt64Vector }
-impl_serializable! { Int8Vector }
-impl_serializable! { Int16Vector }
-impl_serializable! { Int32Vector }
-impl_serializable! { Int64Vector }
-impl_serializable! { Float32Vector }
-impl_serializable! { Float64Vector }
 
 #[cfg(test)]
 mod tests {

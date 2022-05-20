@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::schema::Schema;
-use datatypes::serialize::Serializable;
+use datatypes::vectors;
 use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
 
@@ -24,7 +24,7 @@ impl Serialize for RecordBatch {
 
         let vec = df_columns
             .iter()
-            .map(|c| c.serialize_to_json())
+            .map(|c| vectors::try_into_vector(c.clone())?.serialize_to_json())
             .collect::<Result<Vec<_>, _>>()
             .map_err(S::Error::custom)?;
 
