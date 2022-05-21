@@ -43,33 +43,6 @@ fn concret_types_to_arrow_types(ts: Vec<ConcreteDataType>) -> Vec<ArrowDataType>
     ts.iter().map(ConcreteDataType::as_arrow_type).collect()
 }
 
-impl From<TypeSignature> for DfTypeSignature {
-    fn from(type_signature: TypeSignature) -> DfTypeSignature {
-        match type_signature {
-            TypeSignature::Variadic(types) => {
-                DfTypeSignature::Variadic(concret_types_to_arrow_types(types))
-            }
-            TypeSignature::VariadicEqual => DfTypeSignature::VariadicEqual,
-            TypeSignature::Uniform(n, types) => {
-                DfTypeSignature::Uniform(n, concret_types_to_arrow_types(types))
-            }
-            TypeSignature::Exact(types) => {
-                DfTypeSignature::Exact(concret_types_to_arrow_types(types))
-            }
-            TypeSignature::Any(n) => DfTypeSignature::Any(n),
-            TypeSignature::OneOf(ts) => {
-                DfTypeSignature::OneOf(ts.into_iter().map(Into::into).collect())
-            }
-        }
-    }
-}
-
-impl From<Signature> for DfSignature {
-    fn from(sig: Signature) -> DfSignature {
-        DfSignature::new(sig.type_signature.into(), sig.volatility)
-    }
-}
-
 impl Signature {
     /// new - Creates a new Signature from any type signature and the volatility.
     pub fn new(type_signature: TypeSignature, volatility: Volatility) -> Self {
@@ -123,5 +96,58 @@ impl Signature {
             type_signature: TypeSignature::OneOf(type_signatures),
             volatility,
         }
+    }
+}
+
+/// Conversations between datafusion signature and our signature
+impl From<TypeSignature> for DfTypeSignature {
+    fn from(type_signature: TypeSignature) -> DfTypeSignature {
+        match type_signature {
+            TypeSignature::Variadic(types) => {
+                DfTypeSignature::Variadic(concret_types_to_arrow_types(types))
+            }
+            TypeSignature::VariadicEqual => DfTypeSignature::VariadicEqual,
+            TypeSignature::Uniform(n, types) => {
+                DfTypeSignature::Uniform(n, concret_types_to_arrow_types(types))
+            }
+            TypeSignature::Exact(types) => {
+                DfTypeSignature::Exact(concret_types_to_arrow_types(types))
+            }
+            TypeSignature::Any(n) => DfTypeSignature::Any(n),
+            TypeSignature::OneOf(ts) => {
+                DfTypeSignature::OneOf(ts.into_iter().map(Into::into).collect())
+            }
+        }
+    }
+}
+
+impl From<Signature> for DfSignature {
+    fn from(sig: Signature) -> DfSignature {
+        DfSignature::new(sig.type_signature.into(), sig.volatility)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::datatypes::DataType;
+
+    use super::*;
+
+    #[test]
+    fn test_into_df_signature() {
+        let types = vec![
+            ConcreteDataType::i8_datatype(),
+            ConcreteDataType::f32_datatype(),
+            ConcreteDataType::f64_datatype(),
+        ];
+        let sig = Signature::exact(types.clone(), Volatility::Immutable);
+
+        assert_eq!(Volatility::Immutable, sig.volatility);
+        assert!(matches!(&sig.type_signature, TypeSignature::Exact(x) if x.clone() == types));
+
+        let df_sig = DfSignature::from(sig);
+        assert_eq!(Volatility::Immutable, df_sig.volatility);
+        let types = vec![DataType::Int8, DataType::Float32, DataType::Float64];
+        assert!(matches!(df_sig.type_signature, DfTypeSignature::Exact(x) if x == types));
     }
 }

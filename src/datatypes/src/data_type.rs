@@ -9,7 +9,7 @@ use crate::types::{
 };
 use crate::value::Value;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[enum_dispatch::enum_dispatch(DataType)]
 pub enum ConcreteDataType {
     Null(NullType),
@@ -39,33 +39,82 @@ impl ConcreteDataType {
     /// Panic if given arrow data type is not supported.
     pub fn from_arrow_type(dt: &ArrowDataType) -> Self {
         match dt {
-            ArrowDataType::Null => ConcreteDataType::Null(NullType::default()),
-            ArrowDataType::Boolean => ConcreteDataType::Boolean(BooleanType::default()),
-            ArrowDataType::Binary | ArrowDataType::LargeBinary => {
-                ConcreteDataType::Binary(BinaryType::default())
-            }
-            ArrowDataType::UInt8 => ConcreteDataType::UInt8(UInt8Type::default()),
-            ArrowDataType::UInt16 => ConcreteDataType::UInt16(UInt16Type::default()),
-            ArrowDataType::UInt32 => ConcreteDataType::UInt32(UInt32Type::default()),
-            ArrowDataType::UInt64 => ConcreteDataType::UInt64(UInt64Type::default()),
-            ArrowDataType::Int8 => ConcreteDataType::Int8(Int8Type::default()),
-            ArrowDataType::Int16 => ConcreteDataType::Int16(Int16Type::default()),
-            ArrowDataType::Int32 => ConcreteDataType::Int32(Int32Type::default()),
-            ArrowDataType::Int64 => ConcreteDataType::Int64(Int64Type::default()),
-            ArrowDataType::Float32 => ConcreteDataType::Float32(Float32Type::default()),
-            ArrowDataType::Float64 => ConcreteDataType::Float64(Float64Type::default()),
-            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
-                ConcreteDataType::String(StringType::default())
-            }
-
+            ArrowDataType::Null => Self::null_datatype(),
+            ArrowDataType::Boolean => Self::boolean_datatype(),
+            ArrowDataType::UInt8 => Self::u8_datatype(),
+            ArrowDataType::UInt16 => Self::u16_datatype(),
+            ArrowDataType::UInt32 => Self::u32_datatype(),
+            ArrowDataType::UInt64 => Self::u64_datatype(),
+            ArrowDataType::Int8 => Self::i8_datatype(),
+            ArrowDataType::Int16 => Self::i16_datatype(),
+            ArrowDataType::Int32 => Self::i32_datatype(),
+            ArrowDataType::Int64 => Self::i64_datatype(),
+            ArrowDataType::Float32 => Self::f32_datatype(),
+            ArrowDataType::Float64 => Self::f64_datatype(),
+            ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             _ => {
                 unimplemented!("arrow data_type: {:?}", dt)
             }
         }
     }
-}
 
-/// Data type abstraction.
+    pub fn null_datatype() -> ConcreteDataType {
+        ConcreteDataType::Null(NullType::default())
+    }
+
+    pub fn boolean_datatype() -> ConcreteDataType {
+        ConcreteDataType::Boolean(BooleanType::default())
+    }
+
+    pub fn i8_datatype() -> ConcreteDataType {
+        ConcreteDataType::Int8(Int8Type::default())
+    }
+
+    pub fn i16_datatype() -> ConcreteDataType {
+        ConcreteDataType::Int16(Int16Type::default())
+    }
+
+    pub fn i32_datatype() -> ConcreteDataType {
+        ConcreteDataType::Int32(Int32Type::default())
+    }
+
+    pub fn i64_datatype() -> ConcreteDataType {
+        ConcreteDataType::Int64(Int64Type::default())
+    }
+
+    pub fn u8_datatype() -> ConcreteDataType {
+        ConcreteDataType::UInt8(UInt8Type::default())
+    }
+
+    pub fn u16_datatype() -> ConcreteDataType {
+        ConcreteDataType::UInt16(UInt16Type::default())
+    }
+
+    pub fn u32_datatype() -> ConcreteDataType {
+        ConcreteDataType::UInt32(UInt32Type::default())
+    }
+
+    pub fn u64_datatype() -> ConcreteDataType {
+        ConcreteDataType::UInt64(UInt64Type::default())
+    }
+
+    pub fn f32_datatype() -> ConcreteDataType {
+        ConcreteDataType::Float32(Float32Type::default())
+    }
+
+    pub fn f64_datatype() -> ConcreteDataType {
+        ConcreteDataType::Float64(Float64Type::default())
+    }
+
+    pub fn binary_datatype() -> ConcreteDataType {
+        ConcreteDataType::Binary(BinaryType::default())
+    }
+
+    pub fn string_datatype() -> ConcreteDataType {
+        ConcreteDataType::String(StringType::default())
+    }
+}
 #[enum_dispatch::enum_dispatch]
 pub trait DataType: std::fmt::Debug + Send + Sync {
     /// Name of this data type.
@@ -86,6 +135,16 @@ pub type DataTypeRef = Arc<dyn DataType>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_concrete_type_as_datatype_trait() {
+        let concrete_type = ConcreteDataType::boolean_datatype();
+
+        assert_eq!("Boolean", concrete_type.name());
+        assert_eq!(Value::Boolean(false), concrete_type.default_value());
+        assert_eq!(LogicalTypeId::Boolean, concrete_type.logical_type_id());
+        assert_eq!(ArrowDataType::Boolean, concrete_type.as_arrow_type());
+    }
 
     #[test]
     fn test_from_arrow_type() {

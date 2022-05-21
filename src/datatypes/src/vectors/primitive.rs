@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::iter::FromIterator;
 use std::slice::Iter;
 use std::sync::Arc;
 
@@ -36,6 +37,24 @@ impl<T: Primitive> PrimitiveVector<T> {
                 .clone(),
         ))
     }
+
+    pub fn from_slice<P: AsRef<[T]>>(slice: P) -> Self {
+        Self {
+            array: PrimitiveArray::from_slice(slice),
+        }
+    }
+
+    pub fn from_vec(array: Vec<T>) -> Self {
+        Self {
+            array: PrimitiveArray::from_vec(array),
+        }
+    }
+
+    pub fn from_values<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self {
+            array: PrimitiveArray::from_values(iter),
+        }
+    }
 }
 
 impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
@@ -59,6 +78,14 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
 impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
     fn from(array: PrimitiveArray<T>) -> Self {
         Self { array }
+    }
+}
+
+impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for PrimitiveVector<T> {
+    fn from_iter<I: IntoIterator<Item = Ptr>>(iter: I) -> Self {
+        Self {
+            array: MutablePrimitiveArray::<T>::from_iter(iter).into(),
+        }
     }
 }
 
@@ -153,18 +180,40 @@ mod tests {
     use super::*;
     use crate::serialize::Serializable;
 
-    #[test]
-    pub fn test_from_arrow_array() {
-        let arrow_array = PrimitiveArray::from_slice(vec![1, 2, 3, 4]);
-        let vector = PrimitiveVector::from(arrow_array);
+    fn assert_vec_eq(v: PrimitiveVector<i32>) {
         assert_eq!(
             vec![
-                JsonValue::from(1),
-                JsonValue::from(2),
-                JsonValue::from(3),
-                JsonValue::from(4)
+                JsonValue::from(1i32),
+                JsonValue::from(2i32),
+                JsonValue::from(3i32),
+                JsonValue::from(4i32)
             ],
-            vector.serialize_to_json().unwrap()
+            v.serialize_to_json().unwrap()
         );
+    }
+
+    #[test]
+    fn test_from_values() {
+        let v = PrimitiveVector::<i32>::from_values(vec![1, 2, 3, 4]);
+        assert_vec_eq(v);
+    }
+
+    #[test]
+    fn test_from_vec() {
+        let v = PrimitiveVector::<i32>::from_vec(vec![1, 2, 3, 4]);
+        assert_vec_eq(v);
+    }
+
+    #[test]
+    fn test_from_slice() {
+        let v = PrimitiveVector::<i32>::from_slice(vec![1, 2, 3, 4]);
+        assert_vec_eq(v);
+    }
+
+    #[test]
+    fn test_from_arrow_array() {
+        let arrow_array = PrimitiveArray::from_slice(vec![1, 2, 3, 4]);
+        let v = PrimitiveVector::from(arrow_array);
+        assert_vec_eq(v);
     }
 }

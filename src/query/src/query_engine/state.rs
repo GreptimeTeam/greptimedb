@@ -1,9 +1,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::datatypes::DataType as ArrowDataType;
-use datafusion::physical_plan::functions::{make_scalar_function, Volatility};
-use datafusion::prelude::{create_udf, ExecutionConfig, ExecutionContext};
+use common_query::prelude::{create_udf, make_scalar_function, Volatility};
+use datafusion::prelude::{ExecutionConfig, ExecutionContext};
+use datatypes::data_type::ConcreteDataType;
+use datatypes::types::Float64Type;
 
 use crate::catalog::{self, CatalogListRef};
 use crate::datafusion::DfCatalogListAdapter;
@@ -45,14 +46,17 @@ impl QueryEngineState {
         let pow = create_udf(
             "pow",
             // expects two f64
-            vec![ArrowDataType::Float64, ArrowDataType::Float64],
+            vec![
+                ConcreteDataType::Float64(Float64Type::default()),
+                ConcreteDataType::Float64(Float64Type::default()),
+            ],
             // returns f64
-            Arc::new(ArrowDataType::Float64),
+            Arc::new(ConcreteDataType::Float64(Float64Type::default())),
             Volatility::Immutable,
             pow,
         );
 
-        df_context.register_udf(pow);
+        df_context.register_udf(pow.into_df_udf());
 
         Self {
             df_context,

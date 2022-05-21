@@ -1,7 +1,7 @@
 use common_base::bytes::{Bytes, StringBytes};
 
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Value {
     Null,
 

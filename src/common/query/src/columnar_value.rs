@@ -26,7 +26,7 @@ impl ColumnarValue {
     }
 
     /// Convert a columnar value into an VectorRef
-    pub fn try_into_array(self, num_rows: usize) -> Result<VectorRef> {
+    pub fn try_into_vector(self, num_rows: usize) -> Result<VectorRef> {
         Ok(match self {
             ColumnarValue::Vector(v) => v,
             ColumnarValue::Scalar(s) => {
@@ -57,5 +57,39 @@ impl From<ColumnarValue> for DfColumnarValue {
             ColumnarValue::Scalar(v) => DfColumnarValue::Scalar(v),
             ColumnarValue::Vector(v) => DfColumnarValue::Array(v.to_arrow_array()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::datatypes::DataType as ArrowDataType;
+    use datatypes::vectors::BooleanVector;
+
+    use super::*;
+
+    #[test]
+    fn test_scalar_columnar_value() {
+        let value = ColumnarValue::Scalar(ScalarValue::Boolean(Some(true)));
+
+        assert_eq!(ConcreteDataType::boolean_datatype(), value.data_type());
+        let v = value.clone().try_into_vector(1).unwrap();
+        assert_eq!(1, v.len());
+
+        let df_value = DfColumnarValue::from(value);
+        assert_eq!(ArrowDataType::Boolean, df_value.data_type());
+    }
+
+    #[test]
+    fn test_vector_columnar_value() {
+        let value = ColumnarValue::Vector(Arc::new(BooleanVector::from(vec![true, false, true])));
+
+        assert_eq!(ConcreteDataType::boolean_datatype(), value.data_type());
+        let v = value.clone().try_into_vector(1).unwrap();
+        assert_eq!(3, v.len());
+
+        let df_value = DfColumnarValue::from(value);
+        assert_eq!(ArrowDataType::Boolean, df_value.data_type());
     }
 }

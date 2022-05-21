@@ -18,7 +18,7 @@ pub use string::*;
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
 use crate::serialize::Serializable;
-use crate::vectors::{
+pub use crate::vectors::{
     BinaryVector, BooleanVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector,
     Int64Vector, Int8Vector, NullVector, StringVector, UInt16Vector, UInt32Vector, UInt64Vector,
     UInt8Vector,

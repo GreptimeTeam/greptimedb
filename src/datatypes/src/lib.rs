@@ -9,6 +9,6 @@ mod scalars;
 pub mod schema;
 pub mod serialize;
 pub mod type_id;
-mod types;
+pub mod types;
 pub mod value;
 pub mod vectors;

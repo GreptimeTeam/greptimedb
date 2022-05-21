@@ -46,11 +46,11 @@ where
         // to array
         let args: Result<Vec<_>> = if let Some(len) = len {
             args.iter()
-                .map(|arg| arg.clone().try_into_array(len))
+                .map(|arg| arg.clone().try_into_vector(len))
                 .collect()
         } else {
             args.iter()
-                .map(|arg| arg.clone().try_into_array(1))
+                .map(|arg| arg.clone().try_into_vector(1))
                 .collect()
         };
 
@@ -65,4 +65,67 @@ where
                 .context(ExecuteFunctionSnafu)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datatypes::prelude::ScalarVector;
+    use datatypes::prelude::Vector;
+    use datatypes::vectors::BooleanVector;
+
+    use super::*;
+
+    #[test]
+    fn test_make_scalar_function() {
+        let and_fun = |args: &[VectorRef]| -> Result<VectorRef> {
+            let left = &args[0]
+                .as_any()
+                .downcast_ref::<BooleanVector>()
+                .expect("cast failed");
+            let right = &args[1]
+                .as_any()
+                .downcast_ref::<BooleanVector>()
+                .expect("cast failed");
+
+            let result = left
+                .iter_data()
+                .zip(right.iter_data())
+                .map(|(left, right)| match (left, right) {
+                    (Some(left), Some(right)) => Some(left && right),
+                    _ => None,
+                })
+                .collect::<BooleanVector>();
+            Ok(Arc::new(result) as VectorRef)
+        };
+
+        let and_fun = make_scalar_function(and_fun);
+
+        let args = vec![
+            ColumnarValue::Scalar(ScalarValue::Boolean(Some(true))),
+            ColumnarValue::Vector(Arc::new(BooleanVector::from(vec![
+                true, false, false, true,
+            ]))),
+        ];
+
+        let vec = (and_fun)(&args).unwrap();
+
+        match vec {
+            ColumnarValue::Vector(vec) => {
+                let vec = vec.as_any().downcast_ref::<BooleanVector>().unwrap();
+
+                assert_eq!(4, vec.len());
+                for i in 0..4 {
+                    assert_eq!(
+                        i == 0 || i == 3,
+                        vec.get_data(i).unwrap(),
+                        "failed at {}",
+                        i
+                    )
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
 }

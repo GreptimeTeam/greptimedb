@@ -61,13 +61,13 @@ impl ScalarUDF {
         DfScalarUDF::new(
             &self.name,
             &self.signature.into(),
-            &cast_udf_returntype(self.return_type),
-            &cast_udf_impl(self.fun),
+            &to_df_returntype(self.return_type),
+            &to_df_scalar_func(self.fun),
         )
     }
 }
 
-fn cast_udf_returntype(fun: ReturnTypeFunction) -> DfReturnTypeFunction {
+fn to_df_returntype(fun: ReturnTypeFunction) -> DfReturnTypeFunction {
     Arc::new(move |data_types: &[ArrowDataType]| {
         let concret_types = data_types
             .iter()
@@ -82,7 +82,7 @@ fn cast_udf_returntype(fun: ReturnTypeFunction) -> DfReturnTypeFunction {
     })
 }
 
-fn cast_udf_impl(fun: ScalarFunctionImplementation) -> DfScalarFunctionImplementation {
+fn to_df_scalar_func(fun: ScalarFunctionImplementation) -> DfScalarFunctionImplementation {
     Arc::new(move |args: &[DfColumnarValue]| {
         let args: Result<Vec<_>> = args
             .iter()
