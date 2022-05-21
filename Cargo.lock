@@ -530,9 +530,13 @@ dependencies = [
 name = "common-query"
 version = "0.1.0"
 dependencies = [
+ "arrow2",
+ "common-error",
  "datafusion",
  "datafusion-common",
+ "datafusion-expr",
  "datatypes",
+ "snafu",
 ]
 
 [[package]]
@@ -2296,6 +2300,7 @@ dependencies = [
  "arrow2",
  "async-trait",
  "common-error",
+ "common-query",
  "common-recordbatch",
  "common-telemetry",
  "datafusion",
