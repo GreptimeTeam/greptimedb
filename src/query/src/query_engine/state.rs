@@ -1,15 +1,12 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::prelude::{create_udf, make_scalar_function, Volatility};
+use common_query::prelude::ScalarUDF;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
-use datatypes::data_type::ConcreteDataType;
-use datatypes::types::Float64Type;
 
 use crate::catalog::{self, CatalogListRef};
 use crate::datafusion::DfCatalogListAdapter;
 use crate::executor::Runtime;
-use crate::function::pow;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -34,34 +31,27 @@ impl QueryEngineState {
             catalog::DEFAULT_CATALOG_NAME,
             catalog::DEFAULT_SCHEMA_NAME,
         );
-        let mut df_context = ExecutionContext::with_config(config);
+        let df_context = ExecutionContext::with_config(config);
 
         df_context.state.lock().catalog_list = Arc::new(DfCatalogListAdapter::new(
             df_context.runtime_env(),
             catalog_list.clone(),
         ));
 
-        let pow = make_scalar_function(pow);
-
-        let pow = create_udf(
-            "pow",
-            // expects two f64
-            vec![
-                ConcreteDataType::Float64(Float64Type::default()),
-                ConcreteDataType::Float64(Float64Type::default()),
-            ],
-            // returns f64
-            Arc::new(ConcreteDataType::Float64(Float64Type::default())),
-            Volatility::Immutable,
-            pow,
-        );
-
-        df_context.register_udf(pow.into_df_udf());
-
         Self {
             df_context,
             catalog_list,
         }
+    }
+
+    /// Register a udf function
+    /// TODO(dennis): manage UDFs by ourself.
+    pub fn register_udf(&self, udf: ScalarUDF) {
+        self.df_context
+            .state
+            .lock()
+            .scalar_functions
+            .insert(udf.name.clone(), Arc::new(udf.into_df_udf()));
     }
 
     #[inline]

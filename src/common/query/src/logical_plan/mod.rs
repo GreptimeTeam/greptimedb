@@ -41,7 +41,6 @@ mod tests {
     use datafusion_expr::ScalarUDF as DfScalarUDF;
     use datafusion_expr::TypeSignature as DfTypeSignature;
     use datatypes::prelude::ScalarVector;
-    use datatypes::prelude::Vector;
     use datatypes::vectors::BooleanVector;
     use datatypes::vectors::VectorRef;
 
@@ -95,7 +94,7 @@ mod tests {
         assert!(
             matches!(&udf.signature.type_signature, TypeSignature::Exact(ts) if ts.clone() == input_types)
         );
-        assert_eq!(return_type, (udf.return_type)(&vec![]).unwrap());
+        assert_eq!(return_type, (udf.return_type)(&[]).unwrap());
 
         // test into_df_udf
         let df_udf: DfScalarUDF = udf.into_df_udf();
@@ -107,7 +106,7 @@ mod tests {
         );
         assert_eq!(
             Arc::new(DataType::Boolean),
-            (df_udf.return_type)(&vec![]).unwrap()
+            (df_udf.return_type)(&[]).unwrap()
         );
 
         let args = vec![
@@ -117,6 +116,7 @@ mod tests {
             ]))),
         ];
 
+        // call the function
         let result = (df_udf.fun)(&args).unwrap();
 
         match result {

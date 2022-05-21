@@ -3,6 +3,7 @@ mod state;
 
 use std::sync::Arc;
 
+use common_query::prelude::ScalarUDF;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::catalog::CatalogList;
@@ -23,6 +24,7 @@ pub trait QueryEngine: Send + Sync {
     fn name(&self) -> &str;
     fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan>;
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
+    fn register_udf(&self, udf: ScalarUDF);
 }
 
 pub struct QueryEngineFactory {

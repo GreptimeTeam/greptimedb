@@ -5,12 +5,12 @@ use datafusion::catalog::TableReference;
 use datafusion::datasource::TableProvider;
 use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
-use datafusion::prelude::ExecutionContext;
 use datafusion::sql::planner::{ContextProvider, SqlToRel};
 use snafu::ResultExt;
 use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 
+use crate::query_engine::QueryEngineState;
 use crate::{datafusion::error, error::Result, plan::LogicalPlan, planner::Planner};
 
 pub struct DfPlanner<'a, S: ContextProvider> {
@@ -56,30 +56,41 @@ where
 }
 
 pub(crate) struct DfContextProviderAdapter {
-    df_context: ExecutionContext,
+    state: QueryEngineState,
 }
 
 impl DfContextProviderAdapter {
-    pub(crate) fn new(df_context: ExecutionContext) -> Self {
-        Self { df_context }
+    pub(crate) fn new(state: QueryEngineState) -> Self {
+        Self { state }
     }
 }
 
+/// TODO(dennis): Delegate all requests to ExecutionContext right now,
+///                           manage UDFs, UDAFs, variables by ourself in future.
 impl ContextProvider for DfContextProviderAdapter {
     fn get_table_provider(&self, name: TableReference) -> Option<Arc<dyn TableProvider>> {
-        self.df_context.state.lock().get_table_provider(name)
+        self.state
+            .df_context()
+            .state
+            .lock()
+            .get_table_provider(name)
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
-        self.df_context.state.lock().get_function_meta(name)
+        self.state.df_context().state.lock().get_function_meta(name)
     }
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
-        self.df_context.state.lock().get_aggregate_meta(name)
+        self.state
+            .df_context()
+            .state
+            .lock()
+            .get_aggregate_meta(name)
     }
 
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
-        self.df_context
+        self.state
+            .df_context()
             .state
             .lock()
             .get_variable_type(variable_names)
