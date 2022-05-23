@@ -75,10 +75,10 @@ async fn test_udf() -> Result<()> {
     let udf = create_udf(
         "pow",
         vec![
-            ConcreteDataType::u32_datatype(),
-            ConcreteDataType::u32_datatype(),
+            ConcreteDataType::uint32_datatype(),
+            ConcreteDataType::uint32_datatype(),
         ],
-        Arc::new(ConcreteDataType::u32_datatype()),
+        Arc::new(ConcreteDataType::uint32_datatype()),
         Volatility::Immutable,
         pow,
     );

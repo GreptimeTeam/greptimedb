@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
+use paste::paste;
 
 use crate::type_id::LogicalTypeId;
 use crate::types::{
@@ -41,16 +42,16 @@ impl ConcreteDataType {
         match dt {
             ArrowDataType::Null => Self::null_datatype(),
             ArrowDataType::Boolean => Self::boolean_datatype(),
-            ArrowDataType::UInt8 => Self::u8_datatype(),
-            ArrowDataType::UInt16 => Self::u16_datatype(),
-            ArrowDataType::UInt32 => Self::u32_datatype(),
-            ArrowDataType::UInt64 => Self::u64_datatype(),
-            ArrowDataType::Int8 => Self::i8_datatype(),
-            ArrowDataType::Int16 => Self::i16_datatype(),
-            ArrowDataType::Int32 => Self::i32_datatype(),
-            ArrowDataType::Int64 => Self::i64_datatype(),
-            ArrowDataType::Float32 => Self::f32_datatype(),
-            ArrowDataType::Float64 => Self::f64_datatype(),
+            ArrowDataType::UInt8 => Self::uint8_datatype(),
+            ArrowDataType::UInt16 => Self::uint16_datatype(),
+            ArrowDataType::UInt32 => Self::uint32_datatype(),
+            ArrowDataType::UInt64 => Self::uint64_datatype(),
+            ArrowDataType::Int8 => Self::int8_datatype(),
+            ArrowDataType::Int16 => Self::int16_datatype(),
+            ArrowDataType::Int32 => Self::int32_datatype(),
+            ArrowDataType::Int64 => Self::int64_datatype(),
+            ArrowDataType::Float32 => Self::float32_datatype(),
+            ArrowDataType::Float64 => Self::float64_datatype(),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             _ => {
@@ -58,63 +59,27 @@ impl ConcreteDataType {
             }
         }
     }
+}
 
-    pub fn null_datatype() -> ConcreteDataType {
-        ConcreteDataType::Null(NullType::default())
-    }
-
-    pub fn boolean_datatype() -> ConcreteDataType {
-        ConcreteDataType::Boolean(BooleanType::default())
-    }
-
-    pub fn i8_datatype() -> ConcreteDataType {
-        ConcreteDataType::Int8(Int8Type::default())
-    }
-
-    pub fn i16_datatype() -> ConcreteDataType {
-        ConcreteDataType::Int16(Int16Type::default())
-    }
-
-    pub fn i32_datatype() -> ConcreteDataType {
-        ConcreteDataType::Int32(Int32Type::default())
-    }
-
-    pub fn i64_datatype() -> ConcreteDataType {
-        ConcreteDataType::Int64(Int64Type::default())
-    }
-
-    pub fn u8_datatype() -> ConcreteDataType {
-        ConcreteDataType::UInt8(UInt8Type::default())
-    }
-
-    pub fn u16_datatype() -> ConcreteDataType {
-        ConcreteDataType::UInt16(UInt16Type::default())
-    }
-
-    pub fn u32_datatype() -> ConcreteDataType {
-        ConcreteDataType::UInt32(UInt32Type::default())
-    }
-
-    pub fn u64_datatype() -> ConcreteDataType {
-        ConcreteDataType::UInt64(UInt64Type::default())
-    }
-
-    pub fn f32_datatype() -> ConcreteDataType {
-        ConcreteDataType::Float32(Float32Type::default())
-    }
-
-    pub fn f64_datatype() -> ConcreteDataType {
-        ConcreteDataType::Float64(Float64Type::default())
-    }
-
-    pub fn binary_datatype() -> ConcreteDataType {
-        ConcreteDataType::Binary(BinaryType::default())
-    }
-
-    pub fn string_datatype() -> ConcreteDataType {
-        ConcreteDataType::String(StringType::default())
+macro_rules! impl_new_concret_type_functions {
+    ($($Type: ident), +) => {
+        paste! {
+            impl ConcreteDataType {
+                $(
+                    pub fn [<$Type:lower _datatype>]() -> ConcreteDataType {
+                        ConcreteDataType::$Type([<$Type Type>]::default())
+                    }
+                )+
+            }
+        }
     }
 }
+
+impl_new_concret_type_functions!(
+    Null, Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64,
+    Binary, String
+);
+
 #[enum_dispatch::enum_dispatch]
 pub trait DataType: std::fmt::Debug + Send + Sync {
     /// Name of this data type.

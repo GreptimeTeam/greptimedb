@@ -136,9 +136,9 @@ mod tests {
     #[test]
     fn test_into_df_signature() {
         let types = vec![
-            ConcreteDataType::i8_datatype(),
-            ConcreteDataType::f32_datatype(),
-            ConcreteDataType::f64_datatype(),
+            ConcreteDataType::int8_datatype(),
+            ConcreteDataType::float32_datatype(),
+            ConcreteDataType::float64_datatype(),
         ];
         let sig = Signature::exact(types.clone(), Volatility::Immutable);
 
