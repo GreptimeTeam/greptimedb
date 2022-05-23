@@ -61,7 +61,7 @@ impl ConcreteDataType {
     }
 }
 
-macro_rules! impl_new_concret_type_functions {
+macro_rules! impl_new_concrete_type_functions {
     ($($Type: ident), +) => {
         paste! {
             impl ConcreteDataType {
@@ -75,7 +75,7 @@ macro_rules! impl_new_concret_type_functions {
     }
 }
 
-impl_new_concret_type_functions!(
+impl_new_concrete_type_functions!(
     Null, Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64,
     Binary, String
 );
