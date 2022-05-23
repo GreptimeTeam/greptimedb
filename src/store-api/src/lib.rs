@@ -1,5 +1,4 @@
 //! Storage related APIs
 
-mod error;
+pub mod logstore;
 pub mod storage;
-pub mod wal;
