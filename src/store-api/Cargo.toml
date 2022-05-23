@@ -6,5 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-trait = "0.1"
 common-error = { path = "../common/error" }
 datatypes = { path = "../datatypes" }
+futures = "0.3.21"
