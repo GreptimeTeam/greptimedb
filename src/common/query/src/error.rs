@@ -9,7 +9,10 @@ use datatypes::error::Error as DataTypeError;
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Fail to execute function, source: {}", source))]
-    ExecuteFunction { source: DataFusionError },
+    ExecuteFunction {
+        source: DataFusionError,
+        backtrace: Backtrace,
+    },
     #[snafu(display("Fail to cast arrow array into vector: {:?}, {}", data_type, source))]
     IntoVector {
         source: DataTypeError,
@@ -22,7 +25,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ExecuteFunction { source: _ } => StatusCode::EngineExecuteQuery,
+            Error::ExecuteFunction { source: _, .. } => StatusCode::EngineExecuteQuery,
             Error::IntoVector { source, .. } => source.status_code(),
         }
     }
@@ -39,5 +42,50 @@ impl ErrorExt for Error {
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use snafu::GenerateImplicitData;
+
+    use super::*;
+
+    fn throw_df_error() -> std::result::Result<(), DataFusionError> {
+        Err(DataFusionError::NotImplemented("test".to_string()))
+    }
+
+    fn assert_error(err: &Error, code: StatusCode) {
+        assert_eq!(code, err.status_code());
+        assert!(err.backtrace_opt().is_some());
+    }
+
+    #[test]
+    fn test_datafusion_as_source() {
+        let err = throw_df_error()
+            .context(ExecuteFunctionSnafu {})
+            .err()
+            .unwrap();
+        assert_error(&err, StatusCode::EngineExecuteQuery);
+    }
+
+    fn raise_datatype_error() -> std::result::Result<(), DataTypeError> {
+        Err(DataTypeError::Conversion {
+            from: "test".to_string(),
+            backtrace: Backtrace::generate(),
+        })
+    }
+
+    #[test]
+    fn test_into_vector_error() {
+        let err = raise_datatype_error()
+            .context(IntoVectorSnafu {
+                data_type: ArrowDatatype::Int32,
+            })
+            .err()
+            .unwrap();
+        assert!(err.backtrace_opt().is_none());
+        let datatype_err = raise_datatype_error().err().unwrap();
+        assert_eq!(datatype_err.status_code(), err.status_code());
     }
 }
