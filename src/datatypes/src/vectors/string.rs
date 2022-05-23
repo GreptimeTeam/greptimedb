@@ -10,11 +10,11 @@ use snafu::ResultExt;
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::SerializeSnafu;
-use crate::impl_try_from_arrow_array_for_vector;
 use crate::prelude::{ScalarVectorBuilder, Vector};
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
 use crate::types::StringType;
+use crate::vectors::impl_try_from_arrow_array_for_vector;
 
 /// String array wrapper
 #[derive(Debug, Clone)]

@@ -1,4 +1,5 @@
 mod pow;
+
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
@@ -8,13 +9,14 @@ use datafusion::field_util::FieldExt;
 use datafusion::field_util::SchemaExt;
 use datafusion::logical_plan::LogicalPlanBuilder;
 use datatypes::data_type::ConcreteDataType;
-use pow::pow;
 use query::catalog::memory;
 use query::error::Result;
 use query::plan::LogicalPlan;
 use query::query_engine::{Output, QueryEngineFactory};
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
+
+use crate::pow::pow;
 
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {

@@ -78,7 +78,6 @@ pub fn try_into_vector(array: ArrayRef) -> Result<VectorRef> {
 }
 
 /// Helper to define `try_from_arrow_array(array: arrow::array::ArrayRef)` function.
-#[macro_export(local_inner_macros)]
 macro_rules! impl_try_from_arrow_array_for_vector {
     ($Array: ident, $Vector: ident) => {
         impl $Vector {
@@ -98,6 +97,8 @@ macro_rules! impl_try_from_arrow_array_for_vector {
         }
     };
 }
+
+pub(crate) use impl_try_from_arrow_array_for_vector;
 
 #[cfg(test)]
 mod tests {

@@ -15,6 +15,7 @@ pub enum Error {
     },
     #[snafu(display("Fail to cast arrow array into vector: {:?}, {}", data_type, source))]
     IntoVector {
+        #[snafu(backtrace)]
         source: DataTypeError,
         data_type: ArrowDatatype,
     },
@@ -25,7 +26,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ExecuteFunction { source: _, .. } => StatusCode::EngineExecuteQuery,
+            Error::ExecuteFunction { .. } => StatusCode::EngineExecuteQuery,
             Error::IntoVector { source, .. } => source.status_code(),
         }
     }
@@ -84,7 +85,7 @@ mod tests {
             })
             .err()
             .unwrap();
-        assert!(err.backtrace_opt().is_none());
+        assert!(err.backtrace_opt().is_some());
         let datatype_err = raise_datatype_error().err().unwrap();
         assert_eq!(datatype_err.status_code(), err.status_code());
     }

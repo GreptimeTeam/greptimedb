@@ -44,6 +44,8 @@ where
             });
 
         // to array
+        // TODO(dennis):  we create new vectors from Scalar on each call,
+        //                            should be optimized in the future.
         let args: Result<Vec<_>> = if let Some(len) = len {
             args.iter()
                 .map(|arg| arg.clone().try_into_vector(len))

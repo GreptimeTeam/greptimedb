@@ -4,7 +4,7 @@ use datatypes::vectors;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
-use crate::error::{IntoVectorSnafu, Result};
+use crate::error::{self, IntoVectorSnafu, Result};
 use crate::prelude::ScalarValue;
 
 /// Represents the result from an expression
@@ -32,12 +32,15 @@ impl ColumnarValue {
             ColumnarValue::Scalar(s) => {
                 let v = s.to_array_of_size(num_rows);
                 let data_type = v.data_type().clone();
-                vectors::try_into_vector(v).with_context(|_| IntoVectorSnafu { data_type })?
+                vectors::try_into_vector(v).context(IntoVectorSnafu { data_type })?
             }
         })
     }
+}
 
-    pub fn try_from_df_columnar_value(value: &DfColumnarValue) -> Result<ColumnarValue> {
+impl TryFrom<&DfColumnarValue> for ColumnarValue {
+    type Error = error::Error;
+    fn try_from(value: &DfColumnarValue) -> Result<Self> {
         Ok(match value {
             DfColumnarValue::Scalar(v) => ColumnarValue::Scalar(v.clone()),
             DfColumnarValue::Array(v) => {

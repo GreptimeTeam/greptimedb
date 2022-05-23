@@ -9,10 +9,10 @@ use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
-use crate::impl_try_from_arrow_array_for_vector;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::BooleanType;
+use crate::vectors::impl_try_from_arrow_array_for_vector;
 use crate::vectors::Vector;
 
 /// Vector of boolean.

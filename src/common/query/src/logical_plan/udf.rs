@@ -14,12 +14,11 @@ use datatypes::prelude::{ConcreteDataType, DataType};
 
 use crate::error::Result;
 use crate::function::{ReturnTypeFunction, ScalarFunctionImplementation};
-use crate::prelude::ColumnarValue;
 use crate::signature::Signature;
 
 /// Logical representation of a UDF.
 #[derive(Clone)]
-pub struct ScalarUDF {
+pub struct ScalarUdf {
     /// name
     pub name: String,
     /// signature
@@ -30,9 +29,9 @@ pub struct ScalarUDF {
     pub fun: ScalarFunctionImplementation,
 }
 
-impl Debug for ScalarUDF {
+impl Debug for ScalarUdf {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.debug_struct("ScalarUDF")
+        f.debug_struct("ScalarUdf")
             .field("name", &self.name)
             .field("signature", &self.signature)
             .field("fun", &"<FUNC>")
@@ -40,8 +39,8 @@ impl Debug for ScalarUDF {
     }
 }
 
-impl ScalarUDF {
-    /// Create a new ScalarUDF
+impl ScalarUdf {
+    /// Create a new ScalarUdf
     pub fn new(
         name: &str,
         signature: &Signature,
@@ -84,10 +83,7 @@ fn to_df_returntype(fun: ReturnTypeFunction) -> DfReturnTypeFunction {
 
 fn to_df_scalar_func(fun: ScalarFunctionImplementation) -> DfScalarFunctionImplementation {
     Arc::new(move |args: &[DfColumnarValue]| {
-        let args: Result<Vec<_>> = args
-            .iter()
-            .map(ColumnarValue::try_from_df_columnar_value)
-            .collect();
+        let args: Result<Vec<_>> = args.iter().map(TryFrom::try_from).collect();
 
         let result = (fun)(&args?);
 

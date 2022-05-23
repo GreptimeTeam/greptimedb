@@ -6,7 +6,7 @@ use std::sync::Arc;
 use datatypes::prelude::ConcreteDataType;
 
 pub use self::expr::Expr;
-pub use self::udf::ScalarUDF;
+pub use self::udf::ScalarUdf;
 use crate::function::{ReturnTypeFunction, ScalarFunctionImplementation};
 use crate::signature::{Signature, Volatility};
 
@@ -21,9 +21,9 @@ pub fn create_udf(
     return_type: Arc<ConcreteDataType>,
     volatility: Volatility,
     fun: ScalarFunctionImplementation,
-) -> ScalarUDF {
+) -> ScalarUdf {
     let return_type: ReturnTypeFunction = Arc::new(move |_| Ok(return_type.clone()));
-    ScalarUDF::new(
+    ScalarUdf::new(
         name,
         &Signature::exact(input_types, volatility),
         &return_type,

@@ -7,7 +7,7 @@ mod planner;
 
 use std::sync::Arc;
 
-use common_query::prelude::ScalarUDF;
+use common_query::prelude::ScalarUdf;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use snafu::{OptionExt, ResultExt};
@@ -70,7 +70,7 @@ impl QueryEngine for DatafusionQueryEngine {
         ))
     }
 
-    fn register_udf(&self, udf: ScalarUDF) {
+    fn register_udf(&self, udf: ScalarUdf) {
         self.state.register_udf(udf);
     }
 }

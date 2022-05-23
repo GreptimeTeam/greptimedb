@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::prelude::ScalarUDF;
+use common_query::prelude::ScalarUdf;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 
 use crate::catalog::{self, CatalogListRef};
@@ -46,7 +46,7 @@ impl QueryEngineState {
 
     /// Register a udf function
     /// TODO(dennis): manage UDFs by ourself.
-    pub fn register_udf(&self, udf: ScalarUDF) {
+    pub fn register_udf(&self, udf: ScalarUdf) {
         self.df_context
             .state
             .lock()
