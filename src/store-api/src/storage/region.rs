@@ -18,6 +18,7 @@
 //! a row key. Note that the implementation may allow multiple rows have same row
 //! key (like ClickHouse), which is useful in analytic scenario.
 
+use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
 use crate::storage::column_family::ColumnFamily;
@@ -27,6 +28,7 @@ use crate::storage::snapshot::{ReadContext, Snapshot};
 use crate::storage::SchemaRef;
 
 /// Chunks of rows in storage engine.
+#[async_trait]
 pub trait Region: Send + Sync + Clone {
     type Error: ErrorExt + Send + Sync;
     type WriteRequest: WriteRequest;
@@ -39,7 +41,7 @@ pub trait Region: Send + Sync + Clone {
     fn list_cf(&self) -> Result<Vec<Self::ColumnFamily>, Self::Error>;
 
     /// Write updates to region.
-    fn write(
+    async fn write(
         &self,
         ctx: &WriteContext,
         request: Self::WriteRequest,
