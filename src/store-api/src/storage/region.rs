@@ -35,6 +35,7 @@ pub trait Region: Send + Sync + Clone {
     type ColumnFamily: ColumnFamily;
     type Snapshot: Snapshot;
 
+    // TODO(yingwen): Maybe return `SchemaRef` instead of `&SchemaRef`
     fn schema(&self) -> &SchemaRef;
 
     /// List all column families.
