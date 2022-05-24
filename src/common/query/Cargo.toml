@@ -3,5 +3,14 @@ name = "common-query"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies.arrow]
+package = "arrow2"
+version="0.10"
+
 [dependencies]
+common-error = { path = "../error" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
+datatypes = { path = "../../datatypes"}
+snafu = { version = "0.7", features = ["backtraces"] }

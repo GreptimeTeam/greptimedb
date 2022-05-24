@@ -8,7 +8,7 @@ mod requests;
 mod responses;
 mod snapshot;
 
-pub use datatypes::data_type::ConcretDataType;
+pub use datatypes::data_type::ConcreteDataType;
 pub use datatypes::schema::SchemaRef;
 
 pub use self::column_family::ColumnFamily;

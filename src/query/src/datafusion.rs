@@ -7,6 +7,7 @@ mod planner;
 
 use std::sync::Arc;
 
+use common_query::prelude::ScalarUdf;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use snafu::{OptionExt, ResultExt};
@@ -49,7 +50,7 @@ impl QueryEngine for DatafusionQueryEngine {
 
     fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
-        let context_provider = DfContextProviderAdapter::new(self.state.catalog_list());
+        let context_provider = DfContextProviderAdapter::new(self.state.clone());
         let planner = DfPlanner::new(&context_provider);
         let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
             .context(error::ParseSqlSnafu)?;
@@ -67,6 +68,10 @@ impl QueryEngine for DatafusionQueryEngine {
         Ok(Output::RecordBatch(
             self.execute_stream(&ctx, &physical_plan).await?,
         ))
+    }
+
+    fn register_udf(&self, udf: ScalarUdf) {
+        self.state.register_udf(udf);
     }
 }
 

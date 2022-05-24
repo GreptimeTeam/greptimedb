@@ -5,9 +5,14 @@ use std::sync::Arc;
 use arrow::array::ArrayRef;
 use arrow::array::{Array, NullArray};
 use arrow::datatypes::DataType as ArrowDataType;
+use snafu::OptionExt;
+use snafu::ResultExt;
 
-use crate::data_type::DataTypeRef;
+use crate::data_type::ConcreteDataType;
+use crate::error::{Result, SerializeSnafu};
+use crate::serialize::Serializable;
 use crate::types::NullType;
+use crate::vectors::impl_try_from_arrow_array_for_vector;
 use crate::vectors::Vector;
 
 pub struct NullVector {
@@ -29,8 +34,8 @@ impl From<NullArray> for NullVector {
 }
 
 impl Vector for NullVector {
-    fn data_type(&self) -> DataTypeRef {
-        NullType::arc()
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::Null(NullType::default())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -52,8 +57,23 @@ impl fmt::Debug for NullVector {
     }
 }
 
+const NULL_STR: &str = "NULL";
+impl Serializable for NullVector {
+    fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
+        vec![NULL_STR.to_owned(); self.len()]
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<_>>()
+            .context(SerializeSnafu)
+    }
+}
+
+impl_try_from_arrow_array_for_vector!(NullArray, NullVector);
+
 #[cfg(test)]
 mod tests {
+    use serde_json::Value as JsonValue;
+
     use super::*;
 
     #[test]
@@ -73,5 +93,18 @@ mod tests {
     fn test_debug_null_array() {
         let array = NullVector::new(1024 * 1024);
         assert_eq!(format!("{:?}", array), "NullVector(1048576)");
+    }
+
+    #[test]
+    fn test_serialize_json() {
+        let null_vec = NullVector::new(3);
+        assert_eq!(
+            vec![
+                JsonValue::from(NULL_STR),
+                JsonValue::from(NULL_STR),
+                JsonValue::from(NULL_STR),
+            ],
+            null_vec.serialize_to_json().unwrap()
+        );
     }
 }

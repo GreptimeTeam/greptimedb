@@ -9,15 +9,9 @@ use datafusion::sql::planner::{ContextProvider, SqlToRel};
 use snafu::ResultExt;
 use sql::statements::query::Query;
 use sql::statements::statement::Statement;
-use table::table::adapter::DfTableProviderAdapter;
 
-use crate::{
-    catalog::{self, CatalogListRef},
-    datafusion::error,
-    error::Result,
-    plan::LogicalPlan,
-    planner::Planner,
-};
+use crate::query_engine::QueryEngineState;
+use crate::{datafusion::error, error::Result, plan::LogicalPlan, planner::Planner};
 
 pub struct DfPlanner<'a, S: ContextProvider> {
     sql_to_rel: SqlToRel<'a, S>,
@@ -61,53 +55,44 @@ where
     }
 }
 
-pub(crate) struct DfContextProviderAdapter<'a> {
-    catalog_list: &'a CatalogListRef,
+pub(crate) struct DfContextProviderAdapter {
+    state: QueryEngineState,
 }
 
-impl<'a> DfContextProviderAdapter<'a> {
-    pub(crate) fn new(catalog_list: &'a CatalogListRef) -> Self {
-        Self { catalog_list }
+impl DfContextProviderAdapter {
+    pub(crate) fn new(state: QueryEngineState) -> Self {
+        Self { state }
     }
 }
 
-impl<'a> ContextProvider for DfContextProviderAdapter<'a> {
+/// TODO(dennis): Delegate all requests to ExecutionContext right now,
+///                           manage UDFs, UDAFs, variables by ourself in future.
+impl ContextProvider for DfContextProviderAdapter {
     fn get_table_provider(&self, name: TableReference) -> Option<Arc<dyn TableProvider>> {
-        let (catalog, schema, table) = match name {
-            TableReference::Bare { table } => (
-                catalog::DEFAULT_CATALOG_NAME,
-                catalog::DEFAULT_SCHEMA_NAME,
-                table,
-            ),
-            TableReference::Partial { schema, table } => {
-                (catalog::DEFAULT_CATALOG_NAME, schema, table)
-            }
-            TableReference::Full {
-                catalog,
-                schema,
-                table,
-            } => (catalog, schema, table),
-        };
-
-        self.catalog_list
-            .catalog(catalog)
-            .and_then(|catalog_provider| catalog_provider.schema(schema))
-            .and_then(|schema_provider| schema_provider.table(table))
-            .map(|table| Arc::new(DfTableProviderAdapter::new(table)) as _)
+        self.state
+            .df_context()
+            .state
+            .lock()
+            .get_table_provider(name)
     }
 
-    fn get_function_meta(&self, _name: &str) -> Option<Arc<ScalarUDF>> {
-        // TODO(dennis)
-        None
+    fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
+        self.state.df_context().state.lock().get_function_meta(name)
     }
 
-    fn get_aggregate_meta(&self, _name: &str) -> Option<Arc<AggregateUDF>> {
-        // TODO(dennis)
-        None
+    fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
+        self.state
+            .df_context()
+            .state
+            .lock()
+            .get_aggregate_meta(name)
     }
 
-    fn get_variable_type(&self, _variable_names: &[String]) -> Option<DataType> {
-        // TODO(dennis)
-        None
+    fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
+        self.state
+            .df_context()
+            .state
+            .lock()
+            .get_variable_type(variable_names)
     }
 }

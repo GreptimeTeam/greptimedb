@@ -6,7 +6,7 @@ use common_base::bytes::StringBytes;
 use crate::data_type::DataType;
 use crate::prelude::{DataTypeRef, LogicalTypeId, Value};
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct StringType;
 
 impl StringType {

@@ -1,10 +1,10 @@
-use crate::storage::ConcretDataType;
+use crate::storage::ConcreteDataType;
 
 /// A [ColumnDescriptor] contains information about a column.
 #[derive(Debug)]
 pub struct ColumnDescriptor {
     pub name: String,
-    pub data_type: ConcretDataType,
+    pub data_type: ConcreteDataType,
     pub is_nullable: bool,
 }
 

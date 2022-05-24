@@ -4,15 +4,17 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, Utf8ValuesIter};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value;
+use snafu::OptionExt;
 use snafu::ResultExt;
 
 use crate::arrow_array::{MutableStringArray, StringArray};
-use crate::data_type::DataTypeRef;
+use crate::data_type::ConcreteDataType;
 use crate::error::SerializeSnafu;
 use crate::prelude::{ScalarVectorBuilder, Vector};
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
 use crate::types::StringType;
+use crate::vectors::impl_try_from_arrow_array_for_vector;
 
 /// String array wrapper
 #[derive(Debug, Clone)]
@@ -27,8 +29,8 @@ impl From<StringArray> for StringVector {
 }
 
 impl Vector for StringVector {
-    fn data_type(&self) -> DataTypeRef {
-        StringType::arc()
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::String(StringType::default())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -97,6 +99,8 @@ impl Serializable for StringVector {
             .context(SerializeSnafu)
     }
 }
+
+impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 
 #[cfg(test)]
 mod tests {

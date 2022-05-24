@@ -6,7 +6,7 @@ use crate::data_type::{DataType, DataTypeRef};
 use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct BooleanType;
 
 impl BooleanType {

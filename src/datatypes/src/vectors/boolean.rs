@@ -4,13 +4,15 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BooleanArray, MutableBooleanArray};
 use arrow::bitmap::utils::{BitmapIter, ZipValidity};
+use snafu::OptionExt;
 use snafu::ResultExt;
 
-use crate::data_type::DataTypeRef;
+use crate::data_type::ConcreteDataType;
 use crate::error::Result;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::BooleanType;
+use crate::vectors::impl_try_from_arrow_array_for_vector;
 use crate::vectors::Vector;
 
 /// Vector of boolean.
@@ -50,8 +52,8 @@ impl<Ptr: Borrow<Option<bool>>> FromIterator<Ptr> for BooleanVector {
 }
 
 impl Vector for BooleanVector {
-    fn data_type(&self) -> DataTypeRef {
-        BooleanType::arc()
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::Boolean(BooleanType::default())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -117,6 +119,8 @@ impl Serializable for BooleanVector {
             .context(crate::error::SerializeSnafu)
     }
 }
+
+impl_try_from_arrow_array_for_vector!(BooleanArray, BooleanVector);
 
 #[cfg(test)]
 mod tests {
