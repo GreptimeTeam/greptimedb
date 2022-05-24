@@ -1,4 +1,4 @@
-use arrow::error::ArrowError;
+use datatypes::arrow::error::ArrowError;
 use snafu::{Backtrace, Snafu};
 
 #[derive(Debug, Snafu)]
