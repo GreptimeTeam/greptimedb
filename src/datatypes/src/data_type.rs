@@ -122,6 +122,7 @@ impl_new_concrete_type_functions!(
     Binary, String
 );
 
+/// Data type abstraction.
 #[enum_dispatch::enum_dispatch]
 pub trait DataType: std::fmt::Debug + Send + Sync {
     /// Name of this data type.

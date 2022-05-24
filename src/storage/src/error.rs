@@ -4,7 +4,7 @@ use common_error::prelude::*;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
-pub enum Error {}
+pub struct Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -19,5 +19,18 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error() {
+        let err = Error;
+
+        assert_eq!(StatusCode::Unsupported, err.status_code());
+        assert!(err.backtrace_opt().is_none());
     }
 }

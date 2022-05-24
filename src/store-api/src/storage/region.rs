@@ -9,10 +9,10 @@
 //! ```
 //!
 //! The data model require each row
-//! - has 0 ~ m key column
-//! - **MUST** has a timestamp column
-//! - has a version column
-//! - has 0 ~ n value column
+//! - has 0 ~ m key column, parts of row key columns;
+//! - **MUST** has a timestamp column, part of row key columns;
+//! - has a version column, part of row key columns;
+//! - has 0 ~ n value column.
 //!
 //! Each row is identified by (value of key columns, timestamp, version), which forms
 //! a row key. Note that the implementation may allow multiple rows have same row
@@ -22,10 +22,10 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
 use crate::storage::column_family::ColumnFamily;
+use crate::storage::metadata::RegionMetadataRef;
 use crate::storage::requests::WriteRequest;
 use crate::storage::responses::WriteResponse;
 use crate::storage::snapshot::{ReadContext, Snapshot};
-use crate::storage::SchemaRef;
 
 /// Chunks of rows in storage engine.
 #[async_trait]
@@ -35,8 +35,8 @@ pub trait Region: Send + Sync + Clone {
     type ColumnFamily: ColumnFamily;
     type Snapshot: Snapshot;
 
-    /// Returns the schema snapshot of this region.
-    fn schema(&self) -> SchemaRef;
+    /// Returns the in memory metadata snapshot of this region.
+    fn in_memory_metadata(&self) -> RegionMetadataRef;
 
     /// List all column families.
     fn list_cf(&self) -> Result<Vec<Self::ColumnFamily>, Self::Error>;

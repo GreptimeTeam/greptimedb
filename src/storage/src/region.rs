@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use store_api::storage::{ReadContext, Region, SchemaRef, WriteContext, WriteResponse};
+use store_api::storage::{ReadContext, Region, RegionMetadataRef, WriteContext, WriteResponse};
 
 use crate::column_family::ColumnFamilyHandle;
 use crate::error::{Error, Result};
@@ -22,8 +22,8 @@ impl Region for RegionImpl {
     type ColumnFamily = ColumnFamilyHandle;
     type Snapshot = SnapshotImpl;
 
-    fn schema(&self) -> SchemaRef {
-        self.inner.schema.clone()
+    fn in_memory_metadata(&self) -> RegionMetadataRef {
+        self.inner.metadata.clone()
     }
 
     fn list_cf(&self) -> Result<Vec<ColumnFamilyHandle>> {
@@ -40,5 +40,5 @@ impl Region for RegionImpl {
 }
 
 struct RegionInner {
-    schema: SchemaRef,
+    metadata: RegionMetadataRef,
 }

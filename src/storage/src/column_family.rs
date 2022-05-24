@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use store_api::storage::ColumnFamily;
 
-// TODO(yingwen): Wrap an arc inner.
 /// Handle to column family.
 #[derive(Clone)]
 pub struct ColumnFamilyHandle {
