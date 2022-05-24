@@ -22,8 +22,8 @@ impl Region for RegionImpl {
     type ColumnFamily = ColumnFamilyHandle;
     type Snapshot = SnapshotImpl;
 
-    fn schema(&self) -> &SchemaRef {
-        &self.inner.schema
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema.clone()
     }
 
     fn list_cf(&self) -> Result<Vec<ColumnFamilyHandle>> {
