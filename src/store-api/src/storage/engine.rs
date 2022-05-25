@@ -16,35 +16,37 @@ pub trait StorageEngine: Send + Sync + Clone {
     type Error: ErrorExt + Send + Sync;
     type Region: Region;
 
-    /// Open an existing region.
+    /// Opens an existing region.
     async fn open_region(
         &self,
         ctx: &EngineContext,
         name: &str,
     ) -> Result<Self::Region, Self::Error>;
 
-    /// Close given region.
+    /// Closes given region.
     async fn close_region(
         &self,
         ctx: &EngineContext,
         region: Self::Region,
     ) -> Result<(), Self::Error>;
 
-    /// Create and return a new region.
+    /// Creates and returns the created region.
+    ///
+    /// Returns exsiting region if region with same name already exists.
     async fn create_region(
         &self,
         ctx: &EngineContext,
         descriptor: RegionDescriptor,
     ) -> Result<Self::Region, Self::Error>;
 
-    /// Drop given region.
+    /// Drops given region.
     async fn drop_region(
         &self,
         ctx: &EngineContext,
         region: Self::Region,
     ) -> Result<(), Self::Error>;
 
-    /// Return the opened region with given name.
+    /// Returns the opened region with given name.
     fn get_region(
         &self,
         ctx: &EngineContext,

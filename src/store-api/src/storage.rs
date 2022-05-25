@@ -4,7 +4,7 @@ mod column_family;
 mod consts;
 mod descriptors;
 mod engine;
-mod metadata;
+pub mod metadata;
 mod region;
 mod requests;
 mod responses;

@@ -47,7 +47,7 @@ pub struct ColumnFamilyDescriptor {
 #[derive(Debug)]
 pub struct RegionDescriptor {
     /// Region name.
-    name: String,
+    pub name: String,
     /// Row key descriptor of this region.
     pub row_key: RowKeyDescriptor,
     /// Default column family.

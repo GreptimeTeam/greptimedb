@@ -33,6 +33,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// In memory metadata of region.
 pub struct RegionMetadata {
+    name: String,
     /// Schema of the region.
     ///
     /// Holding a [SchemaRef] to allow converting into `SchemaRef`/`arrow::SchemaRef`
@@ -93,7 +94,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
     type Error = Error;
 
     fn try_from(desc: RegionDescriptor) -> Result<RegionMetadata> {
-        let mut builder = RegionMetadataBuilder::new()
+        let mut builder = RegionMetadataBuilder::new(desc.name)
             .row_key(desc.row_key)?
             .add_column_family(desc.default_cf)?;
         for cf in desc.extra_cfs {
@@ -106,6 +107,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
 
 #[derive(Default)]
 struct RegionMetadataBuilder {
+    name: String,
     columns: Vec<ColumnMetadata>,
     fields: Vec<Field>,
     name_to_col_index: HashMap<String, usize>,
@@ -118,8 +120,16 @@ struct RegionMetadataBuilder {
 }
 
 impl RegionMetadataBuilder {
-    fn new() -> RegionMetadataBuilder {
-        RegionMetadataBuilder::default()
+    fn new(name: String) -> RegionMetadataBuilder {
+        RegionMetadataBuilder {
+            name,
+            ..Default::default()
+        }
+    }
+
+    fn name(mut self, name: String) -> Self {
+        self.name = name;
+        self
     }
 
     fn row_key(mut self, key: RowKeyDescriptor) -> Result<Self> {
@@ -185,6 +195,7 @@ impl RegionMetadataBuilder {
         });
 
         RegionMetadata {
+            name: self.name,
             schema: Arc::new(Schema::new(arrow_schema)),
             columns: ColumnsMetadata {
                 columns: self.columns,

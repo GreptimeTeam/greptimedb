@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use store_api::storage::{ReadContext, Region, RegionMetadataRef, WriteContext, WriteResponse};
+use store_api::storage::{
+    ReadContext, Region, RegionMetadata, RegionMetadataRef, WriteContext, WriteResponse,
+};
 
 use crate::column_family::ColumnFamilyHandle;
 use crate::error::{Error, Result};
@@ -36,6 +38,15 @@ impl Region for RegionImpl {
 
     fn snapshot(&self, _ctx: &ReadContext) -> Result<SnapshotImpl> {
         unimplemented!()
+    }
+}
+
+impl RegionImpl {
+    pub fn new(metadata: RegionMetadata) -> RegionImpl {
+        let metadata = Arc::new(metadata);
+        let inner = Arc::new(RegionInner { metadata });
+
+        RegionImpl { inner }
     }
 }
 

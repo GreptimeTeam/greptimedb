@@ -1,16 +1,28 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use store_api::storage::metadata::Error as MetadataError;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
-pub struct Error;
+pub enum Error {
+    #[snafu(display("Invalid region descriptor, region: {}, source: {}", region, source))]
+    InvalidRegionDesc {
+        region: String,
+        #[snafu(backtrace)]
+        source: MetadataError,
+    },
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        StatusCode::Unsupported
+        use Error::*;
+
+        match self {
+            InvalidRegionDesc { .. } => StatusCode::InvalidArguments,
+        }
     }
 
     fn backtrace_opt(&self) -> Option<&Backtrace> {
@@ -24,13 +36,25 @@ impl ErrorExt for Error {
 
 #[cfg(test)]
 mod tests {
+    use snafu::GenerateImplicitData;
+
     use super::*;
 
-    #[test]
-    fn test_error() {
-        let err = Error;
+    fn throw_metadata_error() -> std::result::Result<(), MetadataError> {
+        Err(MetadataError::CfIdExists {
+            id: 1,
+            backtrace: Backtrace::generate(),
+        })
+    }
 
-        assert_eq!(StatusCode::Unsupported, err.status_code());
-        assert!(err.backtrace_opt().is_none());
+    #[test]
+    fn test_invalid_region_desc_error() {
+        let err = throw_metadata_error()
+            .context(InvalidRegionDescSnafu { region: "hello" })
+            .err()
+            .unwrap();
+
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert!(err.backtrace_opt().is_some());
     }
 }
