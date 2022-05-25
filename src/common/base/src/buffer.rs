@@ -1,0 +1,209 @@
+use std::any::Any;
+use std::io::{Read, Write};
+
+use bytes::{Buf, BufMut, BytesMut};
+use common_error::prelude::ErrorExt;
+use paste::paste;
+use snafu::{ensure, Backtrace, ErrorCompat, ResultExt, Snafu};
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("Destination buffer overflow"))]
+    Overflow { backtrace: Backtrace },
+
+    #[snafu(display("IO operation reach EOF"))]
+    Eof {
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+}
+
+impl ErrorExt for Error {
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+macro_rules! impl_read_le {
+    ( $($num_ty: ty), *) => {
+        $(
+            paste!{
+                fn [<read_ $num_ty _le>](&mut self) -> Result<$num_ty, Self::Error> {
+                    let mut buf = [0u8; std::mem::size_of::<$num_ty>()];
+                    self.read_to_slice(&mut buf)?;
+                    Ok($num_ty::from_le_bytes(buf))
+                }
+            }
+        )*
+    }
+}
+
+macro_rules! impl_write_le {
+    ( $($num_ty: ty), *) => {
+        $(
+            paste!{
+                fn [<write_ $num_ty _le>](&mut self, n: $num_ty) -> Result<(), Self::Error> {
+                    self.write_from_slice(&n.to_le_bytes())?;
+                    Ok(())
+                }
+            }
+        )*
+    }
+}
+
+pub trait Buffer: AsRef<[u8]> {
+    type Error: ErrorExt + Send + Sync;
+
+    fn remaining_slice(&self) -> &[u8];
+
+    fn remaining_size(&self) -> usize {
+        self.remaining_slice().len()
+    }
+
+    fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Self::Error>;
+
+    fn advance_by(&mut self, by: usize);
+
+    impl_read_le![u8, i8, u16, i16, u32, i32, u64, i64, f32, f64];
+}
+
+macro_rules! impl_buffer_for_bytes {
+    ( $($buf_ty:ty), *) => {
+        $(
+        impl Buffer for $buf_ty {
+            type Error = Error;
+
+            #[inline]
+            fn remaining_slice(&self) -> &[u8] {
+                &self
+            }
+
+            fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Error> {
+                ensure!(self.remaining() >= dst.len(), OverflowSnafu);
+                self.copy_to_slice(dst);
+                Ok(())
+            }
+
+            #[inline]
+            fn advance_by(&mut self, by: usize) {
+                self.advance(by);
+            }
+        }
+        )*
+    };
+}
+
+impl_buffer_for_bytes![bytes::Bytes, bytes::BytesMut];
+
+impl Buffer for &[u8] {
+    type Error = Error;
+
+    fn remaining_slice(&self) -> &[u8] {
+        self
+    }
+
+    // todo what is the return value if this method
+    fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        ensure!(self.len() >= dst.len(), OverflowSnafu);
+        self.read_exact(dst).context(EofSnafu)
+    }
+
+    fn advance_by(&mut self, by: usize) {
+        *self = &self[by..];
+    }
+}
+
+/// Mutable buffer.
+pub trait BufferMut {
+    type Error: ErrorExt + Send + Sync;
+
+    fn as_slice(&self) -> &[u8];
+
+    fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Self::Error>;
+
+    impl_write_le![i8, u8, i16, u16, i32, u32, i64, u64, f32, f64];
+}
+
+impl BufferMut for BytesMut {
+    type Error = Error;
+
+    fn as_slice(&self) -> &[u8] {
+        self
+    }
+
+    fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Self::Error> {
+        self.put_slice(src);
+        Ok(())
+    }
+}
+
+impl BufferMut for &mut [u8] {
+    type Error = Error;
+
+    fn as_slice(&self) -> &[u8] {
+        self
+    }
+
+    fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Self::Error> {
+        // see std::io::Write::write_all
+        self.write_all(src).map_err(|_| OverflowSnafu {}.build())
+    }
+}
+
+impl BufferMut for Vec<u8> {
+    type Error = Error;
+
+    fn as_slice(&self) -> &[u8] {
+        self
+    }
+
+    fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Self::Error> {
+        self.extend_from_slice(src);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crc::{Crc, CRC_32_ISCSI};
+
+    use super::*;
+
+    #[test]
+    pub fn test_buffer_read_write() {
+        let mut buf = BytesMut::with_capacity(16);
+        buf.write_u64_le(1234u64).unwrap();
+        let result = buf.read_u64_le().unwrap();
+        assert_eq!(1234u64, result);
+
+        buf.write_from_slice("hello, world".as_bytes()).unwrap();
+        let mut content = vec![0u8; 5];
+        buf.read_to_slice(&mut content).unwrap();
+        let read = String::from_utf8_lossy(&content);
+        assert_eq!("hello", read);
+
+        // after read, buffer should still have 7 bytes to read.
+        assert_eq!(7, buf.remaining());
+    }
+
+    #[test]
+    pub fn test_read_write_2() {
+        let mut buf = BytesMut::with_capacity(128);
+        buf.write_u64_le(114514).unwrap();
+        buf.write_u32_le(114515).unwrap();
+
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+        let crc1 = crc.checksum(buf.as_slice());
+
+        let mut digest = crc.digest();
+        digest.update(&buf.read_u64_le().unwrap().to_le_bytes());
+        digest.update(&buf.read_u32_le().unwrap().to_le_bytes());
+
+        let crc2 = digest.finalize();
+        assert_eq!(crc1, crc2);
+    }
+}

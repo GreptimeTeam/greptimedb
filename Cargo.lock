@@ -549,7 +549,13 @@ dependencies = [
 name = "common-base"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "common-error",
+ "crc",
+ "memmap2",
+ "paste",
  "serde",
+ "snafu",
 ]
 
 [[package]]
@@ -1643,6 +1649,7 @@ dependencies = [
  "base64",
  "byteorder",
  "bytes",
+ "common-base",
  "common-error",
  "common-telemetry",
  "crc",
@@ -3066,6 +3073,8 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "bytes",
+ "common-base",
  "common-error",
  "datatypes",
  "futures",

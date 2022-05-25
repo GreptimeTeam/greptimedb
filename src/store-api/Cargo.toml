@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1"
+bytes = "1.1"
+common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
