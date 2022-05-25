@@ -10,6 +10,7 @@ async-trait = "0.1"
 common-error = { path = "../common/error" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
+snafu = { version = "0.7", features = ["backtraces"] }
 
 [dev-dependencies]
 async-stream = "0.3"
