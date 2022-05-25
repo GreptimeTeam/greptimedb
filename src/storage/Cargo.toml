@@ -8,5 +8,6 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1"
 common-error = { path = "../common/error" }
+common-telemetry = { path = "../common/telemetry" }
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }

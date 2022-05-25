@@ -2965,6 +2965,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "common-error",
+ "common-telemetry",
  "snafu",
  "store-api",
 ]

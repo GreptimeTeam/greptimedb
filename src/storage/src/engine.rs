@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use common_telemetry::logging::info;
 use snafu::ResultExt;
 use store_api::storage::{EngineContext, RegionDescriptor, StorageEngine};
 
@@ -73,8 +74,12 @@ impl EngineInner {
                 return Ok(region.clone());
             }
 
-            regions.insert(region_name, region.clone());
+            regions.insert(region_name.clone(), region.clone());
         }
+        // TODO(yingwen): Persist region metadata to log.
+
+        // TODO(yingwen): Impl Debug format for region and print region info briefly in log.
+        info!("Storage engine create region {}", region_name);
 
         Ok(region)
     }
