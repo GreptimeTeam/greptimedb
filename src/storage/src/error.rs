@@ -1,7 +1,8 @@
 use std::any::Any;
 
 use common_error::prelude::*;
-use store_api::storage::metadata::Error as MetadataError;
+
+use crate::metadata::Error as MetadataError;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]

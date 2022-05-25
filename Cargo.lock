@@ -2973,6 +2973,7 @@ dependencies = [
  "async-trait",
  "common-error",
  "common-telemetry",
+ "datatypes",
  "snafu",
  "store-api",
 ]
@@ -2986,7 +2987,6 @@ dependencies = [
  "common-error",
  "datatypes",
  "futures",
- "snafu",
  "tokio",
 ]
 

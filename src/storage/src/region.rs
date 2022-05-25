@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use store_api::storage::{
-    ReadContext, Region, RegionMetadata, RegionMetadataRef, WriteContext, WriteResponse,
-};
+use store_api::storage::{ReadContext, Region, WriteContext, WriteResponse};
 
 use crate::column_family::ColumnFamilyHandle;
 use crate::error::{Error, Result};
+use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
 use crate::snapshot::SnapshotImpl;
+use crate::sync::CowCell;
+use crate::version::Version;
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
-// TODO(yingwen): Wrap a arc inner.
 #[derive(Clone)]
 pub struct RegionImpl {
     inner: Arc<RegionInner>,
@@ -20,14 +20,18 @@ pub struct RegionImpl {
 #[async_trait]
 impl Region for RegionImpl {
     type Error = Error;
+    type Meta = RegionMetaImpl;
     type WriteRequest = WriteBatch;
     type ColumnFamily = ColumnFamilyHandle;
     type Snapshot = SnapshotImpl;
 
-    fn in_memory_metadata(&self) -> RegionMetadataRef {
-        self.inner.metadata.clone()
+    // TODO(yingwen): Add a name trait ?
+
+    fn in_memory_metadata(&self) -> RegionMetaImpl {
+        self.inner.in_memory_metadata()
     }
 
+    // TODO(yingwen): Move list_cf() to meta trait?
     fn list_cf(&self) -> Result<Vec<ColumnFamilyHandle>> {
         unimplemented!()
     }
@@ -42,14 +46,28 @@ impl Region for RegionImpl {
 }
 
 impl RegionImpl {
-    pub fn new(metadata: RegionMetadata) -> RegionImpl {
+    pub fn new(name: String, metadata: RegionMetadata) -> RegionImpl {
         let metadata = Arc::new(metadata);
-        let inner = Arc::new(RegionInner { metadata });
+        let version = Version { metadata };
+        let inner = Arc::new(RegionInner {
+            name,
+            version: CowCell::new(version),
+        });
 
         RegionImpl { inner }
     }
 }
 
 struct RegionInner {
-    metadata: RegionMetadataRef,
+    name: String,
+    version: CowCell<Version>,
+}
+
+impl RegionInner {
+    fn in_memory_metadata(&self) -> RegionMetaImpl {
+        let version = self.version.get();
+        let metadata = version.metadata.clone();
+
+        RegionMetaImpl::new(metadata)
+    }
 }

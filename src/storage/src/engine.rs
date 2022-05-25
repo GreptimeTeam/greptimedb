@@ -66,7 +66,7 @@ impl EngineInner {
             .context(error::InvalidRegionDescSnafu {
                 region: &region_name,
             })?;
-        let region = RegionImpl::new(metadata);
+        let region = RegionImpl::new(region_name.clone(), metadata);
 
         {
             let mut regions = self.regions.write().unwrap();

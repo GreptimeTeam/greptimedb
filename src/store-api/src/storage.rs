@@ -1,10 +1,10 @@
 //! Storage APIs.
 
 mod column_family;
-mod consts;
+pub mod consts;
 mod descriptors;
 mod engine;
-pub mod metadata;
+mod metadata;
 mod region;
 mod requests;
 mod responses;
@@ -15,10 +15,11 @@ pub use datatypes::schema::{Schema, SchemaRef};
 
 pub use self::column_family::ColumnFamily;
 pub use self::descriptors::{
-    ColumnDescriptor, ColumnFamilyDescriptor, RegionDescriptor, RowKeyDescriptor,
+    ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyId, ColumnId,
+    RegionDescriptor, RowKeyDescriptor,
 };
 pub use self::engine::{EngineContext, StorageEngine};
-pub use self::metadata::{RegionMetadata, RegionMetadataRef};
+pub use self::metadata::RegionMeta;
 pub use self::region::{Region, WriteContext};
 pub use self::requests::{GetRequest, ScanRequest, WriteRequest};
 pub use self::responses::{GetResponse, ScanResponse, WriteResponse};

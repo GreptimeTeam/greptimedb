@@ -10,5 +10,6 @@ arc-swap = "1.0"
 async-trait = "0.1"
 common-error = { path = "../common/error" }
 common-telemetry = { path = "../common/telemetry" }
+datatypes = { path = "../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
