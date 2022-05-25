@@ -1,9 +1,8 @@
 //! LogStore APIs.
 
 use common_error::prelude::ErrorExt;
-use entry::Offset;
 
-use crate::logstore::entry::Entry;
+use crate::logstore::entry::{Entry, Id};
 use crate::logstore::entry_stream::SendableEntryStream;
 use crate::logstore::namespace::Namespace;
 
@@ -19,21 +18,21 @@ pub trait LogStore {
     type Entry: Entry;
 
     /// Append an `Entry` to WAL with given namespace
-    async fn append(&mut self, ns: Self::Namespace, e: Self::Entry) -> Result<Offset, Self::Error>;
+    async fn append(&mut self, ns: Self::Namespace, mut e: Self::Entry) -> Result<Id, Self::Error>;
 
     // Append a batch of entries atomically and return the offset of first entry.
     async fn append_batch(
-        &mut self,
+        &self,
         ns: Self::Namespace,
         e: Vec<Self::Entry>,
-    ) -> Result<Offset, Self::Error>;
+    ) -> Result<Id, Self::Error>;
 
     // Create a new `EntryStream` to asynchronously generates `Entry`.
     async fn read(
         &self,
         ns: Self::Namespace,
-        offset: Offset,
-    ) -> Result<SendableEntryStream<Self::Entry>, Self::Error>;
+        id: Id,
+    ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error>;
 
     // Create a new `Namespace`.
     async fn create_namespace(&mut self, ns: Self::Namespace) -> Result<(), Self::Error>;
