@@ -16,15 +16,16 @@ pub mod namespace;
 pub trait LogStore {
     type Error: ErrorExt + Send + Sync;
     type Namespace: Namespace;
+    type Entry: Entry;
 
     /// Append an `Entry` to WAL with given namespace
-    async fn append(&mut self, ns: Self::Namespace, e: Entry) -> Result<Offset, Self::Error>;
+    async fn append(&mut self, ns: Self::Namespace, e: Self::Entry) -> Result<Offset, Self::Error>;
 
     // Append a batch of entries atomically and return the offset of first entry.
     async fn append_batch(
         &mut self,
         ns: Self::Namespace,
-        e: Vec<Entry>,
+        e: Vec<Self::Entry>,
     ) -> Result<Offset, Self::Error>;
 
     // Create a new `EntryStream` to asynchronously generates `Entry`.
@@ -32,7 +33,7 @@ pub trait LogStore {
         &self,
         ns: Self::Namespace,
         offset: Offset,
-    ) -> Result<SendableEntryStream, Self::Error>;
+    ) -> Result<SendableEntryStream<Self::Entry>, Self::Error>;
 
     // Create a new `Namespace`.
     async fn create_namespace(&mut self, ns: Self::Namespace) -> Result<(), Self::Error>;
