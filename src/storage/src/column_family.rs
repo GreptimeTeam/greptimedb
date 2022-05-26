@@ -1,26 +1,29 @@
-use std::sync::Arc;
+use std::fmt;
 
 use store_api::storage::{ColumnFamily, ColumnFamilyId};
 
-use crate::metadata::RegionMetadataRef;
+use crate::version_control::VersionControlRef;
 
 /// Handle to column family.
 #[derive(Clone)]
 pub struct ColumnFamilyHandle {
-    data: ColumnFamilyDataRef,
+    cf_id: ColumnFamilyId,
+    version: VersionControlRef,
 }
 
-impl ColumnFamily for ColumnFamilyHandle {
-    fn name(&self) -> &str {
-        &self.data.name
+impl fmt::Debug for ColumnFamilyHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let metadata = self.version.metadata();
+        if let Some(cf) = metadata.cf_by_id(self.cf_id) {
+            write!(f, "ColumnFamily({}, {})", cf.name, self.cf_id)
+        } else {
+            write!(f, "ColumnFamily(unknown, {})", self.cf_id)
+        }
     }
 }
 
-type ColumnFamilyDataRef = Arc<ColumnFamilyData>;
-
-struct ColumnFamilyData {
-    // TODO(yingwen): Maybe remove name from cf data.
-    name: String,
-    cf_id: ColumnFamilyId,
-    // TODO(yingwen): metadata.
+impl ColumnFamily for ColumnFamilyHandle {
+    fn id(&self) -> ColumnFamilyId {
+        self.cf_id
+    }
 }

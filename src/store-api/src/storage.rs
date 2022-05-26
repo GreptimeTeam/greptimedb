@@ -21,6 +21,6 @@ pub use self::descriptors::{
 pub use self::engine::{EngineContext, StorageEngine};
 pub use self::metadata::RegionMeta;
 pub use self::region::{Region, WriteContext};
-pub use self::requests::{GetRequest, ScanRequest, WriteRequest};
+pub use self::requests::{GetRequest, PutOperation, ScanRequest, WriteRequest};
 pub use self::responses::{GetResponse, ScanResponse, WriteResponse};
 pub use self::snapshot::{ReadContext, Snapshot};

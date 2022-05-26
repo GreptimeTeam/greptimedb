@@ -6,6 +6,6 @@ mod error;
 mod metadata;
 mod region;
 mod snapshot;
-mod sync;
+pub mod sync;
 mod version_control;
 mod write_batch;

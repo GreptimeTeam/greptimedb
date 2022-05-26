@@ -36,6 +36,9 @@ pub trait Region: Send + Sync + Clone {
     type ColumnFamily: ColumnFamily;
     type Snapshot: Snapshot;
 
+    /// Returns name of the region.
+    fn name(&self) -> &str;
+
     /// Returns the in memory metadata of this region.
     fn in_memory_metadata(&self) -> Self::Meta;
 

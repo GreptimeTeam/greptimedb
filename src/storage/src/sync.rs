@@ -36,14 +36,14 @@ impl<T: Clone> CowCell<T> {
     ///
     /// Note that this will clone the inner data.
     pub fn lock(&self) -> Txn<T> {
-        let guard = self.mutex.lock().unwrap();
+        let _guard = self.mutex.lock().unwrap();
         // Acquire a clone of data inside lock.
         let data = (*self.get()).clone();
 
         Txn {
             inner: &self.inner,
             data,
-            guard,
+            _guard,
         }
     }
 }
@@ -56,12 +56,12 @@ impl<T: Clone> CowCell<T> {
 pub struct Txn<'a, T: Clone> {
     inner: &'a ArcSwap<T>,
     data: T,
-    guard: MutexGuard<'a, ()>,
+    _guard: MutexGuard<'a, ()>,
 }
 
 impl<T: Clone> Txn<'_, T> {
     /// Commit updates to the cell and release the lock.
-    fn commit(self) {
+    pub fn commit(self) {
         let data = Arc::new(self.data);
         self.inner.store(data);
     }

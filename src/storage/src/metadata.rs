@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use common_error::prelude::*;
@@ -59,7 +59,13 @@ pub struct RegionMetadata {
     pub schema: SchemaRef,
     pub columns: ColumnsMetadata,
     pub row_key: RowKeyMetadata,
-    pub column_families: ColumnFamiliesMetadata,
+    column_families: ColumnFamiliesMetadata,
+}
+
+impl RegionMetadata {
+    pub fn cf_by_id(&self, cf_id: ColumnFamilyId) -> Option<&ColumnFamilyMetadata> {
+        self.column_families.cf_by_id(cf_id)
+    }
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
@@ -94,11 +100,15 @@ pub struct RowKeyMetadata {
 
 // TODO(yingwen): id to cfs metadata, name to id.
 #[derive(Clone)]
-pub struct ColumnFamiliesMetadata {
+struct ColumnFamiliesMetadata {
     /// Map column family id to column family metadata.
-    pub id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
-    /// Map column family name to column family id.
-    pub name_to_cf_id: HashMap<String, ColumnFamilyId>,
+    id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
+}
+
+impl ColumnFamiliesMetadata {
+    fn cf_by_id(&self, cf_id: ColumnFamilyId) -> Option<&ColumnFamilyMetadata> {
+        self.id_to_cfs.get(&cf_id)
+    }
 }
 
 #[derive(Clone)]
@@ -136,7 +146,7 @@ struct RegionMetadataBuilder {
     row_key: RowKeyMetadata,
 
     id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
-    name_to_cf_id: HashMap<String, ColumnFamilyId>,
+    cf_names: HashSet<String>,
 }
 
 impl RegionMetadataBuilder {
@@ -175,7 +185,7 @@ impl RegionMetadataBuilder {
         );
 
         ensure!(
-            !self.name_to_cf_id.contains_key(&cf.name),
+            !self.cf_names.contains(&cf.name),
             CfNameExistsSnafu { name: &cf.name }
         );
 
@@ -193,7 +203,7 @@ impl RegionMetadataBuilder {
         };
 
         self.id_to_cfs.insert(cf.cf_id, cf_meta);
-        self.name_to_cf_id.insert(cf.name, cf.cf_id);
+        self.cf_names.insert(cf.name);
 
         Ok(self)
     }
@@ -213,7 +223,6 @@ impl RegionMetadataBuilder {
             row_key: self.row_key,
             column_families: ColumnFamiliesMetadata {
                 id_to_cfs: self.id_to_cfs,
-                name_to_cf_id: self.name_to_cf_id,
             },
         }
     }

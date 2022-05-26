@@ -5,7 +5,7 @@ use store_api::storage::{ReadContext, Region, WriteContext, WriteResponse};
 
 use crate::column_family::ColumnFamilyHandle;
 use crate::error::{Error, Result};
-use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
+use crate::metadata::{RegionMetaImpl, RegionMetadata};
 use crate::snapshot::SnapshotImpl;
 use crate::version_control::{VersionControl, VersionControlRef};
 use crate::write_batch::WriteBatch;
@@ -24,7 +24,9 @@ impl Region for RegionImpl {
     type ColumnFamily = ColumnFamilyHandle;
     type Snapshot = SnapshotImpl;
 
-    // TODO(yingwen): Add a name trait ?
+    fn name(&self) -> &str {
+        &self.inner.name
+    }
 
     fn in_memory_metadata(&self) -> RegionMetaImpl {
         self.inner.in_memory_metadata()
@@ -35,8 +37,8 @@ impl Region for RegionImpl {
         unimplemented!()
     }
 
-    async fn write(&self, _ctx: &WriteContext, _request: WriteBatch) -> Result<WriteResponse> {
-        unimplemented!()
+    async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
+        self.inner.write(ctx, request).await
     }
 
     fn snapshot(&self, _ctx: &ReadContext) -> Result<SnapshotImpl> {
@@ -59,6 +61,7 @@ impl RegionImpl {
 struct RegionInner {
     name: String,
     version: VersionControlRef,
+    // TODO(yingwen): Region writer, wal, memtable.
 }
 
 impl RegionInner {
@@ -66,5 +69,10 @@ impl RegionInner {
         let metadata = self.version.metadata();
 
         RegionMetaImpl::new(metadata)
+    }
+
+    async fn write(&self, _ctx: &WriteContext, _request: WriteBatch) -> Result<WriteResponse> {
+        // TODO(yingwen): Validate schema.
+        unimplemented!()
     }
 }
