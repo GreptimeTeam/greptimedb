@@ -7,8 +7,7 @@ use crate::column_family::ColumnFamilyHandle;
 use crate::error::{Error, Result};
 use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
 use crate::snapshot::SnapshotImpl;
-use crate::sync::CowCell;
-use crate::version::Version;
+use crate::version_control::{VersionControl, VersionControlRef};
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
@@ -47,11 +46,10 @@ impl Region for RegionImpl {
 
 impl RegionImpl {
     pub fn new(name: String, metadata: RegionMetadata) -> RegionImpl {
-        let metadata = Arc::new(metadata);
-        let version = Version { metadata };
+        let version = VersionControl::new(metadata);
         let inner = Arc::new(RegionInner {
             name,
-            version: CowCell::new(version),
+            version: Arc::new(version),
         });
 
         RegionImpl { inner }
@@ -60,13 +58,12 @@ impl RegionImpl {
 
 struct RegionInner {
     name: String,
-    version: CowCell<Version>,
+    version: VersionControlRef,
 }
 
 impl RegionInner {
     fn in_memory_metadata(&self) -> RegionMetaImpl {
-        let version = self.version.get();
-        let metadata = version.metadata.clone();
+        let metadata = self.version.metadata();
 
         RegionMetaImpl::new(metadata)
     }

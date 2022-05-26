@@ -2,7 +2,7 @@ use common_base::bytes::{Bytes, StringBytes};
 use serde::{Serialize, Serializer};
 
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
 

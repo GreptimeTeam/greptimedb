@@ -27,6 +27,8 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Implementation of [RegionMeta].
+///
+/// Holds a snapshot of region metadata.
 pub struct RegionMetaImpl {
     metadata: RegionMetadataRef,
 }
@@ -43,7 +45,10 @@ impl RegionMeta for RegionMetaImpl {
     }
 }
 
+// TODO(yingwen): Make some fields of metadata private.
+
 /// In memory metadata of region.
+#[derive(Clone)]
 pub struct RegionMetadata {
     /// Schema of the region.
     ///
@@ -51,56 +56,60 @@ pub struct RegionMetadata {
     /// conveniently. The fields order in `SchemaRef` **must** be consistent with
     /// columns order in [ColumnsMetadata] to ensure the projection index of a field
     /// is correct.
-    schema: SchemaRef,
-    columns: ColumnsMetadata,
-    row_key: RowKeyMetadata,
-    column_families: ColumnFamiliesMetadata,
+    pub schema: SchemaRef,
+    pub columns: ColumnsMetadata,
+    pub row_key: RowKeyMetadata,
+    pub column_families: ColumnFamiliesMetadata,
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
 
-struct ColumnMetadata {
+#[derive(Clone)]
+pub struct ColumnMetadata {
     /// Id of column family that this column belongs to.
-    cf_id: ColumnFamilyId,
-    desc: ColumnDescriptor,
+    pub cf_id: ColumnFamilyId,
+    pub desc: ColumnDescriptor,
 }
 
-struct ColumnsMetadata {
+#[derive(Clone)]
+pub struct ColumnsMetadata {
     /// All columns, in `(key columns, timestamp, [version,] value columns)` order.
     ///
     /// Columns order should be consistent with fields order in [SchemaRef].
-    columns: Vec<ColumnMetadata>,
+    pub columns: Vec<ColumnMetadata>,
     /// Maps column name to index of columns, used to fast lookup column by name.
-    name_to_col_index: HashMap<String, usize>,
+    pub name_to_col_index: HashMap<String, usize>,
 }
 
-#[derive(Default)]
-struct RowKeyMetadata {
+#[derive(Default, Clone)]
+pub struct RowKeyMetadata {
     /// Exclusive end index of row key columns.
-    row_key_end: usize,
+    pub row_key_end: usize,
     /// Index of timestamp key column.
-    timestamp_key_index: usize,
+    pub timestamp_key_index: usize,
     /// If version column is enabled, then the last column of key columns is a
     /// version column.
-    enable_version_column: bool,
+    pub enable_version_column: bool,
 }
 
 // TODO(yingwen): id to cfs metadata, name to id.
-struct ColumnFamiliesMetadata {
+#[derive(Clone)]
+pub struct ColumnFamiliesMetadata {
     /// Map column family id to column family metadata.
-    id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
+    pub id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
     /// Map column family name to column family id.
-    name_to_cf_id: HashMap<String, ColumnFamilyId>,
+    pub name_to_cf_id: HashMap<String, ColumnFamilyId>,
 }
 
-struct ColumnFamilyMetadata {
+#[derive(Clone)]
+pub struct ColumnFamilyMetadata {
     /// Column family name.
-    name: String,
-    cf_id: ColumnFamilyId,
+    pub name: String,
+    pub cf_id: ColumnFamilyId,
     /// Inclusive start index of columns in the column family.
-    column_index_start: usize,
+    pub column_index_start: usize,
     /// Exclusive end index of columns in the column family.
-    column_index_end: usize,
+    pub column_index_end: usize,
 }
 
 impl TryFrom<RegionDescriptor> for RegionMetadata {

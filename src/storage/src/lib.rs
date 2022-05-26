@@ -7,5 +7,5 @@ mod metadata;
 mod region;
 mod snapshot;
 mod sync;
-mod version;
+mod version_control;
 mod write_batch;

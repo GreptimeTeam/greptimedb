@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use store_api::storage::{ColumnFamily, ColumnFamilyId};
 
+use crate::metadata::RegionMetadataRef;
+
 /// Handle to column family.
 #[derive(Clone)]
 pub struct ColumnFamilyHandle {
@@ -16,8 +18,9 @@ impl ColumnFamily for ColumnFamilyHandle {
 
 type ColumnFamilyDataRef = Arc<ColumnFamilyData>;
 
-// TODO(yingwen): cf_id and region meta.
 struct ColumnFamilyData {
+    // TODO(yingwen): Maybe remove name from cf data.
     name: String,
     cf_id: ColumnFamilyId,
+    // TODO(yingwen): metadata.
 }
