@@ -2,7 +2,7 @@ use std::fmt;
 
 use store_api::storage::{ColumnFamily, ColumnFamilyId};
 
-use crate::version_control::VersionControlRef;
+use crate::version::VersionControlRef;
 
 /// Handle to column family.
 #[derive(Clone)]

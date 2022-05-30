@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
 
+// TODO(yingwen): consider assign a version to schema.
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Schema {
     arrow_schema: Arc<ArrowSchema>,

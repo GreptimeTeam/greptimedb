@@ -2976,6 +2976,7 @@ dependencies = [
  "datatypes",
  "snafu",
  "store-api",
+ "tokio",
 ]
 
 [[package]]

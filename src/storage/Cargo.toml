@@ -13,3 +13,4 @@ common-telemetry = { path = "../common/telemetry" }
 datatypes = { path = "../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
+tokio = { version = "1.18", features = ["full"] }

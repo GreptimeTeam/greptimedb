@@ -2,12 +2,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use store_api::storage::{ReadContext, Region, WriteContext, WriteResponse};
+use tokio::sync::Mutex;
 
 use crate::column_family::ColumnFamilyHandle;
 use crate::error::{Error, Result};
+use crate::memtable::{DefaultMemTableBuilder, MemTableBuilder, MemTableSet};
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
+use crate::region_writer::RegionWriter;
 use crate::snapshot::SnapshotImpl;
-use crate::version_control::{VersionControl, VersionControlRef};
+use crate::version::{VersionControl, VersionControlRef};
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
@@ -48,10 +51,15 @@ impl Region for RegionImpl {
 
 impl RegionImpl {
     pub fn new(name: String, metadata: RegionMetadata) -> RegionImpl {
-        let version = VersionControl::new(metadata);
+        let memtable_builder = Arc::new(DefaultMemTableBuilder {});
+        let mem = memtable_builder.build();
+        let memtables = MemTableSet::new(mem);
+
+        let version = VersionControl::new(metadata, memtables);
         let inner = Arc::new(RegionInner {
             name,
             version: Arc::new(version),
+            writer: Mutex::new(RegionWriter::new(memtable_builder)),
         });
 
         RegionImpl { inner }
@@ -61,7 +69,7 @@ impl RegionImpl {
 struct RegionInner {
     name: String,
     version: VersionControlRef,
-    // TODO(yingwen): Region writer, wal, memtable.
+    writer: Mutex<RegionWriter>,
 }
 
 impl RegionInner {
@@ -71,8 +79,10 @@ impl RegionInner {
         RegionMetaImpl::new(metadata)
     }
 
-    async fn write(&self, _ctx: &WriteContext, _request: WriteBatch) -> Result<WriteResponse> {
+    async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
         // TODO(yingwen): Validate schema.
-        unimplemented!()
+
+        let mut writer = self.writer.lock().await;
+        writer.write(ctx, &self.version, request).await
     }
 }
