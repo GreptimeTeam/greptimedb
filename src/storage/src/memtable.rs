@@ -1,14 +1,13 @@
 use std::mem;
 use std::sync::Arc;
 
-use store_api::storage::SchemaRef;
-
 use crate::error::Result;
+use crate::metadata::ColumnsRowKeyMetadataRef;
 use crate::write_batch::WriteBatch;
 
 /// In memory storage.
 pub trait MemTable: Send + Sync {
-    fn schema(&self) -> &SchemaRef;
+    fn schema(&self) -> &MemTableSchema;
 
     fn write(&self, batch: &WriteBatch) -> Result<()>;
 
@@ -18,15 +17,25 @@ pub trait MemTable: Send + Sync {
 pub type MemTableRef = Arc<dyn MemTable>;
 
 pub trait MemTableBuilder: Send + Sync {
-    fn build(&self) -> MemTableRef;
+    fn build(&self, schema: MemTableSchema) -> MemTableRef;
 }
 
 pub type MemTableBuilderRef = Arc<dyn MemTableBuilder>;
 
+pub struct MemTableSchema {
+    _columns_row_key: ColumnsRowKeyMetadataRef,
+}
+
+impl MemTableSchema {
+    pub fn new(_columns_row_key: ColumnsRowKeyMetadataRef) -> MemTableSchema {
+        MemTableSchema { _columns_row_key }
+    }
+}
+
 pub struct DefaultMemTableBuilder {}
 
 impl MemTableBuilder for DefaultMemTableBuilder {
-    fn build(&self) -> MemTableRef {
+    fn build(&self, _schema: MemTableSchema) -> MemTableRef {
         unimplemented!()
     }
 }

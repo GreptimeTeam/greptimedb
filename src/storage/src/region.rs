@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 
 use crate::column_family::ColumnFamilyHandle;
 use crate::error::{Error, Result};
-use crate::memtable::{DefaultMemTableBuilder, MemTableBuilder, MemTableSet};
+use crate::memtable::{DefaultMemTableBuilder, MemTableBuilder, MemTableSchema, MemTableSet};
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 use crate::region_writer::RegionWriter;
 use crate::snapshot::SnapshotImpl;
@@ -52,7 +52,8 @@ impl Region for RegionImpl {
 impl RegionImpl {
     pub fn new(name: String, metadata: RegionMetadata) -> RegionImpl {
         let memtable_builder = Arc::new(DefaultMemTableBuilder {});
-        let mem = memtable_builder.build();
+        let memtable_schema = MemTableSchema::new(metadata.columns_row_key.clone());
+        let mem = memtable_builder.build(memtable_schema);
         let memtables = MemTableSet::new(mem);
 
         let version = VersionControl::new(metadata, memtables);

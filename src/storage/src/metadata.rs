@@ -57,8 +57,7 @@ pub struct RegionMetadata {
     /// columns order in [ColumnsMetadata] to ensure the projection index of a field
     /// is correct.
     pub schema: SchemaRef,
-    pub columns: ColumnsMetadata,
-    pub row_key: RowKeyMetadata,
+    pub columns_row_key: ColumnsRowKeyMetadataRef,
     column_families: ColumnFamiliesMetadata,
 }
 
@@ -97,6 +96,20 @@ pub struct RowKeyMetadata {
     /// version column.
     pub enable_version_column: bool,
 }
+
+#[derive(Clone)]
+pub struct ColumnsRowKeyMetadata {
+    pub columns: ColumnsMetadata,
+    pub row_key: RowKeyMetadata,
+}
+
+impl ColumnsRowKeyMetadata {
+    pub fn _iter_row_key_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+        self.columns.columns.iter().take(self.row_key.row_key_end)
+    }
+}
+
+pub type ColumnsRowKeyMetadataRef = Arc<ColumnsRowKeyMetadata>;
 
 // TODO(yingwen): id to cfs metadata, name to id.
 #[derive(Clone)]
@@ -213,14 +226,18 @@ impl RegionMetadataBuilder {
             fields: self.fields,
             metadata: BTreeMap::new(),
         });
+        let columns = ColumnsMetadata {
+            columns: self.columns,
+            name_to_col_index: self.name_to_col_index,
+        };
+        let columns_row_key = Arc::new(ColumnsRowKeyMetadata {
+            columns,
+            row_key: self.row_key,
+        });
 
         RegionMetadata {
             schema: Arc::new(Schema::new(arrow_schema)),
-            columns: ColumnsMetadata {
-                columns: self.columns,
-                name_to_col_index: self.name_to_col_index,
-            },
-            row_key: self.row_key,
+            columns_row_key,
             column_families: ColumnFamiliesMetadata {
                 id_to_cfs: self.id_to_cfs,
             },
