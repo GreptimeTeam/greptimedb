@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 
 use common_error::prelude::*;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 use snafu::ensure;
@@ -11,6 +12,28 @@ use store_api::storage::{consts, PutOperation, WriteRequest};
 pub enum Error {
     #[snafu(display("Duplicate column {} in same request", name))]
     DuplicateColumn { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Missing column {} in request", name))]
+    MissingColumn { name: String, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Type of column {} does not match type in schema, expect {:?}, given {:?}",
+        name,
+        expect,
+        given
+    ))]
+    TypeMismatch {
+        name: String,
+        expect: ConcreteDataType,
+        given: ConcreteDataType,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Column {} is not null but input has null", name))]
+    HasNull { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Unknown column {}", name))]
+    UnknownColumn { name: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -56,17 +79,54 @@ impl WriteRequest for WriteBatch {
     }
 
     fn put(&mut self, data: PutData) -> Result<()> {
-        // TODO(yingwen): Validate schema.
+        self.validate_put(&data)?;
+
         self.batch.push(Mutation::Put(data));
         Ok(())
     }
 }
 
 impl WriteBatch {
-    fn validate_put(&self, data: PutData) -> Result<()> {
-        //
+    fn validate_put(&self, data: &PutData) -> Result<()> {
+        for column_schema in self.schema.column_schemas() {
+            match data.column_by_name(&column_schema.name) {
+                Some(col) => {
+                    ensure!(
+                        col.data_type() == column_schema.data_type,
+                        TypeMismatchSnafu {
+                            name: &column_schema.name,
+                            expect: column_schema.data_type.clone(),
+                            given: col.data_type(),
+                        }
+                    );
 
-        unimplemented!()
+                    ensure!(
+                        column_schema.is_nullable || col.null_count() == 0,
+                        HasNullSnafu {
+                            name: &column_schema.name,
+                        }
+                    );
+                }
+                None => {
+                    ensure!(
+                        column_schema.is_nullable,
+                        MissingColumnSnafu {
+                            name: &column_schema.name,
+                        }
+                    );
+                }
+            }
+        }
+
+        // Check all columns in data also exists in schema.
+        for name in data.columns.keys() {
+            ensure!(
+                self.schema.column_schema_by_name(name).is_some(),
+                UnknownColumnSnafu { name }
+            );
+        }
+
+        Ok(())
     }
 }
 

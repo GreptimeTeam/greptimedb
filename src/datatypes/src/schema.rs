@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
@@ -31,20 +32,24 @@ impl ColumnSchema {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Schema {
     column_schemas: Vec<ColumnSchema>,
+    name_to_index: HashMap<String, usize>,
     arrow_schema: Arc<ArrowSchema>,
 }
 
 impl Schema {
     pub fn new(column_schemas: Vec<ColumnSchema>) -> Schema {
         let mut fields = Vec::with_capacity(column_schemas.len());
-        for column_schema in &column_schemas {
+        let mut name_to_index = HashMap::with_capacity(column_schemas.len());
+        for (index, column_schema) in column_schemas.iter().enumerate() {
             let field = Field::from(column_schema);
             fields.push(field);
+            name_to_index.insert(column_schema.name.clone(), index);
         }
         let arrow_schema = Arc::new(ArrowSchema::from(fields));
 
         Schema {
             column_schemas,
+            name_to_index,
             arrow_schema,
         }
     }
@@ -55,6 +60,12 @@ impl Schema {
 
     pub fn column_schemas(&self) -> &[ColumnSchema] {
         &self.column_schemas
+    }
+
+    pub fn column_schema_by_name(&self, name: &str) -> Option<&ColumnSchema> {
+        self.name_to_index
+            .get(name)
+            .map(|index| &self.column_schemas[*index])
     }
 }
 
@@ -89,13 +100,16 @@ impl TryFrom<Arc<ArrowSchema>> for Schema {
 
     fn try_from(arrow_schema: Arc<ArrowSchema>) -> Result<Schema> {
         let mut column_schemas = Vec::with_capacity(arrow_schema.fields.len());
+        let mut name_to_index = HashMap::with_capacity(arrow_schema.fields.len());
         for field in &arrow_schema.fields {
             let column_schema = ColumnSchema::try_from(field)?;
+            name_to_index.insert(field.name.clone(), column_schemas.len());
             column_schemas.push(column_schema);
         }
 
         Ok(Self {
             column_schemas,
+            name_to_index,
             arrow_schema: arrow_schema.clone(),
         })
     }
@@ -126,6 +140,12 @@ mod tests {
             ColumnSchema::new("col2", ConcreteDataType::float64_datatype(), true),
         ];
         let schema = Schema::new(column_schemas.clone());
+
+        for column_schema in &column_schemas {
+            let found = schema.column_schema_by_name(&column_schema.name).unwrap();
+            assert_eq!(column_schema, found);
+        }
+        assert!(schema.column_schema_by_name("col3").is_none());
 
         let fields: Vec<_> = column_schemas.iter().map(Field::from).collect();
         let arrow_schema = Arc::new(ArrowSchema::from(fields));
