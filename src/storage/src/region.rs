@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use store_api::storage::{ReadContext, Region, WriteContext, WriteResponse};
+use snafu::ensure;
+use store_api::storage::{ReadContext, Region, RegionMeta, WriteContext, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::column_family::ColumnFamilyHandle;
-use crate::error::{Error, Result};
+use crate::error::{self, Error, Result};
 use crate::memtable::{DefaultMemTableBuilder, MemTableBuilder, MemTableSchema, MemTableSet};
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 use crate::region_writer::RegionWriter;
@@ -81,8 +82,15 @@ impl RegionInner {
     }
 
     async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
-        // TODO(yingwen): Validate schema.
+        let metadata = self.in_memory_metadata();
+        let schema = metadata.schema();
+        // Only compare column schemas.
+        ensure!(
+            schema.column_schemas() == request.schema().column_schemas(),
+            error::InvalidInputSchemaSnafu { region: &self.name }
+        );
 
+        // Now altering schema is not allowed, so it is safe to validate schema outside of the lock.
         let mut writer = self.writer.lock().await;
         writer.write(ctx, &self.version, request).await
     }

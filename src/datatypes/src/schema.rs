@@ -6,7 +6,8 @@ use arrow::datatypes::{Field, Schema as ArrowSchema};
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{Error, Result};
 
-// TODO(yingwen): consider assign a version to schema.
+// TODO(yingwen): consider assign a version to schema so compare schema can be
+// done by compare version.
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnSchema {
@@ -155,5 +156,6 @@ mod tests {
         assert_eq!(schema, schema2);
         assert_eq!(column_schemas, schema.column_schemas());
         assert_eq!(arrow_schema, *schema.arrow_schema());
+        assert_eq!(arrow_schema, *schema2.arrow_schema());
     }
 }

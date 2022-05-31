@@ -87,6 +87,10 @@ impl WriteRequest for WriteBatch {
 }
 
 impl WriteBatch {
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
     fn validate_put(&self, data: &PutData) -> Result<()> {
         for column_schema in self.schema.column_schemas() {
             match data.column_by_name(&column_schema.name) {

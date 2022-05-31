@@ -13,6 +13,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: MetadataError,
     },
+
+    #[snafu(display("Invalid schema of input data, region: {}", region))]
+    InvalidInputSchema {
+        region: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -22,7 +28,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            InvalidRegionDesc { .. } => StatusCode::InvalidArguments,
+            InvalidRegionDesc { .. } | InvalidInputSchema { .. } => StatusCode::InvalidArguments,
         }
     }
 

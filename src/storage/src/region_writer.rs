@@ -27,7 +27,6 @@ impl RegionWriter {
         let version = version_control.current();
         let memtables = &version.memtables;
 
-        // TODO(yingwen): Need to validate schema of write batch.
         let mem = memtables.mutable_memtable();
         mem.write(&request)?;
 

@@ -38,8 +38,8 @@ impl RegionMetaImpl {
 }
 
 impl RegionMeta for RegionMetaImpl {
-    fn schema(&self) -> SchemaRef {
-        self.metadata.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.metadata.schema
     }
 }
 
