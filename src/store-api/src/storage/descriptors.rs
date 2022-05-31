@@ -1,6 +1,6 @@
 use datatypes::value::Value;
 
-use crate::storage::ConcreteDataType;
+use crate::storage::{ColumnSchema, ConcreteDataType};
 
 /// Id of column, unique in each region.
 pub type ColumnId = u32;
@@ -20,6 +20,12 @@ pub struct ColumnDescriptor {
     /// for this column, and user must provide value for a not-null column.
     pub default_value: Option<Value>,
     pub comment: String,
+}
+
+impl From<&ColumnDescriptor> for ColumnSchema {
+    fn from(desc: &ColumnDescriptor) -> ColumnSchema {
+        ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable)
+    }
 }
 
 /// A [RowKeyDescriptor] contains information to about row key.

@@ -49,7 +49,7 @@ mod tests {
             DataType::UInt32,
             false,
         )]));
-        let schema = Arc::new(Schema::new(arrow_schema.clone()));
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
 
         let numbers: Vec<u32> = (0..10).collect();
         let df_batch = DfRecordBatch::try_new(

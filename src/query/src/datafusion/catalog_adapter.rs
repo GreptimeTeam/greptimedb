@@ -13,7 +13,7 @@ use datafusion::execution::runtime_env::RuntimeEnv;
 use snafu::ResultExt;
 use table::{
     table::adapter::{DfTableProviderAdapter, TableAdapter},
-    Table,
+    TableRef,
 };
 
 use crate::catalog::{schema::SchemaProvider, CatalogListRef, CatalogProvider};
@@ -150,7 +150,7 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
         name: String,
         table: Arc<dyn DfTableProvider>,
     ) -> DataFusionResult<Option<Arc<dyn DfTableProvider>>> {
-        let table = Arc::new(TableAdapter::new(table, self.runtime.clone()));
+        let table = Arc::new(TableAdapter::new(table, self.runtime.clone())?);
         match self.schema_provider.register_table(name, table)? {
             Some(p) => Ok(Some(Arc::new(DfTableProviderAdapter::new(p)))),
             None => Ok(None),
@@ -185,35 +185,46 @@ impl SchemaProvider for SchemaProviderAdapter {
         self.df_schema_provider.table_names()
     }
 
-    fn table(&self, name: &str) -> Option<Arc<dyn Table>> {
+    fn table(&self, name: &str) -> Option<TableRef> {
         self.df_schema_provider.table(name).map(|table_provider| {
-            Arc::new(TableAdapter::new(table_provider, self.runtime.clone())) as _
+            match table_provider
+                .as_any()
+                .downcast_ref::<DfTableProviderAdapter>()
+            {
+                Some(adapter) => adapter.table(),
+                None => {
+                    // TODO(yingwen): Avoid panic here.
+                    let adapter = TableAdapter::new(table_provider, self.runtime.clone())
+                        .expect("convert datafusion table");
+                    Arc::new(adapter) as _
+                }
+            }
         })
     }
 
-    fn register_table(
-        &self,
-        name: String,
-        table: Arc<dyn Table>,
-    ) -> Result<Option<Arc<dyn Table>>> {
-        let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+    fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
+        let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
         Ok(self
             .df_schema_provider
             .register_table(name, table_provider)
             .context(error::DatafusionSnafu {
                 msg: "Fail to register table to datafusion",
             })?
-            .map(|table| (Arc::new(TableAdapter::new(table, self.runtime.clone())) as _)))
+            .map(|_| table))
     }
 
-    fn deregister_table(&self, name: &str) -> Result<Option<Arc<dyn Table>>> {
-        Ok(self
-            .df_schema_provider
+    fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
+        self.df_schema_provider
             .deregister_table(name)
             .context(error::DatafusionSnafu {
                 msg: "Fail to deregister table from datafusion",
             })?
-            .map(|table| Arc::new(TableAdapter::new(table, self.runtime.clone())) as _))
+            .map(|table| {
+                let adapter = TableAdapter::new(table, self.runtime.clone())
+                    .context(error::ConvertTableSnafu)?;
+                Ok(Arc::new(adapter) as _)
+            })
+            .transpose()
     }
 
     fn table_exist(&self, name: &str) -> bool {

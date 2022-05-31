@@ -6,7 +6,6 @@ use std::fmt::Debug;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
-use arrow::error::{ArrowError, Result as ArrowResult};
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::{self as recordbatch_error, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
@@ -25,8 +24,9 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream as DfSendableRecordBatchStream, Statistics,
 };
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use datatypes::arrow::error::{ArrowError, Result as ArrowResult};
 use datatypes::schema::SchemaRef as TableSchemaRef;
-use datatypes::schema::{Schema, SchemaRef};
+use datatypes::schema::SchemaRef;
 use futures::Stream;
 use snafu::prelude::*;
 
@@ -109,6 +109,10 @@ impl DfTableProviderAdapter {
     pub fn new(table: TableRef) -> Self {
         Self { table }
     }
+
+    pub fn table(&self) -> TableRef {
+        self.table.clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -160,16 +164,18 @@ impl TableProvider for DfTableProviderAdapter {
 
 /// Datafusion TableProvider ->  greptime Table
 pub struct TableAdapter {
+    schema: TableSchemaRef,
     table_provider: Arc<dyn TableProvider>,
     runtime: Arc<RuntimeEnv>,
 }
 
 impl TableAdapter {
-    pub fn new(table_provider: Arc<dyn TableProvider>, runtime: Arc<RuntimeEnv>) -> Self {
-        Self {
+    pub fn new(table_provider: Arc<dyn TableProvider>, runtime: Arc<RuntimeEnv>) -> Result<Self> {
+        Ok(Self {
+            schema: Arc::new(table_provider.schema().try_into().unwrap()),
             table_provider,
             runtime,
-        }
+        })
     }
 }
 
@@ -180,7 +186,7 @@ impl Table for TableAdapter {
     }
 
     fn schema(&self) -> TableSchemaRef {
-        Arc::new(self.table_provider.schema().into())
+        self.schema.clone()
     }
 
     fn table_type(&self) -> TableType {
@@ -211,7 +217,10 @@ impl Table for TableAdapter {
             .await
             .context(error::DatafusionSnafu)?;
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(df_stream)))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.schema.clone(),
+            df_stream,
+        )))
     }
 
     fn supports_filter_pushdown(&self, filter: &Expr) -> Result<TableProviderFilterPushDown> {
@@ -268,18 +277,19 @@ impl Stream for DfRecordBatchStreamAdapter {
 
 /// Datafusion SendableRecordBatchStream to greptime RecordBatchStream
 pub struct RecordBatchStreamAdapter {
+    schema: SchemaRef,
     stream: DfSendableRecordBatchStream,
 }
 
 impl RecordBatchStreamAdapter {
-    pub fn new(stream: DfSendableRecordBatchStream) -> Self {
-        Self { stream }
+    pub fn new(schema: SchemaRef, stream: DfSendableRecordBatchStream) -> Self {
+        Self { schema, stream }
     }
 }
 
 impl RecordBatchStream for RecordBatchStreamAdapter {
     fn schema(&self) -> SchemaRef {
-        Arc::new(Schema::new(self.stream.schema()))
+        self.schema.clone()
     }
 }
 

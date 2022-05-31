@@ -1,17 +1,20 @@
+use common_error::ext::ErrorExt;
+use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 
 /// Write request holds a collection of updates to apply to a region.
 pub trait WriteRequest: Send {
+    type Error: ErrorExt + Send + Sync;
     type PutOp: PutOperation;
 
-    fn new() -> Self;
+    fn new(schema: SchemaRef) -> Self;
 
-    fn put(&mut self, put: Self::PutOp);
+    fn put(&mut self, put: Self::PutOp) -> Result<(), Self::Error>;
 }
 
 /// Put multiple rows.
 pub trait PutOperation {
-    type Error;
+    type Error: ErrorExt + Send + Sync;
 
     fn new() -> Self;
 

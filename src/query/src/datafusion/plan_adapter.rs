@@ -97,7 +97,10 @@ impl PhysicalPlan for PhysicalPlanAdapter {
                     msg: "Fail to execute physical plan",
                 })?;
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(df_stream)))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.schema.clone(),
+            df_stream,
+        )))
     }
 
     fn as_any(&self) -> &dyn Any {

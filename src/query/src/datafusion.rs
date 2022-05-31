@@ -124,7 +124,12 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                     })?;
 
                 Ok(Arc::new(PhysicalPlanAdapter::new(
-                    Arc::new(physical_plan.schema().into()),
+                    Arc::new(
+                        physical_plan
+                            .schema()
+                            .try_into()
+                            .context(error::ConvertSchemaSnafu)?,
+                    ),
                     physical_plan,
                 )))
             }

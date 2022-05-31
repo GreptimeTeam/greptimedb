@@ -1,6 +1,8 @@
+use std::any::Any;
 use std::collections::HashMap;
 
 use common_error::prelude::*;
+use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 use snafu::ensure;
 use store_api::storage::{consts, PutOperation, WriteRequest};
@@ -13,22 +15,24 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Implementation of [WriteRequest].
-#[derive(Default)]
-pub struct WriteBatch {
-    batch: Vec<Mutation>,
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        StatusCode::InvalidArguments
+    }
+
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
-impl WriteRequest for WriteBatch {
-    type PutOp = PutData;
-
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn put(&mut self, data: PutData) {
-        self.batch.push(Mutation::Put(data));
-    }
+/// Implementation of [WriteRequest].
+pub struct WriteBatch {
+    schema: SchemaRef,
+    batch: Vec<Mutation>,
 }
 
 enum Mutation {
@@ -38,6 +42,32 @@ enum Mutation {
 #[derive(Default)]
 pub struct PutData {
     columns: HashMap<String, VectorRef>,
+}
+
+impl WriteRequest for WriteBatch {
+    type Error = Error;
+    type PutOp = PutData;
+
+    fn new(schema: SchemaRef) -> Self {
+        Self {
+            schema,
+            batch: Vec::new(),
+        }
+    }
+
+    fn put(&mut self, data: PutData) -> Result<()> {
+        // TODO(yingwen): Validate schema.
+        self.batch.push(Mutation::Put(data));
+        Ok(())
+    }
+}
+
+impl WriteBatch {
+    fn validate_put(&self, data: PutData) -> Result<()> {
+        //
+
+        unimplemented!()
+    }
 }
 
 impl PutData {
@@ -50,6 +80,10 @@ impl PutData {
         self.columns.insert(name.to_string(), vector);
 
         Ok(())
+    }
+
+    fn column_by_name(&self, name: &str) -> Option<&VectorRef> {
+        self.columns.get(name)
     }
 }
 

@@ -3064,7 +3064,6 @@ checksum = "20518fe4a4c9acf048008599e464deb21beeae3d3578418951a189c235a7a9a8"
 name = "table"
 version = "0.1.0"
 dependencies = [
- "arrow2",
  "async-trait",
  "chrono",
  "common-error",

@@ -1,14 +1,12 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use common_error::prelude::*;
-use datatypes::arrow::datatypes::Field;
-use datatypes::arrow::datatypes::Schema as ArrowSchema;
-use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::data_type::ConcreteDataType;
 use snafu::ensure;
 use store_api::storage::{
     consts, ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyId,
-    ColumnId, RegionDescriptor, RegionMeta, RowKeyDescriptor, Schema, SchemaRef,
+    ColumnId, ColumnSchema, RegionDescriptor, RegionMeta, RowKeyDescriptor, Schema, SchemaRef,
 };
 
 /// Error for handling metadata.
@@ -45,6 +43,8 @@ impl RegionMeta for RegionMetaImpl {
     }
 }
 
+pub type VersionNumber = u32;
+
 // TODO(yingwen): Make some fields of metadata private.
 
 /// In memory metadata of region.
@@ -59,6 +59,9 @@ pub struct RegionMetadata {
     pub schema: SchemaRef,
     pub columns_row_key: ColumnsRowKeyMetadataRef,
     column_families: ColumnFamiliesMetadata,
+    /// Version of the metadata. Version is set to zero initially and bumped once the
+    /// metadata have been altered.
+    pub version: VersionNumber,
 }
 
 impl RegionMetadata {
@@ -139,6 +142,8 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
     type Error = Error;
 
     fn try_from(desc: RegionDescriptor) -> Result<RegionMetadata> {
+        // Doesn't set version explicitly here, because this is a new region meta
+        // created from descriptor, using initial version is reasonable.
         let mut builder = RegionMetadataBuilder::new()
             .row_key(desc.row_key)?
             .add_column_family(desc.default_cf)?;
@@ -153,7 +158,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
 #[derive(Default)]
 struct RegionMetadataBuilder {
     columns: Vec<ColumnMetadata>,
-    fields: Vec<Field>,
+    column_schemas: Vec<ColumnSchema>,
     name_to_col_index: HashMap<String, usize>,
 
     row_key: RowKeyMetadata,
@@ -222,10 +227,7 @@ impl RegionMetadataBuilder {
     }
 
     fn build(self) -> RegionMetadata {
-        let arrow_schema = Arc::new(ArrowSchema {
-            fields: self.fields,
-            metadata: BTreeMap::new(),
-        });
+        let schema = Arc::new(Schema::new(self.column_schemas));
         let columns = ColumnsMetadata {
             columns: self.columns,
             name_to_col_index: self.name_to_col_index,
@@ -236,11 +238,12 @@ impl RegionMetadataBuilder {
         });
 
         RegionMetadata {
-            schema: Arc::new(Schema::new(arrow_schema)),
+            schema,
             columns_row_key,
             column_families: ColumnFamiliesMetadata {
                 id_to_cfs: self.id_to_cfs,
             },
+            version: 0,
         }
     }
 
@@ -256,7 +259,7 @@ impl RegionMetadataBuilder {
             ColNameExistsSnafu { name: &desc.name }
         );
 
-        let field = column_desc_to_field(&desc);
+        let column_schema = ColumnSchema::from(&desc);
 
         let column_name = desc.name.clone();
         let meta = ColumnMetadata { cf_id, desc };
@@ -265,15 +268,11 @@ impl RegionMetadataBuilder {
 
         let column_index = self.columns.len();
         self.columns.push(meta);
-        self.fields.push(field);
+        self.column_schemas.push(column_schema);
         self.name_to_col_index.insert(column_name, column_index);
 
         Ok(())
     }
-}
-
-fn column_desc_to_field(desc: &ColumnDescriptor) -> Field {
-    Field::new(&desc.name, desc.data_type.as_arrow_type(), desc.is_nullable)
 }
 
 fn version_column_desc() -> ColumnDescriptor {

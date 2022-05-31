@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arrow::datatypes::DataType as ArrowDataType;
 use paste::paste;
 
+use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
@@ -81,7 +82,15 @@ impl ConcreteDataType {
     /// # Panics
     /// Panic if given arrow data type is not supported.
     pub fn from_arrow_type(dt: &ArrowDataType) -> Self {
-        match dt {
+        ConcreteDataType::try_from(dt).expect("Unimplemented type")
+    }
+}
+
+impl TryFrom<&ArrowDataType> for ConcreteDataType {
+    type Error = Error;
+
+    fn try_from(dt: &ArrowDataType) -> Result<ConcreteDataType> {
+        let concrete_type = match dt {
             ArrowDataType::Null => Self::null_datatype(),
             ArrowDataType::Boolean => Self::boolean_datatype(),
             ArrowDataType::UInt8 => Self::uint8_datatype(),
@@ -97,9 +106,14 @@ impl ConcreteDataType {
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             _ => {
-                unimplemented!("arrow data_type: {:?}", dt)
+                return error::UnsupportedArrowTypeSnafu {
+                    arrow_type: dt.clone(),
+                }
+                .fail()
             }
-        }
+        };
+
+        Ok(concrete_type)
     }
 }
 

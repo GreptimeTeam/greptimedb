@@ -11,7 +11,7 @@ mod responses;
 mod snapshot;
 
 pub use datatypes::data_type::ConcreteDataType;
-pub use datatypes::schema::{Schema, SchemaRef};
+pub use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 
 pub use self::column_family::ColumnFamily;
 pub use self::descriptors::{

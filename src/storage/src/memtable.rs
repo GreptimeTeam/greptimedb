@@ -1,8 +1,10 @@
+mod schema;
+
 use std::mem;
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::metadata::ColumnsRowKeyMetadataRef;
+pub use crate::memtable::schema::MemTableSchema;
 use crate::write_batch::WriteBatch;
 
 /// In memory storage.
@@ -21,16 +23,6 @@ pub trait MemTableBuilder: Send + Sync {
 }
 
 pub type MemTableBuilderRef = Arc<dyn MemTableBuilder>;
-
-pub struct MemTableSchema {
-    _columns_row_key: ColumnsRowKeyMetadataRef,
-}
-
-impl MemTableSchema {
-    pub fn new(_columns_row_key: ColumnsRowKeyMetadataRef) -> MemTableSchema {
-        MemTableSchema { _columns_row_key }
-    }
-}
 
 pub struct DefaultMemTableBuilder {}
 
