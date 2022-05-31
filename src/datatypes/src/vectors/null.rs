@@ -13,7 +13,7 @@ use crate::error::{Result, SerializeSnafu};
 use crate::serialize::Serializable;
 use crate::types::NullType;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::Vector;
+use crate::vectors::{Validity, Vector};
 
 pub struct NullVector {
     array: NullArray,
@@ -48,6 +48,10 @@ impl Vector for NullVector {
 
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
+    }
+
+    fn validity(&self) -> Validity {
+        Validity::AllNull
     }
 }
 

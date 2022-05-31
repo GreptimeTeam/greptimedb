@@ -13,7 +13,7 @@ use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::BooleanType;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::Vector;
+use crate::vectors::{Validity, Vector};
 
 /// Vector of boolean.
 #[derive(Debug)]
@@ -66,6 +66,13 @@ impl Vector for BooleanVector {
 
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
+    }
+
+    fn validity(&self) -> Validity {
+        match self.array.validity() {
+            Some(bitmap) => Validity::Slots(bitmap),
+            None => Validity::AllValid,
+        }
     }
 }
 

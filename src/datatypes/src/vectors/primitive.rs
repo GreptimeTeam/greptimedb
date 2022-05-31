@@ -14,7 +14,7 @@ use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{DataTypeBuilder, Primitive};
-use crate::vectors::Vector;
+use crate::vectors::{Validity, Vector};
 
 /// Vector for primitive data types.
 #[derive(Debug)]
@@ -72,6 +72,13 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
 
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
+    }
+
+    fn validity(&self) -> Validity {
+        match self.array.validity() {
+            Some(bitmap) => Validity::Slots(bitmap),
+            None => Validity::AllValid,
+        }
     }
 }
 

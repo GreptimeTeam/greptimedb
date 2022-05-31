@@ -10,7 +10,7 @@ use snafu::ResultExt;
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::SerializeSnafu;
-use crate::prelude::{ScalarVectorBuilder, Vector};
+use crate::prelude::{ScalarVectorBuilder, Validity, Vector};
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
 use crate::types::StringType;
@@ -43,6 +43,13 @@ impl Vector for StringVector {
 
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
+    }
+
+    fn validity(&self) -> Validity {
+        match self.array.validity() {
+            Some(bitmap) => Validity::Slots(bitmap),
+            None => Validity::AllValid,
+        }
     }
 }
 

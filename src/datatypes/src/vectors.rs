@@ -8,6 +8,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::ArrayRef;
+use arrow::bitmap::Bitmap;
 use arrow::datatypes::DataType as ArrowDataType;
 pub use binary::*;
 pub use boolean::*;
@@ -23,6 +24,16 @@ pub use crate::vectors::{
     Int64Vector, Int8Vector, NullVector, StringVector, UInt16Vector, UInt32Vector, UInt64Vector,
     UInt8Vector,
 };
+
+#[derive(Debug, PartialEq)]
+pub enum Validity<'a> {
+    /// Whether the array slot is valid or not (null).
+    Slots(&'a Bitmap),
+    /// All slots are valid.
+    AllValid,
+    /// All slots are null.
+    AllNull,
+}
 
 /// Vector of data values.
 pub trait Vector: Send + Sync + Serializable {
@@ -45,6 +56,20 @@ pub trait Vector: Send + Sync + Serializable {
 
     /// Convert this vector to a new arrow [ArrayRef].
     fn to_arrow_array(&self) -> ArrayRef;
+
+    /// Returns the validity of the Array.
+    fn validity(&self) -> Validity;
+
+    /// The number of null slots on this [`Vector`].
+    /// # Implementation
+    /// This is `O(1)`.
+    fn null_count(&self) -> usize {
+        match self.validity() {
+            Validity::Slots(bitmap) => bitmap.null_count(),
+            Validity::AllValid => 0,
+            Validity::AllNull => self.len(),
+        }
+    }
 }
 
 pub type VectorRef = Arc<dyn Vector>;
