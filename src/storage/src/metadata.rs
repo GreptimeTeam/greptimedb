@@ -102,13 +102,23 @@ pub struct RowKeyMetadata {
 
 #[derive(Clone)]
 pub struct ColumnsRowKeyMetadata {
-    pub columns: ColumnsMetadata,
-    pub row_key: RowKeyMetadata,
+    columns: ColumnsMetadata,
+    row_key: RowKeyMetadata,
 }
 
 impl ColumnsRowKeyMetadata {
-    pub fn _iter_row_key_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+    pub fn iter_row_key_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
         self.columns.columns.iter().take(self.row_key.row_key_end)
+    }
+
+    #[inline]
+    pub fn num_row_key_columns(&self) -> usize {
+        self.row_key.row_key_end
+    }
+
+    #[inline]
+    pub fn num_value_columns(&self) -> usize {
+        self.columns.columns.len() - self.row_key.row_key_end
     }
 }
 

@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::collections::HashMap;
+use std::slice;
 
 use common_error::prelude::*;
 use datatypes::data_type::ConcreteDataType;
@@ -34,9 +35,35 @@ pub enum Error {
 
     #[snafu(display("Unknown column {}", name))]
     UnknownColumn { name: String, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Length of column {} not equals to other columns, expect {}, given {}",
+        name,
+        expect,
+        given
+    ))]
+    LenNotEquals {
+        name: String,
+        expect: usize,
+        given: usize,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Request is too large, max is {}, current is {}",
+        MAX_BATCH_SIZE,
+        num_rows
+    ))]
+    RequestTooLarge {
+        num_rows: usize,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Max number of updates of a write batch.
+const MAX_BATCH_SIZE: usize = 1_000_000;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
@@ -55,10 +82,11 @@ impl ErrorExt for Error {
 /// Implementation of [WriteRequest].
 pub struct WriteBatch {
     schema: SchemaRef,
-    batch: Vec<Mutation>,
+    mutations: Vec<Mutation>,
+    num_rows: usize,
 }
 
-enum Mutation {
+pub enum Mutation {
     Put(PutData),
 }
 
@@ -74,14 +102,21 @@ impl WriteRequest for WriteBatch {
     fn new(schema: SchemaRef) -> Self {
         Self {
             schema,
-            batch: Vec::new(),
+            mutations: Vec::new(),
+            num_rows: 0,
         }
     }
 
     fn put(&mut self, data: PutData) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
         self.validate_put(&data)?;
 
-        self.batch.push(Mutation::Put(data));
+        self.add_len(data.len())?;
+        self.mutations.push(Mutation::Put(data));
+
         Ok(())
     }
 }
@@ -89,6 +124,10 @@ impl WriteRequest for WriteBatch {
 impl WriteBatch {
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
+    }
+
+    pub fn iter(&self) -> slice::Iter<'_, Mutation> {
+        self.mutations.iter()
     }
 
     fn validate_put(&self, data: &PutData) -> Result<()> {
@@ -132,6 +171,25 @@ impl WriteBatch {
 
         Ok(())
     }
+
+    fn add_len(&mut self, len: usize) -> Result<()> {
+        let num_rows = self.num_rows + len;
+        ensure!(
+            num_rows <= MAX_BATCH_SIZE,
+            RequestTooLargeSnafu { num_rows }
+        );
+        self.num_rows = num_rows;
+        Ok(())
+    }
+}
+
+impl<'a> IntoIterator for &'a WriteBatch {
+    type Item = &'a Mutation;
+    type IntoIter = slice::Iter<'a, Mutation>;
+
+    fn into_iter(self) -> slice::Iter<'a, Mutation> {
+        self.iter()
+    }
 }
 
 impl PutData {
@@ -141,6 +199,17 @@ impl PutData {
             DuplicateColumnSnafu { name }
         );
 
+        if let Some(col) = self.columns.values().next() {
+            ensure!(
+                col.len() == vector.len(),
+                LenNotEqualsSnafu {
+                    name,
+                    expect: col.len(),
+                    given: vector.len(),
+                }
+            );
+        }
+
         self.columns.insert(name.to_string(), vector);
 
         Ok(())
@@ -148,6 +217,18 @@ impl PutData {
 
     fn column_by_name(&self, name: &str) -> Option<&VectorRef> {
         self.columns.get(name)
+    }
+
+    fn len(&self) -> usize {
+        self.columns
+            .values()
+            .next()
+            .map(|col| col.len())
+            .unwrap_or(0)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
