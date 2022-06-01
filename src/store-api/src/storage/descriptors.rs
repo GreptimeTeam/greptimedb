@@ -115,7 +115,7 @@ mod tests {
     use super::*;
 
     fn new_column_descriptor_builder() -> ColumnDescriptorBuilder {
-        ColumnDescriptorBuilder::new(3, "test", ConcreteDataType::float64_datatype())
+        ColumnDescriptorBuilder::new(3, "test", ConcreteDataType::int32_datatype())
     }
 
     #[test]
@@ -123,7 +123,7 @@ mod tests {
         let desc = new_column_descriptor_builder().build();
         assert_eq!(3, desc.id);
         assert_eq!("test", desc.name);
-        assert_eq!(ConcreteDataType::float64_datatype(), desc.data_type);
+        assert_eq!(ConcreteDataType::int32_datatype(), desc.data_type);
         assert!(desc.is_nullable);
         assert!(desc.default_value.is_none());
         assert!(desc.comment.is_empty());
@@ -137,9 +137,9 @@ mod tests {
         assert_eq!(Value::Null, desc.default_value.unwrap());
 
         let desc = new_column_descriptor_builder()
-            .default_value(Some(Value::Float64(1.0)))
+            .default_value(Some(Value::Int32(123)))
             .build();
-        assert_eq!(Value::Float64(1.0), desc.default_value.unwrap());
+        assert_eq!(Value::Int32(123), desc.default_value.unwrap());
 
         let desc = new_column_descriptor_builder()
             .comment("A test column")
