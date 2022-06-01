@@ -35,6 +35,15 @@ pub enum Validity<'a> {
     AllNull,
 }
 
+impl<'a> Validity<'a> {
+    pub fn slots(&self) -> Option<&Bitmap> {
+        match self {
+            Validity::Slots(bitmap) => Some(bitmap),
+            _ => None,
+        }
+    }
+}
+
 /// Vector of data values.
 pub trait Vector: Send + Sync + Serializable {
     /// Returns the data type of the vector.
@@ -126,16 +135,16 @@ macro_rules! impl_try_from_arrow_array_for_vector {
 pub(crate) use impl_try_from_arrow_array_for_vector;
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use arrow::array::{Array, PrimitiveArray};
-    use serde::Serialize;
+    use serde_json;
 
     use super::*;
     use crate::data_type::DataType;
     use crate::types::DataTypeBuilder;
 
     #[test]
-    pub fn test_df_columns_to_vector() {
+    fn test_df_columns_to_vector() {
         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1, 2, 3]));
         let vector = try_into_vector(df_column).unwrap();
         assert_eq!(
@@ -145,28 +154,22 @@ mod tests {
     }
 
     #[test]
-    pub fn test_serialize_i32_vector() {
+    fn test_serialize_i32_vector() {
         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::<i32>::from_slice(vec![1, 2, 3]));
         let json_value = try_into_vector(df_column)
             .unwrap()
             .serialize_to_json()
             .unwrap();
-        let mut output = vec![];
-        let mut serializer = serde_json::ser::Serializer::new(&mut output);
-        json_value.serialize(&mut serializer).unwrap();
-        assert_eq!(b"[1,2,3]", output.as_slice());
+        assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
     }
 
     #[test]
-    pub fn test_serialize_i8_vector() {
+    fn test_serialize_i8_vector() {
         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1u8, 2u8, 3u8]));
         let json_value = try_into_vector(df_column)
             .unwrap()
             .serialize_to_json()
             .unwrap();
-        let mut output = vec![];
-        let mut serializer = serde_json::ser::Serializer::new(&mut output);
-        json_value.serialize(&mut serializer).unwrap();
-        assert_eq!(b"[1,2,3]", output.as_slice());
+        assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
     }
 }

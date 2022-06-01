@@ -6,10 +6,9 @@ use arrow::array::ArrayRef;
 use arrow::array::{Array, NullArray};
 use arrow::datatypes::DataType as ArrowDataType;
 use snafu::OptionExt;
-use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{Result, SerializeSnafu};
+use crate::error::Result;
 use crate::serialize::Serializable;
 use crate::types::NullType;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
@@ -61,14 +60,11 @@ impl fmt::Debug for NullVector {
     }
 }
 
-const NULL_STR: &str = "NULL";
 impl Serializable for NullVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        vec![NULL_STR.to_owned(); self.len()]
-            .into_iter()
-            .map(serde_json::to_value)
-            .collect::<serde_json::Result<_>>()
-            .context(SerializeSnafu)
+        Ok(std::iter::repeat(serde_json::Value::Null)
+            .take(self.len())
+            .collect())
     }
 }
 
@@ -76,16 +72,16 @@ impl_try_from_arrow_array_for_vector!(NullArray, NullVector);
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value as JsonValue;
+    use serde_json;
 
     use super::*;
 
     #[test]
-    fn test_null_array() {
-        let null_arr = NullVector::new(32);
+    fn test_null_vector() {
+        let vector = NullVector::new(32);
 
-        assert_eq!(null_arr.len(), 32);
-        let arrow_arr = null_arr.to_arrow_array();
+        assert_eq!(vector.len(), 32);
+        let arrow_arr = vector.to_arrow_array();
         assert_eq!(arrow_arr.null_count(), 32);
 
         let array2 = arrow_arr.slice(8, 16);
@@ -94,21 +90,25 @@ mod tests {
     }
 
     #[test]
-    fn test_debug_null_array() {
+    fn test_debug_null_vector() {
         let array = NullVector::new(1024 * 1024);
         assert_eq!(format!("{:?}", array), "NullVector(1048576)");
     }
 
     #[test]
     fn test_serialize_json() {
-        let null_vec = NullVector::new(3);
+        let vector = NullVector::new(3);
+        let json_value = vector.serialize_to_json().unwrap();
         assert_eq!(
-            vec![
-                JsonValue::from(NULL_STR),
-                JsonValue::from(NULL_STR),
-                JsonValue::from(NULL_STR),
-            ],
-            null_vec.serialize_to_json().unwrap()
+            "[null,null,null]",
+            serde_json::to_string(&json_value).unwrap()
         );
+    }
+
+    #[test]
+    fn test_null_vector_validity() {
+        let vector = NullVector::new(5);
+        assert_eq!(Validity::AllNull, vector.validity());
+        assert_eq!(5, vector.null_count());
     }
 }

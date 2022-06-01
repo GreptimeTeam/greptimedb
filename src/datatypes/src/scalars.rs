@@ -20,6 +20,9 @@ pub trait ScalarVector: Vector {
     /// Returns the reference to an element at given position.
     ///
     /// Note: `get()` has bad performance, avoid call this function inside loop.
+    ///
+    /// # Panics
+    /// Panics if `idx >= self.len()`.
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>>;
 
     /// Returns iterator of current vector.
