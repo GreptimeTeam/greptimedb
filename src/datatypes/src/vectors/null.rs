@@ -11,8 +11,9 @@ use crate::data_type::ConcreteDataType;
 use crate::error::Result;
 use crate::serialize::Serializable;
 use crate::types::NullType;
+use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{Validity, Vector};
+use crate::vectors::{Validity, Vector, VectorRef};
 
 pub struct NullVector {
     array: NullArray,
@@ -51,6 +52,33 @@ impl Vector for NullVector {
 
     fn validity(&self) -> Validity {
         Validity::AllNull
+    }
+
+    fn is_null(&self, _row: usize) -> bool {
+        true
+    }
+
+    fn get(&self, _index: usize) -> Value {
+        Value::Null
+    }
+
+    fn only_null(&self) -> bool {
+        true
+    }
+
+    fn slice(&self, _offset: usize, length: usize) -> VectorRef {
+        Arc::new(Self::new(length))
+    }
+
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        debug_assert!(
+            offsets.len() == self.len(),
+            "Size of offsets must match size of column"
+        );
+
+        Arc::new(Self {
+            array: NullArray::new(ArrowDataType::Null, *offsets.last().unwrap() as usize),
+        })
     }
 }
 

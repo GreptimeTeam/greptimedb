@@ -1,5 +1,8 @@
 pub mod binary;
 pub mod boolean;
+pub mod constant;
+mod helper;
+pub mod mutable;
 pub mod null;
 pub mod primitive;
 mod string;
@@ -9,16 +12,19 @@ use std::sync::Arc;
 
 use arrow::array::ArrayRef;
 use arrow::bitmap::Bitmap;
-use arrow::datatypes::DataType as ArrowDataType;
 pub use binary::*;
 pub use boolean::*;
+pub use constant::*;
+pub use helper::Helper;
+pub use mutable::MutableVector;
 pub use null::*;
 pub use primitive::*;
 pub use string::*;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::Result;
+use crate::error::{BadArrayAccessSnafu, Result};
 use crate::serialize::Serializable;
+use crate::value::Value;
 pub use crate::vectors::{
     BinaryVector, BooleanVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector,
     Int64Vector, Int8Vector, NullVector, StringVector, UInt16Vector, UInt32Vector, UInt64Vector,
@@ -79,37 +85,45 @@ pub trait Vector: Send + Sync + Serializable {
             Validity::AllNull => self.len(),
         }
     }
+
+    /// Returns true when it's a ConstantColumn
+    fn is_const(&self) -> bool {
+        false
+    }
+
+    /// Returns whether row is null.
+    fn is_null(&self, _row: usize) -> bool {
+        false
+    }
+
+    /// If the only value vector can contain is NULL.
+    fn only_null(&self) -> bool {
+        false
+    }
+
+    fn slice(&self, offset: usize, length: usize) -> VectorRef;
+
+    /// # Safety
+    /// Assumes that the `index` is smaller than size.
+    fn get(&self, index: usize) -> Value;
+
+    fn get_checked(&self, index: usize) -> Result<Value> {
+        if index > self.len() {
+            return BadArrayAccessSnafu {
+                msg: format!("Index out of bounds: {}, col size: {}", index, self.len())
+                    .to_string(),
+            }
+            .fail();
+        }
+        Ok(self.get(index))
+    }
+
+    // Copies each element according offsets parameter.
+    // (i-th element should be copied offsets[i] - offsets[i - 1] times.)
+    fn replicate(&self, offsets: &[usize]) -> VectorRef;
 }
 
 pub type VectorRef = Arc<dyn Vector>;
-
-/// Try to cast an arrow array into vector
-///
-/// # Panics
-/// Panic if given arrow data type is not supported.
-pub fn try_into_vector(array: ArrayRef) -> Result<VectorRef> {
-    Ok(match array.data_type() {
-        ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
-        ArrowDataType::Boolean => Arc::new(BooleanVector::try_from_arrow_array(array)?),
-        ArrowDataType::Binary | ArrowDataType::LargeBinary => {
-            Arc::new(BinaryVector::try_from_arrow_array(array)?)
-        }
-        ArrowDataType::Int8 => Arc::new(Int8Vector::try_from_arrow_array(array)?),
-        ArrowDataType::Int16 => Arc::new(Int16Vector::try_from_arrow_array(array)?),
-        ArrowDataType::Int32 => Arc::new(Int32Vector::try_from_arrow_array(array)?),
-        ArrowDataType::Int64 => Arc::new(Int64Vector::try_from_arrow_array(array)?),
-        ArrowDataType::UInt8 => Arc::new(UInt8Vector::try_from_arrow_array(array)?),
-        ArrowDataType::UInt16 => Arc::new(UInt16Vector::try_from_arrow_array(array)?),
-        ArrowDataType::UInt32 => Arc::new(UInt32Vector::try_from_arrow_array(array)?),
-        ArrowDataType::UInt64 => Arc::new(UInt64Vector::try_from_arrow_array(array)?),
-        ArrowDataType::Float32 => Arc::new(Float32Vector::try_from_arrow_array(array)?),
-        ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
-        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
-            Arc::new(StringVector::try_from_arrow_array(array)?)
-        }
-        _ => unimplemented!(),
-    })
-}
 
 /// Helper to define `try_from_arrow_array(array: arrow::array::ArrayRef)` function.
 macro_rules! impl_try_from_arrow_array_for_vector {
@@ -139,6 +153,7 @@ pub mod tests {
     use arrow::array::{Array, PrimitiveArray};
     use serde_json;
 
+    use super::helper::Helper;
     use super::*;
     use crate::data_type::DataType;
     use crate::types::DataTypeBuilder;
@@ -146,7 +161,7 @@ pub mod tests {
     #[test]
     fn test_df_columns_to_vector() {
         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1, 2, 3]));
-        let vector = try_into_vector(df_column).unwrap();
+        let vector = Helper::try_into_vector(df_column).unwrap();
         assert_eq!(
             i32::build_data_type().as_arrow_type(),
             vector.data_type().as_arrow_type()
@@ -156,7 +171,7 @@ pub mod tests {
     #[test]
     fn test_serialize_i32_vector() {
         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::<i32>::from_slice(vec![1, 2, 3]));
-        let json_value = try_into_vector(df_column)
+        let json_value = Helper::try_into_vector(df_column)
             .unwrap()
             .serialize_to_json()
             .unwrap();
@@ -166,7 +181,7 @@ pub mod tests {
     #[test]
     fn test_serialize_i8_vector() {
         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1u8, 2u8, 3u8]));
-        let json_value = try_into_vector(df_column)
+        let json_value = Helper::try_into_vector(df_column)
             .unwrap()
             .serialize_to_json()
             .unwrap();

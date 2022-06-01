@@ -1,7 +1,8 @@
 use common_base::bytes::{Bytes, StringBytes};
+use serde::Serialize;
 
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Clone)]
 pub enum Value {
     Null,
 
@@ -59,3 +60,15 @@ impl_from!(Float32, f32);
 impl_from!(Float64, f64);
 impl_from!(String, StringBytes);
 impl_from!(Binary, Bytes);
+
+impl From<&[u8]> for Value {
+    fn from(s: &[u8]) -> Self {
+        Value::Binary(Bytes(s.to_vec()))
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Value::String(StringBytes(s.to_string().into_bytes()))
+    }
+}

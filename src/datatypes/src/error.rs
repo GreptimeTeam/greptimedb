@@ -14,6 +14,8 @@ pub enum Error {
 
     #[snafu(display("Failed to convert datafusion type: {}", from))]
     Conversion { from: String, backtrace: Backtrace },
+    #[snafu(display("Bad array access, {}", msg))]
+    BadArrayAccess { msg: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {

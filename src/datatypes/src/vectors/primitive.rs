@@ -2,8 +2,7 @@ use std::any::Any;
 use std::iter::FromIterator;
 use std::slice::Iter;
 use std::sync::Arc;
-
-use arrow::array::{Array, ArrayRef, MutablePrimitiveArray, PrimitiveArray};
+use arrow::array::{ArrayRef, MutableArray, MutablePrimitiveArray, PrimitiveArray};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
 use snafu::{OptionExt, ResultExt};
@@ -11,10 +10,13 @@ use snafu::{OptionExt, ResultExt};
 use crate::data_type::ConcreteDataType;
 use crate::error::ConversionSnafu;
 use crate::error::{Result, SerializeSnafu};
+use crate::scalars::{Scalar, ScalarRef};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{DataTypeBuilder, Primitive};
-use crate::vectors::{Validity, Vector};
+use crate::value::Value;
+use crate::vectors::{MutableVector, Vector, VectorRef, Validity};
+
 
 /// Vector for primitive data types.
 #[derive(Debug)]
@@ -80,11 +82,55 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
             None => Validity::AllValid,
         }
     }
+
+    fn slice(&self, offset: usize, length: usize) -> VectorRef {
+        Arc::new(Self::from(self.array.slice(offset, length)))
+    }
+
+    fn get(&self, index: usize) -> Value {
+        self.array.value(index).into()
+    }
+
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        debug_assert!(
+            offsets.len() == self.len(),
+            "Size of offsets must match size of column"
+        );
+
+        if offsets.is_empty() {
+            return self.slice(0, 0);
+        }
+
+        let mut builder =
+            PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap() as usize);
+
+        let mut previous_offset: usize = 0;
+
+        (0..self.len()).for_each(|i| {
+            let offset: usize = offsets[i];
+            let data = unsafe { self.array.value_unchecked(i) };
+            builder.mutable_array.extend(
+                std::iter::repeat(data)
+                    .take(offset - previous_offset)
+                    .map(Option::Some),
+            );
+            previous_offset = offset;
+        });
+        builder.to_vector()
+    }
 }
 
 impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
     fn from(array: PrimitiveArray<T>) -> Self {
         Self { array }
+    }
+}
+
+impl<T: Primitive> From<Vec<Option<T>>> for PrimitiveVector<T> {
+    fn from(v: Vec<Option<T>>) -> Self {
+        Self {
+            array: PrimitiveArray::<T>::from(v),
+        }
     }
 }
 
@@ -96,7 +142,21 @@ impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for Pr
     }
 }
 
-impl<T: Primitive + DataTypeBuilder> ScalarVector for PrimitiveVector<T> {
+impl<'a, T: Primitive> PrimitiveVector<T> {
+    /// implement iter for PrimitiveVector
+    #[inline]
+    pub fn iter(&'a self) -> std::slice::Iter<'a, T> {
+        self.array.values().iter()
+    }
+}
+
+impl<T> ScalarVector for PrimitiveVector<T>
+where
+    T: Scalar<VectorType = Self> + Primitive + DataTypeBuilder,
+    for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = Self>,
+    for<'a> T: Scalar<RefType<'a> = T>,
+{
+    type OwnedItem = T;
     type RefItem<'a> = T;
     type Iter<'a> = PrimitiveIter<'a, T>;
     type Builder = PrimitiveVectorBuilder<T>;
@@ -141,11 +201,44 @@ impl<'a, T: Copy> Iterator for PrimitiveIter<'a, T> {
     }
 }
 
-pub struct PrimitiveVectorBuilder<T: Primitive> {
+pub struct PrimitiveVectorBuilder<T: Primitive + DataTypeBuilder> {
     mutable_array: MutablePrimitiveArray<T>,
 }
 
-impl<T: Primitive + DataTypeBuilder> ScalarVectorBuilder for PrimitiveVectorBuilder<T> {
+impl<T: Primitive + DataTypeBuilder> PrimitiveVectorBuilder<T> {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            mutable_array: MutablePrimitiveArray::with_capacity(capacity),
+        }
+    }
+}
+
+impl<T: Primitive + DataTypeBuilder> MutableVector for PrimitiveVectorBuilder<T> {
+    fn data_type(&self) -> ConcreteDataType {
+        T::build_data_type()
+    }
+    fn len(&self) -> usize {
+        self.mutable_array.len()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn to_vector(&mut self) -> VectorRef {
+        Arc::new(PrimitiveVector::<T> {
+            array: std::mem::take(&mut self.mutable_array).into(),
+        })
+    }
+}
+
+impl<T> ScalarVectorBuilder for PrimitiveVectorBuilder<T>
+where
+    T: Scalar<VectorType = PrimitiveVector<T>> + Primitive + DataTypeBuilder,
+    for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = PrimitiveVector<T>>,
+    for<'a> T: Scalar<RefType<'a> = T>,
+{
     type VectorType = PrimitiveVector<T>;
 
     fn with_capacity(capacity: usize) -> Self {
@@ -158,9 +251,9 @@ impl<T: Primitive + DataTypeBuilder> ScalarVectorBuilder for PrimitiveVectorBuil
         self.mutable_array.push(value);
     }
 
-    fn finish(self) -> Self::VectorType {
+    fn finish(&mut self) -> Self::VectorType {
         PrimitiveVector {
-            array: self.mutable_array.into(),
+            array: std::mem::take(&mut self.mutable_array).into(),
         }
     }
 }

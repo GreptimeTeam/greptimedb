@@ -1,8 +1,8 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::BinaryValueIter;
-use arrow::array::{Array, ArrayRef, BinaryArray};
+use arrow::array::{ArrayRef, BinaryArray};
+use arrow::array::{BinaryValueIter, MutableArray};
 use arrow::bitmap::utils::ZipValidity;
 use snafu::OptionExt;
 use snafu::ResultExt;
@@ -11,11 +11,11 @@ use crate::arrow_array::{LargeBinaryArray, MutableLargeBinaryArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
 use crate::error::SerializeSnafu;
-use crate::scalars::{ScalarVector, ScalarVectorBuilder};
+use crate::scalars::{common::replicate_scalar_vector, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::types::BinaryType;
+use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{Validity, Vector};
+use crate::vectors::{MutableVector, Vector, VectorRef, Validity};
 
 /// Vector of binary strings.
 #[derive(Debug)]
@@ -29,9 +29,17 @@ impl From<BinaryArray<i64>> for BinaryVector {
     }
 }
 
+impl From<Vec<Option<Vec<u8>>>> for BinaryVector {
+    fn from(data: Vec<Option<Vec<u8>>>) -> Self {
+        Self {
+            array: LargeBinaryArray::from(data),
+        }
+    }
+}
+
 impl Vector for BinaryVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::Binary(BinaryType::default())
+        ConcreteDataType::binary_datatype()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -52,9 +60,22 @@ impl Vector for BinaryVector {
             None => Validity::AllValid,
         }
     }
+
+    fn slice(&self, offset: usize, length: usize) -> VectorRef {
+        Arc::new(Self::from(self.array.slice(offset, length)))
+    }
+
+    fn get(&self, index: usize) -> Value {
+        self.array.value(index).into()
+    }
+
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        replicate_scalar_vector(self, offsets)
+    }
 }
 
 impl ScalarVector for BinaryVector {
+    type OwnedItem = Vec<u8>;
     type RefItem<'a> = &'a [u8];
     type Iter<'a> = ZipValidity<'a, &'a [u8], BinaryValueIter<'a, i64>>;
     type Builder = BinaryVectorBuilder;
@@ -76,6 +97,24 @@ pub struct BinaryVectorBuilder {
     mutable_array: MutableLargeBinaryArray,
 }
 
+impl MutableVector for BinaryVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::binary_datatype()
+    }
+    fn len(&self) -> usize {
+        self.mutable_array.len()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn to_vector(&mut self) -> VectorRef {
+        Arc::new(self.finish())
+    }
+}
+
 impl ScalarVectorBuilder for BinaryVectorBuilder {
     type VectorType = BinaryVector;
 
@@ -89,9 +128,9 @@ impl ScalarVectorBuilder for BinaryVectorBuilder {
         self.mutable_array.push(value);
     }
 
-    fn finish(self) -> Self::VectorType {
+    fn finish(&mut self) -> Self::VectorType {
         BinaryVector {
-            array: self.mutable_array.into(),
+            array: std::mem::take(&mut self.mutable_array).into(),
         }
     }
 }

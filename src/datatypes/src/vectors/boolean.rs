@@ -2,18 +2,19 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, BooleanArray, MutableBooleanArray};
+use arrow::array::{ArrayRef, BooleanArray, MutableArray, MutableBooleanArray};
 use arrow::bitmap::utils::{BitmapIter, ZipValidity};
 use snafu::OptionExt;
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
+use crate::scalars::common::replicate_scalar_vector;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::types::BooleanType;
+use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{Validity, Vector};
+use crate::vectors::{MutableVector, Vector, VectorRef, Validity};
 
 /// Vector of boolean.
 #[derive(Debug)]
@@ -53,7 +54,7 @@ impl<Ptr: Borrow<Option<bool>>> FromIterator<Ptr> for BooleanVector {
 
 impl Vector for BooleanVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::Boolean(BooleanType::default())
+        ConcreteDataType::boolean_datatype()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -74,9 +75,22 @@ impl Vector for BooleanVector {
             None => Validity::AllValid,
         }
     }
+
+    fn slice(&self, offset: usize, length: usize) -> VectorRef {
+        Arc::new(Self::from(self.array.slice(offset, length)))
+    }
+
+    fn get(&self, index: usize) -> Value {
+        self.array.value(index).into()
+    }
+
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        replicate_scalar_vector(self, offsets)
+    }
 }
 
 impl ScalarVector for BooleanVector {
+    type OwnedItem = bool;
     type RefItem<'a> = bool;
     type Iter<'a> = ZipValidity<'a, bool, BitmapIter<'a>>;
     type Builder = BooleanVectorBuilder;
@@ -98,6 +112,24 @@ pub struct BooleanVectorBuilder {
     mutable_array: MutableBooleanArray,
 }
 
+impl MutableVector for BooleanVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::boolean_datatype()
+    }
+    fn len(&self) -> usize {
+        self.mutable_array.len()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn to_vector(&mut self) -> VectorRef {
+        Arc::new(self.finish())
+    }
+}
+
 impl ScalarVectorBuilder for BooleanVectorBuilder {
     type VectorType = BooleanVector;
 
@@ -111,9 +143,9 @@ impl ScalarVectorBuilder for BooleanVectorBuilder {
         self.mutable_array.push(value);
     }
 
-    fn finish(self) -> Self::VectorType {
+    fn finish(&mut self) -> Self::VectorType {
         BooleanVector {
-            array: self.mutable_array.into(),
+            array: std::mem::take(&mut self.mutable_array).into(),
         }
     }
 }

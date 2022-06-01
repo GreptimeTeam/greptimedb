@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, Utf8ValuesIter};
+use arrow::array::{ArrayRef, MutableArray, Utf8ValuesIter};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value;
 use snafu::OptionExt;
@@ -10,10 +10,11 @@ use snafu::ResultExt;
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::SerializeSnafu;
-use crate::prelude::{ScalarVectorBuilder, Validity, Vector};
-use crate::scalars::ScalarVector;
+use crate::prelude::{MutableVector, ScalarVectorBuilder, Vector, VectorRef, Validity};
+use crate::scalars::{common::replicate_scalar_vector, ScalarVector};
 use crate::serialize::Serializable;
 use crate::types::StringType;
+use crate::value::Value as DataValue;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
 
 /// String array wrapper
@@ -25,6 +26,14 @@ pub struct StringVector {
 impl From<StringArray> for StringVector {
     fn from(array: StringArray) -> Self {
         Self { array }
+    }
+}
+
+impl From<Vec<Option<String>>> for StringVector {
+    fn from(data: Vec<Option<String>>) -> Self {
+        Self {
+            array: StringArray::from(data),
+        }
     }
 }
 
@@ -51,9 +60,22 @@ impl Vector for StringVector {
             None => Validity::AllValid,
         }
     }
+
+    fn slice(&self, offset: usize, length: usize) -> VectorRef {
+        Arc::new(Self::from(self.array.slice(offset, length)))
+    }
+
+    fn get(&self, index: usize) -> DataValue {
+        self.array.value(index).into()
+    }
+
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        replicate_scalar_vector(self, offsets)
+    }
 }
 
 impl ScalarVector for StringVector {
+    type OwnedItem = String;
     type RefItem<'a> = &'a str;
     type Iter<'a> = ZipValidity<'a, &'a str, Utf8ValuesIter<'a, i32>>;
     type Builder = StringVectorBuilder;
@@ -75,6 +97,24 @@ pub struct StringVectorBuilder {
     buffer: MutableStringArray,
 }
 
+impl MutableVector for StringVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::string_datatype()
+    }
+    fn len(&self) -> usize {
+        self.buffer.len()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn to_vector(&mut self) -> VectorRef {
+        Arc::new(self.finish())
+    }
+}
+
 impl ScalarVectorBuilder for StringVectorBuilder {
     type VectorType = StringVector;
 
@@ -88,9 +128,9 @@ impl ScalarVectorBuilder for StringVectorBuilder {
         self.buffer.push(value)
     }
 
-    fn finish(self) -> Self::VectorType {
+    fn finish(&mut self) -> Self::VectorType {
         Self::VectorType {
-            array: self.buffer.into(),
+            array: std::mem::take(&mut self.buffer).into(),
         }
     }
 }
