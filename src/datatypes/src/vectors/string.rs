@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, MutableArray, Utf8ValuesIter};
+use arrow::array::{Array, ArrayRef, MutableArray, Utf8ValuesIter};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value;
 use snafu::OptionExt;
@@ -10,7 +10,7 @@ use snafu::ResultExt;
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::SerializeSnafu;
-use crate::prelude::{MutableVector, ScalarVectorBuilder, Vector, VectorRef, Validity};
+use crate::prelude::{MutableVector, ScalarVectorBuilder, Validity, Vector, VectorRef};
 use crate::scalars::{common::replicate_scalar_vector, ScalarVector};
 use crate::serialize::Serializable;
 use crate::types::StringType;

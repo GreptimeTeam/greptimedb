@@ -2,7 +2,7 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, MutableArray, MutableBooleanArray};
+use arrow::array::{Array, ArrayRef, BooleanArray, MutableArray, MutableBooleanArray};
 use arrow::bitmap::utils::{BitmapIter, ZipValidity};
 use snafu::OptionExt;
 use snafu::ResultExt;
@@ -14,7 +14,7 @@ use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{MutableVector, Vector, VectorRef, Validity};
+use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of boolean.
 #[derive(Debug)]

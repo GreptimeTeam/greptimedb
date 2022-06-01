@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BinaryArray};
+use arrow::array::{Array, ArrayRef, BinaryArray};
 use arrow::array::{BinaryValueIter, MutableArray};
 use arrow::bitmap::utils::ZipValidity;
 use snafu::OptionExt;
@@ -15,7 +15,7 @@ use crate::scalars::{common::replicate_scalar_vector, ScalarVector, ScalarVector
 use crate::serialize::Serializable;
 use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{MutableVector, Vector, VectorRef, Validity};
+use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of binary strings.
 #[derive(Debug)]

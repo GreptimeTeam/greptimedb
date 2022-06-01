@@ -2,7 +2,8 @@ use std::any::Any;
 use std::iter::FromIterator;
 use std::slice::Iter;
 use std::sync::Arc;
-use arrow::array::{ArrayRef, MutableArray, MutablePrimitiveArray, PrimitiveArray};
+
+use arrow::array::{Array, ArrayRef, MutableArray, MutablePrimitiveArray, PrimitiveArray};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
 use snafu::{OptionExt, ResultExt};
@@ -15,8 +16,7 @@ use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{DataTypeBuilder, Primitive};
 use crate::value::Value;
-use crate::vectors::{MutableVector, Vector, VectorRef, Validity};
-
+use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
 
 /// Vector for primitive data types.
 #[derive(Debug)]
@@ -260,7 +260,8 @@ where
 
 impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
-        self.iter_data()
+        self.array
+            .iter()
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()
             .context(SerializeSnafu)

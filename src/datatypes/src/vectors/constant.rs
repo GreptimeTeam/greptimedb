@@ -10,7 +10,7 @@ use crate::error::{Result, SerializeSnafu};
 use crate::serialize::Serializable;
 use crate::value::Value;
 use crate::vectors::Helper;
-use crate::vectors::{Vector, VectorRef};
+use crate::vectors::{Validity, Vector, VectorRef};
 
 #[derive(Clone)]
 pub struct ConstantVector {
@@ -52,6 +52,14 @@ impl Vector for ConstantVector {
 
     fn is_const(&self) -> bool {
         true
+    }
+
+    fn validity(&self) -> Validity {
+        if self.vector.is_null(0) {
+            Validity::AllNull
+        } else {
+            Validity::AllValid
+        }
     }
 
     fn is_null(&self, _row: usize) -> bool {
