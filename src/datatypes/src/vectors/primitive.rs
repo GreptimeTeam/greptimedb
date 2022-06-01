@@ -3,7 +3,7 @@ use std::iter::FromIterator;
 use std::slice::Iter;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, MutablePrimitiveArray, PrimitiveArray};
+use arrow::array::{Array, ArrayRef, MutablePrimitiveArray, PrimitiveArray};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
 use snafu::{OptionExt, ResultExt};
@@ -14,7 +14,7 @@ use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{DataTypeBuilder, Primitive};
-use crate::vectors::Vector;
+use crate::vectors::{Validity, Vector};
 
 /// Vector for primitive data types.
 #[derive(Debug)]
@@ -73,6 +73,13 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
     }
+
+    fn validity(&self) -> Validity {
+        match self.array.validity() {
+            Some(bitmap) => Validity::Slots(bitmap),
+            None => Validity::AllValid,
+        }
+    }
 }
 
 impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
@@ -89,21 +96,13 @@ impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for Pr
     }
 }
 
-impl<'a, T: Primitive> PrimitiveVector<T> {
-    /// implement iter for PrimitiveVector
-    #[inline]
-    pub fn iter(&'a self) -> std::slice::Iter<'a, T> {
-        self.array.values().iter()
-    }
-}
-
 impl<T: Primitive + DataTypeBuilder> ScalarVector for PrimitiveVector<T> {
     type RefItem<'a> = T;
     type Iter<'a> = PrimitiveIter<'a, T>;
     type Builder = PrimitiveVectorBuilder<T>;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        if idx < self.len() {
+        if self.array.is_valid(idx) {
             Some(self.array.value(idx))
         } else {
             None
@@ -168,7 +167,7 @@ impl<T: Primitive + DataTypeBuilder> ScalarVectorBuilder for PrimitiveVectorBuil
 
 impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
-        self.iter()
+        self.iter_data()
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()
             .context(SerializeSnafu)
@@ -177,43 +176,92 @@ impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json;
+
     use super::*;
     use crate::serialize::Serializable;
 
-    fn assert_vec_eq(v: PrimitiveVector<i32>) {
-        assert_eq!(
-            vec![
-                JsonValue::from(1i32),
-                JsonValue::from(2i32),
-                JsonValue::from(3i32),
-                JsonValue::from(4i32)
-            ],
-            v.serialize_to_json().unwrap()
-        );
+    fn check_vec(v: PrimitiveVector<i32>) {
+        let json_value = v.serialize_to_json().unwrap();
+        assert_eq!("[1,2,3,4]", serde_json::to_string(&json_value).unwrap(),);
     }
 
     #[test]
     fn test_from_values() {
         let v = PrimitiveVector::<i32>::from_values(vec![1, 2, 3, 4]);
-        assert_vec_eq(v);
+        check_vec(v);
     }
 
     #[test]
     fn test_from_vec() {
         let v = PrimitiveVector::<i32>::from_vec(vec![1, 2, 3, 4]);
-        assert_vec_eq(v);
+        check_vec(v);
     }
 
     #[test]
     fn test_from_slice() {
         let v = PrimitiveVector::<i32>::from_slice(vec![1, 2, 3, 4]);
-        assert_vec_eq(v);
+        check_vec(v);
+    }
+
+    #[test]
+    fn test_serialize_primitive_vector_with_null_to_json() {
+        let input = [Some(1i32), Some(2i32), None, Some(4i32), None];
+        let mut builder = PrimitiveVectorBuilder::with_capacity(input.len());
+        for v in input {
+            builder.push(v);
+        }
+        let vector = builder.finish();
+
+        let json_value = vector.serialize_to_json().unwrap();
+        assert_eq!(
+            "[1,2,null,4,null]",
+            serde_json::to_string(&json_value).unwrap(),
+        );
     }
 
     #[test]
     fn test_from_arrow_array() {
         let arrow_array = PrimitiveArray::from_slice(vec![1, 2, 3, 4]);
         let v = PrimitiveVector::from(arrow_array);
-        assert_vec_eq(v);
+        check_vec(v);
+    }
+
+    #[test]
+    fn test_primitive_vector_build_get() {
+        let input = [Some(1i32), Some(2i32), None, Some(4i32), None];
+        let mut builder = PrimitiveVectorBuilder::with_capacity(input.len());
+        for v in input {
+            builder.push(v);
+        }
+        let vector = builder.finish();
+        assert_eq!(input.len(), vector.len());
+
+        for (i, v) in input.into_iter().enumerate() {
+            assert_eq!(v, vector.get_data(i));
+        }
+
+        let res: Vec<_> = vector.iter_data().collect();
+        assert_eq!(input, &res[..]);
+    }
+
+    #[test]
+    fn test_primitive_vector_validity() {
+        let input = [Some(1i32), Some(2i32), None, None];
+        let mut builder = PrimitiveVectorBuilder::with_capacity(input.len());
+        for v in input {
+            builder.push(v);
+        }
+        let vector = builder.finish();
+        assert_eq!(2, vector.null_count());
+        let validity = vector.validity();
+        let slots = validity.slots().unwrap();
+        assert_eq!(2, slots.null_count());
+        assert!(!slots.get_bit(2));
+        assert!(!slots.get_bit(3));
+
+        let vector = PrimitiveVector::<i32>::from_slice(vec![1, 2, 3, 4]);
+        assert_eq!(0, vector.null_count());
+        assert_eq!(Validity::AllValid, vector.validity());
     }
 }

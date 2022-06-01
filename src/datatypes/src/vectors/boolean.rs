@@ -2,7 +2,7 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, MutableBooleanArray};
+use arrow::array::{Array, ArrayRef, BooleanArray, MutableBooleanArray};
 use arrow::bitmap::utils::{BitmapIter, ZipValidity};
 use snafu::OptionExt;
 use snafu::ResultExt;
@@ -13,7 +13,7 @@ use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::BooleanType;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::Vector;
+use crate::vectors::{Validity, Vector};
 
 /// Vector of boolean.
 #[derive(Debug)]
@@ -67,6 +67,13 @@ impl Vector for BooleanVector {
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
     }
+
+    fn validity(&self) -> Validity {
+        match self.array.validity() {
+            Some(bitmap) => Validity::Slots(bitmap),
+            None => Validity::AllValid,
+        }
+    }
 }
 
 impl ScalarVector for BooleanVector {
@@ -75,7 +82,7 @@ impl ScalarVector for BooleanVector {
     type Builder = BooleanVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        if idx < self.len() {
+        if self.array.is_valid(idx) {
             Some(self.array.value(idx))
         } else {
             None
@@ -124,88 +131,92 @@ impl_try_from_arrow_array_for_vector!(BooleanArray, BooleanVector);
 
 #[cfg(test)]
 mod tests {
-    use serde::*;
+    use serde_json;
 
     use super::*;
     use crate::serialize::Serializable;
 
     #[test]
-    pub fn test_serialize_boolean_vector_to_json() {
-        let vector = BooleanVector {
-            array: BooleanArray::from_slice(&vec![true, false, true, true, false, false]),
-        };
+    fn test_serialize_boolean_vector_to_json() {
+        let vector = BooleanVector::from(vec![true, false, true, true, false, false]);
 
         let json_value = vector.serialize_to_json().unwrap();
-        let mut output = vec![];
-        let mut serializer = serde_json::ser::Serializer::new(&mut output);
-        json_value.serialize(&mut serializer).unwrap();
         assert_eq!(
             "[true,false,true,true,false,false]",
-            String::from_utf8_lossy(&output)
+            serde_json::to_string(&json_value).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_serialize_boolean_vector_with_null_to_json() {
+        let vector = BooleanVector::from(vec![Some(true), None, Some(false)]);
+
+        let json_value = vector.serialize_to_json().unwrap();
+        assert_eq!(
+            "[true,null,false]",
+            serde_json::to_string(&json_value).unwrap(),
         );
     }
 
     #[test]
     fn test_boolean_vector_from_vec() {
-        let vec = BooleanVector::from(vec![false, true, false, true]);
+        let input = vec![false, true, false, true];
+        let vec = BooleanVector::from(input.clone());
         assert_eq!(4, vec.len());
-        for i in 0..4 {
-            assert_eq!(
-                i == 1 || i == 3,
-                vec.get_data(i).unwrap(),
-                "failed at {}",
-                i
-            )
+        for (i, v) in input.into_iter().enumerate() {
+            assert_eq!(Some(v), vec.get_data(i), "failed at {}", i)
         }
     }
 
     #[test]
     fn test_boolean_vector_from_iter() {
-        let v = vec![Some(false), Some(true), Some(false), Some(true)];
-        let vec = v.into_iter().collect::<BooleanVector>();
+        let input = vec![Some(false), Some(true), Some(false), Some(true)];
+        let vec = input.iter().collect::<BooleanVector>();
         assert_eq!(4, vec.len());
-        for i in 0..3 {
-            assert_eq!(
-                i == 1 || i == 3,
-                vec.get_data(i).unwrap(),
-                "failed at {}",
-                i
-            )
+        for (i, v) in input.into_iter().enumerate() {
+            assert_eq!(v, vec.get_data(i), "failed at {}", i)
         }
     }
 
     #[test]
     fn test_boolean_vector_from_vec_option() {
-        let vec = BooleanVector::from(vec![Some(false), Some(true), None, Some(true)]);
+        let input = vec![Some(false), Some(true), None, Some(true)];
+        let vec = BooleanVector::from(input.clone());
         assert_eq!(4, vec.len());
-        for i in 0..4 {
-            assert_eq!(
-                i == 1 || i == 3,
-                vec.get_data(i).unwrap(),
-                "failed at {}",
-                i
-            )
+        for (i, v) in input.into_iter().enumerate() {
+            assert_eq!(v, vec.get_data(i), "failed at {}", i)
         }
     }
 
     #[test]
-    fn test_boolean_vector_builder() {
-        let mut builder = BooleanVectorBuilder::with_capacity(4);
-        builder.push(Some(false));
-        builder.push(Some(true));
-        builder.push(Some(false));
-        builder.push(Some(true));
-
-        let vec = builder.finish();
-
-        assert_eq!(4, vec.len());
-        for i in 0..4 {
-            assert_eq!(
-                i == 1 || i == 3,
-                vec.get_data(i).unwrap(),
-                "failed at {}",
-                i
-            )
+    fn test_boolean_vector_build_get() {
+        let input = [Some(true), None, Some(false)];
+        let mut builder = BooleanVectorBuilder::with_capacity(3);
+        for v in input {
+            builder.push(v);
         }
+        let vector = builder.finish();
+        assert_eq!(input.len(), vector.len());
+
+        let res: Vec<_> = vector.iter_data().collect();
+        assert_eq!(input, &res[..]);
+
+        for (i, v) in input.into_iter().enumerate() {
+            assert_eq!(v, vector.get_data(i));
+        }
+    }
+
+    #[test]
+    fn test_boolean_vector_validity() {
+        let vector = BooleanVector::from(vec![Some(true), None, Some(false)]);
+        assert_eq!(1, vector.null_count());
+        let validity = vector.validity();
+        let slots = validity.slots().unwrap();
+        assert_eq!(1, slots.null_count());
+        assert!(!slots.get_bit(1));
+
+        let vector = BooleanVector::from(vec![true, false, false]);
+        assert_eq!(0, vector.null_count());
+        assert_eq!(Validity::AllValid, vector.validity());
     }
 }

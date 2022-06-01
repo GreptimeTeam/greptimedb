@@ -8,6 +8,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::ArrayRef;
+use arrow::bitmap::Bitmap;
 use arrow::datatypes::DataType as ArrowDataType;
 pub use binary::*;
 pub use boolean::*;
@@ -23,6 +24,25 @@ pub use crate::vectors::{
     Int64Vector, Int8Vector, NullVector, StringVector, UInt16Vector, UInt32Vector, UInt64Vector,
     UInt8Vector,
 };
+
+#[derive(Debug, PartialEq)]
+pub enum Validity<'a> {
+    /// Whether the array slot is valid or not (null).
+    Slots(&'a Bitmap),
+    /// All slots are valid.
+    AllValid,
+    /// All slots are null.
+    AllNull,
+}
+
+impl<'a> Validity<'a> {
+    pub fn slots(&self) -> Option<&Bitmap> {
+        match self {
+            Validity::Slots(bitmap) => Some(bitmap),
+            _ => None,
+        }
+    }
+}
 
 /// Vector of data values.
 pub trait Vector: Send + Sync + Serializable {
@@ -45,6 +65,20 @@ pub trait Vector: Send + Sync + Serializable {
 
     /// Convert this vector to a new arrow [ArrayRef].
     fn to_arrow_array(&self) -> ArrayRef;
+
+    /// Returns the validity of the Array.
+    fn validity(&self) -> Validity;
+
+    /// The number of null slots on this [`Vector`].
+    /// # Implementation
+    /// This is `O(1)`.
+    fn null_count(&self) -> usize {
+        match self.validity() {
+            Validity::Slots(bitmap) => bitmap.null_count(),
+            Validity::AllValid => 0,
+            Validity::AllNull => self.len(),
+        }
+    }
 }
 
 pub type VectorRef = Arc<dyn Vector>;
@@ -101,16 +135,16 @@ macro_rules! impl_try_from_arrow_array_for_vector {
 pub(crate) use impl_try_from_arrow_array_for_vector;
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use arrow::array::{Array, PrimitiveArray};
-    use serde::Serialize;
+    use serde_json;
 
     use super::*;
     use crate::data_type::DataType;
     use crate::types::DataTypeBuilder;
 
     #[test]
-    pub fn test_df_columns_to_vector() {
+    fn test_df_columns_to_vector() {
         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1, 2, 3]));
         let vector = try_into_vector(df_column).unwrap();
         assert_eq!(
@@ -120,28 +154,22 @@ mod tests {
     }
 
     #[test]
-    pub fn test_serialize_i32_vector() {
+    fn test_serialize_i32_vector() {
         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::<i32>::from_slice(vec![1, 2, 3]));
         let json_value = try_into_vector(df_column)
             .unwrap()
             .serialize_to_json()
             .unwrap();
-        let mut output = vec![];
-        let mut serializer = serde_json::ser::Serializer::new(&mut output);
-        json_value.serialize(&mut serializer).unwrap();
-        assert_eq!(b"[1,2,3]", output.as_slice());
+        assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
     }
 
     #[test]
-    pub fn test_serialize_i8_vector() {
+    fn test_serialize_i8_vector() {
         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1u8, 2u8, 3u8]));
         let json_value = try_into_vector(df_column)
             .unwrap()
             .serialize_to_json()
             .unwrap();
-        let mut output = vec![];
-        let mut serializer = serde_json::ser::Serializer::new(&mut output);
-        json_value.serialize(&mut serializer).unwrap();
-        assert_eq!(b"[1,2,3]", output.as_slice());
+        assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
     }
 }

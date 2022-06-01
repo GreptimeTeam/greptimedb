@@ -24,6 +24,6 @@ version="0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
 
 [dev-dependencies]
-serde_json = "1.0.81"
+serde_json = "1.0"
 tokio = { version = "1.18", features = ["full"] }
 

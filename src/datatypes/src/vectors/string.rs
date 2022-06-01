@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Utf8ValuesIter};
+use arrow::array::{Array, ArrayRef, Utf8ValuesIter};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value;
 use snafu::OptionExt;
@@ -10,7 +10,7 @@ use snafu::ResultExt;
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::SerializeSnafu;
-use crate::prelude::{ScalarVectorBuilder, Vector};
+use crate::prelude::{ScalarVectorBuilder, Validity, Vector};
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
 use crate::types::StringType;
@@ -44,6 +44,13 @@ impl Vector for StringVector {
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
     }
+
+    fn validity(&self) -> Validity {
+        match self.array.validity() {
+            Some(bitmap) => Validity::Slots(bitmap),
+            None => Validity::AllValid,
+        }
+    }
 }
 
 impl ScalarVector for StringVector {
@@ -52,9 +59,10 @@ impl ScalarVector for StringVector {
     type Builder = StringVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        match idx < self.array.len() {
-            true => Some(self.array.value(idx)),
-            false => None,
+        if self.array.is_valid(idx) {
+            Some(self.array.value(idx))
+        } else {
+            None
         }
     }
 
@@ -89,8 +97,7 @@ impl ScalarVectorBuilder for StringVectorBuilder {
 
 impl Serializable for StringVector {
     fn serialize_to_json(&self) -> crate::error::Result<Vec<Value>> {
-        self.array
-            .iter()
+        self.iter_data()
             .map(|v| match v {
                 None => Ok(serde_json::Value::Null),
                 Some(s) => serde_json::to_value(s),
@@ -104,31 +111,24 @@ impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 
 #[cfg(test)]
 mod tests {
+    use serde_json;
+
     use super::*;
 
     #[test]
-    pub fn test_serialize_string_vector() {
+    fn test_serialize_string_vector() {
         let mut builder = StringVectorBuilder::with_capacity(3);
         builder.push(Some("hello"));
         builder.push(None);
         builder.push(Some("world"));
         let string_vector = builder.finish();
-        let serialized = serialize_to_json_string(string_vector.serialize_to_json().unwrap());
+        let serialized =
+            serde_json::to_string(&string_vector.serialize_to_json().unwrap()).unwrap();
         assert_eq!(r#"["hello",null,"world"]"#, serialized);
     }
 
-    pub fn serialize_to_json_string<T>(val: T) -> String
-    where
-        T: serde::Serialize,
-    {
-        let mut output = vec![];
-        let mut serializer = serde_json::Serializer::new(&mut output);
-        val.serialize(&mut serializer).unwrap();
-        String::from_utf8_lossy(&output).into()
-    }
-
     #[test]
-    pub fn test_from_arrow_array() {
+    fn test_from_arrow_array() {
         let mut builder = MutableStringArray::new();
         builder.push(Some("A"));
         builder.push(Some("B"));
@@ -138,7 +138,26 @@ mod tests {
         let vector = StringVector::from(string_array);
         assert_eq!(
             r#"["A","B",null,"D"]"#,
-            serialize_to_json_string(vector.serialize_to_json().unwrap())
+            serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap(),
         );
+    }
+
+    #[test]
+    fn test_string_vector_build_get() {
+        let mut builder = StringVectorBuilder::with_capacity(4);
+        builder.push(Some("hello"));
+        builder.push(None);
+        builder.push(Some("world"));
+        let vector = builder.finish();
+
+        assert_eq!(Some("hello"), vector.get_data(0));
+        assert_eq!(None, vector.get_data(1));
+        assert_eq!(Some("world"), vector.get_data(2));
+
+        let mut iter = vector.iter_data();
+        assert_eq!("hello", iter.next().unwrap().unwrap());
+        assert_eq!(None, iter.next().unwrap());
+        assert_eq!("world", iter.next().unwrap().unwrap());
+        assert_eq!(None, iter.next());
     }
 }
