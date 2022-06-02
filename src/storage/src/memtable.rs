@@ -23,6 +23,7 @@ pub trait MemTable: Send + Sync {
     /// Panic if the schema of key/value differs from memtable's schema.
     fn write(&self, key_values: &KeyValues) -> Result<()>;
 
+    /// Returns the estimated bytes allocated by this memtable from heap.
     fn bytes_allocated(&self) -> usize;
 }
 

@@ -5,7 +5,7 @@
 pub type SequenceNumber = u64;
 
 /// Operation type of the value to write to storage.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ValueType {
     /// Put operation.
     Put,
