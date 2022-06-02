@@ -1,3 +1,4 @@
+mod btree;
 mod inserter;
 mod schema;
 
@@ -8,28 +9,19 @@ use datatypes::vectors::VectorRef;
 use store_api::storage::{SequenceNumber, ValueType};
 
 use crate::error::Result;
+use crate::memtable::btree::BTreeMemTable;
 pub use crate::memtable::inserter::Inserter;
 pub use crate::memtable::schema::MemTableSchema;
-
-/// Key-value pairs in columnar format.
-pub struct KeyValues {
-    pub sequence: SequenceNumber,
-    pub value_type: ValueType,
-    /// Start index of these key-value paris in batch.
-    pub start_index_in_batch: usize,
-    pub keys: Vec<VectorRef>,
-    pub values: Vec<VectorRef>,
-}
 
 /// In memory storage.
 pub trait MemTable: Send + Sync {
     fn schema(&self) -> &MemTableSchema;
 
-    /// Write key/values in request to the memtable.
+    /// Write key/values to the memtable.
     ///
     /// # Panics
     /// Panic if the schema of key/value differs from memtable's schema.
-    fn write(&self, request: &KeyValues) -> Result<()>;
+    fn write(&self, key_values: &KeyValues) -> Result<()>;
 
     fn bytes_allocated(&self) -> usize;
 }
@@ -42,11 +34,28 @@ pub trait MemTableBuilder: Send + Sync {
 
 pub type MemTableBuilderRef = Arc<dyn MemTableBuilder>;
 
+// TODO(yingwen): Maybe use individual vector for timestamp and version.
+/// Key-value pairs in columnar format.
+pub struct KeyValues {
+    pub sequence: SequenceNumber,
+    pub value_type: ValueType,
+    /// Start index of these key-value paris in batch.
+    pub start_index_in_batch: usize,
+    pub keys: Vec<VectorRef>,
+    pub values: Vec<VectorRef>,
+}
+
+impl KeyValues {
+    pub fn len(&self) -> usize {
+        self.keys.first().map(|v| v.len()).unwrap_or_default()
+    }
+}
+
 pub struct DefaultMemTableBuilder {}
 
 impl MemTableBuilder for DefaultMemTableBuilder {
-    fn build(&self, _schema: MemTableSchema) -> MemTableRef {
-        unimplemented!()
+    fn build(&self, schema: MemTableSchema) -> MemTableRef {
+        Arc::new(BTreeMemTable::new(schema))
     }
 }
 

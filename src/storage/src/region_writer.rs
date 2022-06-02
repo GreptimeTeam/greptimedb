@@ -1,4 +1,4 @@
-use store_api::storage::{WriteContext, WriteResponse};
+use store_api::storage::{SequenceNumber, WriteContext, WriteResponse};
 
 use crate::error::Result;
 use crate::memtable::{Inserter, MemTableBuilderRef};
@@ -7,11 +7,15 @@ use crate::write_batch::WriteBatch;
 
 pub struct RegionWriter {
     _memtable_builder: MemTableBuilderRef,
+    last_sequence: SequenceNumber,
 }
 
 impl RegionWriter {
     pub fn new(_memtable_builder: MemTableBuilderRef) -> RegionWriter {
-        RegionWriter { _memtable_builder }
+        RegionWriter {
+            _memtable_builder,
+            last_sequence: 0,
+        }
     }
 
     // TODO(yingwen): Support group commit so we can avoid taking mutable reference.
@@ -25,12 +29,13 @@ impl RegionWriter {
         // Mutable reference of writer ensure no other reference of this writer can modify
         // the version control (write is exclusive).
 
+        // TODO(yingwen): Write wal and get sequence.
         let version = version_control.current();
         let memtables = &version.memtables;
 
         let mem = memtables.mutable_memtable();
-        // FIXME(yingwen): Provide sequence number.
-        let mut inserter = Inserter::new(1);
+        self.last_sequence += 1;
+        let mut inserter = Inserter::new(self.last_sequence);
         inserter.insert_memtable(&request, &**mem)?;
 
         Ok(WriteResponse {})
