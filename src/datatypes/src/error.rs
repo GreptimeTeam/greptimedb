@@ -16,6 +16,8 @@ pub enum Error {
     Conversion { from: String, backtrace: Backtrace },
     #[snafu(display("Bad array access, {}", msg))]
     BadArrayAccess { msg: String, backtrace: Backtrace },
+    #[snafu(display("Unknown vector, {}", msg))]
+    UnknownVector { msg: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {

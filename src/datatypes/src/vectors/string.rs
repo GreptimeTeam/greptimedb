@@ -42,6 +42,10 @@ impl Vector for StringVector {
         ConcreteDataType::String(StringType::default())
     }
 
+    fn vector_type_name(&self) -> String {
+        "StringVector".to_string()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -101,15 +105,19 @@ impl MutableVector for StringVectorBuilder {
     fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::string_datatype()
     }
+
     fn len(&self) -> usize {
         self.buffer.len()
     }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
+
     fn as_mut_any(&mut self) -> &mut dyn Any {
         self
     }
+
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(self.finish())
     }

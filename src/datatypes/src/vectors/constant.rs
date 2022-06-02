@@ -6,7 +6,7 @@ use arrow::array::ArrayRef;
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{Result, SerializeSnafu};
+use crate::error::{self, Result, SerializeSnafu};
 use crate::serialize::Serializable;
 use crate::value::Value;
 use crate::vectors::Helper;
@@ -35,6 +35,10 @@ impl ConstantVector {
 impl Vector for ConstantVector {
     fn data_type(&self) -> ConcreteDataType {
         self.vector.data_type()
+    }
+
+    fn vector_type_name(&self) -> String {
+        "ConstantVector".to_string()
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -4,6 +4,14 @@ pub mod common;
 use crate::prelude::*;
 use crate::vectors::*;
 
+pub fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
+    match iter.size_hint() {
+        (_lower, Some(upper)) => upper,
+        (0, None) => 1024,
+        (lower, None) => lower,
+    }
+}
+
 /// Owned scalar value
 /// primitive types, bool, Vec<u8> ...
 pub trait Scalar: 'static + Sized + Default + Any
@@ -14,7 +22,6 @@ where
     type RefType<'a>: ScalarRef<'a, ScalarType = Self, VectorType = Self::VectorType>
     where
         Self: 'a;
-
     /// Get a reference of the current value.
     fn as_scalar_ref(&self) -> Self::RefType<'_>;
 
@@ -39,13 +46,13 @@ pub trait ScalarRef<'a>: std::fmt::Debug + Clone + Copy + Send + 'a {
 /// A sub trait of Vector to add scalar operation support.
 // This implementation refers to Datebend's [ScalarColumn](https://github.com/datafuselabs/databend/blob/main/common/datavalues/src/scalars/type_.rs)
 // and skyzh's [type-exercise-in-rust](https://github.com/skyzh/type-exercise-in-rust).
-pub trait ScalarVector: Vector
+pub trait ScalarVector: Vector + Send + Sync + Sized + 'static
 where
     for<'a> Self::OwnedItem: Scalar<RefType<'a> = Self::RefItem<'a>>,
 {
     type OwnedItem: Scalar<VectorType = Self>;
     /// The reference item of this vector.
-    type RefItem<'a>: Copy
+    type RefItem<'a>: ScalarRef<'a, ScalarType = Self::OwnedItem, VectorType = Self>
     where
         Self: 'a;
 
@@ -67,6 +74,42 @@ where
 
     /// Returns iterator of current vector.
     fn iter_data(&self) -> Self::Iter<'_>;
+
+    fn from_slice(data: &[Self::RefItem<'_>]) -> Self {
+        let mut builder = Self::Builder::with_capacity(data.len());
+        for item in data {
+            builder.push(Some(*item));
+        }
+        builder.finish()
+    }
+
+    fn from_iterator<'a>(it: impl Iterator<Item = Self::RefItem<'a>>) -> Self {
+        let mut builder = Self::Builder::with_capacity(get_iter_capacity(&it));
+        for item in it {
+            builder.push(Some(item));
+        }
+        builder.finish()
+    }
+
+    fn from_owned_iterator(it: impl Iterator<Item = Option<Self::OwnedItem>>) -> Self {
+        let mut builder = Self::Builder::with_capacity(get_iter_capacity(&it));
+        for item in it {
+            match item {
+                Some(item) => builder.push(Some(item.as_scalar_ref())),
+                None => builder.push(None),
+            }
+        }
+        builder.finish()
+    }
+
+    fn from_vecs(values: Vec<Self::OwnedItem>) -> Self {
+        let it = values.iter();
+        let mut builder = Self::Builder::with_capacity(get_iter_capacity(&it));
+        for item in it {
+            builder.push(Some(item.as_scalar_ref()));
+        }
+        builder.finish()
+    }
 }
 
 /// A trait over all vector builders.

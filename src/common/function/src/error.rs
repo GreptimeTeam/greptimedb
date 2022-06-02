@@ -1,0 +1,34 @@
+use std::any::Any;
+
+use common_error::prelude::*;
+use datatypes::error::Error as DataTypeError;
+
+common_error::define_opaque_error!(Error);
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum InnerError {
+    #[snafu(display("Fail to get scalar vector, {}", source))]
+    GetScalarVector {
+        source: DataTypeError,
+        backtrace: Backtrace,
+    },
+}
+
+impl ErrorExt for InnerError {
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl From<InnerError> for Error {
+    fn from(err: InnerError) -> Self {
+        Self::new(err)
+    }
+}

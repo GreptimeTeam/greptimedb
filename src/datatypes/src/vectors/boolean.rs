@@ -57,6 +57,10 @@ impl Vector for BooleanVector {
         ConcreteDataType::boolean_datatype()
     }
 
+    fn vector_type_name(&self) -> String {
+        "BooleanVector".to_string()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -116,15 +120,19 @@ impl MutableVector for BooleanVectorBuilder {
     fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::boolean_datatype()
     }
+
     fn len(&self) -> usize {
         self.mutable_array.len()
     }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
+
     fn as_mut_any(&mut self) -> &mut dyn Any {
         self
     }
+
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(self.finish())
     }

@@ -16,6 +16,7 @@ pub struct PrimitiveType<T: Primitive> {
 /// Create a new [ConcreteDataType] from a primitive type.
 pub trait DataTypeBuilder {
     fn build_data_type() -> ConcreteDataType;
+    fn type_name() -> String;
 }
 
 macro_rules! impl_build_data_type {
@@ -24,6 +25,9 @@ macro_rules! impl_build_data_type {
             impl DataTypeBuilder for $Type {
                 fn build_data_type() -> ConcreteDataType {
                     ConcreteDataType::$TypeId(PrimitiveType::<$Type>::default())
+                }
+                fn type_name() -> String {
+                    stringify!($TypeId).to_string()
                 }
             }
         }

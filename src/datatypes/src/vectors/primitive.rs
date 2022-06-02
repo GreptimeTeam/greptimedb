@@ -64,6 +64,10 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
         T::build_data_type()
     }
 
+    fn vector_type_name(&self) -> String {
+        format!("{}Vector", T::type_name()).to_string()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -217,15 +221,19 @@ impl<T: Primitive + DataTypeBuilder> MutableVector for PrimitiveVectorBuilder<T>
     fn data_type(&self) -> ConcreteDataType {
         T::build_data_type()
     }
+
     fn len(&self) -> usize {
         self.mutable_array.len()
     }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
+
     fn as_mut_any(&mut self) -> &mut dyn Any {
         self
     }
+
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(PrimitiveVector::<T> {
             array: std::mem::take(&mut self.mutable_array).into(),

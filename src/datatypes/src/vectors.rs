@@ -57,6 +57,8 @@ pub trait Vector: Send + Sync + Serializable {
     /// This may require heap allocation.
     fn data_type(&self) -> ConcreteDataType;
 
+    fn vector_type_name(&self) -> String;
+
     /// Returns the vector as [Any](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;

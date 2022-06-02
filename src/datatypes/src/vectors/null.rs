@@ -38,6 +38,10 @@ impl Vector for NullVector {
         ConcreteDataType::Null(NullType::default())
     }
 
+    fn vector_type_name(&self) -> String {
+        "NullVector".to_string()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

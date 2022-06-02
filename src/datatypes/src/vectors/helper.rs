@@ -5,21 +5,88 @@ use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
 use datafusion_common::ScalarValue;
+use snafu::OptionExt;
 
-use crate::error::Result;
+use crate::error::{Result, UnknownVectorSnafu};
+use crate::scalars::*;
 use crate::vectors::*;
 
 pub struct Helper;
 
 impl Helper {
-    /// Get a pointer to the underlying data of this columns.
+    /// Get a pointer to the underlying data of this vectors.
     /// Can be useful for fast comparisons.
     /// # Safety
-    /// Assumes that the `column` is  T.
-    pub unsafe fn static_cast<T: Any>(column: &VectorRef) -> &T {
-        let object = column.as_ref();
+    /// Assumes that the `vector` is  T.
+    pub unsafe fn static_cast<T: Any>(vector: &VectorRef) -> &T {
+        let object = vector.as_ref();
         debug_assert!(object.as_any().is::<T>());
         &*(object as *const dyn Vector as *const T)
+    }
+
+    pub fn check_get_scalar<T: Scalar>(vector: &VectorRef) -> Result<&<T as Scalar>::VectorType> {
+        let arr = vector
+            .as_any()
+            .downcast_ref::<<T as Scalar>::VectorType>()
+            .with_context(|| UnknownVectorSnafu {
+                msg: format!(
+                    "downcast vector error, vector type: {:?}, expected vector: {:?}",
+                    vector.vector_type_name(),
+                    std::any::type_name::<T>(),
+                )
+                .to_string(),
+            });
+        arr
+    }
+
+    pub fn check_get<T: 'static + Vector>(vector: &VectorRef) -> Result<&T> {
+        let arr = vector
+            .as_any()
+            .downcast_ref::<T>()
+            .with_context(|| UnknownVectorSnafu {
+                msg: format!(
+                    "downcast vector error, vector type: {:?}, expected vector: {:?}",
+                    vector.vector_type_name(),
+                    std::any::type_name::<T>(),
+                )
+                .to_string(),
+            });
+        arr
+    }
+
+    pub fn check_get_mutable_vector<T: 'static + MutableVector>(
+        vector: &mut dyn MutableVector,
+    ) -> Result<&mut T> {
+        let ty = vector.data_type();
+        let arr = vector
+            .as_mut_any()
+            .downcast_mut()
+            .with_context(|| UnknownVectorSnafu {
+                msg: format!(
+                    "downcast vector error, vector type: {:?}, expected vector: {:?}",
+                    ty,
+                    std::any::type_name::<T>(),
+                )
+                .to_string(),
+            });
+        arr
+    }
+
+    pub fn check_get_scalar_vector<T: Scalar>(
+        vector: &VectorRef,
+    ) -> Result<&<T as Scalar>::VectorType> {
+        let arr = vector
+            .as_any()
+            .downcast_ref::<<T as Scalar>::VectorType>()
+            .with_context(|| UnknownVectorSnafu {
+                msg: format!(
+                    "downcast vector error, vector type: {:?}, expected vector: {:?}",
+                    vector.vector_type_name(),
+                    std::any::type_name::<T>(),
+                )
+                .to_string(),
+            });
+        arr
     }
 
     /// Try to cast an arrow scalar value into vector
