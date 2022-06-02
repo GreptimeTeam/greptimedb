@@ -58,16 +58,10 @@ pub struct RegionMetadata {
     /// is correct.
     pub schema: SchemaRef,
     pub columns_row_key: ColumnsRowKeyMetadataRef,
-    column_families: ColumnFamiliesMetadata,
+    pub column_families: ColumnFamiliesMetadata,
     /// Version of the metadata. Version is set to zero initially and bumped once the
     /// metadata have been altered.
     pub version: VersionNumber,
-}
-
-impl RegionMetadata {
-    pub fn cf_by_id(&self, cf_id: ColumnFamilyId) -> Option<&ColumnFamilyMetadata> {
-        self.column_families.cf_by_id(cf_id)
-    }
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
@@ -130,15 +124,9 @@ pub type ColumnsRowKeyMetadataRef = Arc<ColumnsRowKeyMetadata>;
 
 // TODO(yingwen): id to cfs metadata, name to id.
 #[derive(Clone)]
-struct ColumnFamiliesMetadata {
+pub struct ColumnFamiliesMetadata {
     /// Map column family id to column family metadata.
-    id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
-}
-
-impl ColumnFamiliesMetadata {
-    fn cf_by_id(&self, cf_id: ColumnFamilyId) -> Option<&ColumnFamilyMetadata> {
-        self.id_to_cfs.get(&cf_id)
-    }
+    pub id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
 }
 
 #[derive(Clone)]

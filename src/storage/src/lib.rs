@@ -1,6 +1,5 @@
 //! Storage engine implementation.
 
-mod column_family;
 mod engine;
 mod error;
 mod memtable;

@@ -21,7 +21,6 @@
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
-use crate::storage::column_family::ColumnFamily;
 use crate::storage::metadata::RegionMeta;
 use crate::storage::requests::WriteRequest;
 use crate::storage::responses::WriteResponse;
@@ -33,7 +32,6 @@ pub trait Region: Send + Sync + Clone {
     type Error: ErrorExt + Send + Sync;
     type Meta: RegionMeta;
     type WriteRequest: WriteRequest;
-    type ColumnFamily: ColumnFamily;
     type Snapshot: Snapshot;
 
     /// Returns name of the region.
@@ -41,9 +39,6 @@ pub trait Region: Send + Sync + Clone {
 
     /// Returns the in memory metadata of this region.
     fn in_memory_metadata(&self) -> Self::Meta;
-
-    /// List all column families.
-    fn list_cf(&self) -> Result<Vec<Self::ColumnFamily>, Self::Error>;
 
     /// Write updates to region.
     async fn write(

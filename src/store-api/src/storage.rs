@@ -1,6 +1,5 @@
 //! Storage APIs.
 
-mod column_family;
 pub mod consts;
 mod descriptors;
 mod engine;
@@ -14,7 +13,6 @@ mod types;
 pub use datatypes::data_type::ConcreteDataType;
 pub use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 
-pub use self::column_family::ColumnFamily;
 pub use self::descriptors::{
     ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyId, ColumnId,
     RegionDescriptor, RowKeyDescriptor,

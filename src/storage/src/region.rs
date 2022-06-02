@@ -5,7 +5,6 @@ use snafu::ensure;
 use store_api::storage::{ReadContext, Region, RegionMeta, WriteContext, WriteResponse};
 use tokio::sync::Mutex;
 
-use crate::column_family::ColumnFamilyHandle;
 use crate::error::{self, Error, Result};
 use crate::memtable::{DefaultMemTableBuilder, MemTableBuilder, MemTableSchema, MemTableSet};
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
@@ -25,7 +24,6 @@ impl Region for RegionImpl {
     type Error = Error;
     type Meta = RegionMetaImpl;
     type WriteRequest = WriteBatch;
-    type ColumnFamily = ColumnFamilyHandle;
     type Snapshot = SnapshotImpl;
 
     fn name(&self) -> &str {
@@ -34,11 +32,6 @@ impl Region for RegionImpl {
 
     fn in_memory_metadata(&self) -> RegionMetaImpl {
         self.inner.in_memory_metadata()
-    }
-
-    // TODO(yingwen): Move list_cf() to meta trait?
-    fn list_cf(&self) -> Result<Vec<ColumnFamilyHandle>> {
-        unimplemented!()
     }
 
     async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
