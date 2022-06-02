@@ -73,8 +73,13 @@ impl Vector for BinaryVector {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
-    fn get_unchecked(&self, index: usize) -> Value {
-        self.array.value(index).into()
+    fn get(&self, index: usize) -> Value {
+        if self.array.is_valid(index) {
+            // Safety: The index have been checked by `is_valid()`.
+            unsafe { Value::Binary(self.array.value_unchecked(index).into()) }
+        } else {
+            Value::Null
+        }
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -186,10 +191,7 @@ mod tests {
 
         for i in 0..2 {
             assert!(!v.is_null(i));
-            assert_eq!(
-                Value::Binary(Bytes::from(vec![1, 2, 3])),
-                v.get_unchecked(i)
-            );
+            assert_eq!(Value::Binary(Bytes::from(vec![1, 2, 3])), v.get(i));
         }
 
         let arrow_arr = v.to_arrow_array();
@@ -245,6 +247,9 @@ mod tests {
         let vector = builder.finish();
         assert_eq!(b"hello", vector.get_data(0).unwrap());
         assert_eq!(None, vector.get_data(3));
+
+        assert_eq!(Value::Binary(b"hello".as_slice().into()), vector.get(0));
+        assert_eq!(Value::Null, vector.get(3));
 
         let mut iter = vector.iter_data();
         assert_eq!(b"hello", iter.next().unwrap().unwrap());

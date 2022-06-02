@@ -104,11 +104,15 @@ pub trait Vector: Send + Sync + Serializable {
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef;
 
-    /// # Safety
-    /// Assumes that the `index` is smaller than size.
-    fn get_unchecked(&self, index: usize) -> Value;
+    /// Returns the clone of value at `index`.
+    ///
+    /// # Panics
+    /// Panic if `index` is out of bound.
+    fn get(&self, index: usize) -> Value;
 
-    fn get(&self, index: usize) -> Result<Value> {
+    /// Returns the clone of value at `index` or error if `index`
+    /// is out of bound.
+    fn try_get(&self, index: usize) -> Result<Value> {
         ensure!(
             index < self.len(),
             BadArrayAccessSnafu {
@@ -116,7 +120,7 @@ pub trait Vector: Send + Sync + Serializable {
                 size: self.len()
             }
         );
-        Ok(self.get_unchecked(index))
+        Ok(self.get(index))
     }
 
     // Copies each element according offsets parameter.

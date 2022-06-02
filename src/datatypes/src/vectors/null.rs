@@ -62,16 +62,17 @@ impl Vector for NullVector {
         true
     }
 
-    fn get_unchecked(&self, _index: usize) -> Value {
-        Value::Null
-    }
-
     fn only_null(&self) -> bool {
         true
     }
 
     fn slice(&self, _offset: usize, length: usize) -> VectorRef {
         Arc::new(Self::new(length))
+    }
+
+    fn get(&self, _index: usize) -> Value {
+        // Skips bound check for null array.
+        Value::Null
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -127,7 +128,7 @@ mod tests {
 
         for i in 0..32 {
             assert!(v.is_null(i));
-            assert_eq!(Value::Null, v.get_unchecked(i));
+            assert_eq!(Value::Null, v.get(i));
         }
     }
 

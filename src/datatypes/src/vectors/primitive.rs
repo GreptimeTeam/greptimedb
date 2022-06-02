@@ -95,8 +95,13 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
-    fn get_unchecked(&self, index: usize) -> Value {
-        self.array.value(index).into()
+    fn get(&self, index: usize) -> Value {
+        if self.array.is_valid(index) {
+            // Safety: The index have been checked by `is_valid()`.
+            unsafe { self.array.value_unchecked(index).into() }
+        } else {
+            Value::Null
+        }
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -288,7 +293,7 @@ mod tests {
 
         for i in 0..4 {
             assert!(!v.is_null(i));
-            assert_eq!(Value::Int32(i as i32 + 1), v.get_unchecked(i));
+            assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
         }
 
         let json_value = v.serialize_to_json().unwrap();
@@ -352,6 +357,7 @@ mod tests {
 
         for (i, v) in input.into_iter().enumerate() {
             assert_eq!(v, vector.get_data(i));
+            assert_eq!(Value::from(v), vector.get(i));
         }
 
         let res: Vec<_> = vector.iter_data().collect();
@@ -388,7 +394,7 @@ mod tests {
         assert_eq!(4, v.len());
 
         for i in 0..4 {
-            assert_eq!(Value::Int32(i as i32 + 1), v.get_unchecked(i));
+            assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
         }
     }
 }

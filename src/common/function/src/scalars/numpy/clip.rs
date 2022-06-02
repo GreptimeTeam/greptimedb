@@ -198,11 +198,11 @@ mod tests {
         // clip([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 3, 6) = [3, 3, 3, 3, 4, 5, 6, 6, 6, 6]
         for i in 0..10 {
             if i <= 3 {
-                assert!(matches!(vector.get_unchecked(i), Value::Int64(v) if v == 3));
+                assert!(matches!(vector.get(i), Value::Int64(v) if v == 3));
             } else if i <= 6 {
-                assert!(matches!(vector.get_unchecked(i), Value::Int64(v) if v == (i as i64)));
+                assert!(matches!(vector.get(i), Value::Int64(v) if v == (i as i64)));
             } else {
-                assert!(matches!(vector.get_unchecked(i), Value::Int64(v) if v == 6));
+                assert!(matches!(vector.get(i), Value::Int64(v) if v == 6));
             }
         }
 
@@ -225,11 +225,11 @@ mod tests {
         // clip([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 3, 6) = [3, 3, 3, 3, 4, 5, 6, 6, 6, 6]
         for i in 0..10 {
             if i <= 3 {
-                assert!(matches!(vector.get_unchecked(i), Value::UInt64(v) if v == 3));
+                assert!(matches!(vector.get(i), Value::UInt64(v) if v == 3));
             } else if i <= 6 {
-                assert!(matches!(vector.get_unchecked(i), Value::UInt64(v) if v == (i as u64)));
+                assert!(matches!(vector.get(i), Value::UInt64(v) if v == (i as u64)));
             } else {
-                assert!(matches!(vector.get_unchecked(i), Value::UInt64(v) if v == 6));
+                assert!(matches!(vector.get(i), Value::UInt64(v) if v == 6));
             }
         }
 
@@ -252,11 +252,11 @@ mod tests {
         // clip([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 3, 6) = [3, 3, 3, 3, 4, 5, 6, 6, 6, 6]
         for i in 0..10 {
             if i <= 3 {
-                assert!(matches!(vector.get_unchecked(i), Value::Float64(v) if v == 3.0));
+                assert!(matches!(vector.get(i), Value::Float64(v) if v == 3.0));
             } else if i <= 6 {
-                assert!(matches!(vector.get_unchecked(i), Value::Float64(v) if v == (i as f64)));
+                assert!(matches!(vector.get(i), Value::Float64(v) if v == (i as f64)));
             } else {
-                assert!(matches!(vector.get_unchecked(i), Value::Float64(v) if v == 6.0));
+                assert!(matches!(vector.get(i), Value::Float64(v) if v == 6.0));
             }
         }
     }

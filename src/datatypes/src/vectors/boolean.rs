@@ -88,8 +88,13 @@ impl Vector for BooleanVector {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
-    fn get_unchecked(&self, index: usize) -> Value {
-        self.array.value(index).into()
+    fn get(&self, index: usize) -> Value {
+        if self.array.is_valid(index) {
+            // Safety: The index have been checked by `is_valid()`.
+            unsafe { Value::Boolean(self.array.value_unchecked(index)) }
+        } else {
+            Value::Null
+        }
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -193,7 +198,7 @@ mod tests {
 
         for (i, b) in bools.iter().enumerate() {
             assert!(!v.is_null(i));
-            assert_eq!(Value::Boolean(*b), v.get_unchecked(i));
+            assert_eq!(Value::Boolean(*b), v.get(i));
         }
 
         let arrow_arr = v.to_arrow_array();
@@ -268,6 +273,7 @@ mod tests {
 
         for (i, v) in input.into_iter().enumerate() {
             assert_eq!(v, vector.get_data(i));
+            assert_eq!(Value::from(v), vector.get(i));
         }
     }
 
