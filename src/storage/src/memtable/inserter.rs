@@ -107,5 +107,3 @@ fn clone_put_data_column_to(
 
     Ok(())
 }
-
-// TODO(yingwen): Iter write batch and insert. Maybe implement iter for WriteBatch.
