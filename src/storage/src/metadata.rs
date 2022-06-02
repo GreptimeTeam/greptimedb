@@ -92,7 +92,7 @@ pub struct ColumnsMetadata {
 #[derive(Default, Clone)]
 pub struct RowKeyMetadata {
     /// Exclusive end index of row key columns.
-    pub row_key_end: usize,
+    row_key_end: usize,
     /// Index of timestamp key column.
     pub timestamp_key_index: usize,
     /// If version column is enabled, then the last column of key columns is a
@@ -109,6 +109,10 @@ pub struct ColumnsRowKeyMetadata {
 impl ColumnsRowKeyMetadata {
     pub fn iter_row_key_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
         self.columns.columns.iter().take(self.row_key.row_key_end)
+    }
+
+    pub fn iter_value_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+        self.columns.columns.iter().skip(self.row_key.row_key_end)
     }
 
     #[inline]

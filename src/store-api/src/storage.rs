@@ -25,4 +25,4 @@ pub use self::region::{Region, WriteContext};
 pub use self::requests::{GetRequest, PutOperation, ScanRequest, WriteRequest};
 pub use self::responses::{GetResponse, ScanResponse, WriteResponse};
 pub use self::snapshot::{ReadContext, Snapshot};
-pub use self::types::SequenceNumber;
+pub use self::types::{SequenceNumber, ValueType};

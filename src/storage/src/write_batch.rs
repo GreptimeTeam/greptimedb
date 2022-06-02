@@ -86,15 +86,6 @@ pub struct WriteBatch {
     num_rows: usize,
 }
 
-pub enum Mutation {
-    Put(PutData),
-}
-
-#[derive(Default)]
-pub struct PutData {
-    columns: HashMap<String, VectorRef>,
-}
-
 impl WriteRequest for WriteBatch {
     type Error = Error;
     type PutOp = PutData;
@@ -114,13 +105,14 @@ impl WriteRequest for WriteBatch {
 
         self.validate_put(&data)?;
 
-        self.add_len(data.len())?;
+        self.add_num_rows(data.num_rows())?;
         self.mutations.push(Mutation::Put(data));
 
         Ok(())
     }
 }
 
+// WriteBatch pub methods.
 impl WriteBatch {
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
@@ -130,6 +122,68 @@ impl WriteBatch {
         self.mutations.iter()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.mutations.is_empty()
+    }
+}
+
+pub enum Mutation {
+    Put(PutData),
+}
+
+#[derive(Default)]
+pub struct PutData {
+    columns: HashMap<String, VectorRef>,
+}
+
+impl PutOperation for PutData {
+    type Error = Error;
+
+    fn new() -> PutData {
+        PutData::default()
+    }
+
+    fn with_num_columns(num_columns: usize) -> PutData {
+        PutData {
+            columns: HashMap::with_capacity(num_columns),
+        }
+    }
+
+    fn add_key_column(&mut self, name: &str, vector: VectorRef) -> Result<()> {
+        self.add_column_by_name(name, vector)
+    }
+
+    fn add_version_column(&mut self, vector: VectorRef) -> Result<()> {
+        self.add_column_by_name(consts::VERSION_COLUMN_NAME, vector)
+    }
+
+    fn add_value_column(&mut self, name: &str, vector: VectorRef) -> Result<()> {
+        self.add_column_by_name(name, vector)
+    }
+}
+
+// PutData pub methods.
+impl PutData {
+    pub fn column_by_name(&self, name: &str) -> Option<&VectorRef> {
+        self.columns.get(name)
+    }
+
+    /// Returns number of rows in data.
+    pub fn num_rows(&self) -> usize {
+        self.columns
+            .values()
+            .next()
+            .map(|col| col.len())
+            .unwrap_or(0)
+    }
+
+    /// Returns true if no rows in data.
+    pub fn is_empty(&self) -> bool {
+        self.num_rows() == 0
+    }
+}
+
+impl WriteBatch {
     fn validate_put(&self, data: &PutData) -> Result<()> {
         for column_schema in self.schema.column_schemas() {
             match data.column_by_name(&column_schema.name) {
@@ -172,7 +226,7 @@ impl WriteBatch {
         Ok(())
     }
 
-    fn add_len(&mut self, len: usize) -> Result<()> {
+    fn add_num_rows(&mut self, len: usize) -> Result<()> {
         let num_rows = self.num_rows + len;
         ensure!(
             num_rows <= MAX_BATCH_SIZE,
@@ -213,47 +267,5 @@ impl PutData {
         self.columns.insert(name.to_string(), vector);
 
         Ok(())
-    }
-
-    fn column_by_name(&self, name: &str) -> Option<&VectorRef> {
-        self.columns.get(name)
-    }
-
-    fn len(&self) -> usize {
-        self.columns
-            .values()
-            .next()
-            .map(|col| col.len())
-            .unwrap_or(0)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-impl PutOperation for PutData {
-    type Error = Error;
-
-    fn new() -> PutData {
-        PutData::default()
-    }
-
-    fn with_num_columns(num_columns: usize) -> PutData {
-        PutData {
-            columns: HashMap::with_capacity(num_columns),
-        }
-    }
-
-    fn add_key_column(&mut self, name: &str, vector: VectorRef) -> Result<()> {
-        self.add_column_by_name(name, vector)
-    }
-
-    fn add_version_column(&mut self, vector: VectorRef) -> Result<()> {
-        self.add_column_by_name(consts::VERSION_COLUMN_NAME, vector)
-    }
-
-    fn add_value_column(&mut self, name: &str, vector: VectorRef) -> Result<()> {
-        self.add_column_by_name(name, vector)
     }
 }

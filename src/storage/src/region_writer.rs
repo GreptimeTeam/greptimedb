@@ -1,7 +1,7 @@
 use store_api::storage::{WriteContext, WriteResponse};
 
 use crate::error::Result;
-use crate::memtable::MemTableBuilderRef;
+use crate::memtable::{Inserter, MemTableBuilderRef};
 use crate::version::VersionControlRef;
 use crate::write_batch::WriteBatch;
 
@@ -15,6 +15,7 @@ impl RegionWriter {
     }
 
     // TODO(yingwen): Support group commit so we can avoid taking mutable reference.
+    /// Write `WriteBatch` to region, now the schema of batch needs to be validated outside.
     pub async fn write(
         &mut self,
         _ctx: &WriteContext,
@@ -28,7 +29,9 @@ impl RegionWriter {
         let memtables = &version.memtables;
 
         let mem = memtables.mutable_memtable();
-        mem.write(&request)?;
+        // FIXME(yingwen): Provide sequence number.
+        let mut inserter = Inserter::new(1);
+        inserter.insert_memtable(&request, &**mem)?;
 
         Ok(WriteResponse {})
     }

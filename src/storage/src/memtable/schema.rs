@@ -15,6 +15,11 @@ impl MemTableSchema {
     }
 
     #[inline]
+    pub fn value_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+        self.columns_row_key.iter_value_columns()
+    }
+
+    #[inline]
     pub fn num_row_key_columns(&self) -> usize {
         self.columns_row_key.num_row_key_columns()
     }

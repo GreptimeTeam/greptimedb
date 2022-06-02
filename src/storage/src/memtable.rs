@@ -1,17 +1,35 @@
+mod inserter;
 mod schema;
 
 use std::mem;
 use std::sync::Arc;
 
+use datatypes::vectors::VectorRef;
+use store_api::storage::{SequenceNumber, ValueType};
+
 use crate::error::Result;
+pub use crate::memtable::inserter::Inserter;
 pub use crate::memtable::schema::MemTableSchema;
-use crate::write_batch::WriteBatch;
+
+/// Key-value pairs in columnar format.
+pub struct KeyValues {
+    pub sequence: SequenceNumber,
+    pub value_type: ValueType,
+    /// Start index of these key-value paris in batch.
+    pub start_index_in_batch: usize,
+    pub keys: Vec<VectorRef>,
+    pub values: Vec<VectorRef>,
+}
 
 /// In memory storage.
 pub trait MemTable: Send + Sync {
     fn schema(&self) -> &MemTableSchema;
 
-    fn write(&self, batch: &WriteBatch) -> Result<()>;
+    /// Write key/values in request to the memtable.
+    ///
+    /// # Panics
+    /// Panic if the schema of key/value differs from memtable's schema.
+    fn write(&self, request: &KeyValues) -> Result<()>;
 
     fn bytes_allocated(&self) -> usize;
 }

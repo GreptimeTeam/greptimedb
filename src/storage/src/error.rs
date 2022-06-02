@@ -19,6 +19,12 @@ pub enum Error {
         region: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Missing column {} in write batch", column))]
+    BatchMissingColumn {
+        column: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -29,6 +35,7 @@ impl ErrorExt for Error {
 
         match self {
             InvalidRegionDesc { .. } | InvalidInputSchema { .. } => StatusCode::InvalidArguments,
+            BatchMissingColumn { .. } => StatusCode::Unexpected,
         }
     }
 
