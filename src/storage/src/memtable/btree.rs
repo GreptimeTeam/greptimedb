@@ -66,7 +66,7 @@ impl<'a> IterRow<'a> {
             .key_values
             .keys
             .iter()
-            .map(|vector| vector.get_value(self.index))
+            .map(|vector| vector.get(self.index))
             .collect();
         let row_key = RowKey {
             keys,
@@ -80,7 +80,7 @@ impl<'a> IterRow<'a> {
                 .key_values
                 .values
                 .iter()
-                .map(|vector| vector.get_value(self.index))
+                .map(|vector| vector.get(self.index))
                 .collect(),
         };
 

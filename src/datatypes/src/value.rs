@@ -179,4 +179,28 @@ mod tests {
         let bytes = Bytes::from(b"world".as_slice());
         assert_eq!(Value::Binary(bytes.clone()), Value::from(bytes));
     }
+
+    #[test]
+    fn test_value_from_string() {
+        let hello = "hello".to_string();
+        assert_eq!(
+            Value::String(StringBytes::from(hello.clone())),
+            Value::from(hello)
+        );
+
+        let world = "world";
+        assert_eq!(Value::String(StringBytes::from(world)), Value::from(world));
+    }
+
+    #[test]
+    fn test_value_from_bytes() {
+        let hello = b"hello".to_vec();
+        assert_eq!(
+            Value::Binary(Bytes::from(hello.clone())),
+            Value::from(hello)
+        );
+
+        let world: &[u8] = b"world";
+        assert_eq!(Value::Binary(Bytes::from(world)), Value::from(world));
+    }
 }
