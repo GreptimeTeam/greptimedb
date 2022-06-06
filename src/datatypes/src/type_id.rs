@@ -1,5 +1,5 @@
 /// Unique identifier for logical data type.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LogicalTypeId {
     Null,
 

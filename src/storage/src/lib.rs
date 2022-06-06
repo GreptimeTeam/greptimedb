@@ -10,3 +10,6 @@ mod snapshot;
 pub mod sync;
 mod version;
 mod write_batch;
+
+#[cfg(test)]
+mod test_util;

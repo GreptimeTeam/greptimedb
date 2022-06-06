@@ -179,10 +179,12 @@ impl RegionMetadataBuilder {
             self.push_row_key_column(col)?;
         }
 
+        // TODO(yingwen): Validate this is a timestamp column.
         let timestamp_key_index = self.columns.len();
         self.push_row_key_column(key.timestamp)?;
 
         if key.enable_version_column {
+            // TODO(yingwen): Validate that version column must be uint64 column.
             let version_col = version_column_desc();
             self.push_row_key_column(version_col)?;
         }
