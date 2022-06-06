@@ -103,7 +103,18 @@ mod tests {
         assert_eq!(3, vector.len());
 
         for i in 0..3 {
-            assert!(matches!(vector.get_unchecked(i), Value::Float64(_)));
+            match i {
+                0 => assert!(
+                    matches!(vector.get_unchecked(i), Value::Float64(v) if v == 0.31830987732601135)
+                ),
+                1 => assert!(
+                    matches!(vector.get_unchecked(i), Value::Float64(v) if v == 31.006279268784656)
+                ),
+                2 => assert!(
+                    matches!(vector.get_unchecked(i), Value::Float64(v) if v == 1.4107037729615416e61)
+                ),
+                _ => unreachable!(),
+            }
         }
     }
 }

@@ -7,6 +7,7 @@ use once_cell::sync::Lazy;
 
 use crate::scalars::function::FunctionRef;
 use crate::scalars::math::MathsFunction;
+use crate::scalars::numpy::NumpyFunction;
 
 #[derive(Default)]
 pub struct FunctionRegistry {
@@ -39,6 +40,7 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     let function_registry = FunctionRegistry::default();
 
     MathsFunction::register(&function_registry);
+    NumpyFunction::register(&function_registry);
 
     Arc::new(function_registry)
 });
