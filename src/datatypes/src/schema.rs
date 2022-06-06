@@ -111,7 +111,7 @@ impl TryFrom<Arc<ArrowSchema>> for Schema {
         Ok(Self {
             column_schemas,
             name_to_index,
-            arrow_schema: arrow_schema.clone(),
+            arrow_schema,
         })
     }
 }
@@ -128,7 +128,7 @@ mod tests {
         let field = Field::from(&column_schema);
         assert_eq!("test", field.name);
         assert_eq!(ArrowDataType::Int32, field.data_type);
-        assert_eq!(true, field.is_nullable);
+        assert!(field.is_nullable);
 
         let column_schema2 = ColumnSchema::try_from(&field).unwrap();
         assert_eq!(column_schema, column_schema2);
