@@ -563,6 +563,7 @@ dependencies = [
  "num",
  "num-traits",
  "once_cell",
+ "paste",
  "snafu",
 ]
 
