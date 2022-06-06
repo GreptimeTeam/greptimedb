@@ -6,7 +6,7 @@ use arrow::array::ArrayRef;
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, Result, SerializeSnafu};
+use crate::error::{Result, SerializeSnafu};
 use crate::serialize::Serializable;
 use crate::value::Value;
 use crate::vectors::Helper;
@@ -113,10 +113,6 @@ impl Serializable for ConstantVector {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value as JsonValue;
-
-    use super::*;
-
     #[test]
     fn test_constant_vector() {}
 

@@ -200,7 +200,7 @@ impl Scalar for String {
 
     #[inline]
     fn as_scalar_ref(&self) -> &str {
-        &self
+        self
     }
 
     #[inline]

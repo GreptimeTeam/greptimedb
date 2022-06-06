@@ -1,8 +1,13 @@
 use datatypes::prelude::ConcreteDataType;
+pub mod datafusion;
 pub mod expression;
 pub mod function;
+pub mod function_registry;
 pub mod math;
 pub mod numpy;
+
+pub use function::{Function, FunctionRef};
+pub use function_registry::{FunctionRegistry, FUNCTION_REGISTRY};
 
 pub(crate) fn numerics() -> Vec<ConcreteDataType> {
     vec![

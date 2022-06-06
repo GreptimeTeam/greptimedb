@@ -4,6 +4,8 @@ use snafu::ResultExt;
 use super::ctx::EvalContext;
 use crate::error::{GetScalarVectorSnafu, Result};
 
+/// TODO: remove the allow_unused when it's used.
+#[allow(unused)]
 pub fn scalar_unary_op<L: Scalar, O: Scalar, F>(
     l: &VectorRef,
     f: F,

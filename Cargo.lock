@@ -562,6 +562,7 @@ dependencies = [
  "dyn-clone",
  "num",
  "num-traits",
+ "once_cell",
  "snafu",
 ]
 
@@ -2440,6 +2441,7 @@ dependencies = [
  "arrow2",
  "async-trait",
  "common-error",
+ "common-function",
  "common-query",
  "common-recordbatch",
  "common-telemetry",

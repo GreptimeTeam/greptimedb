@@ -112,8 +112,7 @@ pub trait Vector: Send + Sync + Serializable {
     fn get_checked(&self, index: usize) -> Result<Value> {
         if index > self.len() {
             return BadArrayAccessSnafu {
-                msg: format!("Index out of bounds: {}, col size: {}", index, self.len())
-                    .to_string(),
+                msg: format!("Index out of bounds: {}, col size: {}", index, self.len()),
             }
             .fail();
         }

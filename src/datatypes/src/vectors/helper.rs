@@ -7,7 +7,7 @@ use arrow::datatypes::DataType as ArrowDataType;
 use datafusion_common::ScalarValue;
 use snafu::OptionExt;
 
-use crate::error::{Result, UnknownVectorSnafu};
+use crate::error::{ConversionSnafu, Result, UnknownVectorSnafu};
 use crate::scalars::*;
 use crate::vectors::*;
 
@@ -33,8 +33,7 @@ impl Helper {
                     "downcast vector error, vector type: {:?}, expected vector: {:?}",
                     vector.vector_type_name(),
                     std::any::type_name::<T>(),
-                )
-                .to_string(),
+                ),
             });
         arr
     }
@@ -48,8 +47,7 @@ impl Helper {
                     "downcast vector error, vector type: {:?}, expected vector: {:?}",
                     vector.vector_type_name(),
                     std::any::type_name::<T>(),
-                )
-                .to_string(),
+                ),
             });
         arr
     }
@@ -66,8 +64,7 @@ impl Helper {
                     "downcast vector error, vector type: {:?}, expected vector: {:?}",
                     ty,
                     std::any::type_name::<T>(),
-                )
-                .to_string(),
+                ),
             });
         arr
     }
@@ -83,8 +80,7 @@ impl Helper {
                     "downcast vector error, vector type: {:?}, expected vector: {:?}",
                     vector.vector_type_name(),
                     std::any::type_name::<T>(),
-                )
-                .to_string(),
+                ),
             });
         arr
     }
@@ -140,7 +136,12 @@ impl Helper {
             ScalarValue::LargeBinary(v) => {
                 ConstantVector::new(Arc::new(BinaryVector::from(vec![v])), length)
             }
-            _ => unimplemented!("FIXME: return error result"),
+            _ => {
+                return ConversionSnafu {
+                    from: format!("Unsupported scalar value: {}", value),
+                }
+                .fail()
+            }
         };
 
         Ok(Arc::new(vector))
@@ -170,7 +171,7 @@ impl Helper {
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
                 Arc::new(StringVector::try_from_arrow_array(array)?)
             }
-            _ => unimplemented!(),
+            _ => unimplemented!("Arrow array datatype: {:?}", array.data_type()),
         })
     }
 }

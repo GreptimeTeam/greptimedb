@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use chrono_tz::Tz;
 use common_query::prelude::Signature;
@@ -21,7 +22,7 @@ impl Default for FunctionContext {
     }
 }
 
-/// Scalar function trait, modified from databend
+/// Scalar function trait, modified from databend to adapte datafusion
 /// TODO(dennis): optimize function by it's monotonicity
 pub trait Function: fmt::Display + Sync + Send + DynClone {
     /// Returns the name of the function, should be unique.
@@ -36,3 +37,5 @@ pub trait Function: fmt::Display + Sync + Send + DynClone {
 }
 
 dyn_clone::clone_trait_object!(Function);
+
+pub type FunctionRef = Arc<dyn Function>;

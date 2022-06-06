@@ -13,12 +13,19 @@ pub enum Error {
         source: DataFusionError,
         backtrace: Backtrace,
     },
+    #[snafu(display("Fail to cast scalar value into vector: {}", source))]
+    FromScalarValue {
+        #[snafu(backtrace)]
+        source: DataTypeError,
+    },
     #[snafu(display("Fail to cast arrow array into vector: {:?}, {}", data_type, source))]
     IntoVector {
         #[snafu(backtrace)]
         source: DataTypeError,
         data_type: ArrowDatatype,
     },
+    #[snafu(display("Common error: {}, {}", msg, backtrace))]
+    External { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -28,6 +35,8 @@ impl ErrorExt for Error {
         match self {
             Error::ExecuteFunction { .. } => StatusCode::EngineExecuteQuery,
             Error::IntoVector { source, .. } => source.status_code(),
+            Error::FromScalarValue { source } => source.status_code(),
+            Error::External { .. } => StatusCode::Internal,
         }
     }
 

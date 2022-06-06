@@ -65,7 +65,7 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
     }
 
     fn vector_type_name(&self) -> String {
-        format!("{}Vector", T::type_name()).to_string()
+        format!("{}Vector", T::type_name())
     }
 
     fn as_any(&self) -> &dyn Any {

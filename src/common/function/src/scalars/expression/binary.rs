@@ -1,3 +1,5 @@
+use std::iter;
+
 use datatypes::prelude::*;
 use datatypes::vectors::ConstantVector;
 
@@ -21,9 +23,9 @@ where
     let result = match (l.is_const(), r.is_const()) {
         (false, true) => {
             let left: &<L as Scalar>::VectorType = unsafe { VectorHelper::static_cast(l) };
-            let rc: &ConstantVector = unsafe { VectorHelper::static_cast(r) };
+            let right: &ConstantVector = unsafe { VectorHelper::static_cast(r) };
             let right: &<R as Scalar>::VectorType =
-                unsafe { VectorHelper::static_cast(rc.inner()) };
+                unsafe { VectorHelper::static_cast(right.inner()) };
             let b = right.get_data(0);
 
             let it = left.iter_data().map(|a| f(a, b, ctx));
@@ -42,9 +44,9 @@ where
         }
 
         (true, false) => {
-            let lc: &ConstantVector = unsafe { VectorHelper::static_cast(l) };
-            let left: &<L as Scalar>::VectorType = unsafe { VectorHelper::static_cast(lc.inner()) };
-
+            let left: &ConstantVector = unsafe { VectorHelper::static_cast(l) };
+            let left: &<L as Scalar>::VectorType =
+                unsafe { VectorHelper::static_cast(left.inner()) };
             let a = left.get_data(0);
 
             let right: &<R as Scalar>::VectorType = unsafe { VectorHelper::static_cast(r) };
@@ -52,8 +54,23 @@ where
             <O as Scalar>::VectorType::from_owned_iterator(it)
         }
 
-        // True True ?
-        (true, true) => unimplemented!(),
+        (true, true) => {
+            let left: &ConstantVector = unsafe { VectorHelper::static_cast(l) };
+            let left: &<L as Scalar>::VectorType =
+                unsafe { VectorHelper::static_cast(left.inner()) };
+            let a = left.get_data(0);
+
+            let right: &ConstantVector = unsafe { VectorHelper::static_cast(r) };
+            let right: &<R as Scalar>::VectorType =
+                unsafe { VectorHelper::static_cast(right.inner()) };
+            let b = right.get_data(0);
+
+            let it = iter::repeat(a)
+                .zip(iter::repeat(b))
+                .map(|(a, b)| f(a, b, ctx))
+                .take(left.len());
+            <O as Scalar>::VectorType::from_owned_iterator(it)
+        }
     };
 
     if let Some(error) = ctx.error.take() {
