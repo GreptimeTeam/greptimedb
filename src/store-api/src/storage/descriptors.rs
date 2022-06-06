@@ -1,6 +1,6 @@
 use datatypes::value::Value;
 
-use crate::storage::{ColumnSchema, ConcreteDataType};
+use crate::storage::{consts, ColumnSchema, ConcreteDataType};
 
 /// Id of column, unique in each region.
 pub type ColumnId = u32;
@@ -110,17 +110,106 @@ impl ColumnDescriptorBuilder {
     }
 }
 
+pub struct RowKeyDescriptorBuilder {
+    columns: Vec<ColumnDescriptor>,
+    timestamp: ColumnDescriptor,
+    enable_version_column: bool,
+}
+
+impl RowKeyDescriptorBuilder {
+    pub fn new(timestamp: ColumnDescriptor) -> Self {
+        Self {
+            columns: Vec::new(),
+            timestamp,
+            enable_version_column: true,
+        }
+    }
+
+    pub fn columns_capacity(mut self, capacity: usize) -> Self {
+        self.columns.reserve(capacity);
+        self
+    }
+
+    pub fn push_column(mut self, column: ColumnDescriptor) -> Self {
+        self.columns.push(column);
+        self
+    }
+
+    pub fn enable_version_column(mut self, enable: bool) -> Self {
+        self.enable_version_column = enable;
+        self
+    }
+
+    pub fn build(self) -> RowKeyDescriptor {
+        RowKeyDescriptor {
+            columns: self.columns,
+            timestamp: self.timestamp,
+            enable_version_column: self.enable_version_column,
+        }
+    }
+}
+
+pub struct ColumnFamilyDescriptorBuilder {
+    cf_id: ColumnFamilyId,
+    name: String,
+    columns: Vec<ColumnDescriptor>,
+}
+
+impl ColumnFamilyDescriptorBuilder {
+    pub fn new() -> Self {
+        Self {
+            cf_id: consts::DEFAULT_CF_ID,
+            name: consts::DEFAULT_CF_NAME.to_string(),
+            columns: Vec::new(),
+        }
+    }
+
+    pub fn cf_id(mut self, cf_id: ColumnFamilyId) -> Self {
+        self.cf_id = cf_id;
+        self
+    }
+
+    pub fn name<T: Into<String>>(mut self, name: T) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    pub fn columns_capacity(mut self, capacity: usize) -> Self {
+        self.columns.reserve(capacity);
+        self
+    }
+
+    pub fn push_column(mut self, column: ColumnDescriptor) -> Self {
+        self.columns.push(column);
+        self
+    }
+
+    pub fn build(self) -> ColumnFamilyDescriptor {
+        ColumnFamilyDescriptor {
+            cf_id: self.cf_id,
+            name: self.name,
+            columns: self.columns,
+        }
+    }
+}
+
+impl Default for ColumnFamilyDescriptorBuilder {
+    fn default() -> ColumnFamilyDescriptorBuilder {
+        ColumnFamilyDescriptorBuilder::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn new_column_descriptor_builder() -> ColumnDescriptorBuilder {
+    fn new_column_desc_builder() -> ColumnDescriptorBuilder {
         ColumnDescriptorBuilder::new(3, "test", ConcreteDataType::int32_datatype())
     }
 
     #[test]
     fn test_column_descriptor_builder() {
-        let desc = new_column_descriptor_builder().build();
+        let desc = new_column_desc_builder().build();
         assert_eq!(3, desc.id);
         assert_eq!("test", desc.name);
         assert_eq!(ConcreteDataType::int32_datatype(), desc.data_type);
@@ -128,22 +217,73 @@ mod tests {
         assert!(desc.default_value.is_none());
         assert!(desc.comment.is_empty());
 
-        let desc = new_column_descriptor_builder().is_nullable(false).build();
+        let desc = new_column_desc_builder().is_nullable(false).build();
         assert!(!desc.is_nullable);
 
-        let desc = new_column_descriptor_builder()
+        let desc = new_column_desc_builder()
             .default_value(Some(Value::Null))
             .build();
         assert_eq!(Value::Null, desc.default_value.unwrap());
 
-        let desc = new_column_descriptor_builder()
+        let desc = new_column_desc_builder()
             .default_value(Some(Value::Int32(123)))
             .build();
         assert_eq!(Value::Int32(123), desc.default_value.unwrap());
 
-        let desc = new_column_descriptor_builder()
-            .comment("A test column")
-            .build();
+        let desc = new_column_desc_builder().comment("A test column").build();
         assert_eq!("A test column", desc.comment);
+    }
+
+    fn new_timestamp_desc() -> ColumnDescriptor {
+        ColumnDescriptorBuilder::new(1, "timestamp", ConcreteDataType::int64_datatype()).build()
+    }
+
+    #[test]
+    fn test_row_key_descriptor_builder() {
+        let timestamp = new_timestamp_desc();
+
+        let desc = RowKeyDescriptorBuilder::new(timestamp.clone()).build();
+        assert!(desc.columns.is_empty());
+        assert!(desc.enable_version_column);
+
+        let desc = RowKeyDescriptorBuilder::new(timestamp.clone())
+            .columns_capacity(1)
+            .push_column(
+                ColumnDescriptorBuilder::new(2, "c1", ConcreteDataType::int32_datatype()).build(),
+            )
+            .push_column(
+                ColumnDescriptorBuilder::new(3, "c2", ConcreteDataType::int32_datatype()).build(),
+            )
+            .build();
+        assert_eq!(2, desc.columns.len());
+        assert!(desc.enable_version_column);
+
+        let desc = RowKeyDescriptorBuilder::new(timestamp.clone())
+            .enable_version_column(false)
+            .build();
+        assert!(desc.columns.is_empty());
+        assert!(!desc.enable_version_column);
+    }
+
+    #[test]
+    fn test_cf_descriptor_builder() {
+        let desc = ColumnFamilyDescriptorBuilder::default().build();
+        assert_eq!(consts::DEFAULT_CF_ID, desc.cf_id);
+        assert_eq!(consts::DEFAULT_CF_NAME, desc.name);
+        assert!(desc.columns.is_empty());
+
+        let desc = ColumnFamilyDescriptorBuilder::new()
+            .cf_id(32)
+            .name("cf1")
+            .build();
+        assert_eq!(32, desc.cf_id);
+        assert_eq!("cf1", desc.name);
+
+        let desc = ColumnFamilyDescriptorBuilder::new()
+            .push_column(
+                ColumnDescriptorBuilder::new(2, "c1", ConcreteDataType::int32_datatype()).build(),
+            )
+            .build();
+        assert_eq!(1, desc.columns.len());
     }
 }

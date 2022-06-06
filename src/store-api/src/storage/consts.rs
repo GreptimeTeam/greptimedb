@@ -12,10 +12,15 @@ pub const KEY_CF_ID: ColumnFamilyId = 0;
 /// Id for default column family.
 pub const DEFAULT_CF_ID: ColumnFamilyId = 1;
 
-// Ids reserved for internal columns.
+// Ids reserved for internal columns:
 
 /// Column id for version column.
 pub const VERSION_COLUMN_ID: ColumnId = 1;
 
-// Names reserved for internal columns.
+// Names reserved for internal columns:
+
+/// Name of version column.
 pub const VERSION_COLUMN_NAME: &str = "__version";
+
+// Names for default column family.
+pub const DEFAULT_CF_NAME: &str = "default";

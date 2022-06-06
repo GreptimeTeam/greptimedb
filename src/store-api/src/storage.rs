@@ -14,8 +14,9 @@ pub use datatypes::data_type::ConcreteDataType;
 pub use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 
 pub use self::descriptors::{
-    ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyId, ColumnId,
-    RegionDescriptor, RowKeyDescriptor,
+    ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor,
+    ColumnFamilyDescriptorBuilder, ColumnFamilyId, ColumnId, RegionDescriptor, RowKeyDescriptor,
+    RowKeyDescriptorBuilder,
 };
 pub use self::engine::{EngineContext, StorageEngine};
 pub use self::metadata::RegionMeta;
