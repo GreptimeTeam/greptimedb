@@ -89,7 +89,11 @@ mod tests {
 
         let args: Vec<VectorRef> = vec![
             Arc::new(ConstantVector::new(
-                Arc::new(Float32Vector::from_vec(vec![std::f32::consts::PI, -1.42, 2.0])),
+                Arc::new(Float32Vector::from_vec(vec![
+                    std::f32::consts::PI,
+                    -1.42,
+                    2.0,
+                ])),
                 3,
             )),
             Arc::new(Int8Vector::from_vec(vec![-1i8, 3, 123])),
