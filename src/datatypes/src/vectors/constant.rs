@@ -81,8 +81,8 @@ impl Vector for ConstantVector {
         })
     }
 
-    fn get(&self, _index: usize) -> Value {
-        self.vector.get(0)
+    fn get_unchecked(&self, _index: usize) -> Value {
+        self.vector.get_unchecked(0)
     }
     // just for resize
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -103,7 +103,7 @@ impl fmt::Debug for ConstantVector {
 
 impl Serializable for ConstantVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        vec![self.get(0); self.len()]
+        vec![self.get_unchecked(0); self.len()]
             .into_iter()
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()

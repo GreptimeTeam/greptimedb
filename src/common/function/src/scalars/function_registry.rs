@@ -42,3 +42,21 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     Arc::new(function_registry)
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scalars::test::TestAndFunction;
+
+    #[test]
+    fn test_function_registry() {
+        let registry = FunctionRegistry::default();
+        let func = Arc::new(TestAndFunction::default());
+
+        assert!(registry.get_function("test_and").is_none());
+        assert!(registry.functions().is_empty());
+        registry.register(func);
+        assert!(registry.get_function("test_and").is_some());
+        assert_eq!(1, registry.functions().len());
+    }
+}

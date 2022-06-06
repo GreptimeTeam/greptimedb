@@ -62,7 +62,7 @@ impl Vector for NullVector {
         true
     }
 
-    fn get(&self, _index: usize) -> Value {
+    fn get_unchecked(&self, _index: usize) -> Value {
         Value::Null
     }
 

@@ -23,7 +23,7 @@ impl Default for FunctionContext {
 }
 
 /// Scalar function trait, modified from databend to adapte datafusion
-/// TODO(dennis): optimize function by it's monotonicity
+/// TODO(dennis): optimize function by it's features such as monotonicity etc.
 pub trait Function: fmt::Display + Sync + Send + DynClone {
     /// Returns the name of the function, should be unique.
     fn name(&self) -> &str;

@@ -107,16 +107,16 @@ pub trait Vector: Send + Sync + Serializable {
 
     /// # Safety
     /// Assumes that the `index` is smaller than size.
-    fn get(&self, index: usize) -> Value;
+    fn get_unchecked(&self, index: usize) -> Value;
 
-    fn get_checked(&self, index: usize) -> Result<Value> {
+    fn get(&self, index: usize) -> Result<Value> {
         if index > self.len() {
             return BadArrayAccessSnafu {
                 msg: format!("Index out of bounds: {}, col size: {}", index, self.len()),
             }
             .fail();
         }
-        Ok(self.get(index))
+        Ok(self.get_unchecked(index))
     }
 
     // Copies each element according offsets parameter.

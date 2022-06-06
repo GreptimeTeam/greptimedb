@@ -69,7 +69,7 @@ impl Vector for BinaryVector {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
-    fn get(&self, index: usize) -> Value {
+    fn get_unchecked(&self, index: usize) -> Value {
         self.array.value(index).into()
     }
 

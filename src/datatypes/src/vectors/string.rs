@@ -69,7 +69,7 @@ impl Vector for StringVector {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
-    fn get(&self, index: usize) -> DataValue {
+    fn get_unchecked(&self, index: usize) -> DataValue {
         self.array.value(index).into()
     }
 

@@ -24,7 +24,7 @@ pub enum Error {
         source: DataTypeError,
         data_type: ArrowDatatype,
     },
-    #[snafu(display("Common error: {}, {}", msg, backtrace))]
+    #[snafu(display("External error: {}, {}", msg, backtrace))]
     External { msg: String, backtrace: Backtrace },
 }
 

@@ -10,6 +10,6 @@ pub(crate) struct MathsFunction;
 
 impl MathsFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(PowFunction {}));
+        registry.register(Arc::new(PowFunction::default()));
     }
 }

@@ -7,7 +7,7 @@ mod planner;
 
 use std::sync::Arc;
 
-use common_function::scalars::datafusion::create_udf;
+use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
 use common_query::prelude::ScalarUdf;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};

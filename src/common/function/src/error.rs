@@ -43,3 +43,27 @@ impl From<Error> for QueryError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raise_datatype_error() -> std::result::Result<(), DataTypeError> {
+        Err(DataTypeError::Conversion {
+            from: "test".to_string(),
+            backtrace: Backtrace::generate(),
+        })
+    }
+
+    #[test]
+    fn test_get_scalar_vector_error() {
+        let err = raise_datatype_error()
+            .context(GetScalarVectorSnafu)
+            .err()
+            .unwrap();
+        assert!(err.backtrace_opt().is_some());
+
+        let query_error = QueryError::from(Error::from(err));
+        assert!(matches!(query_error, QueryError::External { .. }));
+    }
+}

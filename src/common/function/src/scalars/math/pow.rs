@@ -15,7 +15,7 @@ use crate::scalars::expression::{scalar_binary_op, EvalContext};
 use crate::scalars::function::{Function, FunctionContext};
 use crate::scalars::numerics;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PowFunction;
 
 impl Function for PowFunction {
@@ -60,5 +60,46 @@ where
 impl fmt::Display for PowFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "POW")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_query::prelude::TypeSignature;
+    use datatypes::value::Value;
+    use datatypes::vectors::{ConstantVector, Float32Vector, Int8Vector};
+
+    use super::*;
+    #[test]
+    fn test_pow_function() {
+        let pow = PowFunction::default();
+
+        assert_eq!("pow", pow.name());
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            pow.return_type(&[]).unwrap()
+        );
+
+        assert!(matches!(pow.signature(),
+                         Signature {
+                             type_signature: TypeSignature::Uniform(2, valid_types),
+                             volatility: Volatility::Immutable
+                         } if  valid_types == numerics()
+        ));
+
+        let args: Vec<VectorRef> = vec![
+            Arc::new(ConstantVector::new(
+                Arc::new(Float32Vector::from_vec(vec![std::f32::consts::PI, -1.42, 2.0])),
+                3,
+            )),
+            Arc::new(Int8Vector::from_vec(vec![-1i8, 3, 123])),
+        ];
+
+        let vector = pow.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(3, vector.len());
+
+        for i in 0..3 {
+            assert!(matches!(vector.get_unchecked(i), Value::Float64(_)));
+        }
     }
 }
