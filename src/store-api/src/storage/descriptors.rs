@@ -235,7 +235,7 @@ mod tests {
     }
 
     fn new_timestamp_desc() -> ColumnDescriptor {
-        ColumnDescriptorBuilder::new(1, "timestamp", ConcreteDataType::int64_datatype()).build()
+        ColumnDescriptorBuilder::new(5, "timestamp", ConcreteDataType::int64_datatype()).build()
     }
 
     #[test]
@@ -249,10 +249,10 @@ mod tests {
         let desc = RowKeyDescriptorBuilder::new(timestamp.clone())
             .columns_capacity(1)
             .push_column(
-                ColumnDescriptorBuilder::new(2, "c1", ConcreteDataType::int32_datatype()).build(),
+                ColumnDescriptorBuilder::new(6, "c1", ConcreteDataType::int32_datatype()).build(),
             )
             .push_column(
-                ColumnDescriptorBuilder::new(3, "c2", ConcreteDataType::int32_datatype()).build(),
+                ColumnDescriptorBuilder::new(7, "c2", ConcreteDataType::int32_datatype()).build(),
             )
             .build();
         assert_eq!(2, desc.columns.len());
@@ -281,7 +281,7 @@ mod tests {
 
         let desc = ColumnFamilyDescriptorBuilder::new()
             .push_column(
-                ColumnDescriptorBuilder::new(2, "c1", ConcreteDataType::int32_datatype()).build(),
+                ColumnDescriptorBuilder::new(6, "c1", ConcreteDataType::int32_datatype()).build(),
             )
             .build();
         assert_eq!(1, desc.columns.len());

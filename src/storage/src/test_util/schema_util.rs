@@ -22,7 +22,7 @@ pub fn new_schema_ref(column_defs: &[ColumnDef]) -> SchemaRef {
     Arc::new(new_schema(column_defs))
 }
 
-fn logical_type_id_to_concrete_type(type_id: LogicalTypeId) -> ConcreteDataType {
+pub fn logical_type_id_to_concrete_type(type_id: LogicalTypeId) -> ConcreteDataType {
     match type_id {
         LogicalTypeId::Null => ConcreteDataType::null_datatype(),
         LogicalTypeId::Boolean => ConcreteDataType::boolean_datatype(),

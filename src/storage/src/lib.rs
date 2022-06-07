@@ -3,7 +3,7 @@
 mod engine;
 mod error;
 mod memtable;
-mod metadata;
+pub mod metadata;
 mod region;
 mod region_writer;
 mod snapshot;

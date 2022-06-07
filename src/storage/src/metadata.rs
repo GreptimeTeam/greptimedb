@@ -122,11 +122,16 @@ impl ColumnsRowKeyMetadata {
 
 pub type ColumnsRowKeyMetadataRef = Arc<ColumnsRowKeyMetadata>;
 
-// TODO(yingwen): id to cfs metadata, name to id.
 #[derive(Clone)]
 pub struct ColumnFamiliesMetadata {
     /// Map column family id to column family metadata.
-    pub id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
+    id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
+}
+
+impl ColumnFamiliesMetadata {
+    pub fn cf_by_id(&self, cf_id: ColumnFamilyId) -> Option<&ColumnFamilyMetadata> {
+        self.id_to_cfs.get(&cf_id)
+    }
 }
 
 #[derive(Clone)]
@@ -287,4 +292,169 @@ fn version_column_desc() -> ColumnDescriptor {
     )
     .is_nullable(false)
     .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::type_id::LogicalTypeId;
+    use store_api::storage::{
+        ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder, RowKeyDescriptorBuilder,
+    };
+
+    use super::*;
+    use crate::test_util::descriptor_util::RegionDescBuilder;
+    use crate::test_util::schema_util;
+
+    #[test]
+    fn test_descriptor_to_region_metadata() {
+        let desc = RegionDescBuilder::new("region-0")
+            .timestamp(("ts", LogicalTypeId::UInt64, false))
+            .enable_version_column(false)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .build();
+
+        let expect_schema = schema_util::new_schema_ref(&[
+            ("k1", LogicalTypeId::Int32, false),
+            ("ts", LogicalTypeId::UInt64, false),
+            ("v1", LogicalTypeId::Float32, true),
+        ]);
+
+        let metadata = RegionMetadata::try_from(desc).unwrap();
+        assert_eq!(expect_schema, metadata.schema);
+        assert_eq!(2, metadata.columns_row_key.num_row_key_columns());
+        assert_eq!(1, metadata.columns_row_key.num_value_columns());
+    }
+
+    #[test]
+    fn test_build_empty_region_metadata() {
+        let metadata = RegionMetadataBuilder::default().build();
+        assert!(metadata.schema.column_schemas().is_empty());
+
+        assert!(metadata.columns_row_key.columns.columns.is_empty());
+        assert_eq!(0, metadata.columns_row_key.num_row_key_columns());
+        assert!(metadata
+            .columns_row_key
+            .iter_row_key_columns()
+            .next()
+            .is_none());
+        assert_eq!(0, metadata.columns_row_key.num_value_columns());
+        assert!(metadata
+            .columns_row_key
+            .iter_value_columns()
+            .next()
+            .is_none());
+
+        assert!(metadata.column_families.id_to_cfs.is_empty());
+
+        assert_eq!(0, metadata.version);
+    }
+
+    fn new_metadata(enable_version_column: bool) -> RegionMetadata {
+        let timestamp = ColumnDescriptorBuilder::new(2, "ts", ConcreteDataType::int64_datatype())
+            .is_nullable(false)
+            .build();
+        let row_key = RowKeyDescriptorBuilder::new(timestamp)
+            .push_column(
+                ColumnDescriptorBuilder::new(3, "k1", ConcreteDataType::int64_datatype())
+                    .is_nullable(false)
+                    .build(),
+            )
+            .enable_version_column(enable_version_column)
+            .build();
+        let cf = ColumnFamilyDescriptorBuilder::new()
+            .push_column(
+                ColumnDescriptorBuilder::new(4, "v1", ConcreteDataType::int64_datatype()).build(),
+            )
+            .build();
+        RegionMetadataBuilder::new()
+            .row_key(row_key)
+            .unwrap()
+            .add_column_family(cf)
+            .unwrap()
+            .build()
+    }
+
+    #[test]
+    fn test_build_metedata_disable_version() {
+        let metadata = new_metadata(false);
+
+        let expect_schema = schema_util::new_schema_ref(&[
+            ("k1", LogicalTypeId::Int64, false),
+            ("ts", LogicalTypeId::Int64, false),
+            ("v1", LogicalTypeId::Int64, true),
+        ]);
+
+        assert_eq!(expect_schema, metadata.schema);
+
+        // 3 columns
+        assert_eq!(3, metadata.columns_row_key.columns.columns.len());
+        // 2 row key columns
+        assert_eq!(2, metadata.columns_row_key.num_row_key_columns());
+        let row_key_names: Vec<_> = metadata
+            .columns_row_key
+            .iter_row_key_columns()
+            .map(|column| &column.desc.name)
+            .collect();
+        assert_eq!(["k1", "ts"], &row_key_names[..]);
+        // 1 value column
+        assert_eq!(1, metadata.columns_row_key.num_value_columns());
+        let value_names: Vec<_> = metadata
+            .columns_row_key
+            .iter_value_columns()
+            .map(|column| &column.desc.name)
+            .collect();
+        assert_eq!(["v1"], &value_names[..]);
+        // Check timestamp index.
+        assert_eq!(1, metadata.columns_row_key.row_key.timestamp_key_index);
+        // Check version column.
+        assert!(!metadata.columns_row_key.row_key.enable_version_column);
+
+        assert!(metadata
+            .column_families
+            .cf_by_id(consts::DEFAULT_CF_ID)
+            .is_some());
+
+        assert_eq!(0, metadata.version);
+    }
+
+    #[test]
+    fn test_build_metedata_enable_version() {
+        let metadata = new_metadata(true);
+
+        let expect_schema = schema_util::new_schema_ref(&[
+            ("k1", LogicalTypeId::Int64, false),
+            ("ts", LogicalTypeId::Int64, false),
+            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
+            ("v1", LogicalTypeId::Int64, true),
+        ]);
+
+        assert_eq!(expect_schema, metadata.schema);
+
+        // 4 columns
+        assert_eq!(4, metadata.columns_row_key.columns.columns.len());
+        // 3 row key columns
+        assert_eq!(3, metadata.columns_row_key.num_row_key_columns());
+        let row_key_names: Vec<_> = metadata
+            .columns_row_key
+            .iter_row_key_columns()
+            .map(|column| &column.desc.name)
+            .collect();
+        assert_eq!(
+            ["k1", "ts", consts::VERSION_COLUMN_NAME],
+            &row_key_names[..]
+        );
+        // 1 value column
+        assert_eq!(1, metadata.columns_row_key.num_value_columns());
+        let value_names: Vec<_> = metadata
+            .columns_row_key
+            .iter_value_columns()
+            .map(|column| &column.desc.name)
+            .collect();
+        assert_eq!(["v1"], &value_names[..]);
+        // Check timestamp index.
+        assert_eq!(1, metadata.columns_row_key.row_key.timestamp_key_index);
+        // Check version column.
+        assert!(metadata.columns_row_key.row_key.enable_version_column);
+    }
 }

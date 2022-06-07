@@ -14,6 +14,7 @@ pub const DEFAULT_CF_ID: ColumnFamilyId = 1;
 
 // Ids reserved for internal columns:
 
+// TODO(yingwen): Reserve one bit for internal columns.
 /// Column id for version column.
 pub const VERSION_COLUMN_ID: ColumnId = 1;
 
