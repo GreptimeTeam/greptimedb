@@ -55,5 +55,5 @@ pub trait StorageEngine: Send + Sync + Clone {
 }
 
 /// Storage engine context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EngineContext {}

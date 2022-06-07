@@ -18,6 +18,7 @@ impl RegionDescBuilder {
     pub fn new<T: Into<String>>(name: T) -> Self {
         let key_builder = RowKeyDescriptorBuilder::new(
             ColumnDescriptorBuilder::new(2, "timestamp", ConcreteDataType::uint64_datatype())
+                .is_nullable(false)
                 .build(),
         );
 

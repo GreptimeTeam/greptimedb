@@ -13,3 +13,5 @@ mod write_batch;
 
 #[cfg(test)]
 mod test_util;
+
+pub use engine::EngineImpl;

@@ -294,6 +294,7 @@ fn version_column_desc() -> ColumnDescriptor {
     .build()
 }
 
+// TODO(yingwen): Add tests for using invalid row_key/cf to build metadata.
 #[cfg(test)]
 mod tests {
     use datatypes::type_id::LogicalTypeId;

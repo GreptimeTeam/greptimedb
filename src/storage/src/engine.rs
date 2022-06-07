@@ -45,6 +45,16 @@ impl StorageEngine for EngineImpl {
     }
 }
 
+impl EngineImpl {
+    pub fn new() -> EngineImpl {
+        EngineImpl {
+            inner: Arc::new(EngineInner {
+                regions: RwLock::new(HashMap::new()),
+            }),
+        }
+    }
+}
+
 type RegionMap = HashMap<String, RegionImpl>;
 
 struct EngineInner {
@@ -87,5 +97,34 @@ impl EngineInner {
     fn get_region(&self, name: &str) -> Option<RegionImpl> {
         let regions = self.regions.read().unwrap();
         regions.get(name).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::type_id::LogicalTypeId;
+    use store_api::storage::Region;
+
+    use super::*;
+    use crate::test_util::descriptor_util::RegionDescBuilder;
+
+    #[tokio::test]
+    async fn test_create_new_region() {
+        let engine = EngineImpl::new();
+
+        let region_name = "region-0";
+        let desc = RegionDescBuilder::new(region_name)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .build();
+        let ctx = EngineContext::default();
+        let region = engine.create_region(&ctx, desc).await.unwrap();
+
+        assert_eq!(region_name, region.name());
+
+        let region2 = engine.get_region(&ctx, region_name).unwrap().unwrap();
+        assert_eq!(region_name, region2.name());
+
+        assert!(engine.get_region(&ctx, "no such region").unwrap().is_none());
     }
 }
