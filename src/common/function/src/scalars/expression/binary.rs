@@ -3,8 +3,8 @@ use std::iter;
 use datatypes::prelude::*;
 use datatypes::vectors::ConstantVector;
 
-use super::ctx::EvalContext;
 use crate::error::Result;
+use crate::scalars::expression::ctx::EvalContext;
 
 pub fn scalar_binary_op<L: Scalar, R: Scalar, O: Scalar, F>(
     l: &VectorRef,

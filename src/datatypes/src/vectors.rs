@@ -19,6 +19,7 @@ pub use helper::Helper;
 pub use mutable::MutableVector;
 pub use null::*;
 pub use primitive::*;
+use snafu::ensure;
 pub use string::*;
 
 use crate::data_type::ConcreteDataType;
@@ -94,13 +95,11 @@ pub trait Vector: Send + Sync + Serializable {
     }
 
     /// Returns whether row is null.
-    fn is_null(&self, _row: usize) -> bool {
-        false
-    }
+    fn is_null(&self, _row: usize) -> bool;
 
     /// If the only value vector can contain is NULL.
     fn only_null(&self) -> bool {
-        self.validity() == Validity::AllNull
+        self.validity() == Validity::AllNull || self.null_count() == self.len()
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef;
@@ -110,12 +109,13 @@ pub trait Vector: Send + Sync + Serializable {
     fn get_unchecked(&self, index: usize) -> Value;
 
     fn get(&self, index: usize) -> Result<Value> {
-        if index > self.len() {
-            return BadArrayAccessSnafu {
-                msg: format!("Index out of bounds: {}, col size: {}", index, self.len()),
+        ensure!(
+            index < self.len(),
+            BadArrayAccessSnafu {
+                index,
+                size: self.len()
             }
-            .fail();
-        }
+        );
         Ok(self.get_unchecked(index))
     }
 

@@ -5,7 +5,6 @@ use chrono_tz::Tz;
 use common_query::prelude::Signature;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::VectorRef;
-use dyn_clone::DynClone;
 
 use crate::error::Result;
 
@@ -22,9 +21,9 @@ impl Default for FunctionContext {
     }
 }
 
-/// Scalar function trait, modified from databend to adapte datafusion
+/// Scalar function trait, modified from databend to adapt datafusion
 /// TODO(dennis): optimize function by it's features such as monotonicity etc.
-pub trait Function: fmt::Display + Sync + Send + DynClone {
+pub trait Function: fmt::Display + Sync + Send {
     /// Returns the name of the function, should be unique.
     fn name(&self) -> &str;
 
@@ -35,7 +34,5 @@ pub trait Function: fmt::Display + Sync + Send + DynClone {
     /// Evaluate the function, e.g. run/execute the function.
     fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef>;
 }
-
-dyn_clone::clone_trait_object!(Function);
 
 pub type FunctionRef = Arc<dyn Function>;

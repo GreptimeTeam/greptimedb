@@ -34,6 +34,25 @@ pub enum ConcreteDataType {
 }
 
 impl ConcreteDataType {
+    pub fn is_float(&self) -> bool {
+        matches!(self, ConcreteDataType::Float64(_)) || matches!(self, ConcreteDataType::Float32(_))
+    }
+
+    pub fn numerics() -> Vec<ConcreteDataType> {
+        vec![
+            ConcreteDataType::int8_datatype(),
+            ConcreteDataType::int16_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::uint8_datatype(),
+            ConcreteDataType::uint16_datatype(),
+            ConcreteDataType::uint32_datatype(),
+            ConcreteDataType::uint64_datatype(),
+            ConcreteDataType::float32_datatype(),
+            ConcreteDataType::float64_datatype(),
+        ]
+    }
+
     /// Convert arrow data type to [ConcreteDataType].
     ///
     /// # Panics

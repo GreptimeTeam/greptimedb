@@ -6,9 +6,9 @@ use pow::PowFunction;
 
 use crate::scalars::function_registry::FunctionRegistry;
 
-pub(crate) struct MathsFunction;
+pub(crate) struct MathFunction;
 
-impl MathsFunction {
+impl MathFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(PowFunction::default()));
     }

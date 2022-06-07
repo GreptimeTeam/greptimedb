@@ -11,7 +11,7 @@ use crate::arrow_array::{LargeBinaryArray, MutableLargeBinaryArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
 use crate::error::SerializeSnafu;
-use crate::scalars::{common::replicate_scalar_vector, ScalarVector, ScalarVectorBuilder};
+use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
@@ -65,6 +65,10 @@ impl Vector for BinaryVector {
         }
     }
 
+    fn is_null(&self, row: usize) -> bool {
+        self.array.is_null(row)
+    }
+
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
@@ -74,7 +78,7 @@ impl Vector for BinaryVector {
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        replicate_scalar_vector(self, offsets)
+        common::replicate_scalar_vector(self, offsets)
     }
 }
 

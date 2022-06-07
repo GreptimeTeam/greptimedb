@@ -13,8 +13,12 @@ pub enum Error {
     },
     #[snafu(display("Failed to convert datafusion type: {}", from))]
     Conversion { from: String, backtrace: Backtrace },
-    #[snafu(display("Bad array access, {}", msg))]
-    BadArrayAccess { msg: String, backtrace: Backtrace },
+    #[snafu(display("Bad array access, Index out of bounds: {}, size: {}", index, size))]
+    BadArrayAccess {
+        index: usize,
+        size: usize,
+        backtrace: Backtrace,
+    },
     #[snafu(display("Unknown vector, {}", msg))]
     UnknownVector { msg: String, backtrace: Backtrace },
 }

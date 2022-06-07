@@ -9,8 +9,7 @@ edition = "2021"
 chrono-tz = "0.6"
 common-error = { path = "../error" }
 common-query = { path = "../query" }
-datatypes = { path = "../../datatypes"}
-dyn-clone = "1.0"
+datatypes = { path = "../../datatypes" }
 num = "0.4.0"
 num-traits = "0.2.14"
 once_cell = "1.10"

@@ -13,15 +13,10 @@ use paste::paste;
 use crate::error::Result;
 use crate::scalars::expression::{scalar_binary_op, EvalContext};
 use crate::scalars::function::{Function, FunctionContext};
-use crate::scalars::numerics;
 
-/// numpy.clip function, https://numpy.org/doc/stable/reference/generated/numpy.clip.html
+/// numpy.clip function, <https://numpy.org/doc/stable/reference/generated/numpy.clip.html>
 #[derive(Clone, Debug, Default)]
-pub struct ClipFuncton;
-
-fn is_float_type(ty: &ConcreteDataType) -> bool {
-    matches!(ty, ConcreteDataType::Float64(_)) || matches!(ty, ConcreteDataType::Float32(_))
-}
+pub struct ClipFunction;
 
 macro_rules! define_eval {
     ($O: ident) => {
@@ -51,13 +46,13 @@ macro_rules! define_eval {
 define_eval!(i64);
 define_eval!(f64);
 
-impl Function for ClipFuncton {
+impl Function for ClipFunction {
     fn name(&self) -> &str {
         "clip"
     }
 
     fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        if input_types.iter().any(is_float_type) {
+        if input_types.iter().any(ConcreteDataType::is_float) {
             Ok(ConcreteDataType::float64_datatype())
         } else {
             Ok(ConcreteDataType::int64_datatype())
@@ -65,11 +60,11 @@ impl Function for ClipFuncton {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(3, numerics(), Volatility::Immutable)
+        Signature::uniform(3, ConcreteDataType::numerics(), Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        if columns.iter().any(|v| is_float_type(&v.data_type())) {
+        if columns.iter().any(|v| v.data_type().is_float()) {
             eval_f64(columns)
         } else {
             eval_i64(columns)
@@ -121,7 +116,7 @@ where
     }
 }
 
-impl fmt::Display for ClipFuncton {
+impl fmt::Display for ClipFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "CLIP")
     }
@@ -136,7 +131,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_clip_function() {
-        let clip = ClipFuncton::default();
+        let clip = ClipFunction::default();
 
         assert_eq!("clip", clip.name());
         assert_eq!(
@@ -148,7 +143,7 @@ mod tests {
                          Signature {
                              type_signature: TypeSignature::Uniform(3, valid_types),
                              volatility: Volatility::Immutable
-                         } if  valid_types == numerics()
+                         } if  valid_types == ConcreteDataType::numerics()
         ));
 
         // eval with integers

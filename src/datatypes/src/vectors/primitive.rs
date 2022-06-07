@@ -87,6 +87,10 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
         }
     }
 
+    fn is_null(&self, row: usize) -> bool {
+        self.array.is_null(row)
+    }
+
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
@@ -108,10 +112,10 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
         let mut builder =
             PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap() as usize);
 
-        let mut previous_offset: usize = 0;
+        let mut previous_offset = 0;
 
         (0..self.len()).for_each(|i| {
-            let offset: usize = offsets[i];
+            let offset = offsets[i];
             let data = unsafe { self.array.value_unchecked(i) };
             builder.mutable_array.extend(
                 std::iter::repeat(data)
@@ -143,14 +147,6 @@ impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for Pr
         Self {
             array: MutablePrimitiveArray::<T>::from_iter(iter).into(),
         }
-    }
-}
-
-impl<'a, T: Primitive> PrimitiveVector<T> {
-    /// implement iter for PrimitiveVector
-    #[inline]
-    pub fn iter(&'a self) -> std::slice::Iter<'a, T> {
-        self.array.values().iter()
     }
 }
 

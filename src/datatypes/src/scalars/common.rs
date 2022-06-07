@@ -11,9 +11,9 @@ pub fn replicate_scalar_vector<C: ScalarVector>(c: &C, offsets: &[usize]) -> Vec
     }
     let mut builder = <<C as ScalarVector>::Builder>::with_capacity(c.len());
 
-    let mut previous_offset: usize = 0;
+    let mut previous_offset = 0;
     (0..c.len()).for_each(|i| {
-        let offset: usize = offsets[i];
+        let offset = offsets[i];
         let data = c.get_data(i);
         for _ in previous_offset..offset {
             builder.push(data);

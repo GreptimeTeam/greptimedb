@@ -13,7 +13,6 @@ use num_traits::AsPrimitive;
 use crate::error::Result;
 use crate::scalars::expression::{scalar_binary_op, EvalContext};
 use crate::scalars::function::{Function, FunctionContext};
-use crate::scalars::numerics;
 
 #[derive(Clone, Debug, Default)]
 pub struct PowFunction;
@@ -28,7 +27,7 @@ impl Function for PowFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(2, numerics(), Volatility::Immutable)
+        Signature::uniform(2, ConcreteDataType::numerics(), Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -67,7 +66,7 @@ impl fmt::Display for PowFunction {
 mod tests {
     use common_query::prelude::TypeSignature;
     use datatypes::value::Value;
-    use datatypes::vectors::{ConstantVector, Float32Vector, Int8Vector};
+    use datatypes::vectors::{Float32Vector, Int8Vector};
 
     use super::*;
     #[test]
@@ -84,37 +83,23 @@ mod tests {
                          Signature {
                              type_signature: TypeSignature::Uniform(2, valid_types),
                              volatility: Volatility::Immutable
-                         } if  valid_types == numerics()
+                         } if  valid_types == ConcreteDataType::numerics()
         ));
 
+        let values = vec![1.0, 2.0, 3.0];
+        let bases = vec![0i8, -1i8, 3i8];
+
         let args: Vec<VectorRef> = vec![
-            Arc::new(ConstantVector::new(
-                Arc::new(Float32Vector::from_vec(vec![
-                    std::f32::consts::PI,
-                    -1.42,
-                    2.0,
-                ])),
-                3,
-            )),
-            Arc::new(Int8Vector::from_vec(vec![-1i8, 3, 123])),
+            Arc::new(Float32Vector::from_vec(values.clone())),
+            Arc::new(Int8Vector::from_vec(bases.clone())),
         ];
 
         let vector = pow.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(3, vector.len());
 
         for i in 0..3 {
-            match i {
-                0 => assert!(
-                    matches!(vector.get_unchecked(i), Value::Float64(v) if v == 0.31830987732601135)
-                ),
-                1 => assert!(
-                    matches!(vector.get_unchecked(i), Value::Float64(v) if v == 31.006279268784656)
-                ),
-                2 => assert!(
-                    matches!(vector.get_unchecked(i), Value::Float64(v) if v == 1.4107037729615416e61)
-                ),
-                _ => unreachable!(),
-            }
+            let p: f64 = (values[i] as f64).pow(bases[i] as f64);
+            assert!(matches!(vector.get_unchecked(i), Value::Float64(v) if v == p));
         }
     }
 }

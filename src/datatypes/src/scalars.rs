@@ -4,7 +4,7 @@ pub mod common;
 use crate::prelude::*;
 use crate::vectors::*;
 
-pub fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
+fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
     match iter.size_hint() {
         (_lower, Some(upper)) => upper,
         (0, None) => 1024,
@@ -36,11 +36,6 @@ pub trait ScalarRef<'a>: std::fmt::Debug + Clone + Copy + Send + 'a {
 
     /// Convert the reference into an owned value.
     fn to_owned_scalar(&self) -> Self::ScalarType;
-
-    /// Whether to_owned_scalar has heap allocation which is unhandled by Bumplao
-    fn has_alloc_beyond_bump() -> bool {
-        false
-    }
 }
 
 /// A sub trait of Vector to add scalar operation support.
@@ -217,10 +212,6 @@ impl<'a> ScalarRef<'a> for &'a str {
     fn to_owned_scalar(&self) -> String {
         self.to_string()
     }
-
-    fn has_alloc_beyond_bump() -> bool {
-        true
-    }
 }
 
 impl Scalar for Vec<u8> {
@@ -245,10 +236,6 @@ impl<'a> ScalarRef<'a> for &'a [u8] {
     #[inline]
     fn to_owned_scalar(&self) -> Vec<u8> {
         self.to_vec()
-    }
-
-    fn has_alloc_beyond_bump() -> bool {
-        true
     }
 }
 

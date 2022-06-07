@@ -6,7 +6,7 @@ use std::sync::RwLock;
 use once_cell::sync::Lazy;
 
 use crate::scalars::function::FunctionRef;
-use crate::scalars::math::MathsFunction;
+use crate::scalars::math::MathFunction;
 use crate::scalars::numpy::NumpyFunction;
 
 #[derive(Default)]
@@ -23,23 +23,18 @@ impl FunctionRegistry {
     }
 
     pub fn get_function(&self, name: &str) -> Option<FunctionRef> {
-        self.functions.read().unwrap().get(name).map(Clone::clone)
+        self.functions.read().unwrap().get(name).cloned()
     }
 
     pub fn functions(&self) -> Vec<FunctionRef> {
-        self.functions
-            .read()
-            .unwrap()
-            .values()
-            .map(Clone::clone)
-            .collect()
+        self.functions.read().unwrap().values().cloned().collect()
     }
 }
 
 pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     let function_registry = FunctionRegistry::default();
 
-    MathsFunction::register(&function_registry);
+    MathFunction::register(&function_registry);
     NumpyFunction::register(&function_registry);
 
     Arc::new(function_registry)

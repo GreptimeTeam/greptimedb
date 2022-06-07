@@ -1,8 +1,8 @@
 use datatypes::prelude::*;
 use snafu::ResultExt;
 
-use super::ctx::EvalContext;
 use crate::error::{GetScalarVectorSnafu, Result};
+use crate::scalars::expression::ctx::EvalContext;
 
 /// TODO: remove the allow_unused when it's used.
 #[allow(unused)]

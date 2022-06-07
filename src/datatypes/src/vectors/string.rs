@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, MutableArray, Utf8ValuesIter};
 use arrow::bitmap::utils::ZipValidity;
-use serde_json::Value;
+use serde_json::Value as JsonValue;
 use snafu::OptionExt;
 use snafu::ResultExt;
 
@@ -11,10 +11,10 @@ use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::SerializeSnafu;
 use crate::prelude::{MutableVector, ScalarVectorBuilder, Validity, Vector, VectorRef};
-use crate::scalars::{common::replicate_scalar_vector, ScalarVector};
+use crate::scalars::{common, ScalarVector};
 use crate::serialize::Serializable;
 use crate::types::StringType;
-use crate::value::Value as DataValue;
+use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
 
 /// String array wrapper
@@ -97,16 +97,20 @@ impl Vector for StringVector {
         }
     }
 
+    fn is_null(&self, row: usize) -> bool {
+        self.array.is_null(row)
+    }
+
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
-    fn get_unchecked(&self, index: usize) -> DataValue {
+    fn get_unchecked(&self, index: usize) -> Value {
         self.array.value(index).into()
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        replicate_scalar_vector(self, offsets)
+        common::replicate_scalar_vector(self, offsets)
     }
 }
 
@@ -176,7 +180,7 @@ impl ScalarVectorBuilder for StringVectorBuilder {
 }
 
 impl Serializable for StringVector {
-    fn serialize_to_json(&self) -> crate::error::Result<Vec<Value>> {
+    fn serialize_to_json(&self) -> crate::error::Result<Vec<JsonValue>> {
         self.iter_data()
             .map(|v| match v {
                 None => Ok(serde_json::Value::Null),
@@ -192,14 +196,14 @@ impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
-    use common_base::bytes::StringBytes;
     use serde_json;
 
     use super::*;
 
     #[test]
     fn test_string_vector_misc() {
-        let v = StringVector::from(vec!["hello", "greptime", "rust"]);
+        let strs = vec!["hello", "greptime", "rust"];
+        let v = StringVector::from(strs.clone());
         assert_eq!(3, v.len());
         assert_eq!("StringVector", v.vector_type_name());
         assert!(!v.is_const());
@@ -207,19 +211,8 @@ mod tests {
         assert!(!v.only_null());
 
         for i in 0..3 {
-            assert!(!v.is_null(i));
-            match v.get_unchecked(i) {
-                DataValue::String(StringBytes(bs)) => {
-                    let s = String::from_utf8(bs).unwrap();
-                    match i {
-                        0 => assert_eq!(s, "hello"),
-                        1 => assert_eq!(s, "greptime"),
-                        2 => assert_eq!(s, "rust"),
-                        _ => unreachable!(),
-                    }
-                }
-                _ => unreachable!(),
-            }
+            assert_eq!(Value::from(strs[i]), v.get_unchecked(i));
+            assert_eq!(Value::from(strs[i]), v.get(i).unwrap());
         }
 
         let arrow_arr = v.to_arrow_array();

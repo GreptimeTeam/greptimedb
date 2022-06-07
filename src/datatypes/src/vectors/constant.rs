@@ -108,8 +108,8 @@ impl fmt::Debug for ConstantVector {
 
 impl Serializable for ConstantVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        vec![self.get(0)?; self.len()]
-            .into_iter()
+        std::iter::repeat(self.get(0)?)
+            .take(self.len())
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()
             .context(SerializeSnafu)

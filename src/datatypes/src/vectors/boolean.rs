@@ -80,6 +80,10 @@ impl Vector for BooleanVector {
         }
     }
 
+    fn is_null(&self, row: usize) -> bool {
+        self.array.is_null(row)
+    }
+
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
@@ -179,7 +183,8 @@ mod tests {
 
     #[test]
     fn test_boolean_vector_misc() {
-        let v = BooleanVector::from(vec![true, false, true, true, false, false]);
+        let bools = vec![true, false, true, true, false, false];
+        let v = BooleanVector::from(bools.clone());
         assert_eq!(6, v.len());
         assert_eq!("BooleanVector", v.vector_type_name());
         assert!(!v.is_const());
@@ -188,10 +193,7 @@ mod tests {
 
         for i in 0..6 {
             assert!(!v.is_null(i));
-            assert_eq!(
-                Value::Boolean(i == 0 || i == 2 || i == 3),
-                v.get_unchecked(i)
-            );
+            assert_eq!(Value::Boolean(bools[i]), v.get_unchecked(i));
         }
 
         let arrow_arr = v.to_arrow_array();
