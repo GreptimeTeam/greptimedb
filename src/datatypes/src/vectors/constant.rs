@@ -84,7 +84,7 @@ impl Vector for ConstantVector {
     fn get_unchecked(&self, _index: usize) -> Value {
         self.vector.get_unchecked(0)
     }
-    // just for resize
+
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         debug_assert!(
             offsets.len() == self.len(),
@@ -97,13 +97,18 @@ impl Vector for ConstantVector {
 
 impl fmt::Debug for ConstantVector {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ConstantVector({})", self.len())
+        write!(
+            f,
+            "ConstantVector([{:?}; {}])",
+            self.get(0).unwrap_or(Value::Null),
+            self.len()
+        )
     }
 }
 
 impl Serializable for ConstantVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        vec![self.get_unchecked(0); self.len()]
+        vec![self.get(0)?; self.len()]
             .into_iter()
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()
@@ -113,12 +118,47 @@ impl Serializable for ConstantVector {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_constant_vector() {}
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    use super::*;
+    use crate::vectors::Int32Vector;
 
     #[test]
-    fn test_debug_null_array() {}
+    fn test_constant_vector_misc() {
+        let a = Int32Vector::from_slice(vec![1]);
+        let c = ConstantVector::new(Arc::new(a), 10);
+
+        assert_eq!("ConstantVector", c.vector_type_name());
+        assert!(c.is_const());
+        assert_eq!(10, c.len());
+        assert_eq!(Validity::AllValid, c.validity());
+        assert!(!c.only_null());
+
+        for i in 0..10 {
+            assert!(!c.is_null(i));
+            assert_eq!(Value::Int32(1), c.get_unchecked(i));
+        }
+
+        let arrow_arr = c.to_arrow_array();
+        assert_eq!(10, arrow_arr.len());
+        assert_eq!(&ArrowDataType::Int32, arrow_arr.data_type());
+    }
 
     #[test]
-    fn test_serialize_json() {}
+    fn test_debug_null_array() {
+        let a = Int32Vector::from_slice(vec![1]);
+        let c = ConstantVector::new(Arc::new(a), 10);
+
+        let s = format!("{:?}", c);
+        assert_eq!(s, "ConstantVector([Int32(1); 10])");
+    }
+
+    #[test]
+    fn test_serialize_json() {
+        let a = Int32Vector::from_slice(vec![1]);
+        let c = ConstantVector::new(Arc::new(a), 10);
+
+        let s = serde_json::to_string(&c.serialize_to_json().unwrap()).unwrap();
+        assert_eq!(s, "[1,1,1,1,1,1,1,1,1,1]");
+    }
 }

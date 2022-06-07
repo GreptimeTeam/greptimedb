@@ -278,14 +278,30 @@ impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::DataType as ArrowDataType;
     use serde_json;
 
     use super::*;
     use crate::serialize::Serializable;
 
     fn check_vec(v: PrimitiveVector<i32>) {
+        assert_eq!(4, v.len());
+        assert_eq!("Int32Vector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert_eq!(Validity::AllValid, v.validity());
+        assert!(!v.only_null());
+
+        for i in 0..4 {
+            assert!(!v.is_null(i));
+            assert_eq!(Value::Int32(i as i32 + 1), v.get_unchecked(i));
+        }
+
         let json_value = v.serialize_to_json().unwrap();
         assert_eq!("[1,2,3,4]", serde_json::to_string(&json_value).unwrap(),);
+
+        let arrow_arr = v.to_arrow_array();
+        assert_eq!(4, arrow_arr.len());
+        assert_eq!(&ArrowDataType::Int32, arrow_arr.data_type());
     }
 
     #[test]

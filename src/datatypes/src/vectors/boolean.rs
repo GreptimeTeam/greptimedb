@@ -171,10 +171,33 @@ impl_try_from_arrow_array_for_vector!(BooleanArray, BooleanVector);
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::DataType as ArrowDataType;
     use serde_json;
 
     use super::*;
     use crate::serialize::Serializable;
+
+    #[test]
+    fn test_boolean_vector_misc() {
+        let v = BooleanVector::from(vec![true, false, true, true, false, false]);
+        assert_eq!(6, v.len());
+        assert_eq!("BooleanVector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert_eq!(Validity::AllValid, v.validity());
+        assert!(!v.only_null());
+
+        for i in 0..6 {
+            assert!(!v.is_null(i));
+            assert_eq!(
+                Value::Boolean(i == 0 || i == 2 || i == 3),
+                v.get_unchecked(i)
+            );
+        }
+
+        let arrow_arr = v.to_arrow_array();
+        assert_eq!(6, arrow_arr.len());
+        assert_eq!(&ArrowDataType::Boolean, arrow_arr.data_type());
+    }
 
     #[test]
     fn test_serialize_boolean_vector_to_json() {

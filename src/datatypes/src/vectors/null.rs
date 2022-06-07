@@ -109,16 +109,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_null_vector() {
-        let vector = NullVector::new(32);
+    fn test_null_vector_misc() {
+        let v = NullVector::new(32);
 
-        assert_eq!(vector.len(), 32);
-        let arrow_arr = vector.to_arrow_array();
+        assert_eq!(v.len(), 32);
+        let arrow_arr = v.to_arrow_array();
         assert_eq!(arrow_arr.null_count(), 32);
 
         let array2 = arrow_arr.slice(8, 16);
         assert_eq!(array2.len(), 16);
         assert_eq!(array2.null_count(), 16);
+
+        assert_eq!("NullVector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert_eq!(Validity::AllNull, v.validity());
+        assert!(v.only_null());
+
+        for i in 0..32 {
+            assert!(v.is_null(i));
+            assert_eq!(Value::Null, v.get_unchecked(i));
+        }
     }
 
     #[test]

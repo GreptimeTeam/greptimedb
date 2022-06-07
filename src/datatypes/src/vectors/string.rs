@@ -37,6 +37,38 @@ impl From<Vec<Option<String>>> for StringVector {
     }
 }
 
+impl From<Vec<String>> for StringVector {
+    fn from(data: Vec<String>) -> Self {
+        Self {
+            array: StringArray::from(
+                data.into_iter()
+                    .map(Option::Some)
+                    .collect::<Vec<Option<String>>>(),
+            ),
+        }
+    }
+}
+
+impl From<Vec<Option<&str>>> for StringVector {
+    fn from(data: Vec<Option<&str>>) -> Self {
+        Self {
+            array: StringArray::from(data),
+        }
+    }
+}
+
+impl From<Vec<&str>> for StringVector {
+    fn from(data: Vec<&str>) -> Self {
+        Self {
+            array: StringArray::from(
+                data.into_iter()
+                    .map(Option::Some)
+                    .collect::<Vec<Option<&str>>>(),
+            ),
+        }
+    }
+}
+
 impl Vector for StringVector {
     fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::String(StringType::default())
@@ -159,9 +191,41 @@ impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::DataType as ArrowDataType;
+    use common_base::bytes::StringBytes;
     use serde_json;
 
     use super::*;
+
+    #[test]
+    fn test_string_vector_misc() {
+        let v = StringVector::from(vec!["hello", "greptime", "rust"]);
+        assert_eq!(3, v.len());
+        assert_eq!("StringVector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert_eq!(Validity::AllValid, v.validity());
+        assert!(!v.only_null());
+
+        for i in 0..3 {
+            assert!(!v.is_null(i));
+            match v.get_unchecked(i) {
+                DataValue::String(StringBytes(bs)) => {
+                    let s = String::from_utf8(bs).unwrap();
+                    match i {
+                        0 => assert_eq!(s, "hello"),
+                        1 => assert_eq!(s, "greptime"),
+                        2 => assert_eq!(s, "rust"),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let arrow_arr = v.to_arrow_array();
+        assert_eq!(3, arrow_arr.len());
+        assert_eq!(&ArrowDataType::Utf8, arrow_arr.data_type());
+    }
 
     #[test]
     fn test_serialize_string_vector() {

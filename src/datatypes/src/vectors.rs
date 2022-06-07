@@ -100,7 +100,7 @@ pub trait Vector: Send + Sync + Serializable {
 
     /// If the only value vector can contain is NULL.
     fn only_null(&self) -> bool {
-        false
+        self.validity() == Validity::AllNull
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef;
