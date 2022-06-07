@@ -360,7 +360,7 @@ mod tests {
         ));
 
         let mut put_data = PutData::new();
-        put_data.add_key_column("k1", boolv.clone()).unwrap();
+        put_data.add_key_column("k1", boolv).unwrap();
 
         let mut batch = write_batch_util::new_write_batch(&[("k1", LogicalTypeId::Boolean, false)]);
         let err = batch.put(put_data).err().unwrap();

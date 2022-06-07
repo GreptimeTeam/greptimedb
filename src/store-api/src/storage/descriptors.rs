@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(2, desc.columns.len());
         assert!(desc.enable_version_column);
 
-        let desc = RowKeyDescriptorBuilder::new(timestamp.clone())
+        let desc = RowKeyDescriptorBuilder::new(timestamp)
             .enable_version_column(false)
             .build();
         assert!(desc.columns.is_empty());

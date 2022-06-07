@@ -8,7 +8,7 @@ pub type ColumnDef<'a> = (&'a str, LogicalTypeId, bool);
 
 pub fn new_schema(column_defs: &[ColumnDef]) -> Schema {
     let column_schemas = column_defs
-        .into_iter()
+        .iter()
         .map(|column_def| {
             let datatype = logical_type_id_to_concrete_type(column_def.1);
             ColumnSchema::new(column_def.0, datatype, column_def.2)
