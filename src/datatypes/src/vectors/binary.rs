@@ -186,7 +186,10 @@ mod tests {
 
         for i in 0..2 {
             assert!(!v.is_null(i));
-            assert_eq!(Value::Binary(Bytes(vec![1, 2, 3])), v.get_unchecked(i));
+            assert_eq!(
+                Value::Binary(Bytes::from(vec![1, 2, 3])),
+                v.get_unchecked(i)
+            );
         }
 
         let arrow_arr = v.to_arrow_array();

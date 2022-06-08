@@ -61,15 +61,27 @@ impl_from!(Float64, f64);
 impl_from!(String, StringBytes);
 impl_from!(Binary, Bytes);
 
-impl From<&[u8]> for Value {
-    fn from(s: &[u8]) -> Self {
-        Value::Binary(Bytes(s.to_vec()))
+impl From<String> for Value {
+    fn from(string: String) -> Value {
+        Value::String(string.into())
     }
 }
 
 impl From<&str> for Value {
-    fn from(s: &str) -> Self {
-        Value::String(StringBytes(s.to_string().into_bytes()))
+    fn from(string: &str) -> Value {
+        Value::String(string.into())
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(bytes: Vec<u8>) -> Value {
+        Value::Binary(bytes.into())
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(bytes: &[u8]) -> Value {
+        Value::Binary(bytes.into())
     }
 }
 
