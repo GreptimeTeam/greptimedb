@@ -51,6 +51,16 @@ impl ConcreteDataType {
         )
     }
 
+    pub fn is_unsigned(&self) -> bool {
+        matches!(
+            self,
+            ConcreteDataType::UInt8(_)
+                | ConcreteDataType::UInt16(_)
+                | ConcreteDataType::UInt32(_)
+                | ConcreteDataType::UInt64(_)
+        )
+    }
+
     pub fn numerics() -> Vec<ConcreteDataType> {
         vec![
             ConcreteDataType::int8_datatype(),

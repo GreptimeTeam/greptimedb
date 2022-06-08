@@ -53,12 +53,12 @@ impl Function for ClipFunction {
     }
 
     fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        if input_types.iter().any(ConcreteDataType::is_float) {
-            Ok(ConcreteDataType::float64_datatype())
-        } else if input_types.iter().any(ConcreteDataType::is_signed) {
+        if input_types.iter().all(ConcreteDataType::is_signed) {
             Ok(ConcreteDataType::int64_datatype())
-        } else {
+        } else if input_types.iter().all(ConcreteDataType::is_unsigned) {
             Ok(ConcreteDataType::uint64_datatype())
+        } else {
+            Ok(ConcreteDataType::float64_datatype())
         }
     }
 
@@ -67,12 +67,12 @@ impl Function for ClipFunction {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        if columns.iter().any(|v| v.data_type().is_float()) {
-            eval_f64(columns)
-        } else if columns.iter().any(|v| v.data_type().is_signed()) {
+        if columns.iter().all(|v| v.data_type().is_signed()) {
             eval_i64(columns)
-        } else {
+        } else if columns.iter().all(|v| v.data_type().is_unsigned()) {
             eval_u64(columns)
+        } else {
+            eval_f64(columns)
         }
     }
 }
@@ -140,8 +140,36 @@ mod tests {
 
         assert_eq!("clip", clip.name());
         assert_eq!(
-            ConcreteDataType::uint64_datatype(),
+            ConcreteDataType::int64_datatype(),
             clip.return_type(&[]).unwrap()
+        );
+
+        assert_eq!(
+            ConcreteDataType::int64_datatype(),
+            clip.return_type(&[
+                ConcreteDataType::int16_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::int8_datatype()
+            ])
+            .unwrap()
+        );
+        assert_eq!(
+            ConcreteDataType::uint64_datatype(),
+            clip.return_type(&[
+                ConcreteDataType::uint16_datatype(),
+                ConcreteDataType::uint64_datatype(),
+                ConcreteDataType::uint8_datatype()
+            ])
+            .unwrap()
+        );
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            clip.return_type(&[
+                ConcreteDataType::uint16_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::uint8_datatype()
+            ])
+            .unwrap()
         );
 
         assert!(matches!(clip.signature(),
@@ -151,7 +179,7 @@ mod tests {
                          } if  valid_types == ConcreteDataType::numerics()
         ));
 
-        // eval with integers
+        // eval with signed integers
         let args: Vec<VectorRef> = vec![
             Arc::new(Int32Vector::from_values(0..10)),
             Arc::new(ConstantVector::new(
@@ -159,7 +187,7 @@ mod tests {
                 10,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(UInt32Vector::from_vec(vec![6])),
+                Arc::new(Int32Vector::from_vec(vec![6])),
                 10,
             )),
         ];
@@ -178,7 +206,7 @@ mod tests {
             }
         }
 
-        // eval with unsigned
+        // eval with unsigned integers
         let args: Vec<VectorRef> = vec![
             Arc::new(UInt32Vector::from_values(0..10)),
             Arc::new(ConstantVector::new(
