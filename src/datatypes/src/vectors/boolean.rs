@@ -191,9 +191,9 @@ mod tests {
         assert_eq!(Validity::AllValid, v.validity());
         assert!(!v.only_null());
 
-        for i in 0..6 {
+        for (i, b) in bools.iter().enumerate() {
             assert!(!v.is_null(i));
-            assert_eq!(Value::Boolean(bools[i]), v.get_unchecked(i));
+            assert_eq!(Value::Boolean(*b), v.get_unchecked(i));
         }
 
         let arrow_arr = v.to_arrow_array();

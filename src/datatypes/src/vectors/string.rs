@@ -210,9 +210,9 @@ mod tests {
         assert_eq!(Validity::AllValid, v.validity());
         assert!(!v.only_null());
 
-        for i in 0..3 {
-            assert_eq!(Value::from(strs[i]), v.get_unchecked(i));
-            assert_eq!(Value::from(strs[i]), v.get(i).unwrap());
+        for (i, s) in strs.iter().enumerate() {
+            assert_eq!(Value::from(*s), v.get_unchecked(i));
+            assert_eq!(Value::from(*s), v.get(i).unwrap());
         }
 
         let arrow_arr = v.to_arrow_array();
