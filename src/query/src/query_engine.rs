@@ -3,6 +3,7 @@ mod state;
 
 use std::sync::Arc;
 
+use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::prelude::ScalarUdf;
 use common_recordbatch::SendableRecordBatchStream;
 
@@ -28,6 +29,8 @@ pub trait QueryEngine: Send + Sync {
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
 
     fn register_udf(&self, udf: ScalarUdf);
+
+    fn register_function(&self, func: FunctionRef);
 }
 
 pub struct QueryEngineFactory {
@@ -36,9 +39,13 @@ pub struct QueryEngineFactory {
 
 impl QueryEngineFactory {
     pub fn new(catalog_list: Arc<dyn CatalogList>) -> Self {
-        Self {
-            query_engine: Arc::new(DatafusionQueryEngine::new(catalog_list)),
+        let query_engine = Arc::new(DatafusionQueryEngine::new(catalog_list));
+
+        for func in FUNCTION_REGISTRY.functions() {
+            query_engine.register_function(func);
         }
+
+        Self { query_engine }
     }
 }
 

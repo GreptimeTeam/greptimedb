@@ -1,6 +1,6 @@
 use datafusion_expr::ColumnarValue as DfColumnarValue;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors;
+use datatypes::vectors::Helper;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
@@ -32,7 +32,7 @@ impl ColumnarValue {
             ColumnarValue::Scalar(s) => {
                 let v = s.to_array_of_size(num_rows);
                 let data_type = v.data_type().clone();
-                vectors::try_into_vector(v).context(IntoVectorSnafu { data_type })?
+                Helper::try_into_vector(v).context(IntoVectorSnafu { data_type })?
             }
         })
     }
@@ -44,7 +44,7 @@ impl TryFrom<&DfColumnarValue> for ColumnarValue {
         Ok(match value {
             DfColumnarValue::Scalar(v) => ColumnarValue::Scalar(v.clone()),
             DfColumnarValue::Array(v) => {
-                ColumnarValue::Vector(vectors::try_into_vector(v.clone()).with_context(|_| {
+                ColumnarValue::Vector(Helper::try_into_vector(v.clone()).with_context(|_| {
                     IntoVectorSnafu {
                         data_type: v.data_type().clone(),
                     }

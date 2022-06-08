@@ -2,18 +2,19 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, BooleanArray, MutableBooleanArray};
+use arrow::array::{Array, ArrayRef, BooleanArray, MutableArray, MutableBooleanArray};
 use arrow::bitmap::utils::{BitmapIter, ZipValidity};
 use snafu::OptionExt;
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
+use crate::scalars::common::replicate_scalar_vector;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::types::BooleanType;
+use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{Validity, Vector};
+use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of boolean.
 #[derive(Debug)]
@@ -53,7 +54,11 @@ impl<Ptr: Borrow<Option<bool>>> FromIterator<Ptr> for BooleanVector {
 
 impl Vector for BooleanVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::Boolean(BooleanType::default())
+        ConcreteDataType::boolean_datatype()
+    }
+
+    fn vector_type_name(&self) -> String {
+        "BooleanVector".to_string()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -74,9 +79,26 @@ impl Vector for BooleanVector {
             None => Validity::AllValid,
         }
     }
+
+    fn is_null(&self, row: usize) -> bool {
+        self.array.is_null(row)
+    }
+
+    fn slice(&self, offset: usize, length: usize) -> VectorRef {
+        Arc::new(Self::from(self.array.slice(offset, length)))
+    }
+
+    fn get_unchecked(&self, index: usize) -> Value {
+        self.array.value(index).into()
+    }
+
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        replicate_scalar_vector(self, offsets)
+    }
 }
 
 impl ScalarVector for BooleanVector {
+    type OwnedItem = bool;
     type RefItem<'a> = bool;
     type Iter<'a> = ZipValidity<'a, bool, BitmapIter<'a>>;
     type Builder = BooleanVectorBuilder;
@@ -98,6 +120,28 @@ pub struct BooleanVectorBuilder {
     mutable_array: MutableBooleanArray,
 }
 
+impl MutableVector for BooleanVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::boolean_datatype()
+    }
+
+    fn len(&self) -> usize {
+        self.mutable_array.len()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn to_vector(&mut self) -> VectorRef {
+        Arc::new(self.finish())
+    }
+}
+
 impl ScalarVectorBuilder for BooleanVectorBuilder {
     type VectorType = BooleanVector;
 
@@ -111,9 +155,9 @@ impl ScalarVectorBuilder for BooleanVectorBuilder {
         self.mutable_array.push(value);
     }
 
-    fn finish(self) -> Self::VectorType {
+    fn finish(&mut self) -> Self::VectorType {
         BooleanVector {
-            array: self.mutable_array.into(),
+            array: std::mem::take(&mut self.mutable_array).into(),
         }
     }
 }
@@ -131,10 +175,31 @@ impl_try_from_arrow_array_for_vector!(BooleanArray, BooleanVector);
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::DataType as ArrowDataType;
     use serde_json;
 
     use super::*;
     use crate::serialize::Serializable;
+
+    #[test]
+    fn test_boolean_vector_misc() {
+        let bools = vec![true, false, true, true, false, false];
+        let v = BooleanVector::from(bools.clone());
+        assert_eq!(6, v.len());
+        assert_eq!("BooleanVector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert_eq!(Validity::AllValid, v.validity());
+        assert!(!v.only_null());
+
+        for (i, b) in bools.iter().enumerate() {
+            assert!(!v.is_null(i));
+            assert_eq!(Value::Boolean(*b), v.get_unchecked(i));
+        }
+
+        let arrow_arr = v.to_arrow_array();
+        assert_eq!(6, arrow_arr.len());
+        assert_eq!(&ArrowDataType::Boolean, arrow_arr.data_type());
+    }
 
     #[test]
     fn test_serialize_boolean_vector_to_json() {

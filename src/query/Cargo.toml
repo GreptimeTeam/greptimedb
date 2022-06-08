@@ -11,6 +11,7 @@ features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc
 [dependencies]
 async-trait = "0.1"
 common-error = { path = "../common/error" }
+common-function = { path = "../common/function" }
 common-query = { path = "../common/query" }
 common-recordbatch = {path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }

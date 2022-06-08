@@ -11,8 +11,9 @@ use crate::data_type::ConcreteDataType;
 use crate::error::Result;
 use crate::serialize::Serializable;
 use crate::types::NullType;
+use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{Validity, Vector};
+use crate::vectors::{Validity, Vector, VectorRef};
 
 pub struct NullVector {
     array: NullArray,
@@ -37,6 +38,10 @@ impl Vector for NullVector {
         ConcreteDataType::Null(NullType::default())
     }
 
+    fn vector_type_name(&self) -> String {
+        "NullVector".to_string()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -51,6 +56,33 @@ impl Vector for NullVector {
 
     fn validity(&self) -> Validity {
         Validity::AllNull
+    }
+
+    fn is_null(&self, _row: usize) -> bool {
+        true
+    }
+
+    fn get_unchecked(&self, _index: usize) -> Value {
+        Value::Null
+    }
+
+    fn only_null(&self) -> bool {
+        true
+    }
+
+    fn slice(&self, _offset: usize, length: usize) -> VectorRef {
+        Arc::new(Self::new(length))
+    }
+
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        debug_assert!(
+            offsets.len() == self.len(),
+            "Size of offsets must match size of column"
+        );
+
+        Arc::new(Self {
+            array: NullArray::new(ArrowDataType::Null, *offsets.last().unwrap() as usize),
+        })
     }
 }
 
@@ -77,16 +109,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_null_vector() {
-        let vector = NullVector::new(32);
+    fn test_null_vector_misc() {
+        let v = NullVector::new(32);
 
-        assert_eq!(vector.len(), 32);
-        let arrow_arr = vector.to_arrow_array();
+        assert_eq!(v.len(), 32);
+        let arrow_arr = v.to_arrow_array();
         assert_eq!(arrow_arr.null_count(), 32);
 
         let array2 = arrow_arr.slice(8, 16);
         assert_eq!(array2.len(), 16);
         assert_eq!(array2.null_count(), 16);
+
+        assert_eq!("NullVector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert_eq!(Validity::AllNull, v.validity());
+        assert!(v.only_null());
+
+        for i in 0..32 {
+            assert!(v.is_null(i));
+            assert_eq!(Value::Null, v.get_unchecked(i));
+        }
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use common_base::bytes::{Bytes, StringBytes};
+use serde::{Serialize, Serializer};
 
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Value {
     Null,
 
@@ -59,3 +60,41 @@ impl_from!(Float32, f32);
 impl_from!(Float64, f64);
 impl_from!(String, StringBytes);
 impl_from!(Binary, Bytes);
+
+impl From<&[u8]> for Value {
+    fn from(s: &[u8]) -> Self {
+        Value::Binary(Bytes(s.to_vec()))
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Value::String(StringBytes(s.to_string().into_bytes()))
+    }
+}
+
+impl Serialize for Value {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Value::Null => serde_json::Value::Null.serialize(serializer),
+            Value::Boolean(v) => v.serialize(serializer),
+            Value::UInt8(v) => v.serialize(serializer),
+            Value::UInt16(v) => v.serialize(serializer),
+            Value::UInt32(v) => v.serialize(serializer),
+            Value::UInt64(v) => v.serialize(serializer),
+            Value::Int8(v) => v.serialize(serializer),
+            Value::Int16(v) => v.serialize(serializer),
+            Value::Int32(v) => v.serialize(serializer),
+            Value::Int64(v) => v.serialize(serializer),
+            Value::Float32(v) => v.serialize(serializer),
+            Value::Float64(v) => v.serialize(serializer),
+            Value::String(bytes) => bytes.serialize(serializer),
+            Value::Binary(bytes) => bytes.serialize(serializer),
+            Value::Date(v) => v.serialize(serializer),
+            Value::DateTime(v) => v.serialize(serializer),
+        }
+    }
+}

@@ -1,8 +1,8 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::BinaryValueIter;
 use arrow::array::{Array, ArrayRef, BinaryArray};
+use arrow::array::{BinaryValueIter, MutableArray};
 use arrow::bitmap::utils::ZipValidity;
 use snafu::OptionExt;
 use snafu::ResultExt;
@@ -11,11 +11,11 @@ use crate::arrow_array::{LargeBinaryArray, MutableLargeBinaryArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
 use crate::error::SerializeSnafu;
-use crate::scalars::{ScalarVector, ScalarVectorBuilder};
+use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::types::BinaryType;
+use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{Validity, Vector};
+use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of binary strings.
 #[derive(Debug)]
@@ -29,9 +29,21 @@ impl From<BinaryArray<i64>> for BinaryVector {
     }
 }
 
+impl From<Vec<Option<Vec<u8>>>> for BinaryVector {
+    fn from(data: Vec<Option<Vec<u8>>>) -> Self {
+        Self {
+            array: LargeBinaryArray::from(data),
+        }
+    }
+}
+
 impl Vector for BinaryVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::Binary(BinaryType::default())
+        ConcreteDataType::binary_datatype()
+    }
+
+    fn vector_type_name(&self) -> String {
+        "BinaryVector".to_string()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -52,9 +64,26 @@ impl Vector for BinaryVector {
             None => Validity::AllValid,
         }
     }
+
+    fn is_null(&self, row: usize) -> bool {
+        self.array.is_null(row)
+    }
+
+    fn slice(&self, offset: usize, length: usize) -> VectorRef {
+        Arc::new(Self::from(self.array.slice(offset, length)))
+    }
+
+    fn get_unchecked(&self, index: usize) -> Value {
+        self.array.value(index).into()
+    }
+
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        common::replicate_scalar_vector(self, offsets)
+    }
 }
 
 impl ScalarVector for BinaryVector {
+    type OwnedItem = Vec<u8>;
     type RefItem<'a> = &'a [u8];
     type Iter<'a> = ZipValidity<'a, &'a [u8], BinaryValueIter<'a, i64>>;
     type Builder = BinaryVectorBuilder;
@@ -76,6 +105,28 @@ pub struct BinaryVectorBuilder {
     mutable_array: MutableLargeBinaryArray,
 }
 
+impl MutableVector for BinaryVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::binary_datatype()
+    }
+
+    fn len(&self) -> usize {
+        self.mutable_array.len()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn to_vector(&mut self) -> VectorRef {
+        Arc::new(self.finish())
+    }
+}
+
 impl ScalarVectorBuilder for BinaryVectorBuilder {
     type VectorType = BinaryVector;
 
@@ -89,9 +140,9 @@ impl ScalarVectorBuilder for BinaryVectorBuilder {
         self.mutable_array.push(value);
     }
 
-    fn finish(self) -> Self::VectorType {
+    fn finish(&mut self) -> Self::VectorType {
         BinaryVector {
-            array: self.mutable_array.into(),
+            array: std::mem::take(&mut self.mutable_array).into(),
         }
     }
 }
@@ -112,11 +163,36 @@ impl_try_from_arrow_array_for_vector!(LargeBinaryArray, BinaryVector);
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::DataType as ArrowDataType;
+    use common_base::bytes::Bytes;
     use serde_json;
 
     use super::*;
     use crate::arrow_array::LargeBinaryArray;
     use crate::serialize::Serializable;
+
+    #[test]
+    fn test_binary_vector_misc() {
+        let v = BinaryVector::from(LargeBinaryArray::from_slice(&vec![
+            vec![1, 2, 3],
+            vec![1, 2, 3],
+        ]));
+
+        assert_eq!(2, v.len());
+        assert_eq!("BinaryVector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert_eq!(Validity::AllValid, v.validity());
+        assert!(!v.only_null());
+
+        for i in 0..2 {
+            assert!(!v.is_null(i));
+            assert_eq!(Value::Binary(Bytes(vec![1, 2, 3])), v.get_unchecked(i));
+        }
+
+        let arrow_arr = v.to_arrow_array();
+        assert_eq!(2, arrow_arr.len());
+        assert_eq!(&ArrowDataType::LargeBinary, arrow_arr.data_type());
+    }
 
     #[test]
     fn test_serialize_binary_vector_to_json() {

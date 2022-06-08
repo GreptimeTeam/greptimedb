@@ -3,7 +3,7 @@ use std::iter::FromIterator;
 use std::slice::Iter;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, MutablePrimitiveArray, PrimitiveArray};
+use arrow::array::{Array, ArrayRef, MutableArray, MutablePrimitiveArray, PrimitiveArray};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
 use snafu::{OptionExt, ResultExt};
@@ -11,10 +11,12 @@ use snafu::{OptionExt, ResultExt};
 use crate::data_type::ConcreteDataType;
 use crate::error::ConversionSnafu;
 use crate::error::{Result, SerializeSnafu};
+use crate::scalars::{Scalar, ScalarRef};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{DataTypeBuilder, Primitive};
-use crate::vectors::{Validity, Vector};
+use crate::value::Value;
+use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
 
 /// Vector for primitive data types.
 #[derive(Debug)]
@@ -62,6 +64,10 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
         T::build_data_type()
     }
 
+    fn vector_type_name(&self) -> String {
+        format!("{}Vector", T::type_name())
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -80,11 +86,58 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
             None => Validity::AllValid,
         }
     }
+
+    fn is_null(&self, row: usize) -> bool {
+        self.array.is_null(row)
+    }
+
+    fn slice(&self, offset: usize, length: usize) -> VectorRef {
+        Arc::new(Self::from(self.array.slice(offset, length)))
+    }
+
+    fn get_unchecked(&self, index: usize) -> Value {
+        self.array.value(index).into()
+    }
+
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        debug_assert!(
+            offsets.len() == self.len(),
+            "Size of offsets must match size of column"
+        );
+
+        if offsets.is_empty() {
+            return self.slice(0, 0);
+        }
+
+        let mut builder =
+            PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap() as usize);
+
+        let mut previous_offset = 0;
+
+        for (i, offset) in offsets.iter().enumerate() {
+            let data = unsafe { self.array.value_unchecked(i) };
+            builder.mutable_array.extend(
+                std::iter::repeat(data)
+                    .take(*offset - previous_offset)
+                    .map(Option::Some),
+            );
+            previous_offset = *offset;
+        }
+        builder.to_vector()
+    }
 }
 
 impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
     fn from(array: PrimitiveArray<T>) -> Self {
         Self { array }
+    }
+}
+
+impl<T: Primitive> From<Vec<Option<T>>> for PrimitiveVector<T> {
+    fn from(v: Vec<Option<T>>) -> Self {
+        Self {
+            array: PrimitiveArray::<T>::from(v),
+        }
     }
 }
 
@@ -96,7 +149,13 @@ impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for Pr
     }
 }
 
-impl<T: Primitive + DataTypeBuilder> ScalarVector for PrimitiveVector<T> {
+impl<T> ScalarVector for PrimitiveVector<T>
+where
+    T: Scalar<VectorType = Self> + Primitive + DataTypeBuilder,
+    for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = Self>,
+    for<'a> T: Scalar<RefType<'a> = T>,
+{
+    type OwnedItem = T;
     type RefItem<'a> = T;
     type Iter<'a> = PrimitiveIter<'a, T>;
     type Builder = PrimitiveVectorBuilder<T>;
@@ -141,11 +200,48 @@ impl<'a, T: Copy> Iterator for PrimitiveIter<'a, T> {
     }
 }
 
-pub struct PrimitiveVectorBuilder<T: Primitive> {
+pub struct PrimitiveVectorBuilder<T: Primitive + DataTypeBuilder> {
     mutable_array: MutablePrimitiveArray<T>,
 }
 
-impl<T: Primitive + DataTypeBuilder> ScalarVectorBuilder for PrimitiveVectorBuilder<T> {
+impl<T: Primitive + DataTypeBuilder> PrimitiveVectorBuilder<T> {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            mutable_array: MutablePrimitiveArray::with_capacity(capacity),
+        }
+    }
+}
+
+impl<T: Primitive + DataTypeBuilder> MutableVector for PrimitiveVectorBuilder<T> {
+    fn data_type(&self) -> ConcreteDataType {
+        T::build_data_type()
+    }
+
+    fn len(&self) -> usize {
+        self.mutable_array.len()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn to_vector(&mut self) -> VectorRef {
+        Arc::new(PrimitiveVector::<T> {
+            array: std::mem::take(&mut self.mutable_array).into(),
+        })
+    }
+}
+
+impl<T> ScalarVectorBuilder for PrimitiveVectorBuilder<T>
+where
+    T: Scalar<VectorType = PrimitiveVector<T>> + Primitive + DataTypeBuilder,
+    for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = PrimitiveVector<T>>,
+    for<'a> T: Scalar<RefType<'a> = T>,
+{
     type VectorType = PrimitiveVector<T>;
 
     fn with_capacity(capacity: usize) -> Self {
@@ -158,16 +254,17 @@ impl<T: Primitive + DataTypeBuilder> ScalarVectorBuilder for PrimitiveVectorBuil
         self.mutable_array.push(value);
     }
 
-    fn finish(self) -> Self::VectorType {
+    fn finish(&mut self) -> Self::VectorType {
         PrimitiveVector {
-            array: self.mutable_array.into(),
+            array: std::mem::take(&mut self.mutable_array).into(),
         }
     }
 }
 
 impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
-        self.iter_data()
+        self.array
+            .iter()
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()
             .context(SerializeSnafu)
@@ -176,14 +273,30 @@ impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::DataType as ArrowDataType;
     use serde_json;
 
     use super::*;
     use crate::serialize::Serializable;
 
     fn check_vec(v: PrimitiveVector<i32>) {
+        assert_eq!(4, v.len());
+        assert_eq!("Int32Vector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert_eq!(Validity::AllValid, v.validity());
+        assert!(!v.only_null());
+
+        for i in 0..4 {
+            assert!(!v.is_null(i));
+            assert_eq!(Value::Int32(i as i32 + 1), v.get_unchecked(i));
+        }
+
         let json_value = v.serialize_to_json().unwrap();
         assert_eq!("[1,2,3,4]", serde_json::to_string(&json_value).unwrap(),);
+
+        let arrow_arr = v.to_arrow_array();
+        assert_eq!(4, arrow_arr.len());
+        assert_eq!(&ArrowDataType::Int32, arrow_arr.data_type());
     }
 
     #[test]
@@ -263,5 +376,19 @@ mod tests {
         let vector = PrimitiveVector::<i32>::from_slice(vec![1, 2, 3, 4]);
         assert_eq!(0, vector.null_count());
         assert_eq!(Validity::AllValid, vector.validity());
+    }
+
+    #[test]
+    fn test_replicate() {
+        let v = PrimitiveVector::<i32>::from_slice((0..5).collect::<Vec<i32>>());
+
+        let offsets = [0usize, 1usize, 2usize, 3usize, 4usize];
+
+        let v = v.replicate(&offsets);
+        assert_eq!(4, v.len());
+
+        for i in 0..4 {
+            assert_eq!(Value::Int32(i as i32 + 1), v.get_unchecked(i));
+        }
     }
 }

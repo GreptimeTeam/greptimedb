@@ -1,19 +1,20 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, Utf8ValuesIter};
+use arrow::array::{Array, ArrayRef, MutableArray, Utf8ValuesIter};
 use arrow::bitmap::utils::ZipValidity;
-use serde_json::Value;
+use serde_json::Value as JsonValue;
 use snafu::OptionExt;
 use snafu::ResultExt;
 
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::SerializeSnafu;
-use crate::prelude::{ScalarVectorBuilder, Validity, Vector};
-use crate::scalars::ScalarVector;
+use crate::prelude::{MutableVector, ScalarVectorBuilder, Validity, Vector, VectorRef};
+use crate::scalars::{common, ScalarVector};
 use crate::serialize::Serializable;
 use crate::types::StringType;
+use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
 
 /// String array wrapper
@@ -28,9 +29,53 @@ impl From<StringArray> for StringVector {
     }
 }
 
+impl From<Vec<Option<String>>> for StringVector {
+    fn from(data: Vec<Option<String>>) -> Self {
+        Self {
+            array: StringArray::from(data),
+        }
+    }
+}
+
+impl From<Vec<String>> for StringVector {
+    fn from(data: Vec<String>) -> Self {
+        Self {
+            array: StringArray::from(
+                data.into_iter()
+                    .map(Option::Some)
+                    .collect::<Vec<Option<String>>>(),
+            ),
+        }
+    }
+}
+
+impl From<Vec<Option<&str>>> for StringVector {
+    fn from(data: Vec<Option<&str>>) -> Self {
+        Self {
+            array: StringArray::from(data),
+        }
+    }
+}
+
+impl From<Vec<&str>> for StringVector {
+    fn from(data: Vec<&str>) -> Self {
+        Self {
+            array: StringArray::from(
+                data.into_iter()
+                    .map(Option::Some)
+                    .collect::<Vec<Option<&str>>>(),
+            ),
+        }
+    }
+}
+
 impl Vector for StringVector {
     fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::String(StringType::default())
+    }
+
+    fn vector_type_name(&self) -> String {
+        "StringVector".to_string()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -51,9 +96,26 @@ impl Vector for StringVector {
             None => Validity::AllValid,
         }
     }
+
+    fn is_null(&self, row: usize) -> bool {
+        self.array.is_null(row)
+    }
+
+    fn slice(&self, offset: usize, length: usize) -> VectorRef {
+        Arc::new(Self::from(self.array.slice(offset, length)))
+    }
+
+    fn get_unchecked(&self, index: usize) -> Value {
+        self.array.value(index).into()
+    }
+
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        common::replicate_scalar_vector(self, offsets)
+    }
 }
 
 impl ScalarVector for StringVector {
+    type OwnedItem = String;
     type RefItem<'a> = &'a str;
     type Iter<'a> = ZipValidity<'a, &'a str, Utf8ValuesIter<'a, i32>>;
     type Builder = StringVectorBuilder;
@@ -75,6 +137,28 @@ pub struct StringVectorBuilder {
     buffer: MutableStringArray,
 }
 
+impl MutableVector for StringVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::string_datatype()
+    }
+
+    fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn to_vector(&mut self) -> VectorRef {
+        Arc::new(self.finish())
+    }
+}
+
 impl ScalarVectorBuilder for StringVectorBuilder {
     type VectorType = StringVector;
 
@@ -88,15 +172,15 @@ impl ScalarVectorBuilder for StringVectorBuilder {
         self.buffer.push(value)
     }
 
-    fn finish(self) -> Self::VectorType {
+    fn finish(&mut self) -> Self::VectorType {
         Self::VectorType {
-            array: self.buffer.into(),
+            array: std::mem::take(&mut self.buffer).into(),
         }
     }
 }
 
 impl Serializable for StringVector {
-    fn serialize_to_json(&self) -> crate::error::Result<Vec<Value>> {
+    fn serialize_to_json(&self) -> crate::error::Result<Vec<JsonValue>> {
         self.iter_data()
             .map(|v| match v {
                 None => Ok(serde_json::Value::Null),
@@ -111,9 +195,30 @@ impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::DataType as ArrowDataType;
     use serde_json;
 
     use super::*;
+
+    #[test]
+    fn test_string_vector_misc() {
+        let strs = vec!["hello", "greptime", "rust"];
+        let v = StringVector::from(strs.clone());
+        assert_eq!(3, v.len());
+        assert_eq!("StringVector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert_eq!(Validity::AllValid, v.validity());
+        assert!(!v.only_null());
+
+        for (i, s) in strs.iter().enumerate() {
+            assert_eq!(Value::from(*s), v.get_unchecked(i));
+            assert_eq!(Value::from(*s), v.get(i).unwrap());
+        }
+
+        let arrow_arr = v.to_arrow_array();
+        assert_eq!(3, arrow_arr.len());
+        assert_eq!(&ArrowDataType::Utf8, arrow_arr.data_type());
+    }
 
     #[test]
     fn test_serialize_string_vector() {
