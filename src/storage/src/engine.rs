@@ -55,6 +55,12 @@ impl EngineImpl {
     }
 }
 
+impl Default for EngineImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 type RegionMap = HashMap<String, RegionImpl>;
 
 struct EngineInner {
