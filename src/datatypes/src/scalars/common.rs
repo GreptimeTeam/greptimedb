@@ -12,13 +12,12 @@ pub fn replicate_scalar_vector<C: ScalarVector>(c: &C, offsets: &[usize]) -> Vec
     let mut builder = <<C as ScalarVector>::Builder>::with_capacity(c.len());
 
     let mut previous_offset = 0;
-    (0..c.len()).for_each(|i| {
-        let offset = offsets[i];
+    for (i, offset) in offsets.iter().enumerate() {
         let data = c.get_data(i);
-        for _ in previous_offset..offset {
+        for _ in previous_offset..*offset {
             builder.push(data);
         }
-        previous_offset = offset;
-    });
+        previous_offset = *offset;
+    }
     builder.to_vector()
 }

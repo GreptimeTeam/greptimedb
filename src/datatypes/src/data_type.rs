@@ -35,7 +35,20 @@ pub enum ConcreteDataType {
 
 impl ConcreteDataType {
     pub fn is_float(&self) -> bool {
-        matches!(self, ConcreteDataType::Float64(_)) || matches!(self, ConcreteDataType::Float32(_))
+        matches!(
+            self,
+            ConcreteDataType::Float64(_) | ConcreteDataType::Float32(_)
+        )
+    }
+
+    pub fn is_signed(&self) -> bool {
+        matches!(
+            self,
+            ConcreteDataType::Int8(_)
+                | ConcreteDataType::Int16(_)
+                | ConcreteDataType::Int32(_)
+                | ConcreteDataType::Int64(_)
+        )
     }
 
     pub fn numerics() -> Vec<ConcreteDataType> {

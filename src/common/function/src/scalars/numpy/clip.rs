@@ -44,6 +44,7 @@ macro_rules! define_eval {
 }
 
 define_eval!(i64);
+define_eval!(u64);
 define_eval!(f64);
 
 impl Function for ClipFunction {
@@ -54,8 +55,10 @@ impl Function for ClipFunction {
     fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
         if input_types.iter().any(ConcreteDataType::is_float) {
             Ok(ConcreteDataType::float64_datatype())
-        } else {
+        } else if input_types.iter().any(ConcreteDataType::is_signed) {
             Ok(ConcreteDataType::int64_datatype())
+        } else {
+            Ok(ConcreteDataType::uint64_datatype())
         }
     }
 
@@ -66,8 +69,10 @@ impl Function for ClipFunction {
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         if columns.iter().any(|v| v.data_type().is_float()) {
             eval_f64(columns)
-        } else {
+        } else if columns.iter().any(|v| v.data_type().is_signed()) {
             eval_i64(columns)
+        } else {
+            eval_u64(columns)
         }
     }
 }
@@ -126,7 +131,7 @@ impl fmt::Display for ClipFunction {
 mod tests {
     use common_query::prelude::TypeSignature;
     use datatypes::value::Value;
-    use datatypes::vectors::{ConstantVector, Float32Vector, Int32Vector};
+    use datatypes::vectors::{ConstantVector, Float32Vector, Int32Vector, UInt32Vector};
 
     use super::*;
     #[test]
@@ -135,7 +140,7 @@ mod tests {
 
         assert_eq!("clip", clip.name());
         assert_eq!(
-            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::uint64_datatype(),
             clip.return_type(&[]).unwrap()
         );
 
@@ -154,7 +159,7 @@ mod tests {
                 10,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(Int32Vector::from_vec(vec![6])),
+                Arc::new(UInt32Vector::from_vec(vec![6])),
                 10,
             )),
         ];
@@ -165,11 +170,40 @@ mod tests {
         // clip([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 3, 6) = [3, 3, 3, 3, 4, 5, 6, 6, 6, 6]
         for i in 0..10 {
             if i <= 3 {
+                println!("{:?}", vector.get_unchecked(i));
                 assert!(matches!(vector.get_unchecked(i), Value::Int64(v) if v == 3));
             } else if i <= 6 {
                 assert!(matches!(vector.get_unchecked(i), Value::Int64(v) if v == (i as i64)));
             } else {
                 assert!(matches!(vector.get_unchecked(i), Value::Int64(v) if v == 6));
+            }
+        }
+
+        // eval with unsigned
+        let args: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_values(0..10)),
+            Arc::new(ConstantVector::new(
+                Arc::new(UInt32Vector::from_vec(vec![3])),
+                10,
+            )),
+            Arc::new(ConstantVector::new(
+                Arc::new(UInt32Vector::from_vec(vec![6])),
+                10,
+            )),
+        ];
+
+        let vector = clip.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(10, vector.len());
+
+        // clip([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 3, 6) = [3, 3, 3, 3, 4, 5, 6, 6, 6, 6]
+        for i in 0..10 {
+            if i <= 3 {
+                println!("{:?}", vector.get_unchecked(i));
+                assert!(matches!(vector.get_unchecked(i), Value::UInt64(v) if v == 3));
+            } else if i <= 6 {
+                assert!(matches!(vector.get_unchecked(i), Value::UInt64(v) if v == (i as u64)));
+            } else {
+                assert!(matches!(vector.get_unchecked(i), Value::UInt64(v) if v == 6));
             }
         }
 

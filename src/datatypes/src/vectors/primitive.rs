@@ -114,16 +114,15 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
 
         let mut previous_offset = 0;
 
-        (0..self.len()).for_each(|i| {
-            let offset = offsets[i];
+        for (i, offset) in offsets.iter().enumerate() {
             let data = unsafe { self.array.value_unchecked(i) };
             builder.mutable_array.extend(
                 std::iter::repeat(data)
-                    .take(offset - previous_offset)
+                    .take(*offset - previous_offset)
                     .map(Option::Some),
             );
-            previous_offset = offset;
-        });
+            previous_offset = *offset;
+        }
         builder.to_vector()
     }
 }

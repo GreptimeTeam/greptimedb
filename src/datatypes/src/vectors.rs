@@ -95,7 +95,7 @@ pub trait Vector: Send + Sync + Serializable {
     }
 
     /// Returns whether row is null.
-    fn is_null(&self, _row: usize) -> bool;
+    fn is_null(&self, row: usize) -> bool;
 
     /// If the only value vector can contain is NULL.
     fn only_null(&self) -> bool {
