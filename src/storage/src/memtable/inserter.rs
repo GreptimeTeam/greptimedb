@@ -5,10 +5,10 @@ use snafu::ensure;
 use store_api::storage::{ColumnDescriptor, SequenceNumber, ValueType};
 
 use crate::error::{self, Result};
-use crate::memtable::{KeyValues, MemTable};
+use crate::memtable::{KeyValues, Memtable};
 use crate::write_batch::{Mutation, PutData, WriteBatch};
 
-/// Wraps logic of inserting key/values in [WriteBatch] to [MemTable].
+/// Wraps logic of inserting key/values in [WriteBatch] to [Memtable].
 pub struct Inserter {
     /// Sequence of the batch to be inserted.
     sequence: SequenceNumber,
@@ -27,14 +27,14 @@ impl Inserter {
     /// Insert write batch into memtable.
     ///
     /// Won't do schema validation.
-    pub fn insert_memtable(&mut self, batch: &WriteBatch, memtable: &dyn MemTable) -> Result<()> {
+    pub fn insert_memtable(&mut self, batch: &WriteBatch, memtable: &dyn Memtable) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
 
         let schema = memtable.schema();
         // Reusable KeyValues buffer.
-        let mut key_values = KeyValues {
+        let mut kvs = KeyValues {
             sequence: self.sequence,
             value_type: ValueType::Put,
             start_index_in_batch: self.index_in_batch,
@@ -45,7 +45,7 @@ impl Inserter {
         for mutation in batch {
             match mutation {
                 Mutation::Put(put_data) => {
-                    self.put_impl(put_data, memtable, &mut key_values)?;
+                    self.put_impl(put_data, memtable, &mut kvs)?;
                 }
             }
         }
@@ -56,35 +56,28 @@ impl Inserter {
     fn put_impl(
         &mut self,
         put_data: &PutData,
-        memtable: &dyn MemTable,
-        key_values: &mut KeyValues,
+        memtable: &dyn Memtable,
+        kvs: &mut KeyValues,
     ) -> Result<()> {
         let schema = memtable.schema();
         let num_rows = put_data.num_rows();
 
-        reset_key_values(key_values, ValueType::Put, self.index_in_batch);
+        kvs.reset(ValueType::Put, self.index_in_batch);
 
         for key_col in schema.row_key_columns() {
-            clone_put_data_column_to(put_data, &key_col.desc, &mut key_values.keys)?;
+            clone_put_data_column_to(put_data, &key_col.desc, &mut kvs.keys)?;
         }
 
         for value_col in schema.value_columns() {
-            clone_put_data_column_to(put_data, &value_col.desc, &mut key_values.values)?;
+            clone_put_data_column_to(put_data, &value_col.desc, &mut kvs.values)?;
         }
 
-        memtable.write(key_values)?;
+        memtable.write(kvs)?;
 
         self.index_in_batch += num_rows;
 
         Ok(())
     }
-}
-
-fn reset_key_values(key_values: &mut KeyValues, value_type: ValueType, index_in_batch: usize) {
-    key_values.value_type = value_type;
-    key_values.start_index_in_batch = index_in_batch;
-    key_values.keys.clear();
-    key_values.values.clear();
 }
 
 fn clone_put_data_column_to(

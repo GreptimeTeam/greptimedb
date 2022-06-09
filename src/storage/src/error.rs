@@ -34,8 +34,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            InvalidRegionDesc { .. } | InvalidInputSchema { .. } => StatusCode::InvalidArguments,
-            BatchMissingColumn { .. } => StatusCode::Unexpected,
+            InvalidRegionDesc { .. } | InvalidInputSchema { .. } | BatchMissingColumn { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 

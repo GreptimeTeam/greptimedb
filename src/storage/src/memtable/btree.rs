@@ -6,34 +6,34 @@ use datatypes::value::Value;
 use store_api::storage::{SequenceNumber, ValueType};
 
 use crate::error::Result;
-use crate::memtable::{KeyValues, MemTable, MemTableSchema};
+use crate::memtable::{KeyValues, Memtable, MemtableSchema};
 
 /// A simple memtable implementation based on std's [`BTreeMap`].
 ///
 /// Mainly for test purpose.
-pub struct BTreeMemTable {
-    schema: MemTableSchema,
+pub struct BTreeMemtable {
+    schema: MemtableSchema,
     map: RwLock<BTreeMap<RowKey, RowValue>>,
 }
 
-impl BTreeMemTable {
-    pub fn new(schema: MemTableSchema) -> BTreeMemTable {
-        BTreeMemTable {
+impl BTreeMemtable {
+    pub fn new(schema: MemtableSchema) -> BTreeMemtable {
+        BTreeMemtable {
             schema,
             map: RwLock::new(BTreeMap::new()),
         }
     }
 }
 
-impl MemTable for BTreeMemTable {
-    fn schema(&self) -> &MemTableSchema {
+impl Memtable for BTreeMemtable {
+    fn schema(&self) -> &MemtableSchema {
         &self.schema
     }
 
-    fn write(&self, key_values: &KeyValues) -> Result<()> {
+    fn write(&self, kvs: &KeyValues) -> Result<()> {
         let mut map = self.map.write().unwrap();
 
-        let iter_row = IterRow::new(key_values);
+        let iter_row = IterRow::new(kvs);
         for (row_key, row_value) in iter_row {
             map.insert(row_key, row_value);
         }
@@ -47,37 +47,37 @@ impl MemTable for BTreeMemTable {
 }
 
 struct IterRow<'a> {
-    key_values: &'a KeyValues,
+    kvs: &'a KeyValues,
     index: usize,
     len: usize,
 }
 
 impl<'a> IterRow<'a> {
-    fn new(key_values: &KeyValues) -> IterRow {
+    fn new(kvs: &KeyValues) -> IterRow {
         IterRow {
-            key_values,
+            kvs,
             index: 0,
-            len: key_values.len(),
+            len: kvs.len(),
         }
     }
 
     fn fetch_row(&mut self) -> (RowKey, RowValue) {
         let keys = self
-            .key_values
+            .kvs
             .keys
             .iter()
             .map(|vector| vector.get(self.index))
             .collect();
         let row_key = RowKey {
             keys,
-            sequence: self.key_values.sequence,
-            index_in_batch: self.key_values.start_index_in_batch + self.index,
-            value_type: self.key_values.value_type,
+            sequence: self.kvs.sequence,
+            index_in_batch: self.kvs.start_index_in_batch + self.index,
+            value_type: self.kvs.value_type,
         };
 
         let row_value = RowValue {
             _values: self
-                .key_values
+                .kvs
                 .values
                 .iter()
                 .map(|vector| vector.get(self.index))
@@ -97,6 +97,10 @@ impl<'a> Iterator for IterRow<'a> {
         }
 
         Some(self.fetch_row())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.kvs.keys.len(), Some(self.kvs.keys.len()))
     }
 }
 

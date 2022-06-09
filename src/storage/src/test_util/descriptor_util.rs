@@ -4,7 +4,7 @@ use store_api::storage::{
     RegionDescriptor, RowKeyDescriptorBuilder,
 };
 
-use crate::test_util::schema_util::{self, ColumnDef};
+use crate::test_util::schema_util::ColumnDef;
 
 /// A RegionDescriptor builder for test.
 pub struct RegionDescBuilder {
@@ -30,7 +30,7 @@ impl RegionDescBuilder {
         }
     }
 
-    // This will reset the row key builder, so should be called by before `push_key_column()`
+    // This will reset the row key builder, so should be called before `push_key_column()`
     // and `enable_version_column()`, or just call after `new()`.
     pub fn timestamp(mut self, column_def: ColumnDef) -> Self {
         let builder = RowKeyDescriptorBuilder::new(self.new_column(column_def));
@@ -70,7 +70,7 @@ impl RegionDescBuilder {
     }
 
     fn new_column(&mut self, column_def: ColumnDef) -> ColumnDescriptor {
-        let datatype = schema_util::logical_type_id_to_concrete_type(column_def.1);
+        let datatype = column_def.1.data_type();
         ColumnDescriptorBuilder::new(self.alloc_column_id(), column_def.0, datatype)
             .is_nullable(column_def.2)
             .build()

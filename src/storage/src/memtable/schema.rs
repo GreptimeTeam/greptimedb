@@ -1,12 +1,12 @@
 use crate::metadata::{ColumnMetadata, ColumnsRowKeyMetadataRef};
 
-pub struct MemTableSchema {
+pub struct MemtableSchema {
     columns_row_key: ColumnsRowKeyMetadataRef,
 }
 
-impl MemTableSchema {
-    pub fn new(columns_row_key: ColumnsRowKeyMetadataRef) -> MemTableSchema {
-        MemTableSchema { columns_row_key }
+impl MemtableSchema {
+    pub fn new(columns_row_key: ColumnsRowKeyMetadataRef) -> MemtableSchema {
+        MemtableSchema { columns_row_key }
     }
 
     #[inline]

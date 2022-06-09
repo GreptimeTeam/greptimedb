@@ -33,13 +33,13 @@ pub enum InnerError {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Fail to convert arrow schema, source:{}", source))]
+    #[snafu(display("Fail to convert arrow schema, source: {}", source))]
     ConvertSchema {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Fail to convert table, source:{}", source))]
+    #[snafu(display("Fail to convert table, source: {}", source))]
     ConvertTable {
         #[snafu(backtrace)]
         source: table::error::Error,

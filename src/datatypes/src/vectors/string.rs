@@ -10,12 +10,11 @@ use snafu::ResultExt;
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::SerializeSnafu;
-use crate::prelude::{MutableVector, ScalarVectorBuilder, Validity, Vector, VectorRef};
-use crate::scalars::{common, ScalarVector};
+use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::StringType;
 use crate::value::Value;
-use crate::vectors::impl_try_from_arrow_array_for_vector;
+use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// String array wrapper
 #[derive(Debug, Clone)]
@@ -91,10 +90,7 @@ impl Vector for StringVector {
     }
 
     fn validity(&self) -> Validity {
-        match self.array.validity() {
-            Some(bitmap) => Validity::Slots(bitmap),
-            None => Validity::AllValid,
-        }
+        vectors::impl_validity_for_vector!(self.array)
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -106,12 +102,7 @@ impl Vector for StringVector {
     }
 
     fn get(&self, index: usize) -> Value {
-        if self.array.is_valid(index) {
-            // Safety: The index have been checked by `is_valid()`.
-            unsafe { Value::String(self.array.value_unchecked(index).into()) }
-        } else {
-            Value::Null
-        }
+        vectors::impl_get_for_vector!(self.array, index)
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -196,7 +187,7 @@ impl Serializable for StringVector {
     }
 }
 
-impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
+vectors::impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 
 #[cfg(test)]
 mod tests {

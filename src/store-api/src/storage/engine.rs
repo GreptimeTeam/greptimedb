@@ -32,7 +32,8 @@ pub trait StorageEngine: Send + Sync + Clone {
 
     /// Creates and returns the created region.
     ///
-    /// Returns exsiting region if region with same name already exists.
+    /// Returns exsiting region if region with same name already exists. The region will
+    /// be opened before returning.
     async fn create_region(
         &self,
         ctx: &EngineContext,
@@ -40,6 +41,8 @@ pub trait StorageEngine: Send + Sync + Clone {
     ) -> Result<Self::Region, Self::Error>;
 
     /// Drops given region.
+    ///
+    /// The region will be closed before dropping.
     async fn drop_region(
         &self,
         ctx: &EngineContext,

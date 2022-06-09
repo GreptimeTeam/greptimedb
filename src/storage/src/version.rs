@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::memtable::MemTableSet;
+use crate::memtable::MemtableSet;
 use crate::metadata::{RegionMetadata, RegionMetadataRef};
 use crate::sync::CowCell;
 
@@ -11,7 +11,7 @@ pub struct VersionControl {
 
 impl VersionControl {
     /// Construct a new version control from `metadata`.
-    pub fn new(metadata: RegionMetadata, memtables: MemTableSet) -> VersionControl {
+    pub fn new(metadata: RegionMetadata, memtables: MemtableSet) -> VersionControl {
         VersionControl {
             version: CowCell::new(Version::new(metadata, memtables)),
         }
@@ -37,7 +37,7 @@ pub type VersionRef = Arc<Version>;
 // 2. acquire sequence later
 //
 // Reason: data may flush and some data with old sequence may be removed, so need
-// to acquire version firstly.
+// to acquire version at first.
 
 /// Version contains metadata and state of region.
 pub struct Version {
@@ -45,13 +45,13 @@ pub struct Version {
     /// in Arc to allow sharing metadata and reuse metadata when creating a new
     /// `Version`.
     metadata: RegionMetadataRef,
-    pub memtables: MemTableSet,
+    pub memtables: MemtableSet,
     // TODO(yingwen): Also need to store last sequence to this version when switching
     // version, so we can know the newest data can read from this version.
 }
 
 impl Version {
-    pub fn new(metadata: RegionMetadata, memtables: MemTableSet) -> Version {
+    pub fn new(metadata: RegionMetadata, memtables: MemtableSet) -> Version {
         Version {
             metadata: Arc::new(metadata),
             memtables,

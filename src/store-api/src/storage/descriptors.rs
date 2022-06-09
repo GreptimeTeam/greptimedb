@@ -28,7 +28,7 @@ impl From<&ColumnDescriptor> for ColumnSchema {
     }
 }
 
-/// A [RowKeyDescriptor] contains information to about row key.
+/// A [RowKeyDescriptor] contains information about row key.
 #[derive(Debug, Clone)]
 pub struct RowKeyDescriptor {
     pub columns: Vec<ColumnDescriptor>,

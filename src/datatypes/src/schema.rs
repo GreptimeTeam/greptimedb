@@ -130,8 +130,8 @@ mod tests {
         assert_eq!(ArrowDataType::Int32, field.data_type);
         assert!(field.is_nullable);
 
-        let column_schema2 = ColumnSchema::try_from(&field).unwrap();
-        assert_eq!(column_schema, column_schema2);
+        let new_column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!(column_schema, new_column_schema);
     }
 
     #[test]
@@ -151,11 +151,11 @@ mod tests {
         let fields: Vec<_> = column_schemas.iter().map(Field::from).collect();
         let arrow_schema = Arc::new(ArrowSchema::from(fields));
 
-        let schema2 = Schema::try_from(arrow_schema.clone()).unwrap();
+        let new_schema = Schema::try_from(arrow_schema.clone()).unwrap();
 
-        assert_eq!(schema, schema2);
+        assert_eq!(schema, new_schema);
         assert_eq!(column_schemas, schema.column_schemas());
         assert_eq!(arrow_schema, *schema.arrow_schema());
-        assert_eq!(arrow_schema, *schema2.arrow_schema());
+        assert_eq!(arrow_schema, *new_schema.arrow_schema());
     }
 }

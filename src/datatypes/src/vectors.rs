@@ -151,7 +151,29 @@ macro_rules! impl_try_from_arrow_array_for_vector {
     };
 }
 
-pub(crate) use impl_try_from_arrow_array_for_vector;
+macro_rules! impl_validity_for_vector {
+    ($array: expr) => {
+        match $array.validity() {
+            Some(bitmap) => Validity::Slots(bitmap),
+            None => Validity::AllValid,
+        }
+    };
+}
+
+macro_rules! impl_get_for_vector {
+    ($array: expr, $index: ident) => {
+        if $array.is_valid($index) {
+            // Safety: The index have been checked by `is_valid()`.
+            unsafe { $array.value_unchecked($index).into() }
+        } else {
+            Value::Null
+        }
+    };
+}
+
+pub(crate) use {
+    impl_get_for_vector, impl_try_from_arrow_array_for_vector, impl_validity_for_vector,
+};
 
 #[cfg(test)]
 pub mod tests {

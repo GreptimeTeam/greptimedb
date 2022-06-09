@@ -16,7 +16,7 @@ use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{DataTypeBuilder, Primitive};
 use crate::value::Value;
-use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
+use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector for primitive data types.
 #[derive(Debug)]
@@ -81,10 +81,7 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
     }
 
     fn validity(&self) -> Validity {
-        match self.array.validity() {
-            Some(bitmap) => Validity::Slots(bitmap),
-            None => Validity::AllValid,
-        }
+        vectors::impl_validity_for_vector!(self.array)
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -96,12 +93,7 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
     }
 
     fn get(&self, index: usize) -> Value {
-        if self.array.is_valid(index) {
-            // Safety: The index have been checked by `is_valid()`.
-            unsafe { self.array.value_unchecked(index).into() }
-        } else {
-            Value::Null
-        }
+        vectors::impl_get_for_vector!(self.array, index)
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {

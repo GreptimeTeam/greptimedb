@@ -12,7 +12,7 @@ pub enum StatusCode {
     Unexpected,
     /// Internal server error.
     Internal,
-    /// Invalid arguements.
+    /// Invalid arguments.
     InvalidArguments,
     // ====== End of common status code ================
 

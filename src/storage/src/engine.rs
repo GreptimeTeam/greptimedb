@@ -48,9 +48,7 @@ impl StorageEngine for EngineImpl {
 impl EngineImpl {
     pub fn new() -> EngineImpl {
         EngineImpl {
-            inner: Arc::new(EngineInner {
-                regions: RwLock::new(HashMap::new()),
-            }),
+            inner: Arc::new(EngineInner::default()),
         }
     }
 }
@@ -63,6 +61,7 @@ impl Default for EngineImpl {
 
 type RegionMap = HashMap<String, RegionImpl>;
 
+#[derive(Default)]
 struct EngineInner {
     regions: RwLock<RegionMap>,
 }
@@ -101,8 +100,7 @@ impl EngineInner {
     }
 
     fn get_region(&self, name: &str) -> Option<RegionImpl> {
-        let regions = self.regions.read().unwrap();
-        regions.get(name).cloned()
+        self.regions.read().unwrap().get(name).cloned()
     }
 }
 

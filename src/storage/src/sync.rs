@@ -35,12 +35,12 @@ impl<T: Clone> CowCell<T> {
     /// Acquire a write txn, blocking the current thread.
     ///
     /// Note that this will clone the inner data.
-    pub fn lock(&self) -> Txn<T> {
+    pub fn lock(&self) -> TxnGuard<T> {
         let _guard = self.mutex.lock().unwrap();
         // Acquire a clone of data inside lock.
         let data = (*self.get()).clone();
 
-        Txn {
+        TxnGuard {
             inner: &self.inner,
             data,
             _guard,
@@ -53,13 +53,13 @@ impl<T: Clone> CowCell<T> {
 /// When this txn is dropped (falls out of scope or commited), the lock will be
 /// unlocked, but updates to the content won't be visible unless the txn is committed.
 #[must_use = "if unused the CowCell will immediately unlock"]
-pub struct Txn<'a, T: Clone> {
+pub struct TxnGuard<'a, T: Clone> {
     inner: &'a ArcSwap<T>,
     data: T,
     _guard: MutexGuard<'a, ()>,
 }
 
-impl<T: Clone> Txn<'_, T> {
+impl<T: Clone> TxnGuard<'_, T> {
     /// Commit updates to the cell and release the lock.
     pub fn commit(self) {
         let data = Arc::new(self.data);
@@ -67,7 +67,7 @@ impl<T: Clone> Txn<'_, T> {
     }
 }
 
-impl<T: Clone> Deref for Txn<'_, T> {
+impl<T: Clone> Deref for TxnGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -75,7 +75,7 @@ impl<T: Clone> Deref for Txn<'_, T> {
     }
 }
 
-impl<T: Clone> DerefMut for Txn<'_, T> {
+impl<T: Clone> DerefMut for TxnGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.data
     }

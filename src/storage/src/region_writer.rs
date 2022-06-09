@@ -1,17 +1,17 @@
 use store_api::storage::{SequenceNumber, WriteContext, WriteResponse};
 
 use crate::error::Result;
-use crate::memtable::{Inserter, MemTableBuilderRef};
+use crate::memtable::{Inserter, MemtableBuilderRef};
 use crate::version::VersionControlRef;
 use crate::write_batch::WriteBatch;
 
 pub struct RegionWriter {
-    _memtable_builder: MemTableBuilderRef,
+    _memtable_builder: MemtableBuilderRef,
     last_sequence: SequenceNumber,
 }
 
 impl RegionWriter {
-    pub fn new(_memtable_builder: MemTableBuilderRef) -> RegionWriter {
+    pub fn new(_memtable_builder: MemtableBuilderRef) -> RegionWriter {
         RegionWriter {
             _memtable_builder,
             last_sequence: 0,

@@ -14,8 +14,7 @@ use crate::error::SerializeSnafu;
 use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::Value;
-use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
+use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of binary strings.
 #[derive(Debug)]
@@ -59,10 +58,7 @@ impl Vector for BinaryVector {
     }
 
     fn validity(&self) -> Validity {
-        match self.array.validity() {
-            Some(bitmap) => Validity::Slots(bitmap),
-            None => Validity::AllValid,
-        }
+        vectors::impl_validity_for_vector!(self.array)
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -74,12 +70,7 @@ impl Vector for BinaryVector {
     }
 
     fn get(&self, index: usize) -> Value {
-        if self.array.is_valid(index) {
-            // Safety: The index have been checked by `is_valid()`.
-            unsafe { Value::Binary(self.array.value_unchecked(index).into()) }
-        } else {
-            Value::Null
-        }
+        vectors::impl_get_for_vector!(self.array, index)
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -164,7 +155,7 @@ impl Serializable for BinaryVector {
     }
 }
 
-impl_try_from_arrow_array_for_vector!(LargeBinaryArray, BinaryVector);
+vectors::impl_try_from_arrow_array_for_vector!(LargeBinaryArray, BinaryVector);
 
 #[cfg(test)]
 mod tests {

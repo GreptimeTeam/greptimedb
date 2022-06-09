@@ -68,7 +68,6 @@ pub type RegionMetadataRef = Arc<RegionMetadata>;
 
 #[derive(Clone)]
 pub struct ColumnMetadata {
-    /// Id of column family that this column belongs to.
     pub cf_id: ColumnFamilyId,
     pub desc: ColumnDescriptor,
 }
