@@ -3,9 +3,9 @@ use std::collections::{btree_map, BTreeMap};
 use std::ops::Bound;
 use std::sync::{Arc, RwLock};
 
+use datatypes::prelude::*;
 use datatypes::value::Value;
-use datatypes::vectors::VectorBuilder;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{UInt64VectorBuilder, UInt8VectorBuilder, VectorBuilder};
 use store_api::storage::{SequenceNumber, ValueType};
 
 use crate::error::Result;
@@ -101,9 +101,13 @@ impl BTreeIterator {
         let iter = MapIterWrapper::new(iter);
 
         let mut keys = Vec::with_capacity(self.ctx.batch_size);
+        let mut sequences = UInt64VectorBuilder::with_capacity(self.ctx.batch_size);
+        let mut value_types = UInt8VectorBuilder::with_capacity(self.ctx.batch_size);
         let mut values = Vec::with_capacity(self.ctx.batch_size);
         for (inner_key, row_value) in iter.take(self.ctx.batch_size) {
             keys.push(inner_key);
+            sequences.push(Some(inner_key.sequence));
+            value_types.push(Some(inner_key.value_type.as_u8()));
             values.push(row_value);
         }
 
@@ -114,6 +118,8 @@ impl BTreeIterator {
 
         Some(Batch {
             keys: Self::keys_to_vectors(&keys),
+            sequences: sequences.finish(),
+            value_types: value_types.finish(),
             values: Self::values_to_vectors(&values),
         })
     }

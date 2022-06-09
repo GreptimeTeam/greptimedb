@@ -5,7 +5,7 @@ mod schema;
 use std::mem;
 use std::sync::Arc;
 
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{UInt64Vector, UInt8Vector, VectorRef};
 use store_api::storage::{SequenceNumber, ValueType};
 
 use crate::error::Result;
@@ -58,6 +58,8 @@ pub enum RowOrdering {
 
 pub struct Batch {
     pub keys: Vec<VectorRef>,
+    pub sequences: UInt64Vector,
+    pub value_types: UInt8Vector,
     pub values: Vec<VectorRef>,
 }
 
