@@ -12,5 +12,5 @@ tokio = { version = "1.0", features = ["full"] }
 
 [dev-dependencies]
 anyhow = "1.0"
-common-telemetry = { path = "../common/telemetry"}
+common-telemetry = { path = "../common/telemetry" }
 tempdir = "0.3"

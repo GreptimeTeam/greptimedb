@@ -14,6 +14,7 @@ members = [
     "src/object-store",
     "src/query",
     "src/sql",
+    "src/storage",
     "src/store-api",
     "src/table",
 ]

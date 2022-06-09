@@ -2,13 +2,12 @@ use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use arrow::array::UInt32Array;
-use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use datafusion::field_util::SchemaExt;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-use datatypes::schema::{Schema, SchemaRef};
+use datatypes::arrow::array::UInt32Array;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures::task::{Context, Poll};
 use futures::Stream;
 
@@ -16,20 +15,20 @@ use crate::error::Result;
 use crate::table::{Expr, Table};
 
 /// numbers table for test
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct NumbersTable {
     schema: SchemaRef,
 }
 
 impl Default for NumbersTable {
     fn default() -> Self {
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        let column_schemas = vec![ColumnSchema::new(
             "number",
-            DataType::UInt32,
+            ConcreteDataType::uint32_datatype(),
             false,
-        )]));
+        )];
         Self {
-            schema: Arc::new(Schema::new(arrow_schema)),
+            schema: Arc::new(Schema::new(column_schemas)),
         }
     }
 }

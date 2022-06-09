@@ -10,12 +10,11 @@ use snafu::ResultExt;
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::SerializeSnafu;
-use crate::prelude::{MutableVector, ScalarVectorBuilder, Validity, Vector, VectorRef};
-use crate::scalars::{common, ScalarVector};
+use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::StringType;
 use crate::value::Value;
-use crate::vectors::impl_try_from_arrow_array_for_vector;
+use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// String array wrapper
 #[derive(Debug, Clone)]
@@ -91,10 +90,7 @@ impl Vector for StringVector {
     }
 
     fn validity(&self) -> Validity {
-        match self.array.validity() {
-            Some(bitmap) => Validity::Slots(bitmap),
-            None => Validity::AllValid,
-        }
+        vectors::impl_validity_for_vector!(self.array)
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -105,8 +101,8 @@ impl Vector for StringVector {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
-    fn get_unchecked(&self, index: usize) -> Value {
-        self.array.value(index).into()
+    fn get(&self, index: usize) -> Value {
+        vectors::impl_get_for_vector!(self.array, index)
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -191,7 +187,7 @@ impl Serializable for StringVector {
     }
 }
 
-impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
+vectors::impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 
 #[cfg(test)]
 mod tests {
@@ -211,8 +207,8 @@ mod tests {
         assert!(!v.only_null());
 
         for (i, s) in strs.iter().enumerate() {
-            assert_eq!(Value::from(*s), v.get_unchecked(i));
-            assert_eq!(Value::from(*s), v.get(i).unwrap());
+            assert_eq!(Value::from(*s), v.get(i));
+            assert_eq!(Value::from(*s), v.try_get(i).unwrap());
         }
 
         let arrow_arr = v.to_arrow_array();
@@ -258,6 +254,13 @@ mod tests {
         assert_eq!(Some("hello"), vector.get_data(0));
         assert_eq!(None, vector.get_data(1));
         assert_eq!(Some("world"), vector.get_data(2));
+
+        // Get out of bound
+        assert!(vector.try_get(3).is_err());
+
+        assert_eq!(Value::String("hello".into()), vector.get(0));
+        assert_eq!(Value::Null, vector.get(1));
+        assert_eq!(Value::String("world".into()), vector.get(2));
 
         let mut iter = vector.iter_data();
         assert_eq!("hello", iter.next().unwrap().unwrap());

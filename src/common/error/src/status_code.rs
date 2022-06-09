@@ -12,6 +12,8 @@ pub enum StatusCode {
     Unexpected,
     /// Internal server error.
     Internal,
+    /// Invalid arguments.
+    InvalidArguments,
     // ====== End of common status code ================
 
     // ====== Begin of SQL related status code =========

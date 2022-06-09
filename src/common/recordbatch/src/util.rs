@@ -56,7 +56,7 @@ mod tests {
             DataType::UInt32,
             false,
         )]));
-        let schema = Arc::new(Schema::new(arrow_schema.clone()));
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
 
         let stream = MockRecordBatchStream {
             schema: schema.clone(),
@@ -79,7 +79,7 @@ mod tests {
         };
 
         let stream = MockRecordBatchStream {
-            schema: Arc::new(Schema::new(arrow_schema)),
+            schema: Arc::new(Schema::try_from(arrow_schema).unwrap()),
             batch: Some(batch.clone()),
         };
         let batches = collect(Box::pin(stream)).await.unwrap();

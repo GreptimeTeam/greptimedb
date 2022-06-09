@@ -81,8 +81,8 @@ impl Vector for ConstantVector {
         })
     }
 
-    fn get_unchecked(&self, _index: usize) -> Value {
-        self.vector.get_unchecked(0)
+    fn get(&self, _index: usize) -> Value {
+        self.vector.get(0)
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -100,7 +100,7 @@ impl fmt::Debug for ConstantVector {
         write!(
             f,
             "ConstantVector([{:?}; {}])",
-            self.get(0).unwrap_or(Value::Null),
+            self.try_get(0).unwrap_or(Value::Null),
             self.len()
         )
     }
@@ -108,7 +108,7 @@ impl fmt::Debug for ConstantVector {
 
 impl Serializable for ConstantVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        std::iter::repeat(self.get(0)?)
+        std::iter::repeat(self.try_get(0)?)
             .take(self.len())
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()
@@ -136,7 +136,7 @@ mod tests {
 
         for i in 0..10 {
             assert!(!c.is_null(i));
-            assert_eq!(Value::Int32(1), c.get_unchecked(i));
+            assert_eq!(Value::Int32(1), c.get(i));
         }
 
         let arrow_arr = c.to_arrow_array();

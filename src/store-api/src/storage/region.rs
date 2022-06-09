@@ -1,5 +1,5 @@
 //! Region holds chunks of rows stored in the storage engine, but does not require that
-//! rows must have continuous primary key range, which is implementation sepecific.
+//! rows must have continuous primary key range, which is implementation specific.
 //!
 //! Regions support operations like PUT/DELETE/SCAN that most key-value stores provide.
 //! However, unlike key-value store, data stored in region has data model like:
@@ -9,37 +9,39 @@
 //! ```
 //!
 //! The data model require each row
-//! - has 0 ~ m key column
-//! - **MUST** has a timestamp column
-//! - has a version column
-//! - has 0 ~ n value column
+//! - has 0 ~ m key column, parts of row key columns;
+//! - **MUST** has a timestamp column, part of row key columns;
+//! - has a version column, part of row key columns;
+//! - has 0 ~ n value column.
 //!
-//! Each row is identify by (value of key columns, timestamp, version), which forms
+//! Each row is identified by (value of key columns, timestamp, version), which forms
 //! a row key. Note that the implementation may allow multiple rows have same row
-//! key (like ClickHouse), which is useful is analytic scenario.
+//! key (like ClickHouse), which is useful in analytic scenario.
 
+use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
-use crate::storage::column_family::ColumnFamily;
+use crate::storage::metadata::RegionMeta;
 use crate::storage::requests::WriteRequest;
 use crate::storage::responses::WriteResponse;
 use crate::storage::snapshot::{ReadContext, Snapshot};
-use crate::storage::SchemaRef;
 
 /// Chunks of rows in storage engine.
+#[async_trait]
 pub trait Region: Send + Sync + Clone {
     type Error: ErrorExt + Send + Sync;
+    type Meta: RegionMeta;
     type WriteRequest: WriteRequest;
-    type ColumnFamily: ColumnFamily;
     type Snapshot: Snapshot;
 
-    fn schema(&self) -> &SchemaRef;
+    /// Returns name of the region.
+    fn name(&self) -> &str;
 
-    /// List all column families.
-    fn list_cf(&self) -> Result<Vec<Self::ColumnFamily>, Self::Error>;
+    /// Returns the in memory metadata of this region.
+    fn in_memory_metadata(&self) -> Self::Meta;
 
     /// Write updates to region.
-    fn write(
+    async fn write(
         &self,
         ctx: &WriteContext,
         request: Self::WriteRequest,

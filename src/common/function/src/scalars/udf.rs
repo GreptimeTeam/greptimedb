@@ -83,9 +83,7 @@ mod tests {
         assert_eq!(3, vector.len());
 
         for i in 0..3 {
-            assert!(
-                matches!(vector.get_unchecked(i), Value::Boolean(b) if b == (i == 0 || i == 2))
-            );
+            assert!(matches!(vector.get(i), Value::Boolean(b) if b == (i == 0 || i == 2)));
         }
 
         // create a udf and test it again

@@ -99,7 +99,7 @@ mod tests {
 
         for i in 0..3 {
             let p: f64 = (values[i] as f64).pow(bases[i] as f64);
-            assert!(matches!(vector.get_unchecked(i), Value::Float64(v) if v == p));
+            assert!(matches!(vector.get(i), Value::Float64(v) if v == p));
         }
     }
 }

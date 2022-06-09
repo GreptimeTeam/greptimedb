@@ -14,8 +14,7 @@ use crate::error::SerializeSnafu;
 use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::Value;
-use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
+use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of binary strings.
 #[derive(Debug)]
@@ -59,10 +58,7 @@ impl Vector for BinaryVector {
     }
 
     fn validity(&self) -> Validity {
-        match self.array.validity() {
-            Some(bitmap) => Validity::Slots(bitmap),
-            None => Validity::AllValid,
-        }
+        vectors::impl_validity_for_vector!(self.array)
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -73,8 +69,8 @@ impl Vector for BinaryVector {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
-    fn get_unchecked(&self, index: usize) -> Value {
-        self.array.value(index).into()
+    fn get(&self, index: usize) -> Value {
+        vectors::impl_get_for_vector!(self.array, index)
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -159,7 +155,7 @@ impl Serializable for BinaryVector {
     }
 }
 
-impl_try_from_arrow_array_for_vector!(LargeBinaryArray, BinaryVector);
+vectors::impl_try_from_arrow_array_for_vector!(LargeBinaryArray, BinaryVector);
 
 #[cfg(test)]
 mod tests {
@@ -186,10 +182,7 @@ mod tests {
 
         for i in 0..2 {
             assert!(!v.is_null(i));
-            assert_eq!(
-                Value::Binary(Bytes::from(vec![1, 2, 3])),
-                v.get_unchecked(i)
-            );
+            assert_eq!(Value::Binary(Bytes::from(vec![1, 2, 3])), v.get(i));
         }
 
         let arrow_arr = v.to_arrow_array();
@@ -245,6 +238,9 @@ mod tests {
         let vector = builder.finish();
         assert_eq!(b"hello", vector.get_data(0).unwrap());
         assert_eq!(None, vector.get_data(3));
+
+        assert_eq!(Value::Binary(b"hello".as_slice().into()), vector.get(0));
+        assert_eq!(Value::Null, vector.get(3));
 
         let mut iter = vector.iter_data();
         assert_eq!(b"hello", iter.next().unwrap().unwrap());

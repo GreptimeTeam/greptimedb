@@ -13,8 +13,7 @@ use crate::scalars::common::replicate_scalar_vector;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::Value;
-use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
+use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of boolean.
 #[derive(Debug)]
@@ -74,10 +73,7 @@ impl Vector for BooleanVector {
     }
 
     fn validity(&self) -> Validity {
-        match self.array.validity() {
-            Some(bitmap) => Validity::Slots(bitmap),
-            None => Validity::AllValid,
-        }
+        vectors::impl_validity_for_vector!(self.array)
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -88,8 +84,8 @@ impl Vector for BooleanVector {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
-    fn get_unchecked(&self, index: usize) -> Value {
-        self.array.value(index).into()
+    fn get(&self, index: usize) -> Value {
+        vectors::impl_get_for_vector!(self.array, index)
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -171,7 +167,7 @@ impl Serializable for BooleanVector {
     }
 }
 
-impl_try_from_arrow_array_for_vector!(BooleanArray, BooleanVector);
+vectors::impl_try_from_arrow_array_for_vector!(BooleanArray, BooleanVector);
 
 #[cfg(test)]
 mod tests {
@@ -193,7 +189,7 @@ mod tests {
 
         for (i, b) in bools.iter().enumerate() {
             assert!(!v.is_null(i));
-            assert_eq!(Value::Boolean(*b), v.get_unchecked(i));
+            assert_eq!(Value::Boolean(*b), v.get(i));
         }
 
         let arrow_arr = v.to_arrow_array();
@@ -268,6 +264,7 @@ mod tests {
 
         for (i, v) in input.into_iter().enumerate() {
             assert_eq!(v, vector.get_data(i));
+            assert_eq!(Value::from(v), vector.get(i));
         }
     }
 

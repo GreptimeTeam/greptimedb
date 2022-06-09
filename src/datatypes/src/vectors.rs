@@ -104,11 +104,15 @@ pub trait Vector: Send + Sync + Serializable {
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef;
 
-    /// # Safety
-    /// Assumes that the `index` is smaller than size.
-    fn get_unchecked(&self, index: usize) -> Value;
+    /// Returns the clone of value at `index`.
+    ///
+    /// # Panics
+    /// Panic if `index` is out of bound.
+    fn get(&self, index: usize) -> Value;
 
-    fn get(&self, index: usize) -> Result<Value> {
+    /// Returns the clone of value at `index` or error if `index`
+    /// is out of bound.
+    fn try_get(&self, index: usize) -> Result<Value> {
         ensure!(
             index < self.len(),
             BadArrayAccessSnafu {
@@ -116,7 +120,7 @@ pub trait Vector: Send + Sync + Serializable {
                 size: self.len()
             }
         );
-        Ok(self.get_unchecked(index))
+        Ok(self.get(index))
     }
 
     // Copies each element according offsets parameter.
@@ -147,7 +151,29 @@ macro_rules! impl_try_from_arrow_array_for_vector {
     };
 }
 
-pub(crate) use impl_try_from_arrow_array_for_vector;
+macro_rules! impl_validity_for_vector {
+    ($array: expr) => {
+        match $array.validity() {
+            Some(bitmap) => Validity::Slots(bitmap),
+            None => Validity::AllValid,
+        }
+    };
+}
+
+macro_rules! impl_get_for_vector {
+    ($array: expr, $index: ident) => {
+        if $array.is_valid($index) {
+            // Safety: The index have been checked by `is_valid()`.
+            unsafe { $array.value_unchecked($index).into() }
+        } else {
+            Value::Null
+        }
+    };
+}
+
+pub(crate) use {
+    impl_get_for_vector, impl_try_from_arrow_array_for_vector, impl_validity_for_vector,
+};
 
 #[cfg(test)]
 pub mod tests {

@@ -68,6 +68,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08f9b8508dccb7687a1d6c4ce66b2b0ecef467c94667de27d8d7fe1f8d2a9cdc"
 
 [[package]]
+name = "arc-swap"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5d78ce20460b82d3fa150275ed9d55e21064fc7951177baacf86a145c4a4b1f"
+
+[[package]]
 name = "array-init-cursor"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -918,6 +924,7 @@ dependencies = [
  "common-error",
  "datafusion-common",
  "enum_dispatch",
+ "ordered-float 3.0.0",
  "paste",
  "serde",
  "serde_json",
@@ -2117,6 +2124,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ordered-float"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96bcbab4bfea7a59c2c0fe47211a1ac4e3e96bea6eb446d704f310bc5c732ae2"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "ordered-multimap"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2960,6 +2976,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "storage"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "common-error",
+ "common-telemetry",
+ "datatypes",
+ "snafu",
+ "store-api",
+ "tokio",
+]
+
+[[package]]
 name = "store-api"
 version = "0.1.0"
 dependencies = [
@@ -3044,7 +3074,6 @@ checksum = "20518fe4a4c9acf048008599e464deb21beeae3d3578418951a189c235a7a9a8"
 name = "table"
 version = "0.1.0"
 dependencies = [
- "arrow2",
  "async-trait",
  "chrono",
  "common-error",

@@ -19,15 +19,11 @@ pub trait SchemaProvider: Sync + Send {
 
     /// If supported by the implementation, adds a new table to this schema.
     /// If a table of the same name existed before, it returns "Table already exists" error.
-    fn register_table(&self, _name: String, _table: TableRef) -> Result<Option<TableRef>> {
-        todo!();
-    }
+    fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>>;
 
     /// If supported by the implementation, removes an existing table from this schema and returns it.
     /// If no table of that name exists, returns Ok(None).
-    fn deregister_table(&self, _name: &str) -> Result<Option<TableRef>> {
-        todo!();
-    }
+    fn deregister_table(&self, name: &str) -> Result<Option<TableRef>>;
 
     /// If supported by the implementation, checks the table exist in the schema provider or not.
     /// If no matched table in the schema provider, return false.

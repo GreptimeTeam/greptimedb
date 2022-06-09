@@ -16,7 +16,7 @@ use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{DataTypeBuilder, Primitive};
 use crate::value::Value;
-use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
+use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector for primitive data types.
 #[derive(Debug)]
@@ -81,10 +81,7 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
     }
 
     fn validity(&self) -> Validity {
-        match self.array.validity() {
-            Some(bitmap) => Validity::Slots(bitmap),
-            None => Validity::AllValid,
-        }
+        vectors::impl_validity_for_vector!(self.array)
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -95,8 +92,8 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
         Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
-    fn get_unchecked(&self, index: usize) -> Value {
-        self.array.value(index).into()
+    fn get(&self, index: usize) -> Value {
+        vectors::impl_get_for_vector!(self.array, index)
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
@@ -288,7 +285,7 @@ mod tests {
 
         for i in 0..4 {
             assert!(!v.is_null(i));
-            assert_eq!(Value::Int32(i as i32 + 1), v.get_unchecked(i));
+            assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
         }
 
         let json_value = v.serialize_to_json().unwrap();
@@ -352,6 +349,7 @@ mod tests {
 
         for (i, v) in input.into_iter().enumerate() {
             assert_eq!(v, vector.get_data(i));
+            assert_eq!(Value::from(v), vector.get(i));
         }
 
         let res: Vec<_> = vector.iter_data().collect();
@@ -388,7 +386,7 @@ mod tests {
         assert_eq!(4, v.len());
 
         for i in 0..4 {
-            assert_eq!(Value::Int32(i as i32 + 1), v.get_unchecked(i));
+            assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
         }
     }
 }
