@@ -8,6 +8,7 @@ use std::mem;
 use std::sync::Arc;
 
 use datatypes::vectors::{UInt64Vector, UInt8Vector, VectorRef};
+use snafu::Snafu;
 use store_api::storage::{SequenceNumber, ValueType};
 
 use crate::error::Result;
@@ -125,6 +126,10 @@ impl MemtableBuilder for DefaultMemtableBuilder {
     }
 }
 
+#[derive(Debug, Snafu)]
+#[snafu(display("Fail to switch memtable"))]
+pub struct SwitchError;
+
 pub struct MemtableSet {
     mem: MemtableRef,
     // TODO(yingwen): Support multiple immutable memtables.
@@ -141,9 +146,12 @@ impl MemtableSet {
     }
 
     /// Switch mutable memtable to immutable memtable, returns the old mutable memtable if success.
-    pub fn _switch_memtable(&mut self, mem: &MemtableRef) -> std::result::Result<MemtableRef, ()> {
+    pub fn _switch_memtable(
+        &mut self,
+        mem: &MemtableRef,
+    ) -> std::result::Result<MemtableRef, SwitchError> {
         match &self._immem {
-            Some(_) => Err(()),
+            Some(_) => SwitchSnafu {}.fail(),
             None => {
                 let old_mem = mem::replace(&mut self.mem, mem.clone());
                 self._immem = Some(old_mem.clone());

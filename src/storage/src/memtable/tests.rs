@@ -36,7 +36,7 @@ fn kvs_for_test_with_index(
         key_builders.0.push(Some(key.0));
         key_builders.1.push(Some(key.1));
     }
-    let keys = vec![
+    let row_keys = vec![
         Arc::new(key_builders.0.finish()) as _,
         Arc::new(key_builders.1.finish()) as _,
     ];
@@ -45,15 +45,20 @@ fn kvs_for_test_with_index(
     for value in values {
         value_builder.push(*value);
     }
-    let values = vec![Arc::new(value_builder.finish()) as _];
+    let row_values = vec![Arc::new(value_builder.finish()) as _];
 
-    KeyValues {
+    let kvs = KeyValues {
         sequence,
         value_type,
         start_index_in_batch,
-        keys,
-        values,
-    }
+        keys: row_keys,
+        values: row_values,
+    };
+
+    assert_eq!(keys.len(), kvs.len());
+    assert_eq!(keys.is_empty(), kvs.is_empty());
+
+    kvs
 }
 
 fn kvs_for_test(
