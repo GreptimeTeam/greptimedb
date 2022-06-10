@@ -164,11 +164,11 @@ mod tests {
 
             let mut builder = VectorBuilder::new(ConcreteDataType::$datatype());
             builder.push(&Value::Null);
-            builder.push(&Value::Int32(100));
+            builder.push(&Value::$Type(100));
             let vector = builder.finish();
 
             assert!(vector.is_null(0));
-            assert_eq!(Value::Int32(100), vector.get(1));
+            assert_eq!(Value::$Type(100), vector.get(1));
         };
     }
 

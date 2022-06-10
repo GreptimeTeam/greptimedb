@@ -215,6 +215,66 @@ mod tests {
     }
 
     #[test]
+    fn test_value_datatype() {
+        assert_eq!(
+            ConcreteDataType::boolean_datatype(),
+            Value::Boolean(true).data_type()
+        );
+        assert_eq!(
+            ConcreteDataType::uint8_datatype(),
+            Value::UInt8(u8::MIN).data_type()
+        );
+        assert_eq!(
+            ConcreteDataType::uint16_datatype(),
+            Value::UInt16(u16::MIN).data_type()
+        );
+        assert_eq!(
+            ConcreteDataType::uint16_datatype(),
+            Value::UInt16(u16::MAX).data_type()
+        );
+        assert_eq!(
+            ConcreteDataType::uint32_datatype(),
+            Value::UInt32(u32::MIN).data_type()
+        );
+        assert_eq!(
+            ConcreteDataType::uint64_datatype(),
+            Value::UInt64(u64::MIN).data_type()
+        );
+        assert_eq!(
+            ConcreteDataType::int8_datatype(),
+            Value::Int8(i8::MIN).data_type()
+        );
+        assert_eq!(
+            ConcreteDataType::int16_datatype(),
+            Value::Int16(i16::MIN).data_type()
+        );
+        assert_eq!(
+            ConcreteDataType::int32_datatype(),
+            Value::Int32(i32::MIN).data_type()
+        );
+        assert_eq!(
+            ConcreteDataType::int64_datatype(),
+            Value::Int64(i64::MIN).data_type()
+        );
+        assert_eq!(
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(f32::MIN)).data_type(),
+        );
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(f64::MIN)).data_type(),
+        );
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            Value::String(StringBytes::from("hello")).data_type(),
+        );
+        assert_eq!(
+            ConcreteDataType::binary_datatype(),
+            Value::Binary(Bytes::from(b"world".as_slice())).data_type()
+        );
+    }
+
+    #[test]
     fn test_value_from_string() {
         let hello = "hello".to_string();
         assert_eq!(
