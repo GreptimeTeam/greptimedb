@@ -36,7 +36,7 @@ pub trait Memtable: Send + Sync {
 pub type MemtableRef = Arc<dyn Memtable>;
 
 /// Context for iterating memtable.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IterContext {
     /// The suggested batch size of the iterator.
     pub batch_size: usize,
@@ -110,6 +110,10 @@ impl KeyValues {
 
     pub fn len(&self) -> usize {
         self.keys.first().map(|v| v.len()).unwrap_or_default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

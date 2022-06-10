@@ -77,6 +77,16 @@ fn write_kvs(
     memtable.write(&kvs).unwrap();
 }
 
+fn check_batch_valid(batch: &Batch) {
+    assert_eq!(2, batch.keys.len());
+    assert_eq!(1, batch.values.len());
+    let row_num = batch.keys[0].len();
+    assert_eq!(row_num, batch.keys[1].len());
+    assert_eq!(row_num, batch.sequences.len());
+    assert_eq!(row_num, batch.value_types.len());
+    assert_eq!(row_num, batch.values[0].len());
+}
+
 fn check_iter_content(
     iter: &mut dyn BatchIterator,
     keys: &[(i64, u64)],
@@ -86,14 +96,9 @@ fn check_iter_content(
 ) {
     let mut index = 0;
     while let Some(batch) = iter.next().unwrap() {
-        assert_eq!(2, batch.keys.len());
-        assert_eq!(1, batch.values.len());
-        let row_num = batch.keys[0].len();
-        assert_eq!(row_num, batch.keys[1].len());
-        assert_eq!(row_num, batch.sequences.len());
-        assert_eq!(row_num, batch.value_types.len());
-        assert_eq!(row_num, batch.values[0].len());
+        check_batch_valid(&batch);
 
+        let row_num = batch.keys[0].len();
         for i in 0..row_num {
             let (k0, k1) = (batch.keys[0].get(i), batch.keys[1].get(i));
             let sequence = batch.sequences.get_data(i).unwrap();
@@ -115,73 +120,180 @@ fn check_iter_content(
 
 // TODO(yingwen): Check size of the returned batch.
 
-#[test]
-fn test_write_iter_memtable() {
-    let builder = DefaultMemtableBuilder {};
-    let schema = schema_for_test();
-    let mem = builder.build(schema.clone());
+struct MemtableTester {
+    schema: MemtableSchema,
+    builders: Vec<MemtableBuilderRef>,
+}
 
+impl Default for MemtableTester {
+    fn default() -> MemtableTester {
+        MemtableTester::new()
+    }
+}
+
+impl MemtableTester {
+    fn new() -> MemtableTester {
+        let schema = schema_for_test();
+        let builders = vec![Arc::new(DefaultMemtableBuilder {}) as _];
+
+        MemtableTester { schema, builders }
+    }
+
+    fn new_memtables(&self) -> Vec<MemtableRef> {
+        self.builders
+            .iter()
+            .map(|b| b.build(self.schema.clone()))
+            .collect()
+    }
+
+    fn run_testcase<F>(&self, testcase: F)
+    where
+        F: Fn(TestContext),
+    {
+        for memtable in self.new_memtables() {
+            let test_ctx = TestContext {
+                schema: self.schema.clone(),
+                memtable,
+            };
+
+            testcase(test_ctx);
+        }
+    }
+}
+
+struct TestContext {
+    schema: MemtableSchema,
+    memtable: MemtableRef,
+}
+
+fn write_iter_memtable_case(ctx: &TestContext) {
+    // Test iterating an empty memtable.
+    let mut iter = ctx.memtable.iter(IterContext::default()).unwrap();
+    assert!(iter.next().unwrap().is_none());
+
+    // Init test data.
     write_kvs(
-        &*mem,
+        &*ctx.memtable,
         10, // sequence
         ValueType::Put,
         &[
             (1000, 1),
             (1000, 2),
-            (1001, 1),
             (2002, 1),
             (2003, 1),
             (2003, 5),
+            (1001, 1),
         ], // keys
-        &[Some(1), Some(2), Some(3), Some(7), Some(8), Some(9)], // values
+        &[Some(1), Some(2), Some(7), Some(8), Some(9), Some(3)], // values
     );
     write_kvs(
-        &*mem,
+        &*ctx.memtable,
         11, // sequence
         ValueType::Put,
         &[(1002, 1), (1003, 1), (1004, 1)], // keys
         &[None, Some(5), None],             // values
     );
 
-    let mut iter = mem.iter(IterContext { batch_size: 4 }).unwrap();
-    assert_eq!(schema, *iter.schema());
-    assert_eq!(RowOrdering::Key, iter.ordering());
+    let batch_sizes = [1, 4, 8, 256];
+    for batch_size in batch_sizes {
+        let iter_ctx = IterContext { batch_size };
+        let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+        assert_eq!(ctx.schema, *iter.schema());
+        assert_eq!(RowOrdering::Key, iter.ordering());
 
-    check_iter_content(
-        &mut *iter,
-        &[
-            (1000, 1),
-            (1000, 2),
-            (1001, 1),
-            (1002, 1),
-            (1003, 1),
-            (1004, 1),
-            (2002, 1),
-            (2003, 1),
-            (2003, 5),
-        ], // keys
-        &[10, 10, 10, 11, 11, 11, 10, 10, 10], // sequences
-        &[
+        check_iter_content(
+            &mut *iter,
+            &[
+                (1000, 1),
+                (1000, 2),
+                (1001, 1),
+                (1002, 1),
+                (1003, 1),
+                (1004, 1),
+                (2002, 1),
+                (2003, 1),
+                (2003, 5),
+            ], // keys
+            &[10, 10, 10, 11, 11, 11, 10, 10, 10], // sequences
+            &[
+                ValueType::Put,
+                ValueType::Put,
+                ValueType::Put,
+                ValueType::Put,
+                ValueType::Put,
+                ValueType::Put,
+                ValueType::Put,
+                ValueType::Put,
+                ValueType::Put,
+            ], // value types
+            &[
+                Some(1),
+                Some(2),
+                Some(3),
+                None,
+                Some(5),
+                None,
+                Some(7),
+                Some(8),
+                Some(9),
+            ], // values
+        );
+    }
+}
+
+#[test]
+fn test_write_iter_memtable() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_iter_memtable_case(&ctx);
+    });
+}
+
+fn check_iter_batch_size(iter: &mut dyn BatchIterator, total: usize, batch_size: usize) {
+    let mut remains = total;
+    while let Some(batch) = iter.next().unwrap() {
+        check_batch_valid(&batch);
+
+        let row_num = batch.keys[0].len();
+        if remains >= batch_size {
+            assert_eq!(batch_size, row_num);
+            remains -= batch_size;
+        } else {
+            assert_eq!(remains, row_num);
+            remains = 0;
+        }
+    }
+
+    assert_eq!(0, remains);
+}
+
+#[test]
+fn test_iter_batch_size() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_kvs(
+            &*ctx.memtable,
+            10, // sequence
             ValueType::Put,
-            ValueType::Put,
-            ValueType::Put,
-            ValueType::Put,
-            ValueType::Put,
-            ValueType::Put,
-            ValueType::Put,
-            ValueType::Put,
-            ValueType::Put,
-        ], // value types
-        &[
-            Some(1),
-            Some(2),
-            Some(3),
-            None,
-            Some(5),
-            None,
-            Some(7),
-            Some(8),
-            Some(9),
-        ], // values
-    );
+            &[
+                (1000, 1),
+                (1000, 2),
+                (1001, 1),
+                (2002, 1),
+                (2003, 1),
+                (2003, 5),
+            ], // keys
+            &[Some(1), Some(2), Some(3), Some(4), None, None], // values
+        );
+
+        let total = 6;
+        // Batch size [less than, equal to, greater than] total
+        let batch_sizes = [1, 6, 8];
+        for batch_size in batch_sizes {
+            let iter_ctx = IterContext { batch_size };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_batch_size(&mut *iter, total, batch_size);
+        }
+    });
 }
