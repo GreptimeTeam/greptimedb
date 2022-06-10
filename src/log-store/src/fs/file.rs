@@ -30,7 +30,6 @@ use crate::fs::entry::{EntryImpl, StreamImpl};
 use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct LogFile {
     name: FileName,
@@ -54,7 +53,6 @@ impl ToString for LogFile {
     }
 }
 
-#[allow(dead_code)]
 impl LogFile {
     /// Opens a file in path with given log config.
     pub async fn open(path: impl AsRef<str>, config: &LogConfig) -> Result<Self, Error> {
@@ -126,6 +124,7 @@ impl LogFile {
     }
 
     /// Returns the persisted size of current log file.
+    #[allow(unused)]
     pub fn size(&self) -> usize {
         self.flush_offset.load(Relaxed)
     }
@@ -149,6 +148,7 @@ impl LogFile {
     }
 
     /// Returns whether current log file has be started.
+    #[allow(unused)]
     pub fn started(&self) -> bool {
         self.started.load(Relaxed)
     }
@@ -397,54 +397,6 @@ mod tests {
         let path_str = path_buf.to_str().unwrap().to_string();
         File::create(path_str.as_str()).await.unwrap();
         (path_str, dir)
-    }
-
-    #[tokio::test]
-    pub async fn test_write_data() {
-        logging::init_default_ut_logging();
-        let config = LogConfig::default();
-        let mut file = LogFile::open("/Users/lei/test-data/0000.log", &config)
-            .await
-            .unwrap();
-        file.start().await.unwrap();
-        file.append(&mut EntryImpl::new("class Solution".as_bytes()))
-            .await
-            .expect("Failed to append data");
-        logging::debug!(
-            "After append, file offset: {}",
-            file.write_offset.load(Relaxed)
-        );
-    }
-
-    #[tokio::test]
-    pub async fn test_read_file() {
-        logging::init_default_ut_logging();
-
-        let config = LogConfig::default();
-        let mut file = LogFile::open("/Users/lei/test-data/0000.log", &config)
-            .await
-            .unwrap();
-
-        file.start().await.unwrap();
-
-        let mut stream = file.create_stream(
-            LocalNamespace {
-                name: "test".to_string(),
-                id: 1,
-            },
-            0,
-        );
-
-        while let Some(v) = stream.next().await {
-            let entries = v.unwrap();
-            let content = entries[0].data();
-            let vec = content.to_vec();
-            info!(
-                "ID: {}, data: {}",
-                entries[0].id(),
-                String::from_utf8(vec).unwrap()
-            );
-        }
     }
 
     #[tokio::test]
