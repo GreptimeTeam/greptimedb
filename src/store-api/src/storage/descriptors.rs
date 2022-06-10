@@ -9,7 +9,7 @@ pub type ColumnFamilyId = u32;
 
 // TODO(yingwen): Validate default value has same type with column, and name is a valid column name.
 /// A [ColumnDescriptor] contains information to create a column.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ColumnDescriptor {
     pub id: ColumnId,
     pub name: String,
@@ -29,7 +29,7 @@ impl From<&ColumnDescriptor> for ColumnSchema {
 }
 
 /// A [RowKeyDescriptor] contains information about row key.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RowKeyDescriptor {
     pub columns: Vec<ColumnDescriptor>,
     /// Timestamp key column.
@@ -41,7 +41,7 @@ pub struct RowKeyDescriptor {
 }
 
 /// A [ColumnFamilyDescriptor] contains information to create a column family.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ColumnFamilyDescriptor {
     pub cf_id: ColumnFamilyId,
     pub name: String,
@@ -50,7 +50,7 @@ pub struct ColumnFamilyDescriptor {
 }
 
 /// A [RegionDescriptor] contains information to create a region.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RegionDescriptor {
     /// Region name.
     pub name: String,

@@ -1,6 +1,6 @@
 use crate::metadata::{ColumnMetadata, ColumnsRowKeyMetadataRef};
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MemtableSchema {
     columns_row_key: ColumnsRowKeyMetadataRef,
 }

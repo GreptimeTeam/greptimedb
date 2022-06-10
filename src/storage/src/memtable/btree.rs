@@ -257,6 +257,8 @@ impl<'a> IterRow<'a> {
                 .collect(),
         };
 
+        self.index += 1;
+
         (inner_key, row_value)
     }
 }
@@ -277,7 +279,7 @@ impl<'a> Iterator for IterRow<'a> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct InnerKey {
     row_key: Vec<Value>,
     sequence: SequenceNumber,
@@ -309,7 +311,7 @@ impl InnerKey {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct RowValue {
     values: Vec<Value>,
 }

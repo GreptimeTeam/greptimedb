@@ -1,6 +1,8 @@
 mod btree;
 mod inserter;
 mod schema;
+#[cfg(test)]
+mod tests;
 
 use std::mem;
 use std::sync::Arc;
@@ -47,7 +49,7 @@ impl Default for IterContext {
 }
 
 /// The ordering of the iterator output.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum RowOrdering {
     /// The output rows are unordered.
     Unordered,
