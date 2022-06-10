@@ -227,14 +227,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    pub async fn test_read_dir() {
-        common_telemetry::logging::init_default_ut_logging();
-        let config = LogConfig::default();
-        let result = LocalFileLogStoreImpl::load_dir("/Users/lei/test-data", &config).await;
-        info!("{:?}", result);
-    }
-
-    #[tokio::test]
     pub async fn test_roll_file() {
         common_telemetry::logging::init_default_ut_logging();
         let dir = TempDir::new("greptimedb").unwrap();
