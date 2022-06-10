@@ -122,6 +122,7 @@ impl LocalFileLogStoreImpl {
     /// Mark current active file as closed and create a new log file for writing.
     async fn roll_next(&mut self) -> Result<(), Error> {
         // todo need a lock
+        let mut file_lock = self.files.write().await;
 
         // create and start a new log file
         let entry_id = self.active.next_entry_id();
@@ -135,14 +136,11 @@ impl LocalFileLogStoreImpl {
 
         let new_file_ref = Arc::new(new_file);
 
-        self.files
-            .write()
-            .await
-            .insert(new_file_ref.start_entry_id(), new_file_ref.clone());
+        file_lock.insert(new_file_ref.start_entry_id(), new_file_ref.clone());
 
         let start_entry_id = std::mem::replace(&mut self.active, new_file_ref).start_entry_id();
 
-        Arc::get_mut(self.files.write().await.get_mut(&start_entry_id).unwrap())
+        Arc::get_mut(file_lock.get_mut(&start_entry_id).unwrap())
             .ok_or(Error::Internal {
                 msg: "Concurrent modify log file set on rolling".to_string(),
             })?
@@ -224,7 +222,7 @@ mod tests {
     use futures_util::StreamExt;
     use rand::{distributions::Alphanumeric, Rng};
     use store_api::logstore::entry::Entry;
-    use tokio::sync::Mutex;
+    use tempdir::TempDir;
 
     use super::*;
 
@@ -239,82 +237,70 @@ mod tests {
     #[tokio::test]
     pub async fn test_roll_file() {
         common_telemetry::logging::init_default_ut_logging();
+        let dir = TempDir::new("greptimedb").unwrap();
         let config = LogConfig {
             append_buffer_size: 128,
             max_log_file_size: 128,
-            log_file_dir: "/Users/lei/test-data2".to_string(),
+            log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
 
         let mut logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
-        logstore
-            .append(
-                LocalNamespace::new("1", 1),
-                EntryImpl::new("JiNTMyMThiYmZkOWQzYTIzNTUxZWY0YTBjM2VkMzdiNGYwZjNiOTM2MjIyNGRiMm"),
-            )
-            .await
-            .unwrap();
+        assert_eq!(
+            0,
+            logstore
+                .append(
+                    LocalNamespace::default(),
+                    EntryImpl::new(generate_data(100)),
+                )
+                .await
+                .unwrap()
+        );
+
+        assert_eq!(
+            1,
+            logstore
+                .append(
+                    LocalNamespace::default(),
+                    EntryImpl::new(generate_data(100)),
+                )
+                .await
+                .unwrap()
+        );
     }
 
-    fn generate_data() -> Vec<u8> {
+    fn generate_data(size: usize) -> Vec<u8> {
         let s: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
-            .take(1024)
+            .take(size)
             .map(char::from)
             .collect();
         s.into_bytes()
     }
 
     #[tokio::test]
-    pub async fn test_concurrent_write() {
+    pub async fn test_write_and_read_data() {
         common_telemetry::logging::init_default_ut_logging();
+        let dir = TempDir::new("greptimedb").unwrap();
         let config = LogConfig {
             append_buffer_size: 128,
-            max_log_file_size: 1024 * 1024,
-            log_file_dir: "/Users/lei/test-data2".to_string(),
+            max_log_file_size: 128,
+            log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
-
         let mut logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
-
-        let logstore_ref = Arc::new(Mutex::new(logstore));
-
-        let mut join_handles = vec![];
-        for _ in 0..10 {
-            let logstore = logstore_ref.clone();
-            let handle = tokio::spawn(async move {
-                for _ in 0..128 {
-                    logstore
-                        .lock()
-                        .await
-                        .append(LocalNamespace::new("a", 1), EntryImpl::new(generate_data()))
-                        .await
-                        .unwrap();
-                }
-            });
-            join_handles.push(handle);
-        }
-
-        futures::future::join_all(join_handles).await;
-    }
-
-    #[tokio::test]
-    pub async fn test_read_file() {
-        common_telemetry::logging::init_default_ut_logging();
-        let config2 = LogConfig::default();
-
-        // let log_file = LogFile::open("/Users/lei/test-data2/00000000000000000000.log", &config2)
-        //     .await
-        //     .unwrap();
-
-        let log_file = LogFile::open("/Users/lei/test-data2/00000000000000001000.log", &config2)
+        let id = logstore
+            .append(
+                LocalNamespace::default(),
+                EntryImpl::new(generate_data(100)),
+            )
             .await
             .unwrap();
+        assert_eq!(0, id);
 
-        let stream = log_file.create_stream(LocalNamespace::new("1", 1), 0);
+        let stream = logstore.active.create_stream(LocalNamespace::default(), 0);
         tokio::pin!(stream);
-        while let Some(e) = stream.next().await {
-            for i in e.unwrap() {
-                info!("Entry: {}", i.id());
-            }
-        }
+
+        let entries = stream.next().await.unwrap().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id(), 0);
     }
 }

@@ -1,6 +1,6 @@
 use store_api::logstore::namespace::Namespace;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct LocalNamespace {
     pub name: String,
     pub id: u64,
