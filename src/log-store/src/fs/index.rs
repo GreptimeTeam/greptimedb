@@ -3,17 +3,18 @@ use std::sync::{Arc, RwLock};
 
 use store_api::logstore::entry::{Id, Offset};
 
-use crate::error::Error;
+use crate::error::Result;
+use crate::fs::file_name::FileName;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Location {
-    pub file_name: String,
+    pub file_name: FileName,
     pub offset: Offset,
 }
 
 #[allow(dead_code)]
 impl Location {
-    pub fn new(file_name: String, offset: Offset) -> Self {
+    pub fn new(file_name: FileName, offset: Offset) -> Self {
         Self { file_name, offset }
     }
 }
@@ -26,7 +27,7 @@ pub trait EntryIndex {
     fn add_entry_id(&self, id: Id, loc: LocationRef) -> Option<LocationRef>;
 
     /// Find offset by entry id.
-    fn find_offset_by_id(&self, id: Id) -> Result<Option<LocationRef>, Error>;
+    fn find_offset_by_id(&self, id: Id) -> Result<Option<LocationRef>>;
 }
 
 pub struct MemoryIndex {
@@ -47,7 +48,7 @@ impl EntryIndex for MemoryIndex {
         self.map.write().unwrap().insert(id, loc)
     }
 
-    fn find_offset_by_id(&self, id: Id) -> Result<Option<LocationRef>, Error> {
+    fn find_offset_by_id(&self, id: Id) -> Result<Option<LocationRef>> {
         Ok(self.map.read().unwrap().get(&id).cloned())
     }
 }
@@ -59,10 +60,10 @@ mod tests {
     #[test]
     pub fn test_entry() {
         let index = MemoryIndex::new();
-        let location = Arc::new(Location::new("0000.log".to_string(), 1));
+        let location = Arc::new(Location::new(FileName::log(0), 1));
         index.add_entry_id(1, location);
         assert_eq!(
-            Arc::new(Location::new("0000.log".to_string(), 1)),
+            Arc::new(Location::new(FileName::log(0), 1)),
             index.find_offset_by_id(1).unwrap().unwrap()
         );
         assert_eq!(None, index.find_offset_by_id(2).unwrap());

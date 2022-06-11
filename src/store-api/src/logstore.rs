@@ -2,7 +2,7 @@
 
 use common_error::prelude::ErrorExt;
 
-use crate::logstore::entry::{Entry, Id};
+use crate::logstore::entry::{Entry, Id, Offset};
 use crate::logstore::entry_stream::SendableEntryStream;
 use crate::logstore::namespace::Namespace;
 
@@ -16,9 +16,14 @@ pub trait LogStore {
     type Error: ErrorExt + Send + Sync;
     type Namespace: Namespace;
     type Entry: Entry;
+    type AppendResult: AppendResult;
 
     /// Append an `Entry` to WAL with given namespace
-    async fn append(&mut self, ns: Self::Namespace, mut e: Self::Entry) -> Result<Id, Self::Error>;
+    async fn append(
+        &self,
+        ns: Self::Namespace,
+        mut e: Self::Entry,
+    ) -> Result<Self::AppendResult, Self::Error>;
 
     // Append a batch of entries atomically and return the offset of first entry.
     async fn append_batch(
@@ -42,4 +47,10 @@ pub trait LogStore {
 
     // List all existing namespaces.
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
+}
+
+pub trait AppendResult: Send + Sync {
+    fn get_entry_id(&self) -> Id;
+
+    fn get_offset(&self) -> Offset;
 }

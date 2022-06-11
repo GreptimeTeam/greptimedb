@@ -14,8 +14,7 @@ impl Default for LogConfig {
             max_log_file_size: 1024 * 1024 * 1024,
             log_file_dir: Path::new(env!("HOME"))
                 .join("logfiles")
-                .to_str()
-                .unwrap_or("~/logfiles")
+                .to_string_lossy()
                 .to_string(),
         }
     }

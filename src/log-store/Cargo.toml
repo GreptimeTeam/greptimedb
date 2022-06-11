@@ -10,8 +10,9 @@ async-trait = "0.1"
 base64 = "0.13"
 byteorder = "1.4"
 bytes = "1.1"
-crc = "3.0"
 common-error = { path = "../common/error" }
+common-telemetry = { path = "../common/telemetry" }
+crc = "3.0"
 futures = "0.3"
 futures-util = "0.3"
 hex = "0.4"
@@ -19,7 +20,6 @@ memmap2 = "0.5"
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
 tokio = { version = "1.18", features = ["full"] }
-common-telemetry = { path = "../common/telemetry" }
 
 [dev-dependencies]
 tempdir = "0.3"

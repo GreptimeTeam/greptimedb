@@ -1,3 +1,4 @@
+use std::fmt::{Debug, Formatter};
 use std::io::SeekFrom;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
@@ -8,10 +9,11 @@ use async_stream::stream;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use common_telemetry::logging::{error, info};
+use common_telemetry::warn;
 use futures_util::task::noop_waker;
 use futures_util::StreamExt;
 use memmap2::{Mmap, MmapOptions};
-use snafu::ResultExt;
+use snafu::{Backtrace, GenerateImplicitData, ResultExt};
 use store_api::logstore::entry::{Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
 use store_api::logstore::namespace::Namespace;
@@ -23,14 +25,15 @@ use tokio::sync::oneshot::Sender as OneshotSender;
 use tokio::sync::{oneshot, Notify, RwLock};
 use tokio::task::JoinHandle;
 
-use crate::error::{Error, IOSnafu};
+use crate::error::{Error, IoSnafu, OpenLogSnafu, Result};
 use crate::fs::config::LogConfig;
 use crate::fs::crc::CRC_ALGO;
 use crate::fs::entry::{EntryImpl, StreamImpl};
 use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
+use crate::fs::AppendResultImpl;
 
-#[derive(Debug)]
+// TODO(hl): use pwrite polyfill in different platforms, avoid write syscall in each append request.
 pub struct LogFile {
     name: FileName,
     file: Arc<RwLock<File>>,
@@ -42,20 +45,27 @@ pub struct LogFile {
     pending_request_tx: MpscSender<AppendRequest>,
     notify: Arc<Notify>,
     max_file_size: usize,
-    join_handle: Option<JoinHandle<Result<(), Error>>>,
-    started: Arc<AtomicBool>,
+    join_handle: Option<JoinHandle<Result<()>>>,
+    sealed: Arc<AtomicBool>,
 }
 
-impl ToString for LogFile {
-    fn to_string(&self) -> String {
-        format!("LogFile{{ name: {}, write_offset: {}, flush_offset: {}, start_entry_id: {}, entry_id_counter: {} }}",
-                self.name.to_string(), self.write_offset.load(Relaxed), self.flush_offset.load(Relaxed), self.start_entry_id, self.next_entry_id.load(Relaxed))
+impl Debug for LogFile {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogFile")
+            .field("name", &self.name)
+            .field("start_entry_id", &self.start_entry_id)
+            .field("write_offset", &self.write_offset.load(Relaxed))
+            .field("flush_offset", &self.flush_offset.load(Relaxed))
+            .field("next_entry_id", &self.next_entry_id.load(Relaxed))
+            .field("max_file_size", &self.max_file_size)
+            .field("sealed", &self.sealed.load(Relaxed))
+            .finish()
     }
 }
 
 impl LogFile {
     /// Opens a file in path with given log config.
-    pub async fn open(path: impl AsRef<str>, config: &LogConfig) -> Result<Self, Error> {
+    pub async fn open(path: impl AsRef<str>, config: &LogConfig) -> Result<Self> {
         let path = path.as_ref().to_owned();
         let file = OpenOptions::new()
             .write(true)
@@ -63,7 +73,9 @@ impl LogFile {
             .create(true)
             .open(path.clone())
             .await
-            .context(IOSnafu)?;
+            .context(OpenLogSnafu {
+                file_name: path.clone(),
+            })?;
 
         let file_name: FileName = path.as_str().try_into()?;
         let start_entry_id = file_name.entry_id();
@@ -81,10 +93,10 @@ impl LogFile {
             notify: Arc::new(Notify::new()),
             max_file_size: config.max_log_file_size,
             join_handle: None,
-            started: Arc::new(AtomicBool::new(false)),
+            sealed: Arc::new(AtomicBool::new(false)),
         };
 
-        let metadata = log.file.read().await.metadata().await.context(IOSnafu)?;
+        let metadata = log.file.read().await.metadata().await.context(IoSnafu)?;
         let expect_length = metadata.len() as usize;
         log.write_offset.store(expect_length, Relaxed);
         log.flush_offset.store(expect_length, Relaxed);
@@ -102,38 +114,41 @@ impl LogFile {
     }
 
     /// Advances file cursor to given offset.
-    async fn seek(&mut self, offset: usize) -> Result<u64, Error> {
+    async fn seek(&mut self, offset: usize) -> Result<u64> {
         self.file
             .write()
             .await
             .seek(SeekFrom::Start(offset as u64))
             .await
-            .context(IOSnafu)
+            .context(IoSnafu)
     }
 
     /// Creates a file mmap region.
-    async fn map(&self, start: u64, length: usize) -> Result<Mmap, Error> {
+    async fn map(&self, start: u64, length: usize) -> Result<Mmap> {
         unsafe {
             let file = self.file.read().await.try_clone().await.unwrap();
             MmapOptions::new()
                 .offset(start)
                 .len(length)
                 .map(&file)
-                .context(IOSnafu)
+                .context(IoSnafu)
         }
     }
 
     /// Returns the persisted size of current log file.
     #[allow(unused)]
+    #[inline]
     pub fn size(&self) -> usize {
         self.flush_offset.load(Relaxed)
     }
 
+    #[inline]
     pub fn next_entry_id(&self) -> Id {
         self.next_entry_id.load(Relaxed)
     }
 
     /// Increases offset field by `delta` and return the previous value.
+    /// #[inline]
     pub fn inc_offset(&self, delta: usize) -> usize {
         // Relaxed order is enough since no sync-with relationship
         // between `offset` and any other field.
@@ -147,22 +162,14 @@ impl LogFile {
         self.next_entry_id.fetch_add(1, Relaxed)
     }
 
-    /// Returns whether current log file has be started.
-    #[allow(unused)]
-    pub fn started(&self) -> bool {
-        self.started.load(Relaxed)
-    }
-
     /// Starts log file and it's internal components(including flush task, etc.).
-    pub async fn start(&mut self) -> Result<(), Error> {
+    pub async fn start(&mut self) -> Result<()> {
         let notify = self.notify.clone();
-        let file = self.file.write().await.try_clone().await.context(IOSnafu)?;
+        let file = self.file.write().await.try_clone().await.context(IoSnafu)?;
 
         let write_offset = self.write_offset.clone();
         let flush_offset = self.flush_offset.clone();
-        self.started.store(true, Release);
 
-        let started = self.started.clone();
         if let Some(mut rx) = self.pending_request_rx.take() {
             let handle = tokio::spawn(async move {
                 let waker = noop_waker();
@@ -170,7 +177,7 @@ impl LogFile {
                 let mut batch: Vec<AppendRequest> = Vec::with_capacity(16);
 
                 let mut error_occurred = false;
-                while started.load(Acquire) {
+                loop {
                     match rx.poll_recv(&mut ctx) {
                         Poll::Ready(Some(req)) => {
                             batch.push(req);
@@ -189,13 +196,14 @@ impl LogFile {
 
                     // flush all pending data to disk
                     let write_offset_read = write_offset.load(Relaxed);
-                    // todo(hl): add flush metrics
+                    // TODO(hl): add flush metrics
                     let flush_res = file.sync_all().await;
                     if flush_res.is_err() {
                         error!("Failed to flush log file: {}", flush_res.err().unwrap());
                         error_occurred = true;
                     }
                     if error_occurred {
+                        info!("Flush task stop");
                         break;
                     }
                     flush_offset.store(write_offset_read, Relaxed);
@@ -213,31 +221,23 @@ impl LogFile {
     }
 
     /// Stops log file.
-    pub async fn stop(&mut self) -> Result<(), Error> {
-        if self
-            .started
-            .compare_exchange(true, false, AcqRel, Acquire)
-            .is_ok()
-        {
-            self.notify.notify_one();
-            let join_handle = self.join_handle.take().expect("Join handle should present");
+    pub async fn stop(&mut self) -> Result<()> {
+        self.notify.notify_one();
+        let join_handle = self.join_handle.take().expect("Join handle should present");
 
-            let res = join_handle.await;
-            info!("LogFile task finished: {:?}", res);
-            Ok(())
-        } else {
-            Err(Error::Internal {
-                msg: "LogFile is already stopped".to_string(),
-            })
-        }
+        let res = join_handle.await.unwrap();
+        info!("LogFile task finished: {:?}", res);
+        res
     }
 
+    #[inline]
     pub fn start_entry_id(&self) -> Id {
         self.start_entry_id
     }
 
     /// Replays current file til last entry read
-    pub async fn replay(&mut self) -> Result<(usize, Id), Error> {
+    pub async fn replay(&mut self) -> Result<(usize, Id)> {
+        let log_name = self.name.to_string();
         let previous_offset = self.flush_offset.load(Relaxed);
         let mut stream = self.create_stream(
             LocalNamespace {
@@ -258,14 +258,14 @@ impl LogFile {
                     }
                 }
                 Err(e) => {
-                    error!("Error while replay log {:?}", e);
+                    error!("Error while replay log {} {:?}", log_name, e);
                     break;
                 }
             }
         }
         info!(
-            "Replay log finished, offset: {} -> {}",
-            previous_offset, last_offset
+            "Replay log {} finished, offset: {} -> {}",
+            log_name, previous_offset, last_offset
         );
         Ok((
             last_offset,
@@ -313,7 +313,7 @@ impl LogFile {
     }
 
     /// Appends an entry to `LogFile` and return a `Result` containing the id of entry appended.
-    pub async fn append<T: Entry>(&self, e: &mut T) -> Result<Id, Error> {
+    pub async fn append<T: Entry>(&self, e: &mut T) -> Result<AppendResultImpl> {
         e.set_id(0);
         let mut serialized = e.serialize();
         let size = serialized.len();
@@ -322,8 +322,8 @@ impl LogFile {
             return Err(Error::Eof);
         }
 
-        let entry_offset: usize;
-        let entry_id: u64;
+        let entry_offset;
+        let entry_id;
 
         {
             let mut write_guard = self.file.write().await;
@@ -333,15 +333,16 @@ impl LogFile {
             entry_offset = self.inc_offset(size);
             // rewrite encoded data
             LittleEndian::write_u64(&mut serialized[0..8], entry_id);
-            // todo(hl): CRC was calculated twice
+            // TODO(hl): CRC was calculated twice
             let checksum = CRC_ALGO.checksum(&serialized[0..size - 4]);
             LittleEndian::write_u32(&mut serialized[size - 4..], checksum);
 
             // write to file
+            // TODO(hl): use io buffer and pwrite to reduce syscalls.
             write_guard
                 .write(serialized.as_slice())
                 .await
-                .context(IOSnafu)?;
+                .context(IoSnafu)?;
         }
 
         let (tx, rx) = oneshot::channel();
@@ -357,11 +358,40 @@ impl LogFile {
 
         self.notify.notify_one(); // notify flush thread.
         rx.await.map_err(|e| {
-            error!("Error while waiting for append result:{}", e);
+            warn!(
+                "Error while waiting for append result:{}, file {}",
+                e,
+                self.name.to_string()
+            );
             Error::Internal {
                 msg: "Sender already dropped".to_string(),
+                backtrace: Backtrace::generate(),
             }
         })
+    }
+
+    #[inline]
+    pub fn try_seal(&self) -> bool {
+        self.sealed
+            .compare_exchange(false, true, AcqRel, Acquire)
+            .is_ok()
+    }
+
+    #[inline]
+    pub fn unseal(&self) {
+        self.sealed.store(false, Release);
+    }
+
+    #[inline]
+    pub fn file_name(&self) -> String {
+        self.name.to_string()
+    }
+}
+
+impl ToString for LogFile {
+    fn to_string(&self) -> String {
+        format!("LogFile{{ name: {}, write_offset: {}, flush_offset: {}, start_entry_id: {}, entry_id_counter: {} }}",
+                self.name.to_string(), self.write_offset.load(Relaxed), self.flush_offset.load(Relaxed), self.start_entry_id, self.next_entry_id.load(Relaxed))
     }
 }
 
@@ -370,7 +400,7 @@ pub type LogFileRef = Arc<LogFile>;
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct AppendRequest {
-    tx: OneshotSender<Id>,
+    tx: OneshotSender<AppendResultImpl>,
     offset: Offset,
     id: Id,
 }
@@ -378,7 +408,10 @@ pub(crate) struct AppendRequest {
 impl AppendRequest {
     pub fn complete(self) {
         // todo use this result
-        let _ = self.tx.send(self.id);
+        let _ = self.tx.send(AppendResultImpl {
+            offset: self.offset,
+            entry_id: self.id,
+        });
     }
 }
 
@@ -414,6 +447,7 @@ mod tests {
             file.append(&mut EntryImpl::new("test1".as_bytes()))
                 .await
                 .expect("Failed to append entry 1")
+                .entry_id
         );
 
         assert_eq!(
@@ -421,6 +455,7 @@ mod tests {
             file.append(&mut EntryImpl::new("test-2".as_bytes()))
                 .await
                 .expect("Failed to append entry 2")
+                .entry_id
         );
 
         let mut stream = file.create_stream(

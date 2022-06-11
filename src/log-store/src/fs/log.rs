@@ -1,25 +1,29 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::AtomicPtr;
+use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::sync::Arc;
+use std::time::Duration;
 
-use common_telemetry::{error, info};
-use snafu::ResultExt;
+use common_telemetry::{error, info, warn};
+use snafu::{Backtrace, GenerateImplicitData, ResultExt};
 use store_api::logstore::entry::Id;
 use store_api::logstore::LogStore;
 use tokio::sync::RwLock;
 
-use crate::error::{Error, IOSnafu};
+use crate::error::{DuplicateFileSnafu, Error, InternalSnafu, IoSnafu, Result};
 use crate::fs::config::LogConfig;
 use crate::fs::entry::EntryImpl;
 use crate::fs::file::{LogFile, LogFileRef};
 use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
+use crate::fs::AppendResultImpl;
 
 type FileMap = BTreeMap<u64, LogFileRef>;
 
 pub struct LocalFileLogStoreImpl {
     files: RwLock<FileMap>,
-    active: LogFileRef,
+    active: AtomicPtr<LogFile>,
     config: LogConfig,
 }
 
@@ -27,7 +31,7 @@ impl LocalFileLogStoreImpl {
     /// Opens a directory as log store directory, initialize directory if it is empty.
 
     #[allow(unused)]
-    pub async fn open(config: &LogConfig) -> Result<Self, Error> {
+    pub async fn open(config: &LogConfig) -> Result<Self> {
         let mut files = Self::load_dir(config.log_file_dir.as_str(), config).await?;
 
         if files.is_empty() {
@@ -43,6 +47,7 @@ impl LocalFileLogStoreImpl {
                 "log store directory is empty after initialization: {}",
                 config.log_file_dir
             ),
+            backtrace: Backtrace::generate(),
         })?;
 
         info!(
@@ -55,8 +60,10 @@ impl LocalFileLogStoreImpl {
                 "log store directory is empty after initialization: {}",
                 config.log_file_dir
             ),
+            backtrace: Backtrace::generate(),
         })?;
 
+        active_file_ref.unseal();
         let active_file_name = active_file_ref.to_string();
         info!("Log store active log file: {}", active_file_name);
 
@@ -67,6 +74,7 @@ impl LocalFileLogStoreImpl {
                     "Concurrent modification on log store {} start is not allowed",
                     active_file_name
                 ),
+                backtrace: Backtrace::generate(),
             })?
             .start()
             .await?;
@@ -75,16 +83,16 @@ impl LocalFileLogStoreImpl {
             active_file_name
         );
 
-        let active_cloned = active_file_ref.clone();
+        let active_file_2 = active_file_ref.clone();
         Ok(Self {
             files: RwLock::new(files),
-            active: active_cloned,
+            active: AtomicPtr::from(Arc::into_raw(active_file_2) as *mut LogFile),
             config: config.clone(),
         })
     }
 
-    pub async fn init_on_empty(files: &mut FileMap, config: &LogConfig) -> Result<(), Error> {
-        let path = Path::new(config.log_file_dir.as_str()).join(FileName::new(0).to_string());
+    pub async fn init_on_empty(files: &mut FileMap, config: &LogConfig) -> Result<()> {
+        let path = Path::new(config.log_file_dir.as_str()).join(FileName::log(0).to_string());
         let file_path = path.to_str().ok_or(Error::FileNameIllegal {
             file_name: config.log_file_dir.as_str().to_string(),
         })?;
@@ -93,13 +101,13 @@ impl LocalFileLogStoreImpl {
         Ok(())
     }
 
-    pub async fn load_dir(p: impl AsRef<str>, config: &LogConfig) -> Result<FileMap, Error> {
+    pub async fn load_dir(p: impl AsRef<str>, config: &LogConfig) -> Result<FileMap> {
         let mut map = FileMap::new();
         let mut dir = tokio::fs::read_dir(Path::new(p.as_ref()))
             .await
-            .context(IOSnafu)?;
+            .context(IoSnafu)?;
 
-        while let Some(f) = dir.next_entry().await.context(IOSnafu)? {
+        while let Some(f) = dir.next_entry().await.context(IoSnafu)? {
             let path_buf = f.path();
             let path = path_buf.to_str().ok_or(Error::FileNameIllegal {
                 file_name: p.as_ref().to_string(),
@@ -107,46 +115,67 @@ impl LocalFileLogStoreImpl {
             let file_name = FileName::try_from(path)?;
             let start_id = file_name.entry_id();
             let file = LogFile::open(path, config).await?;
-            info!("Load log store file {}: {}", start_id, file.to_string());
+            info!("Load log store file {}: {:?}", start_id, file);
             if map.contains_key(&start_id) {
                 error!("Log file with start entry id: {} already exists", start_id);
-                return Err(Error::FileNameIllegal {
-                    file_name: start_id.to_string() + " already exists",
-                });
+                return DuplicateFileSnafu {
+                    msg: format!("File with start id: {} duplicates on start", start_id),
+                }
+                .fail();
             }
+            file.try_seal();
             map.insert(start_id, Arc::new(file));
         }
         Ok(map)
     }
 
     /// Mark current active file as closed and create a new log file for writing.
-    async fn roll_next(&mut self) -> Result<(), Error> {
-        // todo need a lock
-        let mut file_lock = self.files.write().await;
-
+    async fn roll_next(&self, active: LogFileRef) -> Result<()> {
         // create and start a new log file
-        let entry_id = self.active.next_entry_id();
+        if !active.try_seal() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            return Ok(());
+        }
+        let entry_id = active.next_entry_id();
         let path_buf =
-            Path::new(self.config.log_file_dir.as_str()).join(FileName::new(entry_id).to_string());
+            Path::new(self.config.log_file_dir.as_str()).join(FileName::log(entry_id).to_string());
         let path = path_buf.to_str().ok_or(Error::FileNameIllegal {
             file_name: self.config.log_file_dir.clone(),
         })?;
-        let mut new_file = LogFile::open(path, &self.config).await?;
-        new_file.start().await?;
+
+        let new_file = {
+            // FIXME(hl): make sure to unseal this log file when roll file failed
+            let mut new_file = LogFile::open(path, &self.config).await?;
+            new_file.start().await?;
+            new_file
+        };
 
         let new_file_ref = Arc::new(new_file);
 
+        let mut file_lock = self.files.write().await;
         file_lock.insert(new_file_ref.start_entry_id(), new_file_ref.clone());
 
-        let start_entry_id = std::mem::replace(&mut self.active, new_file_ref).start_entry_id();
+        let prev = unsafe {
+            &mut *self
+                .active
+                .swap(Arc::into_raw(new_file_ref) as *mut LogFile, SeqCst)
+        };
 
-        Arc::get_mut(file_lock.get_mut(&start_entry_id).unwrap())
-            .ok_or(Error::Internal {
-                msg: "Concurrent modify log file set on rolling".to_string(),
-            })?
-            .stop()
-            .await?;
+        tokio::spawn(async move {
+            prev.stop().await.unwrap();
+            info!("Sealed log file {} stopped.", prev.file_name());
+        });
         Ok(())
+    }
+
+    pub fn active_file(&self) -> Arc<LogFile> {
+        unsafe {
+            let arc = Arc::from_raw(self.active.load(Relaxed));
+            // clone and forget to keep ref cnt incremented, otherwise will cause a double free
+            #[allow(clippy::mem_forget)]
+            std::mem::forget(arc.clone());
+            arc
+        }
     }
 }
 
@@ -155,41 +184,39 @@ impl LogStore for LocalFileLogStoreImpl {
     type Error = Error;
     type Namespace = LocalNamespace;
     type Entry = EntryImpl;
+    type AppendResult = AppendResultImpl;
 
-    async fn append(
-        &mut self,
-        _ns: Self::Namespace,
-        mut e: Self::Entry,
-    ) -> Result<Id, Self::Error> {
-        let entry_ref = &mut e;
-
-        // todo(hl): configurable retry times
+    async fn append(&self, _ns: Self::Namespace, mut e: Self::Entry) -> Result<Self::AppendResult> {
+        // TODO(hl): configurable retry times
         for _ in 0..3 {
-            match self.active.append(entry_ref).await {
+            let current_active_file = self.active_file();
+            match current_active_file.append(&mut e).await {
                 Ok(r) => return Ok(r),
                 Err(e) => match e {
                     Error::Eof => {
-                        self.roll_next().await?;
+                        self.roll_next(current_active_file.clone()).await?;
                         info!("Rolled to next file, retry append");
                         continue;
                     }
+                    Error::Internal { .. } => {
+                        warn!("File closed, try new file");
+                        continue;
+                    }
                     _ => {
+                        error!("Failed to roll to next log file, error:{}", e);
                         return Err(e);
                     }
                 },
             }
         }
 
-        return Err(Error::Internal {
+        return InternalSnafu {
             msg: "Failed to append entry with max retry time exceeds".to_string(),
-        });
+        }
+        .fail();
     }
 
-    async fn append_batch(
-        &self,
-        _ns: Self::Namespace,
-        _e: Vec<Self::Entry>,
-    ) -> Result<Id, Self::Error> {
+    async fn append_batch(&self, _ns: Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
         todo!()
     }
 
@@ -197,22 +224,20 @@ impl LogStore for LocalFileLogStoreImpl {
         &self,
         _ns: Self::Namespace,
         _id: Id,
-    ) -> Result<
-        store_api::logstore::entry_stream::SendableEntryStream<'_, Self::Entry, Self::Error>,
-        Self::Error,
-    > {
+    ) -> Result<store_api::logstore::entry_stream::SendableEntryStream<'_, Self::Entry, Self::Error>>
+    {
         todo!()
     }
 
-    async fn create_namespace(&mut self, _ns: Self::Namespace) -> Result<(), Self::Error> {
+    async fn create_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
         todo!()
     }
 
-    async fn delete_namespace(&mut self, _ns: Self::Namespace) -> Result<(), Self::Error> {
+    async fn delete_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
         todo!()
     }
 
-    async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error> {
+    async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
         todo!()
     }
 }
@@ -236,7 +261,7 @@ mod tests {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
 
-        let mut logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
+        let logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
         assert_eq!(
             0,
             logstore
@@ -246,6 +271,7 @@ mod tests {
                 )
                 .await
                 .unwrap()
+                .entry_id
         );
 
         assert_eq!(
@@ -257,6 +283,7 @@ mod tests {
                 )
                 .await
                 .unwrap()
+                .entry_id
         );
     }
 
@@ -278,17 +305,19 @@ mod tests {
             max_log_file_size: 128,
             log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
-        let mut logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
+        let logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
         let id = logstore
             .append(
                 LocalNamespace::default(),
                 EntryImpl::new(generate_data(100)),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .entry_id;
         assert_eq!(0, id);
 
-        let stream = logstore.active.create_stream(LocalNamespace::default(), 0);
+        let active_file = logstore.active_file();
+        let stream = active_file.create_stream(LocalNamespace::default(), 0);
         tokio::pin!(stream);
 
         let entries = stream.next().await.unwrap().unwrap();

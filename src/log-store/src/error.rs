@@ -7,22 +7,35 @@ use snafu::{Backtrace, ErrorCompat};
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Failed to deserialize entry"))]
-    Deserialization,
+    Deserialization { backtrace: Backtrace },
 
     #[snafu(display("Entry corrupted, msg:{}", msg))]
-    Corrupted { msg: String },
+    Corrupted { msg: String, backtrace: Backtrace },
 
     #[snafu(display("IO error, source: {}", source))]
-    IO { source: std::io::Error },
+    Io {
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to open log file {}, source: {}", file_name, source))]
+    OpenLog {
+        file_name: String,
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("File name {} illegal", file_name))]
     FileNameIllegal { file_name: String },
 
     #[snafu(display("Internal error, msg: {}", msg))]
-    Internal { msg: String },
+    Internal { msg: String, backtrace: Backtrace },
 
     #[snafu(display("End of LogFile"))]
     Eof,
+
+    #[snafu(display("File duplicate on start: {}", msg))]
+    DuplicateFile { msg: String },
 }
 
 impl ErrorExt for Error {
@@ -34,3 +47,5 @@ impl ErrorExt for Error {
         self
     }
 }
+
+pub type Result<T> = std::result::Result<T, Error>;

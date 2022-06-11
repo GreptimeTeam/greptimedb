@@ -4,6 +4,7 @@ use std::task::{Context, Poll};
 
 use byteorder::{ByteOrder, LittleEndian};
 use futures::Stream;
+use snafu::{Backtrace, GenerateImplicitData};
 use store_api::logstore::entry::{Entry, Epoch, Id, Offset};
 use store_api::logstore::entry_stream::{EntryStream, SendableEntryStream};
 
@@ -94,7 +95,9 @@ impl TryFrom<&[u8]> for EntryImpl {
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         if value.len() < EntryImpl::min_len() {
-            return Err(Error::Deserialization);
+            return Err(Error::Deserialization {
+                backtrace: Backtrace::generate(),
+            });
         }
 
         let id_end_ofs = 8;
@@ -112,6 +115,7 @@ impl TryFrom<&[u8]> for EntryImpl {
         if crc_calc != crc_read {
             return Err(Error::Corrupted {
                 msg: format!("CRC mismatch, read: {}, calc: {}", crc_read, crc_calc),
+                backtrace: Backtrace::generate(),
             });
         }
 

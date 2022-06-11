@@ -8,6 +8,7 @@ use crate::logstore::entry::Entry;
 pub trait EntryStream: Stream<Item = Result<Vec<Self::Entry>, Self::Error>> {
     type Error: ErrorExt;
     type Entry: Entry;
+
     fn start_id(&self) -> u64;
 }
 
@@ -37,12 +38,7 @@ mod tests {
 
     #[derive(Debug, Snafu)]
     #[snafu(visibility(pub))]
-    pub enum Error {
-        #[snafu(display("Failed to deserialize entry"))]
-        Deserialization,
-        #[snafu(display("Entry corrupted"))]
-        Corrupted,
-    }
+    pub struct Error {}
 
     impl ErrorExt for Error {
         fn backtrace_opt(&self) -> Option<&Backtrace> {
