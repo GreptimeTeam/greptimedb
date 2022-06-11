@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::AtomicPtr;
+use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::sync::Arc;
+use std::time::Duration;
 
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use snafu::ResultExt;
 use store_api::logstore::entry::Id;
 use store_api::logstore::LogStore;
@@ -19,7 +22,7 @@ type FileMap = BTreeMap<u64, LogFileRef>;
 
 pub struct LocalFileLogStoreImpl {
     files: RwLock<FileMap>,
-    active: LogFileRef,
+    active: AtomicPtr<LogFile>,
     config: LogConfig,
 }
 
@@ -57,6 +60,7 @@ impl LocalFileLogStoreImpl {
             ),
         })?;
 
+        active_file_ref.unseal();
         let active_file_name = active_file_ref.to_string();
         info!("Log store active log file: {}", active_file_name);
 
@@ -75,10 +79,10 @@ impl LocalFileLogStoreImpl {
             active_file_name
         );
 
-        let active_cloned = active_file_ref.clone();
+        let active_file_2 = active_file_ref.clone();
         Ok(Self {
             files: RwLock::new(files),
-            active: active_cloned,
+            active: AtomicPtr::from(Arc::into_raw(active_file_2) as *mut LogFile),
             config: config.clone(),
         })
     }
@@ -114,18 +118,20 @@ impl LocalFileLogStoreImpl {
                     file_name: start_id.to_string() + " already exists",
                 });
             }
+            file.try_seal();
             map.insert(start_id, Arc::new(file));
         }
         Ok(map)
     }
 
     /// Mark current active file as closed and create a new log file for writing.
-    async fn roll_next(&mut self) -> Result<(), Error> {
-        // todo need a lock
-        let mut file_lock = self.files.write().await;
-
+    async fn roll_next(&self, active: LogFileRef) -> Result<(), Error> {
         // create and start a new log file
-        let entry_id = self.active.next_entry_id();
+        if !active.try_seal() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            return Ok(());
+        }
+        let entry_id = active.next_entry_id();
         let path_buf =
             Path::new(self.config.log_file_dir.as_str()).join(FileName::new(entry_id).to_string());
         let path = path_buf.to_str().ok_or(Error::FileNameIllegal {
@@ -136,17 +142,30 @@ impl LocalFileLogStoreImpl {
 
         let new_file_ref = Arc::new(new_file);
 
+        let mut file_lock = self.files.write().await;
         file_lock.insert(new_file_ref.start_entry_id(), new_file_ref.clone());
 
-        let start_entry_id = std::mem::replace(&mut self.active, new_file_ref).start_entry_id();
+        let prev = unsafe {
+            &mut *self
+                .active
+                .swap(Arc::into_raw(new_file_ref) as *mut LogFile, SeqCst)
+        };
 
-        Arc::get_mut(file_lock.get_mut(&start_entry_id).unwrap())
-            .ok_or(Error::Internal {
-                msg: "Concurrent modify log file set on rolling".to_string(),
-            })?
-            .stop()
-            .await?;
+        tokio::spawn(async move {
+            prev.stop().await.unwrap();
+            info!("Sealed log file {} stopped.", prev.file_name());
+        });
         Ok(())
+    }
+
+    pub fn active_file(&self) -> Arc<LogFile> {
+        unsafe {
+            let arc = Arc::from_raw(self.active.load(Relaxed));
+            // clone and forget to keep ref cnt incremented, otherwise will cause a double free
+            #[allow(clippy::mem_forget)]
+            std::mem::forget(arc.clone());
+            arc
+        }
     }
 }
 
@@ -156,24 +175,26 @@ impl LogStore for LocalFileLogStoreImpl {
     type Namespace = LocalNamespace;
     type Entry = EntryImpl;
 
-    async fn append(
-        &mut self,
-        _ns: Self::Namespace,
-        mut e: Self::Entry,
-    ) -> Result<Id, Self::Error> {
+    async fn append(&self, _ns: Self::Namespace, mut e: Self::Entry) -> Result<Id, Self::Error> {
         let entry_ref = &mut e;
 
         // todo(hl): configurable retry times
         for _ in 0..3 {
-            match self.active.append(entry_ref).await {
+            let current_active_file = self.active_file();
+            match current_active_file.append(entry_ref).await {
                 Ok(r) => return Ok(r),
                 Err(e) => match e {
                     Error::Eof => {
-                        self.roll_next().await?;
+                        self.roll_next(current_active_file.clone()).await?;
                         info!("Rolled to next file, retry append");
                         continue;
                     }
+                    Error::Internal { .. } => {
+                        warn!("File closed, try new file");
+                        continue;
+                    }
                     _ => {
+                        error!("Failed to roll to next log file, error:{}", e);
                         return Err(e);
                     }
                 },
@@ -236,7 +257,7 @@ mod tests {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
 
-        let mut logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
+        let logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
         assert_eq!(
             0,
             logstore
@@ -278,7 +299,7 @@ mod tests {
             max_log_file_size: 128,
             log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
-        let mut logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
+        let logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
         let id = logstore
             .append(
                 LocalNamespace::default(),
@@ -288,7 +309,8 @@ mod tests {
             .unwrap();
         assert_eq!(0, id);
 
-        let stream = logstore.active.create_stream(LocalNamespace::default(), 0);
+        let active_file = logstore.active_file();
+        let stream = active_file.create_stream(LocalNamespace::default(), 0);
         tokio::pin!(stream);
 
         let entries = stream.next().await.unwrap().unwrap();

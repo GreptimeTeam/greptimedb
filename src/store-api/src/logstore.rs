@@ -18,7 +18,7 @@ pub trait LogStore {
     type Entry: Entry;
 
     /// Append an `Entry` to WAL with given namespace
-    async fn append(&mut self, ns: Self::Namespace, mut e: Self::Entry) -> Result<Id, Self::Error>;
+    async fn append(&self, ns: Self::Namespace, mut e: Self::Entry) -> Result<Id, Self::Error>;
 
     // Append a batch of entries atomically and return the offset of first entry.
     async fn append_batch(

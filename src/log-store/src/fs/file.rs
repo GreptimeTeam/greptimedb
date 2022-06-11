@@ -8,6 +8,7 @@ use async_stream::stream;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use common_telemetry::logging::{error, info};
+use common_telemetry::warn;
 use futures_util::task::noop_waker;
 use futures_util::StreamExt;
 use memmap2::{Mmap, MmapOptions};
@@ -30,6 +31,7 @@ use crate::fs::entry::{EntryImpl, StreamImpl};
 use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
 
+// todo(hl): use pwrite polyfill in different platforms, avoid write syscall in each append request.
 #[derive(Debug)]
 pub struct LogFile {
     name: FileName,
@@ -43,7 +45,7 @@ pub struct LogFile {
     notify: Arc<Notify>,
     max_file_size: usize,
     join_handle: Option<JoinHandle<Result<(), Error>>>,
-    started: Arc<AtomicBool>,
+    sealed: Arc<AtomicBool>,
 }
 
 impl ToString for LogFile {
@@ -81,7 +83,7 @@ impl LogFile {
             notify: Arc::new(Notify::new()),
             max_file_size: config.max_log_file_size,
             join_handle: None,
-            started: Arc::new(AtomicBool::new(false)),
+            sealed: Arc::new(AtomicBool::new(false)),
         };
 
         let metadata = log.file.read().await.metadata().await.context(IOSnafu)?;
@@ -147,12 +149,6 @@ impl LogFile {
         self.next_entry_id.fetch_add(1, Relaxed)
     }
 
-    /// Returns whether current log file has be started.
-    #[allow(unused)]
-    pub fn started(&self) -> bool {
-        self.started.load(Relaxed)
-    }
-
     /// Starts log file and it's internal components(including flush task, etc.).
     pub async fn start(&mut self) -> Result<(), Error> {
         let notify = self.notify.clone();
@@ -160,9 +156,7 @@ impl LogFile {
 
         let write_offset = self.write_offset.clone();
         let flush_offset = self.flush_offset.clone();
-        self.started.store(true, Release);
 
-        let started = self.started.clone();
         if let Some(mut rx) = self.pending_request_rx.take() {
             let handle = tokio::spawn(async move {
                 let waker = noop_waker();
@@ -170,7 +164,7 @@ impl LogFile {
                 let mut batch: Vec<AppendRequest> = Vec::with_capacity(16);
 
                 let mut error_occurred = false;
-                while started.load(Acquire) {
+                loop {
                     match rx.poll_recv(&mut ctx) {
                         Poll::Ready(Some(req)) => {
                             batch.push(req);
@@ -196,6 +190,7 @@ impl LogFile {
                         error_occurred = true;
                     }
                     if error_occurred {
+                        info!("Flush task stop");
                         break;
                     }
                     flush_offset.store(write_offset_read, Relaxed);
@@ -214,30 +209,22 @@ impl LogFile {
 
     /// Stops log file.
     pub async fn stop(&mut self) -> Result<(), Error> {
-        if self
-            .started
-            .compare_exchange(true, false, AcqRel, Acquire)
-            .is_ok()
-        {
-            self.notify.notify_one();
-            let join_handle = self.join_handle.take().expect("Join handle should present");
+        self.notify.notify_one();
+        let join_handle = self.join_handle.take().expect("Join handle should present");
 
-            let res = join_handle.await;
-            info!("LogFile task finished: {:?}", res);
-            Ok(())
-        } else {
-            Err(Error::Internal {
-                msg: "LogFile is already stopped".to_string(),
-            })
-        }
+        let res = join_handle.await.unwrap();
+        info!("LogFile task finished: {:?}", res);
+        res
     }
 
+    #[inline]
     pub fn start_entry_id(&self) -> Id {
         self.start_entry_id
     }
 
     /// Replays current file til last entry read
     pub async fn replay(&mut self) -> Result<(usize, Id), Error> {
+        let log_name = self.name.to_string();
         let previous_offset = self.flush_offset.load(Relaxed);
         let mut stream = self.create_stream(
             LocalNamespace {
@@ -258,14 +245,14 @@ impl LogFile {
                     }
                 }
                 Err(e) => {
-                    error!("Error while replay log {:?}", e);
+                    error!("Error while replay log {} {:?}", log_name, e);
                     break;
                 }
             }
         }
         info!(
-            "Replay log finished, offset: {} -> {}",
-            previous_offset, last_offset
+            "Replay log {} finished, offset: {} -> {}",
+            log_name, previous_offset, last_offset
         );
         Ok((
             last_offset,
@@ -338,6 +325,7 @@ impl LogFile {
             LittleEndian::write_u32(&mut serialized[size - 4..], checksum);
 
             // write to file
+            // todo(hl): use io buffer and pwrite to reduce syscalls.
             write_guard
                 .write(serialized.as_slice())
                 .await
@@ -357,11 +345,32 @@ impl LogFile {
 
         self.notify.notify_one(); // notify flush thread.
         rx.await.map_err(|e| {
-            error!("Error while waiting for append result:{}", e);
+            warn!(
+                "Error while waiting for append result:{}, file {}",
+                e,
+                self.name.to_string()
+            );
             Error::Internal {
                 msg: "Sender already dropped".to_string(),
             }
         })
+    }
+
+    #[inline]
+    pub fn try_seal(&self) -> bool {
+        self.sealed
+            .compare_exchange(false, true, AcqRel, Acquire)
+            .is_ok()
+    }
+
+    #[inline]
+    pub fn unseal(&self) {
+        self.sealed.store(false, Release);
+    }
+
+    #[inline]
+    pub fn file_name(&self) -> String {
+        self.name.to_string()
     }
 }
 
