@@ -119,63 +119,11 @@ impl BTreeIterator {
         self.last_key = keys.last().map(|k| (*k).clone());
 
         Some(Batch {
-            keys: Self::keys_to_vectors(&keys),
+            keys: rows_to_vectors(keys.as_slice()),
             sequences: sequences.finish(),
             value_types: value_types.finish(),
-            values: Self::values_to_vectors(&values),
+            values: rows_to_vectors(values.as_slice()),
         })
-    }
-
-    // Assumes column num of all row key is equal.
-    fn keys_to_vectors(keys: &[&InnerKey]) -> Vec<VectorRef> {
-        if keys.is_empty() {
-            return Vec::new();
-        }
-
-        let column_num = keys[0].row_key.len();
-        let row_num = keys.len();
-        let mut builders = Vec::with_capacity(column_num);
-        for v in &keys[0].row_key {
-            builders.push(VectorBuilder::with_capacity(v.data_type(), row_num));
-        }
-
-        let mut vectors = Vec::with_capacity(column_num);
-        for (col_idx, builder) in builders.iter_mut().enumerate() {
-            for row_key in keys {
-                let value = &row_key.row_key[col_idx];
-                builder.push(value);
-            }
-
-            vectors.push(builder.finish());
-        }
-
-        vectors
-    }
-
-    // Assumes column num of all row value is equal.
-    fn values_to_vectors(values: &[&RowValue]) -> Vec<VectorRef> {
-        if values.is_empty() {
-            return Vec::new();
-        }
-
-        let column_num = values[0].values.len();
-        let row_num = values.len();
-        let mut builders = Vec::with_capacity(column_num);
-        for v in &values[0].values {
-            builders.push(VectorBuilder::with_capacity(v.data_type(), row_num));
-        }
-
-        let mut vectors = Vec::with_capacity(column_num);
-        for (col_idx, builder) in builders.iter_mut().enumerate() {
-            for row_value in values {
-                let value = &row_value.values[col_idx];
-                builder.push(value);
-            }
-
-            vectors.push(builder.finish());
-        }
-
-        vectors
     }
 }
 
@@ -316,4 +264,64 @@ impl InnerKey {
 #[derive(Clone, Debug)]
 struct RowValue {
     values: Vec<Value>,
+}
+
+trait RowsProvider {
+    fn row_num(&self) -> usize;
+
+    fn column_num(&self) -> usize {
+        self.row_by_index(0).len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.row_num() == 0
+    }
+
+    fn row_by_index(&self, idx: usize) -> &Vec<Value>;
+}
+
+impl<'a> RowsProvider for &'a [&InnerKey] {
+    fn row_num(&self) -> usize {
+        self.len()
+    }
+
+    fn row_by_index(&self, idx: usize) -> &Vec<Value> {
+        &self[idx].row_key
+    }
+}
+
+impl<'a> RowsProvider for &'a [&RowValue] {
+    fn row_num(&self) -> usize {
+        self.len()
+    }
+
+    fn row_by_index(&self, idx: usize) -> &Vec<Value> {
+        &self[idx].values
+    }
+}
+
+fn rows_to_vectors<T: RowsProvider>(provider: T) -> Vec<VectorRef> {
+    if provider.is_empty() {
+        return Vec::new();
+    }
+
+    let column_num = provider.column_num();
+    let row_num = provider.row_num();
+    let mut builders = Vec::with_capacity(column_num);
+    for v in provider.row_by_index(0) {
+        builders.push(VectorBuilder::with_capacity(v.data_type(), row_num));
+    }
+
+    let mut vectors = Vec::with_capacity(column_num);
+    for (col_idx, builder) in builders.iter_mut().enumerate() {
+        for row_idx in 0..row_num {
+            let row = provider.row_by_index(row_idx);
+            let value = &row[col_idx];
+            builder.push(value);
+        }
+
+        vectors.push(builder.finish());
+    }
+
+    vectors
 }

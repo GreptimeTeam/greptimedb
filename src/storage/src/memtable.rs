@@ -26,7 +26,7 @@ pub trait Memtable: Send + Sync {
     /// Panics if the schema of key/value differs from memtable's schema.
     fn write(&self, kvs: &KeyValues) -> Result<()>;
 
-    /// Iterators the memtable.
+    /// Iterates the memtable.
     // TODO(yingwen): Consider passing a projector (does column projection).
     fn iter(&self, ctx: IterContext) -> Result<BatchIteratorPtr>;
 
