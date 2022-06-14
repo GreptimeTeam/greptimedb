@@ -1610,6 +1610,7 @@ dependencies = [
 name = "log-store"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-stream",
  "async-trait",
  "base64",

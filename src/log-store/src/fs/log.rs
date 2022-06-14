@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::AtomicPtr;
-use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use common_telemetry::{error, info, warn};
 use snafu::{Backtrace, GenerateImplicitData, ResultExt};
 use store_api::logstore::entry::Id;
@@ -23,7 +22,7 @@ type FileMap = BTreeMap<u64, LogFileRef>;
 
 pub struct LocalFileLogStoreImpl {
     files: RwLock<FileMap>,
-    active: AtomicPtr<LogFile>,
+    active: ArcSwap<LogFile>,
     config: LogConfig,
 }
 
@@ -32,14 +31,11 @@ impl LocalFileLogStoreImpl {
 
     #[allow(unused)]
     pub async fn open(config: &LogConfig) -> Result<Self> {
-        let mut files = Self::load_dir(config.log_file_dir.as_str(), config).await?;
+        let mut files = Self::load_dir(&config.log_file_dir, config).await?;
 
         if files.is_empty() {
             Self::init_on_empty(&mut files, config).await?;
-            info!(
-                "Initialized log store directory: {}",
-                config.log_file_dir.to_string()
-            )
+            info!("Initialized log store directory: {}", config.log_file_dir)
         }
 
         let id = *files.keys().max().ok_or(Error::Internal {
@@ -83,18 +79,18 @@ impl LocalFileLogStoreImpl {
             active_file_name
         );
 
-        let active_file_2 = active_file_ref.clone();
+        let active_file_cloned = active_file_ref.clone();
         Ok(Self {
             files: RwLock::new(files),
-            active: AtomicPtr::from(Arc::into_raw(active_file_2) as *mut LogFile),
+            active: ArcSwap::new(active_file_cloned),
             config: config.clone(),
         })
     }
 
     pub async fn init_on_empty(files: &mut FileMap, config: &LogConfig) -> Result<()> {
-        let path = Path::new(config.log_file_dir.as_str()).join(FileName::log(0).to_string());
+        let path = Path::new(&config.log_file_dir).join(FileName::log(0).to_string());
         let file_path = path.to_str().ok_or(Error::FileNameIllegal {
-            file_name: config.log_file_dir.as_str().to_string(),
+            file_name: config.log_file_dir.to_string(),
         })?;
         let file = LogFile::open(file_path, config).await?;
         files.insert(0, Arc::new(file));
@@ -138,7 +134,7 @@ impl LocalFileLogStoreImpl {
         }
         let entry_id = active.next_entry_id();
         let path_buf =
-            Path::new(self.config.log_file_dir.as_str()).join(FileName::log(entry_id).to_string());
+            Path::new(&self.config.log_file_dir).join(FileName::log(entry_id).to_string());
         let path = path_buf.to_str().ok_or(Error::FileNameIllegal {
             file_name: self.config.log_file_dir.clone(),
         })?;
@@ -150,17 +146,14 @@ impl LocalFileLogStoreImpl {
             new_file
         };
 
-        let new_file_ref = Arc::new(new_file);
+        let new_file = Arc::new(new_file);
 
-        let mut file_lock = self.files.write().await;
-        file_lock.insert(new_file_ref.start_entry_id(), new_file_ref.clone());
+        self.files
+            .write()
+            .await
+            .insert(new_file.start_entry_id(), new_file.clone());
 
-        let prev = unsafe {
-            &mut *self
-                .active
-                .swap(Arc::into_raw(new_file_ref) as *mut LogFile, SeqCst)
-        };
-
+        let prev = self.active.swap(new_file);
         tokio::spawn(async move {
             prev.stop().await.unwrap();
             info!("Sealed log file {} stopped.", prev.file_name());
@@ -169,13 +162,7 @@ impl LocalFileLogStoreImpl {
     }
 
     pub fn active_file(&self) -> Arc<LogFile> {
-        unsafe {
-            let arc = Arc::from_raw(self.active.load(Relaxed));
-            // clone and forget to keep ref cnt incremented, otherwise will cause a double free
-            #[allow(clippy::mem_forget)]
-            std::mem::forget(arc.clone());
-            arc
-        }
+        self.active.load().clone()
     }
 }
 

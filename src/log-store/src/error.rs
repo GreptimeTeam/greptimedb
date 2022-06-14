@@ -9,7 +9,7 @@ pub enum Error {
     #[snafu(display("Failed to deserialize entry"))]
     Deserialization { backtrace: Backtrace },
 
-    #[snafu(display("Entry corrupted, msg:{}", msg))]
+    #[snafu(display("Entry corrupted, msg: {}", msg))]
     Corrupted { msg: String, backtrace: Backtrace },
 
     #[snafu(display("IO error, source: {}", source))]

@@ -11,6 +11,8 @@ use store_api::logstore::entry_stream::{EntryStream, SendableEntryStream};
 use crate::error::Error;
 use crate::fs::crc;
 
+const ENTRY_MIN_LEN: usize = 4 + 8 + 8 + 4;
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct EntryImpl {
     pub data: Vec<u8>,
@@ -78,11 +80,11 @@ impl EntryImpl {
     /// Return minimal possible length of a serialized entry.
     /// length+offset+epoch+crc
     pub fn min_len() -> usize {
-        4 + 8 + 8 + 4
+        ENTRY_MIN_LEN
     }
 }
 
-/// Entry binary format:
+/// Entry binary format (Little endian):
 ///
 /// +--------+--------+--------+--------+--------+
 //  |entry id|  epoch | length |  data  |  CRC   |
@@ -111,6 +113,7 @@ impl TryFrom<&[u8]> for EntryImpl {
         let epoch = LittleEndian::read_u64(&value[id_end_ofs..epoch_end_ofs]);
         let crc_read = LittleEndian::read_u32(&value[data_end_ofs..crc_end_ofs]);
 
+        // TODO(hl): add a config option to turn off CRC checksum.
         let crc_calc = crc::CRC_ALGO.checksum(&value[0..data_end_ofs]);
         if crc_calc != crc_read {
             return Err(Error::Corrupted {

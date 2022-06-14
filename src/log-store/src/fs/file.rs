@@ -1,8 +1,7 @@
 use std::fmt::{Debug, Formatter};
 use std::io::SeekFrom;
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use async_stream::stream;
@@ -24,6 +23,7 @@ use tokio::sync::mpsc::Sender as MpscSender;
 use tokio::sync::oneshot::Sender as OneshotSender;
 use tokio::sync::{oneshot, Notify, RwLock};
 use tokio::task::JoinHandle;
+use tokio::time;
 
 use crate::error::{Error, IoSnafu, OpenLogSnafu, Result};
 use crate::fs::config::LogConfig;
@@ -32,6 +32,8 @@ use crate::fs::entry::{EntryImpl, StreamImpl};
 use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
 use crate::fs::AppendResultImpl;
+
+const LOG_WRITER_BATCH_SIZE: usize = 16;
 
 // TODO(hl): use pwrite polyfill in different platforms, avoid write syscall in each append request.
 pub struct LogFile {
@@ -45,7 +47,7 @@ pub struct LogFile {
     pending_request_tx: MpscSender<AppendRequest>,
     notify: Arc<Notify>,
     max_file_size: usize,
-    join_handle: Option<JoinHandle<Result<()>>>,
+    join_handle: Mutex<Option<JoinHandle<Result<()>>>>,
     sealed: Arc<AtomicBool>,
 }
 
@@ -54,19 +56,19 @@ impl Debug for LogFile {
         f.debug_struct("LogFile")
             .field("name", &self.name)
             .field("start_entry_id", &self.start_entry_id)
-            .field("write_offset", &self.write_offset.load(Relaxed))
-            .field("flush_offset", &self.flush_offset.load(Relaxed))
-            .field("next_entry_id", &self.next_entry_id.load(Relaxed))
+            .field("write_offset", &self.write_offset.load(Ordering::Relaxed))
+            .field("flush_offset", &self.flush_offset.load(Ordering::Relaxed))
+            .field("next_entry_id", &self.next_entry_id.load(Ordering::Relaxed))
             .field("max_file_size", &self.max_file_size)
-            .field("sealed", &self.sealed.load(Relaxed))
+            .field("sealed", &self.sealed.load(Ordering::Relaxed))
             .finish()
     }
 }
 
 impl LogFile {
     /// Opens a file in path with given log config.
-    pub async fn open(path: impl AsRef<str>, config: &LogConfig) -> Result<Self> {
-        let path = path.as_ref().to_owned();
+    pub async fn open(path: impl Into<String>, config: &LogConfig) -> Result<Self> {
+        let path = path.into();
         let file = OpenOptions::new()
             .write(true)
             .read(true)
@@ -92,23 +94,27 @@ impl LogFile {
             pending_request_rx: Some(rx),
             notify: Arc::new(Notify::new()),
             max_file_size: config.max_log_file_size,
-            join_handle: None,
+            join_handle: Mutex::new(None),
             sealed: Arc::new(AtomicBool::new(false)),
         };
 
         let metadata = log.file.read().await.metadata().await.context(IoSnafu)?;
         let expect_length = metadata.len() as usize;
-        log.write_offset.store(expect_length, Relaxed);
-        log.flush_offset.store(expect_length, Relaxed);
+        log.write_offset.store(expect_length, Ordering::Relaxed);
+        log.flush_offset.store(expect_length, Ordering::Relaxed);
+
+        let replay_start_time = time::Instant::now();
         let (actual_offset, next_entry_id) = log.replay().await?;
 
         info!(
-            "Log file {} replay finished, last offset: {}, file start entry id: {}, next entry id: {}",
-            path, actual_offset, start_entry_id, next_entry_id
+            "Log file {} replay finished, last offset: {}, file start entry id: {}, next entry id: {}, elapsed time: {}ms",
+            path, actual_offset, start_entry_id, next_entry_id,
+            time::Instant::now().duration_since(replay_start_time).as_millis()
         );
-        log.write_offset.store(actual_offset, Relaxed);
-        log.flush_offset.store(actual_offset, Relaxed);
-        log.next_entry_id.store(next_entry_id, Relaxed);
+
+        log.write_offset.store(actual_offset, Ordering::Relaxed);
+        log.flush_offset.store(actual_offset, Ordering::Relaxed);
+        log.next_entry_id.store(next_entry_id, Ordering::Relaxed);
         log.seek(actual_offset).await?;
         Ok(log)
     }
@@ -139,27 +145,27 @@ impl LogFile {
     #[allow(unused)]
     #[inline]
     pub fn size(&self) -> usize {
-        self.flush_offset.load(Relaxed)
+        self.flush_offset.load(Ordering::Relaxed)
     }
 
     #[inline]
     pub fn next_entry_id(&self) -> Id {
-        self.next_entry_id.load(Relaxed)
+        self.next_entry_id.load(Ordering::Relaxed)
     }
 
     /// Increases offset field by `delta` and return the previous value.
-    /// #[inline]
-    pub fn inc_offset(&self, delta: usize) -> usize {
+    #[inline]
+    fn inc_offset(&self, delta: usize) -> usize {
         // Relaxed order is enough since no sync-with relationship
         // between `offset` and any other field.
-        self.write_offset.fetch_add(delta, Relaxed)
+        self.write_offset.fetch_add(delta, Ordering::Relaxed)
     }
 
     /// Increases offset field by `delta` and return the previous value.
-    pub fn inc_entry_id(&self) -> u64 {
+    fn inc_entry_id(&self) -> u64 {
         // Relaxed order is enough since no sync-with relationship
         // between `offset` and any other field.
-        self.next_entry_id.fetch_add(1, Relaxed)
+        self.next_entry_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Starts log file and it's internal components(including flush task, etc.).
@@ -174,7 +180,7 @@ impl LogFile {
             let handle = tokio::spawn(async move {
                 let waker = noop_waker();
                 let mut ctx = Context::from_waker(&waker);
-                let mut batch: Vec<AppendRequest> = Vec::with_capacity(16);
+                let mut batch: Vec<AppendRequest> = Vec::with_capacity(LOG_WRITER_BATCH_SIZE);
 
                 let mut error_occurred = false;
                 loop {
@@ -195,18 +201,17 @@ impl LogFile {
                     }
 
                     // flush all pending data to disk
-                    let write_offset_read = write_offset.load(Relaxed);
+                    let write_offset_read = write_offset.load(Ordering::Relaxed);
                     // TODO(hl): add flush metrics
-                    let flush_res = file.sync_all().await;
-                    if flush_res.is_err() {
-                        error!("Failed to flush log file: {}", flush_res.err().unwrap());
+                    if let Err(flush_err) = file.sync_all().await {
+                        error!("Failed to flush log file: {}", flush_err);
                         error_occurred = true;
                     }
                     if error_occurred {
                         info!("Flush task stop");
                         break;
                     }
-                    flush_offset.store(write_offset_read, Relaxed);
+                    flush_offset.store(write_offset_read, Ordering::Relaxed);
                     while let Some(req) = batch.pop() {
                         req.complete();
                     }
@@ -214,16 +219,23 @@ impl LogFile {
                 Ok(())
             });
 
-            self.join_handle = Some(handle);
+            *self.join_handle.lock().unwrap() = Some(handle);
             info!("Flush task started...");
         }
         Ok(())
     }
 
     /// Stops log file.
-    pub async fn stop(&mut self) -> Result<()> {
+    /// # Panics
+    /// Panics when a log file is stopped while not being started ever.
+    pub async fn stop(&self) -> Result<()> {
         self.notify.notify_one();
-        let join_handle = self.join_handle.take().expect("Join handle should present");
+        let join_handle = self
+            .join_handle
+            .lock()
+            .unwrap()
+            .take()
+            .expect("Join handle should present");
 
         let res = join_handle.await.unwrap();
         info!("LogFile task finished: {:?}", res);
@@ -238,8 +250,9 @@ impl LogFile {
     /// Replays current file til last entry read
     pub async fn replay(&mut self) -> Result<(usize, Id)> {
         let log_name = self.name.to_string();
-        let previous_offset = self.flush_offset.load(Relaxed);
+        let previous_offset = self.flush_offset.load(Ordering::Relaxed);
         let mut stream = self.create_stream(
+            // TODO(hl): LocalNamespace should be filled
             LocalNamespace {
                 name: "todo".to_string(),
                 id: 1,
@@ -282,7 +295,7 @@ impl LogFile {
     /// the first entry with an id greater than `start_entry_id`.
     pub fn create_stream(&self, _ns: impl Namespace, start_entry_id: u64) -> impl EntryStream + '_ {
         let s = stream!({
-            let length = self.flush_offset.load(Relaxed);
+            let length = self.flush_offset.load(Ordering::Relaxed);
             let mmap = self.map(0, length).await?;
 
             let mut buf: &[u8] = mmap.as_ref();
@@ -318,7 +331,7 @@ impl LogFile {
         let mut serialized = e.serialize();
         let size = serialized.len();
 
-        if size + self.write_offset.load(Relaxed) > self.max_file_size {
+        if size + self.write_offset.load(Ordering::Relaxed) > self.max_file_size {
             return Err(Error::Eof);
         }
 
@@ -326,7 +339,7 @@ impl LogFile {
         let entry_id;
 
         {
-            let mut write_guard = self.file.write().await;
+            let mut file = self.file.write().await;
             // generate entry id
             entry_id = self.inc_entry_id();
             // generate in-file offset
@@ -339,10 +352,7 @@ impl LogFile {
 
             // write to file
             // TODO(hl): use io buffer and pwrite to reduce syscalls.
-            write_guard
-                .write(serialized.as_slice())
-                .await
-                .context(IoSnafu)?;
+            file.write(serialized.as_slice()).await.context(IoSnafu)?;
         }
 
         let (tx, rx) = oneshot::channel();
@@ -373,13 +383,13 @@ impl LogFile {
     #[inline]
     pub fn try_seal(&self) -> bool {
         self.sealed
-            .compare_exchange(false, true, AcqRel, Acquire)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
     #[inline]
     pub fn unseal(&self) {
-        self.sealed.store(false, Release);
+        self.sealed.store(false, Ordering::Release);
     }
 
     #[inline]
@@ -391,7 +401,7 @@ impl LogFile {
 impl ToString for LogFile {
     fn to_string(&self) -> String {
         format!("LogFile{{ name: {}, write_offset: {}, flush_offset: {}, start_entry_id: {}, entry_id_counter: {} }}",
-                self.name.to_string(), self.write_offset.load(Relaxed), self.flush_offset.load(Relaxed), self.start_entry_id, self.next_entry_id.load(Relaxed))
+                self.name.to_string(), self.write_offset.load(Ordering::Relaxed), self.flush_offset.load(Ordering::Relaxed), self.start_entry_id, self.next_entry_id.load(Ordering::Relaxed))
     }
 }
 
@@ -407,7 +417,7 @@ pub(crate) struct AppendRequest {
 
 impl AppendRequest {
     pub fn complete(self) {
-        // todo use this result
+        // TODO(hl): use this result.
         let _ = self.tx.send(AppendResultImpl {
             offset: self.offset,
             entry_id: self.id,

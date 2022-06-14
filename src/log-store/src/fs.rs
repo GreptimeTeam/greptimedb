@@ -17,10 +17,12 @@ pub struct AppendResultImpl {
 }
 
 impl AppendResult for AppendResultImpl {
+    #[inline]
     fn get_entry_id(&self) -> Id {
         self.entry_id
     }
 
+    #[inline]
     fn get_offset(&self) -> Offset {
         self.offset
     }
