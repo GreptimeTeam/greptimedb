@@ -22,6 +22,12 @@ pub enum Error {
     // a backtrace is not carried in this varaint.
     #[snafu(display("Fail to start HTTP server, source: {}", source))]
     StartHttp { source: hyper::Error },
+
+    #[snafu(display("Fail to parse address {addr}, source: {}", source))]
+    ParseAddr {
+        addr: String,
+        source: std::net::AddrParseError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -31,7 +37,7 @@ impl ErrorExt for Error {
         match self {
             Error::ExecuteSql { source } | Error::NewCatalog { source } => source.status_code(),
             // TODO(yingwen): Further categorize http error.
-            Error::StartHttp { .. } => StatusCode::Internal,
+            Error::StartHttp { .. } | Error::ParseAddr { .. } => StatusCode::Internal,
         }
     }
 

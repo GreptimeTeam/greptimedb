@@ -1,14 +1,12 @@
 [package]
-name = "cmd"
+name = "greptimedb"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "greptime"
-path = "src/bin/greptime.rs"
-
 [dependencies]
 clap = { version = "3.1", features = ["derive"] }
-common-telemetry = { path = "../common/telemetry" , features = ["deadlock_detection"]}
+snafu = { version = "0.7", features = ["backtraces"] }
+common-error = { path = "../common/error" }
+common-telemetry = { path = "../common/telemetry", features = ["deadlock_detection"]}
 datanode = { path = "../datanode" }
 tokio = { version = "1.18.0", features = ["full"] }

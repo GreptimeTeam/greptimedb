@@ -6,3 +6,4 @@ mod metric;
 pub mod server;
 
 pub use crate::datanode::DataNode;
+pub use crate::datanode::DataNodeOptions;

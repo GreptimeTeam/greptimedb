@@ -523,16 +523,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cmd"
-version = "0.1.0"
-dependencies = [
- "clap",
- "common-telemetry",
- "datanode",
- "tokio",
-]
-
-[[package]]
 name = "comfy-table"
 version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1196,6 +1186,18 @@ name = "gimli"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78cc372d058dcf6d5ecd98510e7fbc9e5aec4d21de70f65fea8fecebcd881bd4"
+
+[[package]]
+name = "greptimedb"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "common-error",
+ "common-telemetry",
+ "datanode",
+ "snafu",
+ "tokio",
+]
 
 [[package]]
 name = "h2"
