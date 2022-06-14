@@ -48,7 +48,7 @@ pub type VersionNumber = u32;
 // TODO(yingwen): Make some fields of metadata private.
 
 /// In memory metadata of region.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RegionMetadata {
     /// Schema of the region.
     ///
@@ -66,13 +66,13 @@ pub struct RegionMetadata {
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ColumnMetadata {
     pub cf_id: ColumnFamilyId,
     pub desc: ColumnDescriptor,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ColumnsMetadata {
     /// All columns, in `(key columns, timestamp, [version,] value columns)` order.
     ///
@@ -82,7 +82,7 @@ pub struct ColumnsMetadata {
     pub name_to_col_index: HashMap<String, usize>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RowKeyMetadata {
     /// Exclusive end index of row key columns.
     row_key_end: usize,
@@ -93,7 +93,7 @@ pub struct RowKeyMetadata {
     pub enable_version_column: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ColumnsRowKeyMetadata {
     columns: ColumnsMetadata,
     row_key: RowKeyMetadata,
@@ -121,7 +121,7 @@ impl ColumnsRowKeyMetadata {
 
 pub type ColumnsRowKeyMetadataRef = Arc<ColumnsRowKeyMetadata>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColumnFamiliesMetadata {
     /// Map column family id to column family metadata.
     id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
@@ -133,7 +133,7 @@ impl ColumnFamiliesMetadata {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColumnFamilyMetadata {
     /// Column family name.
     pub name: String,
