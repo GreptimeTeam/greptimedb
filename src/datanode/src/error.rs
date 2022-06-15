@@ -23,7 +23,7 @@ pub enum Error {
     #[snafu(display("Fail to start HTTP server, source: {}", source))]
     StartHttp { source: hyper::Error },
 
-    #[snafu(display("Fail to parse address {addr}, source: {}", source))]
+    #[snafu(display("Fail to parse address {}, source: {}", addr, source))]
     ParseAddr {
         addr: String,
         source: std::net::AddrParseError,

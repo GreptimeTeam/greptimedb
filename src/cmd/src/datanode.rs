@@ -1,8 +1,8 @@
 use clap::Parser;
-use datanode::{DataNode, DataNodeOptions};
+use datanode::{Datanode, DatanodeOptions};
 use snafu::ResultExt;
 
-use crate::error::{Result, StartDataNodeSnafu};
+use crate::error::{Result, StartDatanodeSnafu};
 
 #[derive(Parser)]
 pub struct Command {
@@ -39,17 +39,17 @@ struct StartCommand {
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        DataNode::new(&self.into())
-            .context(StartDataNodeSnafu)?
+        Datanode::new(self.into())
+            .context(StartDatanodeSnafu)?
             .start()
             .await
-            .context(StartDataNodeSnafu)
+            .context(StartDatanodeSnafu)
     }
 }
 
-impl From<StartCommand> for DataNodeOptions {
+impl From<StartCommand> for DatanodeOptions {
     fn from(cmd: StartCommand) -> Self {
-        DataNodeOptions {
+        DatanodeOptions {
             http_addr: cmd.http_addr,
             rpc_addr: cmd.rpc_addr,
         }

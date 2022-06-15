@@ -1,16 +1,14 @@
 use std::fmt;
 
 use clap::Parser;
+use cmd::datanode;
+use cmd::error::Result;
 use common_telemetry::{self, logging::error, logging::info};
 
-use crate::error::Result;
-
-pub mod datanode;
-pub mod error;
-
 #[derive(Parser)]
+#[clap(name = "greptimedb")]
 struct Command {
-    #[clap(long, default_value = "logs")]
+    #[clap(long, default_value = "/tmp/greptime/logs")]
     log_dir: String,
     #[clap(long, default_value = "info")]
     log_level: String,
@@ -26,13 +24,14 @@ impl Command {
 
 #[derive(Parser)]
 enum SubCommand {
-    DataNode(datanode::Command),
+    #[clap(name = "datanode")]
+    Datanode(datanode::Command),
 }
 
 impl SubCommand {
     async fn run(self) -> Result<()> {
         match self {
-            SubCommand::DataNode(cmd) => cmd.run().await,
+            SubCommand::Datanode(cmd) => cmd.run().await,
         }
     }
 }
@@ -40,7 +39,7 @@ impl SubCommand {
 impl fmt::Display for SubCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SubCommand::DataNode(..) => write!(f, "data-node"),
+            SubCommand::Datanode(..) => write!(f, "greptime-datanode"),
         }
     }
 }
@@ -48,10 +47,9 @@ impl fmt::Display for SubCommand {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cmd = Command::parse();
-    let subcmd_name = cmd.subcmd.to_string();
     // TODO(dennis):
     // 1. adds ip/port to app
-    let app_name = &format!("{subcmd_name:?}").to_lowercase();
+    let app_name = &cmd.subcmd.to_string();
     let log_dir = &cmd.log_dir;
     let log_level = &cmd.log_level;
 

@@ -7,16 +7,16 @@ GreptimeDB: the next-generation hybrid timeseries/analytics processing database 
 ## Usage
 
 ```
-// Start data-node with default options.
-cargo run -p greptimedb -- data-node start
+// Start datanode with default options.
+cargo run -- datanode start
 
 OR
 
-// Start data-node with `http-addr` option.
-cargo run -p greptimedb -- data-node start --http-addr=0.0.0.0:9999
+// Start datanode with `http-addr` option.
+cargo run -- datanode start --http-addr=0.0.0.0:9999
 
 OR
 
-// Start data-node with `log-dir` and `log-level` options.
-cargo run -p greptimedb -- --log-dir=logs --log-level=debug data-node start
+// Start datanode with `log-dir` and `log-level` options.
+cargo run -- --log-dir=logs --log-level=debug datanode start
 ```

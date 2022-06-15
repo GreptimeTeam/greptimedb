@@ -23,7 +23,6 @@ use crate::server::InstanceRef;
 
 /// Http server
 pub struct HttpServer {
-    addr: String,
     instance: InstanceRef,
 }
 
@@ -99,8 +98,8 @@ async fn shutdown_signal() {
 }
 
 impl HttpServer {
-    pub fn new(addr: String, instance: InstanceRef) -> Self {
-        Self { addr, instance }
+    pub fn new(instance: InstanceRef) -> Self {
+        Self { instance }
     }
 
     pub fn make_app(&self) -> Router {
@@ -119,13 +118,11 @@ impl HttpServer {
             )
     }
 
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&self, addr: String) -> Result<()> {
         let app = self.make_app();
-        let addr: SocketAddr = self.addr.parse().context(ParseAddrSnafu {
-            addr: self.addr.clone(),
-        })?;
-        info!("Datanode HTTP server is listening on {}", addr);
-        let server = axum::Server::bind(&addr).serve(app.into_make_service());
+        let socket_addr: SocketAddr = addr.parse().context(ParseAddrSnafu { addr: &addr })?;
+        info!("Datanode HTTP server is listening on {}", socket_addr);
+        let server = axum::Server::bind(&socket_addr).serve(app.into_make_service());
         let graceful = server.with_graceful_shutdown(shutdown_signal());
 
         graceful.await.context(StartHttpSnafu)

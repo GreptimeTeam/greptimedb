@@ -9,30 +9,32 @@ use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
 #[derive(Debug)]
-pub struct DataNodeOptions {
+pub struct DatanodeOptions {
     pub http_addr: String,
     pub rpc_addr: String,
 }
 /// DataNode service.
-pub struct DataNode {
+pub struct Datanode {
+    opts: DatanodeOptions,
     services: Services,
     _catalog_list: CatalogListRef,
     _instance: InstanceRef,
 }
 
-impl DataNode {
-    pub fn new(opts: &DataNodeOptions) -> Result<DataNode> {
+impl Datanode {
+    pub fn new(opts: DatanodeOptions) -> Result<Datanode> {
         let catalog_list = memory::new_memory_catalog_list().context(NewCatalogSnafu)?;
         let instance = Arc::new(Instance::new(catalog_list.clone()));
 
         Ok(Self {
-            services: Services::new(opts, instance.clone()),
+            opts,
+            services: Services::new(instance.clone()),
             _catalog_list: catalog_list,
             _instance: instance,
         })
     }
 
     pub async fn start(&self) -> Result<()> {
-        self.services.start().await
+        self.services.start(&self.opts).await
     }
 }

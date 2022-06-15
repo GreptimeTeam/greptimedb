@@ -11,7 +11,7 @@ use query::catalog::memory;
 fn make_test_app() -> Router {
     let catalog_list = memory::new_memory_catalog_list().unwrap();
     let instance = Arc::new(Instance::new(catalog_list));
-    let http_server = HttpServer::new("0.0.0.0:3000".into(), instance);
+    let http_server = HttpServer::new(instance);
     http_server.make_app()
 }
 

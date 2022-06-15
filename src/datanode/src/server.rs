@@ -3,7 +3,7 @@ pub mod http;
 
 use http::HttpServer;
 
-use crate::datanode::DataNodeOptions;
+use crate::datanode::DatanodeOptions;
 use crate::error::Result;
 use crate::instance::InstanceRef;
 
@@ -13,13 +13,13 @@ pub struct Services {
 }
 
 impl Services {
-    pub fn new(opts: &DataNodeOptions, instance: InstanceRef) -> Self {
+    pub fn new(instance: InstanceRef) -> Self {
         Self {
-            http_server: HttpServer::new(opts.http_addr.clone(), instance),
+            http_server: HttpServer::new(instance),
         }
     }
 
-    pub async fn start(&self) -> Result<()> {
-        self.http_server.start().await
+    pub async fn start(&self, opts: &DatanodeOptions) -> Result<()> {
+        self.http_server.start(opts.http_addr.clone()).await
     }
 }
