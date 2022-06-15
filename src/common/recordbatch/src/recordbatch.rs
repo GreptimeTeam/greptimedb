@@ -1,14 +1,12 @@
-use std::sync::Arc;
-
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-use datatypes::schema::Schema;
+use datatypes::schema::SchemaRef;
 use datatypes::vectors::Helper;
 use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordBatch {
-    pub schema: Arc<Schema>,
+    pub schema: SchemaRef,
     pub df_recordbatch: DfRecordBatch,
 }
 
@@ -35,10 +33,13 @@ impl Serialize for RecordBatch {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use arrow::array::UInt32Array;
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datafusion_common::field_util::SchemaExt;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+    use datatypes::schema::Schema;
 
     use super::*;
 
