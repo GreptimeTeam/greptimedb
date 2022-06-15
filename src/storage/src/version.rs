@@ -1,4 +1,16 @@
+//! Version control of storage.
+//!
+//! To read latest data from `VersionControl`, we need to
+//! 1. Acquire `Version` from `VersionControl`.
+//! 2. Then acquire last sequence.
+//!
+//! Reason: data may be flushed/compacted and some data with old sequence may be removed
+//! and became invisible between step 1 and 2, so need to acquire version at first.
+
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use store_api::storage::SequenceNumber;
 
 use crate::memtable::MemtableSet;
 use crate::metadata::{RegionMetadata, RegionMetadataRef};
@@ -7,6 +19,8 @@ use crate::sync::CowCell;
 /// Controls version of in memory state for a region.
 pub struct VersionControl {
     version: CowCell<Version>,
+    /// Last sequence that visible to user.
+    last_sequence: AtomicU64,
 }
 
 impl VersionControl {
@@ -14,10 +28,12 @@ impl VersionControl {
     pub fn new(metadata: RegionMetadata, memtables: MemtableSet) -> VersionControl {
         VersionControl {
             version: CowCell::new(Version::new(metadata, memtables)),
+            last_sequence: AtomicU64::new(0),
         }
     }
 
     /// Returns current version.
+    #[inline]
     pub fn current(&self) -> VersionRef {
         self.version.get()
     }
@@ -26,6 +42,21 @@ impl VersionControl {
     pub fn metadata(&self) -> RegionMetadataRef {
         let version = self.current();
         version.metadata.clone()
+    }
+
+    #[inline]
+    pub fn last_sequence(&self) -> SequenceNumber {
+        self.last_sequence.load(Ordering::Acquire)
+    }
+
+    /// Set last sequence to `value`.
+    ///
+    /// External synchronization is required to ensure only one thread can update the
+    /// last sequence.
+    #[inline]
+    pub fn set_last_sequence(&self, value: SequenceNumber) {
+        // Release ordering should be enough to guarantee sequence is updated at last.
+        self.last_sequence.fetch_add(value, Ordering::Release);
     }
 }
 
