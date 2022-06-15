@@ -18,7 +18,7 @@ pub struct Datanode {
     opts: DatanodeOptions,
     services: Services,
     _catalog_list: CatalogListRef,
-    _instance: InstanceRef,
+    instance: InstanceRef,
 }
 
 impl Datanode {
@@ -30,11 +30,12 @@ impl Datanode {
             opts,
             services: Services::new(instance.clone()),
             _catalog_list: catalog_list,
-            _instance: instance,
+            instance,
         })
     }
 
     pub async fn start(&self) -> Result<()> {
+        self.instance.start().await?;        
         self.services.start(&self.opts).await
     }
 }

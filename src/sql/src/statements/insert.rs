@@ -1,10 +1,57 @@
-use sqlparser::ast::Statement;
+use sqlparser::ast::{Query, SetExpr, Statement, Values};
 use sqlparser::parser::ParserError;
+
+use crate::ast::{Expr, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Insert {
     // Can only be sqlparser::ast::Statement::Insert variant
     pub inner: Statement,
+}
+
+impl Insert {
+    //TODO: table_name may be in the form of "catalog.schema.table"
+    pub fn table_name(&self) -> String {
+        match &self.inner {
+            Statement::Insert { table_name, .. } => {
+                format!("{}", table_name)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn columns(&self) -> Vec<&String> {
+        match &self.inner {
+            Statement::Insert { columns, .. } => columns.iter().map(|ident| &ident.value).collect(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn values(&self) -> Vec<Vec<Value>> {
+        match &self.inner {
+            Statement::Insert { source, .. } => match &**source {
+                Query {
+                    body: SetExpr::Values(Values(values)),
+                    ..
+                } => values
+                    .iter()
+                    .map(|v| {
+                        v.iter()
+                            .map(|expr| match expr {
+                                Expr::Value(v) => v.clone(),
+                                Expr::Identifier(ident) => {
+                                    Value::SingleQuotedString(ident.value.clone())
+                                }
+                                _ => unreachable!(),
+                            })
+                            .collect::<Vec<Value>>()
+                    })
+                    .collect(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl TryFrom<Statement> for Insert {

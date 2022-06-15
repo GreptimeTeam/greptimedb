@@ -48,7 +48,8 @@ where
                 todo!("Currently not supported")
             }
             Statement::Query(qb) => self.query_to_plan(qb),
-            Statement::Insert(_) => {
+            Statement::Insert(p) => {
+                println!("{:?}", p);
                 todo!()
             }
         }

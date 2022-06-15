@@ -905,13 +905,18 @@ dependencies = [
  "common-error",
  "common-recordbatch",
  "common-telemetry",
+ "datatypes",
  "hyper",
  "metrics",
  "query",
  "serde",
  "serde_json",
  "snafu",
+ "sql",
+ "storage",
+ "store-api",
  "table",
+ "table-engine",
  "tokio",
  "tower",
  "tower-http",
@@ -3087,6 +3092,22 @@ dependencies = [
  "futures",
  "serde",
  "snafu",
+]
+
+[[package]]
+name = "table-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "common-error",
+ "common-query",
+ "common-recordbatch",
+ "common-telemetry",
+ "snafu",
+ "storage",
+ "store-api",
+ "table",
 ]
 
 [[package]]

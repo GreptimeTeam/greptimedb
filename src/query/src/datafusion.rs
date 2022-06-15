@@ -13,6 +13,7 @@ use common_query::prelude::ScalarUdf;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use snafu::{OptionExt, ResultExt};
+use sql::statements::statement::Statement;
 use sql::{dialect::GenericDialect, parser::ParserContext};
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
@@ -50,15 +51,25 @@ impl QueryEngine for DatafusionQueryEngine {
         "datafusion"
     }
 
-    fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan> {
-        let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
-        let context_provider = DfContextProviderAdapter::new(self.state.clone());
-        let planner = DfPlanner::new(&context_provider);
+    fn sql_to_statement(&self, sql: &str) -> Result<Statement> {
         let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
             .context(error::ParseSqlSnafu)?;
         // TODO(dennis): supports multi statement in one sql?
         assert!(1 == statement.len());
-        planner.statement_to_plan(statement.remove(0))
+        Ok(statement.remove(0))
+    }
+
+    fn statement_to_plan(&self, stmt: Statement) -> Result<LogicalPlan> {
+        let context_provider = DfContextProviderAdapter::new(self.state.clone());
+        let planner = DfPlanner::new(&context_provider);
+
+        planner.statement_to_plan(stmt)
+    }
+
+    fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan> {
+        let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
+        let stmt = self.sql_to_statement(sql)?;
+        self.statement_to_plan(stmt)
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
