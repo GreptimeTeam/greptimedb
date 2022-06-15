@@ -25,7 +25,7 @@ impl Entry for EntryImpl {
     type Error = Error;
 
     fn data(&self) -> &[u8] {
-        self.data.as_slice()
+        &self.data
     }
 
     fn id(&self) -> Id {

@@ -1,4 +1,4 @@
-use std::path::Path;
+use tempdir::TempDir;
 
 #[derive(Debug, Clone)]
 pub struct LogConfig {
@@ -8,12 +8,15 @@ pub struct LogConfig {
 }
 
 impl Default for LogConfig {
+    /// Default value of config stores log file into a tmp directory, which should only be used
+    /// in tests.
     fn default() -> Self {
         Self {
             append_buffer_size: 128,
             max_log_file_size: 1024 * 1024 * 1024,
-            log_file_dir: Path::new(env!("HOME"))
-                .join("logfiles")
+            log_file_dir: TempDir::new("greptimedb-temp")
+                .unwrap()
+                .path()
                 .to_string_lossy()
                 .to_string(),
         }

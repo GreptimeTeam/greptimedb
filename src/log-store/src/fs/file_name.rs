@@ -1,9 +1,10 @@
+use std::fmt::{Display, Formatter};
 use std::path::Path;
 
 use snafu::OptionExt;
 use store_api::logstore::entry::Id;
 
-use crate::error::{Error, FileNameIllegalSnafu};
+use crate::error::{Error, FileNameIllegalSnafu, SuffixIllegalSnafu};
 use crate::fs::file_name::FileName::Log;
 
 /// FileName represents the file name with padded leading zeros.
@@ -22,7 +23,7 @@ impl TryFrom<&str> for FileName {
         let extension =
             path.extension()
                 .and_then(|s| s.to_str())
-                .context(FileNameIllegalSnafu {
+                .with_context(|| FileNameIllegalSnafu {
                     file_name: path.to_string_lossy(),
                 })?;
 
@@ -30,7 +31,7 @@ impl TryFrom<&str> for FileName {
             .file_stem()
             .and_then(|s| s.to_str())
             .and_then(|s| s.parse::<u64>().ok())
-            .ok_or(Error::FileNameIllegal {
+            .context(FileNameIllegalSnafu {
                 file_name: p.to_string(),
             })?;
 
@@ -52,9 +53,10 @@ impl FileName {
     pub fn new_with_suffix(entry_id: Id, suffix: &str) -> Result<Self, Error> {
         match suffix {
             "log" => Ok(Log(entry_id)),
-            _ => Err(Error::FileNameIllegal {
-                file_name: "Suffix ".to_string() + suffix + " is not valid.",
-            }),
+            _ => SuffixIllegalSnafu {
+                suffix: suffix.to_string(),
+            }
+            .fail(),
         }
     }
 
@@ -76,9 +78,10 @@ impl FileName {
     }
 }
 
-impl ToString for FileName {
-    fn to_string(&self) -> String {
-        FileName::pad_file_name(self.entry_id()) + self.suffix()
+impl Display for FileName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(FileName::pad_file_name(self.entry_id()).as_str())?;
+        f.write_str(self.suffix())
     }
 }
 

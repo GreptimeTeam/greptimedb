@@ -1,5 +1,5 @@
 use store_api::logstore::entry::{Id, Offset};
-use store_api::logstore::AppendResult;
+use store_api::logstore::AppendResponse;
 
 mod config;
 mod crc;
@@ -16,14 +16,14 @@ pub struct AppendResultImpl {
     offset: Offset,
 }
 
-impl AppendResult for AppendResultImpl {
+impl AppendResponse for AppendResultImpl {
     #[inline]
-    fn get_entry_id(&self) -> Id {
+    fn entry_id(&self) -> Id {
         self.entry_id
     }
 
     #[inline]
-    fn get_offset(&self) -> Offset {
+    fn offset(&self) -> Offset {
         self.offset
     }
 }

@@ -26,7 +26,10 @@ pub enum Error {
     },
 
     #[snafu(display("File name {} illegal", file_name))]
-    FileNameIllegal { file_name: String },
+    FileNameIllegal {
+        file_name: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Internal error, msg: {}", msg))]
     Internal { msg: String, backtrace: Backtrace },
@@ -36,6 +39,9 @@ pub enum Error {
 
     #[snafu(display("File duplicate on start: {}", msg))]
     DuplicateFile { msg: String },
+
+    #[snafu(display("Log file suffix is illegal: {}", suffix))]
+    SuffixIllegal { suffix: String },
 }
 
 impl ErrorExt for Error {

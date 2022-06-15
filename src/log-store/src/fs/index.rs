@@ -24,7 +24,7 @@ pub type LocationRef = Arc<Location>;
 /// In-memory entry id to offset index.
 pub trait EntryIndex {
     /// Add entry id to offset mapping.
-    fn add_entry_id(&self, id: Id, loc: LocationRef) -> Option<LocationRef>;
+    fn add_entry_id(&self, id: Id, loc: Location) -> Option<LocationRef>;
 
     /// Find offset by entry id.
     fn find_offset_by_id(&self, id: Id) -> Result<Option<LocationRef>>;
@@ -44,8 +44,8 @@ impl MemoryIndex {
 }
 
 impl EntryIndex for MemoryIndex {
-    fn add_entry_id(&self, id: Id, loc: LocationRef) -> Option<LocationRef> {
-        self.map.write().unwrap().insert(id, loc)
+    fn add_entry_id(&self, id: Id, loc: Location) -> Option<LocationRef> {
+        self.map.write().unwrap().insert(id, Arc::new(loc))
     }
 
     fn find_offset_by_id(&self, id: Id) -> Result<Option<LocationRef>> {
@@ -60,8 +60,7 @@ mod tests {
     #[test]
     pub fn test_entry() {
         let index = MemoryIndex::new();
-        let location = Arc::new(Location::new(FileName::log(0), 1));
-        index.add_entry_id(1, location);
+        index.add_entry_id(1, Location::new(FileName::log(0), 1));
         assert_eq!(
             Arc::new(Location::new(FileName::log(0), 1)),
             index.find_offset_by_id(1).unwrap().unwrap()

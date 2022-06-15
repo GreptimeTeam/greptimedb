@@ -1,16 +1,17 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use common_telemetry::{error, info, warn};
-use snafu::{Backtrace, GenerateImplicitData, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::Id;
 use store_api::logstore::LogStore;
 use tokio::sync::RwLock;
 
-use crate::error::{DuplicateFileSnafu, Error, InternalSnafu, IoSnafu, Result};
+use crate::error::{
+    DuplicateFileSnafu, Error, FileNameIllegalSnafu, InternalSnafu, IoSnafu, Result,
+};
 use crate::fs::config::LogConfig;
 use crate::fs::entry::EntryImpl;
 use crate::fs::file::{LogFile, LogFileRef};
@@ -28,7 +29,6 @@ pub struct LocalFileLogStoreImpl {
 
 impl LocalFileLogStoreImpl {
     /// Opens a directory as log store directory, initialize directory if it is empty.
-
     #[allow(unused)]
     pub async fn open(config: &LogConfig) -> Result<Self> {
         let mut files = Self::load_dir(&config.log_file_dir, config).await?;
@@ -38,12 +38,11 @@ impl LocalFileLogStoreImpl {
             info!("Initialized log store directory: {}", config.log_file_dir)
         }
 
-        let id = *files.keys().max().ok_or(Error::Internal {
+        let id = *files.keys().max().context(InternalSnafu {
             msg: format!(
                 "log store directory is empty after initialization: {}",
                 config.log_file_dir
             ),
-            backtrace: Backtrace::generate(),
         })?;
 
         info!(
@@ -51,26 +50,21 @@ impl LocalFileLogStoreImpl {
             files
         );
 
-        let active_file_ref = files.get_mut(&id).ok_or(Error::Internal {
-            msg: format!(
-                "log store directory is empty after initialization: {}",
-                config.log_file_dir
-            ),
-            backtrace: Backtrace::generate(),
-        })?;
+        let active_file = files
+            .get_mut(&id)
+            .expect("Not expected to fail when initing log store");
 
-        active_file_ref.unseal();
-        let active_file_name = active_file_ref.to_string();
+        active_file.unseal();
+        let active_file_name = active_file.to_string();
         info!("Log store active log file: {}", active_file_name);
 
         // Start active log file
-        Arc::get_mut(active_file_ref)
-            .ok_or(Error::Internal {
+        Arc::get_mut(active_file)
+            .context(InternalSnafu {
                 msg: format!(
                     "Concurrent modification on log store {} start is not allowed",
                     active_file_name
                 ),
-                backtrace: Backtrace::generate(),
             })?
             .start()
             .await?;
@@ -79,7 +73,7 @@ impl LocalFileLogStoreImpl {
             active_file_name
         );
 
-        let active_file_cloned = active_file_ref.clone();
+        let active_file_cloned = active_file.clone();
         Ok(Self {
             files: RwLock::new(files),
             active: ArcSwap::new(active_file_cloned),
@@ -89,24 +83,24 @@ impl LocalFileLogStoreImpl {
 
     pub async fn init_on_empty(files: &mut FileMap, config: &LogConfig) -> Result<()> {
         let path = Path::new(&config.log_file_dir).join(FileName::log(0).to_string());
-        let file_path = path.to_str().ok_or(Error::FileNameIllegal {
-            file_name: config.log_file_dir.to_string(),
+        let file_path = path.to_str().context(FileNameIllegalSnafu {
+            file_name: config.log_file_dir.clone(),
         })?;
         let file = LogFile::open(file_path, config).await?;
         files.insert(0, Arc::new(file));
         Ok(())
     }
 
-    pub async fn load_dir(p: impl AsRef<str>, config: &LogConfig) -> Result<FileMap> {
+    pub async fn load_dir(path: impl AsRef<str>, config: &LogConfig) -> Result<FileMap> {
         let mut map = FileMap::new();
-        let mut dir = tokio::fs::read_dir(Path::new(p.as_ref()))
+        let mut dir = tokio::fs::read_dir(Path::new(path.as_ref()))
             .await
             .context(IoSnafu)?;
 
         while let Some(f) = dir.next_entry().await.context(IoSnafu)? {
             let path_buf = f.path();
-            let path = path_buf.to_str().ok_or(Error::FileNameIllegal {
-                file_name: p.as_ref().to_string(),
+            let path = path_buf.to_str().context(FileNameIllegalSnafu {
+                file_name: path.as_ref().to_string(),
             })?;
             let file_name = FileName::try_from(path)?;
             let start_id = file_name.entry_id();
@@ -127,38 +121,35 @@ impl LocalFileLogStoreImpl {
 
     /// Mark current active file as closed and create a new log file for writing.
     async fn roll_next(&self, active: LogFileRef) -> Result<()> {
-        // create and start a new log file
-        if !active.try_seal() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+        // acquires lock
+        let mut files = self.files.write().await;
+
+        // if active is already sealed, then just return.
+        if active.is_seal() {
             return Ok(());
         }
+
+        // create and start a new log file
         let entry_id = active.next_entry_id();
         let path_buf =
             Path::new(&self.config.log_file_dir).join(FileName::log(entry_id).to_string());
-        let path = path_buf.to_str().ok_or(Error::FileNameIllegal {
+        let path = path_buf.to_str().context(FileNameIllegalSnafu {
             file_name: self.config.log_file_dir.clone(),
         })?;
 
-        let new_file = {
-            // FIXME(hl): make sure to unseal this log file when roll file failed
-            let mut new_file = LogFile::open(path, &self.config).await?;
-            new_file.start().await?;
-            new_file
-        };
+        let mut new_file = LogFile::open(path, &self.config).await?;
+        new_file.start().await?;
 
         let new_file = Arc::new(new_file);
+        files.insert(new_file.start_entry_id(), new_file.clone());
 
-        self.files
-            .write()
-            .await
-            .insert(new_file.start_entry_id(), new_file.clone());
-
-        let prev = self.active.swap(new_file);
+        self.active.swap(new_file);
+        active.try_seal();
         tokio::spawn(async move {
-            prev.stop().await.unwrap();
-            info!("Sealed log file {} stopped.", prev.file_name());
+            active.stop().await.unwrap();
+            info!("Sealed log file {} stopped.", active.file_name());
         });
-        Ok(())
+        Ok(()) // release lock
     }
 
     pub fn active_file(&self) -> Arc<LogFile> {
@@ -171,9 +162,13 @@ impl LogStore for LocalFileLogStoreImpl {
     type Error = Error;
     type Namespace = LocalNamespace;
     type Entry = EntryImpl;
-    type AppendResult = AppendResultImpl;
+    type AppendResponse = AppendResultImpl;
 
-    async fn append(&self, _ns: Self::Namespace, mut e: Self::Entry) -> Result<Self::AppendResult> {
+    async fn append(
+        &self,
+        _ns: Self::Namespace,
+        mut e: Self::Entry,
+    ) -> Result<Self::AppendResponse> {
         // TODO(hl): configurable retry times
         for _ in 0..3 {
             let current_active_file = self.active_file();

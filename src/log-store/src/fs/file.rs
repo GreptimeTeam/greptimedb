@@ -1,15 +1,14 @@
 use std::fmt::{Debug, Formatter};
 use std::io::SeekFrom;
+use std::sync::atomic::Ordering::Acquire;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 
 use async_stream::stream;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use common_telemetry::logging::{error, info};
 use common_telemetry::warn;
-use futures_util::task::noop_waker;
 use futures_util::StreamExt;
 use memmap2::{Mmap, MmapOptions};
 use snafu::{Backtrace, GenerateImplicitData, ResultExt};
@@ -18,6 +17,7 @@ use store_api::logstore::entry_stream::EntryStream;
 use store_api::logstore::namespace::Namespace;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver as MpscReceiver;
 use tokio::sync::mpsc::Sender as MpscSender;
 use tokio::sync::oneshot::Sender as OneshotSender;
@@ -49,6 +49,7 @@ pub struct LogFile {
     max_file_size: usize,
     join_handle: Mutex<Option<JoinHandle<Result<()>>>>,
     sealed: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
 }
 
 impl Debug for LogFile {
@@ -75,9 +76,7 @@ impl LogFile {
             .create(true)
             .open(path.clone())
             .await
-            .context(OpenLogSnafu {
-                file_name: path.clone(),
-            })?;
+            .context(OpenLogSnafu { file_name: &path })?;
 
         let file_name: FileName = path.as_str().try_into()?;
         let start_entry_id = file_name.entry_id();
@@ -96,6 +95,7 @@ impl LogFile {
             max_file_size: config.max_log_file_size,
             join_handle: Mutex::new(None),
             sealed: Arc::new(AtomicBool::new(false)),
+            stopped: Arc::new(AtomicBool::new(false)),
         };
 
         let metadata = log.file.read().await.metadata().await.context(IoSnafu)?;
@@ -132,7 +132,7 @@ impl LogFile {
     /// Creates a file mmap region.
     async fn map(&self, start: u64, length: usize) -> Result<Mmap> {
         unsafe {
-            let file = self.file.read().await.try_clone().await.unwrap();
+            let file = self.file.read().await.try_clone().await.context(IoSnafu)?;
             MmapOptions::new()
                 .offset(start)
                 .len(length)
@@ -144,7 +144,7 @@ impl LogFile {
     /// Returns the persisted size of current log file.
     #[allow(unused)]
     #[inline]
-    pub fn size(&self) -> usize {
+    pub fn persisted_size(&self) -> usize {
         self.flush_offset.load(Ordering::Relaxed)
     }
 
@@ -153,7 +153,7 @@ impl LogFile {
         self.next_entry_id.load(Ordering::Relaxed)
     }
 
-    /// Increases offset field by `delta` and return the previous value.
+    /// Increases write offset field by `delta` and return the previous value.
     #[inline]
     fn inc_offset(&self, delta: usize) -> usize {
         // Relaxed order is enough since no sync-with relationship
@@ -161,7 +161,7 @@ impl LogFile {
         self.write_offset.fetch_add(delta, Ordering::Relaxed)
     }
 
-    /// Increases offset field by `delta` and return the previous value.
+    /// Increases next entry field by `delta` and return the previous value.
     fn inc_entry_id(&self) -> u64 {
         // Relaxed order is enough since no sync-with relationship
         // between `offset` and any other field.
@@ -176,27 +176,36 @@ impl LogFile {
         let write_offset = self.write_offset.clone();
         let flush_offset = self.flush_offset.clone();
 
+        let stopped = self.stopped.clone();
+
         if let Some(mut rx) = self.pending_request_rx.take() {
             let handle = tokio::spawn(async move {
-                let waker = noop_waker();
-                let mut ctx = Context::from_waker(&waker);
                 let mut batch: Vec<AppendRequest> = Vec::with_capacity(LOG_WRITER_BATCH_SIZE);
 
                 let mut error_occurred = false;
-                loop {
-                    match rx.poll_recv(&mut ctx) {
-                        Poll::Ready(Some(req)) => {
-                            batch.push(req);
-                        }
-                        Poll::Ready(None) => {
-                            error_occurred = true;
-                        }
-                        Poll::Pending => {
-                            if batch.is_empty() {
-                                notify.notified().await;
-                            } else {
-                                break;
+                while !stopped.load(Ordering::Acquire) {
+                    for _ in 0..LOG_WRITER_BATCH_SIZE {
+                        match rx.try_recv() {
+                            Ok(req) => {
+                                batch.push(req);
                             }
+                            Err(e) => match e {
+                                TryRecvError::Empty => {
+                                    if batch.is_empty() {
+                                        notify.notified().await;
+                                        if stopped.load(Ordering::Acquire) {
+                                            break;
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                TryRecvError::Disconnected => {
+                                    info!("Channel disconnected...");
+                                    error_occurred = true;
+                                    break;
+                                }
+                            },
                         }
                     }
 
@@ -216,6 +225,15 @@ impl LogFile {
                         req.complete();
                     }
                 }
+
+                // drain all pending request on stopping.
+                let write_offset_read = write_offset.load(Ordering::Relaxed);
+                if file.sync_all().await.is_ok() {
+                    flush_offset.store(write_offset_read, Ordering::Release);
+                    while let Ok(req) = rx.try_recv() {
+                        req.complete()
+                    }
+                }
                 Ok(())
             });
 
@@ -229,14 +247,14 @@ impl LogFile {
     /// # Panics
     /// Panics when a log file is stopped while not being started ever.
     pub async fn stop(&self) -> Result<()> {
-        self.notify.notify_one();
+        self.stopped.store(true, Ordering::Release);
         let join_handle = self
             .join_handle
             .lock()
             .unwrap()
             .take()
             .expect("Join handle should present");
-
+        self.notify.notify_waiters();
         let res = join_handle.await.unwrap();
         info!("LogFile task finished: {:?}", res);
         res
@@ -327,6 +345,9 @@ impl LogFile {
 
     /// Appends an entry to `LogFile` and return a `Result` containing the id of entry appended.
     pub async fn append<T: Entry>(&self, e: &mut T) -> Result<AppendResultImpl> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Error::Eof);
+        }
         e.set_id(0);
         let mut serialized = e.serialize();
         let size = serialized.len();
@@ -357,27 +378,35 @@ impl LogFile {
 
         let (tx, rx) = oneshot::channel();
 
-        self.pending_request_tx
+        if self
+            .pending_request_tx
             .send(AppendRequest {
                 tx,
                 offset: entry_offset,
                 id: entry_id,
             })
             .await
-            .expect("Send failed");
-
-        self.notify.notify_one(); // notify flush thread.
-        rx.await.map_err(|e| {
-            warn!(
-                "Error while waiting for append result:{}, file {}",
-                e,
-                self.name.to_string()
-            );
-            Error::Internal {
-                msg: "Sender already dropped".to_string(),
-                backtrace: Backtrace::generate(),
-            }
-        })
+            .is_err()
+        {
+            self.file.write().await.sync_all().await.context(IoSnafu)?;
+            Ok(AppendResultImpl {
+                offset: entry_offset,
+                entry_id,
+            })
+        } else {
+            self.notify.notify_one(); // notify flush thread.
+            rx.await.map_err(|e| {
+                warn!(
+                    "Error while waiting for append result:{}, file {}",
+                    e,
+                    self.name.to_string()
+                );
+                Error::Internal {
+                    msg: "Sender already dropped".to_string(),
+                    backtrace: Backtrace::generate(),
+                }
+            })
+        }
     }
 
     #[inline]
@@ -385,6 +414,11 @@ impl LogFile {
         self.sealed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    #[inline]
+    pub fn is_seal(&self) -> bool {
+        self.sealed.load(Acquire)
     }
 
     #[inline]
@@ -401,7 +435,7 @@ impl LogFile {
 impl ToString for LogFile {
     fn to_string(&self) -> String {
         format!("LogFile{{ name: {}, write_offset: {}, flush_offset: {}, start_entry_id: {}, entry_id_counter: {} }}",
-                self.name.to_string(), self.write_offset.load(Ordering::Relaxed), self.flush_offset.load(Ordering::Relaxed), self.start_entry_id, self.next_entry_id.load(Ordering::Relaxed))
+                self.name, self.write_offset.load(Ordering::Relaxed), self.flush_offset.load(Ordering::Relaxed), self.start_entry_id, self.next_entry_id.load(Ordering::Relaxed))
     }
 }
 

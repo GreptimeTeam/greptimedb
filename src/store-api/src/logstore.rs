@@ -16,14 +16,14 @@ pub trait LogStore {
     type Error: ErrorExt + Send + Sync;
     type Namespace: Namespace;
     type Entry: Entry;
-    type AppendResult: AppendResult;
+    type AppendResponse: AppendResponse;
 
     /// Append an `Entry` to WAL with given namespace
     async fn append(
         &self,
         ns: Self::Namespace,
         mut e: Self::Entry,
-    ) -> Result<Self::AppendResult, Self::Error>;
+    ) -> Result<Self::AppendResponse, Self::Error>;
 
     // Append a batch of entries atomically and return the offset of first entry.
     async fn append_batch(
@@ -49,8 +49,8 @@ pub trait LogStore {
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
 }
 
-pub trait AppendResult: Send + Sync {
-    fn get_entry_id(&self) -> Id;
+pub trait AppendResponse: Send + Sync {
+    fn entry_id(&self) -> Id;
 
-    fn get_offset(&self) -> Offset;
+    fn offset(&self) -> Offset;
 }
