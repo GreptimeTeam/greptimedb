@@ -73,8 +73,8 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
     }
 }
 
+/// FIXME(boyan) impl system catalog to keep table metadata.
 struct MitoEngineInner<Store: StorageEngine + 'static> {
-    // FIXME(boyan) impl system catalog to keep table metadata.
     tables: RwLock<HashMap<String, TableRef>>,
     storage_engine: Store,
     next_table_id: AtomicU64,

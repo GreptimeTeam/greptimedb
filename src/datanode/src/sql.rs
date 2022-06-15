@@ -10,7 +10,7 @@ use snafu::ensure;
 use snafu::OptionExt;
 use snafu::ResultExt;
 use sql::ast::Value as SqlValue;
-use sql::statements::statement::Statement;
+use sql::statements::{insert::Insert, statement::Statement};
 use table::engine::{EngineContext, TableEngine};
 use table::requests::*;
 
@@ -47,12 +47,12 @@ where
                     .context(GetTableSnafu { table_name })?
                     .context(TableNotFoundSnafu { table_name })?;
 
-                let affetced_rows = table
+                let affected_rows = table
                     .insert(req)
                     .await
                     .context(InsertSnafu { table_name })?;
 
-                Ok(Output::AffectedRows(affetced_rows))
+                Ok(Output::AffectedRows(affected_rows))
             }
         }
     }
@@ -64,130 +64,140 @@ where
         statement: Statement,
     ) -> Result<SqlRequest> {
         match statement {
-            Statement::Insert(stmt) => {
-                let columns = stmt.columns();
-                let values = stmt.values();
-                //TODO(dennis): table name may be in the form of `catalog.schema.table`
-                let table_name = stmt.table_name();
-
-                ensure!(
-                    columns.is_empty() || values.iter().all(|v| v.len() == columns.len()),
-                    ColumnValuesNumberMismatchSnafu {
-                        columns: columns.len(),
-                        values: values.len(),
-                    }
-                );
-                let table =
-                    schema_provider
-                        .table(&table_name)
-                        .with_context(|| TableNotFoundSnafu {
-                            table_name: table_name.clone(),
-                        })?;
-                let schema = table.schema();
-                let columns_number = if columns.is_empty() {
-                    schema.column_schemas().len()
-                } else {
-                    columns.len()
-                };
-                let rows_num = values.len();
-
-                let mut columns_builders: Vec<(&String, &ConcreteDataType, VectorBuilder)> =
-                    Vec::with_capacity(columns_number);
-
-                if columns.is_empty() {
-                    for column_schema in schema.column_schemas() {
-                        let data_type = &column_schema.data_type;
-                        columns_builders.push((
-                            &column_schema.name,
-                            data_type,
-                            VectorBuilder::with_capacity(data_type.clone(), rows_num),
-                        ));
-                    }
-                } else {
-                    for column_name in columns {
-                        let column_schema = schema
-                            .column_schema_by_name(column_name)
-                            .with_context(|| ColumnNotFoundSnafu {
-                                table_name: table_name.clone(),
-                                column_name: column_name.to_string(),
-                            })?;
-                        let data_type = &column_schema.data_type;
-                        columns_builders.push((
-                            column_name,
-                            data_type,
-                            VectorBuilder::with_capacity(data_type.clone(), rows_num),
-                        ));
-                    }
-                }
-
-                // Convert rows into columns
-                for row in values {
-                    ensure!(
-                        row.len() == columns_number,
-                        ColumnValuesNumberMismatchSnafu {
-                            columns: columns_number,
-                            values: row.len(),
-                        }
-                    );
-
-                    for (i, sql_val) in row.iter().enumerate() {
-                        let (column_name, data_type, builder) =
-                            columns_builders.get_mut(i).expect("unreachable");
-                        Self::add_row_to_vector(column_name, data_type, sql_val, builder)?;
-                    }
-                }
-
-                Ok(SqlRequest::Insert(InsertRequest {
-                    table_name,
-                    columns_values: columns_builders
-                        .into_iter()
-                        .map(|(c, _, mut b)| (c.to_owned(), b.finish()))
-                        .collect(),
-                }))
-            }
+            Statement::Insert(stmt) => self.insert_to_request(schema_provider, *stmt),
             _ => unimplemented!(),
         }
     }
 
-    fn add_row_to_vector(
-        column_name: &str,
-        data_type: &ConcreteDataType,
-        sql_val: &SqlValue,
-        builder: &mut VectorBuilder,
-    ) -> Result<()> {
-        let value = match sql_val {
-            SqlValue::Number(n, _) => sql_number_to_value(data_type, n)?,
-            SqlValue::Null => Value::Null,
-            SqlValue::Boolean(b) => {
-                ensure!(
-                    data_type.is_boolean(),
-                    ColumnTypeMistchSnafu {
-                        column_name,
-                        expect: data_type.clone(),
-                        actual: ConcreteDataType::boolean_datatype(),
-                    }
-                );
+    fn insert_to_request(
+        &self,
+        schema_provider: SchemaProviderRef,
+        stmt: Insert,
+    ) -> Result<SqlRequest> {
+        let columns = stmt.columns();
+        let values = stmt.values();
+        //TODO(dennis): table name may be in the form of `catalog.schema.table`,
+        //   but we don't process it right now.
+        let table_name = stmt.table_name();
 
-                (*b).into()
-            }
-            SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
-                ensure!(
-                    data_type.is_string(),
-                    ColumnTypeMistchSnafu {
-                        column_name,
-                        expect: data_type.clone(),
-                        actual: ConcreteDataType::string_datatype(),
-                    }
-                );
-
-                s.to_owned().into()
-            }
-
-            _ => todo!("Other sql value"),
+        let table = schema_provider
+            .table(&table_name)
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_name.clone(),
+            })?;
+        let schema = table.schema();
+        let columns_num = if columns.is_empty() {
+            schema.column_schemas().len()
+        } else {
+            columns.len()
         };
-        builder.push(&value);
-        Ok(())
+        let rows_num = values.len();
+
+        let mut columns_builders: Vec<(&String, &ConcreteDataType, VectorBuilder)> =
+            Vec::with_capacity(columns_num);
+
+        if columns.is_empty() {
+            for column_schema in schema.column_schemas() {
+                let data_type = &column_schema.data_type;
+                columns_builders.push((
+                    &column_schema.name,
+                    data_type,
+                    VectorBuilder::with_capacity(data_type.clone(), rows_num),
+                ));
+            }
+        } else {
+            for column_name in columns {
+                let column_schema =
+                    schema.column_schema_by_name(column_name).with_context(|| {
+                        ColumnNotFoundSnafu {
+                            table_name: table_name.clone(),
+                            column_name: column_name.to_string(),
+                        }
+                    })?;
+                let data_type = &column_schema.data_type;
+                columns_builders.push((
+                    column_name,
+                    data_type,
+                    VectorBuilder::with_capacity(data_type.clone(), rows_num),
+                ));
+            }
+        }
+
+        // Convert rows into columns
+        for row in values {
+            ensure!(
+                row.len() == columns_num,
+                ColumnValuesNumberMismatchSnafu {
+                    columns: columns_num,
+                    values: row.len(),
+                }
+            );
+
+            for (i, sql_val) in row.iter().enumerate() {
+                let (column_name, data_type, builder) =
+                    columns_builders.get_mut(i).expect("unreachable");
+
+                add_row_to_vector(column_name, data_type, sql_val, builder)?;
+            }
+        }
+
+        Ok(SqlRequest::Insert(InsertRequest {
+            table_name,
+            columns_values: columns_builders
+                .into_iter()
+                .map(|(c, _, mut b)| (c.to_owned(), b.finish()))
+                .collect(),
+        }))
     }
+}
+
+fn add_row_to_vector(
+    column_name: &str,
+    data_type: &ConcreteDataType,
+    sql_val: &SqlValue,
+    builder: &mut VectorBuilder,
+) -> Result<()> {
+    let value = parse_sql_value(column_name, data_type, sql_val)?;
+    builder.push(&value);
+
+    Ok(())
+}
+
+fn parse_sql_value(
+    column_name: &str,
+    data_type: &ConcreteDataType,
+    sql_val: &SqlValue,
+) -> Result<Value> {
+    Ok(match sql_val {
+        SqlValue::Number(n, _) => sql_number_to_value(data_type, n)?,
+        SqlValue::Null => Value::Null,
+        SqlValue::Boolean(b) => {
+            ensure!(
+                data_type.is_boolean(),
+                ColumnTypeMistchSnafu {
+                    column_name,
+                    expect: data_type.clone(),
+                    actual: ConcreteDataType::boolean_datatype(),
+                }
+            );
+
+            (*b).into()
+        }
+        SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
+            ensure!(
+                data_type.is_string(),
+                ColumnTypeMistchSnafu {
+                    column_name,
+                    expect: data_type.clone(),
+                    actual: ConcreteDataType::string_datatype(),
+                }
+            );
+
+            s.to_owned().into()
+        }
+
+        _ => todo!("Other sql value"),
+    })
 }
 
 macro_rules! parse_number_to_value {
