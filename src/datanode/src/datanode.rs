@@ -13,7 +13,7 @@ pub struct DatanodeOptions {
     pub http_addr: String,
     pub rpc_addr: String,
 }
-/// DataNode service.
+/// Datanode service.
 pub struct Datanode {
     opts: DatanodeOptions,
     services: Services,
