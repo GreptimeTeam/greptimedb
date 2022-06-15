@@ -31,6 +31,10 @@ impl<R: Region + 'static> Table for MitoTable<R> {
     }
 
     async fn insert(&self, request: InsertRequest) -> TableResult<usize> {
+        if request.columns_values.is_empty() {
+            return Ok(0);
+        }
+
         let mut write_request = R::WriteRequest::new(self.schema());
 
         //FIXME(boyan): we can only insert to demo table right now

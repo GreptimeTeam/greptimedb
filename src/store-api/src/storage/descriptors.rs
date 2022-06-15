@@ -295,4 +295,10 @@ mod tests {
             .build();
         assert_eq!(1, desc.columns.len());
     }
+
+    #[test]
+    fn test_gen_region_name() {
+        assert_eq!("r_0", gen_region_name(0));
+        assert_eq!("r_99", gen_region_name(99));
+    }
 }

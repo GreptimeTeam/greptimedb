@@ -3106,10 +3106,12 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "datatypes",
  "snafu",
  "storage",
  "store-api",
  "table",
+ "tokio",
 ]
 
 [[package]]

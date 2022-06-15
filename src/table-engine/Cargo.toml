@@ -14,3 +14,7 @@ common-telemetry = {path = "../common/telemetry" }
 snafu = { version = "0.7", features = ["backtraces"] }
 storage ={ path = "../storage" }
 store-api ={ path = "../store-api" }
+
+[dev-dependencies]
+datatypes = { path = "../datatypes" }
+tokio = { version = "1.18", features = ["full"] }
