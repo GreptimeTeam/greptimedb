@@ -18,3 +18,17 @@ impl From<DfExpr> for Expr {
         Self { df_expr }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_df_expr() {
+        let df_expr = DfExpr::Wildcard;
+
+        let expr: Expr = df_expr.into();
+
+        assert_eq!(DfExpr::Wildcard, *expr.df_expr());
+    }
+}

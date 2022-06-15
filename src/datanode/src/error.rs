@@ -54,7 +54,7 @@ pub enum Error {
         expect,
         actual
     ))]
-    ColumnTypeMistch {
+    ColumnTypeMismatch {
         column_name: String,
         expect: ConcreteDataType,
         actual: ConcreteDataType,
@@ -90,7 +90,7 @@ impl ErrorExt for Error {
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
             Error::ColumnValuesNumberMismatch { .. }
             | Error::ParseSqlValue { .. }
-            | Error::ColumnTypeMistch { .. } => StatusCode::InvalidArguments,
+            | Error::ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
             Error::Insert { source, .. } => source.status_code(),
         }
     }

@@ -899,10 +899,12 @@ name = "datanode"
 version = "0.1.0"
 dependencies = [
  "arrow2",
+ "async-trait",
  "axum",
  "axum-macros",
  "axum-test-helper",
  "common-error",
+ "common-query",
  "common-recordbatch",
  "common-telemetry",
  "datatypes",

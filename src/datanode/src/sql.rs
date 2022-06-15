@@ -15,7 +15,7 @@ use table::engine::{EngineContext, TableEngine};
 use table::requests::*;
 
 use crate::error::{
-    ColumnNotFoundSnafu, ColumnTypeMistchSnafu, ColumnValuesNumberMismatchSnafu, GetTableSnafu,
+    ColumnNotFoundSnafu, ColumnTypeMismatchSnafu, ColumnValuesNumberMismatchSnafu, GetTableSnafu,
     InsertSnafu, ParseSqlValueSnafu, Result, TableNotFoundSnafu,
 };
 
@@ -174,7 +174,7 @@ fn parse_sql_value(
         SqlValue::Boolean(b) => {
             ensure!(
                 data_type.is_boolean(),
-                ColumnTypeMistchSnafu {
+                ColumnTypeMismatchSnafu {
                     column_name,
                     expect: data_type.clone(),
                     actual: ConcreteDataType::boolean_datatype(),
@@ -186,7 +186,7 @@ fn parse_sql_value(
         SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
             ensure!(
                 data_type.is_string(),
-                ColumnTypeMistchSnafu {
+                ColumnTypeMismatchSnafu {
                     column_name,
                     expect: data_type.clone(),
                     actual: ConcreteDataType::string_datatype(),
@@ -244,5 +244,176 @@ where
             msg: format!("Fail to parse number {}, {:?}", n, e),
         }
         .fail(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::sync::Arc;
+
+    use common_query::logical_plan::Expr;
+    use common_recordbatch::SendableRecordBatchStream;
+    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+    use datatypes::value::OrderedFloat;
+    use query::catalog::memory;
+    use query::catalog::schema::SchemaProvider;
+    use query::error::Result as QueryResult;
+    use query::QueryEngineFactory;
+    use storage::EngineImpl;
+    use table::error::Result as TableResult;
+    use table::{Table, TableRef};
+    use table_engine::engine::MitoEngine;
+
+    use super::*;
+
+    #[test]
+    fn test_sql_number_to_value() {
+        let v = sql_number_to_value(&ConcreteDataType::float64_datatype(), "3.0").unwrap();
+        assert_eq!(Value::Float64(OrderedFloat(3.0)), v);
+
+        let v = sql_number_to_value(&ConcreteDataType::int32_datatype(), "999").unwrap();
+        assert_eq!(Value::Int32(999), v);
+
+        let v = sql_number_to_value(&ConcreteDataType::string_datatype(), "999");
+        assert!(v.is_err(), "parse value error is: {:?}", v);
+    }
+
+    #[test]
+    fn test_parse_sql_value() {
+        let sql_val = SqlValue::Null;
+        assert_eq!(
+            Value::Null,
+            parse_sql_value("a", &ConcreteDataType::float64_datatype(), &sql_val).unwrap()
+        );
+
+        let sql_val = SqlValue::Boolean(true);
+        assert_eq!(
+            Value::Boolean(true),
+            parse_sql_value("a", &ConcreteDataType::boolean_datatype(), &sql_val).unwrap()
+        );
+
+        let sql_val = SqlValue::Number("3.0".to_string(), false);
+        assert_eq!(
+            Value::Float64(OrderedFloat(3.0)),
+            parse_sql_value("a", &ConcreteDataType::float64_datatype(), &sql_val).unwrap()
+        );
+
+        let sql_val = SqlValue::Number("3.0".to_string(), false);
+        let v = parse_sql_value("a", &ConcreteDataType::boolean_datatype(), &sql_val);
+        assert!(v.is_err());
+        assert!(format!("{:?}", v)
+            .contains("Fail to parse number 3.0, invalid column type: Boolean(BooleanType)"));
+
+        let sql_val = SqlValue::Boolean(true);
+        let v = parse_sql_value("a", &ConcreteDataType::float64_datatype(), &sql_val);
+        assert!(v.is_err());
+        assert!(format!("{:?}", v).contains(
+            "column_name: \"a\", expect: Float64(Float64), actual: Boolean(BooleanType)"
+        ));
+    }
+
+    struct DemoTable;
+
+    #[async_trait::async_trait]
+    impl Table for DemoTable {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn schema(&self) -> SchemaRef {
+            let column_schemas = vec![
+                ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+                ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
+                ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
+                ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
+            ];
+
+            Arc::new(Schema::new(column_schemas))
+        }
+        async fn scan(
+            &self,
+            _projection: &Option<Vec<usize>>,
+            _filters: &[Expr],
+            _limit: Option<usize>,
+        ) -> TableResult<SendableRecordBatchStream> {
+            unimplemented!();
+        }
+    }
+
+    struct MockSchemaProvider;
+
+    impl SchemaProvider for MockSchemaProvider {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn table_names(&self) -> Vec<String> {
+            vec!["demo".to_string()]
+        }
+
+        fn table(&self, name: &str) -> Option<TableRef> {
+            assert_eq!(name, "demo");
+            Some(Arc::new(DemoTable {}))
+        }
+
+        fn register_table(&self, _name: String, _table: TableRef) -> QueryResult<Option<TableRef>> {
+            unimplemented!();
+        }
+        fn deregister_table(&self, _name: &str) -> QueryResult<Option<TableRef>> {
+            unimplemented!();
+        }
+        fn table_exist(&self, name: &str) -> bool {
+            name == "demo"
+        }
+    }
+
+    #[test]
+    fn test_statement_to_request() {
+        let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let factory = QueryEngineFactory::new(catalog_list);
+        let query_engine = factory.query_engine().clone();
+
+        let sql = r#"insert into demo(host, cpu, memory, ts) values
+                           ('host1', 66.6, 1024, 1655276557000),
+                           ('host2', 88.8,  333.3, 1655276558000)
+                           "#;
+
+        let table_engine = MitoEngine::<EngineImpl>::new(EngineImpl::new());
+        let sql_handler = SqlHandler::new(table_engine);
+
+        let stmt = query_engine.sql_to_statement(sql).unwrap();
+        let schema_provider = Arc::new(MockSchemaProvider {});
+        let request = sql_handler
+            .statement_to_request(schema_provider, stmt)
+            .unwrap();
+
+        match request {
+            SqlRequest::Insert(req) => {
+                assert_eq!(req.table_name, "demo");
+                let columns_values = req.columns_values;
+                assert_eq!(4, columns_values.len());
+
+                let hosts = &columns_values["host"];
+                assert_eq!(2, hosts.len());
+                assert_eq!(Value::from("host1"), hosts.get(0));
+                assert_eq!(Value::from("host2"), hosts.get(1));
+
+                let cpus = &columns_values["cpu"];
+                assert_eq!(2, cpus.len());
+                assert_eq!(Value::from(66.6f64), cpus.get(0));
+                assert_eq!(Value::from(88.8f64), cpus.get(1));
+
+                let memories = &columns_values["memory"];
+                assert_eq!(2, memories.len());
+                assert_eq!(Value::from(1024f64), memories.get(0));
+                assert_eq!(Value::from(333.3f64), memories.get(1));
+
+                let ts = &columns_values["ts"];
+                assert_eq!(2, ts.len());
+                assert_eq!(Value::from(1655276557000i64), ts.get(0));
+                assert_eq!(Value::from(1655276558000i64), ts.get(1));
+            }
+        }
     }
 }
