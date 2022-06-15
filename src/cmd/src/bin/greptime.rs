@@ -1,33 +1,72 @@
+use std::fmt;
+
 use clap::Parser;
-use cmd::opts::{GrepTimeOpts, NodeType};
-use common_telemetry::{self, logging::error};
-use datanode::DataNode;
+use cmd::datanode;
+use cmd::error::Result;
+use common_telemetry::{self, logging::error, logging::info};
 
-async fn datanode_main(_opts: &GrepTimeOpts) {
-    match DataNode::new() {
-        Ok(data_node) => {
-            if let Err(e) = data_node.start().await {
-                error!(e; "Fail to start data node");
-            }
+#[derive(Parser)]
+#[clap(name = "greptimedb")]
+struct Command {
+    #[clap(long, default_value = "/tmp/greptime/logs")]
+    log_dir: String,
+    #[clap(long, default_value = "info")]
+    log_level: String,
+    #[clap(subcommand)]
+    subcmd: SubCommand,
+}
+
+impl Command {
+    async fn run(self) -> Result<()> {
+        self.subcmd.run().await
+    }
+}
+
+#[derive(Parser)]
+enum SubCommand {
+    #[clap(name = "datanode")]
+    Datanode(datanode::Command),
+}
+
+impl SubCommand {
+    async fn run(self) -> Result<()> {
+        match self {
+            SubCommand::Datanode(cmd) => cmd.run().await,
         }
+    }
+}
 
-        Err(e) => error!(e; "Fail to new data node"),
+impl fmt::Display for SubCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SubCommand::Datanode(..) => write!(f, "greptime-datanode"),
+        }
     }
 }
 
 #[tokio::main]
-async fn main() {
-    let opts = GrepTimeOpts::parse();
-    let node_type = opts.node_type;
-    // TODO(dennis): 1. adds ip/port to app
-    //                          2. config log dir
-    let app = format!("{node_type:?}-node").to_lowercase();
+async fn main() -> Result<()> {
+    let cmd = Command::parse();
+    // TODO(dennis):
+    // 1. adds ip/port to app
+    let app_name = &cmd.subcmd.to_string();
+    let log_dir = &cmd.log_dir;
+    let log_level = &cmd.log_level;
 
     common_telemetry::set_panic_hook();
     common_telemetry::init_default_metrics_recorder();
-    let _guard = common_telemetry::init_global_logging(&app, "logs", "info", false);
+    let _guard = common_telemetry::init_global_logging(app_name, log_dir, log_level, false);
 
-    match node_type {
-        NodeType::Data => datanode_main(&opts).await,
+    tokio::select! {
+        result = cmd.run() => {
+            if let Err(err) = result {
+                error!(err; "Fatal error occurs!");
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Goodbye!");
+        }
     }
+
+    Ok(())
 }

@@ -18,7 +18,7 @@ use snafu::ResultExt;
 use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
-use crate::error::{Result, StartHttpSnafu};
+use crate::error::{ParseAddrSnafu, Result, StartHttpSnafu};
 use crate::server::InstanceRef;
 
 /// Http server
@@ -118,17 +118,14 @@ impl HttpServer {
             )
     }
 
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&self, addr: &str) -> Result<()> {
         let app = self.make_app();
-
-        let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-        info!("Datanode HTTP server is listening on {}", addr);
-        let server = axum::Server::bind(&addr).serve(app.into_make_service());
+        let socket_addr: SocketAddr = addr.parse().context(ParseAddrSnafu { addr })?;
+        info!("Datanode HTTP server is listening on {}", socket_addr);
+        let server = axum::Server::bind(&socket_addr).serve(app.into_make_service());
         let graceful = server.with_graceful_shutdown(shutdown_signal());
 
-        graceful.await.context(StartHttpSnafu)?;
-
-        Ok(())
+        graceful.await.context(StartHttpSnafu)
     }
 }
 

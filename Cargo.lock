@@ -527,8 +527,10 @@ name = "cmd"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "common-error",
  "common-telemetry",
  "datanode",
+ "snafu",
  "tokio",
 ]
 
