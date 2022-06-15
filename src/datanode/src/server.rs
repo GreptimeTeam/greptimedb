@@ -20,6 +20,6 @@ impl Services {
     }
 
     pub async fn start(&self, opts: &DatanodeOptions) -> Result<()> {
-        self.http_server.start(opts.http_addr.clone()).await
+        self.http_server.start(&opts.http_addr).await
     }
 }

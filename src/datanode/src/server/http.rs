@@ -118,9 +118,9 @@ impl HttpServer {
             )
     }
 
-    pub async fn start(&self, addr: String) -> Result<()> {
+    pub async fn start(&self, addr: &str) -> Result<()> {
         let app = self.make_app();
-        let socket_addr: SocketAddr = addr.parse().context(ParseAddrSnafu { addr: &addr })?;
+        let socket_addr: SocketAddr = addr.parse().context(ParseAddrSnafu { addr })?;
         info!("Datanode HTTP server is listening on {}", socket_addr);
         let server = axum::Server::bind(&socket_addr).serve(app.into_make_service());
         let graceful = server.with_graceful_shutdown(shutdown_signal());
