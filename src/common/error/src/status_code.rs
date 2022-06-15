@@ -31,6 +31,8 @@ pub enum StatusCode {
     // ====== Begin of catalog related status code =====
     /// Table already exists.
     TableAlreadyExists,
+    TableNotFound,
+    TableColumnNotFound,
     // ====== End of catalog related status code =======
 }
 

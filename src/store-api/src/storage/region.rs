@@ -52,5 +52,5 @@ pub trait Region: Send + Sync + Clone {
 }
 
 /// Context for write operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WriteContext {}

@@ -139,7 +139,7 @@ impl TableProvider for DfTableProviderAdapter {
         filters: &[DfExpr],
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Expr::new).collect();
+        let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Into::into).collect();
 
         let stream = self.table.scan(projection, &filters, limit).await?;
         Ok(Arc::new(ExecutionPlanAdapter {
@@ -151,7 +151,7 @@ impl TableProvider for DfTableProviderAdapter {
     fn supports_filter_pushdown(&self, filter: &DfExpr) -> DfResult<DfTableProviderFilterPushDown> {
         let p = self
             .table
-            .supports_filter_pushdown(&Expr::new(filter.clone()))?;
+            .supports_filter_pushdown(&filter.clone().into())?;
         match p {
             TableProviderFilterPushDown::Unsupported => {
                 Ok(DfTableProviderFilterPushDown::Unsupported)

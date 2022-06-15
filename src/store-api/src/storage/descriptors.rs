@@ -6,6 +6,14 @@ use crate::storage::{consts, ColumnSchema, ConcreteDataType};
 pub type ColumnId = u32;
 /// Id of column family, unique in each region.
 pub type ColumnFamilyId = u32;
+pub type RegionId = u32;
+/// Default region name prefix
+pub const REGION_PREFIX: &str = "r_";
+
+#[inline]
+pub fn gen_region_name(id: RegionId) -> String {
+    format!("{}{}", REGION_PREFIX, id)
+}
 
 // TODO(yingwen): Validate default value has same type with column, and name is a valid column name.
 /// A [ColumnDescriptor] contains information to create a column.
@@ -52,6 +60,7 @@ pub struct ColumnFamilyDescriptor {
 /// A [RegionDescriptor] contains information to create a region.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegionDescriptor {
+    pub id: RegionId,
     /// Region name.
     pub name: String,
     /// Row key descriptor of this region.

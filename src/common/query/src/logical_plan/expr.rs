@@ -8,11 +8,13 @@ pub struct Expr {
 }
 
 impl Expr {
-    pub fn new(df_expr: DfExpr) -> Self {
-        Self { df_expr }
-    }
-
     pub fn df_expr(&self) -> &DfExpr {
         &self.df_expr
+    }
+}
+
+impl From<DfExpr> for Expr {
+    fn from(df_expr: DfExpr) -> Self {
+        Self { df_expr }
     }
 }

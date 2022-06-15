@@ -13,7 +13,7 @@ pub trait WriteRequest: Send {
 }
 
 /// Put multiple rows.
-pub trait PutOperation {
+pub trait PutOperation: Send {
     type Error: ErrorExt + Send + Sync;
 
     fn new() -> Self;

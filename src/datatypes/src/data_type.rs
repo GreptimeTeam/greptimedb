@@ -42,6 +42,14 @@ impl ConcreteDataType {
         )
     }
 
+    pub fn is_boolean(&self) -> bool {
+        matches!(self, ConcreteDataType::Boolean(_))
+    }
+
+    pub fn is_string(&self) -> bool {
+        matches!(self, ConcreteDataType::String(_))
+    }
+
     pub fn is_signed(&self) -> bool {
         matches!(
             self,
