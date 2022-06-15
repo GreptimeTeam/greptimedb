@@ -100,7 +100,7 @@ impl BTreeIterator {
         } else {
             map.range(..)
         };
-        let iter = MapIterWrapper::new(iter);
+        let iter = MapIterWrapper::new(iter, self.ctx.sequence);
 
         let mut keys = Vec::with_capacity(self.ctx.batch_size);
         let mut sequences = UInt64VectorBuilder::with_capacity(self.ctx.batch_size);
@@ -131,16 +131,29 @@ impl BTreeIterator {
 struct MapIterWrapper<'a, InnerKey, RowValue> {
     iter: btree_map::Range<'a, InnerKey, RowValue>,
     prev_key: Option<InnerKey>,
+    visible_sequence: SequenceNumber,
 }
 
 impl<'a> MapIterWrapper<'a, InnerKey, RowValue> {
     fn new(
         iter: btree_map::Range<'a, InnerKey, RowValue>,
+        visible_sequence: SequenceNumber,
     ) -> MapIterWrapper<'a, InnerKey, RowValue> {
         MapIterWrapper {
             iter,
             prev_key: None,
+            visible_sequence,
         }
+    }
+
+    fn next_visible_entry(&mut self) -> Option<(&'a InnerKey, &'a RowValue)> {
+        while let Some((k, v)) = self.iter.next() {
+            if k.is_visible(self.visible_sequence) {
+                return Some((k, v));
+            }
+        }
+
+        None
     }
 }
 
@@ -148,7 +161,7 @@ impl<'a> Iterator for MapIterWrapper<'a, InnerKey, RowValue> {
     type Item = (&'a InnerKey, &'a RowValue);
 
     fn next(&mut self) -> Option<(&'a InnerKey, &'a RowValue)> {
-        let (mut current_key, mut current_value) = self.iter.next()?;
+        let (mut current_key, mut current_value) = self.next_visible_entry()?;
         if self.prev_key.is_none() {
             self.prev_key = Some(current_key.clone());
             return Some((current_key, current_value));
@@ -256,8 +269,14 @@ impl PartialOrd for InnerKey {
 }
 
 impl InnerKey {
+    #[inline]
     fn is_row_key_equal(&self, other: &InnerKey) -> bool {
         self.row_key == other.row_key
+    }
+
+    #[inline]
+    fn is_visible(&self, sequence: SequenceNumber) -> bool {
+        self.sequence <= sequence
     }
 }
 

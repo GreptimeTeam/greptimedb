@@ -41,11 +41,17 @@ pub type MemtableRef = Arc<dyn Memtable>;
 pub struct IterContext {
     /// The suggested batch size of the iterator.
     pub batch_size: usize,
+    /// Max visible sequence (inclusive).
+    pub sequence: SequenceNumber,
 }
 
 impl Default for IterContext {
     fn default() -> Self {
-        Self { batch_size: 256 }
+        Self {
+            batch_size: 256,
+            // All data in memory is visible.
+            sequence: SequenceNumber::MAX,
+        }
     }
 }
 

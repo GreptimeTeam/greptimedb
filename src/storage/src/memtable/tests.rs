@@ -201,7 +201,10 @@ fn write_iter_memtable_case(ctx: &TestContext) {
 
     let batch_sizes = [1, 4, 8, 256];
     for batch_size in batch_sizes {
-        let iter_ctx = IterContext { batch_size };
+        let iter_ctx = IterContext {
+            batch_size,
+            ..Default::default()
+        };
         let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
         assert_eq!(ctx.schema, *iter.schema());
         assert_eq!(RowOrdering::Key, iter.ordering());
@@ -295,7 +298,10 @@ fn test_iter_batch_size() {
         // Batch size [less than, equal to, greater than] total
         let batch_sizes = [1, 6, 8];
         for batch_size in batch_sizes {
-            let iter_ctx = IterContext { batch_size };
+            let iter_ctx = IterContext {
+                batch_size,
+                ..Default::default()
+            };
 
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
             check_iter_batch_size(&mut *iter, total, batch_size);
