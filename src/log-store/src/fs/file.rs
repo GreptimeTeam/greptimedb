@@ -31,7 +31,7 @@ use crate::fs::crc::CRC_ALGO;
 use crate::fs::entry::{EntryImpl, StreamImpl};
 use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
-use crate::fs::AppendResultImpl;
+use crate::fs::AppendResponseImpl;
 
 const LOG_WRITER_BATCH_SIZE: usize = 16;
 
@@ -271,10 +271,7 @@ impl LogFile {
         let previous_offset = self.flush_offset.load(Ordering::Relaxed);
         let mut stream = self.create_stream(
             // TODO(hl): LocalNamespace should be filled
-            LocalNamespace {
-                name: "todo".to_string(),
-                id: 1,
-            },
+            LocalNamespace::default(),
             0,
         );
 
@@ -344,7 +341,7 @@ impl LogFile {
     }
 
     /// Appends an entry to `LogFile` and return a `Result` containing the id of entry appended.
-    pub async fn append<T: Entry>(&self, e: &mut T) -> Result<AppendResultImpl> {
+    pub async fn append<T: Entry>(&self, e: &mut T) -> Result<AppendResponseImpl> {
         if self.stopped.load(Ordering::Acquire) {
             return Err(Error::Eof);
         }
@@ -389,7 +386,7 @@ impl LogFile {
             .is_err()
         {
             self.file.write().await.sync_all().await.context(IoSnafu)?;
-            Ok(AppendResultImpl {
+            Ok(AppendResponseImpl {
                 offset: entry_offset,
                 entry_id,
             })
@@ -444,7 +441,7 @@ pub type LogFileRef = Arc<LogFile>;
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct AppendRequest {
-    tx: OneshotSender<AppendResultImpl>,
+    tx: OneshotSender<AppendResponseImpl>,
     offset: Offset,
     id: Id,
 }
@@ -452,7 +449,7 @@ pub(crate) struct AppendRequest {
 impl AppendRequest {
     pub fn complete(self) {
         // TODO(hl): use this result.
-        let _ = self.tx.send(AppendResultImpl {
+        let _ = self.tx.send(AppendResponseImpl {
             offset: self.offset,
             entry_id: self.id,
         });
@@ -502,13 +499,7 @@ mod tests {
                 .entry_id
         );
 
-        let mut stream = file.create_stream(
-            LocalNamespace {
-                name: "test".to_string(),
-                id: 1,
-            },
-            0,
-        );
+        let mut stream = file.create_stream(LocalNamespace::default(), 0);
 
         let mut data = vec![];
 

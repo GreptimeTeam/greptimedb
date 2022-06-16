@@ -1,5 +1,3 @@
-use tempdir::TempDir;
-
 #[derive(Debug, Clone)]
 pub struct LogConfig {
     pub append_buffer_size: usize,
@@ -14,11 +12,7 @@ impl Default for LogConfig {
         Self {
             append_buffer_size: 128,
             max_log_file_size: 1024 * 1024 * 1024,
-            log_file_dir: TempDir::new("greptimedb-temp")
-                .unwrap()
-                .path()
-                .to_string_lossy()
-                .to_string(),
+            log_file_dir: "/tmp/greptimedb".to_string(),
         }
     }
 }

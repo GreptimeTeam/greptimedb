@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use store_api::logstore::entry::{Id, Offset};
 
@@ -19,19 +19,17 @@ impl Location {
     }
 }
 
-pub type LocationRef = Arc<Location>;
-
 /// In-memory entry id to offset index.
 pub trait EntryIndex {
     /// Add entry id to offset mapping.
-    fn add_entry_id(&self, id: Id, loc: Location) -> Option<LocationRef>;
+    fn add_entry_id(&self, id: Id, loc: Location) -> Option<Location>;
 
     /// Find offset by entry id.
-    fn find_offset_by_id(&self, id: Id) -> Result<Option<LocationRef>>;
+    fn find_offset_by_id(&self, id: Id) -> Result<Option<Location>>;
 }
 
 pub struct MemoryIndex {
-    map: RwLock<BTreeMap<Id, LocationRef>>,
+    map: RwLock<BTreeMap<Id, Location>>,
 }
 
 #[allow(dead_code)]
@@ -44,11 +42,11 @@ impl MemoryIndex {
 }
 
 impl EntryIndex for MemoryIndex {
-    fn add_entry_id(&self, id: Id, loc: Location) -> Option<LocationRef> {
-        self.map.write().unwrap().insert(id, Arc::new(loc))
+    fn add_entry_id(&self, id: Id, loc: Location) -> Option<Location> {
+        self.map.write().unwrap().insert(id, loc)
     }
 
-    fn find_offset_by_id(&self, id: Id) -> Result<Option<LocationRef>> {
+    fn find_offset_by_id(&self, id: Id) -> Result<Option<Location>> {
         Ok(self.map.read().unwrap().get(&id).cloned())
     }
 }
@@ -62,7 +60,7 @@ mod tests {
         let index = MemoryIndex::new();
         index.add_entry_id(1, Location::new(FileName::log(0), 1));
         assert_eq!(
-            Arc::new(Location::new(FileName::log(0), 1)),
+            Location::new(FileName::log(0), 1),
             index.find_offset_by_id(1).unwrap().unwrap()
         );
         assert_eq!(None, index.find_offset_by_id(2).unwrap());

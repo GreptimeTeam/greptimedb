@@ -1,16 +1,16 @@
 use std::pin::Pin;
-use std::ptr;
 use std::task::{Context, Poll};
 
 use byteorder::{ByteOrder, LittleEndian};
 use futures::Stream;
-use snafu::{Backtrace, GenerateImplicitData};
+use snafu::{ensure, Backtrace, GenerateImplicitData};
 use store_api::logstore::entry::{Entry, Epoch, Id, Offset};
 use store_api::logstore::entry_stream::{EntryStream, SendableEntryStream};
 
-use crate::error::Error;
+use crate::error::{DeserializationSnafu, Error};
 use crate::fs::crc;
 
+// length+offset+epoch+crc
 const ENTRY_MIN_LEN: usize = 4 + 8 + 8 + 4;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -49,7 +49,7 @@ impl Entry for EntryImpl {
     }
 
     fn len(&self) -> usize {
-        Self::min_len() + self.data.len()
+        ENTRY_MIN_LEN + self.data.len()
     }
 
     fn is_empty(&self) -> bool {
@@ -76,12 +76,6 @@ impl EntryImpl {
             epoch: 0,
         }
     }
-
-    /// Return minimal possible length of a serialized entry.
-    /// length+offset+epoch+crc
-    pub fn min_len() -> usize {
-        ENTRY_MIN_LEN
-    }
 }
 
 /// Entry binary format (Little endian):
@@ -96,12 +90,9 @@ impl TryFrom<&[u8]> for EntryImpl {
     type Error = Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < EntryImpl::min_len() {
-            return Err(Error::Deserialization {
-                backtrace: Backtrace::generate(),
-            });
-        }
+        ensure!(value.len() >= ENTRY_MIN_LEN, DeserializationSnafu);
 
+        // TODO(hl): will use byteorder to simplify encoding/decoding.
         let id_end_ofs = 8;
         let epoch_end_ofs = id_end_ofs + 8;
         let length_end_offset = epoch_end_ofs + 4;
@@ -134,7 +125,7 @@ impl TryFrom<&[u8]> for EntryImpl {
 impl From<&EntryImpl> for Vec<u8> {
     fn from(e: &EntryImpl) -> Self {
         let data_length = e.data.len();
-        let total_size = data_length + EntryImpl::min_len();
+        let total_size = data_length + ENTRY_MIN_LEN;
         let mut vec = vec![0u8; total_size];
 
         let buf = vec.as_mut_slice();
@@ -151,28 +142,11 @@ impl From<&EntryImpl> for Vec<u8> {
             &mut buf[epoch_end_ofs..length_end_offset],
             data_length as u32,
         ); // todo check this cast
-        copy_memory(e.data.as_slice(), &mut buf[length_end_offset..data_end_ofs]);
 
+        buf[length_end_offset..data_end_ofs].copy_from_slice(e.data.as_slice());
         let checksum = crc::CRC_ALGO.checksum(&buf[0..data_end_ofs]);
         LittleEndian::write_u32(&mut buf[data_end_ofs..crc_end_ofs], checksum);
         vec
-    }
-}
-
-/// Copies data from `src` to `dst`
-///
-/// # Panics
-/// Panics if the length of `dst` is less than the length of `src`.
-///
-/// # Safety
-/// First 3 safety requirements for `ptr::copy_nonoverlapping` are automatically satisfied because
-/// both src and dst are restricted to `&u[8]`, this function is safe iff src does not overlap with
-/// dst.   
-pub fn copy_memory(src: &[u8], dst: &mut [u8]) {
-    let len_src = src.len();
-    assert!(dst.len() >= len_src);
-    unsafe {
-        ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), len_src);
     }
 }
 
@@ -208,7 +182,7 @@ mod tests {
         let data = "hello, world";
         let entry = EntryImpl::new(data.as_bytes());
         let vec: Vec<u8> = (&entry).into();
-        assert_eq!(EntryImpl::min_len() + data.as_bytes().len(), vec.len());
+        assert_eq!(ENTRY_MIN_LEN + data.as_bytes().len(), vec.len());
         let deserialized = EntryImpl::try_from(vec.as_slice()).unwrap();
         assert_eq!(entry, deserialized);
     }

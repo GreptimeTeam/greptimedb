@@ -11,12 +11,12 @@ mod log;
 mod namespace;
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct AppendResultImpl {
+pub struct AppendResponseImpl {
     entry_id: Id,
     offset: Offset,
 }
 
-impl AppendResponse for AppendResultImpl {
+impl AppendResponse for AppendResponseImpl {
     #[inline]
     fn entry_id(&self) -> Id {
         self.entry_id

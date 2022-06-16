@@ -17,17 +17,17 @@ use crate::fs::entry::EntryImpl;
 use crate::fs::file::{LogFile, LogFileRef};
 use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
-use crate::fs::AppendResultImpl;
+use crate::fs::AppendResponseImpl;
 
 type FileMap = BTreeMap<u64, LogFileRef>;
 
-pub struct LocalFileLogStoreImpl {
+pub struct LocalFileLogStore {
     files: RwLock<FileMap>,
     active: ArcSwap<LogFile>,
     config: LogConfig,
 }
 
-impl LocalFileLogStoreImpl {
+impl LocalFileLogStore {
     /// Opens a directory as log store directory, initialize directory if it is empty.
     #[allow(unused)]
     pub async fn open(config: &LogConfig) -> Result<Self> {
@@ -60,7 +60,7 @@ impl LocalFileLogStoreImpl {
 
         // Start active log file
         Arc::get_mut(active_file)
-            .context(InternalSnafu {
+            .with_context(|| InternalSnafu {
                 msg: format!(
                     "Concurrent modification on log store {} start is not allowed",
                     active_file_name
@@ -158,11 +158,11 @@ impl LocalFileLogStoreImpl {
 }
 
 #[async_trait::async_trait]
-impl LogStore for LocalFileLogStoreImpl {
+impl LogStore for LocalFileLogStore {
     type Error = Error;
     type Namespace = LocalNamespace;
     type Entry = EntryImpl;
-    type AppendResponse = AppendResultImpl;
+    type AppendResponse = AppendResponseImpl;
 
     async fn append(
         &self,
@@ -243,7 +243,7 @@ mod tests {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
 
-        let logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
+        let logstore = LocalFileLogStore::open(&config).await.unwrap();
         assert_eq!(
             0,
             logstore
@@ -287,7 +287,7 @@ mod tests {
             max_log_file_size: 128,
             log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
-        let logstore = LocalFileLogStoreImpl::open(&config).await.unwrap();
+        let logstore = LocalFileLogStore::open(&config).await.unwrap();
         let id = logstore
             .append(
                 LocalNamespace::default(),

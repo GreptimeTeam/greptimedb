@@ -11,10 +11,10 @@ pub trait Entry: Send + Sync {
     /// Return contained data of entry.
     fn data(&self) -> &[u8];
 
-    /// Return entry id
+    /// Return entry id that monotonically increments.
     fn id(&self) -> Id;
 
-    /// Return offset of entry.
+    /// Return file offset of entry.
     fn offset(&self) -> Offset;
 
     fn set_offset(&mut self, offset: Offset);

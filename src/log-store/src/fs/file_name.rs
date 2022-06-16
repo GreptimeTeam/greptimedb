@@ -31,7 +31,7 @@ impl TryFrom<&str> for FileName {
             .file_stem()
             .and_then(|s| s.to_str())
             .and_then(|s| s.parse::<u64>().ok())
-            .context(FileNameIllegalSnafu {
+            .with_context(|| FileNameIllegalSnafu {
                 file_name: p.to_string(),
             })?;
 
@@ -53,10 +53,7 @@ impl FileName {
     pub fn new_with_suffix(entry_id: Id, suffix: &str) -> Result<Self, Error> {
         match suffix {
             "log" => Ok(Log(entry_id)),
-            _ => SuffixIllegalSnafu {
-                suffix: suffix.to_string(),
-            }
-            .fail(),
+            _ => SuffixIllegalSnafu { suffix }.fail(),
         }
     }
 
@@ -64,11 +61,6 @@ impl FileName {
         match self {
             Log(id) => *id,
         }
-    }
-
-    fn pad_file_name(id: u64) -> String {
-        // file name padded to `u64::MAX.to_string().len()` with prefixed zeros
-        format!("{:020}", id)
     }
 
     fn suffix(&self) -> &str {
@@ -80,8 +72,7 @@ impl FileName {
 
 impl Display for FileName {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(FileName::pad_file_name(self.entry_id()).as_str())?;
-        f.write_str(self.suffix())
+        write!(f, "{:020}{}", self.entry_id(), self.suffix())
     }
 }
 
@@ -91,13 +82,14 @@ mod tests {
 
     #[test]
     pub fn test_padding_file_name() {
-        assert_eq!("00000000000000000000", FileName::pad_file_name(u64::MIN));
-        assert_eq!("00000000000000000123", FileName::pad_file_name(123));
-        assert_eq!(
-            "00000000123123123123",
-            FileName::pad_file_name(123123123123)
-        );
-        assert_eq!(u64::MAX.to_string(), FileName::pad_file_name(u64::MAX));
+        let id = u64::MIN;
+        assert_eq!("00000000000000000000", format!("{:020}", id));
+        let id = 123u64;
+        assert_eq!("00000000000000000123", format!("{:020}", id));
+        let id = 123123123123u64;
+        assert_eq!("00000000123123123123", format!("{:020}", id));
+        let id = u64::MAX;
+        assert_eq!(u64::MAX.to_string(), format!("{:020}", id));
     }
 
     #[test]
