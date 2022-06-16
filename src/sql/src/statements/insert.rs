@@ -1,4 +1,4 @@
-use sqlparser::ast::{Query, SetExpr, Statement, Values};
+use sqlparser::ast::{SetExpr, Statement, Values};
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value};
@@ -10,11 +10,11 @@ pub struct Insert {
 }
 
 impl Insert {
-    //TODO: table_name may be in the form of "catalog.schema.table"
     pub fn table_name(&self) -> String {
         match &self.inner {
             Statement::Insert { table_name, .. } => {
-                format!("{}", table_name)
+                // FIXME(dennis): table_name may be in the form of "catalog.schema.table"
+                table_name.to_string()
             }
             _ => unreachable!(),
         }
@@ -29,11 +29,8 @@ impl Insert {
 
     pub fn values(&self) -> Vec<Vec<Value>> {
         match &self.inner {
-            Statement::Insert { source, .. } => match &**source {
-                Query {
-                    body: SetExpr::Values(Values(values)),
-                    ..
-                } => values
+            Statement::Insert { source, .. } => match &source.body {
+                SetExpr::Values(Values(values)) => values
                     .iter()
                     .map(|v| {
                         v.iter()

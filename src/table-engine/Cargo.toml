@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-table = { path = "../table" }
 common-error = {path = "../common/error" }
 common-query = {path = "../common/query" }
 common-recordbatch = {path = "../common/recordbatch" }
@@ -14,6 +13,7 @@ common-telemetry = {path = "../common/telemetry" }
 snafu = { version = "0.7", features = ["backtraces"] }
 storage ={ path = "../storage" }
 store-api ={ path = "../store-api" }
+table = { path = "../table" }
 
 [dev-dependencies]
 datatypes = { path = "../datatypes" }

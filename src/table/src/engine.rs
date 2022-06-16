@@ -6,7 +6,7 @@ use crate::TableRef;
 /// Table engine abstraction.
 #[async_trait::async_trait]
 pub trait TableEngine: Send + Sync + Clone {
-    type Error: ErrorExt + Send + Sync;
+    type Error: ErrorExt + Send + Sync + 'static;
 
     /// Create a table by given request.
     ///

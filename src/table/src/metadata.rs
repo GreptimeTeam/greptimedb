@@ -9,7 +9,7 @@ pub type TableVersion = u64;
 /// Indicates whether and how a filter expression can be handled by a
 /// Table for table scans.
 #[derive(Debug, Clone, PartialEq)]
-pub enum TableProviderFilterPushDown {
+pub enum FilterPushDownType {
     /// The expression cannot be used by the provider.
     Unsupported,
     /// The expression can be used to help minimise the data retrieved,
@@ -78,7 +78,7 @@ impl TableMetaBuilder {
     pub fn new(schema: SchemaRef) -> Self {
         Self {
             schema,
-            engine: "".to_string(),
+            engine: String::default(),
             engine_options: HashMap::default(),
             options: HashMap::default(),
         }

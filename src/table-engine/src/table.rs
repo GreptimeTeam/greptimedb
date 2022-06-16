@@ -21,7 +21,7 @@ pub struct MitoTable<R: Region> {
 }
 
 #[async_trait]
-impl<R: Region + 'static> Table for MitoTable<R> {
+impl<R: Region> Table for MitoTable<R> {
     fn as_any(&self) -> &dyn Any {
         self
     }

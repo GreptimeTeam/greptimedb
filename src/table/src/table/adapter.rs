@@ -31,7 +31,7 @@ use futures::Stream;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
-use crate::table::{Table, TableProviderFilterPushDown, TableRef, TableType};
+use crate::table::{FilterPushDownType, Table, TableRef, TableType};
 
 /// Greptime SendableRecordBatchStream -> datafusion ExecutionPlan.
 struct ExecutionPlanAdapter {
@@ -153,11 +153,9 @@ impl TableProvider for DfTableProviderAdapter {
             .table
             .supports_filter_pushdown(&filter.clone().into())?;
         match p {
-            TableProviderFilterPushDown::Unsupported => {
-                Ok(DfTableProviderFilterPushDown::Unsupported)
-            }
-            TableProviderFilterPushDown::Inexact => Ok(DfTableProviderFilterPushDown::Inexact),
-            TableProviderFilterPushDown::Exact => Ok(DfTableProviderFilterPushDown::Exact),
+            FilterPushDownType::Unsupported => Ok(DfTableProviderFilterPushDown::Unsupported),
+            FilterPushDownType::Inexact => Ok(DfTableProviderFilterPushDown::Inexact),
+            FilterPushDownType::Exact => Ok(DfTableProviderFilterPushDown::Exact),
         }
     }
 }
@@ -223,17 +221,15 @@ impl Table for TableAdapter {
         )))
     }
 
-    fn supports_filter_pushdown(&self, filter: &Expr) -> Result<TableProviderFilterPushDown> {
+    fn supports_filter_pushdown(&self, filter: &Expr) -> Result<FilterPushDownType> {
         match self
             .table_provider
             .supports_filter_pushdown(filter.df_expr())
             .context(error::DatafusionSnafu)?
         {
-            DfTableProviderFilterPushDown::Unsupported => {
-                Ok(TableProviderFilterPushDown::Unsupported)
-            }
-            DfTableProviderFilterPushDown::Inexact => Ok(TableProviderFilterPushDown::Inexact),
-            DfTableProviderFilterPushDown::Exact => Ok(TableProviderFilterPushDown::Exact),
+            DfTableProviderFilterPushDown::Unsupported => Ok(FilterPushDownType::Unsupported),
+            DfTableProviderFilterPushDown::Inexact => Ok(FilterPushDownType::Inexact),
+            DfTableProviderFilterPushDown::Exact => Ok(FilterPushDownType::Exact),
         }
     }
 }

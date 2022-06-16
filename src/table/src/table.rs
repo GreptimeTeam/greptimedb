@@ -9,7 +9,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 
 use crate::error::Result;
-use crate::metadata::{TableProviderFilterPushDown, TableType};
+use crate::metadata::{FilterPushDownType, TableType};
 use crate::requests::InsertRequest;
 
 /// Table abstraction.
@@ -46,8 +46,8 @@ pub trait Table: Send + Sync {
 
     /// Tests whether the table provider can make use of a filter expression
     /// to optimise data retrieval.
-    fn supports_filter_pushdown(&self, _filter: &Expr) -> Result<TableProviderFilterPushDown> {
-        Ok(TableProviderFilterPushDown::Unsupported)
+    fn supports_filter_pushdown(&self, _filter: &Expr) -> Result<FilterPushDownType> {
+        Ok(FilterPushDownType::Unsupported)
     }
 }
 

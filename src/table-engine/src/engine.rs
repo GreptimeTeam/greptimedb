@@ -4,8 +4,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
-use snafu::Backtrace;
-use snafu::GenerateImplicitData;
+use snafu::ResultExt;
 use store_api::storage::ConcreteDataType;
 use store_api::storage::{
     self as store, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder,
@@ -19,21 +18,21 @@ use table::{
     table::TableRef,
 };
 
-use crate::error::{Error, Result};
+use crate::error::{CreateTableSnafu, Error, Result};
 use crate::table::MitoTable;
 
 pub const DEFAULT_ENGINE: &str = "mito";
 
-/// [TableEgnine] implementation.
+/// [TableEngine] implementation.
 ///
 /// About mito <https://en.wikipedia.org/wiki/Alfa_Romeo_MiTo>.
 /// "you can't be a true petrolhead until you've owned an Alfa Romeo" -- by Jeremy Clarkson
 #[derive(Clone)]
-pub struct MitoEngine<Store: StorageEngine + 'static> {
+pub struct MitoEngine<Store: StorageEngine> {
     inner: Arc<MitoEngineInner<Store>>,
 }
 
-impl<Store: StorageEngine + 'static> MitoEngine<Store> {
+impl<Store: StorageEngine> MitoEngine<Store> {
     pub fn new(storage_engine: Store) -> Self {
         Self {
             inner: Arc::new(MitoEngineInner::new(storage_engine)),
@@ -75,7 +74,7 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
 }
 
 /// FIXME(boyan) impl system catalog to keep table metadata.
-struct MitoEngineInner<Store: StorageEngine + 'static> {
+struct MitoEngineInner<Store: StorageEngine> {
     tables: RwLock<HashMap<String, TableRef>>,
     storage_engine: Store,
     next_table_id: AtomicU64,
@@ -95,7 +94,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
     }
 }
 
-impl<Store: StorageEngine + 'static> MitoEngineInner<Store> {
+impl<Store: StorageEngine> MitoEngineInner<Store> {
     async fn create_table(
         &self,
         _ctx: &EngineContext,
@@ -107,7 +106,7 @@ impl<Store: StorageEngine + 'static> MitoEngineInner<Store> {
         //                                  ts int64,
         //                                  cpu float64,
         //                                  memory float64,
-        //                                  TIMESTAMP KEY(ts, host)) with regions=1;
+        //                                  PRIMARY KEY(ts, host)) with regions=1;
 
         //TODO(boyan): supports multi regions
         let region_id: RegionId = 0;
@@ -151,10 +150,8 @@ impl<Store: StorageEngine + 'static> MitoEngineInner<Store> {
                 },
             )
             .await
-            .map_err(|e| Error::CreateTable {
-                source: Box::new(e),
-                backtrace: Backtrace::generate(),
-            })?;
+            .map_err(|e| Box::new(e) as _)
+            .context(CreateTableSnafu)?;
 
         // Use region meta schema instead of request schema
         let table_meta = TableMetaBuilder::new(region.in_memory_metadata().schema().clone())

@@ -17,5 +17,5 @@ members = [
     "src/storage",
     "src/store-api",
     "src/table",
-     "src/table-engine",
+    "src/table-engine",
 ]

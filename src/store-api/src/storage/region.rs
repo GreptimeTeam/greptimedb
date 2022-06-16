@@ -28,7 +28,7 @@ use crate::storage::snapshot::{ReadContext, Snapshot};
 
 /// Chunks of rows in storage engine.
 #[async_trait]
-pub trait Region: Send + Sync + Clone {
+pub trait Region: Send + Sync + Clone + 'static {
     type Error: ErrorExt + Send + Sync;
     type Meta: RegionMeta;
     type WriteRequest: WriteRequest;

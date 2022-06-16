@@ -17,6 +17,7 @@ pub enum Error {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
+
     #[snafu(display("Fail to create catalog list, source: {}", source))]
     NewCatalog {
         #[snafu(backtrace)]
@@ -28,26 +29,32 @@ pub enum Error {
         table_name: String,
         source: TableEngineError,
     },
+
     #[snafu(display("Fail to get table: {}, {}", table_name, source))]
     GetTable {
         table_name: String,
         source: BoxedError,
     },
+
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
+
     #[snafu(display("Column {} not found in table {}", column_name, table_name))]
     ColumnNotFound {
         column_name: String,
         table_name: String,
     },
+
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
         columns,
         values
     ))]
     ColumnValuesNumberMismatch { columns: usize, values: usize },
+
     #[snafu(display("Fail to parse value: {}, {}", msg, backtrace))]
     ParseSqlValue { msg: String, backtrace: Backtrace },
+
     #[snafu(display(
         "Column {} expect type: {:?}, actual: {:?}",
         column_name,
@@ -59,11 +66,13 @@ pub enum Error {
         expect: ConcreteDataType,
         actual: ConcreteDataType,
     },
+
     #[snafu(display("Fail to insert value to table: {}, {}", table_name, source))]
     Insert {
         table_name: String,
         source: TableError,
     },
+
     // The error source of http error is clear even without backtrace now so
     // a backtrace is not carried in this varaint.
     #[snafu(display("Fail to start HTTP server, source: {}", source))]

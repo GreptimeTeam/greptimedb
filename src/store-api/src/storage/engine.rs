@@ -12,7 +12,7 @@ use crate::storage::region::Region;
 
 /// Storage engine provides primitive operations to store and access data.
 #[async_trait]
-pub trait StorageEngine: Send + Sync + Clone {
+pub trait StorageEngine: Send + Sync + Clone + 'static {
     type Error: ErrorExt + Send + Sync;
     type Region: Region;
 
