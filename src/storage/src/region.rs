@@ -39,7 +39,7 @@ impl Region for RegionImpl {
     }
 
     fn snapshot(&self, _ctx: &ReadContext) -> Result<SnapshotImpl> {
-        unimplemented!()
+        Ok(self.inner.create_snapshot())
     }
 }
 
@@ -86,6 +86,13 @@ impl RegionInner {
         // Now altering schema is not allowed, so it is safe to validate schema outside of the lock.
         let mut writer = self.writer.lock().await;
         writer.write(ctx, &self.version, request).await
+    }
+
+    fn create_snapshot(&self) -> SnapshotImpl {
+        let version = self.version.current();
+        let sequence = self.version.last_sequence();
+
+        SnapshotImpl::new(version, sequence)
     }
 }
 

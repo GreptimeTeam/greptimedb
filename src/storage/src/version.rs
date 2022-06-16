@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use store_api::storage::SequenceNumber;
+use store_api::storage::{SchemaRef, SequenceNumber};
 
 use crate::memtable::MemtableSet;
 use crate::metadata::{RegionMetadata, RegionMetadataRef};
@@ -87,5 +87,9 @@ impl Version {
             metadata: Arc::new(metadata),
             memtables,
         }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.metadata.schema
     }
 }

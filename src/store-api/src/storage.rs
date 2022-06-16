@@ -9,6 +9,7 @@ mod requests;
 mod responses;
 mod snapshot;
 mod types;
+mod chunk;
 
 pub use datatypes::data_type::ConcreteDataType;
 pub use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
