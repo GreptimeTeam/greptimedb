@@ -35,7 +35,7 @@ impl Datanode {
     }
 
     pub async fn start(&self) -> Result<()> {
-        self.instance.start().await?;        
+        self.instance.start().await?;
         self.services.start(&self.opts).await
     }
 }
