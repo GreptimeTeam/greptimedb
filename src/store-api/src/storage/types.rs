@@ -15,4 +15,9 @@ impl ValueType {
     pub fn as_u8(&self) -> u8 {
         *self as u8
     }
+
+    /// Minimum value type after casting to u8.
+    pub const fn min_type() -> ValueType {
+        ValueType::Put
+    }
 }

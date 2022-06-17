@@ -309,4 +309,79 @@ fn test_iter_batch_size() {
     });
 }
 
+#[test]
+fn test_duplicate_key_across_batch() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_kvs(
+            &*ctx.memtable,
+            10, // sequence
+            ValueType::Put,
+            &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
+            &[Some(1), None, None, None],                  // values
+        );
+
+        write_kvs(
+            &*ctx.memtable,
+            11, // sequence
+            ValueType::Put,
+            &[(1000, 1), (2001, 2)],   // keys
+            &[Some(1231), Some(1232)], // values
+        );
+
+        let batch_sizes = [1, 2, 3, 4, 5];
+        for batch_size in batch_sizes {
+            let iter_ctx = IterContext {
+                batch_size,
+                ..Default::default()
+            };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_content(
+                &mut *iter,
+                &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
+                &[11, 10, 10, 11],                             // sequences
+                &[
+                    ValueType::Put,
+                    ValueType::Put,
+                    ValueType::Put,
+                    ValueType::Put,
+                ], // value types
+                &[Some(1231), None, None, Some(1232)],         // values
+            );
+        }
+    });
+}
+
+#[test]
+fn test_duplicate_key_in_batch() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_kvs(
+            &*ctx.memtable,
+            10, // sequence
+            ValueType::Put,
+            &[(1000, 1), (1000, 2), (1000, 1), (2001, 2)], // keys
+            &[None, None, Some(1234), None],               // values
+        );
+
+        let batch_sizes = [1, 2, 3, 4, 5];
+        for batch_size in batch_sizes {
+            let iter_ctx = IterContext {
+                batch_size,
+                ..Default::default()
+            };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_content(
+                &mut *iter,
+                &[(1000, 1), (1000, 2), (2001, 2)], // keys
+                &[10, 10, 10],                      // sequences
+                &[ValueType::Put, ValueType::Put, ValueType::Put], // value types
+                &[Some(1234), None, None, None],    // values
+            );
+        }
+    });
+}
+
 // TODO(yingwen): Test key overwrite in same batch.
