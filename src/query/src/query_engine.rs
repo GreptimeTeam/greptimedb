@@ -6,6 +6,7 @@ use std::sync::Arc;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::prelude::ScalarUdf;
 use common_recordbatch::SendableRecordBatchStream;
+use sql::statements::statement::Statement;
 
 use crate::catalog::CatalogList;
 use crate::datafusion::DatafusionQueryEngine;
@@ -23,6 +24,10 @@ pub enum Output {
 #[async_trait::async_trait]
 pub trait QueryEngine: Send + Sync {
     fn name(&self) -> &str;
+
+    fn sql_to_statement(&self, sql: &str) -> Result<Statement>;
+
+    fn statement_to_plan(&self, stmt: Statement) -> Result<LogicalPlan>;
 
     fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan>;
 

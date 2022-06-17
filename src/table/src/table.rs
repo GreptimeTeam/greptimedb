@@ -2,70 +2,15 @@ pub mod adapter;
 pub mod numbers;
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::DateTime;
-use chrono::Utc;
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
-use datatypes::schema::{Schema, SchemaRef};
+use datatypes::schema::SchemaRef;
 
 use crate::error::Result;
-
-pub type TableId = u64;
-pub type TableVersion = u64;
-
-/// Indicates whether and how a filter expression can be handled by a
-/// Table for table scans.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TableProviderFilterPushDown {
-    /// The expression cannot be used by the provider.
-    Unsupported,
-    /// The expression can be used to help minimise the data retrieved,
-    /// but the provider cannot guarantee that all returned tuples
-    /// satisfy the filter. The Filter plan node containing this expression
-    /// will be preserved.
-    Inexact,
-    /// The provider guarantees that all returned data satisfies this
-    /// filter expression. The Filter plan node containing this expression
-    /// will be removed.
-    Exact,
-}
-
-/// Indicates the type of this table for metadata/catalog purposes.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TableType {
-    /// An ordinary physical table.
-    Base,
-    /// A non-materialised table that itself uses a query internally to provide data.
-    View,
-    /// A transient table.
-    Temporary,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Default)]
-pub struct TableIdent {
-    pub table_id: TableId,
-    pub version: TableVersion,
-}
-
-#[derive(Debug)]
-pub struct TableInfo {
-    pub ident: TableIdent,
-    pub name: String,
-    pub desc: Option<String>,
-    pub meta: TableMeta,
-}
-
-#[derive(Clone, Debug)]
-pub struct TableMeta {
-    pub schema: Arc<Schema>,
-    pub engine: String,
-    pub engine_options: HashMap<String, String>,
-    pub options: HashMap<String, String>,
-    pub created_on: DateTime<Utc>,
-}
+use crate::metadata::{FilterPushDownType, TableType};
+use crate::requests::InsertRequest;
 
 /// Table abstraction.
 #[async_trait::async_trait]
@@ -82,6 +27,11 @@ pub trait Table: Send + Sync {
         TableType::Base
     }
 
+    /// Insert values into table.
+    async fn insert(&self, _request: InsertRequest) -> Result<usize> {
+        unimplemented!();
+    }
+
     /// Scan the table and returns a SendableRecordBatchStream.
     async fn scan(
         &self,
@@ -96,8 +46,8 @@ pub trait Table: Send + Sync {
 
     /// Tests whether the table provider can make use of a filter expression
     /// to optimise data retrieval.
-    fn supports_filter_pushdown(&self, _filter: &Expr) -> Result<TableProviderFilterPushDown> {
-        Ok(TableProviderFilterPushDown::Unsupported)
+    fn supports_filter_pushdown(&self, _filter: &Expr) -> Result<FilterPushDownType> {
+        Ok(FilterPushDownType::Unsupported)
     }
 }
 

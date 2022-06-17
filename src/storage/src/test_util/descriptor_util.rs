@@ -57,6 +57,7 @@ impl RegionDescBuilder {
 
     pub fn build(self) -> RegionDescriptor {
         RegionDescriptor {
+            id: 0,
             name: self.name,
             row_key: self.key_builder.build(),
             default_cf: self.default_cf_builder.build(),

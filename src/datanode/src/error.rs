@@ -1,6 +1,12 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use datatypes::prelude::ConcreteDataType;
+use table::error::Error as TableError;
+use table_engine::error::Error as TableEngineError;
+
+// TODO(boyan): use ErrorExt instead.
+pub type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
@@ -16,6 +22,55 @@ pub enum Error {
     NewCatalog {
         #[snafu(backtrace)]
         source: query::error::Error,
+    },
+
+    #[snafu(display("Fail to create table: {}, {}", table_name, source))]
+    CreateTable {
+        table_name: String,
+        source: TableEngineError,
+    },
+
+    #[snafu(display("Fail to get table: {}, {}", table_name, source))]
+    GetTable {
+        table_name: String,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Table not found: {}", table_name))]
+    TableNotFound { table_name: String },
+
+    #[snafu(display("Column {} not found in table {}", column_name, table_name))]
+    ColumnNotFound {
+        column_name: String,
+        table_name: String,
+    },
+
+    #[snafu(display(
+        "Columns and values number mismatch, columns: {}, values: {}",
+        columns,
+        values
+    ))]
+    ColumnValuesNumberMismatch { columns: usize, values: usize },
+
+    #[snafu(display("Fail to parse value: {}, {}", msg, backtrace))]
+    ParseSqlValue { msg: String, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Column {} expect type: {:?}, actual: {:?}",
+        column_name,
+        expect,
+        actual
+    ))]
+    ColumnTypeMismatch {
+        column_name: String,
+        expect: ConcreteDataType,
+        actual: ConcreteDataType,
+    },
+
+    #[snafu(display("Fail to insert value to table: {}, {}", table_name, source))]
+    Insert {
+        table_name: String,
+        source: TableError,
     },
 
     // The error source of http error is clear even without backtrace now so
@@ -38,6 +93,14 @@ impl ErrorExt for Error {
             Error::ExecuteSql { source } | Error::NewCatalog { source } => source.status_code(),
             // TODO(yingwen): Further categorize http error.
             Error::StartHttp { .. } | Error::ParseAddr { .. } => StatusCode::Internal,
+            Error::CreateTable { source, .. } => source.status_code(),
+            Error::GetTable { .. } => StatusCode::Internal,
+            Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
+            Error::ColumnValuesNumberMismatch { .. }
+            | Error::ParseSqlValue { .. }
+            | Error::ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
+            Error::Insert { source, .. } => source.status_code(),
         }
     }
 

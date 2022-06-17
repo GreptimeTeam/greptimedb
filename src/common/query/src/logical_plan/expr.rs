@@ -8,11 +8,27 @@ pub struct Expr {
 }
 
 impl Expr {
-    pub fn new(df_expr: DfExpr) -> Self {
-        Self { df_expr }
-    }
-
     pub fn df_expr(&self) -> &DfExpr {
         &self.df_expr
+    }
+}
+
+impl From<DfExpr> for Expr {
+    fn from(df_expr: DfExpr) -> Self {
+        Self { df_expr }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_df_expr() {
+        let df_expr = DfExpr::Wildcard;
+
+        let expr: Expr = df_expr.into();
+
+        assert_eq!(DfExpr::Wildcard, *expr.df_expr());
     }
 }

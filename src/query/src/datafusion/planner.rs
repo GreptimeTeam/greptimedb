@@ -48,9 +48,7 @@ where
                 todo!("Currently not supported")
             }
             Statement::Query(qb) => self.query_to_plan(qb),
-            Statement::Insert(_) => {
-                todo!()
-            }
+            Statement::Insert(_) => unreachable!(),
         }
     }
 }

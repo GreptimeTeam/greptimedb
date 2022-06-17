@@ -23,6 +23,9 @@ pub enum InnerError {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Missing column when insert, column : {}", name))]
+    MissingColumn { name: String, backtrace: Backtrace },
+
     #[snafu(display("Not expected to run ExecutionPlan more than once"))]
     ExecuteRepeatedly { backtrace: Backtrace },
 }
