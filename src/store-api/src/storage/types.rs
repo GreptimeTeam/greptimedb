@@ -21,3 +21,14 @@ impl ValueType {
         ValueType::Put
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_value_type() {
+        assert_eq!(0, ValueType::Put.as_u8());
+        assert_eq!(0, ValueType::min_type().as_u8());
+    }
+}
