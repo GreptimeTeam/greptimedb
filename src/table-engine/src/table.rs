@@ -1,11 +1,20 @@
 use std::any::Any;
+use std::pin::Pin;
 
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::error::{Result as RecordBatchResult, StorageSnafu};
+use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use futures::task::{Context, Poll};
+use futures::Stream;
 use snafu::OptionExt;
+use snafu::ResultExt;
 use store_api::storage::SchemaRef;
-use store_api::storage::{PutOperation, Region, WriteContext, WriteRequest};
+use store_api::storage::{
+    ChunkReader, PutOperation, ReadContext, Region, ScanRequest, Snapshot, WriteContext,
+    WriteRequest,
+};
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
 use table::requests::InsertRequest;
 use table::{
@@ -83,7 +92,64 @@ impl<R: Region> Table for MitoTable<R> {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> TableResult<SendableRecordBatchStream> {
-        unimplemented!();
+        let read_ctx = ReadContext::default();
+        let snapshot = self.region.snapshot(&read_ctx).map_err(TableError::new)?;
+
+        let mut reader = snapshot
+            .scan(&read_ctx, ScanRequest::default())
+            .await
+            .map_err(TableError::new)?
+            .reader;
+
+        let schema = reader.schema().clone();
+        let stream_schema = schema.clone();
+
+        let stream = Box::pin(async_stream::try_stream! {
+
+            for chunk in reader.next_chunk()
+                .await
+                .map_err(|e| Box::new(e) as _)
+                .context(StorageSnafu {
+                    msg: "Fail to reader chunk",
+                })?
+            {
+                let batch = DfRecordBatch::try_new(
+                    stream_schema.arrow_schema().clone(),
+                    chunk.columns.into_iter().map(|v| v.to_arrow_array()).collect());
+                let batch = batch
+                    .map_err(|e| Box::new(e) as _)
+                    .context(StorageSnafu {
+                        msg: "Fail to new datafusion record batch",
+                    })?;
+
+                yield RecordBatch {
+                    schema: stream_schema.clone(),
+                    df_recordbatch: batch,
+                }
+            }
+        });
+
+        Ok(Box::pin(ChunkStream { schema, stream }))
+    }
+}
+
+// Limited numbers stream
+struct ChunkStream {
+    schema: SchemaRef,
+    stream: Pin<Box<dyn Stream<Item = RecordBatchResult<RecordBatch>> + Send>>,
+}
+
+impl RecordBatchStream for ChunkStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl Stream for ChunkStream {
+    type Item = RecordBatchResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.stream).poll_next(ctx)
     }
 }
 

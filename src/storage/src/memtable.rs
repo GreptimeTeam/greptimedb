@@ -87,7 +87,7 @@ pub trait BatchIterator: Send {
     fn next(&mut self) -> Result<Option<Batch>>;
 }
 
-pub type BatchIteratorPtr = Box<dyn BatchIterator>;
+pub type BatchIteratorPtr = Box<dyn BatchIterator + Send>;
 
 pub trait MemtableBuilder: Send + Sync {
     fn build(&self, schema: MemtableSchema) -> MemtableRef;
