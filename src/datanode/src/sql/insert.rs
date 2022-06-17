@@ -45,7 +45,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
 
         let table = schema_provider
             .table(&table_name)
-            .with_context(|| TableNotFoundSnafu {
+            .context(TableNotFoundSnafu {
                 table_name: &table_name,
             })?;
         let schema = table.schema();
