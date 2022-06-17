@@ -384,4 +384,82 @@ fn test_duplicate_key_in_batch() {
     });
 }
 
+#[test]
+fn test_sequence_visibility() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_kvs(
+            &*ctx.memtable,
+            10, // sequence
+            ValueType::Put,
+            &[(1000, 1), (1000, 2)], // keys
+            &[Some(1), Some(2)],     // values
+        );
+
+        write_kvs(
+            &*ctx.memtable,
+            11, // sequence
+            ValueType::Put,
+            &[(1000, 1), (1000, 2)], // keys
+            &[Some(11), Some(12)],   // values
+        );
+
+        write_kvs(
+            &*ctx.memtable,
+            12, // sequence
+            ValueType::Put,
+            &[(1000, 1), (1000, 2)], // keys
+            &[Some(21), Some(22)],   // values
+        );
+
+        {
+            let iter_ctx = IterContext {
+                batch_size: 1,
+                sequence: 9,
+            };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_content(
+                &mut *iter,
+                &[], // keys
+                &[], // sequences
+                &[], // value types
+                &[], // values
+            );
+        }
+
+        {
+            let iter_ctx = IterContext {
+                batch_size: 1,
+                sequence: 10,
+            };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_content(
+                &mut *iter,
+                &[(1000, 1), (1000, 2)],           // keys
+                &[10, 10],                         // sequences
+                &[ValueType::Put, ValueType::Put], // value types
+                &[Some(1), Some(2)],               // values
+            );
+        }
+
+        {
+            let iter_ctx = IterContext {
+                batch_size: 1,
+                sequence: 11,
+            };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_content(
+                &mut *iter,
+                &[(1000, 1), (1000, 2)],           // keys
+                &[11, 11],                         // sequences
+                &[ValueType::Put, ValueType::Put], // value types
+                &[Some(11), Some(12)],             // values
+            );
+        }
+    });
+}
+
 // TODO(yingwen): Test key overwrite in same batch.
