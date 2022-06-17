@@ -147,7 +147,7 @@ impl<'a> MapIterWrapper<'a, InnerKey, RowValue> {
     }
 
     fn next_visible_entry(&mut self) -> Option<(&'a InnerKey, &'a RowValue)> {
-        while let Some((k, v)) = self.iter.next() {
+        for (k, v) in self.iter.by_ref() {
             if k.is_visible(self.visible_sequence) {
                 return Some((k, v));
             }
