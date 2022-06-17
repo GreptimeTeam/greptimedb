@@ -6,7 +6,6 @@ mod error;
 pub mod memtable;
 pub mod metadata;
 mod region;
-mod region_writer;
 mod snapshot;
 pub mod sync;
 mod version;

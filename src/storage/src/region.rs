@@ -1,3 +1,7 @@
+#[cfg(test)]
+mod tests;
+mod writer;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,7 +12,7 @@ use tokio::sync::Mutex;
 use crate::error::{self, Error, Result};
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilder, MemtableSchema, MemtableSet};
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
-use crate::region_writer::RegionWriter;
+use crate::region::writer::RegionWriter;
 use crate::snapshot::SnapshotImpl;
 use crate::version::{VersionControl, VersionControlRef};
 use crate::write_batch::WriteBatch;
@@ -93,37 +97,5 @@ impl RegionInner {
         let sequence = self.version.last_sequence();
 
         SnapshotImpl::new(version, sequence)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use datatypes::type_id::LogicalTypeId;
-    use store_api::storage::consts;
-
-    use super::*;
-    use crate::test_util::descriptor_util::RegionDescBuilder;
-    use crate::test_util::schema_util;
-
-    #[test]
-    fn test_new_region() {
-        let region_name = "region-0";
-        let desc = RegionDescBuilder::new(region_name)
-            .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
-            .build();
-        let metadata = desc.try_into().unwrap();
-
-        let region = RegionImpl::new(region_name.to_string(), metadata);
-
-        let expect_schema = schema_util::new_schema_ref(&[
-            ("k1", LogicalTypeId::Int32, false),
-            ("timestamp", LogicalTypeId::UInt64, false),
-            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-            ("v1", LogicalTypeId::Float32, true),
-        ]);
-
-        assert_eq!(region_name, region.name());
-        assert_eq!(expect_schema, *region.in_memory_metadata().schema());
     }
 }

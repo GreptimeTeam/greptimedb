@@ -308,3 +308,5 @@ fn test_iter_batch_size() {
         }
     });
 }
+
+// TODO(yingwen): Test key overwrite in same batch.

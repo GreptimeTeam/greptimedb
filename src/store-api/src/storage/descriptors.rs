@@ -45,6 +45,7 @@ pub struct RowKeyDescriptor {
     /// Enable version column in row key if this field is true.
     ///
     /// The default value is true.
+    // FIXME(yingwen): Change default value to true (Disable version column by default).
     pub enable_version_column: bool,
 }
 
