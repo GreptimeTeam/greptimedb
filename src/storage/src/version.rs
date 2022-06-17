@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use store_api::storage::{SchemaRef, SequenceNumber};
 
-use crate::memtable::MemtableSet;
+use crate::memtable::{MemtableRef, MemtableSet};
 use crate::metadata::{RegionMetadata, RegionMetadataRef};
 use crate::sync::CowCell;
 
@@ -76,7 +76,7 @@ pub struct Version {
     /// in Arc to allow sharing metadata and reuse metadata when creating a new
     /// `Version`.
     metadata: RegionMetadataRef,
-    pub memtables: MemtableSet,
+    memtables: MemtableSet,
     // TODO(yingwen): Also need to store last sequence to this version when switching
     // version, so we can know the newest data can read from this version.
 }
@@ -89,7 +89,13 @@ impl Version {
         }
     }
 
+    #[inline]
     pub fn schema(&self) -> &SchemaRef {
         &self.metadata.schema
+    }
+
+    #[inline]
+    pub fn mutable_memtable(&self) -> &MemtableRef {
+        self.memtables.mutable_memtable()
     }
 }

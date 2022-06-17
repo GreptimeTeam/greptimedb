@@ -2,6 +2,8 @@ use common_error::ext::ErrorExt;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 
+use crate::storage::SequenceNumber;
+
 /// Write request holds a collection of updates to apply to a region.
 pub trait WriteRequest: Send {
     type Error: ErrorExt + Send + Sync;
@@ -27,8 +29,14 @@ pub trait PutOperation: Send {
     fn add_value_column(&mut self, name: &str, vector: VectorRef) -> Result<(), Self::Error>;
 }
 
-#[derive(Debug)]
-pub struct ScanRequest {}
+#[derive(Debug, Default)]
+pub struct ScanRequest {
+    /// Max sequence number to read, None for latest sequence.
+    ///
+    /// Default is None. Only returns data whose sequence number is less than or
+    /// equal to the `sequence`.
+    pub sequence: Option<SequenceNumber>,
+}
 
 #[derive(Debug)]
 pub struct GetRequest {}

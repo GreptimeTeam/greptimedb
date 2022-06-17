@@ -1,5 +1,6 @@
 //! Storage engine implementation.
 
+mod chunk;
 mod engine;
 mod error;
 pub mod memtable;

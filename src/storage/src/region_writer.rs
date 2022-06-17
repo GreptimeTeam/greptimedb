@@ -27,9 +27,8 @@ impl RegionWriter {
 
         // TODO(yingwen): Write wal and get sequence.
         let version = version_control.current();
-        let memtables = &version.memtables;
+        let mem = version.mutable_memtable();
 
-        let mem = memtables.mutable_memtable();
         let last_sequence = version_control.last_sequence();
         // Sequence for current write batch.
         let next_sequence = last_sequence + 1;
