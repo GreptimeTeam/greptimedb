@@ -100,7 +100,7 @@ impl BTreeIterator {
         } else {
             map.range(..)
         };
-        let iter = MapIterWrapper::new(iter);
+        let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence);
 
         let mut keys = Vec::with_capacity(self.ctx.batch_size);
         let mut sequences = UInt64VectorBuilder::with_capacity(self.ctx.batch_size);
@@ -116,13 +116,26 @@ impl BTreeIterator {
         if keys.is_empty() {
             return None;
         }
-        self.last_key = keys.last().map(|k| (*k).clone());
+        self.last_key = keys.last().map(|k| {
+            let mut last_key = (*k).clone();
+            last_key.reset_for_seek();
+            last_key
+        });
+
+        let key_data_types = self
+            .schema
+            .row_key_columns()
+            .map(|column_meta| column_meta.desc.data_type.clone());
+        let value_data_types = self
+            .schema
+            .value_columns()
+            .map(|column_meta| column_meta.desc.data_type.clone());
 
         Some(Batch {
-            keys: rows_to_vectors(keys.as_slice()),
+            keys: rows_to_vectors(key_data_types, keys.as_slice()),
             sequences: sequences.finish(),
             value_types: value_types.finish(),
-            values: rows_to_vectors(values.as_slice()),
+            values: rows_to_vectors(value_data_types, values.as_slice()),
         })
     }
 }
@@ -131,16 +144,29 @@ impl BTreeIterator {
 struct MapIterWrapper<'a, InnerKey, RowValue> {
     iter: btree_map::Range<'a, InnerKey, RowValue>,
     prev_key: Option<InnerKey>,
+    visible_sequence: SequenceNumber,
 }
 
 impl<'a> MapIterWrapper<'a, InnerKey, RowValue> {
     fn new(
         iter: btree_map::Range<'a, InnerKey, RowValue>,
+        visible_sequence: SequenceNumber,
     ) -> MapIterWrapper<'a, InnerKey, RowValue> {
         MapIterWrapper {
             iter,
             prev_key: None,
+            visible_sequence,
         }
+    }
+
+    fn next_visible_entry(&mut self) -> Option<(&'a InnerKey, &'a RowValue)> {
+        for (k, v) in self.iter.by_ref() {
+            if k.is_visible(self.visible_sequence) {
+                return Some((k, v));
+            }
+        }
+
+        None
     }
 }
 
@@ -148,7 +174,7 @@ impl<'a> Iterator for MapIterWrapper<'a, InnerKey, RowValue> {
     type Item = (&'a InnerKey, &'a RowValue);
 
     fn next(&mut self) -> Option<(&'a InnerKey, &'a RowValue)> {
-        let (mut current_key, mut current_value) = self.iter.next()?;
+        let (mut current_key, mut current_value) = self.next_visible_entry()?;
         if self.prev_key.is_none() {
             self.prev_key = Some(current_key.clone());
             return Some((current_key, current_value));
@@ -156,7 +182,7 @@ impl<'a> Iterator for MapIterWrapper<'a, InnerKey, RowValue> {
 
         let prev_key = self.prev_key.take().unwrap();
         while prev_key.is_row_key_equal(current_key) {
-            if let Some((next_key, next_value)) = self.iter.next() {
+            if let Some((next_key, next_value)) = self.next_visible_entry() {
                 (current_key, current_value) = (next_key, next_value);
             } else {
                 return None;
@@ -256,8 +282,25 @@ impl PartialOrd for InnerKey {
 }
 
 impl InnerKey {
+    #[inline]
     fn is_row_key_equal(&self, other: &InnerKey) -> bool {
         self.row_key == other.row_key
+    }
+
+    #[inline]
+    fn is_visible(&self, sequence: SequenceNumber) -> bool {
+        self.sequence <= sequence
+    }
+
+    /// Reset the `InnerKey` so that we can use it to seek next key that
+    /// has different row key.
+    fn reset_for_seek(&mut self) {
+        // sequence, index_in_batch, value_type are ordered in desc order, so
+        // we can represent the last inner key with same row key by setting them
+        // to zero (Minimum value).
+        self.sequence = 0;
+        self.index_in_batch = 0;
+        self.value_type = ValueType::min_type();
     }
 }
 
@@ -300,7 +343,10 @@ impl<'a> RowsProvider for &'a [&RowValue] {
     }
 }
 
-fn rows_to_vectors<T: RowsProvider>(provider: T) -> Vec<VectorRef> {
+fn rows_to_vectors<I: Iterator<Item = ConcreteDataType>, T: RowsProvider>(
+    data_types: I,
+    provider: T,
+) -> Vec<VectorRef> {
     if provider.is_empty() {
         return Vec::new();
     }
@@ -308,8 +354,8 @@ fn rows_to_vectors<T: RowsProvider>(provider: T) -> Vec<VectorRef> {
     let column_num = provider.column_num();
     let row_num = provider.row_num();
     let mut builders = Vec::with_capacity(column_num);
-    for v in provider.row_by_index(0) {
-        builders.push(VectorBuilder::with_capacity(v.data_type(), row_num));
+    for data_type in data_types {
+        builders.push(VectorBuilder::with_capacity(data_type, row_num));
     }
 
     let mut vectors = Vec::with_capacity(column_num);

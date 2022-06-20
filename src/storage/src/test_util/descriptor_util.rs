@@ -4,7 +4,7 @@ use store_api::storage::{
     RegionDescriptor, RowKeyDescriptorBuilder,
 };
 
-use crate::test_util::schema_util::ColumnDef;
+use crate::test_util::{self, schema_util::ColumnDef};
 
 /// A RegionDescriptor builder for test.
 pub struct RegionDescBuilder {
@@ -17,9 +17,13 @@ pub struct RegionDescBuilder {
 impl RegionDescBuilder {
     pub fn new<T: Into<String>>(name: T) -> Self {
         let key_builder = RowKeyDescriptorBuilder::new(
-            ColumnDescriptorBuilder::new(2, "timestamp", ConcreteDataType::uint64_datatype())
-                .is_nullable(false)
-                .build(),
+            ColumnDescriptorBuilder::new(
+                2,
+                test_util::TIMESTAMP_NAME,
+                ConcreteDataType::int64_datatype(),
+            )
+            .is_nullable(false)
+            .build(),
         );
 
         Self {

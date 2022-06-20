@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use datatypes::schema::SchemaRef;
 
+use crate::storage::chunk::ChunkReader;
+use crate::storage::consts;
 use crate::storage::requests::{GetRequest, ScanRequest};
 use crate::storage::responses::{GetResponse, ScanResponse};
 
@@ -9,6 +11,7 @@ use crate::storage::responses::{GetResponse, ScanResponse};
 #[async_trait]
 pub trait Snapshot: Send + Sync {
     type Error: ErrorExt + Send + Sync;
+    type Reader: ChunkReader;
 
     fn schema(&self) -> &SchemaRef;
 
@@ -16,7 +19,7 @@ pub trait Snapshot: Send + Sync {
         &self,
         ctx: &ReadContext,
         request: ScanRequest,
-    ) -> Result<ScanResponse, Self::Error>;
+    ) -> Result<ScanResponse<Self::Reader>, Self::Error>;
 
     async fn get(&self, ctx: &ReadContext, request: GetRequest)
         -> Result<GetResponse, Self::Error>;
@@ -24,4 +27,15 @@ pub trait Snapshot: Send + Sync {
 
 /// Context for read.
 #[derive(Debug, Clone)]
-pub struct ReadContext {}
+pub struct ReadContext {
+    /// Suggested batch size of chunk.
+    pub batch_size: usize,
+}
+
+impl Default for ReadContext {
+    fn default() -> ReadContext {
+        ReadContext {
+            batch_size: consts::READ_BATCH_SIZE,
+        }
+    }
+}

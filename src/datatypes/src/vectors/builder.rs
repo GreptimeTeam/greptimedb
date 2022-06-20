@@ -5,8 +5,8 @@ use crate::scalars::ScalarVectorBuilder;
 use crate::value::Value;
 use crate::vectors::{
     BinaryVectorBuilder, BooleanVectorBuilder, Float32VectorBuilder, Float64VectorBuilder,
-    Int16VectorBuilder, Int32VectorBuilder, Int64VectorBuilder, Int8VectorBuilder, NullVector,
-    StringVectorBuilder, UInt16VectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder,
+    Int16VectorBuilder, Int32VectorBuilder, Int64VectorBuilder, Int8VectorBuilder, MutableVector,
+    NullVector, StringVectorBuilder, UInt16VectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder,
     UInt8VectorBuilder, VectorRef,
 };
 
@@ -81,13 +81,32 @@ impl VectorBuilder {
         }
     }
 
+    pub fn data_type(&self) -> ConcreteDataType {
+        match self {
+            VectorBuilder::Null(_) => ConcreteDataType::null_datatype(),
+            VectorBuilder::Boolean(b) => b.data_type(),
+            VectorBuilder::UInt8(b) => b.data_type(),
+            VectorBuilder::UInt16(b) => b.data_type(),
+            VectorBuilder::UInt32(b) => b.data_type(),
+            VectorBuilder::UInt64(b) => b.data_type(),
+            VectorBuilder::Int8(b) => b.data_type(),
+            VectorBuilder::Int16(b) => b.data_type(),
+            VectorBuilder::Int32(b) => b.data_type(),
+            VectorBuilder::Int64(b) => b.data_type(),
+            VectorBuilder::Float32(b) => b.data_type(),
+            VectorBuilder::Float64(b) => b.data_type(),
+            VectorBuilder::String(b) => b.data_type(),
+            VectorBuilder::Binary(b) => b.data_type(),
+        }
+    }
+
     pub fn push(&mut self, value: &Value) {
         if value.is_null() {
             self.push_null();
             return;
         }
 
-        match (self, value) {
+        match (&mut *self, value) {
             (VectorBuilder::Boolean(b), Value::Boolean(v)) => b.push(Some(*v)),
             (VectorBuilder::UInt8(b), Value::UInt8(v)) => b.push(Some(*v)),
             (VectorBuilder::UInt16(b), Value::UInt16(v)) => b.push(Some(*v)),
@@ -101,7 +120,11 @@ impl VectorBuilder {
             (VectorBuilder::Float64(b), Value::Float64(v)) => b.push(Some(v.into_inner())),
             (VectorBuilder::String(b), Value::String(v)) => b.push(Some(v.as_utf8())),
             (VectorBuilder::Binary(b), Value::Binary(v)) => b.push(Some(v)),
-            _ => panic!("Value {:?} does not match builder type", value),
+            _ => panic!(
+                "Value {:?} does not match builder type {:?}",
+                value,
+                self.data_type()
+            ),
         }
     }
 
@@ -152,7 +175,10 @@ mod tests {
 
     macro_rules! impl_integer_builder_test {
         ($Type: ident, $datatype: ident) => {
-            let mut builder = VectorBuilder::with_capacity(ConcreteDataType::$datatype(), 10);
+            let data_type = ConcreteDataType::$datatype();
+            let mut builder = VectorBuilder::with_capacity(data_type.clone(), 10);
+            assert_eq!(data_type, builder.data_type());
+
             for i in 0..10 {
                 builder.push(&Value::$Type(i));
             }
@@ -175,6 +201,7 @@ mod tests {
     #[test]
     fn test_null_vector_builder() {
         let mut builder = VectorBuilder::new(ConcreteDataType::null_datatype());
+        assert_eq!(ConcreteDataType::null_datatype(), builder.data_type());
         builder.push(&Value::Null);
         let vector = builder.finish();
         assert!(vector.is_null(0));
@@ -194,7 +221,10 @@ mod tests {
 
     #[test]
     fn test_float_vector_builder() {
-        let mut builder = VectorBuilder::new(ConcreteDataType::float32_datatype());
+        let data_type = ConcreteDataType::float32_datatype();
+        let mut builder = VectorBuilder::new(data_type.clone());
+        assert_eq!(data_type, builder.data_type());
+
         builder.push(&Value::Float32(OrderedFloat(1.0)));
         let vector = builder.finish();
         assert_eq!(Value::Float32(OrderedFloat(1.0)), vector.get(0));
@@ -207,8 +237,10 @@ mod tests {
 
     #[test]
     fn test_binary_vector_builder() {
+        let data_type = ConcreteDataType::binary_datatype();
         let hello: &[u8] = b"hello";
-        let mut builder = VectorBuilder::new(ConcreteDataType::binary_datatype());
+        let mut builder = VectorBuilder::new(data_type.clone());
+        assert_eq!(data_type, builder.data_type());
         builder.push(&Value::Binary(hello.into()));
         let vector = builder.finish();
         assert_eq!(Value::Binary(hello.into()), vector.get(0));
@@ -216,8 +248,10 @@ mod tests {
 
     #[test]
     fn test_string_vector_builder() {
+        let data_type = ConcreteDataType::string_datatype();
         let hello = "hello";
-        let mut builder = VectorBuilder::new(ConcreteDataType::string_datatype());
+        let mut builder = VectorBuilder::new(data_type.clone());
+        assert_eq!(data_type, builder.data_type());
         builder.push(&Value::String(hello.into()));
         let vector = builder.finish();
         assert_eq!(Value::String(hello.into()), vector.get(0));

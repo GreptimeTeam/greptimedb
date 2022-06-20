@@ -199,9 +199,12 @@ fn write_iter_memtable_case(ctx: &TestContext) {
         &[None, Some(5), None],             // values
     );
 
-    let batch_sizes = [1, 4, 8, 256];
+    let batch_sizes = [1, 4, 8, consts::READ_BATCH_SIZE];
     for batch_size in batch_sizes {
-        let iter_ctx = IterContext { batch_size };
+        let iter_ctx = IterContext {
+            batch_size,
+            ..Default::default()
+        };
         let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
         assert_eq!(ctx.schema, *iter.schema());
         assert_eq!(RowOrdering::Key, iter.ordering());
@@ -295,10 +298,168 @@ fn test_iter_batch_size() {
         // Batch size [less than, equal to, greater than] total
         let batch_sizes = [1, 6, 8];
         for batch_size in batch_sizes {
-            let iter_ctx = IterContext { batch_size };
+            let iter_ctx = IterContext {
+                batch_size,
+                ..Default::default()
+            };
 
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
             check_iter_batch_size(&mut *iter, total, batch_size);
         }
     });
 }
+
+#[test]
+fn test_duplicate_key_across_batch() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_kvs(
+            &*ctx.memtable,
+            10, // sequence
+            ValueType::Put,
+            &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
+            &[Some(1), None, None, None],                  // values
+        );
+
+        write_kvs(
+            &*ctx.memtable,
+            11, // sequence
+            ValueType::Put,
+            &[(1000, 1), (2001, 2)],   // keys
+            &[Some(1231), Some(1232)], // values
+        );
+
+        let batch_sizes = [1, 2, 3, 4, 5];
+        for batch_size in batch_sizes {
+            let iter_ctx = IterContext {
+                batch_size,
+                ..Default::default()
+            };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_content(
+                &mut *iter,
+                &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
+                &[11, 10, 10, 11],                             // sequences
+                &[
+                    ValueType::Put,
+                    ValueType::Put,
+                    ValueType::Put,
+                    ValueType::Put,
+                ], // value types
+                &[Some(1231), None, None, Some(1232)],         // values
+            );
+        }
+    });
+}
+
+#[test]
+fn test_duplicate_key_in_batch() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_kvs(
+            &*ctx.memtable,
+            10, // sequence
+            ValueType::Put,
+            &[(1000, 1), (1000, 2), (1000, 1), (2001, 2)], // keys
+            &[None, None, Some(1234), None],               // values
+        );
+
+        let batch_sizes = [1, 2, 3, 4, 5];
+        for batch_size in batch_sizes {
+            let iter_ctx = IterContext {
+                batch_size,
+                ..Default::default()
+            };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_content(
+                &mut *iter,
+                &[(1000, 1), (1000, 2), (2001, 2)], // keys
+                &[10, 10, 10],                      // sequences
+                &[ValueType::Put, ValueType::Put, ValueType::Put], // value types
+                &[Some(1234), None, None, None],    // values
+            );
+        }
+    });
+}
+
+#[test]
+fn test_sequence_visibility() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_kvs(
+            &*ctx.memtable,
+            10, // sequence
+            ValueType::Put,
+            &[(1000, 1), (1000, 2)], // keys
+            &[Some(1), Some(2)],     // values
+        );
+
+        write_kvs(
+            &*ctx.memtable,
+            11, // sequence
+            ValueType::Put,
+            &[(1000, 1), (1000, 2)], // keys
+            &[Some(11), Some(12)],   // values
+        );
+
+        write_kvs(
+            &*ctx.memtable,
+            12, // sequence
+            ValueType::Put,
+            &[(1000, 1), (1000, 2)], // keys
+            &[Some(21), Some(22)],   // values
+        );
+
+        {
+            let iter_ctx = IterContext {
+                batch_size: 1,
+                visible_sequence: 9,
+            };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_content(
+                &mut *iter,
+                &[], // keys
+                &[], // sequences
+                &[], // value types
+                &[], // values
+            );
+        }
+
+        {
+            let iter_ctx = IterContext {
+                batch_size: 1,
+                visible_sequence: 10,
+            };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_content(
+                &mut *iter,
+                &[(1000, 1), (1000, 2)],           // keys
+                &[10, 10],                         // sequences
+                &[ValueType::Put, ValueType::Put], // value types
+                &[Some(1), Some(2)],               // values
+            );
+        }
+
+        {
+            let iter_ctx = IterContext {
+                batch_size: 1,
+                visible_sequence: 11,
+            };
+
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            check_iter_content(
+                &mut *iter,
+                &[(1000, 1), (1000, 2)],           // keys
+                &[11, 11],                         // sequences
+                &[ValueType::Put, ValueType::Put], // value types
+                &[Some(11), Some(12)],             // values
+            );
+        }
+    });
+}
+
+// TODO(yingwen): Test key overwrite in same batch.

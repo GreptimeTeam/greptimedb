@@ -1,5 +1,6 @@
 //! Storage APIs.
 
+mod chunk;
 pub mod consts;
 mod descriptors;
 mod engine;
@@ -13,6 +14,7 @@ mod types;
 pub use datatypes::data_type::ConcreteDataType;
 pub use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 
+pub use self::chunk::{Chunk, ChunkReader};
 pub use self::descriptors::{
     gen_region_name, ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor,
     ColumnFamilyDescriptorBuilder, ColumnFamilyId, ColumnId, RegionDescriptor, RegionId,
