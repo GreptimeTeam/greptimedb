@@ -117,7 +117,6 @@ macro_rules! define_opaque_error {
 
                 let msg = format!("{:?}", err);
                 assert!(msg.contains("\nBacktrace:\n"));
-                assert!(msg.contains("Caused by"));
                 let fmt_msg = format!("{:?}", DebugFormat::new(&err));
                 assert_eq!(msg, fmt_msg);
 
@@ -135,6 +134,10 @@ macro_rules! define_opaque_error {
                 assert_eq!(StatusCode::Internal, err.status_code());
                 assert!(err.as_any().downcast_ref::<MockError>().is_some());
                 assert!(err.source().is_some());
+
+                let msg = format!("{:?}", err);
+                assert!(msg.contains("\nBacktrace:\n"));
+                assert!(msg.contains("Caused by"));
 
                 assert!(ErrorCompat::backtrace(&err).is_some());
             }
