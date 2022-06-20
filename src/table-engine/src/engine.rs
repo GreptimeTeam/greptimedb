@@ -73,7 +73,7 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
     }
 }
 
-/// FIXME(boyan) impl system catalog to keep table metadata.
+/// FIXME(dennis) impl system catalog to keep table metadata.
 struct MitoEngineInner<Store: StorageEngine> {
     tables: RwLock<HashMap<String, TableRef>>,
     storage_engine: Store,
@@ -100,7 +100,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
         _ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> Result<TableRef> {
-        //FIXME(boyan): we only supports creating a demo table right now
+        //FIXME(dennis): we only supports creating a demo table right now
         //The create table sql is like:
         //    create table demo(host string,
         //                                  ts int64,
@@ -108,7 +108,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
         //                                  memory float64,
         //                                  PRIMARY KEY(ts, host)) with regions=1;
 
-        //TODO(boyan): supports multi regions
+        //TODO(dennis): supports multi regions
         let region_id: RegionId = 0;
         let name = store::gen_region_name(region_id);
 
@@ -183,69 +183,62 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
 
 #[cfg(test)]
 mod tests {
-    use datatypes::schema::{ColumnSchema, Schema};
+    use common_recordbatch::util;
+    use datafusion_common::field_util::FieldExt;
+    use datafusion_common::field_util::SchemaExt;
     use datatypes::vectors::*;
-    use storage::EngineImpl;
     use table::requests::InsertRequest;
 
     use super::*;
+    use crate::table::test;
 
     #[tokio::test]
-    async fn test_creat_table_insert() {
-        let column_schemas = vec![
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
-            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ];
-
-        let table_engine = MitoEngine::<EngineImpl>::new(EngineImpl::new());
-
-        let table_name = "demo";
-        let schema = Arc::new(Schema::new(column_schemas));
-        let table = table_engine
-            .create_table(
-                &EngineContext::default(),
-                CreateTableRequest {
-                    name: table_name.to_string(),
-                    desc: Some(" a test table".to_string()),
-                    schema: schema.clone(),
-                },
-            )
-            .await
-            .unwrap();
+    async fn test_creat_table_insert_scan() {
+        let (_engine, table, schema) = test::setup_test_engine_and_table().await;
 
         assert_eq!(TableType::Base, table.table_type());
         assert_eq!(schema, table.schema());
 
         let insert_req = InsertRequest {
-            table_name: table_name.to_string(),
+            table_name: "demo".to_string(),
             columns_values: HashMap::default(),
         };
         assert_eq!(0, table.insert(insert_req).await.unwrap());
 
         let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
-        columns_values.insert(
-            "host".to_string(),
-            Arc::new(StringVector::from(vec!["host1", "host2"])),
-        );
-        columns_values.insert(
-            "cpu".to_string(),
-            Arc::new(Float64Vector::from_vec(vec![55.5, 66.6])),
-        );
-        columns_values.insert(
-            "memory".to_string(),
-            Arc::new(Float64Vector::from_vec(vec![1024f64, 4096f64])),
-        );
-        columns_values.insert(
-            "ts".to_string(),
-            Arc::new(Int64Vector::from_vec(vec![1, 2])),
-        );
+        let hosts = StringVector::from(vec!["host1", "host2"]);
+        let cpus = Float64Vector::from_vec(vec![55.5, 66.6]);
+        let memories = Float64Vector::from_vec(vec![1024f64, 4096f64]);
+        let tss = Int64Vector::from_vec(vec![1, 2]);
+
+        columns_values.insert("host".to_string(), Arc::new(hosts.clone()));
+        columns_values.insert("cpu".to_string(), Arc::new(cpus.clone()));
+        columns_values.insert("memory".to_string(), Arc::new(memories.clone()));
+        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
 
         let insert_req = InsertRequest {
-            table_name: table_name.to_string(),
+            table_name: "demo".to_string(),
             columns_values,
         };
         assert_eq!(2, table.insert(insert_req).await.unwrap());
+
+        let stream = table.scan(&None, &[], None).await.unwrap();
+        let batches = util::collect(stream).await.unwrap();
+        assert_eq!(1, batches.len());
+        assert_eq!(batches[0].df_recordbatch.num_columns(), 4);
+
+        let arrow_schema = batches[0].schema.arrow_schema();
+        assert_eq!(arrow_schema.fields().len(), 4);
+        assert_eq!(arrow_schema.field(0).name(), "host");
+        assert_eq!(arrow_schema.field(1).name(), "ts");
+        assert_eq!(arrow_schema.field(2).name(), "cpu");
+        assert_eq!(arrow_schema.field(3).name(), "memory");
+
+        let columns = batches[0].df_recordbatch.columns();
+        assert_eq!(4, columns.len());
+        assert_eq!(hosts.to_arrow_array(), columns[0]);
+        assert_eq!(tss.to_arrow_array(), columns[1]);
+        assert_eq!(cpus.to_arrow_array(), columns[2]);
+        assert_eq!(memories.to_arrow_array(), columns[3]);
     }
 }
