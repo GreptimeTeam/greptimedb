@@ -117,7 +117,10 @@ impl<R: Region> Table for MitoTable<R> {
             {
                 let batch = DfRecordBatch::try_new(
                     stream_schema.arrow_schema().clone(),
-                    chunk.columns.into_iter().map(|v| v.to_arrow_array()).collect());
+                    chunk.columns
+                        .into_iter()
+                        .map(|v| v.to_arrow_array())
+                        .collect());
                 let batch = batch
                     .map_err(|e| Box::new(e) as _)
                     .context(StorageSnafu {
@@ -135,7 +138,6 @@ impl<R: Region> Table for MitoTable<R> {
     }
 }
 
-// Limited numbers stream
 struct ChunkStream {
     schema: SchemaRef,
     stream: Pin<Box<dyn Stream<Item = RecordBatchResult<RecordBatch>> + Send>>,
