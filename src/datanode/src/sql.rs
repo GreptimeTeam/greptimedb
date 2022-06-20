@@ -1,6 +1,7 @@
 //! sql handler
 
 mod insert;
+use common_error::ext::BoxedError;
 use query::catalog::schema::SchemaProviderRef;
 use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
@@ -34,7 +35,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
     pub(crate) fn get_table(&self, table_name: &str) -> Result<TableRef> {
         self.table_engine
             .get_table(&EngineContext::default(), table_name)
-            .map_err(|e| Box::new(e) as _)
+            .map_err(BoxedError::new)
             .context(GetTableSnafu { table_name })?
             .context(TableNotFoundSnafu { table_name })
     }

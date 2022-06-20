@@ -1,12 +1,10 @@
 use std::any::Any;
 
+use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
 use table::error::Error as TableError;
 use table_engine::error::Error as TableEngineError;
-
-// TODO(dennis): use ErrorExt instead.
-pub type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
