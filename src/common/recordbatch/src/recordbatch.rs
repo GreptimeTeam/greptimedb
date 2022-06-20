@@ -55,10 +55,10 @@ impl Serialize for RecordBatch {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::UInt32Array;
-    use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datafusion_common::field_util::SchemaExt;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+    use datatypes::arrow::array::UInt32Array;
+    use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datatypes::schema::Schema;
 
     use super::*;
