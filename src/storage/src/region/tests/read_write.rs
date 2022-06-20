@@ -7,12 +7,11 @@ use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::Int64Vector;
 use store_api::storage::{
     consts, Chunk, ChunkReader, PutOperation, ReadContext, Region, RegionMeta, ScanRequest,
-    Snapshot, WriteContext, WriteRequest, WriteResponse,
+    SequenceNumber, Snapshot, WriteContext, WriteRequest, WriteResponse,
 };
 
 use crate::region::RegionImpl;
-use crate::test_util::write_batch_util;
-use crate::test_util::{self, descriptor_util::RegionDescBuilder};
+use crate::test_util::{self, descriptor_util::RegionDescBuilder, write_batch_util};
 use crate::write_batch::{PutData, WriteBatch};
 
 /// Create a new region for read/write test
@@ -127,6 +126,10 @@ impl Tester {
 
         dst
     }
+
+    fn committed_sequence(&self) -> SequenceNumber {
+        self.region.committed_sequence()
+    }
 }
 
 #[tokio::test]
@@ -145,4 +148,17 @@ async fn test_simple_put_scan() {
 
     let output = tester.full_scan().await;
     assert_eq!(data, output);
+}
+
+#[tokio::test]
+async fn test_sequence_increase() {
+    let tester = Tester::default();
+
+    let mut committed_sequence = tester.committed_sequence();
+    for i in 0..100 {
+        tester.put(&[(i, Some(1234))]).await;
+        committed_sequence += 1;
+
+        assert_eq!(committed_sequence, tester.committed_sequence());
+    }
 }

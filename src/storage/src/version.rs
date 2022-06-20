@@ -56,7 +56,7 @@ impl VersionControl {
     #[inline]
     pub fn set_committed_sequence(&self, value: SequenceNumber) {
         // Release ordering should be enough to guarantee sequence is updated at last.
-        self.committed_sequence.fetch_add(value, Ordering::Release);
+        self.committed_sequence.store(value, Ordering::Release);
     }
 }
 
@@ -97,5 +97,34 @@ impl Version {
     #[inline]
     pub fn mutable_memtable(&self) -> &MemtableRef {
         self.memtables.mutable_memtable()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memtable::{DefaultMemtableBuilder, MemtableBuilder, MemtableSchema};
+    use crate::test_util::descriptor_util::RegionDescBuilder;
+
+    fn new_version_control() -> VersionControl {
+        let desc = RegionDescBuilder::new("version-test")
+            .enable_version_column(false)
+            .build();
+        let metadata: RegionMetadata = desc.try_into().unwrap();
+
+        let schema = MemtableSchema::new(metadata.columns_row_key.clone());
+        let memtable = DefaultMemtableBuilder {}.build(schema);
+        let memtable_set = MemtableSet::new(memtable);
+
+        VersionControl::new(metadata, memtable_set)
+    }
+
+    #[test]
+    fn test_version_control() {
+        let version_control = new_version_control();
+
+        assert_eq!(0, version_control.committed_sequence());
+        version_control.set_committed_sequence(12345);
+        assert_eq!(12345, version_control.committed_sequence());
     }
 }

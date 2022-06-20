@@ -63,6 +63,12 @@ impl RegionImpl {
 
         RegionImpl { inner }
     }
+
+    #[cfg(test)]
+    #[inline]
+    fn committed_sequence(&self) -> store_api::storage::SequenceNumber {
+        self.inner.version.committed_sequence()
+    }
 }
 
 struct RegionInner {
