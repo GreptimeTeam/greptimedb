@@ -3,6 +3,7 @@ use common_error::ext::ErrorExt;
 use datatypes::schema::SchemaRef;
 
 use crate::storage::chunk::ChunkReader;
+use crate::storage::consts;
 use crate::storage::requests::{GetRequest, ScanRequest};
 use crate::storage::responses::{GetResponse, ScanResponse};
 
@@ -33,6 +34,8 @@ pub struct ReadContext {
 
 impl Default for ReadContext {
     fn default() -> ReadContext {
-        ReadContext { batch_size: 256 }
+        ReadContext {
+            batch_size: consts::READ_BATCH_SIZE,
+        }
     }
 }

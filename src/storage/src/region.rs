@@ -94,7 +94,7 @@ impl RegionInner {
 
     fn create_snapshot(&self) -> SnapshotImpl {
         let version = self.version.current();
-        let sequence = self.version.last_sequence();
+        let sequence = self.version.committed_sequence();
 
         SnapshotImpl::new(version, sequence)
     }

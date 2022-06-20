@@ -199,7 +199,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
         &[None, Some(5), None],             // values
     );
 
-    let batch_sizes = [1, 4, 8, 256];
+    let batch_sizes = [1, 4, 8, consts::READ_BATCH_SIZE];
     for batch_size in batch_sizes {
         let iter_ctx = IterContext {
             batch_size,
@@ -415,7 +415,7 @@ fn test_sequence_visibility() {
         {
             let iter_ctx = IterContext {
                 batch_size: 1,
-                sequence: 9,
+                visible_sequence: 9,
             };
 
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
@@ -431,7 +431,7 @@ fn test_sequence_visibility() {
         {
             let iter_ctx = IterContext {
                 batch_size: 1,
-                sequence: 10,
+                visible_sequence: 10,
             };
 
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
@@ -447,7 +447,7 @@ fn test_sequence_visibility() {
         {
             let iter_ctx = IterContext {
                 batch_size: 1,
-                sequence: 11,
+                visible_sequence: 11,
             };
 
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();

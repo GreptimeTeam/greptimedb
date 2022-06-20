@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use datatypes::vectors::{UInt64Vector, UInt8Vector, VectorRef};
 use snafu::Snafu;
-use store_api::storage::{SequenceNumber, ValueType};
+use store_api::storage::{consts, SequenceNumber, ValueType};
 
 use crate::error::Result;
 use crate::memtable::btree::BTreeMemtable;
@@ -42,15 +42,15 @@ pub struct IterContext {
     /// The suggested batch size of the iterator.
     pub batch_size: usize,
     /// Max visible sequence (inclusive).
-    pub sequence: SequenceNumber,
+    pub visible_sequence: SequenceNumber,
 }
 
 impl Default for IterContext {
     fn default() -> Self {
         Self {
-            batch_size: 256,
-            // All data in memory is visible.
-            sequence: SequenceNumber::MAX,
+            batch_size: consts::READ_BATCH_SIZE,
+            // All data in memory is visible by default.
+            visible_sequence: SequenceNumber::MAX,
         }
     }
 }

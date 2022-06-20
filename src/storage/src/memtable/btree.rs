@@ -100,7 +100,7 @@ impl BTreeIterator {
         } else {
             map.range(..)
         };
-        let iter = MapIterWrapper::new(iter, self.ctx.sequence);
+        let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence);
 
         let mut keys = Vec::with_capacity(self.ctx.batch_size);
         let mut sequences = UInt64VectorBuilder::with_capacity(self.ctx.batch_size);

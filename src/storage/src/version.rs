@@ -19,8 +19,8 @@ use crate::sync::CowCell;
 /// Controls version of in memory state for a region.
 pub struct VersionControl {
     version: CowCell<Version>,
-    /// Last sequence that visible to user.
-    last_sequence: AtomicU64,
+    /// Latest sequence that is committed and visible to user.
+    committed_sequence: AtomicU64,
 }
 
 impl VersionControl {
@@ -28,7 +28,7 @@ impl VersionControl {
     pub fn new(metadata: RegionMetadata, memtables: MemtableSet) -> VersionControl {
         VersionControl {
             version: CowCell::new(Version::new(metadata, memtables)),
-            last_sequence: AtomicU64::new(0),
+            committed_sequence: AtomicU64::new(0),
         }
     }
 
@@ -45,18 +45,18 @@ impl VersionControl {
     }
 
     #[inline]
-    pub fn last_sequence(&self) -> SequenceNumber {
-        self.last_sequence.load(Ordering::Acquire)
+    pub fn committed_sequence(&self) -> SequenceNumber {
+        self.committed_sequence.load(Ordering::Acquire)
     }
 
-    /// Set last sequence to `value`.
+    /// Set committed sequence to `value`.
     ///
     /// External synchronization is required to ensure only one thread can update the
     /// last sequence.
     #[inline]
-    pub fn set_last_sequence(&self, value: SequenceNumber) {
+    pub fn set_committed_sequence(&self, value: SequenceNumber) {
         // Release ordering should be enough to guarantee sequence is updated at last.
-        self.last_sequence.fetch_add(value, Ordering::Release);
+        self.committed_sequence.fetch_add(value, Ordering::Release);
     }
 }
 

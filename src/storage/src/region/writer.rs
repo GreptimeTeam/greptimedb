@@ -29,17 +29,17 @@ impl RegionWriter {
         let version = version_control.current();
         let mem = version.mutable_memtable();
 
-        let last_sequence = version_control.last_sequence();
+        let committed_sequence = version_control.committed_sequence();
         // Sequence for current write batch.
-        let next_sequence = last_sequence + 1;
+        let next_sequence = committed_sequence + 1;
 
         // Insert batch into memtable.
         let mut inserter = Inserter::new(next_sequence);
         inserter.insert_memtable(&request, &**mem)?;
 
-        // Update last_sequence to make current batch visible. The `&mut self` of RegionWriter
+        // Update committed_sequence to make current batch visible. The `&mut self` of RegionWriter
         // guarantees the writer is exclusive.
-        version_control.set_last_sequence(next_sequence);
+        version_control.set_committed_sequence(next_sequence);
 
         Ok(WriteResponse {})
     }

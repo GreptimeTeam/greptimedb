@@ -50,7 +50,7 @@ impl<T: Clone> CowCell<T> {
 
 /// A RAII implementation of a write transaction of the [CowCell].
 ///
-/// When this txn is dropped (falls out of scope or commited), the lock will be
+/// When this txn is dropped (falls out of scope or committed), the lock will be
 /// unlocked, but updates to the content won't be visible unless the txn is committed.
 #[must_use = "if unused the CowCell will immediately unlock"]
 pub struct TxnGuard<'a, T: Clone> {

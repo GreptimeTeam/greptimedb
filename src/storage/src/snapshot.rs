@@ -15,7 +15,7 @@ use crate::version::VersionRef;
 pub struct SnapshotImpl {
     version: VersionRef,
     /// Max sequence number (inclusive) visible to user.
-    sequence: SequenceNumber,
+    visible_sequence: SequenceNumber,
 }
 
 #[async_trait]
@@ -32,12 +32,12 @@ impl Snapshot for SnapshotImpl {
         ctx: &ReadContext,
         request: ScanRequest,
     ) -> Result<ScanResponse<ChunkReaderImpl>> {
-        let sequence = self.sequence_to_read(request.sequence);
+        let visible_sequence = self.sequence_to_read(request.sequence);
 
         let mem = self.version.mutable_memtable();
         let iter_ctx = IterContext {
             batch_size: ctx.batch_size,
-            sequence,
+            visible_sequence,
         };
         let iter = mem.iter(iter_ctx)?;
 
@@ -52,14 +52,17 @@ impl Snapshot for SnapshotImpl {
 }
 
 impl SnapshotImpl {
-    pub fn new(version: VersionRef, sequence: SequenceNumber) -> SnapshotImpl {
-        SnapshotImpl { version, sequence }
+    pub fn new(version: VersionRef, visible_sequence: SequenceNumber) -> SnapshotImpl {
+        SnapshotImpl {
+            version,
+            visible_sequence,
+        }
     }
 
     #[inline]
     fn sequence_to_read(&self, request_sequence: Option<SequenceNumber>) -> SequenceNumber {
         request_sequence
-            .map(|s| cmp::min(s, self.sequence))
-            .unwrap_or(self.sequence)
+            .map(|s| cmp::min(s, self.visible_sequence))
+            .unwrap_or(self.visible_sequence)
     }
 }
