@@ -79,7 +79,7 @@ impl Instance {
     }
 
     pub async fn start(&self) -> Result<()> {
-        // FIXME(boyan): create a demo table for test
+        // FIXME(dennis): create a demo table for test
         let column_schemas = vec![
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),

@@ -73,7 +73,7 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
     }
 }
 
-/// FIXME(boyan) impl system catalog to keep table metadata.
+/// FIXME(dennis) impl system catalog to keep table metadata.
 struct MitoEngineInner<Store: StorageEngine> {
     tables: RwLock<HashMap<String, TableRef>>,
     storage_engine: Store,
@@ -100,7 +100,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
         _ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> Result<TableRef> {
-        //FIXME(boyan): we only supports creating a demo table right now
+        //FIXME(dennis): we only supports creating a demo table right now
         //The create table sql is like:
         //    create table demo(host string,
         //                                  ts int64,
@@ -108,7 +108,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
         //                                  memory float64,
         //                                  PRIMARY KEY(ts, host)) with regions=1;
 
-        //TODO(boyan): supports multi regions
+        //TODO(dennis): supports multi regions
         let region_id: RegionId = 0;
         let name = store::gen_region_name(region_id);
 

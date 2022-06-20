@@ -48,7 +48,7 @@ impl<R: Region> Table for MitoTable<R> {
 
         let mut write_request = R::WriteRequest::new(self.schema());
 
-        //FIXME(boyan): we can only insert to demo table right now
+        //FIXME(dennis): we can only insert to demo table right now
         let mut put_op = <<R as Region>::WriteRequest as WriteRequest>::PutOp::new();
         let mut columns_values = request.columns_values;
         let key_columns = vec!["ts", "host"];

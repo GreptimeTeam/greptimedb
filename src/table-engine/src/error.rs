@@ -2,7 +2,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 
-// TODO(boyan): use ErrorExt instead.
+// TODO(dennis): use ErrorExt instead.
 pub type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Snafu)]
