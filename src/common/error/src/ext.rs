@@ -80,99 +80,67 @@ macro_rules! define_opaque_error {
                 self.inner.backtrace_opt()
             }
         }
+
+        // Also generate test for the generated opaque error type.
+        #[cfg(test)]
+        mod opaque_error_tests {
+            use std::error::Error as StdError;
+
+            use $crate::ext::ErrorExt;
+            use $crate::format::DebugFormat;
+            use $crate::mock::MockError;
+            use $crate::snafu::ErrorCompat;
+            use $crate::status_code::StatusCode;
+
+            use super::$Error;
+
+            #[test]
+            fn test_opaque_error_without_backtrace() {
+                let err = $Error::new(MockError::new(StatusCode::Internal));
+                assert!(err.backtrace_opt().is_none());
+                assert_eq!(StatusCode::Internal, err.status_code());
+                assert!(err.as_any().downcast_ref::<MockError>().is_some());
+                assert!(err.source().is_none());
+
+                assert!(ErrorCompat::backtrace(&err).is_none());
+            }
+
+            #[test]
+            fn test_opaque_error_with_backtrace() {
+                let err = $Error::new(MockError::with_backtrace(StatusCode::Internal));
+                assert!(err.backtrace_opt().is_some());
+                assert_eq!(StatusCode::Internal, err.status_code());
+                assert!(err.as_any().downcast_ref::<MockError>().is_some());
+                assert!(err.source().is_none());
+
+                assert!(ErrorCompat::backtrace(&err).is_some());
+
+                let msg = format!("{:?}", err);
+                assert!(msg.contains("\nBacktrace:\n"));
+                assert!(msg.contains("Caused by"));
+                let fmt_msg = format!("{:?}", DebugFormat::new(&err));
+                assert_eq!(msg, fmt_msg);
+
+                let msg = err.to_string();
+                msg.contains("Internal");
+            }
+
+            #[test]
+            fn test_opaque_error_with_source() {
+                let leaf_err = MockError::with_backtrace(StatusCode::Internal);
+                let internal_err = MockError::with_source(leaf_err);
+                let err = $Error::new(internal_err);
+
+                assert!(err.backtrace_opt().is_some());
+                assert_eq!(StatusCode::Internal, err.status_code());
+                assert!(err.as_any().downcast_ref::<MockError>().is_some());
+                assert!(err.source().is_some());
+
+                assert!(ErrorCompat::backtrace(&err).is_some());
+            }
+        }
     };
 }
 
 // Define a general boxed error.
 define_opaque_error!(BoxedError);
-
-#[cfg(test)]
-mod tests {
-    use std::error::Error as StdError;
-
-    use super::*;
-    use crate::prelude::*;
-
-    #[derive(Debug, Snafu)]
-    enum InnerError {
-        #[snafu(display("This is a leaf error, val: {}", val))]
-        Leaf { val: i32, backtrace: Backtrace },
-
-        #[snafu(display("This is an internal error"))]
-        Internal {
-            source: std::io::Error,
-            backtrace: Backtrace,
-        },
-    }
-
-    impl ErrorExt for InnerError {
-        fn status_code(&self) -> StatusCode {
-            StatusCode::Internal
-        }
-
-        fn backtrace_opt(&self) -> Option<&snafu::Backtrace> {
-            ErrorCompat::backtrace(self)
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-    }
-
-    fn throw_leaf() -> std::result::Result<(), InnerError> {
-        LeafSnafu { val: 10 }.fail()
-    }
-
-    fn throw_io() -> std::result::Result<(), std::io::Error> {
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "oh no!"))
-    }
-
-    fn throw_internal() -> std::result::Result<(), InnerError> {
-        throw_io().context(InternalSnafu)
-    }
-
-    #[test]
-    fn test_inner_error() {
-        let leaf = throw_leaf().err().unwrap();
-        assert!(leaf.backtrace_opt().is_some());
-        assert!(leaf.source().is_none());
-
-        let internal = throw_internal().err().unwrap();
-        assert!(internal.backtrace_opt().is_some());
-        assert!(internal.source().is_some());
-    }
-
-    #[test]
-    fn test_opaque_error() {
-        // Test leaf error.
-        let err = throw_leaf().map_err(BoxedError::new).err().unwrap();
-        let msg = format!("{:?}", err);
-        assert!(msg.contains("\nBacktrace:\n"));
-
-        let fmt_msg = format!("{:?}", DebugFormat::new(&err));
-        assert_eq!(msg, fmt_msg);
-
-        assert!(ErrorCompat::backtrace(&err).is_some());
-        assert!(err.backtrace_opt().is_some());
-        assert_eq!("This is a leaf error, val: 10", err.to_string());
-        assert_eq!(StatusCode::Internal, err.status_code());
-
-        err.as_any().downcast_ref::<InnerError>().unwrap();
-
-        // Test internal error.
-        let err = throw_internal().map_err(BoxedError::new).err().unwrap();
-        let msg = format!("{:?}", err);
-        assert!(msg.contains("\nBacktrace:\n"));
-        assert!(msg.contains("Caused by"));
-
-        let fmt_msg = format!("{:?}", DebugFormat::new(&err));
-        assert_eq!(msg, fmt_msg);
-
-        assert!(ErrorCompat::backtrace(&err).is_some());
-        assert!(err.backtrace_opt().is_some());
-        assert_eq!("This is an internal error", err.to_string());
-        assert_eq!(StatusCode::Internal, err.status_code());
-
-        err.as_any().downcast_ref::<InnerError>().unwrap();
-    }
-}
