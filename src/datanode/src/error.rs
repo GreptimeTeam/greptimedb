@@ -92,7 +92,7 @@ impl ErrorExt for Error {
             // TODO(yingwen): Further categorize http error.
             Error::StartHttp { .. } | Error::ParseAddr { .. } => StatusCode::Internal,
             Error::CreateTable { source, .. } => source.status_code(),
-            Error::GetTable { .. } => StatusCode::Internal,
+            Error::GetTable { source, .. } => source.status_code(),
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
             Error::ColumnValuesNumberMismatch { .. }

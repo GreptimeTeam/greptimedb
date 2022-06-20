@@ -18,8 +18,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            //TODO: should return the source's status code after use ErrorExt in BoxedError.
-            Error::CreateTable { .. } => StatusCode::InvalidArguments,
+            Error::CreateTable { source, .. } => source.status_code(),
         }
     }
 
