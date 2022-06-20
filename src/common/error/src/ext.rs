@@ -83,14 +83,15 @@ macro_rules! define_opaque_error {
     };
 }
 
+// Define a general boxed error.
+define_opaque_error!(BoxedError);
+
 #[cfg(test)]
 mod tests {
     use std::error::Error as StdError;
 
     use super::*;
     use crate::prelude::*;
-
-    define_opaque_error!(Error);
 
     #[derive(Debug, Snafu)]
     enum InnerError {
@@ -115,12 +116,6 @@ mod tests {
 
         fn as_any(&self) -> &dyn Any {
             self
-        }
-    }
-
-    impl From<InnerError> for Error {
-        fn from(err: InnerError) -> Self {
-            Self::new(err)
         }
     }
 
@@ -150,7 +145,7 @@ mod tests {
     #[test]
     fn test_opaque_error() {
         // Test leaf error.
-        let err: Error = throw_leaf().map_err(Into::into).err().unwrap();
+        let err = throw_leaf().map_err(BoxedError::new).err().unwrap();
         let msg = format!("{:?}", err);
         assert!(msg.contains("\nBacktrace:\n"));
 
@@ -165,7 +160,7 @@ mod tests {
         err.as_any().downcast_ref::<InnerError>().unwrap();
 
         // Test internal error.
-        let err: Error = throw_internal().map_err(Into::into).err().unwrap();
+        let err = throw_internal().map_err(BoxedError::new).err().unwrap();
         let msg = format!("{:?}", err);
         assert!(msg.contains("\nBacktrace:\n"));
         assert!(msg.contains("Caused by"));
