@@ -1,3 +1,5 @@
+#[cfg(test)]
+pub mod test;
 use std::any::Any;
 use std::pin::Pin;
 

@@ -186,43 +186,21 @@ mod tests {
     use common_recordbatch::util;
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;
-    use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::*;
-    use storage::EngineImpl;
     use table::requests::InsertRequest;
 
     use super::*;
+    use crate::table::test;
 
     #[tokio::test]
     async fn test_creat_table_insert_scan() {
-        let column_schemas = vec![
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
-            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ];
-
-        let table_engine = MitoEngine::<EngineImpl>::new(EngineImpl::new());
-
-        let table_name = "demo";
-        let schema = Arc::new(Schema::new(column_schemas));
-        let table = table_engine
-            .create_table(
-                &EngineContext::default(),
-                CreateTableRequest {
-                    name: table_name.to_string(),
-                    desc: Some(" a test table".to_string()),
-                    schema: schema.clone(),
-                },
-            )
-            .await
-            .unwrap();
+        let (_engine, table, schema) = test::setup_test_engine_and_table().await;
 
         assert_eq!(TableType::Base, table.table_type());
         assert_eq!(schema, table.schema());
 
         let insert_req = InsertRequest {
-            table_name: table_name.to_string(),
+            table_name: "demo".to_string(),
             columns_values: HashMap::default(),
         };
         assert_eq!(0, table.insert(insert_req).await.unwrap());
@@ -239,7 +217,7 @@ mod tests {
         columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
 
         let insert_req = InsertRequest {
-            table_name: table_name.to_string(),
+            table_name: "demo".to_string(),
             columns_values,
         };
         assert_eq!(2, table.insert(insert_req).await.unwrap());
