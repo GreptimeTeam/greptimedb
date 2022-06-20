@@ -44,9 +44,9 @@ pub fn create_udf(func: FunctionRef) -> ScalarUdf {
         if len.is_some() {
             result.map(ColumnarValue::Vector).map_err(|e| e.into())
         } else {
-            ScalarValue::try_from_array(&result?.to_arrow_array(), 0)
+            Ok(ScalarValue::try_from_array(&result?.to_arrow_array(), 0)
                 .map(ColumnarValue::Scalar)
-                .context(ExecuteFunctionSnafu)
+                .context(ExecuteFunctionSnafu)?)
         }
     });
 
