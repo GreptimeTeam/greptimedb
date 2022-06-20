@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use snafu::ResultExt;
 use store_api::storage::ConcreteDataType;
 use store_api::storage::{
@@ -150,7 +151,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
                 },
             )
             .await
-            .map_err(|e| Box::new(e) as _)
+            .map_err(BoxedError::new)
             .context(CreateTableSnafu)?;
 
         // Use region meta schema instead of request schema

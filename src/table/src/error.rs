@@ -1,7 +1,9 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::error::DataFusionError;
+use datatypes::arrow::error::ArrowError;
 
 common_error::define_opaque_error!(Error);
 
@@ -23,11 +25,14 @@ pub enum InnerError {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Missing column when insert, column : {}", name))]
+    #[snafu(display("Missing column when insert, column: {}", name))]
     MissingColumn { name: String, backtrace: Backtrace },
 
     #[snafu(display("Not expected to run ExecutionPlan more than once"))]
     ExecuteRepeatedly { backtrace: Backtrace },
+
+    #[snafu(display("Poll stream failed, source: {}", source))]
+    PollStream { source: ArrowError },
 }
 
 impl ErrorExt for InnerError {
@@ -49,6 +54,12 @@ impl From<InnerError> for Error {
 impl From<InnerError> for DataFusionError {
     fn from(e: InnerError) -> DataFusionError {
         DataFusionError::External(Box::new(e))
+    }
+}
+
+impl From<InnerError> for RecordBatchError {
+    fn from(e: InnerError) -> RecordBatchError {
+        RecordBatchError::new(e)
     }
 }
 

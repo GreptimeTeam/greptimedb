@@ -1,8 +1,11 @@
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::schema::SchemaRef;
-use datatypes::vectors::Helper;
+use datatypes::vectors::{Helper, VectorRef};
 use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
+use snafu::ResultExt;
+
+use crate::error::{self, Result};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordBatch {
@@ -10,8 +13,25 @@ pub struct RecordBatch {
     pub df_recordbatch: DfRecordBatch,
 }
 
+impl RecordBatch {
+    pub fn new<I: IntoIterator<Item = VectorRef>>(
+        schema: SchemaRef,
+        columns: I,
+    ) -> Result<RecordBatch> {
+        let arrow_arrays = columns.into_iter().map(|v| v.to_arrow_array()).collect();
+
+        let df_recordbatch = DfRecordBatch::try_new(schema.arrow_schema().clone(), arrow_arrays)
+            .context(error::NewDfRecordBatchSnafu)?;
+
+        Ok(RecordBatch {
+            schema,
+            df_recordbatch,
+        })
+    }
+}
+
 impl Serialize for RecordBatch {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -23,7 +43,7 @@ impl Serialize for RecordBatch {
         let vec = df_columns
             .iter()
             .map(|c| Helper::try_into_vector(c.clone())?.serialize_to_json())
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(S::Error::custom)?;
 
         s.serialize_field("columns", &vec)?;

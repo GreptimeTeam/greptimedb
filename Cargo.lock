@@ -592,6 +592,7 @@ name = "common-recordbatch"
 version = "0.1.0"
 dependencies = [
  "arrow2",
+ "common-error",
  "datafusion",
  "datafusion-common",
  "datatypes",

@@ -7,7 +7,7 @@ use std::mem;
 use std::sync::{Arc, Mutex};
 
 use common_query::logical_plan::Expr;
-use common_recordbatch::error::{self as recordbatch_error, Result as RecordBatchResult};
+use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 ///  Datafusion table adpaters
@@ -297,7 +297,7 @@ impl Stream for RecordBatchStreamAdapter {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(df_recordbatch)) => Poll::Ready(Some(Ok(RecordBatch {
                 schema: self.schema(),
-                df_recordbatch: df_recordbatch.context(recordbatch_error::ArrowSnafu)?,
+                df_recordbatch: df_recordbatch.context(error::PollStreamSnafu)?,
             }))),
             Poll::Ready(None) => Poll::Ready(None),
         }
