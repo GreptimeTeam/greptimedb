@@ -24,7 +24,7 @@ macro_rules! define_spawn {
     ($type: ident) => {
         paste! {
 
-            pub fn [<spawn_ $type>]<F>(&self, future: F) -> JoinHandle<F::Output>
+            fn [<spawn_ $type>]<F>(&self, future: F) -> JoinHandle<F::Output>
             where
                 F: Future + Send + 'static,
                 F::Output: Send + 'static,
@@ -32,12 +32,16 @@ macro_rules! define_spawn {
                 self.[<$type _runtime>].spawn(future)
             }
 
-            pub fn [<spawn_blocking_ $type>]<F, R>(&self, future: F) ->  JoinHandle<R>
+            fn [<spawn_blocking_ $type>]<F, R>(&self, future: F) ->  JoinHandle<R>
             where
                 F: FnOnce() -> R + Send + 'static,
                 R: Send + 'static,
             {
                 self.[<$type _runtime>].spawn_blocking(future)
+            }
+
+            fn [<block_on_ $type>]<F: Future>(&self, future: F) -> F::Output {
+                self.[<$type _runtime>].block_on(future)
             }
         }
     };
@@ -87,6 +91,11 @@ pub fn init_global_runtimes(
 macro_rules! define_global_runtime_spawn {
     ($type: ident) => {
         paste! {
+            #[doc = "Returns the global `" $type "` thread pool."]
+            pub fn [<$type _runtime>]() -> Runtime {
+                GLOBAL_RUNTIMES.as_ref().[<$type _runtime>].clone()
+            }
+
             #[doc = "Spawn a future and execute it in `" $type "` thread pool."]
             pub fn [<spawn_ $type>]<F>(future: F) -> JoinHandle<F::Output>
             where
@@ -105,9 +114,9 @@ macro_rules! define_global_runtime_spawn {
                 GLOBAL_RUNTIMES.as_ref().[<spawn_blocking_ $type>](future)
             }
 
-            #[doc = "Returns the global `" $type "` thread pool."]
-            pub fn [<$type _runtime>]() -> Runtime {
-                GLOBAL_RUNTIMES.as_ref().[<$type _runtime>].clone()
+            #[doc = "Run a future to complete in `" $type "` thread pool."]
+            pub fn [<block_on_ $type>]<F: Future>(future: F) -> F::Output {
+                GLOBAL_RUNTIMES.as_ref().[<block_on_ $type>](future)
             }
         }
     };
@@ -124,18 +133,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_spawn() {
-        let runtime = read_runtime();
+    fn test_spawn_block_on() {
         let handle = spawn_read(async { 1 + 1 });
-        assert_eq!(2, runtime.block_on(handle).unwrap());
+        assert_eq!(2, block_on_read(handle).unwrap());
 
-        let runtime = write_runtime();
         let handle = spawn_write(async { 2 + 2 });
-        assert_eq!(4, runtime.block_on(handle).unwrap());
+        assert_eq!(4, block_on_write(handle).unwrap());
 
-        let runtime = bg_runtime();
         let handle = spawn_bg(async { 3 + 3 });
-        assert_eq!(6, runtime.block_on(handle).unwrap());
+        assert_eq!(6, block_on_bg(handle).unwrap());
     }
 
     #[test]
