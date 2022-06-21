@@ -41,13 +41,15 @@ pub fn create_udf(func: FunctionRef) -> ScalarUdf {
 
         let result = func_cloned.eval(func_ctx, &args.context(FromScalarValueSnafu)?);
 
-        if len.is_some() {
-            result.map(ColumnarValue::Vector).map_err(|e| e.into())
+        let udf = if len.is_some() {
+            result.map(ColumnarValue::Vector)?
         } else {
             ScalarValue::try_from_array(&result?.to_arrow_array(), 0)
                 .map(ColumnarValue::Scalar)
-                .context(ExecuteFunctionSnafu)
-        }
+                .context(ExecuteFunctionSnafu)?
+        };
+
+        Ok(udf)
     });
 
     ScalarUdf::new(func.name(), &func.signature(), &return_type, &fun)

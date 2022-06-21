@@ -5,38 +5,39 @@ use common_error::prelude::*;
 use datafusion_common::DataFusionError;
 use datatypes::error::Error as DataTypeError;
 
+common_error::define_opaque_error!(Error);
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum Error {
+pub enum InnerError {
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
         backtrace: Backtrace,
     },
+
     #[snafu(display("Fail to cast scalar value into vector: {}", source))]
     FromScalarValue {
         #[snafu(backtrace)]
         source: DataTypeError,
     },
+
     #[snafu(display("Fail to cast arrow array into vector: {:?}, {}", data_type, source))]
     IntoVector {
         #[snafu(backtrace)]
         source: DataTypeError,
         data_type: ArrowDatatype,
     },
-    #[snafu(display("External error: {}, {}", msg, backtrace))]
-    External { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl ErrorExt for Error {
+impl ErrorExt for InnerError {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ExecuteFunction { .. } => StatusCode::EngineExecuteQuery,
-            Error::IntoVector { source, .. } => source.status_code(),
-            Error::FromScalarValue { source } => source.status_code(),
-            Error::External { .. } => StatusCode::Internal,
+            InnerError::ExecuteFunction { .. } => StatusCode::EngineExecuteQuery,
+            InnerError::IntoVector { source, .. } => source.status_code(),
+            InnerError::FromScalarValue { source } => source.status_code(),
         }
     }
 
@@ -46,6 +47,12 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl From<InnerError> for Error {
+    fn from(e: InnerError) -> Error {
+        Error::new(e)
     }
 }
 
@@ -66,16 +73,18 @@ mod tests {
     }
 
     fn assert_error(err: &Error, code: StatusCode) {
-        assert_eq!(code, err.status_code());
-        assert!(err.backtrace_opt().is_some());
+        let inner_err = err.as_any().downcast_ref::<InnerError>().unwrap();
+        assert_eq!(code, inner_err.status_code());
+        assert!(inner_err.backtrace_opt().is_some());
     }
 
     #[test]
     fn test_datafusion_as_source() {
-        let err = throw_df_error()
-            .context(ExecuteFunctionSnafu {})
+        let err: Error = throw_df_error()
+            .context(ExecuteFunctionSnafu)
             .err()
-            .unwrap();
+            .unwrap()
+            .into();
         assert_error(&err, StatusCode::EngineExecuteQuery);
     }
 
@@ -88,12 +97,13 @@ mod tests {
 
     #[test]
     fn test_into_vector_error() {
-        let err = raise_datatype_error()
+        let err: Error = raise_datatype_error()
             .context(IntoVectorSnafu {
                 data_type: ArrowDatatype::Int32,
             })
             .err()
-            .unwrap();
+            .unwrap()
+            .into();
         assert!(err.backtrace_opt().is_some());
         let datatype_err = raise_datatype_error().err().unwrap();
         assert_eq!(datatype_err.status_code(), err.status_code());

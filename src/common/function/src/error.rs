@@ -1,13 +1,8 @@
 use std::any::Any;
 
 use common_error::prelude::*;
-use common_query::error::Error as QueryError;
+pub use common_query::error::{Error, Result};
 use datatypes::error::Error as DataTypeError;
-use snafu::GenerateImplicitData;
-
-common_error::define_opaque_error!(Error);
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -35,17 +30,10 @@ impl From<InnerError> for Error {
     }
 }
 
-impl From<Error> for QueryError {
-    fn from(err: Error) -> Self {
-        QueryError::External {
-            msg: err.to_string(),
-            backtrace: Backtrace::generate(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use snafu::GenerateImplicitData;
+
     use super::*;
 
     fn raise_datatype_error() -> std::result::Result<(), DataTypeError> {
@@ -57,13 +45,11 @@ mod tests {
 
     #[test]
     fn test_get_scalar_vector_error() {
-        let err = raise_datatype_error()
+        let err: Error = raise_datatype_error()
             .context(GetScalarVectorSnafu)
             .err()
-            .unwrap();
+            .unwrap()
+            .into();
         assert!(err.backtrace_opt().is_some());
-
-        let query_error = QueryError::from(Error::from(err));
-        assert!(matches!(query_error, QueryError::External { .. }));
     }
 }

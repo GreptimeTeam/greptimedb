@@ -62,9 +62,9 @@ where
         if len.is_some() {
             result.map(ColumnarValue::Vector)
         } else {
-            ScalarValue::try_from_array(&result?.to_arrow_array(), 0)
+            Ok(ScalarValue::try_from_array(&result?.to_arrow_array(), 0)
                 .map(ColumnarValue::Scalar)
-                .context(ExecuteFunctionSnafu)
+                .context(ExecuteFunctionSnafu)?)
         }
     })
 }

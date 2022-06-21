@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use snafu::ResultExt;
 use store_api::storage::ConcreteDataType;
 use store_api::storage::{
@@ -18,7 +19,7 @@ use table::{
     table::TableRef,
 };
 
-use crate::error::{CreateTableSnafu, Error, Result};
+use crate::error::{self, Error, Result};
 use crate::table::MitoTable;
 
 pub const DEFAULT_ENGINE: &str = "mito";
@@ -150,8 +151,8 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
                 },
             )
             .await
-            .map_err(|e| Box::new(e) as _)
-            .context(CreateTableSnafu)?;
+            .map_err(BoxedError::new)
+            .context(error::CreateRegionSnafu)?;
 
         // Use region meta schema instead of request schema
         let table_meta = TableMetaBuilder::new(region.in_memory_metadata().schema().clone())

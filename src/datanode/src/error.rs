@@ -1,12 +1,10 @@
 use std::any::Any;
 
+use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
 use table::error::Error as TableError;
 use table_engine::error::Error as TableEngineError;
-
-// TODO(dennis): use ErrorExt instead.
-pub type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
@@ -27,12 +25,14 @@ pub enum Error {
     #[snafu(display("Fail to create table: {}, {}", table_name, source))]
     CreateTable {
         table_name: String,
+        #[snafu(backtrace)]
         source: TableEngineError,
     },
 
     #[snafu(display("Fail to get table: {}, {}", table_name, source))]
     GetTable {
         table_name: String,
+        #[snafu(backtrace)]
         source: BoxedError,
     },
 
@@ -94,7 +94,7 @@ impl ErrorExt for Error {
             // TODO(yingwen): Further categorize http error.
             Error::StartHttp { .. } | Error::ParseAddr { .. } => StatusCode::Internal,
             Error::CreateTable { source, .. } => source.status_code(),
-            Error::GetTable { .. } => StatusCode::Internal,
+            Error::GetTable { source, .. } => source.status_code(),
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
             Error::ColumnValuesNumberMismatch { .. }

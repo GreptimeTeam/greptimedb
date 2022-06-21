@@ -1,20 +1,40 @@
-use datatypes::arrow::error::ArrowError;
-use snafu::{Backtrace, Snafu};
+//! Error of record batch.
+use std::any::Any;
 
-// TODO(dennis): use ErrorExt instead.
-pub type BoxedError = Box<dyn std::error::Error + Send + Sync>;
+use common_error::prelude::*;
+
+common_error::define_opaque_error!(Error);
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum Error {
-    #[snafu(display("Arrow error: {}", source))]
-    Arrow {
-        source: ArrowError,
+pub enum InnerError {
+    #[snafu(display("Fail to create datafusion record batch, source: {}", source))]
+    NewDfRecordBatch {
+        source: datatypes::arrow::error::ArrowError,
         backtrace: Backtrace,
     },
-
-    #[snafu(display("Storage error: {}, source: {}", msg, source))]
-    Storage { source: BoxedError, msg: String },
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+impl ErrorExt for InnerError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            InnerError::NewDfRecordBatch { .. } => StatusCode::InvalidArguments,
+        }
+    }
+
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl From<InnerError> for Error {
+    fn from(e: InnerError) -> Error {
+        Error::new(e)
+    }
+}

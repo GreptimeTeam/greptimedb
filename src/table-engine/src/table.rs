@@ -1,20 +1,18 @@
 #[cfg(test)]
 pub mod test;
+
 use std::any::Any;
 use std::pin::Pin;
 
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
-use common_recordbatch::error::{Result as RecordBatchResult, StorageSnafu};
+use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use futures::task::{Context, Poll};
 use futures::Stream;
 use snafu::OptionExt;
-use snafu::ResultExt;
-use store_api::storage::SchemaRef;
 use store_api::storage::{
-    ChunkReader, PutOperation, ReadContext, Region, ScanRequest, Snapshot, WriteContext,
+    ChunkReader, PutOperation, ReadContext, Region, ScanRequest, SchemaRef, Snapshot, WriteContext,
     WriteRequest,
 };
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
@@ -110,27 +108,9 @@ impl<R: Region> Table for MitoTable<R> {
 
             for chunk in reader.next_chunk()
                 .await
-                .map_err(|e| Box::new(e) as _)
-                .context(StorageSnafu {
-                    msg: "Fail to reader chunk",
-                })?
+                .map_err(RecordBatchError::new)?
             {
-                let batch = DfRecordBatch::try_new(
-                    stream_schema.arrow_schema().clone(),
-                    chunk.columns
-                        .into_iter()
-                        .map(|v| v.to_arrow_array())
-                        .collect());
-                let batch = batch
-                    .map_err(|e| Box::new(e) as _)
-                    .context(StorageSnafu {
-                        msg: "Fail to new datafusion record batch",
-                    })?;
-
-                yield RecordBatch {
-                    schema: stream_schema.clone(),
-                    df_recordbatch: batch,
-                }
+                yield RecordBatch::new(stream_schema.clone(), chunk.columns)?
             }
         });
 
