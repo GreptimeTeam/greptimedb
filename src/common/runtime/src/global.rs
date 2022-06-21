@@ -7,9 +7,14 @@ use paste::paste;
 
 use crate::{Builder, JoinHandle, Runtime};
 
-fn create_runtime(thread_name: &str) -> Runtime {
+const READ_WORKERS: usize = 10;
+const WRITE_WORKERS: usize = 10;
+const BG_WORKERS: usize = 20;
+
+pub fn create_runtime(thread_name: &str, worker_threads: usize) -> Runtime {
     Builder::default()
         .thread_name(thread_name)
+        .worker_threads(worker_threads)
         .build()
         .expect("Fail to create runtime")
 }
@@ -59,9 +64,9 @@ impl GlobalRuntimes {
         let background = std::mem::replace(&mut c.bg_runtime, None);
         c.already_init = true;
         Self {
-            read_runtime: read.unwrap_or_else(|| create_runtime("read-worker")),
-            write_runtime: write.unwrap_or_else(|| create_runtime("write-worker")),
-            bg_runtime: background.unwrap_or_else(|| create_runtime("bg-worker")),
+            read_runtime: read.unwrap_or_else(|| create_runtime("read-worker", READ_WORKERS)),
+            write_runtime: write.unwrap_or_else(|| create_runtime("write-worker", WRITE_WORKERS)),
+            bg_runtime: background.unwrap_or_else(|| create_runtime("bg-worker", BG_WORKERS)),
         }
     }
 }
