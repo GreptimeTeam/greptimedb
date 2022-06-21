@@ -80,70 +80,67 @@ macro_rules! define_opaque_error {
                 self.inner.backtrace_opt()
             }
         }
-
-        // Also generate test for the generated opaque error type.
-        #[cfg(test)]
-        mod opaque_error_tests {
-            use std::error::Error as StdError;
-
-            use $crate::ext::ErrorExt;
-            use $crate::format::DebugFormat;
-            use $crate::mock::MockError;
-            use $crate::snafu::ErrorCompat;
-            use $crate::status_code::StatusCode;
-
-            use super::$Error;
-
-            #[test]
-            fn test_opaque_error_without_backtrace() {
-                let err = $Error::new(MockError::new(StatusCode::Internal));
-                assert!(err.backtrace_opt().is_none());
-                assert_eq!(StatusCode::Internal, err.status_code());
-                assert!(err.as_any().downcast_ref::<MockError>().is_some());
-                assert!(err.source().is_none());
-
-                assert!(ErrorCompat::backtrace(&err).is_none());
-            }
-
-            #[test]
-            fn test_opaque_error_with_backtrace() {
-                let err = $Error::new(MockError::with_backtrace(StatusCode::Internal));
-                assert!(err.backtrace_opt().is_some());
-                assert_eq!(StatusCode::Internal, err.status_code());
-                assert!(err.as_any().downcast_ref::<MockError>().is_some());
-                assert!(err.source().is_none());
-
-                assert!(ErrorCompat::backtrace(&err).is_some());
-
-                let msg = format!("{:?}", err);
-                assert!(msg.contains("\nBacktrace:\n"));
-                let fmt_msg = format!("{:?}", DebugFormat::new(&err));
-                assert_eq!(msg, fmt_msg);
-
-                let msg = err.to_string();
-                msg.contains("Internal");
-            }
-
-            #[test]
-            fn test_opaque_error_with_source() {
-                let leaf_err = MockError::with_backtrace(StatusCode::Internal);
-                let internal_err = MockError::with_source(leaf_err);
-                let err = $Error::new(internal_err);
-
-                assert!(err.backtrace_opt().is_some());
-                assert_eq!(StatusCode::Internal, err.status_code());
-                assert!(err.as_any().downcast_ref::<MockError>().is_some());
-                assert!(err.source().is_some());
-
-                let msg = format!("{:?}", err);
-                assert!(msg.contains("\nBacktrace:\n"));
-                assert!(msg.contains("Caused by"));
-
-                assert!(ErrorCompat::backtrace(&err).is_some());
-            }
-        }
     };
 }
 
 // Define a general boxed error.
 define_opaque_error!(BoxedError);
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use snafu::ErrorCompat;
+
+    use super::*;
+    use crate::format::DebugFormat;
+    use crate::mock::MockError;
+
+    #[test]
+    fn test_opaque_error_without_backtrace() {
+        let err = BoxedError::new(MockError::new(StatusCode::Internal));
+        assert!(err.backtrace_opt().is_none());
+        assert_eq!(StatusCode::Internal, err.status_code());
+        assert!(err.as_any().downcast_ref::<MockError>().is_some());
+        assert!(err.source().is_none());
+
+        assert!(ErrorCompat::backtrace(&err).is_none());
+    }
+
+    #[test]
+    fn test_opaque_error_with_backtrace() {
+        let err = BoxedError::new(MockError::with_backtrace(StatusCode::Internal));
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::Internal, err.status_code());
+        assert!(err.as_any().downcast_ref::<MockError>().is_some());
+        assert!(err.source().is_none());
+
+        assert!(ErrorCompat::backtrace(&err).is_some());
+
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("\nBacktrace:\n"));
+        let fmt_msg = format!("{:?}", DebugFormat::new(&err));
+        assert_eq!(msg, fmt_msg);
+
+        let msg = err.to_string();
+        msg.contains("Internal");
+    }
+
+    #[test]
+    fn test_opaque_error_with_source() {
+        let leaf_err = MockError::with_backtrace(StatusCode::Internal);
+        let internal_err = MockError::with_source(leaf_err);
+        let err = BoxedError::new(internal_err);
+
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::Internal, err.status_code());
+        assert!(err.as_any().downcast_ref::<MockError>().is_some());
+        assert!(err.source().is_some());
+
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("\nBacktrace:\n"));
+        assert!(msg.contains("Caused by"));
+
+        assert!(ErrorCompat::backtrace(&err).is_some());
+    }
+}
