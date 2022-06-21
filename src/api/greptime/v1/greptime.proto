@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package greptime.v1;
+
+import "greptime/v1/database.proto";
+
+service Greptime {
+    rpc Batch(BatchRequest) returns (BatchResponse) {}
+}
+
+message BatchRequest {
+    repeated DatabaseRequest databases = 1;
+}
+
+message BatchResponse {
+    repeated DatabaseResponse databases = 1;
+}
