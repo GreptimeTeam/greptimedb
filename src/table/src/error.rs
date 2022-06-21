@@ -32,10 +32,23 @@ pub enum InnerError {
     ExecuteRepeatedly { backtrace: Backtrace },
 
     #[snafu(display("Poll stream failed, source: {}", source))]
-    PollStream { source: ArrowError },
+    PollStream {
+        source: ArrowError,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for InnerError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            InnerError::Datafusion { .. } | InnerError::PollStream { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
+            InnerError::MissingColumn { .. } => StatusCode::InvalidArguments,
+            InnerError::ExecuteRepeatedly { .. } => StatusCode::Unexpected,
+        }
+    }
+
     fn backtrace_opt(&self) -> Option<&Backtrace> {
         ErrorCompat::backtrace(self)
     }
@@ -75,14 +88,49 @@ mod tests {
         ExecuteRepeatedlySnafu {}.fail()?
     }
 
+    fn throw_missing_column_inner() -> std::result::Result<(), InnerError> {
+        MissingColumnSnafu { name: "test" }.fail()
+    }
+
+    fn throw_missing_column() -> Result<()> {
+        Ok(throw_missing_column_inner()?)
+    }
+
+    fn throw_arrow() -> Result<()> {
+        Err(ArrowError::Overflow).context(PollStreamSnafu)?
+    }
+
     #[test]
     fn test_error() {
         let err = throw_df_error().err().unwrap();
         assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::Unknown, err.status_code());
+        assert_eq!(StatusCode::EngineExecuteQuery, err.status_code());
 
         let err = throw_repeatedly().err().unwrap();
         assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::Unknown, err.status_code());
+        assert_eq!(StatusCode::Unexpected, err.status_code());
+
+        let err = throw_missing_column().err().unwrap();
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+
+        let err = throw_arrow().err().unwrap();
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::EngineExecuteQuery, err.status_code());
+    }
+
+    #[test]
+    fn test_into_record_batch_error() {
+        let err = throw_missing_column_inner().err().unwrap();
+        let err: RecordBatchError = err.into();
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_into_df_error() {
+        let err = throw_missing_column_inner().err().unwrap();
+        let err: DataFusionError = err.into();
+        assert!(matches!(err, DataFusionError::External(_)));
     }
 }

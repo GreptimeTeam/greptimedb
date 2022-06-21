@@ -25,12 +25,14 @@ pub enum Error {
     #[snafu(display("Fail to create table: {}, {}", table_name, source))]
     CreateTable {
         table_name: String,
+        #[snafu(backtrace)]
         source: TableEngineError,
     },
 
     #[snafu(display("Fail to get table: {}, {}", table_name, source))]
     GetTable {
         table_name: String,
+        #[snafu(backtrace)]
         source: BoxedError,
     },
 

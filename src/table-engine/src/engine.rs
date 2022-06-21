@@ -19,7 +19,7 @@ use table::{
     table::TableRef,
 };
 
-use crate::error::{CreateTableSnafu, Error, Result};
+use crate::error::{self, Error, Result};
 use crate::table::MitoTable;
 
 pub const DEFAULT_ENGINE: &str = "mito";
@@ -152,7 +152,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
             )
             .await
             .map_err(BoxedError::new)
-            .context(CreateTableSnafu)?;
+            .context(error::CreateRegionSnafu)?;
 
         // Use region meta schema instead of request schema
         let table_meta = TableMetaBuilder::new(region.in_memory_metadata().schema().clone())
