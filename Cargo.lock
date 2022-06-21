@@ -612,7 +612,6 @@ dependencies = [
  "metrics",
  "once_cell",
  "paste",
- "pin-project-lite",
  "snafu",
  "tokio",
  "tokio-test",

@@ -7,9 +7,9 @@ use paste::paste;
 
 use crate::{Builder, JoinHandle, Runtime};
 
-const READ_WORKERS: usize = 10;
-const WRITE_WORKERS: usize = 10;
-const BG_WORKERS: usize = 20;
+const READ_WORKERS: usize = 8;
+const WRITE_WORKERS: usize = 8;
+const BG_WORKERS: usize = 8;
 
 pub fn create_runtime(thread_name: &str, worker_threads: usize) -> Runtime {
     Builder::default()
@@ -76,9 +76,9 @@ struct ConfigRuntimes {
 
 static GLOBAL_RUNTIMES: Lazy<GlobalRuntimes> = Lazy::new(|| {
     let mut c = CONFIG_RUNTIMES.lock().unwrap();
-    let read = std::mem::replace(&mut c.read_runtime, None);
-    let write = std::mem::replace(&mut c.write_runtime, None);
-    let background = std::mem::replace(&mut c.bg_runtime, None);
+    let read = c.read_runtime.take();
+    let write = c.write_runtime.take();
+    let background = c.bg_runtime.take();
     c.already_init = true;
 
     GlobalRuntimes::new(read, write, background)
@@ -100,9 +100,7 @@ pub fn init_global_runtimes(
     static START: Once = Once::new();
     START.call_once(move || {
         let mut c = CONFIG_RUNTIMES.lock().unwrap();
-        if c.already_init {
-            panic!("Global runtimes already initialized");
-        }
+        assert!(!c.already_init, "Global runtimes already initialized");
         c.read_runtime = read;
         c.write_runtime = write;
         c.bg_runtime = background;
@@ -165,17 +163,29 @@ mod tests {
         assert_eq!(6, block_on_bg(handle).unwrap());
     }
 
-    #[test]
-    fn spawn_from_blocking() {
-        let runtime = read_runtime();
-        let out = runtime.block_on(async move {
-            let inner = assert_ok!(
-                spawn_blocking_read(move || { spawn_read(async move { "hello" }) }).await
-            );
+    macro_rules! define_spawn_blocking_test {
+        ($type: ident) => {
+            paste! {
+                #[test]
+                fn [<test_spawn_ $type _from_blocking>]() {
+                    let runtime = [<$type _runtime>]();
+                    let out = runtime.block_on(async move {
+                        let inner = assert_ok!(
+                            [<spawn_blocking_  $type>](move || {
+                                [<spawn_ $type>](async move { "hello" })
+                            }).await
+                        );
 
-            assert_ok!(inner.await)
-        });
+                        assert_ok!(inner.await)
+                    });
 
-        assert_eq!(out, "hello")
+                    assert_eq!(out, "hello")
+                }
+            }
+        };
     }
+
+    define_spawn_blocking_test!(read);
+    define_spawn_blocking_test!(write);
+    define_spawn_blocking_test!(bg);
 }

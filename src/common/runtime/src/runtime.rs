@@ -1,21 +1,12 @@
 use std::sync::Arc;
 use std::thread;
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::{future::Future, time::Duration};
 
 use metrics::{decrement_gauge, increment_gauge};
-use pin_project_lite::pin_project;
-use snafu::GenerateImplicitData;
-use snafu::{Backtrace, ResultExt};
+use snafu::ResultExt;
+use tokio::runtime::{Builder as RuntimeBuilder, Handle};
 use tokio::sync::oneshot;
-use tokio::{
-    runtime::{Builder as RuntimeBuilder, Handle},
-    task::JoinHandle as TokioJoinHandle,
-};
+pub use tokio::task::JoinHandle;
 
 use crate::error::*;
 use crate::metric::*;
@@ -49,17 +40,7 @@ impl Runtime {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        JoinHandle {
-            inner: self.handle.spawn(future),
-        }
-    }
-
-    /// Return a handle to the runtime's spawner.
-    ///
-    /// The returned handle can be used to spawn tasks that run on this runtime,
-    /// and can be cloned to allow moving the Handle to other threads.
-    pub fn handle(&self) -> &Handle {
-        &self.handle
+        self.handle.spawn(future)
     }
 
     /// Run the provided function on an executor dedicated to blocking
@@ -69,37 +50,12 @@ impl Runtime {
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
-        JoinHandle {
-            inner: self.handle.spawn_blocking(func),
-        }
+        self.handle.spawn_blocking(func)
     }
 
     /// Run a future to complete, this is the runtime's entry point
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         self.handle.block_on(future)
-    }
-}
-
-pin_project! {
-    #[derive(Debug)]
-    pub struct JoinHandle<T> {
-        #[pin]
-        inner: TokioJoinHandle<T>,
-    }
-}
-
-impl<T> Future for JoinHandle<T> {
-    type Output = Result<T>;
-
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        this.inner.poll(ctx).map_err(|source| {
-            InnerError::JoinTask {
-                source,
-                backtrace: Backtrace::generate(),
-            }
-            .into()
-        })
     }
 }
 
@@ -111,7 +67,7 @@ pub struct Builder {
 impl Default for Builder {
     fn default() -> Self {
         Self {
-            thread_name: "greptime-runtime-worker".to_string(),
+            thread_name: "default-worker".to_string(),
             builder: RuntimeBuilder::new_multi_thread(),
         }
     }
@@ -165,7 +121,9 @@ impl Builder {
         let handle = runtime.handle().clone();
         let (send_stop, recv_stop) = oneshot::channel();
         // Block the runtime to shutdown.
-        let _ = thread::spawn(move || runtime.block_on(recv_stop));
+        let _ = thread::Builder::new()
+            .name(format!("{}-blocker", self.thread_name))
+            .spawn(move || runtime.block_on(recv_stop));
 
         Ok(Runtime {
             handle,
