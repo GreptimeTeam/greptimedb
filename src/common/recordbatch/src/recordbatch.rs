@@ -60,8 +60,32 @@ mod tests {
     use datatypes::arrow::array::UInt32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datatypes::schema::Schema;
+    use datatypes::vectors::{UInt32Vector, Vector};
 
     use super::*;
+
+    #[test]
+    fn test_new_record_batch() {
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("c1", DataType::UInt32, false),
+            Field::new("c2", DataType::UInt32, false),
+        ]));
+        let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
+
+        let v = Arc::new(UInt32Vector::from_slice(&[1, 2, 3]));
+        let columns: Vec<VectorRef> = vec![v.clone(), v.clone()];
+
+        let batch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let expect = v.to_arrow_array();
+        for column in batch.df_recordbatch.columns() {
+            let array = column.as_any().downcast_ref::<UInt32Array>().unwrap();
+            assert_eq!(
+                expect.as_any().downcast_ref::<UInt32Array>().unwrap(),
+                array
+            );
+        }
+        assert_eq!(schema, batch.schema);
+    }
 
     #[test]
     pub fn test_serialize_recordbatch() {
@@ -84,12 +108,10 @@ mod tests {
             df_recordbatch: df_batch,
         };
 
-        let mut output = vec![];
-        let mut serializer = serde_json::Serializer::new(&mut output);
-        batch.serialize(&mut serializer).unwrap();
+        let output = serde_json::to_string(&batch).unwrap();
         assert_eq!(
             r#"{"schema":{"fields":[{"name":"number","data_type":"UInt32","is_nullable":false,"metadata":{}}],"metadata":{}},"columns":[[0,1,2,3,4,5,6,7,8,9]]}"#,
-            String::from_utf8_lossy(&output)
+            output
         );
     }
 }
