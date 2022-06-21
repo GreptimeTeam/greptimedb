@@ -1,6 +1,6 @@
 //! Global runtimes
 use std::future::Future;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Mutex, Once};
 
 use once_cell::sync::Lazy;
 use paste::paste;
@@ -51,14 +51,13 @@ impl GlobalRuntimes {
     define_spawn!(read);
     define_spawn!(write);
     define_spawn!(bg);
-}
 
-impl Default for GlobalRuntimes {
-    fn default() -> Self {
-        let mut c = CONFIG_RUNTIMES.as_ref().lock().unwrap();
-        let read = std::mem::replace(&mut c.0, None);
-        let write = std::mem::replace(&mut c.1, None);
-        let background = std::mem::replace(&mut c.2, None);
+    fn new() -> Self {
+        let mut c = CONFIG_RUNTIMES.lock().unwrap();
+        let read = std::mem::replace(&mut c.read_runtime, None);
+        let write = std::mem::replace(&mut c.write_runtime, None);
+        let background = std::mem::replace(&mut c.bg_runtime, None);
+        c.already_init = true;
         Self {
             read_runtime: read.unwrap_or_else(|| create_runtime("read-worker")),
             write_runtime: write.unwrap_or_else(|| create_runtime("write-worker")),
@@ -67,15 +66,34 @@ impl Default for GlobalRuntimes {
     }
 }
 
-static GLOBAL_RUNTIMES: Lazy<Arc<GlobalRuntimes>> =
-    Lazy::new(|| Arc::new(GlobalRuntimes::default()));
+struct ConfigRuntimes {
+    read_runtime: Option<Runtime>,
+    write_runtime: Option<Runtime>,
+    bg_runtime: Option<Runtime>,
+    already_init: bool,
+}
 
-static CONFIG_RUNTIMES: Lazy<Arc<Mutex<(Option<Runtime>, Option<Runtime>, Option<Runtime>)>>> =
-    Lazy::new(|| Arc::new(Mutex::new((None, None, None))));
+impl Default for ConfigRuntimes {
+    fn default() -> Self {
+        Self {
+            read_runtime: None,
+            write_runtime: None,
+            bg_runtime: None,
+            already_init: false,
+        }
+    }
+}
+
+static GLOBAL_RUNTIMES: Lazy<GlobalRuntimes> = Lazy::new(|| GlobalRuntimes::new());
+
+static CONFIG_RUNTIMES: Lazy<Mutex<ConfigRuntimes>> =
+    Lazy::new(|| Mutex::new(ConfigRuntimes::default()));
 
 /// Initialize the global runtimes
 ///
-/// You SHOULD call this function before using the global runtimes, otherwise the setting is not effective.
+/// # Panics
+/// Panics when the global runtimes are already initialized.
+/// You should call this function before using any runtime functions.
 pub fn init_global_runtimes(
     read: Option<Runtime>,
     write: Option<Runtime>,
@@ -83,8 +101,13 @@ pub fn init_global_runtimes(
 ) {
     static START: Once = Once::new();
     START.call_once(move || {
-        let mut c = CONFIG_RUNTIMES.as_ref().lock().unwrap();
-        *c = (read, write, background);
+        let mut c = CONFIG_RUNTIMES.lock().unwrap();
+        if c.already_init {
+            panic!("Global runtimes already initialized");
+        }
+        c.read_runtime = read;
+        c.write_runtime = write;
+        c.bg_runtime = background;
     });
 }
 
@@ -93,7 +116,7 @@ macro_rules! define_global_runtime_spawn {
         paste! {
             #[doc = "Returns the global `" $type "` thread pool."]
             pub fn [<$type _runtime>]() -> Runtime {
-                GLOBAL_RUNTIMES.as_ref().[<$type _runtime>].clone()
+                GLOBAL_RUNTIMES.[<$type _runtime>].clone()
             }
 
             #[doc = "Spawn a future and execute it in `" $type "` thread pool."]
@@ -102,7 +125,7 @@ macro_rules! define_global_runtime_spawn {
                 F: Future + Send + 'static,
                 F::Output: Send + 'static,
             {
-                GLOBAL_RUNTIMES.as_ref().[<spawn_ $type>](future)
+                GLOBAL_RUNTIMES.[<spawn_ $type>](future)
             }
 
             #[doc = "Run the blocking operation in `" $type "` thread pool."]
@@ -111,12 +134,12 @@ macro_rules! define_global_runtime_spawn {
                 F: FnOnce() -> R + Send + 'static,
                 R: Send + 'static,
             {
-                GLOBAL_RUNTIMES.as_ref().[<spawn_blocking_ $type>](future)
+                GLOBAL_RUNTIMES.[<spawn_blocking_ $type>](future)
             }
 
             #[doc = "Run a future to complete in `" $type "` thread pool."]
             pub fn [<block_on_ $type>]<F: Future>(future: F) -> F::Output {
-                GLOBAL_RUNTIMES.as_ref().[<block_on_ $type>](future)
+                GLOBAL_RUNTIMES.[<block_on_ $type>](future)
             }
         }
     };
