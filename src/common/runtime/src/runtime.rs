@@ -226,6 +226,7 @@ mod tests {
 
     #[test]
     fn test_metric() {
+        common_telemetry::init_default_metrics_recorder();
         let runtime = Builder::default()
             .worker_threads(5)
             .thread_name("test_runtime_metric")
