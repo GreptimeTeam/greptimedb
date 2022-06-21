@@ -57,12 +57,7 @@ impl GlobalRuntimes {
     define_spawn!(write);
     define_spawn!(bg);
 
-    fn new() -> Self {
-        let mut c = CONFIG_RUNTIMES.lock().unwrap();
-        let read = std::mem::replace(&mut c.read_runtime, None);
-        let write = std::mem::replace(&mut c.write_runtime, None);
-        let background = std::mem::replace(&mut c.bg_runtime, None);
-        c.already_init = true;
+    fn new(read: Option<Runtime>, write: Option<Runtime>, background: Option<Runtime>) -> Self {
         Self {
             read_runtime: read.unwrap_or_else(|| create_runtime("read-worker", READ_WORKERS)),
             write_runtime: write.unwrap_or_else(|| create_runtime("write-worker", WRITE_WORKERS)),
@@ -71,6 +66,7 @@ impl GlobalRuntimes {
     }
 }
 
+#[derive(Default)]
 struct ConfigRuntimes {
     read_runtime: Option<Runtime>,
     write_runtime: Option<Runtime>,
@@ -78,18 +74,15 @@ struct ConfigRuntimes {
     already_init: bool,
 }
 
-impl Default for ConfigRuntimes {
-    fn default() -> Self {
-        Self {
-            read_runtime: None,
-            write_runtime: None,
-            bg_runtime: None,
-            already_init: false,
-        }
-    }
-}
+static GLOBAL_RUNTIMES: Lazy<GlobalRuntimes> = Lazy::new(|| {
+    let mut c = CONFIG_RUNTIMES.lock().unwrap();
+    let read = std::mem::replace(&mut c.read_runtime, None);
+    let write = std::mem::replace(&mut c.write_runtime, None);
+    let background = std::mem::replace(&mut c.bg_runtime, None);
+    c.already_init = true;
 
-static GLOBAL_RUNTIMES: Lazy<GlobalRuntimes> = Lazy::new(|| GlobalRuntimes::new());
+    GlobalRuntimes::new(read, write, background)
+});
 
 static CONFIG_RUNTIMES: Lazy<Mutex<ConfigRuntimes>> =
     Lazy::new(|| Mutex::new(ConfigRuntimes::default()));
