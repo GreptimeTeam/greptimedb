@@ -2,6 +2,7 @@
 use std::future::Future;
 use std::sync::{Mutex, Once};
 
+use common_telemetry::logging;
 use once_cell::sync::Lazy;
 use paste::paste;
 
@@ -12,6 +13,11 @@ const WRITE_WORKERS: usize = 8;
 const BG_WORKERS: usize = 8;
 
 pub fn create_runtime(thread_name: &str, worker_threads: usize) -> Runtime {
+    logging::info!(
+        "Creating runtime, thread name: {}, work_threads: {}.",
+        thread_name,
+        worker_threads
+    );
     Builder::default()
         .thread_name(thread_name)
         .worker_threads(worker_threads)
