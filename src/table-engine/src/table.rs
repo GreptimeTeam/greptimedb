@@ -110,9 +110,7 @@ impl<R: Region> Table for MitoTable<R> {
                 .await
                 .map_err(RecordBatchError::new)?
             {
-                let batch = RecordBatch::new(stream_schema.clone(), chunk.columns)?;
-
-                yield batch
+                yield RecordBatch::new(stream_schema.clone(), chunk.columns)?
             }
         });
 
