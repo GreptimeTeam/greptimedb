@@ -955,6 +955,7 @@ dependencies = [
 name = "datanode"
 version = "0.1.0"
 dependencies = [
+ "api",
  "arrow2",
  "async-trait",
  "axum",
@@ -977,6 +978,8 @@ dependencies = [
  "table",
  "table-engine",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tower",
  "tower-http",
 ]

@@ -83,6 +83,15 @@ pub enum Error {
         addr: String,
         source: std::net::AddrParseError,
     },
+
+    #[snafu(display("Fail to bind address {}, source: {}", addr, source))]
+    TcpBind {
+        addr: String,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("Fail to start gRPC server, source: {}", source))]
+    StartGrpc { source: tonic::transport::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -91,16 +100,19 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::ExecuteSql { source } | Error::NewCatalog { source } => source.status_code(),
-            // TODO(yingwen): Further categorize http error.
-            Error::StartHttp { .. } | Error::ParseAddr { .. } => StatusCode::Internal,
             Error::CreateTable { source, .. } => source.status_code(),
             Error::GetTable { source, .. } => source.status_code(),
+            Error::Insert { source, .. } => source.status_code(),
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
             Error::ColumnValuesNumberMismatch { .. }
             | Error::ParseSqlValue { .. }
             | Error::ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
-            Error::Insert { source, .. } => source.status_code(),
+            // TODO(yingwen): Further categorize http error.
+            Error::StartHttp { .. }
+            | Error::ParseAddr { .. }
+            | Error::TcpBind { .. }
+            | Error::StartGrpc { .. } => StatusCode::Internal,
         }
     }
 
@@ -110,6 +122,12 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl From<Error> for tonic::Status {
+    fn from(err: Error) -> Self {
+        tonic::Status::new(tonic::Code::Internal, err.to_string())
     }
 }
 
@@ -130,11 +148,18 @@ mod tests {
         assert_eq!(StatusCode::Internal, err.status_code());
     }
 
+    fn assert_tonic_internal_error(err: Error) {
+        let s: tonic::Status = err.into();
+        assert_eq!(s.code(), tonic::Code::Internal);
+    }
+
     #[test]
     fn test_error() {
         let err = throw_query_error().context(ExecuteSqlSnafu).err().unwrap();
         assert_internal_error(&err);
+        assert_tonic_internal_error(err);
         let err = throw_query_error().context(NewCatalogSnafu).err().unwrap();
         assert_internal_error(&err);
+        assert_tonic_internal_error(err);
     }
 }

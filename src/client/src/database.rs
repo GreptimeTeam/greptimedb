@@ -5,7 +5,7 @@ use crate::{Client, MissingResultSnafu, Result};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
-pub type Values = Vec<Vec<u8>>;
+pub type Bytes = Vec<u8>;
 
 pub struct Database {
     name: String,
@@ -24,7 +24,7 @@ impl Database {
         &self.name
     }
 
-    pub async fn insert(&self, table: impl Into<String>, values: Values) -> Result<()> {
+    pub async fn insert(&self, table: impl Into<String>, values: Vec<Bytes>) -> Result<()> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
         };

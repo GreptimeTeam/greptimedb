@@ -8,6 +8,5 @@ edition = "2021"
 [dependencies]
 api = { path = "../api" }
 common-error = { path = "../common/error" }
-
 snafu = { version = "0.7", features = ["backtraces"] }
 tonic = "0.7.2"
