@@ -106,7 +106,6 @@ impl Buffer for &[u8] {
         self
     }
 
-    // todo what is the return value if this method
     fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
         ensure!(self.len() >= dst.len(), OverflowSnafu);
         self.read_exact(dst).context(EofSnafu)
