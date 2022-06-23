@@ -38,13 +38,6 @@ pub trait Encode: Sized {
     /// If given buffer is not large enough to hold the encoded item.
     fn encode_to<T: BufferMut>(&self, buf: &mut T) -> Result<usize, Self::Error>;
 
-    // /// Returns an owned buffer with item encoded inside.
-    // fn encode<T: BufferMut>(&self) -> Result<T, Self::Error> {
-    //     let mut buffer = BytesMut::with_capacity(self.encoded_size());
-    //     self.encode_to(&mut buffer)?;
-    //     Ok(Box::new(buffer))
-    // }
-
     /// Decodes item from given buffer.
     fn decode<T: Buffer>(buf: &mut T) -> Result<Self, Self::Error>;
 

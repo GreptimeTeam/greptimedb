@@ -49,6 +49,10 @@ mod tests {
 
     use super::*;
 
+    fn read_char_from_buffer_unchecked(buf: &mut dyn Buffer<Error = Error>) -> char {
+        char::try_from(buf.read_u8_le().unwrap() as u32).unwrap()
+    }
+
     #[test]
     pub fn test_mmap_buffer() {
         let dir = TempDir::new("greptime-test").unwrap();
@@ -66,25 +70,10 @@ mod tests {
 
         let mut buffer = MmappedBuffer::new(result);
 
-        assert_eq!(
-            'h',
-            char::try_from(buffer.read_u8_le().unwrap() as u32).unwrap()
-        );
-        assert_eq!(
-            'e',
-            char::try_from(buffer.read_u8_le().unwrap() as u32).unwrap()
-        );
-        assert_eq!(
-            'l',
-            char::try_from(buffer.read_u8_le().unwrap() as u32).unwrap()
-        );
-        assert_eq!(
-            'l',
-            char::try_from(buffer.read_u8_le().unwrap() as u32).unwrap()
-        );
-        assert_eq!(
-            'o',
-            char::try_from(buffer.read_u8_le().unwrap() as u32).unwrap()
-        );
+        assert_eq!('h', read_char_from_buffer_unchecked(&mut buffer));
+        assert_eq!('e', read_char_from_buffer_unchecked(&mut buffer));
+        assert_eq!('l', read_char_from_buffer_unchecked(&mut buffer));
+        assert_eq!('l', read_char_from_buffer_unchecked(&mut buffer));
+        assert_eq!('o', read_char_from_buffer_unchecked(&mut buffer));
     }
 }

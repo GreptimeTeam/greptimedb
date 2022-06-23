@@ -187,7 +187,6 @@ mod tests {
         let mut buf = BytesMut::with_capacity(entry.encoded_size());
         entry.encode_to(&mut buf).unwrap();
         assert_eq!(ENTRY_MIN_LEN + data.as_bytes().len(), buf.len());
-        // let deserialized = EntryImpl::try_from(&vec.freeze() as &[u8]).unwrap();
         let decoded: EntryImpl = EntryImpl::decode(&mut buf.as_slice()).unwrap();
         assert_eq!(entry, decoded);
     }

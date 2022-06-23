@@ -57,7 +57,6 @@ mod tests {
         fn encode_to<T: BufferMut>(&self, buf: &mut T) -> Result<usize, Self::Error> {
             buf.write_from_slice(self.data.as_slice()).unwrap();
             Ok(self.data.as_slice().len())
-            // buf.write().map_err(|_| Error {})
         }
 
         fn decode<T: Buffer>(_buf: &mut T) -> Result<Self, Self::Error> {

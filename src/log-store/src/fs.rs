@@ -11,7 +11,6 @@ mod index;
 mod log;
 mod mmap;
 mod namespace;
-mod pad;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct AppendResponseImpl {

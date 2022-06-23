@@ -8,8 +8,16 @@ use snafu::{ensure, Backtrace, ErrorCompat, ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    #[snafu(display("Destination buffer overflow"))]
-    Overflow { backtrace: Backtrace },
+    #[snafu(display(
+        "Destination buffer overflow, src_len: {}, dst_len: {}",
+        src_len,
+        dst_len
+    ))]
+    Overflow {
+        src_len: usize,
+        dst_len: usize,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("IO operation reach EOF"))]
     Eof {
@@ -83,7 +91,11 @@ macro_rules! impl_buffer_for_bytes {
             }
 
             fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Error> {
-                ensure!(self.remaining() >= dst.len(), OverflowSnafu);
+                ensure!(self.remaining() >= dst.len(), OverflowSnafu {
+                        src_len: self.remaining_size(),
+                        dst_len: dst.len(),
+                    }
+                );
                 self.copy_to_slice(dst);
                 Ok(())
             }
@@ -107,7 +119,13 @@ impl Buffer for &[u8] {
     }
 
     fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        ensure!(self.len() >= dst.len(), OverflowSnafu);
+        ensure!(
+            self.len() >= dst.len(),
+            OverflowSnafu {
+                src_len: self.remaining_size(),
+                dst_len: dst.len(),
+            }
+        );
         self.read_exact(dst).context(EofSnafu)
     }
 
@@ -149,7 +167,13 @@ impl BufferMut for &mut [u8] {
 
     fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Self::Error> {
         // see std::io::Write::write_all
-        self.write_all(src).map_err(|_| OverflowSnafu {}.build())
+        self.write_all(src).map_err(|_| {
+            OverflowSnafu {
+                src_len: src.len(),
+                dst_len: self.as_slice().len(),
+            }
+            .build()
+        })
     }
 }
 
@@ -168,8 +192,6 @@ impl BufferMut for Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use crc::{Crc, CRC_32_ISCSI};
-
     use super::*;
 
     #[test]
@@ -187,22 +209,5 @@ mod tests {
 
         // after read, buffer should still have 7 bytes to read.
         assert_eq!(7, buf.remaining());
-    }
-
-    #[test]
-    pub fn test_read_write_2() {
-        let mut buf = BytesMut::with_capacity(128);
-        buf.write_u64_le(114514).unwrap();
-        buf.write_u32_le(114515).unwrap();
-
-        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
-        let crc1 = crc.checksum(buf.as_slice());
-
-        let mut digest = crc.digest();
-        digest.update(&buf.read_u64_le().unwrap().to_le_bytes());
-        digest.update(&buf.read_u32_le().unwrap().to_le_bytes());
-
-        let crc2 = digest.finalize();
-        assert_eq!(crc1, crc2);
     }
 }
