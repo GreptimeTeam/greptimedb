@@ -1,7 +1,5 @@
 #![feature(assert_matches)]
 
-extern crate core;
-
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;

@@ -551,8 +551,6 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "common-error",
- "crc",
- "memmap2",
  "paste",
  "serde",
  "snafu",

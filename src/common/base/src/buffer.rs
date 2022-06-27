@@ -19,7 +19,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("IO operation reach EOF"))]
+    #[snafu(display("IO operation reach EOF, source: {}", source))]
     Eof {
         source: std::io::Error,
         backtrace: Backtrace,
@@ -72,8 +72,12 @@ pub trait Buffer: AsRef<[u8]> {
         self.remaining_slice().len()
     }
 
+    /// # Panics
+    /// This method **may** panic if buffer does not have enough data to be copied to dst.
     fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Self::Error>;
 
+    /// # Panics
+    /// This method **may** panic if the offset after advancing exceeds the length of underlying buffer.
     fn advance_by(&mut self, by: usize);
 
     impl_read_le![u8, i8, u16, i16, u32, i32, u64, i64, f32, f64];
@@ -167,6 +171,7 @@ impl BufferMut for &mut [u8] {
 
     fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Self::Error> {
         // see std::io::Write::write_all
+        // https://doc.rust-lang.org/src/std/io/impls.rs.html#363
         self.write_all(src).map_err(|_| {
             OverflowSnafu {
                 src_len: src.len(),

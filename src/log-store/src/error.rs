@@ -7,8 +7,11 @@ use snafu::{Backtrace, ErrorCompat};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to encode entry"))]
-    Encode { source: BoxedError },
+    #[snafu(display("Failed to encode entry, source: {}", source))]
+    Encode {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("Failed to decode entry"))]
     Decode { backtrace: Backtrace },

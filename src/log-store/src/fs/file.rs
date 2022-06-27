@@ -226,7 +226,9 @@ impl LogFile {
                         info!("Flush task stop");
                         break;
                     }
+                    let prev = flush_offset.load(Ordering::Acquire);
                     flush_offset.store(write_offset_read, Ordering::Relaxed);
+                    info!("Flush offset: {} -> {}", prev, write_offset_read);
                     while let Some(req) = batch.pop() {
                         req.complete();
                     }

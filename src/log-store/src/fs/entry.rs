@@ -144,7 +144,7 @@ impl From<&EntryImpl> for BytesMut {
     fn from(e: &EntryImpl) -> Self {
         let size = e.encoded_size();
         let mut res = BytesMut::with_capacity(size);
-        let _ = e.encode_to(&mut res); // buffer is pre-allocated, so won't fail
+        e.encode_to(&mut res).unwrap(); // buffer is pre-allocated, so won't fail
         res
     }
 }
