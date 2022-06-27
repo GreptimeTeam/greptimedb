@@ -14,3 +14,11 @@ datatypes = { path = "../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
 tokio = { version = "1.18", features = ["full"] }
+
+[dev-dependencies]
+criterion="0.3"
+rand="0.8.5"
+
+[[bench]]
+name="bench"
+harness=false
