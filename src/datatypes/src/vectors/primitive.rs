@@ -28,13 +28,15 @@ impl<T: Primitive> PrimitiveVector<T> {
     pub fn new(array: PrimitiveArray<T>) -> Self {
         Self { array }
     }
-    pub fn try_from_arrow_array(array: ArrayRef) -> Result<Self> {
+
+    pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> Result<Self> {
         Ok(Self::new(
             array
+                .as_ref()
                 .as_any()
                 .downcast_ref::<PrimitiveArray<T>>()
                 .with_context(|| ConversionSnafu {
-                    from: format!("{:?}", array.data_type()),
+                    from: format!("{:?}", array.as_ref().data_type()),
                 })?
                 .clone(),
         ))
