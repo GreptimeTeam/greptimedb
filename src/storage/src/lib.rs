@@ -11,7 +11,7 @@ pub mod sync;
 mod version;
 mod write_batch;
 
-// #[cfg(test)]
-pub mod test_util;
+#[cfg(test)]
+mod test_util;
 
 pub use engine::EngineImpl;
