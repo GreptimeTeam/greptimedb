@@ -192,10 +192,8 @@ impl LogFile {
                             Err(e) => match e {
                                 TryRecvError::Empty => {
                                     if batch.is_empty() {
-                                        info!("empty");
                                         notify.notified().await;
                                         if stopped.load(Ordering::Acquire) {
-                                            info!("stopped.");
                                             break;
                                         }
                                     } else {
@@ -213,21 +211,16 @@ impl LogFile {
 
                     // flush all pending data to disk
                     let write_offset_read = write_offset.load(Ordering::Relaxed);
-                    info!("wor: {}/{}", write_offset_read, batch.len());
                     // TODO(hl): add flush metrics
                     if let Err(flush_err) = file.sync_all().await {
                         error!("Failed to flush log file: {}", flush_err);
                         error_occurred = true;
                     }
-                    info!("flush {}/{}", write_offset_read, batch.len());
-
                     if error_occurred {
                         info!("Flush task stop");
                         break;
                     }
-                    let prev = flush_offset.load(Ordering::Acquire);
                     flush_offset.store(write_offset_read, Ordering::Relaxed);
-                    info!("{} -> {}", prev, write_offset_read);
                     while let Some(req) = batch.pop() {
                         req.complete();
                     }
@@ -398,7 +391,6 @@ impl LogFile {
                 entry_id,
             })
         } else {
-            info!("notify {}/{}", entry_id, entry_offset);
             self.notify.notify_one(); // notify flush thread.
             rx.await.map_err(|e| {
                 warn!(
@@ -484,7 +476,7 @@ mod tests {
     #[tokio::test]
     pub async fn test_create_entry_stream() {
         logging::init_default_ut_logging();
-        for _ in 0..200 {
+        for _ in 0..1000 {
             let config = LogConfig::default();
             let (path, _dir) = create_temp_dir("0010.log").await;
             let mut file = LogFile::open(path.clone(), &config)
