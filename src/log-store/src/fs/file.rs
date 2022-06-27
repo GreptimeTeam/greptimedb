@@ -238,7 +238,7 @@ impl LogFile {
             });
 
             *self.join_handle.lock().unwrap() = Some(handle);
-            info!("Flush task started...");
+            info!("Flush task started: {}", self.name);
         }
         Ok(())
     }
@@ -311,6 +311,7 @@ impl LogFile {
     pub fn create_stream(&self, _ns: impl Namespace, start_entry_id: u64) -> impl EntryStream + '_ {
         let s = stream!({
             let length = self.flush_offset.load(Ordering::Relaxed);
+            info!("Read mmap file: {}, length: {}", self.to_string(), length);
             let mmap = self.map(0, length).await?;
 
             let mut buf: &[u8] = mmap.as_ref();
@@ -360,8 +361,6 @@ impl LogFile {
             let mut file = self.file.write().await;
             // generate entry id
             entry_id = self.inc_entry_id();
-            // generate in-file offset
-            entry_offset = self.inc_offset(size);
             // rewrite encoded data
             LittleEndian::write_u64(&mut serialized[0..8], entry_id);
             // TODO(hl): CRC was calculated twice
@@ -370,7 +369,11 @@ impl LogFile {
 
             // write to file
             // TODO(hl): use io buffer and pwrite to reduce syscalls.
-            file.write(serialized.as_slice()).await.context(IoSnafu)?;
+            file.write_all(serialized.as_slice())
+                .await
+                .context(IoSnafu)?;
+            // generate in-file offset
+            entry_offset = self.inc_offset(size);
         }
 
         let (tx, rx) = oneshot::channel();
@@ -476,46 +479,44 @@ mod tests {
     #[tokio::test]
     pub async fn test_create_entry_stream() {
         logging::init_default_ut_logging();
-        for _ in 0..1000 {
-            let config = LogConfig::default();
-            let (path, _dir) = create_temp_dir("0010.log").await;
-            let mut file = LogFile::open(path.clone(), &config)
+        let config = LogConfig::default();
+        let (path, _dir) = create_temp_dir("0010.log").await;
+        let mut file = LogFile::open(path.clone(), &config)
+            .await
+            .unwrap_or_else(|_| panic!("Failed to open file: {}", path));
+        file.start().await.expect("Failed to start log file");
+
+        assert_eq!(
+            10,
+            file.append(&mut EntryImpl::new("test1".as_bytes()))
                 .await
-                .unwrap_or_else(|_| panic!("Failed to open file: {}", path));
-            file.start().await.expect("Failed to start log file");
+                .expect("Failed to append entry 1")
+                .entry_id
+        );
 
-            assert_eq!(
-                10,
-                file.append(&mut EntryImpl::new("test1".as_bytes()))
-                    .await
-                    .expect("Failed to append entry 1")
-                    .entry_id
-            );
+        assert_eq!(
+            11,
+            file.append(&mut EntryImpl::new("test-2".as_bytes()))
+                .await
+                .expect("Failed to append entry 2")
+                .entry_id
+        );
 
-            assert_eq!(
-                11,
-                file.append(&mut EntryImpl::new("test-2".as_bytes()))
-                    .await
-                    .expect("Failed to append entry 2")
-                    .entry_id
-            );
+        let mut stream = file.create_stream(LocalNamespace::default(), 0);
 
-            let mut stream = file.create_stream(LocalNamespace::default(), 0);
+        let mut data = vec![];
 
-            let mut data = vec![];
-
-            while let Some(v) = stream.next().await {
-                let entries = v.unwrap();
-                let content = entries[0].data();
-                let vec = content.to_vec();
-                data.push(String::from_utf8(vec).unwrap());
-            }
-
-            assert_eq!(vec!["test1".to_string(), "test-2".to_string()], data);
-            drop(stream);
-
-            let result = file.stop().await;
-            info!("Stop file res: {:?}", result);
+        while let Some(v) = stream.next().await {
+            let entries = v.unwrap();
+            let content = entries[0].data();
+            let vec = content.to_vec();
+            data.push(String::from_utf8(vec).unwrap());
         }
+
+        assert_eq!(vec!["test1".to_string(), "test-2".to_string()], data);
+        drop(stream);
+
+        let result = file.stop().await;
+        info!("Stop file res: {:?}", result);
     }
 }

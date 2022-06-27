@@ -236,7 +236,7 @@ mod tests {
     #[tokio::test]
     pub async fn test_roll_file() {
         common_telemetry::logging::init_default_ut_logging();
-        let dir = TempDir::new("greptimedb").unwrap();
+        let dir = TempDir::new("greptimedb1").unwrap();
         let config = LogConfig {
             append_buffer_size: 128,
             max_log_file_size: 128,
@@ -281,7 +281,7 @@ mod tests {
     #[tokio::test]
     pub async fn test_write_and_read_data() {
         common_telemetry::logging::init_default_ut_logging();
-        let dir = TempDir::new("greptimedb").unwrap();
+        let dir = TempDir::new("greptimedb2").unwrap();
         let config = LogConfig {
             append_buffer_size: 128,
             max_log_file_size: 128,
