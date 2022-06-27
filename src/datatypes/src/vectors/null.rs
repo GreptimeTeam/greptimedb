@@ -118,6 +118,7 @@ mod tests {
         let v = NullVector::new(32);
 
         assert_eq!(v.len(), 32);
+        assert_eq!(8, v.memory_size());
         let arrow_arr = v.to_arrow_array();
         assert_eq!(arrow_arr.null_count(), 32);
 
