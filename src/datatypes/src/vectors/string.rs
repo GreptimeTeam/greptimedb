@@ -94,7 +94,7 @@ impl Vector for StringVector {
     }
 
     fn memory_size(&self) -> usize {
-        self.len() * std::mem::size_of::<i32>() + self.array.values().len()
+        self.len() * std::mem::size_of::<i64>() + self.array.values().len()
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -117,7 +117,7 @@ impl Vector for StringVector {
 impl ScalarVector for StringVector {
     type OwnedItem = String;
     type RefItem<'a> = &'a str;
-    type Iter<'a> = ZipValidity<'a, &'a str, Utf8ValuesIter<'a, i32>>;
+    type Iter<'a> = ZipValidity<'a, &'a str, Utf8ValuesIter<'a, i64>>;
     type Builder = StringVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
@@ -209,7 +209,7 @@ mod tests {
         assert!(!v.is_const());
         assert_eq!(Validity::AllValid, v.validity());
         assert!(!v.only_null());
-        assert_eq!(29, v.memory_size());
+        assert_eq!(41, v.memory_size());
 
         for (i, s) in strs.iter().enumerate() {
             assert_eq!(Value::from(*s), v.get(i));
@@ -218,7 +218,7 @@ mod tests {
 
         let arrow_arr = v.to_arrow_array();
         assert_eq!(3, arrow_arr.len());
-        assert_eq!(&ArrowDataType::Utf8, arrow_arr.data_type());
+        assert_eq!(&ArrowDataType::LargeUtf8, arrow_arr.data_type());
     }
 
     #[test]

@@ -1,6 +1,9 @@
-use arrow::array::{BinaryArray, MutableBinaryArray, MutableUtf8Array, Utf8Array};
+use arrow::array::{
+    BinaryArray as ArrowBinaryArray, MutableBinaryArray as ArrowMutableBinaryArray,
+    MutableUtf8Array, Utf8Array,
+};
 
-pub type LargeBinaryArray = BinaryArray<i64>;
-pub type MutableLargeBinaryArray = MutableBinaryArray<i64>;
-pub type MutableStringArray = MutableUtf8Array<i32>;
-pub type StringArray = Utf8Array<i32>;
+pub type BinaryArray = ArrowBinaryArray<i64>;
+pub type MutableBinaryArray = ArrowMutableBinaryArray<i64>;
+pub type MutableStringArray = MutableUtf8Array<i64>;
+pub type StringArray = Utf8Array<i64>;
