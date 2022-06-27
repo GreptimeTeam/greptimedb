@@ -192,8 +192,10 @@ impl LogFile {
                             Err(e) => match e {
                                 TryRecvError::Empty => {
                                     if batch.is_empty() {
+                                        info!("empty");
                                         notify.notified().await;
                                         if stopped.load(Ordering::Acquire) {
+                                            info!("stopped.");
                                             break;
                                         }
                                     } else {
@@ -211,17 +213,23 @@ impl LogFile {
 
                     // flush all pending data to disk
                     let write_offset_read = write_offset.load(Ordering::Relaxed);
+                    info!("wor: {}/{}", write_offset_read, batch.len());
                     // TODO(hl): add flush metrics
                     if let Err(flush_err) = file.sync_all().await {
                         error!("Failed to flush log file: {}", flush_err);
                         error_occurred = true;
                     }
+                    info!("flush {}/{}", write_offset_read, batch.len());
+
                     if error_occurred {
                         info!("Flush task stop");
                         break;
                     }
+                    let prev = flush_offset.load(Ordering::Acquire);
                     flush_offset.store(write_offset_read, Ordering::Relaxed);
+                    info!("{} -> {}", prev, write_offset_read);
                     while let Some(req) = batch.pop() {
+                        info!("LogFile: complete req: {}/{}", req.id, req.offset);
                         req.complete();
                     }
                 }
@@ -362,6 +370,7 @@ impl LogFile {
             entry_id = self.inc_entry_id();
             // generate in-file offset
             entry_offset = self.inc_offset(size);
+            info!("ap {}/{}", entry_id, entry_offset);
             // rewrite encoded data
             LittleEndian::write_u64(&mut serialized[0..8], entry_id);
             // TODO(hl): CRC was calculated twice
@@ -371,6 +380,7 @@ impl LogFile {
             // write to file
             // TODO(hl): use io buffer and pwrite to reduce syscalls.
             file.write(serialized.as_slice()).await.context(IoSnafu)?;
+            info!("write {}/{}", entry_id, entry_offset);
         }
 
         let (tx, rx) = oneshot::channel();
@@ -391,6 +401,7 @@ impl LogFile {
                 entry_id,
             })
         } else {
+            info!("notify {}/{}", entry_id, entry_offset);
             self.notify.notify_one(); // notify flush thread.
             rx.await.map_err(|e| {
                 warn!(
@@ -476,44 +487,46 @@ mod tests {
     #[tokio::test]
     pub async fn test_create_entry_stream() {
         logging::init_default_ut_logging();
-        let config = LogConfig::default();
-        let (path, _dir) = create_temp_dir("0010.log").await;
-        let mut file = LogFile::open(path.clone(), &config)
-            .await
-            .unwrap_or_else(|_| panic!("Failed to open file: {}", path));
-        file.start().await.expect("Failed to start log file");
-
-        assert_eq!(
-            10,
-            file.append(&mut EntryImpl::new("test1".as_bytes()))
+        for _ in 0..200 {
+            let config = LogConfig::default();
+            let (path, _dir) = create_temp_dir("0010.log").await;
+            let mut file = LogFile::open(path.clone(), &config)
                 .await
-                .expect("Failed to append entry 1")
-                .entry_id
-        );
+                .unwrap_or_else(|_| panic!("Failed to open file: {}", path));
+            file.start().await.expect("Failed to start log file");
 
-        assert_eq!(
-            11,
-            file.append(&mut EntryImpl::new("test-2".as_bytes()))
-                .await
-                .expect("Failed to append entry 2")
-                .entry_id
-        );
+            assert_eq!(
+                10,
+                file.append(&mut EntryImpl::new("test1".as_bytes()))
+                    .await
+                    .expect("Failed to append entry 1")
+                    .entry_id
+            );
 
-        let mut stream = file.create_stream(LocalNamespace::default(), 0);
+            assert_eq!(
+                11,
+                file.append(&mut EntryImpl::new("test-2".as_bytes()))
+                    .await
+                    .expect("Failed to append entry 2")
+                    .entry_id
+            );
 
-        let mut data = vec![];
+            let mut stream = file.create_stream(LocalNamespace::default(), 0);
 
-        while let Some(v) = stream.next().await {
-            let entries = v.unwrap();
-            let content = entries[0].data();
-            let vec = content.to_vec();
-            data.push(String::from_utf8(vec).unwrap());
+            let mut data = vec![];
+
+            while let Some(v) = stream.next().await {
+                let entries = v.unwrap();
+                let content = entries[0].data();
+                let vec = content.to_vec();
+                data.push(String::from_utf8(vec).unwrap());
+            }
+
+            assert_eq!(vec!["test1".to_string(), "test-2".to_string()], data);
+            drop(stream);
+
+            let result = file.stop().await;
+            info!("Stop file res: {:?}", result);
         }
-
-        assert_eq!(vec!["test1".to_string(), "test-2".to_string()], data);
-        drop(stream);
-
-        let result = file.stop().await;
-        info!("Stop file res: {:?}", result);
     }
 }
