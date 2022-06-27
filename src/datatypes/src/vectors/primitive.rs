@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, MutableArray, MutablePrimitiveArray, PrimitiveArray};
 use arrow::bitmap::utils::ZipValidity;
+use arrow::datatypes::DataType as ArrowDataType;
 use serde_json::Value as JsonValue;
 use snafu::{OptionExt, ResultExt};
 
@@ -84,6 +85,17 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
 
     fn validity(&self) -> Validity {
         vectors::impl_validity_for_vector!(self.array)
+    }
+
+    fn memory_size(&self) -> usize {
+        std::mem::size_of::<ArrowDataType>()
+            + match self.array.validity() {
+                Some(bitmap) => {
+                    (self.len() - bitmap.null_count()) * std::mem::size_of::<T>()
+                        + bitmap.as_slice().0.len()
+                }
+                None => self.len() * std::mem::size_of::<T>(),
+            }
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -285,7 +297,7 @@ impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::DataType as ArrowDataType;
+
     use serde_json;
 
     use super::*;
@@ -403,5 +415,14 @@ mod tests {
         for i in 0..4 {
             assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
         }
+    }
+
+    #[test]
+    fn test_memory_size() {
+        let data_type_size = std::mem::size_of::<ArrowDataType>();
+        let v = PrimitiveVector::<i32>::from_slice((0..5).collect::<Vec<i32>>());
+        assert_eq!(data_type_size + 20, v.memory_size());
+        let v = PrimitiveVector::<i64>::from(vec![Some(0i64), Some(1i64), Some(2i64), None, None]);
+        assert_eq!(data_type_size + 3 * 8 + 1, v.memory_size());
     }
 }

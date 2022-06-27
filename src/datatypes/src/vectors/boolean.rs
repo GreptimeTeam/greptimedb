@@ -76,6 +76,10 @@ impl Vector for BooleanVector {
         vectors::impl_validity_for_vector!(self.array)
     }
 
+    fn memory_size(&self) -> usize {
+        self.array.values().as_slice().0.len()
+    }
+
     fn is_null(&self, row: usize) -> bool {
         self.array.is_null(row)
     }
@@ -179,13 +183,14 @@ mod tests {
 
     #[test]
     fn test_boolean_vector_misc() {
-        let bools = vec![true, false, true, true, false, false];
+        let bools = vec![true, false, true, true, false, false, true, true, false];
         let v = BooleanVector::from(bools.clone());
-        assert_eq!(6, v.len());
+        assert_eq!(9, v.len());
         assert_eq!("BooleanVector", v.vector_type_name());
         assert!(!v.is_const());
         assert_eq!(Validity::AllValid, v.validity());
         assert!(!v.only_null());
+        assert_eq!(2, v.memory_size());
 
         for (i, b) in bools.iter().enumerate() {
             assert!(!v.is_null(i));
@@ -193,7 +198,7 @@ mod tests {
         }
 
         let arrow_arr = v.to_arrow_array();
-        assert_eq!(6, arrow_arr.len());
+        assert_eq!(9, arrow_arr.len());
         assert_eq!(&ArrowDataType::Boolean, arrow_arr.data_type());
     }
 

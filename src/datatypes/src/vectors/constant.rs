@@ -66,6 +66,10 @@ impl Vector for ConstantVector {
         }
     }
 
+    fn memory_size(&self) -> usize {
+        std::mem::size_of::<usize>() + self.vector.memory_size()
+    }
+
     fn is_null(&self, _row: usize) -> bool {
         self.vector.is_null(0)
     }
@@ -133,6 +137,7 @@ mod tests {
         assert_eq!(10, c.len());
         assert_eq!(Validity::AllValid, c.validity());
         assert!(!c.only_null());
+        assert_eq!(76, c.memory_size());
 
         for i in 0..10 {
             assert!(!c.is_null(i));

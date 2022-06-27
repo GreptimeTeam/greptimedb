@@ -75,6 +75,9 @@ pub trait Vector: Send + Sync + Serializable {
     /// Returns the validity of the Array.
     fn validity(&self) -> Validity;
 
+    /// Returns the memory size of vector.
+    fn memory_size(&self) -> usize;
+
     /// The number of null slots on this [`Vector`].
     /// # Implementation
     /// This is `O(1)`.

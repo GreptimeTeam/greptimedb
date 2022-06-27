@@ -93,6 +93,10 @@ impl Vector for StringVector {
         vectors::impl_validity_for_vector!(self.array)
     }
 
+    fn memory_size(&self) -> usize {
+        self.len() * std::mem::size_of::<i32>() + self.array.values().len()
+    }
+
     fn is_null(&self, row: usize) -> bool {
         self.array.is_null(row)
     }
@@ -205,6 +209,7 @@ mod tests {
         assert!(!v.is_const());
         assert_eq!(Validity::AllValid, v.validity());
         assert!(!v.only_null());
+        assert_eq!(29, v.memory_size());
 
         for (i, s) in strs.iter().enumerate() {
             assert_eq!(Value::from(*s), v.get(i));

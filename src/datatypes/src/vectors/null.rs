@@ -58,6 +58,10 @@ impl Vector for NullVector {
         Validity::AllNull
     }
 
+    fn memory_size(&self) -> usize {
+        std::mem::size_of::<usize>()
+    }
+
     fn is_null(&self, _row: usize) -> bool {
         true
     }
