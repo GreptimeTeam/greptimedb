@@ -9,6 +9,9 @@ package = "arrow2"
 version="0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
 
+[features]
+default = ["python-udf"]
+python-udf = ["dep:rustpython-vm"]
 
 [dependencies]
 arc-swap = "1.0"
@@ -17,9 +20,11 @@ common-error = { path = "../error" }
 common-query = { path = "../query" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2" }
 datatypes = { path = "../../datatypes" }
+libc = "0.2.126"
 num = "0.4.0"
 num-traits = "0.2.14"
 once_cell = "1.10"
 paste = "1.0"
+rustpython-vm = { git = "https://github.com/RustPython/RustPython", optional = true }
 snafu = { version = "0.7", features = ["backtraces"] }
 statrs = "0.15"
