@@ -229,7 +229,6 @@ impl LogFile {
                     flush_offset.store(write_offset_read, Ordering::Relaxed);
                     info!("{} -> {}", prev, write_offset_read);
                     while let Some(req) = batch.pop() {
-                        info!("LogFile: complete req: {}/{}", req.id, req.offset);
                         req.complete();
                     }
                 }
@@ -370,7 +369,6 @@ impl LogFile {
             entry_id = self.inc_entry_id();
             // generate in-file offset
             entry_offset = self.inc_offset(size);
-            info!("ap {}/{}", entry_id, entry_offset);
             // rewrite encoded data
             LittleEndian::write_u64(&mut serialized[0..8], entry_id);
             // TODO(hl): CRC was calculated twice
@@ -380,7 +378,6 @@ impl LogFile {
             // write to file
             // TODO(hl): use io buffer and pwrite to reduce syscalls.
             file.write(serialized.as_slice()).await.context(IoSnafu)?;
-            info!("write {}/{}", entry_id, entry_offset);
         }
 
         let (tx, rx) = oneshot::channel();
