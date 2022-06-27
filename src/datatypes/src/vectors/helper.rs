@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::sync::Arc;
+use arrow::array::Array;
 
 use arrow::array::Array;
 use arrow::datatypes::DataType as ArrowDataType;
