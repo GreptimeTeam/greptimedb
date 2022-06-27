@@ -59,7 +59,7 @@ impl Vector for NullVector {
     }
 
     fn memory_size(&self) -> usize {
-        std::mem::size_of::<usize>()
+        0
     }
 
     fn is_null(&self, _row: usize) -> bool {
@@ -118,7 +118,7 @@ mod tests {
         let v = NullVector::new(32);
 
         assert_eq!(v.len(), 32);
-        assert_eq!(8, v.memory_size());
+        assert_eq!(0, v.memory_size());
         let arrow_arr = v.to_arrow_array();
         assert_eq!(arrow_arr.null_count(), 32);
 
