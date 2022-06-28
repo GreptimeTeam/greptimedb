@@ -75,6 +75,9 @@ pub trait Vector: Send + Sync + Serializable {
     /// Returns the validity of the Array.
     fn validity(&self) -> Validity;
 
+    /// Returns the memory size of vector.
+    fn memory_size(&self) -> usize;
+
     /// The number of null slots on this [`Vector`].
     /// # Implementation
     /// This is `O(1)`.
@@ -132,14 +135,15 @@ macro_rules! impl_try_from_arrow_array_for_vector {
     ($Array: ident, $Vector: ident) => {
         impl $Vector {
             pub fn try_from_arrow_array(
-                array: arrow::array::ArrayRef,
+                array: impl AsRef<dyn arrow::array::Array>,
             ) -> crate::error::Result<$Vector> {
                 Ok($Vector::from(
                     array
+                        .as_ref()
                         .as_any()
                         .downcast_ref::<$Array>()
                         .with_context(|| crate::error::ConversionSnafu {
-                            from: std::format!("{:?}", array.data_type()),
+                            from: std::format!("{:?}", array.as_ref().data_type()),
                         })?
                         .clone(),
                 ))
