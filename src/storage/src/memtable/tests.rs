@@ -175,6 +175,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
     // Test iterating an empty memtable.
     let mut iter = ctx.memtable.iter(IterContext::default()).unwrap();
     assert!(iter.next().unwrap().is_none());
+    assert_eq!(0, ctx.memtable.bytes_allocated());
 
     // Init test data.
     write_kvs(
@@ -198,6 +199,8 @@ fn write_iter_memtable_case(ctx: &TestContext) {
         &[(1002, 1), (1003, 1), (1004, 1)], // keys
         &[None, Some(5), None],             // values
     );
+
+    assert_eq!(216, ctx.memtable.bytes_allocated());
 
     let batch_sizes = [1, 4, 8, consts::READ_BATCH_SIZE];
     for batch_size in batch_sizes {

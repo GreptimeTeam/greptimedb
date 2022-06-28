@@ -122,6 +122,11 @@ impl KeyValues {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    pub fn estimated_memory_size(&self) -> usize {
+        self.keys.iter().fold(0, |acc, v| acc + v.memory_size())
+            + self.values.iter().fold(0, |acc, v| acc + v.memory_size())
+    }
 }
 
 pub struct DefaultMemtableBuilder {}
