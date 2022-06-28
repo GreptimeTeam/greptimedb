@@ -4,12 +4,36 @@ use arrow::compute::cast;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
 use datatypes::vectors::{Helper, VectorRef};
-use rustpython_vm::{pyclass, pyimpl, AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine};
+use rustpython_vm::{
+    protocol::{PyMappingMethods, PySequenceMethods},
+    pyclass, pyimpl,
+    types::{AsMapping, AsSequence},
+    AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+};
 
 #[pyclass(module = false, name = "vector")]
 #[derive(PyPayload, Clone)]
 pub struct PyVector {
     vector: VectorRef,
+}
+
+impl AsSequence for PyVector {
+    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
+        item: Some(|seq, i, vm| {
+            let zelf = Self::sequence_downcast(seq);
+            zelf.getitem_by_index(i, vm)
+        }),
+        ass_item: Some(|seq, i, value, vm| {
+            let zelf = Self::sequence_downcast(seq);
+            if let Some(value) = value {
+                Self::setitem_by_index(zelf.to_owned(), i, value, vm)
+            } else {
+                Err(vm.new_type_error("PyVector object doesn't support item deletion".to_owned()))
+            }
+        }),
+        ..PySequenceMethods::NOT_IMPLEMENTED
+    };
 }
 
 impl From<VectorRef> for PyVector {
@@ -166,5 +190,18 @@ impl PyVector {
     #[pymethod(magic)]
     fn len(&self) -> usize {
         self.vector.len()
+    }
+
+    fn getitem_by_index(&self, i: isize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        unimplemented!()
+    }
+
+    fn setitem_by_index(
+        zelf: PyRef<Self>,
+        i: isize,
+        value: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
+        unimplemented!()
     }
 }
