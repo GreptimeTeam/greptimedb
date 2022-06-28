@@ -1,7 +1,10 @@
 use std::cmp::Ordering;
 use std::collections::{btree_map, BTreeMap};
 use std::ops::Bound;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    Arc, RwLock,
+};
 
 use datatypes::prelude::*;
 use datatypes::value::Value;
@@ -22,6 +25,7 @@ type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
 pub struct BTreeMemtable {
     schema: MemtableSchema,
     map: Arc<RwLockMap>,
+    estimated_bytes: AtomicUsize,
 }
 
 impl BTreeMemtable {
@@ -29,6 +33,7 @@ impl BTreeMemtable {
         BTreeMemtable {
             schema,
             map: Arc::new(RwLock::new(BTreeMap::new())),
+            estimated_bytes: AtomicUsize::new(0),
         }
     }
 }
@@ -39,8 +44,10 @@ impl Memtable for BTreeMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
-        let mut map = self.map.write().unwrap();
+        self.estimated_bytes
+            .fetch_add(kvs.estimated_memory_size(), AtomicOrdering::Relaxed);
 
+        let mut map = self.map.write().unwrap();
         let iter_row = IterRow::new(kvs);
         for (inner_key, row_value) in iter_row {
             map.insert(inner_key, row_value);
@@ -58,7 +65,7 @@ impl Memtable for BTreeMemtable {
     }
 
     fn bytes_allocated(&self) -> usize {
-        unimplemented!()
+        self.estimated_bytes.load(AtomicOrdering::Relaxed)
     }
 }
 
