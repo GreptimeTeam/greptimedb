@@ -282,6 +282,10 @@ mod tests {
     pub async fn test_write_and_read_data() {
         common_telemetry::logging::init_default_ut_logging();
         let dir = TempDir::new("greptimedb2").unwrap();
+
+        let dir_str = dir.path().to_string_lossy().to_string();
+        info!("dir: {}", dir_str);
+
         let config = LogConfig {
             append_buffer_size: 128,
             max_log_file_size: 128,

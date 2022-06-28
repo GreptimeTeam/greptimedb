@@ -39,6 +39,7 @@ const LOG_WRITER_BATCH_SIZE: usize = 16;
 pub struct LogFile {
     name: FileName,
     file: Arc<RwLock<File>>,
+    path: String,
     write_offset: Arc<AtomicUsize>,
     flush_offset: Arc<AtomicUsize>,
     next_entry_id: Arc<AtomicU64>,
@@ -85,6 +86,7 @@ impl LogFile {
         let mut log = Self {
             name: file_name,
             file: Arc::new(RwLock::new(file)),
+            path: path.to_string(),
             write_offset: Arc::new(AtomicUsize::new(0)),
             flush_offset: Arc::new(AtomicUsize::new(0)),
             next_entry_id: Arc::new(AtomicU64::new(start_entry_id)),
@@ -434,8 +436,10 @@ impl LogFile {
 
 impl ToString for LogFile {
     fn to_string(&self) -> String {
-        format!("LogFile{{ name: {}, write_offset: {}, flush_offset: {}, start_entry_id: {}, entry_id_counter: {} }}",
-                self.name, self.write_offset.load(Ordering::Relaxed), self.flush_offset.load(Ordering::Relaxed), self.start_entry_id, self.next_entry_id.load(Ordering::Relaxed))
+        format!("LogFile{{ name: {}, path: {}, write_offset: {}, flush_offset: {}, start_entry_id: {}, entry_id_counter: {} }}",
+                self.name,
+                self.path,
+                self.write_offset.load(Ordering::Relaxed), self.flush_offset.load(Ordering::Relaxed), self.start_entry_id, self.next_entry_id.load(Ordering::Relaxed))
     }
 }
 
