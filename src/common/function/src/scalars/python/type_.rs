@@ -1,13 +1,20 @@
+use std::ops::Deref;
+
 use arrow::array::{Array, ArrayRef};
 use arrow::compute::arithmetics;
 use arrow::compute::cast;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
-use datatypes::vectors::{Helper, VectorRef};
+use datatypes::{
+    value,
+    vectors::{Helper, VectorRef},
+};
+use rustpython_vm::types::Constructor;
 use rustpython_vm::{
-    protocol::{PyMappingMethods, PySequenceMethods},
+    builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
+    protocol::PySequenceMethods,
     pyclass, pyimpl,
-    types::{AsMapping, AsSequence},
+    types::AsSequence,
     AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
@@ -15,25 +22,6 @@ use rustpython_vm::{
 #[derive(PyPayload, Clone)]
 pub struct PyVector {
     vector: VectorRef,
-}
-
-impl AsSequence for PyVector {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
-        item: Some(|seq, i, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            zelf.getitem_by_index(i, vm)
-        }),
-        ass_item: Some(|seq, i, value, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            if let Some(value) = value {
-                Self::setitem_by_index(zelf.to_owned(), i, value, vm)
-            } else {
-                Err(vm.new_type_error("PyVector object doesn't support item deletion".to_owned()))
-            }
-        }),
-        ..PySequenceMethods::NOT_IMPLEMENTED
-    };
 }
 
 impl From<VectorRef> for PyVector {
@@ -193,7 +181,10 @@ impl PyVector {
     }
 
     fn getitem_by_index(&self, i: isize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        unimplemented!()
+        let i = pythonic_index(i, self.len())
+            .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_owned()))?;
+        PyInt::from(1i32).into_ref(vm);
+        Ok(into_py_obj(self.vector.get(i), vm).into())
     }
 
     fn setitem_by_index(
@@ -203,5 +194,94 @@ impl PyVector {
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         unimplemented!()
+    }
+}
+
+/// convert a DataType Value into a PyObject(is that ok?)
+fn into_py_obj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
+    use value::Value::*;
+    match val {
+        // FIXME: properly init a `None`
+        // This comes from:https://github.com/RustPython/RustPython/blob/8ab4e770351d451cfdff5dc2bf8cce8df76a60ab/vm/src/builtins/singletons.rs#L37
+        // None in Python is universally singleton so
+        Null => vm.ctx.none.clone().into(),
+        // FIXME: properly init a `bool`
+        Boolean(v) => PyInt::from(if v { 1u8 } else { 0u8 }).into_pyobject(vm),
+        UInt8(v) => PyInt::from(v).into_pyobject(vm),
+        UInt32(v) => PyInt::from(v).into_pyobject(vm),
+        UInt64(v) => PyInt::from(v).into_pyobject(vm),
+        Int16(v) => PyInt::from(v).into_pyobject(vm),
+        Int32(v) => PyInt::from(v).into_pyobject(vm),
+        Int64(v) => PyInt::from(v).into_pyobject(vm),
+        Float32(v) => PyFloat::from(v.0 as f64).into_pyobject(vm),
+        Float64(v) => PyFloat::from(v.0).into_pyobject(vm),
+        String(s) => PyStr::from(s.as_utf8()).into_pyobject(vm),
+        // is this copy necessary?
+        Binary(b) => PyBytes::from(b.deref().to_vec()).into_pyobject(vm),
+        Date(v) => PyInt::from(v).into_pyobject(vm),
+        DateTime(v) => PyInt::from(v).into_pyobject(vm),
+        _ => todo!(),
+    }
+}
+
+/// check `i` is in range of `len` in a Pythonic manner
+///
+/// note that using Python semantics `-1` means last elem in list
+/// So `i` is isize
+fn pythonic_index(i: isize, len: usize) -> Option<usize> {
+    if i >= 0 {
+        // This try_into should never return Err for isize->usize when isize>0 which should always fit
+        // but for the sake of do not panic, we set default value of len(So rustpython will panic for us if unthinkable happened and need to panic)
+        let i = i.try_into().unwrap_or(len);
+        if i < len {
+            Some(i)
+        } else {
+            None
+        }
+    } else {
+        // i < 0, count rev from last elem to first
+        let i = (-i).try_into().unwrap_or(len);
+        if i <= len {
+            // Starting from -1 so:
+            Some(len - i)
+        } else {
+            None
+        }
+    }
+}
+
+impl AsSequence for PyVector {
+    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
+        item: Some(|seq, i, vm| {
+            let zelf = Self::sequence_downcast(seq);
+            zelf.getitem_by_index(i, vm)
+        }),
+        ass_item: Some(|seq, i, value, vm| {
+            let zelf = Self::sequence_downcast(seq);
+            if let Some(value) = value {
+                Self::setitem_by_index(zelf.to_owned(), i, value, vm)
+            } else {
+                Err(vm.new_type_error("PyVector object doesn't support item deletion".to_owned()))
+            }
+        }),
+        ..PySequenceMethods::NOT_IMPLEMENTED
+    };
+}
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wrapped_at() {
+        let i: isize = 1;
+        let len: usize = 3;
+        assert_eq!(pythonic_index(i, len), Some(1));
+        let i: isize = -1;
+        assert_eq!(pythonic_index(i, len), Some(2));
+        let i: isize = -4;
+        assert_eq!(pythonic_index(i, len), None);
+        let i: isize = 4;
+        assert_eq!(pythonic_index(i, len), None);
     }
 }
