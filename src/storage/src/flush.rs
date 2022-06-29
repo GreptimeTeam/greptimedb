@@ -168,6 +168,8 @@ fn get_encoding_for_schema<F: Fn(&DataType) -> Encoding + Clone>(
         .collect()
 }
 
+// TODO(hl): backport from arrow2 v0.12 (https://github.com/jorgecarleitao/arrow2/blob/f57dbd5dbc61b940a71decd5f81d0fd4c93b158d/src/io/parquet/write/mod.rs#L454-L509)
+// remove it when upgrade to newer version
 pub fn transverse<T, F: Fn(&DataType) -> T + Clone>(data_type: &DataType, map: F) -> Vec<T> {
     let mut encodings = vec![];
     transverse_recursive(data_type, map, &mut encodings);
