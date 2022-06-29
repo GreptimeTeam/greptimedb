@@ -9,4 +9,4 @@ edition = "2021"
 api = { path = "../api" }
 common-error = { path = "../common/error" }
 snafu = { version = "0.7", features = ["backtraces"] }
-tonic = "0.7.2"
+tonic = "0.7"
