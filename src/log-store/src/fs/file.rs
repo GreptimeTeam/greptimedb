@@ -39,6 +39,7 @@ const LOG_WRITER_BATCH_SIZE: usize = 16;
 pub struct LogFile {
     name: FileName,
     file: Arc<RwLock<File>>,
+    path: String,
     write_offset: Arc<AtomicUsize>,
     flush_offset: Arc<AtomicUsize>,
     next_entry_id: Arc<AtomicU64>,
@@ -85,6 +86,7 @@ impl LogFile {
         let mut log = Self {
             name: file_name,
             file: Arc::new(RwLock::new(file)),
+            path: path.to_string(),
             write_offset: Arc::new(AtomicUsize::new(0)),
             flush_offset: Arc::new(AtomicUsize::new(0)),
             next_entry_id: Arc::new(AtomicU64::new(start_entry_id)),
@@ -238,7 +240,7 @@ impl LogFile {
             });
 
             *self.join_handle.lock().unwrap() = Some(handle);
-            info!("Flush task started...");
+            info!("Flush task started: {}", self.name);
         }
         Ok(())
     }
@@ -311,6 +313,7 @@ impl LogFile {
     pub fn create_stream(&self, _ns: impl Namespace, start_entry_id: u64) -> impl EntryStream + '_ {
         let s = stream!({
             let length = self.flush_offset.load(Ordering::Relaxed);
+            info!("Read mmap file: {}, length: {}", self.to_string(), length);
             let mmap = self.map(0, length).await?;
 
             let mut buf: &[u8] = mmap.as_ref();
@@ -360,8 +363,6 @@ impl LogFile {
             let mut file = self.file.write().await;
             // generate entry id
             entry_id = self.inc_entry_id();
-            // generate in-file offset
-            entry_offset = self.inc_offset(size);
             // rewrite encoded data
             LittleEndian::write_u64(&mut serialized[0..8], entry_id);
             // TODO(hl): CRC was calculated twice
@@ -370,7 +371,11 @@ impl LogFile {
 
             // write to file
             // TODO(hl): use io buffer and pwrite to reduce syscalls.
-            file.write(serialized.as_slice()).await.context(IoSnafu)?;
+            file.write_all(serialized.as_slice())
+                .await
+                .context(IoSnafu)?;
+            // generate in-file offset
+            entry_offset = self.inc_offset(size);
         }
 
         let (tx, rx) = oneshot::channel();
@@ -431,8 +436,10 @@ impl LogFile {
 
 impl ToString for LogFile {
     fn to_string(&self) -> String {
-        format!("LogFile{{ name: {}, write_offset: {}, flush_offset: {}, start_entry_id: {}, entry_id_counter: {} }}",
-                self.name, self.write_offset.load(Ordering::Relaxed), self.flush_offset.load(Ordering::Relaxed), self.start_entry_id, self.next_entry_id.load(Ordering::Relaxed))
+        format!("LogFile{{ name: {}, path: {}, write_offset: {}, flush_offset: {}, start_entry_id: {}, entry_id_counter: {} }}",
+                self.name,
+                self.path,
+                self.write_offset.load(Ordering::Relaxed), self.flush_offset.load(Ordering::Relaxed), self.start_entry_id, self.next_entry_id.load(Ordering::Relaxed))
     }
 }
 
