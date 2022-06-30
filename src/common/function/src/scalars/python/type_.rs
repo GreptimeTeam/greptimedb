@@ -5,11 +5,13 @@ use arrow::compute::arithmetics;
 use arrow::compute::cast;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::value::{OrderedF32, OrderedFloat};
 use datatypes::{
     value,
     vectors::{Helper, VectorRef},
 };
-use rustpython_vm::types::Constructor;
+use rustpython_vm::types::{Constructor, PyComparisonOp};
 use rustpython_vm::{
     builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
     protocol::PySequenceMethods,
@@ -196,15 +198,132 @@ impl PyVector {
         unimplemented!()
     }
 }
+/// convert a `PyObjectRef` into a `datatypess::Value`(is that ok?)
+/// if `obj` can be convert to given ConcreteDataType then return inner `Value` else return None
+fn into_datatypes_value(
+    obj: PyObjectRef,
+    vm: &VirtualMachine,
+    dtype: ConcreteDataType,
+) -> Option<value::Value> {
+    use value::Value;
 
-/// convert a DataType Value into a PyObject(is that ok?)
+    match dtype {
+        ConcreteDataType::Null(_) => {
+            if obj
+                .is_instance(PyNone::class(vm).into(), vm)
+                .unwrap_or(false)
+            {
+                Some(Value::Null)
+            } else {
+                None
+            }
+        }
+        ConcreteDataType::Boolean(_) => {
+            if obj
+                .is_instance(PyBool::class(vm).into(), vm)
+                .unwrap_or(false)
+            {
+                Some(Value::Boolean(
+                    obj.try_into_value::<bool>(vm).unwrap_or(false),
+                ))
+            } else {
+                None
+            }
+        }
+        ConcreteDataType::Int8(_)
+        | ConcreteDataType::Int16(_)
+        | ConcreteDataType::Int32(_)
+        | ConcreteDataType::Int64(_) => {
+            if obj
+                .is_instance(PyInt::class(vm).into(), vm)
+                .unwrap_or(false)
+            {
+                match dtype {
+                    ConcreteDataType::Int8(_) => obj
+                        .try_into_value::<i8>(vm)
+                        .ok()
+                        .and_then(|v| Some(Value::Int8(v))),
+                    ConcreteDataType::Int16(_) => obj
+                        .try_into_value::<i16>(vm)
+                        .ok()
+                        .and_then(|v| Some(Value::Int16(v))),
+                    ConcreteDataType::Int32(_) => obj
+                        .try_into_value::<i32>(vm)
+                        .ok()
+                        .and_then(|v| Some(Value::Int32(v))),
+                    ConcreteDataType::Int64(_) => obj
+                        .try_into_value::<i64>(vm)
+                        .ok()
+                        .and_then(|v| Some(Value::Int64(v))),
+                    _ => unreachable!(),
+                }
+            } else {
+                unreachable!()
+            }
+        }
+        ConcreteDataType::UInt8(_)
+        | ConcreteDataType::UInt16(_)
+        | ConcreteDataType::UInt32(_)
+        | ConcreteDataType::UInt64(_) => {
+            if obj
+                .is_instance(PyInt::class(vm).into(), vm)
+                .unwrap_or(false)
+                && obj.clone().try_into_value::<i64>(vm).unwrap_or(-1) >= 0
+            {
+                match dtype {
+                    ConcreteDataType::UInt8(_) => obj
+                        .try_into_value::<u8>(vm)
+                        .ok()
+                        .and_then(|v| Some(Value::UInt8(v))),
+                    ConcreteDataType::UInt16(_) => obj
+                        .try_into_value::<u16>(vm)
+                        .ok()
+                        .and_then(|v| Some(Value::UInt16(v))),
+                    ConcreteDataType::UInt32(_) => obj
+                        .try_into_value::<u32>(vm)
+                        .ok()
+                        .and_then(|v| Some(Value::UInt32(v))),
+                    ConcreteDataType::UInt64(_) => obj
+                        .try_into_value::<u64>(vm)
+                        .ok()
+                        .and_then(|v| Some(Value::UInt64(v))),
+                    _ => unreachable!(),
+                }
+            } else {
+                None
+            }
+        }
+        ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
+            if obj
+                .is_instance(PyFloat::class(vm).into(), vm)
+                .unwrap_or(false)
+            {
+                match dtype {
+                    ConcreteDataType::Float32(_) => obj
+                        .try_into_value::<f32>(vm)
+                        .ok()
+                        .and_then(|v| Some(Value::Float32(OrderedFloat(v)))),
+                    ConcreteDataType::Float64(_) => obj
+                        .try_into_value::<f64>(vm)
+                        .ok()
+                        .and_then(|v| Some(Value::Float64(OrderedFloat(v)))),
+                    _ => unreachable!(),
+                }
+            } else {
+                None
+            }
+        }
+        _ => todo!(),
+    }
+}
+/// convert a DataType `Value` into a `PyObjectRef`(is that ok?)
 fn into_py_obj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
     use value::Value::*;
     match val {
         // FIXME: properly init a `None`
         // This comes from:https://github.com/RustPython/RustPython/blob/8ab4e770351d451cfdff5dc2bf8cce8df76a60ab/vm/src/builtins/singletons.rs#L37
         // None in Python is universally singleton so
-        Null => vm.ctx.none.clone().into(),
+        Null => vm.ctx.none(),
         // FIXME: properly init a `bool`
         Boolean(v) => PyInt::from(if v { 1u8 } else { 0u8 }).into_pyobject(vm),
         UInt8(v) => PyInt::from(v).into_pyobject(vm),
