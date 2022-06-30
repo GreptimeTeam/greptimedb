@@ -14,9 +14,9 @@ use datatypes::{
 };
 use rustpython_vm::{
     builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
-    protocol::PySequenceMethods,
+    protocol::{PyMappingMethods, PySequenceMethods},
     pyclass, pyimpl,
-    types::AsSequence,
+    types::{AsMapping, AsSequence},
     AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
@@ -182,6 +182,13 @@ impl PyVector {
         self.vector.len()
     }
 
+    #[pymethod(magic)]
+    fn doc(&self) -> PyResult<PyStr> {
+        Ok(PyStr::from(
+            "PyVector is like a Python array, a compact array of elem of same datatype, but Readonly for now",
+        ))
+    }
+
     fn getitem_by_index(&self, i: isize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         let i = pythonic_index(i, self.len())
             .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_owned()))?;
@@ -341,11 +348,10 @@ fn into_datatypes_value(
             } else {
                 None
             }
-        }
-        _ => unimplemented!("Unsupported data type of value {:?}", dtype),
+        } //_ => unimplemented!("Unsupported data type of value {:?}", dtype),
     }
 }
-/// convert a DataType `Value` into a `PyObjectRef`(is that ok?)
+/// convert a DataType `Value` into a `PyObjectRef`
 fn into_py_obj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
     use value::Value::*;
     match val {
@@ -399,28 +405,34 @@ fn pythonic_index(i: isize, len: usize) -> Option<usize> {
     }
 }
 
+impl AsMapping for PyVector {
+    const AS_MAPPING: PyMappingMethods = PyMappingMethods {
+        length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
+        subscript: None,
+        ass_subscript: None,
+    };
+}
+
 impl AsSequence for PyVector {
     const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
+        length: Some(|seq, _vm| {
+            println!("Call length in here");
+            Ok(Self::sequence_downcast(seq).len())
+        }),
         item: Some(|seq, i, vm| {
             let zelf = Self::sequence_downcast(seq);
             zelf.getitem_by_index(i, vm)
         }),
         ass_item: Some(|seq, i, value, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            if let Some(value) = value {
-                Self::setitem_by_index(zelf.to_owned(), i, value, vm)
-            } else {
-                Err(vm.new_type_error("PyVector object doesn't support item deletion".to_owned()))
-            }
+            Err(vm.new_type_error("PyVector object doesn't support item assigns".to_owned()))
         }),
         ..PySequenceMethods::NOT_IMPLEMENTED
     };
 }
 #[cfg(test)]
 pub mod tests {
-    use super::*;
 
+    use super::*;
     #[test]
     fn test_wrapped_at() {
         let i: isize = 1;
@@ -432,5 +444,97 @@ pub mod tests {
         assert_eq!(pythonic_index(i, len), None);
         let i: isize = 4;
         assert_eq!(pythonic_index(i, len), None);
+    }
+
+    #[test]
+    fn test_getitem_by_index_in_vm() {
+        use std::sync::Arc;
+
+        use datatypes::vectors::*;
+        use rustpython_vm as vm;
+        use rustpython_vm::class::PyClassImpl;
+        vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
+            PyVector::make_class(&vm.ctx);
+            let a: VectorRef = Arc::new(Int32Vector::from_vec(vec![1, 2, 3, 4]));
+            let a = PyVector::from(a);
+            println!("{:?}", a.getitem_by_index(0, vm));
+            assert_eq!(
+                1,
+                a.getitem_by_index(0, vm)
+                    .and_then(|v| Ok(v.try_into_value::<i32>(vm).unwrap_or(0)))
+                    .unwrap_or(0)
+            );
+            assert!(a.getitem_by_index(4, vm).ok().is_none());
+            assert_eq!(
+                4,
+                a.getitem_by_index(-1, vm)
+                    .and_then(|v| Ok(v.try_into_value::<i32>(vm).unwrap_or(0)))
+                    .unwrap_or(0)
+            );
+            assert!(a.getitem_by_index(-5, vm).ok().is_none());
+            
+        })
+    }
+
+    pub fn execute_script(script: &str, test_vec: Option<PyVector>) -> PyResult {
+        use std::sync::Arc;
+
+        use datatypes::vectors::*;
+        use rustpython_vm as vm;
+        use rustpython_vm::class::PyClassImpl;
+        vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
+            PyVector::make_class(&vm.ctx);
+            let scope = vm.new_scope_with_builtins();
+            let a: VectorRef = Arc::new(Int32Vector::from_vec(vec![1, 2, 3, 4]));
+            let a = PyVector::from(a);
+            let b: VectorRef = Arc::new(Float32Vector::from_vec(vec![1.2, 2.0, 3.4, 4.5]));
+            let b = PyVector::from(b);
+            scope
+                .locals
+                .as_object()
+                .set_item("a", vm.new_pyobj(a), vm)
+                .expect("failed");
+            scope
+                .locals
+                .as_object()
+                .set_item("b", vm.new_pyobj(b), vm)
+                .expect("failed");
+            
+            if let Some(v) = test_vec{
+                scope
+                .locals
+                .as_object()
+                .set_item("test_vec", vm.new_pyobj(v), vm)
+                .expect("failed");
+            }
+
+            let code_obj = vm
+                .compile(
+                    script,
+                    vm::compile::Mode::BlockExpr,
+                    "<embedded>".to_owned(),
+                )
+                .map_err(|err| vm.new_syntax_error(&err))?;
+            vm.run_code_obj(code_obj, scope)
+        })
+    }
+
+    #[test]
+    fn test_execute_script() {
+        let snippet = vec!["a.len()", "a.__len__()", "len(a)", "a[0]", "list(a)", "a.__getitem__(0)"];
+        for code in snippet {
+            let result = execute_script(code, None);
+            println!("{code}: {:?}", result);
+        }
+
+        use datatypes::vectors::*;
+        use std::sync::Arc;
+        let a: VectorRef = Arc::new(NullVector::new(42));
+        let a = PyVector::from(a);
+        let result = execute_script("test_vec", Some(a));
+        
+        let result = execute_script("test_vec", Some(a));
+        println!("test_vec: {:?}", result);
+        //assert!(false);
     }
 }
