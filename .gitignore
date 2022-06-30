@@ -22,3 +22,6 @@ debug/
 # Logs
 **/__unittest_logs
 logs/
+
+.DS_store
+.gitignore
