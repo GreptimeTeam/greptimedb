@@ -1,6 +1,5 @@
 use std::fmt::{Debug, Formatter};
 use std::io::SeekFrom;
-use std::sync::atomic::Ordering::Acquire;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -8,13 +7,11 @@ use async_stream::stream;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use bytes::BytesMut;
-use common_base::buffer::Buffer;
 use common_error::ext::BoxedError;
 use common_telemetry::logging::{error, info};
 use common_telemetry::warn;
 use futures_util::StreamExt;
 use memmap2::{Mmap, MmapOptions};
-use mmap::MmappedBuffer;
 use snafu::{Backtrace, GenerateImplicitData, ResultExt};
 use store_api::logstore::entry::{Encode, Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
@@ -29,13 +26,13 @@ use tokio::sync::{oneshot, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time;
 
-use crate::error::{EncodeSnafu, Error, IoSnafu, OpenLogSnafu, Result};
+use crate::error::{AppendSnafu, Error, IoSnafu, OpenLogSnafu, Result};
 use crate::fs::config::LogConfig;
 use crate::fs::crc::CRC_ALGO;
 use crate::fs::entry::{EntryImpl, StreamImpl};
 use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
-use crate::fs::{mmap, AppendResponseImpl};
+use crate::fs::AppendResponseImpl;
 
 const LOG_WRITER_BATCH_SIZE: usize = 16;
 
@@ -321,7 +318,7 @@ impl LogFile {
 
         let s = stream!({
             let mmap = self.map(0, length).await?;
-            let mut buf = MmappedBuffer::new(mmap);
+            let mut buf = &mmap[..];
             if buf.is_empty() {
                 info!("File is just created!");
                 // file is newly created
@@ -343,7 +340,10 @@ impl LogFile {
     }
 
     /// Appends an entry to `LogFile` and return a `Result` containing the id of entry appended.
-    pub async fn append<T: Entry>(&self, e: &mut T) -> Result<AppendResponseImpl> {
+    pub async fn append<T: Entry>(&self, e: &mut T) -> Result<AppendResponseImpl>
+    where
+        T: Encode<Error = Error>,
+    {
         if self.stopped.load(Ordering::Acquire) {
             return Err(Error::Eof);
         }
@@ -351,7 +351,7 @@ impl LogFile {
         let mut serialized = BytesMut::with_capacity(e.encoded_size());
         e.encode_to(&mut serialized)
             .map_err(BoxedError::new)
-            .context(EncodeSnafu)?;
+            .context(AppendSnafu)?;
         let size = serialized.len();
 
         if size + self.write_offset.load(Ordering::Relaxed) > self.max_file_size {
@@ -420,7 +420,7 @@ impl LogFile {
 
     #[inline]
     pub fn is_seal(&self) -> bool {
-        self.sealed.load(Acquire)
+        self.sealed.load(Ordering::Acquire)
     }
 
     #[inline]

@@ -9,7 +9,6 @@ mod file_name;
 mod index;
 
 mod log;
-mod mmap;
 mod namespace;
 
 #[derive(Debug, PartialEq, Eq)]

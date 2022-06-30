@@ -4,11 +4,11 @@ use std::task::{Context, Poll};
 use bytes::{Bytes, BytesMut};
 use common_base::buffer::{Buffer, BufferMut};
 use futures::Stream;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::{Encode, Entry, Epoch, Id, Offset};
 use store_api::logstore::entry_stream::{EntryStream, SendableEntryStream};
 
-use crate::error::{CorruptedSnafu, DecodeSnafu, Error};
+use crate::error::{CorruptedSnafu, DecodeSnafu, EncodeSnafu, Error};
 use crate::fs::crc;
 
 // length+offset+epoch+crc
@@ -35,12 +35,13 @@ impl Encode for EntryImpl {
     ///
     fn encode_to<T: BufferMut>(&self, buf: &mut T) -> Result<usize, Self::Error> {
         let data_length = self.data.len();
-        buf.write_u64_le(self.id).unwrap(); // TODO(hl): remove these unwraps
-        buf.write_u64_le(self.epoch).unwrap();
-        buf.write_u32_le(data_length as u32).unwrap();
-        buf.write_from_slice(self.data.as_slice()).unwrap();
+        buf.write_u64_le(self.id).context(EncodeSnafu)?;
+        buf.write_u64_le(self.epoch).context(EncodeSnafu)?;
+        buf.write_u32_le(data_length as u32).context(EncodeSnafu)?;
+        buf.write_from_slice(self.data.as_slice())
+            .context(EncodeSnafu)?;
         let checksum = crc::CRC_ALGO.checksum(buf.as_slice());
-        buf.write_u32_le(checksum).unwrap();
+        buf.write_u32_le(checksum).context(EncodeSnafu)?;
         Ok(data_length + ENTRY_MIN_LEN)
     }
 
@@ -48,27 +49,38 @@ impl Encode for EntryImpl {
         ensure!(
             buf.remaining_size() >= ENTRY_MIN_LEN,
             DecodeSnafu {
-                remain_size: buf.remaining_size()
+                size: buf.remaining_size(),
             }
         );
 
+        macro_rules! map_err {
+            ($stmt: expr, $var: ident) => {
+                $stmt.map_err(|_| {
+                    DecodeSnafu {
+                        size: $var.remaining_size(),
+                    }
+                    .build()
+                })
+            };
+        }
+
         let mut digest = crc::CRC_ALGO.digest();
-        let id = buf.read_u64_le().unwrap();
+        let id = map_err!(buf.read_u64_le(), buf)?;
         digest.update(&id.to_le_bytes());
-        let epoch = buf.read_u64_le().unwrap();
+        let epoch = map_err!(buf.read_u64_le(), buf)?;
         digest.update(&epoch.to_le_bytes());
-        let data_len = buf.read_u32_le().unwrap();
+        let data_len = map_err!(buf.read_u32_le(), buf)?;
         digest.update(&data_len.to_le_bytes());
         ensure!(
             buf.remaining_size() >= data_len as usize,
             DecodeSnafu {
-                remain_size: buf.remaining_size()
+                size: buf.remaining_size()
             }
         );
         let mut data = vec![0u8; data_len as usize];
-        buf.read_to_slice(&mut data).unwrap();
+        map_err!(buf.read_to_slice(&mut data), buf)?;
         digest.update(&data);
-        let crc_read = buf.read_u32_le().unwrap();
+        let crc_read = map_err!(buf.read_u32_le(), buf)?;
         let crc_calc = digest.finalize();
         ensure!(
             crc_read == crc_calc,

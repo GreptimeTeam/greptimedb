@@ -8,15 +8,15 @@ use snafu::{Backtrace, ErrorCompat};
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Failed to encode entry, source: {}", source))]
-    Encode {
+    Encode { source: common_base::buffer::Error },
+
+    #[snafu(display("Failed to decode entry, remain size: {}", size))]
+    Decode { size: usize, backtrace: Backtrace },
+
+    #[snafu(display("Failed to append entry, source: {}", source))]
+    Append {
         #[snafu(backtrace)]
         source: BoxedError,
-    },
-
-    #[snafu(display("Failed to decode entry, remain size: {}", remain_size))]
-    Decode {
-        remain_size: usize,
-        backtrace: Backtrace,
     },
 
     #[snafu(display("Entry corrupted, msg: {}", msg))]
