@@ -15,10 +15,11 @@ use datatypes::{
 use rustpython_vm::{
     builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
     protocol::{PyMappingMethods, PySequenceMethods},
-    pyclass, pyimpl,
+    pyclass, pyimpl, 
     types::{AsMapping, AsSequence},
     AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
+
 
 #[pyclass(module = false, name = "vector")]
 #[derive(PyPayload, Clone)]
@@ -75,7 +76,7 @@ impl AsRef<PyVector> for PyVector {
     }
 }
 
-#[pyimpl]
+#[pyimpl(with(AsMapping, AsSequence))]
 impl PyVector {
     #[inline]
     fn arith_op<F>(
@@ -432,6 +433,8 @@ impl AsSequence for PyVector {
 #[cfg(test)]
 pub mod tests {
 
+    use rustpython_vm::protocol::PySequence;
+
     use super::*;
     #[test]
     fn test_wrapped_at() {
@@ -457,7 +460,7 @@ pub mod tests {
             PyVector::make_class(&vm.ctx);
             let a: VectorRef = Arc::new(Int32Vector::from_vec(vec![1, 2, 3, 4]));
             let a = PyVector::from(a);
-            println!("{:?}", a.getitem_by_index(0, vm));
+            //println!("{:?}", a.getitem_by_index(0, vm));
             assert_eq!(
                 1,
                 a.getitem_by_index(0, vm)
@@ -472,7 +475,12 @@ pub mod tests {
                     .unwrap_or(0)
             );
             assert!(a.getitem_by_index(-5, vm).ok().is_none());
-            
+
+            let a: VectorRef = Arc::new(NullVector::new(42));
+            let a = PyVector::from(a);
+            if let Some(seq) = PySequence::find_methods(&a.into_pyobject(vm), vm){
+                println!("{:?}",seq)
+            }
         })
     }
 
@@ -499,13 +507,13 @@ pub mod tests {
                 .as_object()
                 .set_item("b", vm.new_pyobj(b), vm)
                 .expect("failed");
-            
-            if let Some(v) = test_vec{
+
+            if let Some(v) = test_vec {
                 scope
-                .locals
-                .as_object()
-                .set_item("test_vec", vm.new_pyobj(v), vm)
-                .expect("failed");
+                    .locals
+                    .as_object()
+                    .set_item("test_vec", vm.new_pyobj(v), vm)
+                    .expect("failed");
             }
 
             let code_obj = vm
@@ -521,20 +529,27 @@ pub mod tests {
 
     #[test]
     fn test_execute_script() {
-        let snippet = vec!["a.len()", "a.__len__()", "len(a)", "a[0]", "list(a)", "a.__getitem__(0)"];
+        let snippet = vec![
+            "a.len()",
+            "a.__len__()",
+            "len(a)",
+            "a[0]",
+            "list(a)",
+            "a.__getitem__(0)",
+        ];
         for code in snippet {
             let result = execute_script(code, None);
             println!("{code}: {:?}", result);
         }
 
-        use datatypes::vectors::*;
         use std::sync::Arc;
+
+        use datatypes::vectors::*;
         let a: VectorRef = Arc::new(NullVector::new(42));
         let a = PyVector::from(a);
         let result = execute_script("test_vec", Some(a));
-        
-        let result = execute_script("test_vec", Some(a));
         println!("test_vec: {:?}", result);
+
         //assert!(false);
     }
 }
