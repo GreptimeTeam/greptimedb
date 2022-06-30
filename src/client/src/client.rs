@@ -17,14 +17,24 @@ impl Client {
         Ok(Self { client })
     }
 
-    pub async fn batch(&self, req: BatchRequest) -> Result<BatchResponse> {
-        let res = self.client.clone().batch(req).await?;
-        Ok(res.into_inner())
+    pub async fn admin(&self, req: AdminRequest) -> Result<AdminResponse> {
+        let req = BatchRequest {
+            admins: vec![req],
+            ..Default::default()
+        };
+
+        let mut res = self.batch(req).await?;
+        res.admins.pop().context(MissingResultSnafu {
+            name: "admins",
+            expected: 1_usize,
+            actual: 0_usize,
+        })
     }
 
     pub async fn database(&self, req: DatabaseRequest) -> Result<DatabaseResponse> {
         let req = BatchRequest {
             databases: vec![req],
+            ..Default::default()
         };
 
         let mut res = self.batch(req).await?;
@@ -33,5 +43,10 @@ impl Client {
             expected: 1_usize,
             actual: 0_usize,
         })
+    }
+
+    pub async fn batch(&self, req: BatchRequest) -> Result<BatchResponse> {
+        let res = self.client.clone().batch(req).await?;
+        Ok(res.into_inner())
     }
 }
