@@ -72,6 +72,10 @@ pub trait Buffer: AsRef<[u8]> {
         self.remaining_slice().len()
     }
 
+    fn is_empty(&self) -> bool {
+        self.remaining_size() == 0
+    }
+
     /// # Panics
     /// This method **may** panic if buffer does not have enough data to be copied to dst.
     fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Self::Error>;
@@ -192,27 +196,5 @@ impl BufferMut for Vec<u8> {
     fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Self::Error> {
         self.extend_from_slice(src);
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    pub fn test_buffer_read_write() {
-        let mut buf = BytesMut::with_capacity(16);
-        buf.write_u64_le(1234u64).unwrap();
-        let result = buf.read_u64_le().unwrap();
-        assert_eq!(1234u64, result);
-
-        buf.write_from_slice("hello, world".as_bytes()).unwrap();
-        let mut content = vec![0u8; 5];
-        buf.read_to_slice(&mut content).unwrap();
-        let read = String::from_utf8_lossy(&content);
-        assert_eq!("hello", read);
-
-        // after read, buffer should still have 7 bytes to read.
-        assert_eq!(7, buf.remaining());
     }
 }

@@ -322,13 +322,13 @@ impl LogFile {
         let s = stream!({
             let mmap = self.map(0, length).await?;
             let mut buf = MmappedBuffer::new(mmap);
-            if buf.remaining_size() == 0 {
+            if buf.is_empty() {
                 info!("File is just created!");
                 // file is newly created
                 return;
             }
 
-            while buf.remaining_size() > 0 {
+            while !buf.is_empty() {
                 let entry: EntryImpl = EntryImpl::decode(&mut buf)?;
                 if entry.id() >= start_entry_id {
                     yield Ok(vec![entry]);

@@ -45,7 +45,12 @@ impl Encode for EntryImpl {
     }
 
     fn decode<T: Buffer>(buf: &mut T) -> Result<Self, Self::Error> {
-        ensure!(buf.remaining_size() >= ENTRY_MIN_LEN, DecodeSnafu);
+        ensure!(
+            buf.remaining_size() >= ENTRY_MIN_LEN,
+            DecodeSnafu {
+                remain_size: buf.remaining_size()
+            }
+        );
 
         let mut digest = crc::CRC_ALGO.digest();
         let id = buf.read_u64_le().unwrap();
@@ -54,7 +59,12 @@ impl Encode for EntryImpl {
         digest.update(&epoch.to_le_bytes());
         let data_len = buf.read_u32_le().unwrap();
         digest.update(&data_len.to_le_bytes());
-        ensure!(buf.remaining_size() >= data_len as usize, DecodeSnafu);
+        ensure!(
+            buf.remaining_size() >= data_len as usize,
+            DecodeSnafu {
+                remain_size: buf.remaining_size()
+            }
+        );
         let mut data = vec![0u8; data_len as usize];
         buf.read_to_slice(&mut data).unwrap();
         digest.update(&data);

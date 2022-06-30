@@ -13,8 +13,11 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to decode entry"))]
-    Decode { backtrace: Backtrace },
+    #[snafu(display("Failed to decode entry, remain size: {}", remain_size))]
+    Decode {
+        remain_size: usize,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Entry corrupted, msg: {}", msg))]
     Corrupted { msg: String, backtrace: Backtrace },
