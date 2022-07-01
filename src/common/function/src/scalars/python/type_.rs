@@ -10,14 +10,15 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
 use datatypes::{
     value,
-    vectors::{Helper, VectorRef},
+    vectors::{Helper, VectorRef, VectorBuilder},
 };
 use rustpython_vm::{
     builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
     protocol::{PyMappingMethods, PySequenceMethods},
     pyclass, pyimpl, 
+    sliceable::{SaturatedSlice, SequenceIndex},
     types::{AsMapping, AsSequence},
-    AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
 
@@ -190,11 +191,53 @@ impl PyVector {
         ))
     }
 
+
+    fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        match SequenceIndex::try_from_borrowed_object(vm, needle, "mmap")? {
+            SequenceIndex::Int(i) => self.getitem_by_index(i, vm),
+            SequenceIndex::Slice(slice) => self.getitem_by_slice(&slice, vm),
+        }
+    }
+
     fn getitem_by_index(&self, i: isize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         let i = pythonic_index(i, self.len())
             .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_owned()))?;
         PyInt::from(1i32).into_ref(vm);
         Ok(into_py_obj(self.vector.get(i), vm).into())
+    }
+
+    /// Return a `PyVector` in `PyObjectRef`
+    fn getitem_by_slice(
+        &self,
+        slice: &SaturatedSlice,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
+        // println!("{:?}", slice);
+        // adjust_indices so negative number is transform to usize
+        let (range, step, slice_len) = slice.adjust_indices(self.len());
+        // println!("{:?},{step},{slice_len}", range);
+        let mut buf = VectorBuilder::with_capacity(self.vector.data_type(), slice_len);
+        if slice_len==0{
+            let v: PyVector = buf.finish().into();
+            return Ok(v.into_pyobject(vm))
+        }else if step==1{
+            let v: PyVector = self.vector.slice(range.clone().next().unwrap_or(0), slice_len).into();
+            return Ok(v.into_pyobject(vm))
+        }
+        else if step.is_negative() {
+            // Negative step require special treatment
+            for i in range.rev().step_by(step.unsigned_abs()){
+                buf.push(&self.vector.get(i))
+            }
+            let v: PyVector = buf.finish().into();
+            return Ok(v.into_pyobject(vm))
+        } else {
+            for i in range.step_by(step.unsigned_abs()){
+                buf.push(&self.vector.get(i))
+            }
+            let v: PyVector = buf.finish().into();
+            return Ok(v.into_pyobject(vm))
+        }
     }
 
     // Unsupport
@@ -409,7 +452,9 @@ fn pythonic_index(i: isize, len: usize) -> Option<usize> {
 impl AsMapping for PyVector {
     const AS_MAPPING: PyMappingMethods = PyMappingMethods {
         length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
-        subscript: None,
+        subscript: Some(|mapping, needle, vm| {
+            Self::mapping_downcast(mapping)._getitem(needle, vm)
+        }),
         ass_subscript: None,
     };
 }
@@ -417,7 +462,6 @@ impl AsMapping for PyVector {
 impl AsSequence for PyVector {
     const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
         length: Some(|seq, _vm| {
-            println!("Call length in here");
             Ok(Self::sequence_downcast(seq).len())
         }),
         item: Some(|seq, i, vm| {
@@ -478,8 +522,13 @@ pub mod tests {
 
             let a: VectorRef = Arc::new(NullVector::new(42));
             let a = PyVector::from(a);
-            if let Some(seq) = PySequence::find_methods(&a.into_pyobject(vm), vm){
+            let a = a.into_pyobject(vm);
+            if let Some(seq) = PySequence::find_methods(&a, vm){
                 println!("{:?}",seq)
+            }
+            if let Some(s) = PySequence::new(&a, vm){
+                println!("{:?}",s.length(vm))
+                
             }
         })
     }
@@ -530,12 +579,12 @@ pub mod tests {
     #[test]
     fn test_execute_script() {
         let snippet = vec![
-            "a.len()",
-            "a.__len__()",
             "len(a)",
+            "a[0]=1#Unsupport?",
+            "a[-1]",
             "a[0]",
             "list(a)",
-            "a.__getitem__(0)",
+            "a[1:-1]"
         ];
         for code in snippet {
             let result = execute_script(code, None);
