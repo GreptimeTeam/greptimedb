@@ -582,13 +582,13 @@ pub mod tests {
             "len(a)",
             "a[0]=1#Unsupport?",
             "a[-1]",
-            "a[0]",
+            "a[0]*5",
             "list(a)",
-            "a[1:-1]"
+            "a[1:-1]#elem in [1,3)"
         ];
         for code in snippet {
             let result = execute_script(code, None);
-            println!("{code}: {:?}", result);
+            println!("\u{001B}[35m{code}\u{001B}[0m: \u{001B}[32m{:?}\u{001B}[0m", result);
         }
 
         use std::sync::Arc;
