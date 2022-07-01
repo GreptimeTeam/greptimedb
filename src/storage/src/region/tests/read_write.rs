@@ -6,18 +6,20 @@ use datatypes::prelude::*;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::Int64Vector;
 use log_store::fs::noop::NoopLogStore;
+use object_store::{backend::fs::Backend, ObjectStore};
 use store_api::storage::{
     consts, Chunk, ChunkReader, PutOperation, ReadContext, Region, RegionMeta, ScanRequest,
     SequenceNumber, Snapshot, WriteContext, WriteRequest, WriteResponse,
 };
 
 use crate::region::RegionImpl;
+use crate::sst::FsAccessLayer;
 use crate::test_util::{self, descriptor_util::RegionDescBuilder, write_batch_util};
 use crate::wal::Wal;
 use crate::write_batch::{PutData, WriteBatch};
 
 /// Create a new region for read/write test
-fn new_region_for_rw(enable_version_column: bool) -> RegionImpl<NoopLogStore> {
+async fn new_region_for_rw(sst_dir: &str, enable_version_column: bool) -> RegionImpl<NoopLogStore> {
     let region_name = "region-rw-0";
     let desc = RegionDescBuilder::new(region_name)
         .enable_version_column(enable_version_column)
@@ -25,7 +27,11 @@ fn new_region_for_rw(enable_version_column: bool) -> RegionImpl<NoopLogStore> {
         .build();
     let metadata = desc.try_into().unwrap();
     let wal = Wal::new(region_name, Arc::new(NoopLogStore::default()));
-    RegionImpl::new(region_name.to_string(), metadata, wal)
+    let accessor = Backend::build().root(sst_dir).finish().await.unwrap();
+    let object_store = ObjectStore::new(accessor);
+    let sst_layer = Arc::new(FsAccessLayer::new(object_store));
+
+    RegionImpl::new(region_name.to_string(), metadata, wal, sst_layer)
 }
 
 fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
@@ -80,15 +86,10 @@ struct Tester {
     read_ctx: ReadContext,
 }
 
-impl Default for Tester {
-    fn default() -> Tester {
-        Tester::new()
-    }
-}
-
 impl Tester {
-    fn new() -> Tester {
-        let region = new_region_for_rw(false);
+    async fn new(sst_dir: &str) -> Tester {
+        // TODO(yingwen): Temp dir
+        let region = new_region_for_rw(sst_dir, false).await;
 
         Tester {
             region,
@@ -136,7 +137,8 @@ impl Tester {
 
 #[tokio::test]
 async fn test_simple_put_scan() {
-    let tester = Tester::default();
+    // TODO(yingwen): Temp dir
+    let tester = Tester::new("/tmp/test").await;
 
     let data = vec![
         (1000, Some(100)),
@@ -154,7 +156,8 @@ async fn test_simple_put_scan() {
 
 #[tokio::test]
 async fn test_sequence_increase() {
-    let tester = Tester::default();
+    // TODO(yingwen): Temp dir
+    let tester = Tester::new("/tmp/test").await;
 
     let mut committed_sequence = tester.committed_sequence();
     for i in 0..100 {

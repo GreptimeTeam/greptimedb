@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_telemetry::logging::info;
+use object_store::{backend::fs::Backend, ObjectStore};
 use snafu::ResultExt;
 use store_api::{
     logstore::LogStore,
@@ -11,6 +12,7 @@ use store_api::{
 
 use crate::error::{self, Error, Result};
 use crate::region::RegionImpl;
+use crate::sst::FsAccessLayer;
 use crate::wal::Wal;
 
 /// [StorageEngine] implementation.
@@ -97,7 +99,17 @@ impl<S: LogStore> EngineInner<S> {
                 region: &region_name,
             })?;
         let wal = Wal::new(region_name.clone(), self.log_store.clone());
-        let region = RegionImpl::new(region_name.clone(), metadata, wal);
+        // TODO(yingwen): [flush] Reuse backend of access layer.
+        let sst_dir = self.sst_dir();
+        let accessor = Backend::build()
+            .root(&sst_dir)
+            .finish()
+            .await
+            .context(error::InitBackendSnafu { dir: sst_dir })?;
+        let object_store = ObjectStore::new(accessor);
+        let sst_layer = Arc::new(FsAccessLayer::new(object_store));
+
+        let region = RegionImpl::new(region_name.clone(), metadata, wal, sst_layer);
 
         {
             let mut regions = self.regions.write().unwrap();
@@ -117,6 +129,11 @@ impl<S: LogStore> EngineInner<S> {
 
     fn get_region(&self, name: &str) -> Option<RegionImpl<S>> {
         self.regions.read().unwrap().get(name).cloned()
+    }
+
+    fn sst_dir(&self) -> String {
+        // TODO(yingwen): [flush] Format sst path.
+        unimplemented!()
     }
 }
 

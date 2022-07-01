@@ -5,7 +5,7 @@ use snafu::ensure;
 use store_api::storage::{ColumnDescriptor, SequenceNumber, ValueType};
 
 use crate::error::{self, Result};
-use crate::memtable::{KeyValues, Memtable};
+use crate::memtable::{KeyValues, Memtable, MemtableSet};
 use crate::write_batch::{Mutation, PutData, WriteBatch};
 
 /// Wraps logic of inserting key/values in [WriteBatch] to [Memtable].
@@ -24,28 +24,29 @@ impl Inserter {
     }
 
     // TODO(yingwen): Can we take the WriteBatch?
-    /// Insert write batch into memtable.
+    /// Insert write batch into memtables.
     ///
     /// Won't do schema validation.
-    pub fn insert_memtable(&mut self, batch: &WriteBatch, memtable: &dyn Memtable) -> Result<()> {
+    pub fn insert_memtables(&mut self, batch: &WriteBatch, memtables: &MemtableSet) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
 
-        let schema = memtable.schema();
+        // Enough to hold all key or value columns.
+        let total_column_num = batch.schema().num_columns();
         // Reusable KeyValues buffer.
         let mut kvs = KeyValues {
             sequence: self.sequence,
             value_type: ValueType::Put,
             start_index_in_batch: self.index_in_batch,
-            keys: Vec::with_capacity(schema.num_row_key_columns()),
-            values: Vec::with_capacity(schema.num_value_columns()),
+            keys: Vec::with_capacity(total_column_num),
+            values: Vec::with_capacity(total_column_num),
         };
 
         for mutation in batch {
             match mutation {
                 Mutation::Put(put_data) => {
-                    self.put_impl(put_data, memtable, &mut kvs)?;
+                    self.put_memtables(put_data, memtables, &mut kvs)?;
                 }
             }
         }
@@ -53,6 +54,17 @@ impl Inserter {
         Ok(())
     }
 
+    fn put_memtables(
+        &mut self,
+        _put_data: &PutData,
+        _memtables: &MemtableSet,
+        _kvs: &mut KeyValues,
+    ) -> Result<()> {
+        // TODO(yingwen): [flush] Split data by time range and put into memtables.
+        unimplemented!()
+    }
+
+    #[allow(unused)]
     fn put_impl(
         &mut self,
         put_data: &PutData,

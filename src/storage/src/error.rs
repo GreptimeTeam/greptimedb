@@ -37,6 +37,13 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Failed to init backend, source: {}", source))]
+    InitBackend {
+        dir: String,
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to write parquet file, source: {}", source))]
     WriteParquet {
         source: arrow::error::ArrowError,
@@ -97,7 +104,17 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to write wal, region: {}, source: {}", region, source))]
-    WriteWal { region: String, source: BoxedError },
+    WriteWal {
+        region: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to join task, source: {}", source))]
+    JoinTask {
+        source: common_runtime::JoinError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -111,8 +128,13 @@ impl ErrorExt for Error {
             | InvalidRegionDesc { .. }
             | InvalidInputSchema { .. }
             | BatchMissingColumn { .. } => StatusCode::InvalidArguments,
-            Utf8 { .. } | EncodeJson { .. } | DecodeJson { .. } => StatusCode::Unexpected,
+
+            Utf8 { .. } | EncodeJson { .. } | DecodeJson { .. } | JoinTask { .. } => {
+                StatusCode::Unexpected
+            }
+
             FlushIo { .. }
+            | InitBackend { .. }
             | WriteParquet { .. }
             | ReadObject { .. }
             | WriteObject { .. }

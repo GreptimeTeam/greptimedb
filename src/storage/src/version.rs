@@ -9,15 +9,22 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use store_api::storage::{SchemaRef, SequenceNumber};
 
-use crate::memtable::{MemtableRef, MemtableSet};
+use crate::flush::ManifestVersion;
+use crate::memtable::{FreezeError, MemtableSchema, MemtableSet, MemtableVersion};
 use crate::metadata::{RegionMetadata, RegionMetadataRef};
+use crate::sst::FileMeta;
 use crate::sync::CowCell;
 
 /// Controls version of in memory state for a region.
 pub struct VersionControl {
+    // TODO(yingwen): If all modification to version must acquire the region writer lock first,
+    // then we may just use ArcSwap to hold version. But some operations may only require the
+    // version lock, instead of the writer lock, since we can use the version lock the protect
+    // the read-modify-write of version.
     version: CowCell<Version>,
     /// Latest sequence that is committed and visible to user.
     committed_sequence: AtomicU64,
@@ -25,7 +32,7 @@ pub struct VersionControl {
 
 impl VersionControl {
     /// Construct a new version control from `metadata`.
-    pub fn new(metadata: RegionMetadata, memtables: MemtableSet) -> VersionControl {
+    pub fn new(metadata: RegionMetadata, memtables: MemtableVersion) -> VersionControl {
         VersionControl {
             version: CowCell::new(Version::new(metadata, memtables)),
             committed_sequence: AtomicU64::new(0),
@@ -58,34 +65,72 @@ impl VersionControl {
         // Release ordering should be enough to guarantee sequence is updated at last.
         self.committed_sequence.store(value, Ordering::Release);
     }
+
+    /// Add mutable memtables and commit.
+    ///
+    /// # Panics
+    /// See [MemtableVersion::add_mutable](MemtableVersion::add_mutable).
+    pub fn add_mutable(&self, memtables_to_add: MemtableSet) {
+        let mut version_to_update = self.version.lock();
+
+        let memtable_version = version_to_update.memtables();
+        let merged = memtable_version.add_mutable(memtables_to_add);
+        version_to_update.set_memtables(Arc::new(merged));
+
+        version_to_update.commit();
+    }
+
+    /// Try to freeze mutable memtables.
+    pub fn try_freeze_mutable(&self) -> Result<(), FreezeError> {
+        let mut version_to_update = self.version.lock();
+
+        let memtable_version = version_to_update.memtables();
+        let freezed = memtable_version.try_freeze_mutable()?;
+        version_to_update.set_memtables(Arc::new(freezed));
+
+        version_to_update.commit();
+
+        Ok(())
+    }
+
+    pub fn apply_edit(&self, _edit: VersionEdit) {
+        // TODO(yingwen): [flush] Apply edit to version.
+        unimplemented!()
+    }
+}
+
+#[derive(Debug)]
+pub struct VersionEdit {
+    pub files_to_add: Vec<FileMeta>,
+    pub flushed_sequence: Option<SequenceNumber>,
+    pub manifest_version: ManifestVersion,
 }
 
 pub type VersionControlRef = Arc<VersionControl>;
 pub type VersionRef = Arc<Version>;
-
-// Get data from version, need to
-// 1. acquire version first
-// 2. acquire sequence later
-//
-// Reason: data may flush and some data with old sequence may be removed, so need
-// to acquire version at first.
+type MemtableVersionRef = Arc<MemtableVersion>;
 
 /// Version contains metadata and state of region.
+#[derive(Clone)]
 pub struct Version {
-    /// Metadata of the region. Altering metadata isn't frequent, storing metadata
-    /// in Arc to allow sharing metadata and reuse metadata when creating a new
-    /// `Version`.
+    /// Metadata of the region.
+    ///
+    /// Altering metadata isn't frequent, storing metadata in Arc to allow sharing
+    /// metadata and reuse metadata when creating a new `Version`.
     metadata: RegionMetadataRef,
-    memtables: MemtableSet,
-    // TODO(yingwen): Also need to store last sequence to this version when switching
+    /// Mutable and immutable memtables.
+    ///
+    /// Wrapped in Arc to make clone of `Version` much cheaper.
+    memtables: MemtableVersionRef,
+    // TODO(yingwen): Maybe also store last sequence to this version when switching
     // version, so we can know the newest data can read from this version.
 }
 
 impl Version {
-    pub fn new(metadata: RegionMetadata, memtables: MemtableSet) -> Version {
+    pub fn new(metadata: RegionMetadata, memtables: MemtableVersion) -> Version {
         Version {
             metadata: Arc::new(metadata),
-            memtables,
+            memtables: Arc::new(memtables),
         }
     }
 
@@ -95,15 +140,33 @@ impl Version {
     }
 
     #[inline]
-    pub fn mutable_memtable(&self) -> &MemtableRef {
-        self.memtables.mutable_memtable()
+    pub fn mutable_memtables(&self) -> &MemtableSet {
+        self.memtables.mutable_memtables()
+    }
+
+    pub fn memtables(&self) -> &MemtableVersionRef {
+        &self.memtables
+    }
+
+    /// Returns duration used to partition the memtables and ssts by time.
+    pub fn bucket_duration(&self) -> Duration {
+        unimplemented!()
+    }
+
+    #[inline]
+    pub fn memtable_schema(&self) -> MemtableSchema {
+        MemtableSchema::new(self.metadata.columns_row_key.clone())
+    }
+
+    #[inline]
+    pub fn set_memtables(&mut self, memtables: MemtableVersionRef) {
+        self.memtables = memtables;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memtable::{DefaultMemtableBuilder, MemtableBuilder, MemtableSchema};
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     fn new_version_control() -> VersionControl {
@@ -112,11 +175,7 @@ mod tests {
             .build();
         let metadata: RegionMetadata = desc.try_into().unwrap();
 
-        let schema = MemtableSchema::new(metadata.columns_row_key.clone());
-        let memtable = DefaultMemtableBuilder {}.build(schema);
-        let memtable_set = MemtableSet::new(memtable);
-
-        VersionControl::new(metadata, memtable_set)
+        VersionControl::new(metadata, MemtableVersion::new())
     }
 
     #[test]
