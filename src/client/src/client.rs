@@ -4,6 +4,7 @@ use tonic::transport::Channel;
 
 use crate::{ConnectFailedSnafu, MissingResultSnafu, Result};
 
+#[derive(Clone, Debug)]
 pub struct Client {
     client: GreptimeClient<Channel>,
 }

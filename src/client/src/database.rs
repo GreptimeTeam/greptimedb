@@ -7,6 +7,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 pub type Bytes = Vec<u8>;
 
+#[derive(Clone, Debug)]
 pub struct Database {
     name: String,
     client: Client,
