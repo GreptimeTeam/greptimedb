@@ -7,9 +7,12 @@ use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64VectorBuilder, UInt64VectorBuilder};
 
 use super::*;
-use crate::flush::{Backend, FlushConfig, FlushTask};
+use crate::flush_task::{Backend, FlushConfig, FlushTask};
 use crate::metadata::RegionMetadata;
 use crate::test_util::descriptor_util::RegionDescBuilder;
+
+// For simplicity, all memtables in test share same memtable id.
+const MEMTABLE_ID: MemtableId = 1;
 
 // Schema for testing memtable:
 // - key: Int64(timestamp), UInt64(version),
@@ -152,7 +155,7 @@ impl MemtableTester {
     fn new_memtables(&self) -> Vec<MemtableRef> {
         self.builders
             .iter()
-            .map(|b| b.build(self.schema.clone()))
+            .map(|b| b.build(MEMTABLE_ID, self.schema.clone()))
             .collect()
     }
 
@@ -424,6 +427,7 @@ fn test_sequence_visibility() {
             let iter_ctx = IterContext {
                 batch_size: 1,
                 visible_sequence: 9,
+                for_flush: false,
             };
 
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
@@ -440,6 +444,7 @@ fn test_sequence_visibility() {
             let iter_ctx = IterContext {
                 batch_size: 1,
                 visible_sequence: 10,
+                for_flush: false,
             };
 
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
@@ -456,6 +461,7 @@ fn test_sequence_visibility() {
             let iter_ctx = IterContext {
                 batch_size: 1,
                 visible_sequence: 11,
+                for_flush: false,
             };
 
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();

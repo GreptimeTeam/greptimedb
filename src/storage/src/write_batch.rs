@@ -1,8 +1,10 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::slice;
+use std::time::Duration;
 
 use common_error::prelude::*;
+use common_time::RangeMillis;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
@@ -109,6 +111,11 @@ impl WriteRequest for WriteBatch {
         self.mutations.push(Mutation::Put(data));
 
         Ok(())
+    }
+
+    fn time_ranges(&self, _duration: Duration) -> Vec<RangeMillis> {
+        // TODO(yingwen): [flush] Count all time ranges of input.
+        unimplemented!()
     }
 }
 

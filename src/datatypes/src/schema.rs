@@ -69,6 +69,11 @@ impl Schema {
             .get(name)
             .map(|index| &self.column_schemas[*index])
     }
+
+    #[inline]
+    pub fn num_columns(&self) -> usize {
+        self.column_schemas.len()
+    }
 }
 
 pub type SchemaRef = Arc<Schema>;
@@ -142,6 +147,8 @@ mod tests {
             ColumnSchema::new("col2", ConcreteDataType::float64_datatype(), true),
         ];
         let schema = Schema::new(column_schemas.clone());
+
+        assert_eq!(2, schema.num_columns());
 
         for column_schema in &column_schemas {
             let found = schema.column_schema_by_name(&column_schema.name).unwrap();

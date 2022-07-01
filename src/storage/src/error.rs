@@ -98,6 +98,12 @@ pub enum Error {
 
     #[snafu(display("Failed to write wal, region: {}, source: {}", region, source))]
     WriteWal { region: String, source: BoxedError },
+
+    #[snafu(display("Failed to join task, source: {}", source))]
+    JoinTask {
+        source: common_runtime::JoinError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -111,7 +117,11 @@ impl ErrorExt for Error {
             | InvalidRegionDesc { .. }
             | InvalidInputSchema { .. }
             | BatchMissingColumn { .. } => StatusCode::InvalidArguments,
-            Utf8 { .. } | EncodeJson { .. } | DecodeJson { .. } => StatusCode::Unexpected,
+
+            Utf8 { .. } | EncodeJson { .. } | DecodeJson { .. } | JoinTask { .. } => {
+                StatusCode::Unexpected
+            }
+
             FlushIo { .. }
             | WriteParquet { .. }
             | ReadObject { .. }

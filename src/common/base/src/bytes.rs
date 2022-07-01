@@ -1,9 +1,9 @@
 use std::ops::Deref;
 
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bytes buffer.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct Bytes(bytes::Bytes);
 
 impl From<bytes::Bytes> for Bytes {
@@ -56,20 +56,11 @@ impl PartialEq<Bytes> for [u8] {
     }
 }
 
-impl Serialize for Bytes {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
 /// String buffer that can hold arbitrary encoding string (only support UTF-8 now).
 ///
 /// Now this buffer is restricted to only hold valid UTF-8 string (only allow constructing `StringBytes`
 /// from String or str). We may support other encoding in the future.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StringBytes(bytes::Bytes);
 
 impl StringBytes {
@@ -125,6 +116,17 @@ impl Serialize for StringBytes {
         S: Serializer,
     {
         self.as_utf8().serialize(serializer)
+    }
+}
+
+// Custom Deserialize to ensure UTF-8 check is always done.
+impl<'de> Deserialize<'de> for StringBytes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(StringBytes::from(s))
     }
 }
 

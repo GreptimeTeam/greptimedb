@@ -6,7 +6,7 @@ use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
 use tokio::runtime::{Builder as RuntimeBuilder, Handle};
 use tokio::sync::oneshot;
-pub use tokio::task::JoinHandle;
+pub use tokio::task::{JoinError, JoinHandle};
 
 use crate::error::*;
 use crate::metric::*;

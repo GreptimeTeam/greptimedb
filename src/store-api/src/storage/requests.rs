@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use common_error::ext::ErrorExt;
+use common_time::RangeMillis;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 
@@ -12,6 +15,11 @@ pub trait WriteRequest: Send {
     fn new(schema: SchemaRef) -> Self;
 
     fn put(&mut self, put: Self::PutOp) -> Result<(), Self::Error>;
+
+    /// Returns all possible time ranges that contain the timestamp in this batch.
+    ///
+    /// Each time range is aligned to given `duration`.
+    fn time_ranges(&self, duration: Duration) -> Vec<RangeMillis>;
 }
 
 /// Put multiple rows.

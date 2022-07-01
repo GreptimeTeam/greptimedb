@@ -3,21 +3,26 @@ mod inserter;
 mod schema;
 #[cfg(test)]
 mod tests;
+mod version;
 
-use std::mem;
 use std::sync::Arc;
 
 use datatypes::vectors::{UInt64Vector, UInt8Vector, VectorRef};
-use snafu::Snafu;
 use store_api::storage::{consts, SequenceNumber, ValueType};
 
 use crate::error::Result;
 use crate::memtable::btree::BTreeMemtable;
 pub use crate::memtable::inserter::Inserter;
 pub use crate::memtable::schema::MemtableSchema;
+pub use crate::memtable::version::{FreezeError, MemtableSet, MemtableVersion};
+
+/// Unique id for memtables under same region.
+pub type MemtableId = u32;
 
 /// In memory storage.
 pub trait Memtable: Send + Sync {
+    fn id(&self) -> MemtableId;
+
     fn schema(&self) -> &MemtableSchema;
 
     /// Write key/values to the memtable.
@@ -43,6 +48,11 @@ pub struct IterContext {
     pub batch_size: usize,
     /// Max visible sequence (inclusive).
     pub visible_sequence: SequenceNumber,
+
+    // TODO(yingwen): [flush] Maybe delay deduping and visiblility handling, just returns all rows
+    // in memtable.
+    /// Returns all rows, ignores sequence visibility and key duplication.
+    pub for_flush: bool,
 }
 
 impl Default for IterContext {
@@ -51,6 +61,7 @@ impl Default for IterContext {
             batch_size: consts::READ_BATCH_SIZE,
             // All data in memory is visible by default.
             visible_sequence: SequenceNumber::MAX,
+            for_flush: false,
         }
     }
 }
@@ -65,6 +76,7 @@ pub enum RowOrdering {
     Key,
 }
 
+// TODO(yingwen): Maybe pack value_type with sequence (reserve 8bits in u64 for value type) like RocksDB.
 pub struct Batch {
     pub keys: Vec<VectorRef>,
     pub sequences: UInt64Vector,
@@ -73,7 +85,7 @@ pub struct Batch {
 }
 
 /// Iterator of memtable.
-pub trait BatchIterator: Send {
+pub trait BatchIterator: Send + Sync {
     /// Returns the schema of this iterator.
     fn schema(&self) -> &MemtableSchema;
 
@@ -90,7 +102,7 @@ pub trait BatchIterator: Send {
 pub type BatchIteratorPtr = Box<dyn BatchIterator>;
 
 pub trait MemtableBuilder: Send + Sync {
-    fn build(&self, schema: MemtableSchema) -> MemtableRef;
+    fn build(&self, id: MemtableId, schema: MemtableSchema) -> MemtableRef;
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
@@ -132,42 +144,7 @@ impl KeyValues {
 pub struct DefaultMemtableBuilder {}
 
 impl MemtableBuilder for DefaultMemtableBuilder {
-    fn build(&self, schema: MemtableSchema) -> MemtableRef {
-        Arc::new(BTreeMemtable::new(schema))
-    }
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(display("Fail to switch memtable"))]
-pub struct SwitchError;
-
-pub struct MemtableSet {
-    mem: MemtableRef,
-    // TODO(yingwen): Support multiple immutable memtables.
-    _immem: Option<MemtableRef>,
-}
-
-impl MemtableSet {
-    pub fn new(mem: MemtableRef) -> MemtableSet {
-        MemtableSet { mem, _immem: None }
-    }
-
-    pub fn mutable_memtable(&self) -> &MemtableRef {
-        &self.mem
-    }
-
-    /// Switch mutable memtable to immutable memtable, returns the old mutable memtable if success.
-    pub fn _switch_memtable(
-        &mut self,
-        mem: &MemtableRef,
-    ) -> std::result::Result<MemtableRef, SwitchError> {
-        match &self._immem {
-            Some(_) => SwitchSnafu {}.fail(),
-            None => {
-                let old_mem = mem::replace(&mut self.mem, mem.clone());
-                self._immem = Some(old_mem.clone());
-                Ok(old_mem)
-            }
-        }
+    fn build(&self, id: MemtableId, schema: MemtableSchema) -> MemtableRef {
+        Arc::new(BTreeMemtable::new(id, schema))
     }
 }

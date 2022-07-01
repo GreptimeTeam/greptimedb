@@ -8,7 +8,6 @@ use store_api::storage::{
 
 use crate::chunk::ChunkReaderImpl;
 use crate::error::{Error, Result};
-use crate::memtable::IterContext;
 use crate::version::VersionRef;
 
 /// [Snapshot] implementation.
@@ -29,21 +28,14 @@ impl Snapshot for SnapshotImpl {
 
     async fn scan(
         &self,
-        ctx: &ReadContext,
+        _ctx: &ReadContext,
         request: ScanRequest,
     ) -> Result<ScanResponse<ChunkReaderImpl>> {
-        let visible_sequence = self.sequence_to_read(request.sequence);
+        let _visible_sequence = self.sequence_to_read(request.sequence);
+        let _mem = self.version.memtables();
 
-        let mem = self.version.mutable_memtable();
-        let iter_ctx = IterContext {
-            batch_size: ctx.batch_size,
-            visible_sequence,
-        };
-        let iter = mem.iter(iter_ctx)?;
-
-        let reader = ChunkReaderImpl::new(self.version.schema().clone(), iter);
-
-        Ok(ScanResponse { reader })
+        // TODO(yingwen): [flush] Scan and merge results from mutable memtables.
+        unimplemented!()
     }
 
     async fn get(&self, _ctx: &ReadContext, _request: GetRequest) -> Result<GetResponse> {
