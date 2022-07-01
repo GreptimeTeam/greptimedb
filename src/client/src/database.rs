@@ -29,7 +29,7 @@ impl Database {
             version: PROTOCOL_VERSION,
         };
         let insert = InsertExpr {
-            name: table.into(),
+            table_name: table.into(),
             values,
         };
         let expr = ObjectExpr {
