@@ -1,13 +1,23 @@
 use std::any::Any;
 
+use common_error::ext::BoxedError;
 use common_error::prelude::{ErrorExt, Snafu};
 use snafu::{Backtrace, ErrorCompat};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to deserialize entry"))]
-    Deserialization { backtrace: Backtrace },
+    #[snafu(display("Failed to encode entry, source: {}", source))]
+    Encode { source: common_base::buffer::Error },
+
+    #[snafu(display("Failed to decode entry, remain size: {}", size))]
+    Decode { size: usize, backtrace: Backtrace },
+
+    #[snafu(display("Failed to append entry, source: {}", source))]
+    Append {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("Entry corrupted, msg: {}", msg))]
     Corrupted { msg: String, backtrace: Backtrace },

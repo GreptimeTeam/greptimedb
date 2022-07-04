@@ -22,7 +22,7 @@ mod tests {
     use futures::StreamExt;
 
     use super::*;
-    use crate::logstore::entry::{Epoch, Id, Offset};
+    use crate::logstore::entry::{Encode, Epoch, Id, Offset};
 
     pub struct SimpleEntry {
         /// Offset of current entry
@@ -33,6 +33,7 @@ mod tests {
         data: Vec<u8>,
     }
 
+    use common_base::buffer::{Buffer, BufferMut};
     use common_error::prelude::{ErrorExt, Snafu};
     use snafu::{Backtrace, ErrorCompat};
 
@@ -50,11 +51,32 @@ mod tests {
         }
     }
 
+    impl Encode for SimpleEntry {
+        type Error = Error;
+
+        fn encode_to<T: BufferMut>(&self, buf: &mut T) -> Result<usize, Self::Error> {
+            buf.write_from_slice(self.data.as_slice()).unwrap();
+            Ok(self.data.as_slice().len())
+        }
+
+        fn decode<T: Buffer>(_buf: &mut T) -> Result<Self, Self::Error> {
+            unimplemented!()
+        }
+
+        fn encoded_size(&self) -> usize {
+            self.data.as_slice().len()
+        }
+    }
+
     impl Entry for SimpleEntry {
         type Error = Error;
 
         fn new(data: impl AsRef<[u8]>) -> Self {
-            Self::new(data, 0, 0)
+            Self {
+                data: data.as_ref().to_vec(),
+                offset: 0,
+                epoch: 0,
+            }
         }
 
         fn data(&self) -> &[u8] {
@@ -83,14 +105,6 @@ mod tests {
 
         fn is_empty(&self) -> bool {
             self.data.is_empty()
-        }
-
-        fn serialize(&self) -> Vec<u8> {
-            self.data.clone()
-        }
-
-        fn deserialize(_b: impl AsRef<[u8]>) -> Result<Self, Self::Error> {
-            unimplemented!()
         }
     }
 
