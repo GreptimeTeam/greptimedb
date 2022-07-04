@@ -109,6 +109,15 @@ impl Encode for EntryImpl {
 impl Entry for EntryImpl {
     type Error = Error;
 
+    fn new(data: impl AsRef<[u8]>) -> Self {
+        Self {
+            id: 0,
+            data: data.as_ref().to_vec(),
+            offset: 0,
+            epoch: 0,
+        }
+    }
+
     fn data(&self) -> &[u8] {
         &self.data
     }
@@ -139,18 +148,6 @@ impl Entry for EntryImpl {
 
     fn is_empty(&self) -> bool {
         self.data.is_empty()
-    }
-}
-
-impl EntryImpl {
-    pub fn new(data: impl AsRef<[u8]>) -> Self {
-        let data = Vec::from(data.as_ref());
-        Self {
-            id: 0,
-            data,
-            offset: 0,
-            epoch: 0,
-        }
     }
 }
 
