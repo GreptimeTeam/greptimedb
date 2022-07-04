@@ -35,7 +35,7 @@ impl Instance {
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine().clone();
         // TODO(jiachun): log config
-        let log_file_dir = std::path::Path::new("greptime_wal")
+        let log_file_dir = std::path::Path::new("/tmp/greptime_wal")
             .to_str()
             .expect("Invalid log dir");
         std::fs::create_dir_all(log_file_dir)
