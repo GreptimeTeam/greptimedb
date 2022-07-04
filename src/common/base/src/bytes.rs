@@ -1,6 +1,5 @@
 use std::ops::Deref;
 
-use bytes::BytesMut;
 use serde::{Serialize, Serializer};
 
 /// Bytes buffer.
@@ -15,13 +14,13 @@ impl From<bytes::Bytes> for Bytes {
 
 impl From<&[u8]> for Bytes {
     fn from(bytes: &[u8]) -> Bytes {
-        Bytes(BytesMut::from(bytes).freeze())
+        Bytes(bytes::Bytes::copy_from_slice(bytes))
     }
 }
 
 impl From<Vec<u8>> for Bytes {
     fn from(bytes: Vec<u8>) -> Bytes {
-        Bytes(BytesMut::from(bytes.as_slice()).freeze())
+        Bytes(bytes::Bytes::from(bytes))
     }
 }
 
@@ -35,7 +34,7 @@ impl Deref for Bytes {
 
 impl PartialEq<Vec<u8>> for Bytes {
     fn eq(&self, other: &Vec<u8>) -> bool {
-        &self.0 == other
+        self.0 == other
     }
 }
 
@@ -86,13 +85,13 @@ impl StringBytes {
 
 impl From<String> for StringBytes {
     fn from(string: String) -> StringBytes {
-        StringBytes(BytesMut::from(string.as_bytes()).freeze())
+        StringBytes(bytes::Bytes::from(string))
     }
 }
 
 impl From<&str> for StringBytes {
     fn from(string: &str) -> StringBytes {
-        StringBytes(BytesMut::from(string.as_bytes()).freeze())
+        StringBytes(bytes::Bytes::copy_from_slice(string.as_bytes()))
     }
 }
 
@@ -125,7 +124,7 @@ impl Serialize for StringBytes {
     where
         S: Serializer,
     {
-        self.0.serialize(serializer)
+        self.as_utf8().serialize(serializer)
     }
 }
 

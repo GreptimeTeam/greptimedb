@@ -26,6 +26,8 @@ pub enum Error {
     },
 }
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 impl ErrorExt for Error {
     fn backtrace_opt(&self) -> Option<&Backtrace> {
         ErrorCompat::backtrace(self)
@@ -40,7 +42,7 @@ macro_rules! impl_read_le {
     ( $($num_ty: ty), *) => {
         $(
             paste!{
-                fn [<read_ $num_ty _le>](&mut self) -> Result<$num_ty, Error> {
+                fn [<read_ $num_ty _le>](&mut self) -> Result<$num_ty> {
                     let mut buf = [0u8; std::mem::size_of::<$num_ty>()];
                     self.read_to_slice(&mut buf)?;
                     Ok($num_ty::from_le_bytes(buf))
@@ -54,7 +56,7 @@ macro_rules! impl_write_le {
     ( $($num_ty: ty), *) => {
         $(
             paste!{
-                fn [<write_ $num_ty _le>](&mut self, n: $num_ty) -> Result<(), Error> {
+                fn [<write_ $num_ty _le>](&mut self, n: $num_ty) -> Result<()> {
                     self.write_from_slice(&n.to_le_bytes())?;
                     Ok(())
                 }
@@ -76,7 +78,7 @@ pub trait Buffer: AsRef<[u8]> {
 
     /// # Panics
     /// This method **may** panic if buffer does not have enough data to be copied to dst.
-    fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Error>;
+    fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()>;
 
     /// # Panics
     /// This method **may** panic if the offset after advancing exceeds the length of underlying buffer.
@@ -94,7 +96,7 @@ macro_rules! impl_buffer_for_bytes {
                 &self
             }
 
-            fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Error> {
+            fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {
                 ensure!(self.remaining() >= dst.len(), OverflowSnafu {
                         src_len: self.remaining_size(),
                         dst_len: dst.len(),
@@ -120,7 +122,7 @@ impl Buffer for &[u8] {
         self
     }
 
-    fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Error> {
+    fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {
         ensure!(
             self.len() >= dst.len(),
             OverflowSnafu {
@@ -140,7 +142,7 @@ impl Buffer for &[u8] {
 pub trait BufferMut {
     fn as_slice(&self) -> &[u8];
 
-    fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Error>;
+    fn write_from_slice(&mut self, src: &[u8]) -> Result<()>;
 
     impl_write_le![i8, u8, i16, u16, i32, u32, i64, u64, f32, f64];
 }
@@ -150,7 +152,7 @@ impl BufferMut for BytesMut {
         self
     }
 
-    fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Error> {
+    fn write_from_slice(&mut self, src: &[u8]) -> Result<()> {
         self.put_slice(src);
         Ok(())
     }
@@ -161,7 +163,7 @@ impl BufferMut for &mut [u8] {
         self
     }
 
-    fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Error> {
+    fn write_from_slice(&mut self, src: &[u8]) -> Result<()> {
         // see std::io::Write::write_all
         // https://doc.rust-lang.org/src/std/io/impls.rs.html#363
         self.write_all(src).map_err(|_| {
@@ -179,7 +181,7 @@ impl BufferMut for Vec<u8> {
         self
     }
 
-    fn write_from_slice(&mut self, src: &[u8]) -> Result<(), Error> {
+    fn write_from_slice(&mut self, src: &[u8]) -> Result<()> {
         self.extend_from_slice(src);
         Ok(())
     }

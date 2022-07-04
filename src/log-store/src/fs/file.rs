@@ -326,7 +326,7 @@ impl LogFile {
             }
 
             while !buf.is_empty() {
-                let entry: EntryImpl = EntryImpl::decode(&mut buf)?;
+                let entry = EntryImpl::decode(&mut buf)?;
                 if entry.id() >= start_entry_id {
                     yield Ok(vec![entry]);
                 }
