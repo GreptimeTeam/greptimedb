@@ -24,6 +24,16 @@ pub struct EntryImpl {
 impl Entry for EntryImpl {
     type Error = Error;
 
+    fn new(data: impl AsRef<[u8]>) -> Self {
+        let data = Vec::from(data.as_ref());
+        Self {
+            id: 0,
+            data,
+            offset: 0,
+            epoch: 0,
+        }
+    }
+
     fn data(&self) -> &[u8] {
         &self.data
     }
@@ -63,18 +73,6 @@ impl Entry for EntryImpl {
 
     fn deserialize(b: impl AsRef<[u8]>) -> Result<Self, Self::Error> {
         EntryImpl::try_from(b.as_ref())
-    }
-}
-
-impl EntryImpl {
-    pub fn new(data: impl AsRef<[u8]>) -> Self {
-        let data = Vec::from(data.as_ref());
-        Self {
-            id: 0,
-            data,
-            offset: 0,
-            epoch: 0,
-        }
     }
 }
 

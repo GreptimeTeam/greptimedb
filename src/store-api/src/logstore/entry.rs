@@ -8,6 +8,8 @@ pub type Id = u64;
 pub trait Entry: Send + Sync {
     type Error: ErrorExt + Send + Sync;
 
+    fn new(data: impl AsRef<[u8]>) -> Self;
+
     /// Return contained data of entry.
     fn data(&self) -> &[u8];
 

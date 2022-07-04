@@ -25,6 +25,9 @@ pub enum Error {
         column: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failt to write wal, region: {}, source: {}", region, source))]
+    WriteWal { region: String, source: BoxedError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -37,6 +40,7 @@ impl ErrorExt for Error {
             InvalidRegionDesc { .. } | InvalidInputSchema { .. } | BatchMissingColumn { .. } => {
                 StatusCode::InvalidArguments
             }
+            WriteWal { .. } => StatusCode::Internal,
         }
     }
 

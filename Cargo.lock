@@ -3055,6 +3055,7 @@ dependencies = [
  "common-error",
  "common-telemetry",
  "datatypes",
+ "log-store",
  "snafu",
  "store-api",
  "tokio",

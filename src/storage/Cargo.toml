@@ -11,6 +11,7 @@ async-trait = "0.1"
 common-error = { path = "../common/error" }
 common-telemetry = { path = "../common/telemetry" }
 datatypes = { path = "../datatypes" }
+log-store = { path = "../log-store" }
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
 tokio = { version = "1.18", features = ["full"] }
