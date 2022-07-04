@@ -12,7 +12,7 @@ pub mod namespace;
 
 /// `LogStore` serves as a Write-Ahead-Log for storage engine.
 #[async_trait::async_trait]
-pub trait LogStore {
+pub trait LogStore: Send + Sync + 'static {
     type Error: ErrorExt + Send + Sync + 'static;
     type Namespace: Namespace;
     type Entry: Entry;

@@ -942,6 +942,7 @@ dependencies = [
  "common-telemetry",
  "datatypes",
  "hyper",
+ "log-store",
  "metrics",
  "query",
  "serde",
@@ -3058,6 +3059,7 @@ dependencies = [
  "log-store",
  "snafu",
  "store-api",
+ "tempdir",
  "tokio",
 ]
 
@@ -3174,6 +3176,7 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
+ "log-store",
  "snafu",
  "storage",
  "store-api",

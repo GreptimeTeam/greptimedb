@@ -40,6 +40,7 @@ struct StartCommand {
 impl StartCommand {
     async fn run(self) -> Result<()> {
         Datanode::new(self.into())
+            .await
             .context(StartDatanodeSnafu)?
             .start()
             .await

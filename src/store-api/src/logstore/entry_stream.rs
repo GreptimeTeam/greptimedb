@@ -53,6 +53,10 @@ mod tests {
     impl Entry for SimpleEntry {
         type Error = Error;
 
+        fn new(data: impl AsRef<[u8]>) -> Self {
+            Self::new(data, 0, 0)
+        }
+
         fn data(&self) -> &[u8] {
             &self.data
         }

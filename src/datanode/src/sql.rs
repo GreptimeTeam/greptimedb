@@ -63,6 +63,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::value::Value;
+    use log_store::{fs::log::LocalFileLogStore, test_util};
     use query::catalog::memory;
     use query::catalog::schema::SchemaProvider;
     use query::error::Result as QueryResult;
@@ -129,8 +130,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_statement_to_request() {
+    #[tokio::test]
+    async fn test_statement_to_request() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
         let factory = QueryEngineFactory::new(catalog_list);
         let query_engine = factory.query_engine().clone();
@@ -140,7 +141,9 @@ mod tests {
                            ('host2', 88.8,  333.3, 1655276558000)
                            "#;
 
-        let table_engine = MitoEngine::<EngineImpl>::new(EngineImpl::new());
+        let table_engine = MitoEngine::<EngineImpl<LocalFileLogStore>>::new(EngineImpl::new(
+            test_util::local_log_store_util::create_tmp_log_store().await,
+        ));
         let sql_handler = SqlHandler::new(table_engine);
 
         let stmt = query_engine.sql_to_statement(sql).unwrap();

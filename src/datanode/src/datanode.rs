@@ -22,9 +22,9 @@ pub struct Datanode {
 }
 
 impl Datanode {
-    pub fn new(opts: DatanodeOptions) -> Result<Datanode> {
+    pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
         let catalog_list = memory::new_memory_catalog_list().context(NewCatalogSnafu)?;
-        let instance = Arc::new(Instance::new(catalog_list.clone()));
+        let instance = Arc::new(Instance::new(catalog_list.clone()).await);
 
         Ok(Self {
             opts,

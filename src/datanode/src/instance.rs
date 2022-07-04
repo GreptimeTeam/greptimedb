@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
+use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use query::catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::ResultExt;
@@ -15,7 +16,7 @@ use table_engine::engine::MitoEngine;
 use crate::error::{CreateTableSnafu, ExecuteSqlSnafu, Result};
 use crate::sql::SqlHandler;
 
-type DefaultEngine = MitoEngine<EngineImpl>;
+type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 
 // An abstraction to read/write services.
 pub struct Instance {
@@ -30,10 +31,24 @@ pub struct Instance {
 pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    pub fn new(catalog_list: CatalogListRef) -> Self {
+    pub async fn new(catalog_list: CatalogListRef) -> Self {
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine().clone();
-        let table_engine = DefaultEngine::new(EngineImpl::new());
+        // TODO(jiachun): log config
+        let log_file_dir = std::path::Path::new("greptime_wal")
+            .to_str()
+            .expect("Invalid log dir");
+        std::fs::create_dir_all(log_file_dir)
+            .expect(&format!("Fail to create log dir: {}", log_file_dir));
+        let log_cfg = LogConfig {
+            append_buffer_size: 128,
+            max_log_file_size: 1024 * 1024 * 1024,
+            log_file_dir: log_file_dir.to_string(),
+        };
+        let log_store = LocalFileLogStore::open(&log_cfg)
+            .await
+            .expect("Fail to open log-store");
+        let table_engine = DefaultEngine::new(EngineImpl::new(Arc::new(log_store)));
 
         Self {
             query_engine,
@@ -128,7 +143,7 @@ mod tests {
     async fn test_execute_insert() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
 
-        let instance = Instance::new(catalog_list);
+        let instance = Instance::new(catalog_list).await;
         instance.start().await.unwrap();
 
         let output = instance
@@ -148,7 +163,7 @@ mod tests {
     async fn test_execute_query() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
 
-        let instance = Instance::new(catalog_list);
+        let instance = Instance::new(catalog_list).await;
 
         let output = instance
             .execute_sql("select sum(number) from numbers limit 20")
