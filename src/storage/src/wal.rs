@@ -39,7 +39,6 @@ impl<Writer: LogStore> Wal<Writer> {
         Ok((res.entry_id(), res.offset()))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use log_store::fs::*;
