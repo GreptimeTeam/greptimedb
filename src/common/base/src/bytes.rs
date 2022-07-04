@@ -1,20 +1,26 @@
 use std::ops::Deref;
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 /// Bytes buffer.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct Bytes(Vec<u8>);
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Bytes(bytes::Bytes);
 
-impl From<Vec<u8>> for Bytes {
-    fn from(bytes: Vec<u8>) -> Bytes {
+impl From<bytes::Bytes> for Bytes {
+    fn from(bytes: bytes::Bytes) -> Bytes {
         Bytes(bytes)
     }
 }
 
 impl From<&[u8]> for Bytes {
     fn from(bytes: &[u8]) -> Bytes {
-        Bytes(bytes.to_vec())
+        Bytes(bytes::Bytes::copy_from_slice(bytes))
+    }
+}
+
+impl From<Vec<u8>> for Bytes {
+    fn from(bytes: Vec<u8>) -> Bytes {
+        Bytes(bytes::Bytes::from(bytes))
     }
 }
 
@@ -28,7 +34,7 @@ impl Deref for Bytes {
 
 impl PartialEq<Vec<u8>> for Bytes {
     fn eq(&self, other: &Vec<u8>) -> bool {
-        &self.0 == other
+        self.0 == other
     }
 }
 
@@ -50,12 +56,21 @@ impl PartialEq<Bytes> for [u8] {
     }
 }
 
+impl Serialize for Bytes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
 /// String buffer that can hold arbitrary encoding string (only support UTF-8 now).
 ///
 /// Now this buffer is restricted to only hold valid UTF-8 string (only allow constructing `StringBytes`
 /// from String or str). We may support other encoding in the future.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct StringBytes(Vec<u8>);
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StringBytes(bytes::Bytes);
 
 impl StringBytes {
     /// View this string as UTF-8 string slice.
@@ -70,13 +85,13 @@ impl StringBytes {
 
 impl From<String> for StringBytes {
     fn from(string: String) -> StringBytes {
-        StringBytes(string.into_bytes())
+        StringBytes(bytes::Bytes::from(string))
     }
 }
 
 impl From<&str> for StringBytes {
     fn from(string: &str) -> StringBytes {
-        StringBytes(string.as_bytes().to_vec())
+        StringBytes(bytes::Bytes::copy_from_slice(string.as_bytes()))
     }
 }
 
@@ -101,6 +116,15 @@ impl PartialEq<str> for StringBytes {
 impl PartialEq<StringBytes> for str {
     fn eq(&self, other: &StringBytes) -> bool {
         self.as_bytes() == other.0
+    }
+}
+
+impl Serialize for StringBytes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.as_utf8().serialize(serializer)
     }
 }
 
