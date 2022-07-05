@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use snafu::ensure;
+use store_api::logstore::LogStore;
 use store_api::storage::{ReadContext, Region, RegionMeta, WriteContext, WriteResponse};
 use tokio::sync::Mutex;
 
@@ -15,16 +16,24 @@ use crate::metadata::{RegionMetaImpl, RegionMetadata};
 use crate::region::writer::RegionWriter;
 use crate::snapshot::SnapshotImpl;
 use crate::version::{VersionControl, VersionControlRef};
+use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
-#[derive(Clone)]
-pub struct RegionImpl {
-    inner: Arc<RegionInner>,
+pub struct RegionImpl<T> {
+    inner: Arc<RegionInner<T>>,
+}
+
+impl<T> Clone for RegionImpl<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 #[async_trait]
-impl Region for RegionImpl {
+impl<T: LogStore> Region for RegionImpl<T> {
     type Error = Error;
     type Meta = RegionMetaImpl;
     type WriteRequest = WriteBatch;
@@ -47,8 +56,8 @@ impl Region for RegionImpl {
     }
 }
 
-impl RegionImpl {
-    pub fn new(name: String, metadata: RegionMetadata) -> RegionImpl {
+impl<T> RegionImpl<T> {
+    pub fn new(name: String, metadata: RegionMetadata, wal_writer: Wal<T>) -> RegionImpl<T> {
         let memtable_builder = Arc::new(DefaultMemtableBuilder {});
         let memtable_schema = MemtableSchema::new(metadata.columns_row_key.clone());
         let mem = memtable_builder.build(memtable_schema);
@@ -59,6 +68,7 @@ impl RegionImpl {
             name,
             version: Arc::new(version),
             writer: Mutex::new(RegionWriter::new(memtable_builder)),
+            wal_writer,
         });
 
         RegionImpl { inner }
@@ -71,13 +81,15 @@ impl RegionImpl {
     }
 }
 
-struct RegionInner {
+#[allow(dead_code)]
+struct RegionInner<T> {
     name: String,
     version: VersionControlRef,
     writer: Mutex<RegionWriter>,
+    wal_writer: Wal<T>,
 }
 
-impl RegionInner {
+impl<T> RegionInner<T> {
     fn in_memory_metadata(&self) -> RegionMetaImpl {
         let metadata = self.version.metadata();
 

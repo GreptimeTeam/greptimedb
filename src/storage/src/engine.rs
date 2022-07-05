@@ -11,6 +11,7 @@ use store_api::{
 
 use crate::error::{self, Error, Result};
 use crate::region::RegionImpl;
+use crate::wal::Wal;
 
 /// [StorageEngine] implementation.
 pub struct EngineImpl<T> {
@@ -28,13 +29,13 @@ impl<T> Clone for EngineImpl<T> {
 #[async_trait]
 impl<T: LogStore> StorageEngine for EngineImpl<T> {
     type Error = Error;
-    type Region = RegionImpl;
+    type Region = RegionImpl<T>;
 
-    async fn open_region(&self, _ctx: &EngineContext, _name: &str) -> Result<RegionImpl> {
+    async fn open_region(&self, _ctx: &EngineContext, _name: &str) -> Result<Self::Region> {
         unimplemented!()
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, _region: RegionImpl) -> Result<()> {
+    async fn close_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
         unimplemented!()
     }
 
@@ -42,15 +43,15 @@ impl<T: LogStore> StorageEngine for EngineImpl<T> {
         &self,
         _ctx: &EngineContext,
         descriptor: RegionDescriptor,
-    ) -> Result<RegionImpl> {
+    ) -> Result<Self::Region> {
         self.inner.create_region(descriptor).await
     }
 
-    async fn drop_region(&self, _ctx: &EngineContext, _region: RegionImpl) -> Result<()> {
+    async fn drop_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
         unimplemented!()
     }
 
-    fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<RegionImpl>> {
+    fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<Self::Region>> {
         Ok(self.inner.get_region(name))
     }
 }
@@ -63,13 +64,13 @@ impl<T> EngineImpl<T> {
     }
 }
 
-type RegionMap = HashMap<String, RegionImpl>;
+type RegionMap<T> = HashMap<String, RegionImpl<T>>;
 
 #[allow(dead_code)]
 #[derive(Default)]
 struct EngineInner<T> {
     log_store: Arc<T>,
-    regions: RwLock<RegionMap>,
+    regions: RwLock<RegionMap<T>>,
 }
 
 impl<T> EngineInner<T> {
@@ -82,7 +83,7 @@ impl<T> EngineInner<T> {
 }
 
 impl<T: LogStore> EngineInner<T> {
-    async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl> {
+    async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl<T>> {
         {
             let regions = self.regions.read().unwrap();
             if let Some(region) = regions.get(&descriptor.name) {
@@ -96,7 +97,8 @@ impl<T: LogStore> EngineInner<T> {
             .context(error::InvalidRegionDescSnafu {
                 region: &region_name,
             })?;
-        let region = RegionImpl::new(region_name.clone(), metadata);
+        let wal_writer = Wal::new(region_name.clone(), self.log_store.clone());
+        let region = RegionImpl::new(region_name.clone(), metadata, wal_writer);
 
         {
             let mut regions = self.regions.write().unwrap();
@@ -114,7 +116,7 @@ impl<T: LogStore> EngineInner<T> {
         Ok(region)
     }
 
-    fn get_region(&self, name: &str) -> Option<RegionImpl> {
+    fn get_region(&self, name: &str) -> Option<RegionImpl<T>> {
         self.regions.read().unwrap().get(name).cloned()
     }
 }
