@@ -6,7 +6,7 @@ use crate::fs::{config::LogConfig, log::LocalFileLogStore};
 
 /// Create a tmp directory for write log, used for test.
 pub async fn create_log_file_store(dir: &str) -> Arc<LocalFileLogStore> {
-    let dir = TempDir::new(dir.into()).unwrap();
+    let dir = TempDir::new(dir).unwrap();
     let cfg = LogConfig {
         append_buffer_size: 128,
         max_log_file_size: 128,

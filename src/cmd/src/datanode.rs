@@ -1,5 +1,6 @@
 use clap::Parser;
-use datanode::{Datanode, DatanodeOptions};
+use common_options::GreptimeOptions;
+use datanode::datanode::Datanode;
 use snafu::ResultExt;
 
 use crate::error::{Result, StartDatanodeSnafu};
@@ -35,11 +36,14 @@ struct StartCommand {
     http_addr: String,
     #[clap(long, default_value = "0.0.0.0:3001")]
     rpc_addr: String,
+    #[clap(long, default_value = "./greptimedb_wal")]
+    wal_dir: String,
 }
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
         Datanode::new(self.into())
+            .await
             .context(StartDatanodeSnafu)?
             .start()
             .await
@@ -47,11 +51,12 @@ impl StartCommand {
     }
 }
 
-impl From<StartCommand> for DatanodeOptions {
+impl From<StartCommand> for GreptimeOptions {
     fn from(cmd: StartCommand) -> Self {
-        DatanodeOptions {
+        GreptimeOptions {
             http_addr: cmd.http_addr,
             rpc_addr: cmd.rpc_addr,
+            wal_dir: cmd.wal_dir,
         }
     }
 }

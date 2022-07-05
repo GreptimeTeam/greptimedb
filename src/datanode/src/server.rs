@@ -1,9 +1,9 @@
 pub mod grpc;
 pub mod http;
 
+use common_options::GreptimeOptions;
 use http::HttpServer;
 
-use crate::datanode::DatanodeOptions;
 use crate::error::Result;
 use crate::instance::InstanceRef;
 
@@ -19,7 +19,7 @@ impl Services {
         }
     }
 
-    pub async fn start(&self, opts: &DatanodeOptions) -> Result<()> {
+    pub async fn start(&self, opts: &GreptimeOptions) -> Result<()> {
         self.http_server.start(&opts.http_addr).await
     }
 }

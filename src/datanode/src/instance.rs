@@ -1,7 +1,9 @@
-use std::sync::Arc;
+use std::{fs, path, sync::Arc};
 
+use common_options::GreptimeOptions;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
+use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use query::catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::ResultExt;
@@ -15,7 +17,7 @@ use table_engine::engine::MitoEngine;
 use crate::error::{CreateTableSnafu, ExecuteSqlSnafu, Result};
 use crate::sql::SqlHandler;
 
-type DefaultEngine = MitoEngine<EngineImpl>;
+type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 
 // An abstraction to read/write services.
 pub struct Instance {
@@ -30,10 +32,26 @@ pub struct Instance {
 pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    pub fn new(catalog_list: CatalogListRef) -> Self {
+    pub async fn new(opts: &GreptimeOptions, catalog_list: CatalogListRef) -> Self {
+        // create wal directory
+        let wal_dir = path::Path::new(&opts.wal_dir)
+            .to_str()
+            .unwrap_or_else(|| panic!("Invalid wal directory: {}", &opts.wal_dir));
+        let _ = fs::create_dir_all(wal_dir)
+            .unwrap_or_else(|_| panic!("Couldn't create wal directory: {}", &opts.wal_dir));
+        // TODO(jiachun): log store options
+        let log_config = LogConfig {
+            append_buffer_size: 128,
+            max_log_file_size: 128,
+            log_file_dir: wal_dir.to_string(),
+        };
+        let log_store = LocalFileLogStore::open(&log_config)
+            .await
+            .unwrap_or_else(|_| panic!("Couldn't open log store: {}", &opts.wal_dir));
+
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine().clone();
-        let table_engine = DefaultEngine::new(EngineImpl::new());
+        let table_engine = DefaultEngine::new(EngineImpl::new(Arc::new(log_store)));
 
         Self {
             query_engine,

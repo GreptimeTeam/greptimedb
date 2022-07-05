@@ -10,6 +10,7 @@ path = "src/bin/greptime.rs"
 [dependencies]
 clap = { version = "3.1", features = ["derive"] }
 common-error = { path = "../common/error" }
+common-options = { path = "../common/options" }
 common-telemetry = { path = "../common/telemetry", features = ["deadlock_detection"]}
 datanode = { path = "../datanode" }
 snafu = { version = "0.7", features = ["backtraces"] }

@@ -5,6 +5,3 @@ pub mod instance;
 mod metric;
 pub mod server;
 mod sql;
-
-pub use crate::datanode::Datanode;
-pub use crate::datanode::DatanodeOptions;
