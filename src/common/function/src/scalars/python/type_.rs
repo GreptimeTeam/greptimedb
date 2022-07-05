@@ -219,10 +219,10 @@ impl PyVector {
         let mut buf = VectorBuilder::with_capacity(self.vector.data_type(), slice_len);
         if slice_len==0{
             let v: PyVector = buf.finish().into();
-            return Ok(v.into_pyobject(vm))
+            Ok(v.into_pyobject(vm))
         }else if step==1{
             let v: PyVector = self.vector.slice(range.clone().next().unwrap_or(0), slice_len).into();
-            return Ok(v.into_pyobject(vm))
+            Ok(v.into_pyobject(vm))
         }
         else if step.is_negative() {
             // Negative step require special treatment
@@ -230,13 +230,13 @@ impl PyVector {
                 buf.push(&self.vector.get(i))
             }
             let v: PyVector = buf.finish().into();
-            return Ok(v.into_pyobject(vm))
+            Ok(v.into_pyobject(vm))
         } else {
             for i in range.step_by(step.unsigned_abs()){
                 buf.push(&self.vector.get(i))
             }
             let v: PyVector = buf.finish().into();
-            return Ok(v.into_pyobject(vm))
+            Ok(v.into_pyobject(vm))
         }
     }
 
@@ -293,19 +293,19 @@ fn into_datatypes_value(
                     ConcreteDataType::Int8(_) => obj
                         .try_into_value::<i8>(vm)
                         .ok()
-                        .and_then(|v| Some(Value::Int8(v))),
+                        .map(Value::Int8),
                     ConcreteDataType::Int16(_) => obj
                         .try_into_value::<i16>(vm)
                         .ok()
-                        .and_then(|v| Some(Value::Int16(v))),
+                        .map(Value::Int16),
                     ConcreteDataType::Int32(_) => obj
                         .try_into_value::<i32>(vm)
                         .ok()
-                        .and_then(|v| Some(Value::Int32(v))),
+                        .map(Value::Int32),
                     ConcreteDataType::Int64(_) => obj
                         .try_into_value::<i64>(vm)
                         .ok()
-                        .and_then(|v| Some(Value::Int64(v))),
+                        .map(Value::Int64),
                     _ => unreachable!(),
                 }
             } else {
@@ -325,19 +325,19 @@ fn into_datatypes_value(
                     ConcreteDataType::UInt8(_) => obj
                         .try_into_value::<u8>(vm)
                         .ok()
-                        .and_then(|v| Some(Value::UInt8(v))),
+                        .map(Value::UInt8),
                     ConcreteDataType::UInt16(_) => obj
                         .try_into_value::<u16>(vm)
                         .ok()
-                        .and_then(|v| Some(Value::UInt16(v))),
+                        .map(Value::UInt16),
                     ConcreteDataType::UInt32(_) => obj
                         .try_into_value::<u32>(vm)
                         .ok()
-                        .and_then(|v| Some(Value::UInt32(v))),
+                        .map(Value::UInt32),
                     ConcreteDataType::UInt64(_) => obj
                         .try_into_value::<u64>(vm)
                         .ok()
-                        .and_then(|v| Some(Value::UInt64(v))),
+                        .map(Value::UInt64),
                     _ => unreachable!(),
                 }
             } else {
@@ -353,11 +353,11 @@ fn into_datatypes_value(
                     ConcreteDataType::Float32(_) => obj
                         .try_into_value::<f32>(vm)
                         .ok()
-                        .and_then(|v| Some(Value::Float32(OrderedFloat(v)))),
+                        .map(|v| Value::Float32(OrderedFloat(v))),
                     ConcreteDataType::Float64(_) => obj
                         .try_into_value::<f64>(vm)
                         .ok()
-                        .and_then(|v| Some(Value::Float64(OrderedFloat(v)))),
+                        .map(|v| Value::Float64(OrderedFloat(v))),
                     _ => unreachable!(),
                 }
             } else {
@@ -373,7 +373,7 @@ fn into_datatypes_value(
                 obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
                     String::from_utf8(v)
                         .ok()
-                        .and_then(|v| Some(Value::String(v.into())).into())
+                        .map(|v| Value::String(v.into()))
                 })
             } else {
                 None
@@ -508,14 +508,14 @@ pub mod tests {
             assert_eq!(
                 1,
                 a.getitem_by_index(0, vm)
-                    .and_then(|v| Ok(v.try_into_value::<i32>(vm).unwrap_or(0)))
+                    .map(|v| v.try_into_value::<i32>(vm).unwrap_or(0))
                     .unwrap_or(0)
             );
             assert!(a.getitem_by_index(4, vm).ok().is_none());
             assert_eq!(
                 4,
                 a.getitem_by_index(-1, vm)
-                    .and_then(|v| Ok(v.try_into_value::<i32>(vm).unwrap_or(0)))
+                    .map(|v| v.try_into_value::<i32>(vm).unwrap_or(0))
                     .unwrap_or(0)
             );
             assert!(a.getitem_by_index(-5, vm).ok().is_none());
