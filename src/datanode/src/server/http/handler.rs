@@ -42,6 +42,7 @@ pub async fn metrics(
 mod tests {
     use std::sync::Arc;
 
+    use common_options::GreptimeOptions;
     use metrics::counter;
     use query::catalog::memory;
 
@@ -58,15 +59,19 @@ mod tests {
         Query(map)
     }
 
-    fn create_extension() -> Extension<InstanceRef> {
+    async fn create_extension() -> Extension<InstanceRef> {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
-        let instance = Arc::new(Instance::new(catalog_list));
+        let opts = GreptimeOptions {
+            wal_dir: "/tmp/greptimedb".to_string(),
+            ..Default::default()
+        };
+        let instance = Arc::new(Instance::new(&opts, catalog_list).await);
         Extension(instance)
     }
 
     #[tokio::test]
     async fn test_sql_not_provided() {
-        let extension = create_extension();
+        let extension = create_extension().await;
 
         let json = sql(extension, Query(HashMap::default())).await;
         match json {
@@ -82,7 +87,7 @@ mod tests {
     #[tokio::test]
     async fn test_sql_output_rows() {
         let query = create_params();
-        let extension = create_extension();
+        let extension = create_extension().await;
 
         let json = sql(extension, query).await;
 
@@ -110,7 +115,7 @@ mod tests {
         counter!("test_metrics", 1);
 
         let query = create_params();
-        let extension = create_extension();
+        let extension = create_extension().await;
         let text = metrics(extension, query).await;
 
         match text {

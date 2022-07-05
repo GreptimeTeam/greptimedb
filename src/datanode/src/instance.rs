@@ -145,8 +145,11 @@ mod tests {
     #[tokio::test]
     async fn test_execute_insert() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
-
-        let instance = Instance::new(catalog_list);
+        let opts = GreptimeOptions {
+            wal_dir: "/tmp/greptimedb".to_string(),
+            ..Default::default()
+        };
+        let instance = Instance::new(&opts, catalog_list).await;
         instance.start().await.unwrap();
 
         let output = instance
@@ -165,8 +168,11 @@ mod tests {
     #[tokio::test]
     async fn test_execute_query() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
-
-        let instance = Instance::new(catalog_list);
+        let opts = GreptimeOptions {
+            wal_dir: "/tmp/greptimedb".to_string(),
+            ..Default::default()
+        };
+        let instance = Instance::new(&opts, catalog_list).await;
 
         let output = instance
             .execute_sql("select sum(number) from numbers limit 20")
