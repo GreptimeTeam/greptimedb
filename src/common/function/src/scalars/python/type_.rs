@@ -579,16 +579,19 @@ pub mod tests {
     #[test]
     fn test_execute_script() {
         let snippet = vec![
-            "len(a)",
-            "a[0]=1#Unsupport?",
-            "a[-1]",
-            "a[0]*5",
-            "list(a)",
-            "a[1:-1]#elem in [1,3)"
+            ("len(a)", Some(|v: PyResult<PyObjectRef>|v.is_ok())),
+            ("a[0]=1#Unsupport?",None),
+            ("a[-1]",None),
+            ("a[0]*5",None),
+            ("list(a)",None),
+            ("a[1:-1]#elem in [1,3)",None),
         ];
-        for code in snippet {
+        for (code, pred) in snippet {
             let result = execute_script(code, None);
             println!("\u{001B}[35m{code}\u{001B}[0m: \u{001B}[32m{:?}\u{001B}[0m", result);
+            if let Some(p) = pred{
+                assert!(p(result))
+            }
         }
 
         use std::sync::Arc;
