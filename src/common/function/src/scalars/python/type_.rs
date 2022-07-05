@@ -578,9 +578,10 @@ pub mod tests {
 
     #[test]
     fn test_execute_script() {
-        let snippet = vec![
-            ("len(a)", Some(|v: PyResult<PyObjectRef>|v.is_ok())),
-            ("a[0]=1#Unsupport?",None),
+        type RetType = Option<fn(PyResult::<PyObjectRef>)->bool>;
+        let snippet: Vec<(&str,RetType)>= vec![
+            ("len(a)", Some(|v|v.is_ok())),
+            ("a[0]=1#Unsupport?",Some(|v|v.is_err())),
             ("a[-1]",None),
             ("a[0]*5",None),
             ("list(a)",None),
