@@ -13,11 +13,12 @@ use datatypes::{
     vectors::{Helper, VectorRef, VectorBuilder},
 };
 use rustpython_vm::{
-    builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
+    builtins::{PyTypeRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
+    function::{FuncArgs, OptionalArg},
     protocol::{PyMappingMethods, PySequenceMethods},
     pyclass, pyimpl, 
     sliceable::{SaturatedSlice, SequenceIndex},
-    types::{AsMapping, AsSequence},
+    types::{AsMapping, AsSequence, Initializer, Constructor},
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
@@ -77,7 +78,7 @@ impl AsRef<PyVector> for PyVector {
     }
 }
 
-#[pyimpl(with(AsMapping, AsSequence))]
+#[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
 impl PyVector {
     #[inline]
     fn arith_op<F>(
@@ -449,6 +450,27 @@ fn pythonic_index(i: isize, len: usize) -> Option<usize> {
     }
 }
 
+impl Constructor for PyVector {
+    type Args = FuncArgs;
+
+    fn py_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        println!("Call constr: {:?}", _args);
+        todo!()
+        /*PyVector::default()
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)*/
+    }
+}
+
+impl Initializer for PyVector {
+    type Args = OptionalArg<PyObjectRef>;
+
+    fn init(zelf: PyRef<Self>, iterable: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
+        println!("Call init: {:?}", iterable);
+        Ok(())
+    }
+}
+
 impl AsMapping for PyVector {
     const AS_MAPPING: PyMappingMethods = PyMappingMethods {
         length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
@@ -476,6 +498,8 @@ impl AsSequence for PyVector {
 }
 #[cfg(test)]
 pub mod tests {
+
+    use std::fmt::Debug;
 
     use rustpython_vm::protocol::PySequence;
 
@@ -586,6 +610,10 @@ pub mod tests {
             ("a[0]*5",None),
             ("list(a)",None),
             ("a[1:-1]#elem in [1,3)",None),
+            ("vector", Some(|v|{// possibly need to load the module of PyVector, but how
+                println!("{:?}", v);
+                true
+            }))
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None);
