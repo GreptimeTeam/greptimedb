@@ -95,6 +95,9 @@ pub enum Error {
         end: Version,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failt to write wal, region: {}, source: {}", region, source))]
+    WriteWal { region: String, source: BoxedError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -108,15 +111,17 @@ impl ErrorExt for Error {
             | InvalidRegionDesc { .. }
             | InvalidInputSchema { .. }
             | BatchMissingColumn { .. } => StatusCode::InvalidArguments,
-
             Utf8 { .. } | EncodeJson { .. } | DecodeJson { .. } => StatusCode::Unexpected,
-
-            Error::FlushIo { .. }
-            | Error::WriteParquet { .. }
+            FlushIo { .. }
+            | WriteParquet { .. }
             | ReadObject { .. }
             | WriteObject { .. }
             | ListObjects { .. }
             | DeleteObject { .. } => StatusCode::StorageUnavailable,
+            // TODO(hl): IO related error should be categorized into StorageUnavailable
+            // when https://github.com/GrepTimeTeam/greptimedb/pull/57 is merged.
+            FlushIo { .. } | WriteParquet { .. } => StatusCode::Internal,
+            WriteWal { .. } => StatusCode::Internal,
         }
     }
 

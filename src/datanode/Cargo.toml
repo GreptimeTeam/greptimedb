@@ -14,6 +14,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 datatypes = { path = "../datatypes"}
 hyper = { version = "0.14", features = ["full"] }
+log-store = { path = "../log-store" }
 metrics = "0.18"
 query = { path = "../query" }
 serde = "1.0"

@@ -10,6 +10,7 @@ mod region;
 mod snapshot;
 pub mod sync;
 mod version;
+mod wal;
 mod write_batch;
 
 mod flush;
