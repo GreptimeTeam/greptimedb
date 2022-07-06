@@ -24,7 +24,7 @@ fn new_region_for_rw(enable_version_column: bool) -> RegionImpl<NoopLogStore> {
         .push_value_column(("v1", LogicalTypeId::Int64, true))
         .build();
     let metadata = desc.try_into().unwrap();
-    let wal_writer = Wal::new(region_name.clone(), Arc::new(NoopLogStore::default()));
+    let wal_writer = Wal::new(region_name, Arc::new(NoopLogStore::default()));
     RegionImpl::new(region_name.to_string(), metadata, wal_writer)
 }
 
