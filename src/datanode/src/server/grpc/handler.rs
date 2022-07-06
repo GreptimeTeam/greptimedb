@@ -3,9 +3,9 @@ use api::v1::*;
 use crate::{error::Result, instance::InstanceRef};
 
 #[derive(Clone)]
-pub struct BatchProcessor {}
+pub struct BatchHandler {}
 
-impl BatchProcessor {
+impl BatchHandler {
     pub fn new(_instance: InstanceRef) -> Self {
         Self {}
     }

@@ -6,20 +6,20 @@ use tokio_stream::wrappers::TcpListenerStream;
 use crate::{
     error::{Result, StartGrpcSnafu, TcpBindSnafu},
     instance::InstanceRef,
-    server::grpc::{processors::BatchProcessor, server::Server},
+    server::grpc::{handler::BatchHandler, server::Server},
 };
 
-mod processors;
+mod handler;
 mod server;
 
 pub struct GrpcServer {
-    processor: BatchProcessor,
+    handler: BatchHandler,
 }
 
 impl GrpcServer {
     pub fn new(instance: InstanceRef) -> Self {
         Self {
-            processor: BatchProcessor::new(instance),
+            handler: BatchHandler::new(instance),
         }
     }
 
@@ -30,7 +30,7 @@ impl GrpcServer {
         let addr = listener.local_addr().context(TcpBindSnafu { addr })?;
         info!("The gRPC server is running at {}", addr);
 
-        let svc = Server::new(self.processor.clone()).into_service();
+        let svc = Server::new(self.handler.clone()).into_service();
         let _ = tonic::transport::Server::builder()
             .add_service(svc)
             .serve_with_incoming(TcpListenerStream::new(listener))
