@@ -15,6 +15,7 @@ use store_api::storage::SequenceNumber;
 
 use crate::error::{ArrowSnafu, FlushIoSnafu, Result};
 use crate::memtable::{IterContext, MemtableRef, MemtableSchema};
+use crate::metadata::ColumnMetadata;
 
 pub enum Backend {
     Fs { dir: String },
@@ -92,38 +93,31 @@ impl FlushTask {
     }
 }
 
-/// Schema
-fn memtable_schema_to_arrow_schema(mtschema: &MemtableSchema) -> Schema {
-    let mut fields =
-        Vec::with_capacity(mtschema.num_row_key_columns() + mtschema.num_value_columns() + 2);
-
-    for col_meta in mtschema.row_key_columns() {
-        fields.push(Field::from(&ColumnSchema::new(
+/// Assembles arrow schema from memtable schema info.
+fn memtable_schema_to_arrow_schema(schema: &MemtableSchema) -> Schema {
+    let col_meta_to_field: fn(&ColumnMetadata) -> Field = |col_meta| {
+        Field::from(&ColumnSchema::new(
             col_meta.desc.name.clone(),
             col_meta.desc.data_type.clone(),
             col_meta.desc.is_nullable,
-        )));
-    }
+        ))
+    };
 
-    fields.push(Field::from(&ColumnSchema::new(
-        SEQUENCE_COLUMN_NAME,
-        ConcreteDataType::uint64_datatype(),
-        false,
-    )));
-
-    fields.push(Field::from(&ColumnSchema::new(
-        VALUE_TYPE_COLUMN_NAME,
-        ConcreteDataType::uint8_datatype(),
-        false,
-    )));
-
-    for col_meta in mtschema.value_columns() {
-        fields.push(Field::from(&ColumnSchema::new(
-            col_meta.desc.name.clone(),
-            col_meta.desc.data_type.clone(),
-            col_meta.desc.is_nullable,
-        )));
-    }
+    let fields = schema
+        .row_key_columns()
+        .map(col_meta_to_field)
+        .chain(std::iter::once(Field::from(&ColumnSchema::new(
+            SEQUENCE_COLUMN_NAME,
+            ConcreteDataType::uint64_datatype(),
+            false,
+        ))))
+        .chain(std::iter::once(Field::from(&ColumnSchema::new(
+            SEQUENCE_COLUMN_NAME,
+            ConcreteDataType::uint64_datatype(),
+            false,
+        ))))
+        .chain(schema.value_columns().map(col_meta_to_field))
+        .collect::<Vec<_>>();
     Schema::from(fields)
 }
 
