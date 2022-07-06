@@ -11,18 +11,17 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
 use datatypes::{
     value,
-    vectors::{Helper, VectorRef, VectorBuilder},
+    vectors::{Helper, VectorBuilder, VectorRef},
 };
 use rustpython_vm::{
-    builtins::{PyTypeRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
+    builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr, PyTypeRef},
     function::{FuncArgs, OptionalArg},
     protocol::{PyMappingMethods, PySequenceMethods},
-    pyclass, pyimpl, 
+    pyclass, pyimpl,
     sliceable::{SaturatedSlice, SequenceIndex},
-    types::{AsMapping, AsSequence, Initializer, Constructor},
+    types::{AsMapping, AsSequence, Constructor, Initializer},
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
-
 
 #[pyclass(module = false, name = "vector")]
 #[derive(PyPayload, Clone)]
@@ -78,8 +77,6 @@ impl AsRef<PyVector> for PyVector {
         self
     }
 }
-
-
 
 #[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
 impl PyVector {
@@ -208,7 +205,6 @@ impl PyVector {
         ))
     }
 
-
     fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         match SequenceIndex::try_from_borrowed_object(vm, needle, "mmap")? {
             SequenceIndex::Int(i) => self.getitem_by_index(i, vm),
@@ -234,22 +230,24 @@ impl PyVector {
         let (range, step, slice_len) = slice.adjust_indices(self.len());
         // println!("{:?},{step},{slice_len}", range);
         let mut buf = VectorBuilder::with_capacity(self.vector.data_type(), slice_len);
-        if slice_len==0{
+        if slice_len == 0 {
             let v: PyVector = buf.finish().into();
             Ok(v.into_pyobject(vm))
-        }else if step==1{
-            let v: PyVector = self.vector.slice(range.clone().next().unwrap_or(0), slice_len).into();
+        } else if step == 1 {
+            let v: PyVector = self
+                .vector
+                .slice(range.clone().next().unwrap_or(0), slice_len)
+                .into();
             Ok(v.into_pyobject(vm))
-        }
-        else if step.is_negative() {
+        } else if step.is_negative() {
             // Negative step require special treatment
-            for i in range.rev().step_by(step.unsigned_abs()){
+            for i in range.rev().step_by(step.unsigned_abs()) {
                 buf.push(&self.vector.get(i))
             }
             let v: PyVector = buf.finish().into();
             Ok(v.into_pyobject(vm))
         } else {
-            for i in range.step_by(step.unsigned_abs()){
+            for i in range.step_by(step.unsigned_abs()) {
                 buf.push(&self.vector.get(i))
             }
             let v: PyVector = buf.finish().into();
@@ -269,9 +267,12 @@ impl PyVector {
 }
 
 /// found out if this pyobj can be cast to a scalar value(i.e is a number(int or float))
-fn is_pyobj_scalar(obj: &PyObjectRef)->bool{
-    
-    false
+fn is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
+    let is_instance = |ty: &PyObject| obj.is_instance(ty, vm).unwrap_or(false);
+    is_instance(PyNone::class(vm).into())
+        || is_instance(PyInt::class(vm).into())
+        || is_instance(PyFloat::class(vm).into())
+        || is_instance(PyBool::class(vm).into())
 }
 
 /// convert a `PyObjectRef` into a `datatypess::Value`(is that ok?)
@@ -282,11 +283,10 @@ fn pyobj_to_val(
     dtype: ConcreteDataType,
 ) -> Option<value::Value> {
     use value::Value;
+    let is_instance = |ty: &PyObject| obj.is_instance(ty, vm).unwrap_or(false);
     match dtype {
         ConcreteDataType::Null(_) => {
-            if obj
-                .is_instance(PyNone::class(vm).into(), vm)
-                .unwrap_or(false)
+            if is_instance(PyNone::class(vm).into())
             {
                 Some(Value::Null)
             } else {
@@ -294,9 +294,7 @@ fn pyobj_to_val(
             }
         }
         ConcreteDataType::Boolean(_) => {
-            if obj
-                .is_instance(PyBool::class(vm).into(), vm)
-                .unwrap_or(false)
+            if is_instance(PyBool::class(vm).into())
             {
                 Some(Value::Boolean(
                     obj.try_into_value::<bool>(vm).unwrap_or(false),
@@ -309,59 +307,45 @@ fn pyobj_to_val(
         | ConcreteDataType::Int16(_)
         | ConcreteDataType::Int32(_)
         | ConcreteDataType::Int64(_) => {
-            if obj
-                .is_instance(PyInt::class(vm).into(), vm)
-                .unwrap_or(false)
+            if is_instance(PyInt::class(vm).into())
             {
                 match dtype {
-                    ConcreteDataType::Int8(_) => obj
-                        .try_into_value::<i8>(vm)
-                        .ok()
-                        .map(Value::Int8),
-                    ConcreteDataType::Int16(_) => obj
-                        .try_into_value::<i16>(vm)
-                        .ok()
-                        .map(Value::Int16),
-                    ConcreteDataType::Int32(_) => obj
-                        .try_into_value::<i32>(vm)
-                        .ok()
-                        .map(Value::Int32),
-                    ConcreteDataType::Int64(_) => obj
-                        .try_into_value::<i64>(vm)
-                        .ok()
-                        .map(Value::Int64),
+                    ConcreteDataType::Int8(_) => obj.try_into_value::<i8>(vm).ok().map(Value::Int8),
+                    ConcreteDataType::Int16(_) => {
+                        obj.try_into_value::<i16>(vm).ok().map(Value::Int16)
+                    }
+                    ConcreteDataType::Int32(_) => {
+                        obj.try_into_value::<i32>(vm).ok().map(Value::Int32)
+                    }
+                    ConcreteDataType::Int64(_) => {
+                        obj.try_into_value::<i64>(vm).ok().map(Value::Int64)
+                    }
                     _ => unreachable!(),
                 }
             } else {
-                unreachable!()
+                None
             }
         }
         ConcreteDataType::UInt8(_)
         | ConcreteDataType::UInt16(_)
         | ConcreteDataType::UInt32(_)
         | ConcreteDataType::UInt64(_) => {
-            if obj
-                .is_instance(PyInt::class(vm).into(), vm)
-                .unwrap_or(false)
+            if is_instance(PyInt::class(vm).into())
                 && obj.clone().try_into_value::<i64>(vm).unwrap_or(-1) >= 0
             {
                 match dtype {
-                    ConcreteDataType::UInt8(_) => obj
-                        .try_into_value::<u8>(vm)
-                        .ok()
-                        .map(Value::UInt8),
-                    ConcreteDataType::UInt16(_) => obj
-                        .try_into_value::<u16>(vm)
-                        .ok()
-                        .map(Value::UInt16),
-                    ConcreteDataType::UInt32(_) => obj
-                        .try_into_value::<u32>(vm)
-                        .ok()
-                        .map(Value::UInt32),
-                    ConcreteDataType::UInt64(_) => obj
-                        .try_into_value::<u64>(vm)
-                        .ok()
-                        .map(Value::UInt64),
+                    ConcreteDataType::UInt8(_) => {
+                        obj.try_into_value::<u8>(vm).ok().map(Value::UInt8)
+                    }
+                    ConcreteDataType::UInt16(_) => {
+                        obj.try_into_value::<u16>(vm).ok().map(Value::UInt16)
+                    }
+                    ConcreteDataType::UInt32(_) => {
+                        obj.try_into_value::<u32>(vm).ok().map(Value::UInt32)
+                    }
+                    ConcreteDataType::UInt64(_) => {
+                        obj.try_into_value::<u64>(vm).ok().map(Value::UInt64)
+                    }
                     _ => unreachable!(),
                 }
             } else {
@@ -369,9 +353,7 @@ fn pyobj_to_val(
             }
         }
         ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
-            if obj
-                .is_instance(PyFloat::class(vm).into(), vm)
-                .unwrap_or(false)
+            if is_instance(PyFloat::class(vm).into())
             {
                 match dtype {
                     ConcreteDataType::Float32(_) => obj
@@ -390,9 +372,17 @@ fn pyobj_to_val(
         }
 
         ConcreteDataType::String(_) => {
-            if obj
-                .is_instance(PyStr::class(vm).into(), vm)
-                .unwrap_or(false)
+            if is_instance(PyStr::class(vm).into())
+            {
+                obj.try_into_value::<Vec<u8>>(vm)
+                    .ok()
+                    .and_then(|v| String::from_utf8(v).ok().map(|v| Value::String(v.into())))
+            } else {
+                None
+            }
+        }
+        ConcreteDataType::Binary(_) => {
+            if is_instance(PyBytes::class(vm).into())
             {
                 obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
                     String::from_utf8(v)
@@ -402,24 +392,9 @@ fn pyobj_to_val(
             } else {
                 None
             }
-        }
-        ConcreteDataType::Binary(_) => {
-            if obj
-                .is_instance(PyBytes::class(vm).into(), vm)
-                .unwrap_or(false)
-            {
-                obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
-                    String::from_utf8(v)
-                        .ok()
-                        .and_then(|v| Some(Value::String(v.into())).into())
-                })
-            } else {
-                None
-            }
         } //_ => unimplemented!("Unsupported data type of value {:?}", dtype),
     }
 }
-
 
 /// convert a DataType `Value` into a `PyObjectRef`
 fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
@@ -482,8 +457,8 @@ impl Constructor for PyVector {
         println!("Call constr: {:?}", _args);
         todo!()
         /*PyVector::default()
-            .into_ref_with_type(vm, cls)
-            .map(Into::into)*/
+        .into_ref_with_type(vm, cls)
+        .map(Into::into)*/
     }
 }
 
@@ -499,18 +474,14 @@ impl Initializer for PyVector {
 impl AsMapping for PyVector {
     const AS_MAPPING: PyMappingMethods = PyMappingMethods {
         length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
-        subscript: Some(|mapping, needle, vm| {
-            Self::mapping_downcast(mapping)._getitem(needle, vm)
-        }),
+        subscript: Some(|mapping, needle, vm| Self::mapping_downcast(mapping)._getitem(needle, vm)),
         ass_subscript: None,
     };
 }
 
 impl AsSequence for PyVector {
     const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| {
-            Ok(Self::sequence_downcast(seq).len())
-        }),
+        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
         item: Some(|seq, i, vm| {
             let zelf = Self::sequence_downcast(seq);
             zelf.getitem_by_index(i, vm)
@@ -532,14 +503,19 @@ pub mod tests {
     /// test the paired `val_to_obj` and `pyobj_to_val` func
     #[test]
     fn test_val2pyobj2val() {
-        
         use rustpython_vm as vm;
         vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
             let i = value::Value::Float32(OrderedFloat(2.0));
+            let j = value::Value::Int32(1);
             let dtype = i.data_type();
             let obj = val_to_pyobj(i, vm);
+            assert!(is_pyobj_scalar(&obj, vm));
+            let obj_1 = obj.clone();
             let ri = pyobj_to_val(obj, vm, dtype);
-            println!("{:?}", ri);
+            let rj = pyobj_to_val(obj_1, vm, j.data_type());
+            println!("{:?}, {:?}", ri, rj);
+            assert_eq!(ri, Some(value::Value::Float32(OrderedFloat(2.0))));
+            
         })
     }
 
@@ -586,12 +562,11 @@ pub mod tests {
             let a: VectorRef = Arc::new(NullVector::new(42));
             let a = PyVector::from(a);
             let a = a.into_pyobject(vm);
-            if let Some(seq) = PySequence::find_methods(&a, vm){
-                println!("{:?}",seq)
+            if let Some(seq) = PySequence::find_methods(&a, vm) {
+                println!("{:?}", seq)
             }
-            if let Some(s) = PySequence::new(&a, vm){
-                println!("{:?}",s.length(vm))
-                
+            if let Some(s) = PySequence::new(&a, vm) {
+                println!("{:?}", s.length(vm))
             }
         })
     }
@@ -641,23 +616,30 @@ pub mod tests {
 
     #[test]
     fn test_execute_script() {
-        type RetType = Option<fn(PyResult::<PyObjectRef>)->bool>;
-        let snippet: Vec<(&str,RetType)>= vec![
-            ("len(a)", Some(|v|v.is_ok())),
-            ("a[0]=1#Unsupport?",Some(|v|v.is_err())),
-            ("a[-1]",None),
-            ("a[0]*5",None),
-            ("list(a)",None),
-            ("a[1:-1]#elem in [1,3)",None),
-            ("vector", Some(|v|{// possibly need to load the module of PyVector, but how
-                println!("{:?}", v);
-                true
-            }))
+        type RetType = Option<fn(PyResult<PyObjectRef>) -> bool>;
+        let snippet: Vec<(&str, RetType)> = vec![
+            ("len(a)", Some(|v| v.is_ok())),
+            ("a[0]=1#Unsupport?", Some(|v| v.is_err())),
+            ("a[-1]", None),
+            ("a[0]*5", None),
+            ("list(a)", None),
+            ("a[1:-1]#elem in [1,3)", None),
+            (
+                "vector",
+                Some(|v| {
+                    // possibly need to load the module of PyVector, but how
+                    println!("{:?}", v);
+                    true
+                }),
+            ),
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None);
-            println!("\u{001B}[35m{code}\u{001B}[0m: \u{001B}[32m{:?}\u{001B}[0m", result);
-            if let Some(p) = pred{
+            println!(
+                "\u{001B}[35m{code}\u{001B}[0m: \u{001B}[32m{:?}\u{001B}[0m",
+                result
+            );
+            if let Some(p) = pred {
                 assert!(p(result))
             }
         }
