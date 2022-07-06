@@ -9,12 +9,14 @@ pub enum Error {
         source: tonic::transport::Error,
         backtrace: Backtrace,
     },
+
     #[snafu(display("Missing {}, expected {}, actual {}", name, expected, actual))]
     MissingResult {
         name: String,
         expected: usize,
         actual: usize,
     },
+
     #[snafu(display("Tonic internal error, source: {}", source))]
     TonicStatus {
         source: tonic::Status,
