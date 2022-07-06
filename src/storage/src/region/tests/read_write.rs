@@ -149,6 +149,7 @@ async fn test_simple_put_scan() {
     let output = tester.full_scan().await;
     assert_eq!(data, output);
 }
+
 #[tokio::test]
 async fn test_sequence_increase() {
     let tester = Tester::default();
