@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use datatypes::arrow::chunk::Chunk;
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
 use datatypes::arrow::io::parquet::write::{
@@ -16,25 +18,46 @@ use crate::error::{ArrowSnafu, FlushIoSnafu, Result};
 use crate::memtable::{IterContext, MemtableRef, MemtableSchema};
 use crate::metadata::ColumnMetadata;
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub enum Backend {
     Fs { dir: String },
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub struct FlushConfig {
     pub backend: Backend,
     pub row_group_size: usize,
 }
 
+impl Default for FlushConfig {
+    fn default() -> Self {
+        Self {
+            row_group_size: 128,
+            backend: Backend::Fs {
+                dir: "/tmp/greptimedb-sst".to_string(),
+            },
+        }
+    }
+}
+
+#[allow(dead_code)]
 pub struct FlushTask {
     config: FlushConfig,
     object_store: ObjectStore,
 }
 
+#[allow(dead_code)]
 impl FlushTask {
     pub async fn try_new(config: FlushConfig) -> Result<Self> {
         let operator = match config.backend {
             Backend::Fs { ref dir } => {
-                let accessor = fs::Backend::build().root(dir).finish().await.unwrap();
+                let accessor = fs::Backend::build()
+                    .root(dir)
+                    .finish()
+                    .await
+                    .context(FlushIoSnafu)?;
                 ObjectStore::new(accessor)
             }
         };
@@ -44,10 +67,16 @@ impl FlushTask {
         })
     }
 
-    pub async fn write_rows(&self, mt: &MemtableRef, object_name: &str) -> Result<()> {
-        let schema = mt.schema();
-
-        let schema = memtable_schema_to_arrow_schema(schema);
+    /// Iterates memtable and writes rows to Parquet file.
+    /// A chunk of records yielded from each iteration with a size given
+    /// in config will be written to a single row group.
+    pub async fn write_rows(
+        &self,
+        mt: &MemtableRef,
+        object_name: &str,
+        extra_meta: Option<HashMap<String, String>>,
+    ) -> Result<()> {
+        let schema = memtable_schema_to_arrow_schema(mt.schema());
         let object = self.object_store.object(object_name);
 
         // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
@@ -55,8 +84,10 @@ impl FlushTask {
         // to this value.
         let writer = object.writer(0).await.context(FlushIoSnafu)?;
 
+        // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
         let encodings = get_encoding_for_schema(&schema, |_| Encoding::Plain);
-        let mut streamer = FileSink::try_new(
+
+        let mut sink = FileSink::try_new(
             writer,
             schema,
             encodings,
@@ -73,25 +104,28 @@ impl FlushTask {
             visible_sequence: SequenceNumber::MAX,
         };
 
-        let mut iter = mt.iter(iter_ctx).unwrap();
-
-        while let Some(batch) = iter.next().unwrap() {
-            streamer
-                .send(Chunk::new(
-                    batch
-                        .keys
-                        .iter()
-                        .map(|v| v.to_arrow_array())
-                        .chain(std::iter::once(batch.sequences.to_arrow_array()))
-                        .chain(std::iter::once(batch.value_types.to_arrow_array()))
-                        .chain(batch.values.iter().map(|v| v.to_arrow_array()))
-                        .collect(),
-                ))
-                .await
-                .context(ArrowSnafu)?;
+        let mut iter = mt.iter(iter_ctx)?;
+        while let Some(batch) = iter.next()? {
+            sink.send(Chunk::new(
+                batch
+                    .keys
+                    .iter()
+                    .map(|v| v.to_arrow_array())
+                    .chain(std::iter::once(batch.sequences.to_arrow_array()))
+                    .chain(std::iter::once(batch.value_types.to_arrow_array()))
+                    .chain(batch.values.iter().map(|v| v.to_arrow_array()))
+                    .collect(),
+            ))
+            .await
+            .context(ArrowSnafu)?;
         }
 
-        streamer.close().await.context(ArrowSnafu)
+        if let Some(meta) = extra_meta {
+            for (k, v) in meta {
+                sink.metadata.insert(k, Some(v));
+            }
+        }
+        sink.close().await.context(ArrowSnafu)
     }
 }
 
@@ -114,8 +148,8 @@ fn memtable_schema_to_arrow_schema(schema: &MemtableSchema) -> Schema {
             false,
         ))))
         .chain(std::iter::once(Field::from(&ColumnSchema::new(
-            SEQUENCE_COLUMN_NAME,
-            ConcreteDataType::uint64_datatype(),
+            VALUE_TYPE_COLUMN_NAME,
+            ConcreteDataType::uint8_datatype(),
             false,
         ))))
         .chain(schema.value_columns().map(col_meta_to_field))
