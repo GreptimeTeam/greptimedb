@@ -28,10 +28,16 @@ pub enum Error {
     },
 
     #[snafu(display("Error while writing columns, source: {}", source))]
-    FlushIo { source: std::io::Error },
+    FlushIo {
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Arrow error, source: {}", source))]
-    Arrow { source: arrow::error::ArrowError },
+    Arrow {
+        source: arrow::error::ArrowError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -59,6 +65,9 @@ impl ErrorExt for Error {
 
 #[cfg(test)]
 mod tests {
+
+    use common_error::prelude::StatusCode::Internal;
+    use datatypes::arrow::error::ArrowError;
     use snafu::GenerateImplicitData;
 
     use super::*;
@@ -79,5 +88,30 @@ mod tests {
 
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
         assert!(err.backtrace_opt().is_some());
+    }
+
+    #[test]
+    pub fn test_flush_error() {
+        fn throw_io_error() -> std::result::Result<(), std::io::Error> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "writer is closed",
+            ))
+        }
+
+        let error = throw_io_error().context(FlushIoSnafu).err().unwrap();
+        assert_eq!(StatusCode::Internal, error.status_code());
+        assert!(error.backtrace_opt().is_some());
+    }
+
+    #[test]
+    pub fn test_arrow_error() {
+        fn throw_arrow_error() -> std::result::Result<(), ArrowError> {
+            Err(ArrowError::ExternalFormat("Lorem ipsum".to_string()))
+        }
+
+        let error = throw_arrow_error().context(ArrowSnafu).err().unwrap();
+        assert_eq!(Internal, error.status_code());
+        assert!(error.backtrace_opt().is_some());
     }
 }
