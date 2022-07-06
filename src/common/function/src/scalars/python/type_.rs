@@ -5,7 +5,7 @@ use arrow::compute::arithmetics;
 use arrow::compute::cast;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
-use arrow::scalar::Scalar;
+use arrow::scalar::{BooleanScalar, NullScalar, PrimitiveScalar, Scalar};
 //use common_base::bytes::StringBytes;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
@@ -81,7 +81,7 @@ impl AsRef<PyVector> for PyVector {
 #[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
 impl PyVector {
     #[inline]
-    fn arith_op_scalar<F>(
+    fn scalar_arith_op<F>(
         &self,
         other: PyObjectRef,
         target_type: Option<DataType>,
@@ -91,16 +91,60 @@ impl PyVector {
     where
         F: Fn(&dyn Array, &dyn Scalar) -> Box<dyn Array>,
     {
-        let right = pyobj_try_to_typed_val(other, vm, None).ok_or_else(||{
+        let right = pyobj_try_to_typed_val(other.clone(), vm, None).ok_or_else(|| {
             vm.new_type_error(format!(
                 "Can't cast right operand into Scalar, actual: {}",
                 other.class().name()
             ))
         })?;
-        
+        use value::Value;
+        // assuming they are all 64 bit type if possible
 
         let left = self.vector.to_arrow_array();
-        todo!()
+
+        let left_type = &left.data_type();
+        //let right_type = &right.data_type();
+
+        let target_type = target_type.unwrap_or_else(|| {
+            if is_signed(left_type) {
+                DataType::Int64
+            } else if is_unsigned(left_type) {
+                DataType::UInt64
+            } else {
+                DataType::Float64
+            }
+        });
+        let left = cast(left, &target_type, vm)?;
+        let right: Box<dyn Scalar> = if target_type == DataType::Float64 {
+            match right {
+                Value::Int64(v) => {
+                    Box::new(PrimitiveScalar::new(DataType::Float64, Some(v as f64)))
+                }
+                Value::Float64(v) => {
+                    Box::new(PrimitiveScalar::new(DataType::Float64, Some(f64::from(v))))
+                }
+                _ => unreachable!(),
+            }
+        } else {
+            match right {
+                Value::Int64(v) => Box::new(PrimitiveScalar::new(DataType::Int64, Some(v))),
+                Value::Float64(v) => Box::new(
+                    PrimitiveScalar::new(DataType::Float64, Some(f64::from(v) as i64)),
+                ),
+                _ => unreachable!(),
+            }
+        };
+
+        let result = op(left.as_ref(), right.as_ref());
+
+        Ok(PyVector {
+            vector: Helper::try_into_vector(&*result).map_err(|e| {
+                vm.new_type_error(format!(
+                    "Can't cast result into vector, result: {:?}, err: {:?}",
+                    result, e
+                ))
+            })?,
+        })
     }
     #[inline]
     fn arith_op<F>(
@@ -153,17 +197,20 @@ impl PyVector {
     #[pymethod(name = "__radd__")]
     #[pymethod(magic)]
     fn add(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm){
-            self.arith_op_scalar(other, None, arithmetics::add_scalar, vm)
-        }else{
+        if is_pyobj_scalar(&other, vm) {
+            self.scalar_arith_op(other, None, arithmetics::add_scalar, vm)
+        } else {
             self.arith_op(other, None, arithmetics::add, vm)
         }
-        
     }
 
     #[pymethod(magic)]
     fn sub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.arith_op(other, None, arithmetics::sub, vm)
+        if is_pyobj_scalar(&other, vm) {
+            self.scalar_arith_op(other, None, arithmetics::sub_scalar, vm)
+        } else {
+            self.arith_op(other, None, arithmetics::sub, vm)
+        }
     }
 
     #[pymethod(magic)]
@@ -174,12 +221,20 @@ impl PyVector {
     #[pymethod(name = "__rmul__")]
     #[pymethod(magic)]
     fn mul(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.arith_op(other, None, arithmetics::mul, vm)
+        if is_pyobj_scalar(&other, vm) {
+            self.scalar_arith_op(other, None, arithmetics::mul_scalar, vm)
+        } else {
+            self.arith_op(other, None, arithmetics::mul, vm)
+        }
     }
 
     #[pymethod(magic)]
     fn truediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.arith_op(other, Some(DataType::Float64), arithmetics::div, vm)
+        if is_pyobj_scalar(&other, vm) {
+            self.scalar_arith_op(other, Some(DataType::Float64), arithmetics::div_scalar, vm)
+        } else {
+            self.arith_op(other, Some(DataType::Float64), arithmetics::div, vm)
+        }
     }
 
     #[pymethod(magic)]
@@ -194,7 +249,11 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn floordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.arith_op(other, Some(DataType::Int64), arithmetics::div, vm)
+        if is_pyobj_scalar(&other, vm) {
+            self.scalar_arith_op(other, Some(DataType::Int64), arithmetics::div_scalar, vm)
+        } else {
+            self.arith_op(other, Some(DataType::Int64), arithmetics::div, vm)
+        }
     }
 
     #[pymethod(magic)]
@@ -280,7 +339,7 @@ impl PyVector {
     }
 }
 
-/// found out if this pyobj can be cast to a scalar value(i.e is a number(int or float))
+/// if this pyobj can be cast to a scalar value(i.e Null/Int/Float/Bool)
 fn is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
     let is_instance = |ty: &PyObject| obj.is_instance(ty, vm).unwrap_or(false);
     is_instance(PyNone::class(vm).into())
@@ -299,152 +358,135 @@ fn pyobj_try_to_typed_val(
 ) -> Option<value::Value> {
     use value::Value;
     let is_instance = |ty: &PyObject| obj.is_instance(ty, vm).unwrap_or(false);
-    if let Some(dtype) = dtype{
-      match dtype {
-        ConcreteDataType::Null(_) => {
-            if is_instance(PyNone::class(vm).into())
-            {
-                Some(Value::Null)
-            } else {
-                None
-            }
-        }
-        ConcreteDataType::Boolean(_) => {
-            if is_instance(PyBool::class(vm).into())
-            {
-                Some(Value::Boolean(
-                    obj.try_into_value::<bool>(vm).unwrap_or(false),
-                ))
-            } else {
-                None
-            }
-        }
-        ConcreteDataType::Int8(_)
-        | ConcreteDataType::Int16(_)
-        | ConcreteDataType::Int32(_)
-        | ConcreteDataType::Int64(_) => {
-            if is_instance(PyInt::class(vm).into())
-            {
-                match dtype {
-                    ConcreteDataType::Int8(_) => obj.try_into_value::<i8>(vm).ok().map(Value::Int8),
-                    ConcreteDataType::Int16(_) => {
-                        obj.try_into_value::<i16>(vm).ok().map(Value::Int16)
-                    }
-                    ConcreteDataType::Int32(_) => {
-                        obj.try_into_value::<i32>(vm).ok().map(Value::Int32)
-                    }
-                    ConcreteDataType::Int64(_) => {
-                        obj.try_into_value::<i64>(vm).ok().map(Value::Int64)
-                    }
-                    _ => unreachable!(),
+    if let Some(dtype) = dtype {
+        match dtype {
+            ConcreteDataType::Null(_) => {
+                if is_instance(PyNone::class(vm).into()) {
+                    Some(Value::Null)
+                } else {
+                    None
                 }
-            } else {
-                None
             }
-        }
-        ConcreteDataType::UInt8(_)
-        | ConcreteDataType::UInt16(_)
-        | ConcreteDataType::UInt32(_)
-        | ConcreteDataType::UInt64(_) => {
-            if is_instance(PyInt::class(vm).into())
-                && obj.clone().try_into_value::<i64>(vm).unwrap_or(-1) >= 0
-            {
-                match dtype {
-                    ConcreteDataType::UInt8(_) => {
-                        obj.try_into_value::<u8>(vm).ok().map(Value::UInt8)
-                    }
-                    ConcreteDataType::UInt16(_) => {
-                        obj.try_into_value::<u16>(vm).ok().map(Value::UInt16)
-                    }
-                    ConcreteDataType::UInt32(_) => {
-                        obj.try_into_value::<u32>(vm).ok().map(Value::UInt32)
-                    }
-                    ConcreteDataType::UInt64(_) => {
-                        obj.try_into_value::<u64>(vm).ok().map(Value::UInt64)
-                    }
-                    _ => unreachable!(),
+            ConcreteDataType::Boolean(_) => {
+                if is_instance(PyBool::class(vm).into()) {
+                    Some(Value::Boolean(
+                        obj.try_into_value::<bool>(vm).unwrap_or(false),
+                    ))
+                } else {
+                    None
                 }
-            } else {
-                None
             }
-        }
-        ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
-            if is_instance(PyFloat::class(vm).into())
-            {
-                match dtype {
-                    ConcreteDataType::Float32(_) => obj
-                        .try_into_value::<f32>(vm)
-                        .ok()
-                        .map(|v| Value::Float32(OrderedFloat(v))),
-                    ConcreteDataType::Float64(_) => obj
-                        .try_into_value::<f64>(vm)
-                        .ok()
-                        .map(|v| Value::Float64(OrderedFloat(v))),
-                    _ => unreachable!(),
+            ConcreteDataType::Int8(_)
+            | ConcreteDataType::Int16(_)
+            | ConcreteDataType::Int32(_)
+            | ConcreteDataType::Int64(_) => {
+                if is_instance(PyInt::class(vm).into()) {
+                    match dtype {
+                        ConcreteDataType::Int8(_) => {
+                            obj.try_into_value::<i8>(vm).ok().map(Value::Int8)
+                        }
+                        ConcreteDataType::Int16(_) => {
+                            obj.try_into_value::<i16>(vm).ok().map(Value::Int16)
+                        }
+                        ConcreteDataType::Int32(_) => {
+                            obj.try_into_value::<i32>(vm).ok().map(Value::Int32)
+                        }
+                        ConcreteDataType::Int64(_) => {
+                            obj.try_into_value::<i64>(vm).ok().map(Value::Int64)
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    None
                 }
-            } else {
-                None
             }
-        }
+            ConcreteDataType::UInt8(_)
+            | ConcreteDataType::UInt16(_)
+            | ConcreteDataType::UInt32(_)
+            | ConcreteDataType::UInt64(_) => {
+                if is_instance(PyInt::class(vm).into())
+                    && obj.clone().try_into_value::<i64>(vm).unwrap_or(-1) >= 0
+                {
+                    match dtype {
+                        ConcreteDataType::UInt8(_) => {
+                            obj.try_into_value::<u8>(vm).ok().map(Value::UInt8)
+                        }
+                        ConcreteDataType::UInt16(_) => {
+                            obj.try_into_value::<u16>(vm).ok().map(Value::UInt16)
+                        }
+                        ConcreteDataType::UInt32(_) => {
+                            obj.try_into_value::<u32>(vm).ok().map(Value::UInt32)
+                        }
+                        ConcreteDataType::UInt64(_) => {
+                            obj.try_into_value::<u64>(vm).ok().map(Value::UInt64)
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    None
+                }
+            }
+            ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
+                if is_instance(PyFloat::class(vm).into()) {
+                    match dtype {
+                        ConcreteDataType::Float32(_) => obj
+                            .try_into_value::<f32>(vm)
+                            .ok()
+                            .map(|v| Value::Float32(OrderedFloat(v))),
+                        ConcreteDataType::Float64(_) => obj
+                            .try_into_value::<f64>(vm)
+                            .ok()
+                            .map(|v| Value::Float64(OrderedFloat(v))),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    None
+                }
+            }
 
-        ConcreteDataType::String(_) => {
-            if is_instance(PyStr::class(vm).into())
-            {
-                obj.try_into_value::<Vec<u8>>(vm)
-                    .ok()
-                    .and_then(|v| String::from_utf8(v).ok().map(|v| Value::String(v.into())))
-            } else {
-                None
+            ConcreteDataType::String(_) => {
+                if is_instance(PyStr::class(vm).into()) {
+                    obj.try_into_value::<Vec<u8>>(vm)
+                        .ok()
+                        .and_then(|v| String::from_utf8(v).ok().map(|v| Value::String(v.into())))
+                } else {
+                    None
+                }
             }
+            ConcreteDataType::Binary(_) => {
+                if is_instance(PyBytes::class(vm).into()) {
+                    obj.try_into_value::<Vec<u8>>(vm)
+                        .ok()
+                        .and_then(|v| String::from_utf8(v).ok().map(|v| Value::String(v.into())))
+                } else {
+                    None
+                }
+            } //_ => unimplemented!("Unsupported data type of value {:?}", dtype),
         }
-        ConcreteDataType::Binary(_) => {
-            if is_instance(PyBytes::class(vm).into())
-            {
-                obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
-                    String::from_utf8(v)
-                        .ok()
-                        .map(|v| Value::String(v.into()))
-                })
-            } else {
-                None
-            }
-        } //_ => unimplemented!("Unsupported data type of value {:?}", dtype),
+    } else if is_instance(PyNone::class(vm).into()) {
+        Some(Value::Null)
+    } else if is_instance(PyBool::class(vm).into()) {
+        Some(Value::Boolean(
+            obj.try_into_value::<bool>(vm).unwrap_or(false),
+        ))
+    } else if is_instance(PyInt::class(vm).into()) {
+        obj.try_into_value::<i64>(vm).ok().map(Value::Int64)
+    } else if is_instance(PyFloat::class(vm).into()) {
+        obj.try_into_value::<f64>(vm)
+            .ok()
+            .map(|v| Value::Float64(OrderedFloat(v)))
+    } else if is_instance(PyStr::class(vm).into()) {
+        obj.try_into_value::<Vec<u8>>(vm)
+            .ok()
+            .and_then(|v| String::from_utf8(v).ok().map(|v| Value::String(v.into())))
+    } else if is_instance(PyBytes::class(vm).into()) {
+        obj.try_into_value::<Vec<u8>>(vm)
+            .ok()
+            .and_then(|v| String::from_utf8(v).ok().map(|v| Value::String(v.into())))
+    } else {
+        None
     }
-    }else
-        if is_instance(PyNone::class(vm).into())
-            {
-                Some(Value::Null)
-            }else if is_instance(PyBool::class(vm).into())
-            {
-                Some(Value::Boolean(
-                    obj.try_into_value::<bool>(vm).unwrap_or(false),
-                ))
-            }else if is_instance(PyInt::class(vm).into())
-            {
-                obj.try_into_value::<i64>(vm).ok().map(Value::Int64)
-            }
-            else if is_instance(PyFloat::class(vm).into()){
-                obj
-                        .try_into_value::<f64>(vm)
-                        .ok()
-                        .map(|v| Value::Float64(OrderedFloat(v)))
-            }else if is_instance(PyStr::class(vm).into())
-            {
-                obj.try_into_value::<Vec<u8>>(vm)
-                    .ok()
-                    .and_then(|v| String::from_utf8(v).ok().map(|v| Value::String(v.into())))
-            }else if is_instance(PyBytes::class(vm).into())
-            {
-                obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
-                    String::from_utf8(v)
-                        .ok()
-                        .map(|v| Value::String(v.into()))
-                })
-            }else {
-                None
-            }
-    }
-    
+}
 
 /// convert a DataType `Value` into a `PyObjectRef`
 fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
@@ -567,7 +609,6 @@ pub mod tests {
             let rn = pyobj_try_to_typed_val(obj_2, vm, None);
             println!("{:?}, {:?}, {:?}", ri, rj, rn);
             assert_eq!(ri, Some(value::Value::Float32(OrderedFloat(2.0))));
-            
         })
     }
 
@@ -676,6 +717,12 @@ pub mod tests {
             ("a[0]*5", None),
             ("list(a)", None),
             ("a[1:-1]#elem in [1,3)", None),
+            ("(a+1)[0]", Some(|v| v.is_ok())),
+            ("(a-1)[0]", Some(|v| v.is_ok())),
+            ("(a*2)[0]", Some(|v| v.is_ok())),
+            ("(a/2.0)[2]", Some(|v| v.is_ok())),
+            ("(a/2)[2]", Some(|v| v.is_ok())),
+            ("(a//2)[2]", Some(|v| v.is_ok())),
             (
                 "vector",
                 Some(|v| {
