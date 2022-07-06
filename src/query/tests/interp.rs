@@ -17,14 +17,21 @@ use snafu::{ensure, Snafu};
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display(
+        "the length of the args is not enough,expect ate least :{},have: {}",
+        expect,
+        have
+    ))]
+    ArgsLen { expect: usize, have: usize },
+
+    #[snafu(display("the sample is empty"))]
+    SampleEmpty { len: usize },
+
+    #[snafu(display(
         "the length of the len1  {}  dost not match the length of the len2  {}",
         len1,
         len2,
     ))]
     LenNotEquals { len1: usize, len2: usize },
-
-    #[snafu(display("the sample is empty"))]
-    SampleEmpty { len: usize },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -35,7 +42,7 @@ fn linear_search(x: Value, xp: &PrimitiveVector<f64>) -> usize {
             return i - 1;
         }
     }
-    xp.len()
+    xp.len() - 1
 }
 
 fn binary_search(key: Value, xp: &PrimitiveVector<f64>) -> usize {
@@ -74,11 +81,28 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
     let mut left = None;
     let mut right = None;
 
+    ensure!(
+        args.len() >= 3,
+        ArgsLenSnafu {
+            expect: 3_usize,
+            have: args.len()
+        }
+    );
+
     let x = concrete_type_to_primitive_vector(&args[0])?;
     let xp = concrete_type_to_primitive_vector(&args[1])?;
     let fp = concrete_type_to_primitive_vector(&args[2])?;
 
-    if args.len() == 5 {
+    // make the args.len() is 3 or 5
+    if args.len() > 3 {
+        ensure!(
+            args.len() == 5,
+            ArgsLenSnafu {
+                expect: 5_usize,
+                have: args.len()
+            }
+        );
+
         left = concrete_type_to_primitive_vector(&args[3])
             .unwrap()
             .get_data(0);
@@ -87,22 +111,9 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
             .get_data(0);
     }
 
-    println!("{:?},{:?}", left, right);
-    // 想办法确保args.eln()==3!!args.len()==5
-    // ensure!(
-    //     args.len() ==3||args.len()==5,
-    //     LenNotEqualsSnafu {
-    //         expect: col.len(),
-    //         given: vector.len(),
-    //     }
-    // );
-
-    // ensure!(
-
-    // )
-
     ensure!(x.len() != 0, SampleEmptySnafu { len: x.len() });
-
+    ensure!(xp.len() != 0, SampleEmptySnafu { len: x.len() });
+    ensure!(fp.len() != 0, SampleEmptySnafu { len: x.len() });
     ensure!(
         xp.len() == fp.len(),
         LenNotEqualsSnafu {
@@ -224,11 +235,14 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::vectors::{Int32Vector, Int64Vector};
+    use datatypes::{
+        prelude::ScalarVectorBuilder,
+        vectors::{Int32Vector, Int64Vector, PrimitiveVectorBuilder},
+    };
 
     use super::*;
     #[test]
-    fn test_interp_function() {
+    fn test_basic_interp() {
         // x xp fp
         let x = 2.5;
         let xp = vec![1i32, 2i32, 3i32];
@@ -258,5 +272,69 @@ mod tests {
         for (i, item) in res.iter().enumerate().take(vector.len()) {
             assert!(matches!(vector.get(i),Value::Float64(v) if v==*item));
         }
+    }
+
+    #[test]
+    fn test_left_right() {
+        let x = vec![0.0, 1.0, 1.5, 2.0, 3.0, 4.0];
+        let xp = vec![1i32, 2i32, 3i32];
+        let fp = vec![3i64, 2i64, 0i64];
+        let left = vec![-1];
+        let right = vec![2];
+
+        let expect = vec![-1.0, 3.0, 2.5, 2.0, 0.0, 2.0];
+
+        let args: Vec<VectorRef> = vec![
+            Arc::new(Float64Vector::from_vec(x)),
+            Arc::new(Int32Vector::from_vec(xp)),
+            Arc::new(Int64Vector::from_vec(fp)),
+            Arc::new(Int32Vector::from_vec(left)),
+            Arc::new(Int32Vector::from_vec(right)),
+        ];
+        let vector = interp(&args).unwrap();
+
+        for (i, item) in expect.iter().enumerate().take(vector.len()) {
+            assert!(matches!(vector.get(i),Value::Float64(v) if v==*item));
+        }
+    }
+
+    #[test]
+    fn test_scalar_interpolation_point() {
+        // x=0 output:0
+        let x = vec![0];
+        let xp = vec![0, 1, 5];
+        let fp = vec![0, 1, 5];
+        let args: Vec<VectorRef> = vec![
+            Arc::new(Int64Vector::from_vec(x.clone())),
+            Arc::new(Int64Vector::from_vec(xp.clone())),
+            Arc::new(Int64Vector::from_vec(fp.clone())),
+        ];
+        let vector = interp(&args).unwrap();
+        assert!(matches!(vector.get(0), Value::Float64(v) if v==x[0] as f64));
+
+        // x=0.3 output:0.3
+        let x = vec![0.3];
+        let args: Vec<VectorRef> = vec![
+            Arc::new(Float64Vector::from_vec(x.clone())),
+            Arc::new(Int64Vector::from_vec(xp.clone())),
+            Arc::new(Int64Vector::from_vec(fp.clone())),
+        ];
+        let vector = interp(&args).unwrap();
+        assert!(matches!(vector.get(0), Value::Float64(v) if v==x[0] as f64));
+
+        // x=None output:Null
+        let input = [None, Some(0.0), Some(0.3)];
+        let mut builder = PrimitiveVectorBuilder::with_capacity(input.len());
+        for v in input {
+            builder.push(v);
+        }
+        let x = builder.finish();
+        let args: Vec<VectorRef> = vec![
+            Arc::new(x),
+            Arc::new(Int64Vector::from_vec(xp)),
+            Arc::new(Int64Vector::from_vec(fp)),
+        ];
+        let vector = interp(&args).unwrap();
+        assert!(matches!(vector.get(0), Value::Null));
     }
 }
