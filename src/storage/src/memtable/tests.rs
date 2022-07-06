@@ -3,6 +3,8 @@ use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64VectorBuilder, UInt64VectorBuilder};
 
 use super::*;
+use crate::flush::Backend::Fs;
+use crate::flush::{FlushConfig, FlushTask};
 use crate::metadata::RegionMetadata;
 use crate::test_util::descriptor_util::RegionDescBuilder;
 
@@ -258,6 +260,41 @@ fn test_write_iter_memtable() {
     tester.run_testcase(|ctx| {
         write_iter_memtable_case(&ctx);
     });
+}
+
+#[tokio::test]
+async fn test_flush() {
+    let tester = MemtableTester::default();
+
+    let memtable = tester.new_memtables().get(0).unwrap().clone();
+
+    write_kvs(
+        &*memtable,
+        10, // sequence
+        ValueType::Put,
+        &[
+            (1000, 1),
+            (1000, 2),
+            (2002, 1),
+            (2003, 1),
+            (2003, 5),
+            (1001, 1),
+        ], // keys
+        &[Some(1), Some(2), Some(7), Some(8), Some(9), Some(3)], // values
+    );
+
+    let config = FlushConfig {
+        backend: Fs {
+            dir: env!("HOME").to_string(),
+        },
+        row_group_size: 128,
+    };
+
+    let flusher = FlushTask::try_new(config).await.unwrap();
+    flusher
+        .write_rows(&memtable, "test-flush.parquet")
+        .await
+        .unwrap();
 }
 
 fn check_iter_batch_size(iter: &mut dyn BatchIterator, total: usize, batch_size: usize) {

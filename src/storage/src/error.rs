@@ -1,6 +1,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use datatypes::arrow;
 
 use crate::metadata::Error as MetadataError;
 
@@ -25,6 +26,12 @@ pub enum Error {
         column: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Error while writing columns, source: {}", source))]
+    FlushIo { source: std::io::Error },
+
+    #[snafu(display("Arrow error, source: {}", source))]
+    Arrow { source: arrow::error::ArrowError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -37,6 +44,7 @@ impl ErrorExt for Error {
             InvalidRegionDesc { .. } | InvalidInputSchema { .. } | BatchMissingColumn { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::FlushIo { .. } | Error::Arrow { .. } => StatusCode::Internal,
         }
     }
 

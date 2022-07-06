@@ -3060,8 +3060,12 @@ dependencies = [
  "common-error",
  "common-telemetry",
  "datatypes",
+ "futures-util",
+ "object-store",
+ "opendal",
  "snafu",
  "store-api",
+ "tempdir",
  "tokio",
 ]
 
