@@ -8,7 +8,6 @@ use datatypes::prelude::Vector;
 use datatypes::schema::ColumnSchema;
 use futures_util::sink::SinkExt;
 use object_store::{backend::fs, ObjectStore};
-use opendal::Operator;
 use snafu::ResultExt;
 use store_api::storage::consts::{SEQUENCE_COLUMN_NAME, VALUE_TYPE_COLUMN_NAME};
 use store_api::storage::SequenceNumber;
@@ -28,7 +27,7 @@ pub struct FlushConfig {
 
 pub struct FlushTask {
     config: FlushConfig,
-    operator: Operator,
+    object_store: ObjectStore,
 }
 
 impl FlushTask {
@@ -39,14 +38,17 @@ impl FlushTask {
                 ObjectStore::new(accessor)
             }
         };
-        Ok(Self { config, operator })
+        Ok(Self {
+            config,
+            object_store: operator,
+        })
     }
 
     pub async fn write_rows(&self, mt: &MemtableRef, object_name: &str) -> Result<()> {
         let schema = mt.schema();
 
         let schema = memtable_schema_to_arrow_schema(schema);
-        let object = self.operator.object(object_name);
+        let object = self.object_store.object(object_name);
 
         // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
         // but in s3/azblob backend the Content-Length field of HTTP request is set

@@ -3062,7 +3062,6 @@ dependencies = [
  "datatypes",
  "futures-util",
  "object-store",
- "opendal",
  "snafu",
  "store-api",
  "tempdir",
