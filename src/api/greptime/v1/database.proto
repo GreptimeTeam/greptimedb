@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package greptime.v1;
+
+message DatabaseRequest {
+    string name = 1;
+    repeated ObjectExpr exprs = 2;
+}
+
+message DatabaseResponse {
+    repeated ObjectResult results = 1;
+}
+
+message ObjectExpr {
+    ExprHeader header = 1;
+    InsertExpr insert = 2;
+    SelectExpr select = 3;
+    UpdateExpr update = 4;
+    DeleteExpr delete = 5;
+}
+
+message SelectExpr {
+    string select = 1; // sql, promql, etc.
+}
+
+message InsertExpr {
+    string table_name = 1;
+    repeated bytes values = 2;
+}
+
+// TODO(jiachun)
+message UpdateExpr {}
+// TODO(jiachun)
+message DeleteExpr {}
+
+message ObjectResult {
+    ResultHeader header = 1;
+    string schema = 2;
+    repeated bytes results = 3;
+}
+
+message ExprHeader {
+    uint32 version = 1;
+}
+
+message ResultHeader {
+    uint32 version = 1;
+    uint32 success = 2;
+    uint32 failure = 3;
+    uint32 code = 4;
+    string err_msg = 5;
+}
