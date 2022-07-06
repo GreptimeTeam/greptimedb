@@ -5,5 +5,5 @@ mod error;
 pub use self::{
     client::Client,
     database::Database,
-    error::{ConnectFailedSnafu, Error, MissingResultSnafu, Result},
+    error::{Error, Result},
 };

@@ -2,7 +2,8 @@ use api::v1::{greptime_client::GreptimeClient, *};
 use snafu::{OptionExt, ResultExt};
 use tonic::transport::Channel;
 
-use crate::{ConnectFailedSnafu, MissingResultSnafu, Result};
+use crate::error;
+use crate::Result;
 
 #[derive(Clone, Debug)]
 pub struct Client {
@@ -14,7 +15,7 @@ impl Client {
         let url = url.into();
         let client = GreptimeClient::connect(url.clone())
             .await
-            .context(ConnectFailedSnafu { url })?;
+            .context(error::ConnectFailedSnafu { url })?;
         Ok(Self { client })
     }
 
@@ -25,7 +26,7 @@ impl Client {
         };
 
         let mut res = self.batch(req).await?;
-        res.admins.pop().context(MissingResultSnafu {
+        res.admins.pop().context(error::MissingResultSnafu {
             name: "admins",
             expected: 1_usize,
             actual: 0_usize,
@@ -39,7 +40,7 @@ impl Client {
         };
 
         let mut res = self.batch(req).await?;
-        res.databases.pop().context(MissingResultSnafu {
+        res.databases.pop().context(error::MissingResultSnafu {
             name: "database",
             expected: 1_usize,
             actual: 0_usize,
@@ -47,7 +48,12 @@ impl Client {
     }
 
     pub async fn batch(&self, req: BatchRequest) -> Result<BatchResponse> {
-        let res = self.client.clone().batch(req).await?;
+        let res = self
+            .client
+            .clone()
+            .batch(req)
+            .await
+            .context(error::TonicStatusSnafu)?;
         Ok(res.into_inner())
     }
 }

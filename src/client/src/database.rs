@@ -1,7 +1,8 @@
 use api::v1::*;
 use snafu::ensure;
 
-use crate::{Client, MissingResultSnafu, Result};
+use crate::error;
+use crate::{Client, Result};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -63,7 +64,7 @@ impl Database {
 
         ensure!(
             res.len() == expr_count,
-            MissingResultSnafu {
+            error::MissingResultSnafu {
                 name: "object_results",
                 expected: expr_count,
                 actual: res.len(),
