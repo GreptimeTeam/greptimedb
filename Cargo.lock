@@ -2624,6 +2624,7 @@ dependencies = [
  "futures",
  "futures-util",
  "metrics",
+ "num-traits",
  "snafu",
  "sql",
  "table",
