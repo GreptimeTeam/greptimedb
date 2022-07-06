@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use snafu::ensure;
-use store_api::logstore::LogStore;
 use store_api::storage::{ReadContext, Region, RegionMeta, WriteContext, WriteResponse};
 use tokio::sync::Mutex;
 
@@ -33,7 +32,10 @@ impl<T> Clone for RegionImpl<T> {
 }
 
 #[async_trait]
-impl<T: LogStore> Region for RegionImpl<T> {
+impl<T> Region for RegionImpl<T>
+where
+    T: Send + Sync + 'static,
+{
     type Error = Error;
     type Meta = RegionMetaImpl;
     type WriteRequest = WriteBatch;

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use datatypes::prelude::*;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::Int64Vector;
+use log_store::fs::log::NoopLogStore;
 use store_api::storage::{
     consts, Chunk, ChunkReader, PutOperation, ReadContext, Region, RegionMeta, ScanRequest,
     SequenceNumber, Snapshot, WriteContext, WriteRequest, WriteResponse,
@@ -12,18 +13,19 @@ use store_api::storage::{
 
 use crate::region::RegionImpl;
 use crate::test_util::{self, descriptor_util::RegionDescBuilder, write_batch_util};
+use crate::wal::Wal;
 use crate::write_batch::{PutData, WriteBatch};
 
 /// Create a new region for read/write test
-fn new_region_for_rw(enable_version_column: bool) -> RegionImpl {
+fn new_region_for_rw(enable_version_column: bool) -> RegionImpl<NoopLogStore> {
     let region_name = "region-rw-0";
     let desc = RegionDescBuilder::new(region_name)
         .enable_version_column(enable_version_column)
         .push_value_column(("v1", LogicalTypeId::Int64, true))
         .build();
     let metadata = desc.try_into().unwrap();
-
-    RegionImpl::new(region_name.to_string(), metadata)
+    let wal_writer = Wal::new(region_name.clone(), Arc::new(NoopLogStore::default()));
+    RegionImpl::new(region_name.to_string(), metadata, wal_writer)
 }
 
 fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
@@ -73,7 +75,7 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
 
 /// Test region without considering version column.
 struct Tester {
-    region: RegionImpl,
+    region: RegionImpl<NoopLogStore>,
     write_ctx: WriteContext,
     read_ctx: ReadContext,
 }

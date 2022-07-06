@@ -63,8 +63,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::value::Value;
-    use log_store::fs::log::LocalFileLogStore;
-    use log_store::test_util::log_store_util;
+    use log_store::fs::log::NoopLogStore;
     use query::catalog::memory;
     use query::catalog::schema::SchemaProvider;
     use query::error::Result as QueryResult;
@@ -142,9 +141,9 @@ mod tests {
                            ('host2', 88.8,  333.3, 1655276558000)
                            "#;
 
-        let table_engine = MitoEngine::<EngineImpl<LocalFileLogStore>>::new(EngineImpl::new(
-            log_store_util::create_log_file_store("greptimedb_test").await,
-        ));
+        let table_engine = MitoEngine::<EngineImpl<NoopLogStore>>::new(EngineImpl::new(Arc::new(
+            NoopLogStore::default(),
+        )));
         let sql_handler = SqlHandler::new(table_engine);
 
         let stmt = query_engine.sql_to_statement(sql).unwrap();
