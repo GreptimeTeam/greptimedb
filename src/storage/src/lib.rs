@@ -3,6 +3,7 @@
 mod chunk;
 mod engine;
 mod error;
+pub mod manifest;
 pub mod memtable;
 pub mod metadata;
 mod region;

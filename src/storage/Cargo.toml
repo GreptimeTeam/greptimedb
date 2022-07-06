@@ -12,8 +12,15 @@ common-error = { path = "../common/error" }
 common-telemetry = { path = "../common/telemetry" }
 datatypes = { path = "../datatypes" }
 futures-util = "0.3"
+lazy_static = "1.4.0"
 object-store = { path = "../object-store" }
+serde = { version = "1.0.136", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.5"
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
-tempdir = "0.3"
+time = "0.3.9"
 tokio = { version = "1.18", features = ["full"] }
+
+[dev-dependencies]
+tempdir = "0.3"

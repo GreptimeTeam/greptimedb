@@ -1,6 +1,6 @@
 use common_base::bytes::{Bytes, StringBytes};
 pub use ordered_float::OrderedFloat;
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::data_type::ConcreteDataType;
 
@@ -12,7 +12,7 @@ pub type OrderedF64 = OrderedFloat<f64>;
 /// Although compare Value with different data type is allowed, it is recommended to only
 /// compare Value with same data type. Comparing Value with different data type may not
 /// behaves as what you expect.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 pub enum Value {
     Null,
 

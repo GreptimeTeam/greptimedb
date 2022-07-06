@@ -1,7 +1,10 @@
 use std::any::Any;
+use std::io::Error as IoError;
+use std::string::FromUtf8Error;
 
 use common_error::prelude::*;
 use datatypes::arrow;
+use serde_json::error::Error as JsonError;
 
 use crate::metadata::Error as MetadataError;
 
@@ -38,6 +41,27 @@ pub enum Error {
         source: arrow::error::ArrowError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Fail to read object from path: {}, err: {}", path, source))]
+    ReadObject { path: String, source: IoError },
+
+    #[snafu(display("Fail to write object into path: {}, err: {}", path, source))]
+    WriteObject { path: String, source: IoError },
+
+    #[snafu(display("Fail to delete object from path: {}, err: {}", path, source))]
+    DeleteObject { path: String, source: IoError },
+
+    #[snafu(display("Fail to list objects in path: {}, err: {}", path, source))]
+    ListObjects { path: String, source: IoError },
+
+    #[snafu(display("Fail to create string from bytes, err: {}", source))]
+    FromUtf8 { source: FromUtf8Error },
+
+    #[snafu(display("Fail to encode object into json , err: {}", source))]
+    EncodeJson { source: JsonError },
+
+    #[snafu(display("Fail to decode object from json , err: {}", source))]
+    DecodeJson { source: JsonError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -50,9 +74,15 @@ impl ErrorExt for Error {
             InvalidRegionDesc { .. } | InvalidInputSchema { .. } | BatchMissingColumn { .. } => {
                 StatusCode::InvalidArguments
             }
-            // TODO(hl): IO related error should be categorized into StorageUnavailable
-            // when https://github.com/GrepTimeTeam/greptimedb/pull/57 is merged.
-            Error::FlushIo { .. } | Error::WriteParquet { .. } => StatusCode::Internal,
+
+            FromUtf8 { .. } | EncodeJson { .. } | DecodeJson { .. } => StatusCode::Unexpected,
+
+            Error::FlushIo { .. }
+            | Error::WriteParquet { .. }
+            | ReadObject { .. }
+            | WriteObject { .. }
+            | ListObjects { .. }
+            | DeleteObject { .. } => StatusCode::StorageUnavailable,
         }
     }
 

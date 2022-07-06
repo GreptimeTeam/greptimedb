@@ -2,14 +2,16 @@ use std::marker::PhantomData;
 
 use arrow::datatypes::DataType as ArrowDataType;
 use paste::paste;
+use serde::{Deserialize, Serialize};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::type_id::LogicalTypeId;
 use crate::types::primitive_traits::Primitive;
 use crate::value::Value;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrimitiveType<T: Primitive> {
+    #[serde(skip)]
     _phantom: PhantomData<T>,
 }
 

@@ -3,10 +3,13 @@ use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::serialize::Serializable;
+use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use store_api::storage::{
     consts, ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyId,
-    ColumnId, ColumnSchema, RegionDescriptor, RegionMeta, RowKeyDescriptor, Schema, SchemaRef,
+    ColumnId, ColumnSchema, RegionDescriptor, RegionId, RegionMeta, RowKeyDescriptor, Schema,
+    SchemaRef,
 };
 
 /// Error for handling metadata.
@@ -27,8 +30,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Implementation of [RegionMeta].
 ///
 /// Holds a snapshot of region metadata.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct RegionMetaImpl {
-    metadata: RegionMetadataRef,
+    pub metadata: RegionMetadataRef,
 }
 
 impl RegionMetaImpl {
@@ -48,8 +52,9 @@ pub type VersionNumber = u32;
 // TODO(yingwen): Make some fields of metadata private.
 
 /// In memory metadata of region.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RegionMetadata {
+    pub id: RegionId,
     /// Schema of the region.
     ///
     /// Holding a [SchemaRef] to allow converting into `SchemaRef`/`arrow::SchemaRef`
@@ -64,15 +69,21 @@ pub struct RegionMetadata {
     pub version: VersionNumber,
 }
 
+impl Serializable for RegionMetadata {
+    fn serialize_to_json(&self) -> datatypes::error::Result<Vec<serde_json::Value>> {
+        unimplemented!();
+    }
+}
+
 pub type RegionMetadataRef = Arc<RegionMetadata>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColumnMetadata {
     pub cf_id: ColumnFamilyId,
     pub desc: ColumnDescriptor,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColumnsMetadata {
     /// All columns, in `(key columns, timestamp, [version,] value columns)` order.
     ///
@@ -82,7 +93,7 @@ pub struct ColumnsMetadata {
     pub name_to_col_index: HashMap<String, usize>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RowKeyMetadata {
     /// Exclusive end index of row key columns.
     row_key_end: usize,
@@ -93,7 +104,7 @@ pub struct RowKeyMetadata {
     pub enable_version_column: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColumnsRowKeyMetadata {
     columns: ColumnsMetadata,
     row_key: RowKeyMetadata,
@@ -121,7 +132,7 @@ impl ColumnsRowKeyMetadata {
 
 pub type ColumnsRowKeyMetadataRef = Arc<ColumnsRowKeyMetadata>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ColumnFamiliesMetadata {
     /// Map column family id to column family metadata.
     id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
@@ -133,7 +144,7 @@ impl ColumnFamiliesMetadata {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ColumnFamilyMetadata {
     /// Column family name.
     pub name: String,
@@ -151,6 +162,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
         // Doesn't set version explicitly here, because this is a new region meta
         // created from descriptor, using initial version is reasonable.
         let mut builder = RegionMetadataBuilder::new()
+            .id(desc.id)?
             .row_key(desc.row_key)?
             .add_column_family(desc.default_cf)?;
         for cf in desc.extra_cfs {
@@ -163,6 +175,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
 
 #[derive(Default)]
 struct RegionMetadataBuilder {
+    id: RegionId,
     columns: Vec<ColumnMetadata>,
     column_schemas: Vec<ColumnSchema>,
     name_to_col_index: HashMap<String, usize>,
@@ -176,6 +189,11 @@ struct RegionMetadataBuilder {
 impl RegionMetadataBuilder {
     fn new() -> RegionMetadataBuilder {
         RegionMetadataBuilder::default()
+    }
+
+    fn id(mut self, id: RegionId) -> Result<Self> {
+        self.id = id;
+        Ok(self)
     }
 
     fn row_key(mut self, key: RowKeyDescriptor) -> Result<Self> {
@@ -246,6 +264,7 @@ impl RegionMetadataBuilder {
         });
 
         RegionMetadata {
+            id: self.id,
             schema,
             columns_row_key,
             column_families: ColumnFamiliesMetadata {
