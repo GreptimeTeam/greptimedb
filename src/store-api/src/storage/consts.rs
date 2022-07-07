@@ -29,6 +29,12 @@ pub const VERSION_COLUMN_NAME: &str = "__version";
 // Names for default column family.
 pub const DEFAULT_CF_NAME: &str = "default";
 
+// Name for reserved column: sequence
+pub const SEQUENCE_COLUMN_NAME: &str = "__sequence";
+
+// Name for reserved column: value_type
+pub const VALUE_TYPE_COLUMN_NAME: &str = "__value_type";
+
 // -----------------------------------------------------------------------------
 
 // ---------- Default options --------------------------------------------------

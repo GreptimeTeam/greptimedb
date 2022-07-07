@@ -4,7 +4,7 @@ use anyhow::Result;
 use common_telemetry::logging;
 use object_store::{
     backend::{fs, s3},
-    util, Object, ObjectMode, ObjectStore, ObjectStreamer,
+    util, DirStreamer, Object, ObjectMode, ObjectStore,
 };
 use tempdir::TempDir;
 
@@ -25,8 +25,7 @@ async fn test_object_crud(store: &ObjectStore) -> Result<()> {
 
     // Get object's Metadata
     let meta = object.metadata().await?;
-    assert!(meta.complete());
-    assert_eq!("test_file", meta.path());
+    assert_eq!("test_file", object.path());
     assert_eq!(ObjectMode::FILE, meta.mode());
     assert_eq!(13, meta.content_length());
 
@@ -50,7 +49,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 
     // List objects
     let o: Object = store.object("/");
-    let obs: ObjectStreamer = o.list().await?;
+    let obs: DirStreamer = o.list().await?;
     let objects = util::collect(obs).await?;
     assert_eq!(3, objects.len());
 
@@ -63,7 +62,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     assert_eq!(1, objects.len());
 
     // Only o2 is exists
-    let o2 = &objects[0];
+    let o2 = &objects[0].clone().into_object();
     let bs = o2.read().await?;
     assert_eq!("Hello, object2!", String::from_utf8(bs)?);
     // Delete o2

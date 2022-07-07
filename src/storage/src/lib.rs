@@ -11,6 +11,7 @@ pub mod sync;
 mod version;
 mod write_batch;
 
+mod flush;
 #[cfg(test)]
 mod test_util;
 
