@@ -27,14 +27,14 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Error while writing columns, source: {}", source))]
+    #[snafu(display("Fail to write columns, source: {}", source))]
     FlushIo {
         source: std::io::Error,
         backtrace: Backtrace,
     },
 
     #[snafu(display("Arrow error, source: {}", source))]
-    Arrow {
+    WriteParquet {
         source: arrow::error::ArrowError,
         backtrace: Backtrace,
     },
@@ -50,7 +50,9 @@ impl ErrorExt for Error {
             InvalidRegionDesc { .. } | InvalidInputSchema { .. } | BatchMissingColumn { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::FlushIo { .. } | Error::Arrow { .. } => StatusCode::Internal,
+            // TODO(hl): IO related error should be categorized into StorageUnavailable
+            // when https://github.com/GrepTimeTeam/greptimedb/pull/57 is merged.
+            Error::FlushIo { .. } | Error::WriteParquet { .. } => StatusCode::Internal,
         }
     }
 
@@ -110,7 +112,10 @@ mod tests {
             Err(ArrowError::ExternalFormat("Lorem ipsum".to_string()))
         }
 
-        let error = throw_arrow_error().context(ArrowSnafu).err().unwrap();
+        let error = throw_arrow_error()
+            .context(WriteParquetSnafu)
+            .err()
+            .unwrap();
         assert_eq!(Internal, error.status_code());
         assert!(error.backtrace_opt().is_some());
     }

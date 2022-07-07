@@ -14,7 +14,7 @@ use snafu::ResultExt;
 use store_api::storage::consts::{SEQUENCE_COLUMN_NAME, VALUE_TYPE_COLUMN_NAME};
 use store_api::storage::SequenceNumber;
 
-use crate::error::{ArrowSnafu, FlushIoSnafu, Result};
+use crate::error::{FlushIoSnafu, Result, WriteParquetSnafu};
 use crate::memtable::{IterContext, MemtableRef, MemtableSchema};
 use crate::metadata::ColumnMetadata;
 
@@ -97,7 +97,7 @@ impl FlushTask {
                 version: Version::V2,
             },
         )
-        .context(ArrowSnafu)?;
+        .context(WriteParquetSnafu)?;
 
         let iter_ctx = IterContext {
             batch_size: 128,
@@ -117,7 +117,7 @@ impl FlushTask {
                     .collect(),
             ))
             .await
-            .context(ArrowSnafu)?;
+            .context(WriteParquetSnafu)?;
         }
 
         if let Some(meta) = extra_meta {
@@ -125,7 +125,7 @@ impl FlushTask {
                 sink.metadata.insert(k, Some(v));
             }
         }
-        sink.close().await.context(ArrowSnafu)
+        sink.close().await.context(WriteParquetSnafu)
     }
 }
 
