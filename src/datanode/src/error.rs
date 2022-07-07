@@ -83,6 +83,12 @@ pub enum Error {
         addr: String,
         source: std::net::AddrParseError,
     },
+
+    #[snafu(display("Failed to create directory {}, source: {}", dir, source))]
+    CreateDir { dir: String, source: std::io::Error },
+
+    #[snafu(display("Failed to open log store, source: {}", source))]
+    OpenLogStore { source: log_store::error::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -92,7 +98,9 @@ impl ErrorExt for Error {
         match self {
             Error::ExecuteSql { source } | Error::NewCatalog { source } => source.status_code(),
             // TODO(yingwen): Further categorize http error.
-            Error::StartHttp { .. } | Error::ParseAddr { .. } => StatusCode::Internal,
+            Error::StartHttp { .. } | Error::ParseAddr { .. } | Error::CreateDir { .. } => {
+                StatusCode::Internal
+            }
             Error::CreateTable { source, .. } => source.status_code(),
             Error::GetTable { source, .. } => source.status_code(),
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
@@ -101,6 +109,7 @@ impl ErrorExt for Error {
             | Error::ParseSqlValue { .. }
             | Error::ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
             Error::Insert { source, .. } => source.status_code(),
+            Error::OpenLogStore { source } => source.status_code(),
         }
     }
 

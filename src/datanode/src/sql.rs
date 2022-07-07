@@ -63,7 +63,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::value::Value;
-    use log_store::fs::log::NoopLogStore;
+    use log_store::fs::noop::NoopLogStore;
     use query::catalog::memory;
     use query::catalog::schema::SchemaProvider;
     use query::error::Result as QueryResult;

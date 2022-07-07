@@ -96,7 +96,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failt to write wal, region: {}, source: {}", region, source))]
+    #[snafu(display("Failed to write wal, region: {}, source: {}", region, source))]
     WriteWal { region: String, source: BoxedError },
 }
 

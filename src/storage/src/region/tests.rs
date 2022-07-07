@@ -3,7 +3,7 @@
 mod read_write;
 
 use datatypes::type_id::LogicalTypeId;
-use log_store::fs::log::NoopLogStore;
+use log_store::fs::noop::NoopLogStore;
 use store_api::storage::consts;
 
 use super::*;
@@ -18,8 +18,8 @@ fn test_new_region() {
         .build();
     let metadata = desc.try_into().unwrap();
 
-    let wal_writer = Wal::new(region_name, Arc::new(NoopLogStore::default()));
-    let region = RegionImpl::new(region_name.to_string(), metadata, wal_writer);
+    let wal = Wal::new(region_name, Arc::new(NoopLogStore::default()));
+    let region = RegionImpl::new(region_name.to_string(), metadata, wal);
 
     let expect_schema = schema_util::new_schema_ref(&[
         ("k1", LogicalTypeId::Int32, false),

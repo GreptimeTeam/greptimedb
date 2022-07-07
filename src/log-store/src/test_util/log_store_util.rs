@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use tempdir::TempDir;
 
 use crate::fs::{config::LogConfig, log::LocalFileLogStore};
 
 /// Create a tmp directory for write log, used for test.
-pub async fn create_log_file_store(dir: &str) -> Arc<LocalFileLogStore> {
+pub async fn create_tmp_local_file_log_store(dir: &str) -> (LocalFileLogStore, TempDir) {
     let dir = TempDir::new(dir).unwrap();
     let cfg = LogConfig {
         append_buffer_size: 128,
@@ -13,5 +11,5 @@ pub async fn create_log_file_store(dir: &str) -> Arc<LocalFileLogStore> {
         log_file_dir: dir.path().to_str().unwrap().to_string(),
     };
 
-    Arc::new(LocalFileLogStore::open(&cfg).await.unwrap())
+    (LocalFileLogStore::open(&cfg).await.unwrap(), dir)
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use datatypes::prelude::*;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::Int64Vector;
-use log_store::fs::log::NoopLogStore;
+use log_store::fs::noop::NoopLogStore;
 use store_api::storage::{
     consts, Chunk, ChunkReader, PutOperation, ReadContext, Region, RegionMeta, ScanRequest,
     SequenceNumber, Snapshot, WriteContext, WriteRequest, WriteResponse,
@@ -24,8 +24,8 @@ fn new_region_for_rw(enable_version_column: bool) -> RegionImpl<NoopLogStore> {
         .push_value_column(("v1", LogicalTypeId::Int64, true))
         .build();
     let metadata = desc.try_into().unwrap();
-    let wal_writer = Wal::new(region_name, Arc::new(NoopLogStore::default()));
-    RegionImpl::new(region_name.to_string(), metadata, wal_writer)
+    let wal = Wal::new(region_name, Arc::new(NoopLogStore::default()));
+    RegionImpl::new(region_name.to_string(), metadata, wal)
 }
 
 fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {

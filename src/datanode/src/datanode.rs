@@ -9,13 +9,13 @@ use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
 #[derive(Clone, Debug)]
-pub struct GreptimeOptions {
+pub struct DatanodeOptions {
     pub http_addr: String,
     pub rpc_addr: String,
     pub wal_dir: String,
 }
 
-impl Default for GreptimeOptions {
+impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
             http_addr: Default::default(),
@@ -27,16 +27,16 @@ impl Default for GreptimeOptions {
 
 /// Datanode service.
 pub struct Datanode {
-    opts: GreptimeOptions,
+    opts: DatanodeOptions,
     services: Services,
     _catalog_list: CatalogListRef,
     instance: InstanceRef,
 }
 
 impl Datanode {
-    pub async fn new(opts: GreptimeOptions) -> Result<Datanode> {
+    pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
         let catalog_list = memory::new_memory_catalog_list().context(NewCatalogSnafu)?;
-        let instance = Arc::new(Instance::new(&opts, catalog_list.clone()).await);
+        let instance = Arc::new(Instance::new(&opts, catalog_list.clone()).await?);
 
         Ok(Self {
             opts,

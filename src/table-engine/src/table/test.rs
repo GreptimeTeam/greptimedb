@@ -3,9 +3,10 @@ use std::sync::Arc;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use datatypes::schema::{ColumnSchema, Schema};
-use log_store::fs::log::NoopLogStore;
+use log_store::fs::noop::NoopLogStore;
 use storage::EngineImpl;
-use table::engine::{EngineContext, TableEngine};
+use table::engine::EngineContext;
+use table::engine::TableEngine;
 use table::requests::CreateTableRequest;
 use table::TableRef;
 

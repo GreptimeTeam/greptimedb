@@ -44,10 +44,8 @@ mod tests {
 
     use metrics::counter;
     use query::catalog::memory;
-    use tempdir::TempDir;
 
     use super::*;
-    use crate::datanode::GreptimeOptions;
     use crate::instance::Instance;
     use crate::server::http::JsonOutput;
 
@@ -62,12 +60,11 @@ mod tests {
 
     async fn create_extension() -> Extension<InstanceRef> {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
-        let tmp_dir = TempDir::new("/tmp/greptimedb_test").unwrap();
-        let opts = GreptimeOptions {
-            wal_dir: tmp_dir.path().to_str().unwrap().to_string(),
-            ..Default::default()
-        };
-        let instance = Arc::new(Instance::new(&opts, catalog_list).await);
+        let instance = Arc::new(
+            Instance::new(&Default::default(), catalog_list)
+                .await
+                .unwrap(),
+        );
         Extension(instance)
     }
 

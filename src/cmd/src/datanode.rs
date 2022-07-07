@@ -1,5 +1,5 @@
 use clap::Parser;
-use datanode::datanode::{Datanode, GreptimeOptions};
+use datanode::datanode::{Datanode, DatanodeOptions};
 use snafu::ResultExt;
 
 use crate::error::{Result, StartDatanodeSnafu};
@@ -48,9 +48,9 @@ impl StartCommand {
     }
 }
 
-impl From<StartCommand> for GreptimeOptions {
+impl From<StartCommand> for DatanodeOptions {
     fn from(cmd: StartCommand) -> Self {
-        GreptimeOptions {
+        DatanodeOptions {
             http_addr: cmd.http_addr,
             rpc_addr: cmd.rpc_addr,
             ..Default::default()

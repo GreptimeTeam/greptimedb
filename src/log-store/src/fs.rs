@@ -9,6 +9,7 @@ mod file_name;
 mod index;
 pub mod log;
 mod namespace;
+pub mod noop;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct AppendResponseImpl {
