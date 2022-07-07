@@ -16,7 +16,7 @@ pub trait MetaAction: Serialize + DeserializeOwned {
     type MetadataId: MetadataId;
 
     /// Returns the metadata id of the action
-    fn metadata_id(&self) -> &Self::MetadataId;
+    fn metadata_id(&self) -> Self::MetadataId;
 }
 
 /// Manifest service

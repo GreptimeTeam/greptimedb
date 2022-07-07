@@ -132,7 +132,7 @@ impl ErrorExt for Error {
 #[cfg(test)]
 mod tests {
 
-    use common_error::prelude::StatusCode::Internal;
+    use common_error::prelude::StatusCode::*;
     use datatypes::arrow::error::ArrowError;
     use snafu::GenerateImplicitData;
 
@@ -166,7 +166,7 @@ mod tests {
         }
 
         let error = throw_io_error().context(FlushIoSnafu).err().unwrap();
-        assert_eq!(StatusCode::Internal, error.status_code());
+        assert_eq!(StatusCode::StorageUnavailable, error.status_code());
         assert!(error.backtrace_opt().is_some());
     }
 
@@ -180,7 +180,7 @@ mod tests {
             .context(WriteParquetSnafu)
             .err()
             .unwrap();
-        assert_eq!(Internal, error.status_code());
+        assert_eq!(StorageUnavailable, error.status_code());
         assert!(error.backtrace_opt().is_some());
     }
 }

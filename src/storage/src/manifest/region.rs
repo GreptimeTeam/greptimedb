@@ -41,7 +41,7 @@ impl Manifest for RegionManifest {
         let current_version = self.inner.next_version();
 
         let start_bound = if current_version == MIN_VERSION {
-            // no actions have ever saved
+            // No actions have ever saved
             MIN_VERSION
         } else {
             current_version - 1

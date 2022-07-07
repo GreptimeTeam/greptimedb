@@ -60,11 +60,11 @@ impl Metadata for RegionManifestData {}
 impl MetaAction for RegionMetaAction {
     type MetadataId = RegionId;
 
-    fn metadata_id(&self) -> &RegionId {
+    fn metadata_id(&self) -> RegionId {
         match self {
-            RegionMetaAction::Change(c) => &c.metadata.id,
-            RegionMetaAction::Remove(r) => &r.region_id,
-            RegionMetaAction::Edit(e) => &e.region_id,
+            RegionMetaAction::Change(c) => c.metadata.id,
+            RegionMetaAction::Remove(r) => r.region_id,
+            RegionMetaAction::Edit(e) => e.region_id,
         }
     }
 }
