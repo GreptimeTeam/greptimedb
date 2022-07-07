@@ -1,10 +1,11 @@
 use std::any::Any;
 use std::io::Error as IoError;
-use std::string::FromUtf8Error;
+use std::str::Utf8Error;
 
 use common_error::prelude::*;
 use datatypes::arrow;
 use serde_json::error::Error as JsonError;
+use store_api::manifest::Version;
 
 use crate::metadata::Error as MetadataError;
 
@@ -42,26 +43,58 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Fail to read object from path: {}, err: {}", path, source))]
-    ReadObject { path: String, source: IoError },
+    #[snafu(display("Fail to read object from path: {}, source: {}", path, source))]
+    ReadObject {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
 
-    #[snafu(display("Fail to write object into path: {}, err: {}", path, source))]
-    WriteObject { path: String, source: IoError },
+    #[snafu(display("Fail to write object into path: {}, source: {}", path, source))]
+    WriteObject {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
 
-    #[snafu(display("Fail to delete object from path: {}, err: {}", path, source))]
-    DeleteObject { path: String, source: IoError },
+    #[snafu(display("Fail to delete object from path: {}, source: {}", path, source))]
+    DeleteObject {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
 
-    #[snafu(display("Fail to list objects in path: {}, err: {}", path, source))]
-    ListObjects { path: String, source: IoError },
+    #[snafu(display("Fail to list objects in path: {}, source: {}", path, source))]
+    ListObjects {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
 
-    #[snafu(display("Fail to create string from bytes, err: {}", source))]
-    FromUtf8 { source: FromUtf8Error },
+    #[snafu(display("Fail to create str from bytes, source: {}", source))]
+    Utf8 {
+        backtrace: Backtrace,
+        source: Utf8Error,
+    },
 
-    #[snafu(display("Fail to encode object into json , err: {}", source))]
-    EncodeJson { source: JsonError },
+    #[snafu(display("Fail to encode object into json , source: {}", source))]
+    EncodeJson {
+        backtrace: Backtrace,
+        source: JsonError,
+    },
 
-    #[snafu(display("Fail to decode object from json , err: {}", source))]
-    DecodeJson { source: JsonError },
+    #[snafu(display("Fail to decode object from json , source: {}", source))]
+    DecodeJson {
+        backtrace: Backtrace,
+        source: JsonError,
+    },
+
+    #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
+    InvalidScanIndex {
+        start: Version,
+        end: Version,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -71,11 +104,12 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            InvalidRegionDesc { .. } | InvalidInputSchema { .. } | BatchMissingColumn { .. } => {
-                StatusCode::InvalidArguments
-            }
+            InvalidScanIndex { .. }
+            | InvalidRegionDesc { .. }
+            | InvalidInputSchema { .. }
+            | BatchMissingColumn { .. } => StatusCode::InvalidArguments,
 
-            FromUtf8 { .. } | EncodeJson { .. } | DecodeJson { .. } => StatusCode::Unexpected,
+            Utf8 { .. } | EncodeJson { .. } | DecodeJson { .. } => StatusCode::Unexpected,
 
             Error::FlushIo { .. }
             | Error::WriteParquet { .. }

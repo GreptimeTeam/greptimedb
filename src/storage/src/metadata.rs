@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::serialize::Serializable;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use store_api::storage::{
@@ -32,7 +31,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Holds a snapshot of region metadata.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct RegionMetaImpl {
-    pub metadata: RegionMetadataRef,
+    metadata: RegionMetadataRef,
 }
 
 impl RegionMetaImpl {
@@ -67,12 +66,6 @@ pub struct RegionMetadata {
     /// Version of the metadata. Version is set to zero initially and bumped once the
     /// metadata have been altered.
     pub version: VersionNumber,
-}
-
-impl Serializable for RegionMetadata {
-    fn serialize_to_json(&self) -> datatypes::error::Result<Vec<serde_json::Value>> {
-        unimplemented!();
-    }
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
@@ -162,7 +155,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
         // Doesn't set version explicitly here, because this is a new region meta
         // created from descriptor, using initial version is reasonable.
         let mut builder = RegionMetadataBuilder::new()
-            .id(desc.id)?
+            .id(desc.id)
             .row_key(desc.row_key)?
             .add_column_family(desc.default_cf)?;
         for cf in desc.extra_cfs {
@@ -191,9 +184,9 @@ impl RegionMetadataBuilder {
         RegionMetadataBuilder::default()
     }
 
-    fn id(mut self, id: RegionId) -> Result<Self> {
+    fn id(mut self, id: RegionId) -> Self {
         self.id = id;
-        Ok(self)
+        self
     }
 
     fn row_key(mut self, key: RowKeyDescriptor) -> Result<Self> {

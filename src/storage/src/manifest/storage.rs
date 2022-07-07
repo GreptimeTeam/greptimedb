@@ -7,16 +7,16 @@ use lazy_static::lazy_static;
 use object_store::{util, DirEntry, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
-use store_api::manifest::{ManifestLogStorage, MetaLogIterator, Version};
+use snafu::{ensure, ResultExt};
+use store_api::manifest::{LogIterator, ManifestLogStorage, Version};
 
 use crate::error::{
-    DecodeJsonSnafu, DeleteObjectSnafu, EncodeJsonSnafu, Error, FromUtf8Snafu, ListObjectsSnafu,
-    ReadObjectSnafu, Result, WriteObjectSnafu,
+    DecodeJsonSnafu, DeleteObjectSnafu, EncodeJsonSnafu, Error, InvalidScanIndexSnafu,
+    ListObjectsSnafu, ReadObjectSnafu, Result, Utf8Snafu, WriteObjectSnafu,
 };
 
 lazy_static! {
-    static ref RE: Regex = Regex::new("\\d+\\.json").unwrap();
+    static ref RE: Regex = Regex::new("^\\d+\\.json$").unwrap();
 }
 
 const LAST_CHECKPOINT_FILE: &str = "_last_checkpoint";
@@ -37,15 +37,14 @@ pub fn checkpoint_file(version: Version) -> String {
 /// Panics if the file path is not a valid delta file.
 #[inline]
 pub fn delta_version(path: &str) -> Version {
-    let split: Vec<_> = path.split('.').collect();
-    split[0]
-        .parse()
+    let s = path.split('.').next().unwrap();
+    s.parse()
         .unwrap_or_else(|_| panic!("Invalid delta file: {}", path))
 }
 
 #[inline]
-pub fn is_delta_file(path: &str) -> bool {
-    RE.is_match(path)
+pub fn is_delta_file(file_name: &str) -> bool {
+    RE.is_match(file_name)
 }
 
 pub struct ObjectStoreLogIterator {
@@ -53,7 +52,7 @@ pub struct ObjectStoreLogIterator {
 }
 
 #[async_trait]
-impl MetaLogIterator for ObjectStoreLogIterator {
+impl LogIterator for ObjectStoreLogIterator {
     type Error = Error;
 
     async fn next_log(&mut self) -> Result<Option<(Version, Vec<u8>)>> {
@@ -102,19 +101,33 @@ struct CheckpointMetadata {
     pub extend_metadata: Option<HashMap<String, String>>,
 }
 
+impl CheckpointMetadata {
+    fn encode(&self) -> Result<impl AsRef<[u8]>> {
+        serde_json::to_string(self).context(EncodeJsonSnafu)
+    }
+
+    fn decode(bs: &[u8]) -> Result<Self> {
+        let data = std::str::from_utf8(bs).context(Utf8Snafu)?;
+
+        serde_json::from_str(data).context(DecodeJsonSnafu)
+    }
+}
+
 #[async_trait]
 impl ManifestLogStorage for ManifestObjectStore {
     type Error = Error;
     type Iter = ObjectStoreLogIterator;
 
     async fn scan(&self, start: Version, end: Version) -> Result<ObjectStoreLogIterator> {
-        let dir = self.object_store.object(&self.path);
+        ensure!(start <= end, InvalidScanIndexSnafu { start, end });
 
-        if !dir
+        let dir = self.object_store.object(&self.path);
+        let dir_exists = dir
             .is_exist()
             .await
-            .context(ReadObjectSnafu { path: &self.path })?
-        {
+            .context(ReadObjectSnafu { path: &self.path })?;
+
+        if !dir_exists {
             return Ok(ObjectStoreLogIterator {
                 iter: Box::new(Vec::default().into_iter()),
             });
@@ -134,7 +147,7 @@ impl ManifestLogStorage for ManifestObjectStore {
             .filter(|(v, _)| *v >= start && *v < end)
             .collect();
 
-        entries.sort_by(|(v1, _), (v2, _)| v1.partial_cmp(v2).unwrap());
+        entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
 
         Ok(ObjectStoreLogIterator {
             iter: Box::new(entries.into_iter()),
@@ -188,12 +201,10 @@ impl ManifestLogStorage for ManifestObjectStore {
             checkpoint_metadata
         );
 
-        last_checkpoint
-            .write(serde_json::to_string(&checkpoint_metadata).context(EncodeJsonSnafu)?)
-            .await
-            .context(WriteObjectSnafu {
-                path: last_checkpoint.path(),
-            })?;
+        let bs = checkpoint_metadata.encode()?;
+        last_checkpoint.write(bs).await.context(WriteObjectSnafu {
+            path: last_checkpoint.path(),
+        })?;
 
         Ok(())
     }
@@ -203,17 +214,16 @@ impl ManifestLogStorage for ManifestObjectStore {
             .object_store
             .object(&format!("{}/{}", self.path, LAST_CHECKPOINT_FILE));
 
-        if last_checkpoint.is_exist().await.context(ReadObjectSnafu {
+        let checkpoint_exists = last_checkpoint.is_exist().await.context(ReadObjectSnafu {
             path: last_checkpoint.path(),
-        })? {
-            let data =
-                String::from_utf8(last_checkpoint.read().await.context(ReadObjectSnafu {
-                    path: last_checkpoint.path(),
-                })?)
-                .context(FromUtf8Snafu)?;
+        })?;
 
-            let checkpoint_metadata: CheckpointMetadata =
-                serde_json::from_str(&data).context(DecodeJsonSnafu)?;
+        if checkpoint_exists {
+            let bytes = last_checkpoint.read().await.context(ReadObjectSnafu {
+                path: last_checkpoint.path(),
+            })?;
+
+            let checkpoint_metadata = CheckpointMetadata::decode(&bytes)?;
 
             logging::debug!(
                 "Load checkpoint in path: {},  metadata: {:?}",

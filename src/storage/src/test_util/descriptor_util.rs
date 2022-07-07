@@ -1,13 +1,14 @@
 use datatypes::prelude::ConcreteDataType;
 use store_api::storage::{
     ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder, ColumnId,
-    RegionDescriptor, RowKeyDescriptorBuilder,
+    RegionDescriptor, RegionId, RowKeyDescriptorBuilder,
 };
 
 use crate::test_util::{self, schema_util::ColumnDef};
 
 /// A RegionDescriptor builder for test.
 pub struct RegionDescBuilder {
+    id: RegionId,
     name: String,
     last_column_id: ColumnId,
     key_builder: RowKeyDescriptorBuilder,
@@ -27,11 +28,17 @@ impl RegionDescBuilder {
         );
 
         Self {
+            id: 0,
             name: name.into(),
             last_column_id: 2,
             key_builder,
             default_cf_builder: ColumnFamilyDescriptorBuilder::new(),
         }
+    }
+
+    pub fn id(mut self, id: RegionId) -> Self {
+        self.id = id;
+        self
     }
 
     // This will reset the row key builder, so should be called before `push_key_column()`
@@ -61,7 +68,7 @@ impl RegionDescBuilder {
 
     pub fn build(self) -> RegionDescriptor {
         RegionDescriptor {
-            id: 0,
+            id: self.id,
             name: self.name,
             row_key: self.key_builder.build(),
             default_cf: self.default_cf_builder.build(),

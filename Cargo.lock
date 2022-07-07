@@ -3262,6 +3262,7 @@ dependencies = [
  "common-error",
  "datatypes",
  "futures",
+ "object-store",
  "serde",
  "snafu",
  "tokio",
