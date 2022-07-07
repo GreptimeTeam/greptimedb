@@ -1,13 +1,8 @@
-use std::path::PathBuf;
-
-use datatypes::arrow::array::{Array, Int64Array, UInt64Array, UInt8Array};
-use datatypes::arrow::io::parquet::read::FileReader;
 use datatypes::prelude::*;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64VectorBuilder, UInt64VectorBuilder};
 
 use super::*;
-use crate::flush_task::{Backend, FlushConfig, FlushTask};
 use crate::metadata::RegionMetadata;
 use crate::test_util::descriptor_util::RegionDescBuilder;
 
@@ -17,7 +12,7 @@ const MEMTABLE_ID: MemtableId = 1;
 // Schema for testing memtable:
 // - key: Int64(timestamp), UInt64(version),
 // - value: UInt64
-fn schema_for_test() -> MemtableSchema {
+pub fn schema_for_test() -> MemtableSchema {
     // Just build a region desc and use its columns_row_key metadata.
     let desc = RegionDescBuilder::new("test")
         .push_value_column(("v1", LogicalTypeId::UInt64, true))
@@ -78,7 +73,7 @@ fn kvs_for_test(
     kvs_for_test_with_index(sequence, value_type, 0, keys, values)
 }
 
-fn write_kvs(
+pub fn write_kvs(
     memtable: &dyn Memtable,
     sequence: SequenceNumber,
     value_type: ValueType,
@@ -477,74 +472,3 @@ fn test_sequence_visibility() {
 }
 
 // TODO(yingwen): Test key overwrite in same batch.
-
-#[tokio::test]
-async fn test_flush() {
-    let tester = MemtableTester::default();
-
-    let memtable = tester.new_memtables().get(0).unwrap().clone();
-
-    write_kvs(
-        &*memtable,
-        10, // sequence
-        ValueType::Put,
-        &[
-            (1000, 1),
-            (1000, 2),
-            (2002, 1),
-            (2003, 1),
-            (2003, 5),
-            (1001, 1),
-        ], // keys
-        &[Some(1), Some(2), Some(7), Some(8), Some(9), Some(3)], // values
-    );
-
-    let config = FlushConfig::default();
-    let sst_dir = match &config.backend {
-        Backend::Fs { dir } => dir.clone(),
-    };
-
-    let flusher = FlushTask::try_new(config).await.unwrap();
-    let sst_file_name = "test-flush.parquet";
-
-    flusher
-        .write_rows(&memtable, sst_file_name, None)
-        .await
-        .unwrap();
-
-    // verify parquet file
-
-    let reader = std::fs::File::open(PathBuf::from(sst_dir).join(sst_file_name)).unwrap();
-    let mut file_reader = FileReader::try_new(reader, None, Some(128), None, None).unwrap();
-
-    // chunk schema: timestamp, __version, __sequence, __value_type, v1
-    let chunk = file_reader.next().unwrap().unwrap();
-    assert_eq!(5, chunk.arrays().len());
-
-    assert_eq!(
-        Arc::new(Int64Array::from_slice(&[
-            1000, 1000, 1001, 2002, 2003, 2003
-        ])) as Arc<dyn Array>,
-        chunk.arrays()[0]
-    );
-
-    assert_eq!(
-        Arc::new(UInt64Array::from_slice(&[1, 2, 1, 1, 1, 5])) as Arc<dyn Array>,
-        chunk.arrays()[1]
-    );
-
-    assert_eq!(
-        Arc::new(UInt64Array::from_slice(&[10, 10, 10, 10, 10, 10])) as Arc<dyn Array>,
-        chunk.arrays()[2]
-    );
-
-    assert_eq!(
-        Arc::new(UInt8Array::from_slice(&[0, 0, 0, 0, 0, 0])) as Arc<dyn Array>,
-        chunk.arrays()[3]
-    );
-
-    assert_eq!(
-        Arc::new(UInt64Array::from_slice(&[1, 2, 3, 7, 8, 9])) as Arc<dyn Array>,
-        chunk.arrays()[4]
-    );
-}

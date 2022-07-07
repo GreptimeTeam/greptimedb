@@ -7,10 +7,11 @@ use log_store::fs::noop::NoopLogStore;
 use store_api::storage::consts;
 
 use super::*;
+use crate::sst::FsAccessLayer;
 use crate::test_util::{self, descriptor_util::RegionDescBuilder, schema_util};
 
-#[test]
-fn test_new_region() {
+#[tokio::test]
+async fn test_new_region() {
     let region_name = "region-0";
     let desc = RegionDescBuilder::new(region_name)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
@@ -19,7 +20,9 @@ fn test_new_region() {
     let metadata = desc.try_into().unwrap();
 
     let wal = Wal::new(region_name, Arc::new(NoopLogStore::default()));
-    let region = RegionImpl::new(region_name.to_string(), metadata, wal);
+    // TODO(yingwen): temp dir
+    let sst_layer = Arc::new(FsAccessLayer::new("/tmp/test").await.unwrap());
+    let region = RegionImpl::new(region_name.to_string(), metadata, wal, sst_layer);
 
     let expect_schema = schema_util::new_schema_ref(&[
         ("k1", LogicalTypeId::Int32, false),

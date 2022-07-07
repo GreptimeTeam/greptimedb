@@ -2,7 +2,7 @@ mod btree;
 mod inserter;
 mod schema;
 #[cfg(test)]
-mod tests;
+pub mod tests;
 mod version;
 
 use std::sync::Arc;

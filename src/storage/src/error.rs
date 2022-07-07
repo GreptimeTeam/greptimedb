@@ -37,6 +37,13 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Failed to init backend, source: {}", source))]
+    InitBackend {
+        dir: String,
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to write parquet file, source: {}", source))]
     WriteParquet {
         source: arrow::error::ArrowError,
@@ -123,6 +130,7 @@ impl ErrorExt for Error {
             }
 
             FlushIo { .. }
+            | InitBackend { .. }
             | WriteParquet { .. }
             | ReadObject { .. }
             | WriteObject { .. }

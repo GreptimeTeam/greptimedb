@@ -5,7 +5,6 @@ mod chunk;
 mod engine;
 mod error;
 mod flush;
-mod flush_task;
 pub mod manifest;
 pub mod memtable;
 pub mod metadata;

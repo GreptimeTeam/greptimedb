@@ -15,7 +15,7 @@ use crate::memtable::{DefaultMemtableBuilder, MemtableVersion};
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{RegionWriter, RegionWriterRef, WriterContext};
 use crate::snapshot::SnapshotImpl;
-use crate::sst::{AccessLayerRef, FsAccessLayer};
+use crate::sst::AccessLayerRef;
 use crate::version::{VersionControl, VersionControlRef};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
@@ -61,7 +61,12 @@ where
 }
 
 impl<S> RegionImpl<S> {
-    pub fn new(name: String, metadata: RegionMetadata, _wal: Wal<S>) -> RegionImpl<S> {
+    pub fn new(
+        name: String,
+        metadata: RegionMetadata,
+        wal: Wal<S>,
+        sst_layer: AccessLayerRef,
+    ) -> RegionImpl<S> {
         let memtable_builder = Arc::new(DefaultMemtableBuilder {});
         let memtable_version = MemtableVersion::new();
         // TODO(yingwen): Pass flush scheduler to `RegionImpl::new`.
@@ -75,10 +80,10 @@ impl<S> RegionImpl<S> {
                 version_control: Arc::new(version_control),
             }),
             writer: Arc::new(RegionWriter::new(memtable_builder)),
-            _wal,
+            _wal: wal,
             flush_strategy: Arc::new(SizeBasedStrategy),
             flush_scheduler,
-            sst_layer: Arc::new(FsAccessLayer {}),
+            sst_layer,
         });
 
         RegionImpl { inner }
