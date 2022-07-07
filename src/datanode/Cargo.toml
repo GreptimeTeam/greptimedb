@@ -10,7 +10,6 @@ async-trait = "0.1"
 axum = "0.5"
 axum-macros = "0.2"
 common-error = { path = "../common/error" }
-common-options = { path = "../common/options" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 datatypes = { path = "../datatypes"}
@@ -33,6 +32,7 @@ tower-http = { version ="0.3", features = ["full"]}
 [dev-dependencies]
 axum-test-helper = "0.1"
 common-query = { path = "../common/query" }
+tempdir = "0.3"
 
 [dev-dependencies.arrow]
 package = "arrow2"

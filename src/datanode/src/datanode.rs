@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use common_options::GreptimeOptions;
 use query::catalog::memory;
 use query::catalog::CatalogListRef;
 use snafu::ResultExt;
@@ -8,6 +7,23 @@ use snafu::ResultExt;
 use crate::error::{NewCatalogSnafu, Result};
 use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
+
+#[derive(Clone, Debug)]
+pub struct GreptimeOptions {
+    pub http_addr: String,
+    pub rpc_addr: String,
+    pub wal_dir: String,
+}
+
+impl Default for GreptimeOptions {
+    fn default() -> Self {
+        Self {
+            http_addr: Default::default(),
+            rpc_addr: Default::default(),
+            wal_dir: "/tmp/wal".to_string(),
+        }
+    }
+}
 
 /// Datanode service.
 pub struct Datanode {

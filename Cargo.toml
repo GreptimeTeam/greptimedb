@@ -3,7 +3,6 @@ members = [
     "src/common/base",
     "src/common/error",
     "src/common/function",
-    "src/common/options",
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",

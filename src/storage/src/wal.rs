@@ -6,14 +6,12 @@ use store_api::logstore::{entry::Entry, namespace::Namespace, AppendResponse, Lo
 
 use crate::error::{Result, WriteWalSnafu};
 
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct Wal<T> {
     region: String,
     writer: Arc<T>,
 }
 
-#[allow(dead_code)]
 impl<T> Wal<T> {
     pub fn new(region: impl Into<String>, writer: Arc<T>) -> Self {
         Self {
@@ -24,7 +22,6 @@ impl<T> Wal<T> {
 }
 
 impl<T: LogStore> Wal<T> {
-    #[allow(dead_code)]
     pub async fn write_wal(&self, bytes: &[u8]) -> Result<(u64, usize)> {
         // TODO(jiachun): region id
         let ns = T::Namespace::new(&self.region, 0);

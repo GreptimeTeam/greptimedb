@@ -1,6 +1,5 @@
 use clap::Parser;
-use common_options::GreptimeOptions;
-use datanode::datanode::Datanode;
+use datanode::datanode::{Datanode, GreptimeOptions};
 use snafu::ResultExt;
 
 use crate::error::{Result, StartDatanodeSnafu};
@@ -36,8 +35,6 @@ struct StartCommand {
     http_addr: String,
     #[clap(long, default_value = "0.0.0.0:3001")]
     rpc_addr: String,
-    #[clap(long, default_value = "./greptimedb_wal")]
-    wal_dir: String,
 }
 
 impl StartCommand {
@@ -56,7 +53,7 @@ impl From<StartCommand> for GreptimeOptions {
         GreptimeOptions {
             http_addr: cmd.http_addr,
             rpc_addr: cmd.rpc_addr,
-            wal_dir: cmd.wal_dir,
+            ..Default::default()
         }
     }
 }

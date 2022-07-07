@@ -19,11 +19,11 @@ use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
-pub struct RegionImpl<T> {
-    inner: Arc<RegionInner<T>>,
+pub struct RegionImpl<W> {
+    inner: Arc<RegionInner<W>>,
 }
 
-impl<T> Clone for RegionImpl<T> {
+impl<W> Clone for RegionImpl<W> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -32,9 +32,9 @@ impl<T> Clone for RegionImpl<T> {
 }
 
 #[async_trait]
-impl<T> Region for RegionImpl<T>
+impl<W> Region for RegionImpl<W>
 where
-    T: Send + Sync + 'static,
+    W: Send + Sync + 'static,
 {
     type Error = Error;
     type Meta = RegionMetaImpl;
@@ -58,8 +58,8 @@ where
     }
 }
 
-impl<T> RegionImpl<T> {
-    pub fn new(name: String, metadata: RegionMetadata, wal_writer: Wal<T>) -> RegionImpl<T> {
+impl<W> RegionImpl<W> {
+    pub fn new(name: String, metadata: RegionMetadata, _wal_writer: Wal<W>) -> RegionImpl<W> {
         let memtable_builder = Arc::new(DefaultMemtableBuilder {});
         let memtable_schema = MemtableSchema::new(metadata.columns_row_key.clone());
         let mem = memtable_builder.build(memtable_schema);
@@ -70,7 +70,7 @@ impl<T> RegionImpl<T> {
             name,
             version: Arc::new(version),
             writer: Mutex::new(RegionWriter::new(memtable_builder)),
-            wal_writer,
+            _wal_writer,
         });
 
         RegionImpl { inner }
@@ -83,15 +83,14 @@ impl<T> RegionImpl<T> {
     }
 }
 
-#[allow(dead_code)]
-struct RegionInner<T> {
+struct RegionInner<W> {
     name: String,
     version: VersionControlRef,
     writer: Mutex<RegionWriter>,
-    wal_writer: Wal<T>,
+    _wal_writer: Wal<W>,
 }
 
-impl<T> RegionInner<T> {
+impl<W> RegionInner<W> {
     fn in_memory_metadata(&self) -> RegionMetaImpl {
         let metadata = self.version.metadata();
 

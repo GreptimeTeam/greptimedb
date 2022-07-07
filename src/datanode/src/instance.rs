@@ -1,6 +1,6 @@
 use std::{fs, path, sync::Arc};
 
-use common_options::GreptimeOptions;
+use common_telemetry::logging::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
@@ -14,6 +14,7 @@ use table::engine::TableEngine;
 use table::requests::CreateTableRequest;
 use table_engine::engine::MitoEngine;
 
+use crate::datanode::GreptimeOptions;
 use crate::error::{CreateTableSnafu, ExecuteSqlSnafu, Result};
 use crate::sql::SqlHandler;
 
@@ -39,6 +40,8 @@ impl Instance {
             .unwrap_or_else(|| panic!("Invalid wal directory: {}", &opts.wal_dir));
         let _ = fs::create_dir_all(wal_dir)
             .unwrap_or_else(|_| panic!("Couldn't create wal directory: {}", &opts.wal_dir));
+
+        info!("The wal directory is: {}", &opts.wal_dir);
         // TODO(jiachun): log store options
         let log_config = LogConfig {
             append_buffer_size: 128,
@@ -139,14 +142,17 @@ mod tests {
     use arrow::array::UInt64Array;
     use common_recordbatch::util;
     use query::catalog::memory;
+    use tempdir::TempDir;
 
     use super::*;
+    use crate::datanode::GreptimeOptions;
 
     #[tokio::test]
     async fn test_execute_insert() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let tmp_dir = TempDir::new("/tmp/greptimedb_test").unwrap();
         let opts = GreptimeOptions {
-            wal_dir: "/tmp/greptimedb".to_string(),
+            wal_dir: tmp_dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         };
         let instance = Instance::new(&opts, catalog_list).await;
@@ -168,8 +174,9 @@ mod tests {
     #[tokio::test]
     async fn test_execute_query() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let tmp_dir = TempDir::new("/tmp/greptimedb_test").unwrap();
         let opts = GreptimeOptions {
-            wal_dir: "/tmp/greptimedb".to_string(),
+            wal_dir: tmp_dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         };
         let instance = Instance::new(&opts, catalog_list).await;

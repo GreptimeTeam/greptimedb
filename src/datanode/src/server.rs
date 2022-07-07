@@ -1,9 +1,9 @@
 pub mod grpc;
 pub mod http;
 
-use common_options::GreptimeOptions;
 use http::HttpServer;
 
+use crate::datanode::GreptimeOptions;
 use crate::error::Result;
 use crate::instance::InstanceRef;
 

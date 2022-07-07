@@ -5,14 +5,15 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
-use common_options::GreptimeOptions;
-use datanode::{instance::Instance, server::http::HttpServer};
+use datanode::{datanode::GreptimeOptions, instance::Instance, server::http::HttpServer};
 use query::catalog::memory;
+use tempdir::TempDir;
 
 async fn make_test_app() -> Router {
     let catalog_list = memory::new_memory_catalog_list().unwrap();
+    let tmp_dir = TempDir::new("/tmp/greptimedb_test").unwrap();
     let opts = GreptimeOptions {
-        wal_dir: "/tmp/greptimedb".to_string(),
+        wal_dir: tmp_dir.path().to_str().unwrap().to_string(),
         ..Default::default()
     };
     let instance = Arc::new(Instance::new(&opts, catalog_list).await);

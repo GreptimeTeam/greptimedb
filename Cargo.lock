@@ -566,7 +566,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "common-error",
- "common-options",
  "common-telemetry",
  "datanode",
  "snafu",
@@ -616,10 +615,6 @@ dependencies = [
  "paste",
  "snafu",
 ]
-
-[[package]]
-name = "common-options"
-version = "0.1.0"
 
 [[package]]
 name = "common-query"
@@ -1024,7 +1019,6 @@ dependencies = [
  "axum-macros",
  "axum-test-helper",
  "common-error",
- "common-options",
  "common-query",
  "common-recordbatch",
  "common-telemetry",
@@ -1041,6 +1035,7 @@ dependencies = [
  "store-api",
  "table",
  "table-engine",
+ "tempdir",
  "tokio",
  "tower",
  "tower-http",

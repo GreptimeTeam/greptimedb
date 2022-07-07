@@ -14,11 +14,11 @@ use crate::region::RegionImpl;
 use crate::wal::Wal;
 
 /// [StorageEngine] implementation.
-pub struct EngineImpl<T> {
-    inner: Arc<EngineInner<T>>,
+pub struct EngineImpl<W> {
+    inner: Arc<EngineInner<W>>,
 }
 
-impl<T> Clone for EngineImpl<T> {
+impl<W> Clone for EngineImpl<W> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -27,9 +27,9 @@ impl<T> Clone for EngineImpl<T> {
 }
 
 #[async_trait]
-impl<T: LogStore> StorageEngine for EngineImpl<T> {
+impl<W: LogStore> StorageEngine for EngineImpl<W> {
     type Error = Error;
-    type Region = RegionImpl<T>;
+    type Region = RegionImpl<W>;
 
     async fn open_region(&self, _ctx: &EngineContext, _name: &str) -> Result<Self::Region> {
         unimplemented!()
@@ -56,25 +56,24 @@ impl<T: LogStore> StorageEngine for EngineImpl<T> {
     }
 }
 
-impl<T> EngineImpl<T> {
-    pub fn new(log_store: Arc<T>) -> Self {
+impl<W> EngineImpl<W> {
+    pub fn new(log_store: Arc<W>) -> Self {
         Self {
             inner: Arc::new(EngineInner::new(log_store)),
         }
     }
 }
 
-type RegionMap<T> = HashMap<String, RegionImpl<T>>;
+type RegionMap<W> = HashMap<String, RegionImpl<W>>;
 
-#[allow(dead_code)]
 #[derive(Default)]
-struct EngineInner<T> {
-    log_store: Arc<T>,
-    regions: RwLock<RegionMap<T>>,
+struct EngineInner<W> {
+    log_store: Arc<W>,
+    regions: RwLock<RegionMap<W>>,
 }
 
-impl<T> EngineInner<T> {
-    pub fn new(log_store: Arc<T>) -> Self {
+impl<W> EngineInner<W> {
+    pub fn new(log_store: Arc<W>) -> Self {
         Self {
             log_store,
             regions: RwLock::new(Default::default()),
@@ -82,8 +81,8 @@ impl<T> EngineInner<T> {
     }
 }
 
-impl<T: LogStore> EngineInner<T> {
-    async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl<T>> {
+impl<W: LogStore> EngineInner<W> {
+    async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl<W>> {
         {
             let regions = self.regions.read().unwrap();
             if let Some(region) = regions.get(&descriptor.name) {
@@ -116,7 +115,7 @@ impl<T: LogStore> EngineInner<T> {
         Ok(region)
     }
 
-    fn get_region(&self, name: &str) -> Option<RegionImpl<T>> {
+    fn get_region(&self, name: &str) -> Option<RegionImpl<W>> {
         self.regions.read().unwrap().get(name).cloned()
     }
 }
