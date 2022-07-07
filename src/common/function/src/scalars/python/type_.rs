@@ -133,9 +133,12 @@ impl PyVector {
 
         let left_type = left.data_type();
         let right_type = &right_type;
-
+        //dbg!(left_type.clone(), right_type.clone());
         let target_type = target_type.unwrap_or_else(|| {
-            if is_signed(left_type) && is_signed(right_type) {
+            if is_signed(left_type) && is_signed(right_type)
+                || is_signed(left_type) && is_unsigned(right_type)
+                || is_unsigned(left_type) && is_signed(right_type)
+            {
                 DataType::Int64
             } else if is_unsigned(left_type) && is_unsigned(right_type) {
                 DataType::UInt64
@@ -143,10 +146,10 @@ impl PyVector {
                 DataType::Float64
             }
         });
+        //dbg!(target_type.clone());
         // dbg!(target_type.clone());
         let left = cast(left, &target_type, vm)?;
-        let right: Box<dyn Scalar> = if is_float(&target_type)
-        {
+        let right: Box<dyn Scalar> = if is_float(&target_type) {
             match right {
                 Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v as f64))),
                 Value::UInt64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v as f64))),
@@ -177,8 +180,7 @@ impl PyVector {
         } else {
             return Err(vm.new_type_error(format!(
                 "Can't cast right operand(Type: {:?}) into target type: {:?}",
-                right_type,
-                target_type
+                right_type, target_type
             )));
         };
 
@@ -621,6 +623,8 @@ pub mod tests {
     use rustpython_vm::protocol::PySequence;
 
     use super::*;
+
+    type PredicateFn = Option<fn(PyResult<PyObjectRef>, &VirtualMachine) -> bool>;
     /// test the paired `val_to_obj` and `pyobj_to_val` func
     #[test]
     fn test_val2pyobj2val() {
@@ -704,82 +708,111 @@ pub mod tests {
         })
     }
 
-    pub fn execute_script(script: &str, test_vec: Option<PyVector>) -> PyResult {
+    pub fn execute_script(
+        script: &str,
+        test_vec: Option<PyVector>,
+        predicate: PredicateFn,
+    ) -> Result<(PyObjectRef, Option<bool>), PyRef<rustpython_vm::builtins::PyBaseException>> {
         use std::sync::Arc;
 
         use datatypes::vectors::*;
         use rustpython_vm as vm;
         use rustpython_vm::class::PyClassImpl;
-        vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
-            PyVector::make_class(&vm.ctx);
-            let scope = vm.new_scope_with_builtins();
-            let a: VectorRef = Arc::new(Int32Vector::from_vec(vec![1, 2, 3, 4]));
-            let a = PyVector::from(a);
-            let b: VectorRef = Arc::new(Float32Vector::from_vec(vec![1.2, 2.0, 3.4, 4.5]));
-            let b = PyVector::from(b);
-            scope
-                .locals
-                .as_object()
-                .set_item("a", vm.new_pyobj(a), vm)
-                .expect("failed");
-            scope
-                .locals
-                .as_object()
-                .set_item("b", vm.new_pyobj(b), vm)
-                .expect("failed");
-
-            if let Some(v) = test_vec {
+        let mut pred_res = None;
+        vm::Interpreter::without_stdlib(Default::default())
+            .enter(|vm| {
+                PyVector::make_class(&vm.ctx);
+                let scope = vm.new_scope_with_builtins();
+                let a: VectorRef = Arc::new(Int32Vector::from_vec(vec![1, 2, 3, 4]));
+                let a = PyVector::from(a);
+                let b: VectorRef = Arc::new(Float32Vector::from_vec(vec![1.2, 2.0, 3.4, 4.5]));
+                let b = PyVector::from(b);
                 scope
                     .locals
                     .as_object()
-                    .set_item("test_vec", vm.new_pyobj(v), vm)
+                    .set_item("a", vm.new_pyobj(a), vm)
                     .expect("failed");
-            }
+                scope
+                    .locals
+                    .as_object()
+                    .set_item("b", vm.new_pyobj(b), vm)
+                    .expect("failed");
 
-            let code_obj = vm
-                .compile(
-                    script,
-                    vm::compile::Mode::BlockExpr,
-                    "<embedded>".to_owned(),
-                )
-                .map_err(|err| vm.new_syntax_error(&err))?;
-            vm.run_code_obj(code_obj, scope)
-        })
+                if let Some(v) = test_vec {
+                    scope
+                        .locals
+                        .as_object()
+                        .set_item("test_vec", vm.new_pyobj(v), vm)
+                        .expect("failed");
+                }
+
+                let code_obj = vm
+                    .compile(
+                        script,
+                        vm::compile::Mode::BlockExpr,
+                        "<embedded>".to_owned(),
+                    )
+                    .map_err(|err| vm.new_syntax_error(&err))?;
+                let ret = vm.run_code_obj(code_obj, scope);
+                pred_res = predicate.map(|f| f(ret.clone(), vm));
+                ret
+            })
+            .map(|r| (r, pred_res))
     }
 
     #[test]
     fn test_execute_script() {
-        type RetType = Option<fn(PyResult<PyObjectRef>) -> bool>;
-        let snippet: Vec<(&str, RetType)> = vec![
-            ("len(a)", Some(|v| v.is_ok())),
-            ("a[0]=1#Unsupport?", Some(|v| v.is_err())),
-            ("a[-1]", None),
-            ("a[0]*5", None),
+        fn is_eq<T: std::cmp::PartialEq + rustpython_vm::TryFromObject>(
+            v: PyResult,
+            i: T,
+            vm: &VirtualMachine,
+        ) -> bool {
+            v.and_then(|v| v.try_into_value::<T>(vm))
+                .map(|v| v == i)
+                .unwrap_or(false)
+        }
+        let snippet: Vec<(&str, PredicateFn)> = vec![
+            ("1", None),
+            ("len(a)", Some(|v, vm| is_eq(v, 4i32, vm))),
+            //("a[0]=1#Unsupport?", Some(|v, _vm|v.is_err())),
+            ("a[-1]", Some(|v, vm| is_eq(v, 4i32, vm))),
+            ("a[0]*5", Some(|v, vm| is_eq(v, 5i32, vm))),
             ("list(a)", None),
-            ("a[1:-1]#elem in [1,3)", None),
-            ("(a+1)[0]", Some(|v| v.is_ok())),
-            ("(a-1)[0]", Some(|v| v.is_ok())),
-            ("(a*2)[0]", Some(|v| v.is_ok())),
-            ("(a/2.0)[2]", Some(|v| v.is_ok())),
-            ("(a/2)[2]", Some(|v| v.is_ok())),
-            ("(a//2)[2]", Some(|v| v.is_ok())),
             (
-                "vector",
-                Some(|_v| {
-                    // possibly need to load the module of PyVector, but how
-                    //println!("{:?}", v);
-                    true
-                }),
+                "len(a[1:-1])#elem in [1,3)",
+                Some(|v, vm| is_eq(v, 2i64, vm)),
             ),
+            ("(a+1)[0]", Some(|v, vm| is_eq(v, 2i32, vm))),
+            ("(a-1)[0]", Some(|v, vm| is_eq(v, 0i32, vm))),
+            ("(a*2)[0]", Some(|v, vm| is_eq(v, 2i64, vm))),
+            ("(a/2.0)[2]", Some(|v, vm| is_eq(v, 1.5f64, vm))),
+            ("(a/2)[2]", Some(|v, vm| is_eq(v, 1.5f64, vm))),
+            ("(a//2)[2]", Some(|v, vm| is_eq(v, 1i32, vm))),
+            //("vector", None),
         ];
         for (code, pred) in snippet {
-            let result = execute_script(code, None);
+            let result = execute_script(code, None, pred);
             println!(
-                "\u{001B}[35m{code}\u{001B}[0m: \u{001B}[32m{:?}\u{001B}[0m",
+                "\u{001B}[35m{code}\u{001B}[0m: {:?}\u{001B}[32m{}\u{001B}[0m",
+                result.clone().map(|v| v.0),
                 result
+                    .clone()
+                    .map(|v| if let Some(v) = v.1 {
+                        if v {
+                            "...[ok]".to_string()
+                        } else {
+                            "...[failed]".to_string()
+                        }
+                    } else {
+                        "...[unappliable]".to_string()
+                    })
+                    .unwrap()
             );
-            if let Some(p) = pred {
-                assert!(p(result))
+
+            if let Ok(p) = result {
+                if let Some(v) = p.1 {
+                    assert!(v)
+                }
             }
         }
 
