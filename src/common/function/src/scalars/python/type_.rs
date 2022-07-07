@@ -128,9 +128,10 @@ impl PyVector {
         } else {
             match right {
                 Value::Int64(v) => Box::new(PrimitiveScalar::new(DataType::Int64, Some(v))),
-                Value::Float64(v) => Box::new(
-                    PrimitiveScalar::new(DataType::Float64, Some(f64::from(v) as i64)),
-                ),
+                Value::Float64(v) => Box::new(PrimitiveScalar::new(
+                    DataType::Float64,
+                    Some(f64::from(v) as i64),
+                )),
                 _ => unreachable!(),
             }
         };
@@ -370,7 +371,7 @@ fn pyobj_try_to_typed_val(
                 }
             }
             ConcreteDataType::Boolean(_) => {
-                if is_instance(PyBool::class(vm).into()) {
+                if is_instance(PyBool::class(vm).into()) || is_instance(PyInt::class(vm).into()) {
                     Some(Value::Boolean(
                         obj.try_into_value::<bool>(vm).unwrap_or(false),
                     ))
@@ -448,9 +449,9 @@ fn pyobj_try_to_typed_val(
 
             ConcreteDataType::String(_) => {
                 if is_instance(PyStr::class(vm).into()) {
-                    obj.try_into_value::<Vec<u8>>(vm)
+                    obj.try_into_value::<String>(vm)
                         .ok()
-                        .and_then(|v| String::from_utf8(v).ok().map(|v| Value::String(v.into())))
+                        .map(|v| Value::String(v.into()))
                 } else {
                     None
                 }
@@ -466,6 +467,7 @@ fn pyobj_try_to_typed_val(
             } //_ => unimplemented!("Unsupported data type of value {:?}", dtype),
         }
     } else if is_instance(PyNone::class(vm).into()) {
+        // Untyped so by default return types with highest precision
         Some(Value::Null)
     } else if is_instance(PyBool::class(vm).into()) {
         Some(Value::Boolean(
@@ -498,11 +500,12 @@ fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         // This comes from:https://github.com/RustPython/RustPython/blob/8ab4e770351d451cfdff5dc2bf8cce8df76a60ab/vm/src/builtins/singletons.rs#L37
         // None in Python is universally singleton so
         Null => vm.ctx.none(),
-        // FIXME: properly init a `bool`
-        Boolean(v) => PyInt::from(if v { 1u8 } else { 0u8 }).into_pyobject(vm),
+        Boolean(v) => vm.ctx.new_bool(v).into(),
         UInt8(v) => PyInt::from(v).into_pyobject(vm),
+        UInt16(v) => PyInt::from(v).into_pyobject(vm),
         UInt32(v) => PyInt::from(v).into_pyobject(vm),
         UInt64(v) => PyInt::from(v).into_pyobject(vm),
+        Int8(v) => PyInt::from(v).into_pyobject(vm),
         Int16(v) => PyInt::from(v).into_pyobject(vm),
         Int32(v) => PyInt::from(v).into_pyobject(vm),
         Int64(v) => PyInt::from(v).into_pyobject(vm),
@@ -513,8 +516,7 @@ fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         Binary(b) => PyBytes::from(b.deref().to_vec()).into_pyobject(vm),
         // is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt
         Date(v) => PyInt::from(v).into_pyobject(vm),
-        DateTime(v) => PyInt::from(v).into_pyobject(vm),
-        _ => todo!(),
+        DateTime(v) => PyInt::from(v).into_pyobject(vm)
     }
 }
 
@@ -615,6 +617,32 @@ pub mod tests {
             assert_eq!(rj, None);
             assert_eq!(rn, Some(value::Value::Float64(OrderedFloat(2.0))));
             assert_eq!(ri, Some(value::Value::Float32(OrderedFloat(2.0))));
+            let typed_lst = {
+                use value::Value::*;
+                [
+                    Null,
+                    Boolean(true),
+                    Boolean(false),
+                    // PyInt is Big Int
+                    Int16(2),
+                    Int32(2),
+                    Int64(2),
+                    UInt16(2),
+                    UInt32(2), 
+                    UInt64(2),
+                    Float32(OrderedFloat(2.0)),
+                    Float64(OrderedFloat(2.0)),
+                    String("123".into()),
+                    // TODO: testBytes and Date/DateTime 
+                ]
+            };
+            for val in typed_lst {
+                let obj = val_to_pyobj(val.clone(), vm);
+                //println!("{:?}", obj);
+                let ret = pyobj_try_to_typed_val(obj, vm, Some(val.data_type()));
+                assert_eq!(ret, Some(val.clone()));
+                //println!("{:?}, {:?}", ret, Some(val));
+            }
             //assert_eq!(rj)
         })
     }
@@ -745,14 +773,6 @@ pub mod tests {
                 assert!(p(result))
             }
         }
-
-        use std::sync::Arc;
-
-        use datatypes::vectors::*;
-        let a: VectorRef = Arc::new(NullVector::new(42));
-        let a = PyVector::from(a);
-        let result = execute_script("test_vec", Some(a));
-        println!("test_vec: {:?}", result);
 
         //assert!(false);
     }
