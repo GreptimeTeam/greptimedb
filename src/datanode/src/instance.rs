@@ -143,13 +143,13 @@ mod tests {
     use query::catalog::memory;
 
     use super::*;
+    use crate::test_util;
 
     #[tokio::test]
     async fn test_execute_insert() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
-        let instance = Instance::new(&Default::default(), catalog_list)
-            .await
-            .unwrap();
+        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let instance = Instance::new(&opts, catalog_list).await.unwrap();
         instance.start().await.unwrap();
 
         let output = instance
@@ -168,9 +168,8 @@ mod tests {
     #[tokio::test]
     async fn test_execute_query() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
-        let instance = Instance::new(&Default::default(), catalog_list)
-            .await
-            .unwrap();
+        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let instance = Instance::new(&opts, catalog_list).await.unwrap();
 
         let output = instance
             .execute_sql("select sum(number) from numbers limit 20")

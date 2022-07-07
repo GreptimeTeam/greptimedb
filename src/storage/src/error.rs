@@ -121,6 +121,7 @@ impl ErrorExt for Error {
             // TODO(hl): IO related error should be categorized into StorageUnavailable
             // when https://github.com/GrepTimeTeam/greptimedb/pull/57 is merged.
             FlushIo { .. } | WriteParquet { .. } => StatusCode::Internal,
+            // TODO(jiachun) use `StatusCode::StorageUnavailable`
             WriteWal { .. } => StatusCode::Internal,
         }
     }

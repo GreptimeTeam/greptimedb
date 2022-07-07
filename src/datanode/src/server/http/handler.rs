@@ -48,6 +48,7 @@ mod tests {
     use super::*;
     use crate::instance::Instance;
     use crate::server::http::JsonOutput;
+    use crate::test_util;
 
     fn create_params() -> Query<HashMap<String, String>> {
         let mut map = HashMap::new();
@@ -60,11 +61,8 @@ mod tests {
 
     async fn create_extension() -> Extension<InstanceRef> {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
-        let instance = Arc::new(
-            Instance::new(&Default::default(), catalog_list)
-                .await
-                .unwrap(),
-        );
+        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let instance = Arc::new(Instance::new(&opts, catalog_list).await.unwrap());
         Extension(instance)
     }
 

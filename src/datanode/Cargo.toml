@@ -25,6 +25,7 @@ storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
 table-engine = { path = "../table-engine" }
+tempdir = "0.3"
 tokio = { version = "1.18", features = ["full"] }
 tower = { version = "0.4", features = ["full"]}
 tower-http = { version ="0.3", features = ["full"]}
@@ -32,7 +33,6 @@ tower-http = { version ="0.3", features = ["full"]}
 [dev-dependencies]
 axum-test-helper = "0.1"
 common-query = { path = "../common/query" }
-tempdir = "0.3"
 
 [dev-dependencies.arrow]
 package = "arrow2"
