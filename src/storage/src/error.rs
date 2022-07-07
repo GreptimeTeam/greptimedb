@@ -27,13 +27,13 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Fail to write columns, source: {}", source))]
+    #[snafu(display("Failed to write columns, source: {}", source))]
     FlushIo {
         source: std::io::Error,
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Arrow error, source: {}", source))]
+    #[snafu(display("Failed to write parquet file, source: {}", source))]
     WriteParquet {
         source: arrow::error::ArrowError,
         backtrace: Backtrace,
