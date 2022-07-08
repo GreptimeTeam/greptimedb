@@ -44,7 +44,5 @@ mod tests {
     fn test_execute_script() {
         let result = execute_script("a//b");
         assert!(result.is_ok());
-        //println!("{:?}", result);
-        //assert!(false);
     }
 }
