@@ -8,6 +8,7 @@ use arrow::datatypes::DataType;
 use arrow::scalar::{PrimitiveScalar, Scalar};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
+use datatypes::vectors::Vector;
 use datatypes::{
     value,
     vectors::{Helper, VectorBuilder, VectorRef},
@@ -292,20 +293,20 @@ impl PyVector {
     #[pymethod(magic)]
     fn rtruediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            use std::sync::Arc;
-
+            let divisor = cast(self.vector.to_arrow_array(), &DataType::Float64, vm)?;
             use datatypes::vectors::Float64Vector;
-            let dividend: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0; self.len()]));
-            let dividend = PyVector::from(dividend);
+            let dividend = Float64Vector::from_vec(vec![1.0; self.len()]).to_arrow_array();
+            let res = arithmetics::div(dividend.as_ref(), divisor.as_ref());
+            let res = PyVector {
+                vector: Helper::try_into_vector(&*res).map_err(|e| {
+                    vm.new_type_error(format!(
+                        "Can't cast result into vector, result: {:?}, err: {:?}",
+                        res, e
+                    ))
+                })?,
+            };
             // b / a => b * (1/a)
-            dividend
-                .arith_op(
-                    self.clone().into_pyobject(vm),
-                    Some(DataType::Float64),
-                    arithmetics::div,
-                    vm,
-                )?
-                .scalar_arith_op(other, None, arithmetics::mul_scalar, vm)
+            res.scalar_arith_op(other, Some(DataType::Float64), arithmetics::mul_scalar, vm)
         } else {
             self.arith_op(
                 other,
