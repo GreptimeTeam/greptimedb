@@ -80,7 +80,7 @@ impl<S> RegionImpl<S> {
                 version_control: Arc::new(version_control),
             }),
             writer: Arc::new(RegionWriter::new(memtable_builder)),
-            _wal: wal,
+            wal,
             flush_strategy: Arc::new(SizeBasedStrategy),
             flush_scheduler,
             sst_layer,
@@ -108,7 +108,7 @@ pub type SharedDataRef = Arc<SharedData>;
 struct RegionInner<S> {
     shared: SharedDataRef,
     writer: RegionWriterRef,
-    _wal: Wal<S>,
+    wal: Wal<S>,
     flush_strategy: FlushStrategyRef,
     flush_scheduler: FlushSchedulerRef,
     sst_layer: AccessLayerRef,
@@ -137,14 +137,12 @@ impl<S> RegionInner<S> {
             }
         );
 
-        // TODO(jiachun) [flush] write data to wal
-
-        // TODO(yingwen): [flush] Add wal to WriteContext
         let writer_ctx = WriterContext {
             shared: &self.shared,
             flush_strategy: &self.flush_strategy,
             flush_scheduler: &self.flush_scheduler,
             sst_layer: &self.sst_layer,
+            wal: &self.wal,
             writer: &self.writer,
         };
         // Now altering schema is not allowed, so it is safe to validate schema outside of the lock.

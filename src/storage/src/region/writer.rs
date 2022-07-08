@@ -10,6 +10,7 @@ use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
 use crate::region::SharedDataRef;
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControlRef, VersionEdit};
+use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
 pub type RegionWriterRef = Arc<RegionWriter>;
@@ -25,11 +26,11 @@ impl RegionWriter {
         }
     }
 
-    pub async fn write(
+    pub async fn write<S>(
         &self,
         ctx: &WriteContext,
         request: WriteBatch,
-        writer_ctx: WriterContext<'_>,
+        writer_ctx: WriterContext<'_, S>,
     ) -> Result<WriteResponse> {
         let mut inner = self.inner.lock().await;
         inner.write(ctx, request, writer_ctx).await
@@ -45,15 +46,16 @@ impl RegionWriter {
     }
 }
 
-pub struct WriterContext<'a> {
+pub struct WriterContext<'a, S> {
     pub shared: &'a SharedDataRef,
     pub flush_strategy: &'a FlushStrategyRef,
     pub flush_scheduler: &'a FlushSchedulerRef,
     pub sst_layer: &'a AccessLayerRef,
+    pub wal: &'a Wal<S>,
     pub writer: &'a RegionWriterRef,
 }
 
-impl<'a> WriterContext<'a> {
+impl<'a, S> WriterContext<'a, S> {
     #[inline]
     fn version_control(&self) -> &VersionControlRef {
         &self.shared.version_control
@@ -80,11 +82,11 @@ impl WriterInner {
     ///
     /// Mutable reference of writer ensure no other reference of this writer can modify the
     /// version control (write is exclusive).
-    async fn write(
+    async fn write<S>(
         &mut self,
         _ctx: &WriteContext,
         request: WriteBatch,
-        writer_ctx: WriterContext<'_>,
+        writer_ctx: WriterContext<'_, S>,
     ) -> Result<WriteResponse> {
         self.preprocess_write(&request, &writer_ctx).await?;
 
@@ -95,6 +97,8 @@ impl WriterInner {
         let committed_sequence = version_control.committed_sequence();
         // Sequence for current write batch.
         let next_sequence = committed_sequence + 1;
+
+        // TODO(jiachun): [flush] write data to wal
 
         // Insert batch into memtable.
         let mut inserter = Inserter::new(next_sequence);
@@ -109,10 +113,10 @@ impl WriterInner {
 
     // TODO(yingwen): [flush] Provide a method in CowCell that takes a closure which returns `Result`
     // and commit on `Ok`, rollback on `Err`.
-    async fn preprocess_write(
+    async fn preprocess_write<S>(
         &mut self,
         request: &WriteBatch,
-        writer_ctx: &WriterContext<'_>,
+        writer_ctx: &WriterContext<'_, S>,
     ) -> Result<()> {
         let version_control = writer_ctx.version_control();
         // Check whether memtable is full or flush should be triggered. We need to do this first since
