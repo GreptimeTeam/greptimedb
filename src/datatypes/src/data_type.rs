@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
 use paste::paste;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
@@ -11,7 +12,7 @@ use crate::types::{
 };
 use crate::value::Value;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[enum_dispatch::enum_dispatch(DataType)]
 pub enum ConcreteDataType {
     Null(NullType),

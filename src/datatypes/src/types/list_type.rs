@@ -1,10 +1,11 @@
 use arrow::datatypes::{DataType as ArrowDataType, Field};
+use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
 use crate::value::ListValue;
 
 /// Used to represent the List datatype.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListType {
     /// The type of List's inner data.
     inner: Box<ConcreteDataType>,

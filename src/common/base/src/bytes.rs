@@ -1,9 +1,9 @@
 use std::ops::Deref;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 /// Bytes buffer.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 pub struct Bytes(bytes::Bytes);
 
 impl From<bytes::Bytes> for Bytes {
@@ -69,7 +69,7 @@ impl Serialize for Bytes {
 ///
 /// Now this buffer is restricted to only hold valid UTF-8 string (only allow constructing `StringBytes`
 /// from String or str). We may support other encoding in the future.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 pub struct StringBytes(bytes::Bytes);
 
 impl StringBytes {
