@@ -792,27 +792,33 @@ pub mod tests {
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None, pred);
+            /* 
             println!(
-                "\u{001B}[35m{code}\u{001B}[0m: {:?}\u{001B}[32m{}\u{001B}[0m",
+                "\u{001B}[35m{code}\u{001B}[0m: {:?}{}",
                 result.clone().map(|v| v.0),
                 result
                     .clone()
                     .map(|v| if let Some(v) = v.1 {
                         if v {
-                            "...[ok]".to_string()
+                            "\u{001B}[32m...[ok]\u{001B}[0m".to_string()
                         } else {
-                            "...[failed]".to_string()
+                            "\u{001B}[12m...[failed]\u{001B}[0m".to_string()
                         }
                     } else {
-                        "...[unappliable]".to_string()
+                        "\u{001B}[36m...[unappliable]\u{001B}[0m".to_string()
                     })
                     .unwrap()
             );
+            */
 
             if let Ok(p) = result {
                 if let Some(v) = p.1 {
-                    assert!(v)
+                    if !v{
+                        panic!("{code}: {:?}\u{001B}[12m...[failed]\u{001B}[0m", p.0)
+                    }
                 }
+            }else{
+                panic!("{code}: {:?}", result)
             }
         }
 
