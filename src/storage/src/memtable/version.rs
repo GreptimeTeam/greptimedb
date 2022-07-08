@@ -15,6 +15,7 @@ pub struct FreezeError;
 /// A version of all memtables.
 ///
 /// This structure is immutable now.
+#[derive(Default)]
 pub struct MemtableVersion {
     mutable: MemtableSet,
     /// Immutable memtables.
@@ -24,10 +25,7 @@ pub struct MemtableVersion {
 
 impl MemtableVersion {
     pub fn new() -> MemtableVersion {
-        MemtableVersion {
-            mutable: MemtableSet::default(),
-            immem: None,
-        }
+        MemtableVersion::default()
     }
 
     pub fn mutable_memtables(&self) -> &MemtableSet {
