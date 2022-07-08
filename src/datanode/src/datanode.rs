@@ -8,11 +8,23 @@ use crate::error::{NewCatalogSnafu, Result};
 use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DatanodeOptions {
     pub http_addr: String,
     pub rpc_addr: String,
+    pub wal_dir: String,
 }
+
+impl Default for DatanodeOptions {
+    fn default() -> Self {
+        Self {
+            http_addr: Default::default(),
+            rpc_addr: Default::default(),
+            wal_dir: "/tmp/wal".to_string(),
+        }
+    }
+}
+
 /// Datanode service.
 pub struct Datanode {
     opts: DatanodeOptions,
@@ -22,9 +34,9 @@ pub struct Datanode {
 }
 
 impl Datanode {
-    pub fn new(opts: DatanodeOptions) -> Result<Datanode> {
+    pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
         let catalog_list = memory::new_memory_catalog_list().context(NewCatalogSnafu)?;
-        let instance = Arc::new(Instance::new(catalog_list.clone()));
+        let instance = Arc::new(Instance::new(&opts, catalog_list.clone()).await?);
 
         Ok(Self {
             opts,

@@ -4,27 +4,38 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use common_telemetry::logging::info;
 use snafu::ResultExt;
-use store_api::storage::{EngineContext, RegionDescriptor, StorageEngine};
+use store_api::{
+    logstore::LogStore,
+    storage::{EngineContext, RegionDescriptor, StorageEngine},
+};
 
 use crate::error::{self, Error, Result};
 use crate::region::RegionImpl;
+use crate::wal::Wal;
 
 /// [StorageEngine] implementation.
-#[derive(Clone)]
-pub struct EngineImpl {
-    inner: Arc<EngineInner>,
+pub struct EngineImpl<S> {
+    inner: Arc<EngineInner<S>>,
+}
+
+impl<S> Clone for EngineImpl<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 #[async_trait]
-impl StorageEngine for EngineImpl {
+impl<S: LogStore> StorageEngine for EngineImpl<S> {
     type Error = Error;
-    type Region = RegionImpl;
+    type Region = RegionImpl<S>;
 
-    async fn open_region(&self, _ctx: &EngineContext, _name: &str) -> Result<RegionImpl> {
+    async fn open_region(&self, _ctx: &EngineContext, _name: &str) -> Result<Self::Region> {
         unimplemented!()
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, _region: RegionImpl) -> Result<()> {
+    async fn close_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
         unimplemented!()
     }
 
@@ -32,42 +43,46 @@ impl StorageEngine for EngineImpl {
         &self,
         _ctx: &EngineContext,
         descriptor: RegionDescriptor,
-    ) -> Result<RegionImpl> {
+    ) -> Result<Self::Region> {
         self.inner.create_region(descriptor).await
     }
 
-    async fn drop_region(&self, _ctx: &EngineContext, _region: RegionImpl) -> Result<()> {
+    async fn drop_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
         unimplemented!()
     }
 
-    fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<RegionImpl>> {
+    fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<Self::Region>> {
         Ok(self.inner.get_region(name))
     }
 }
 
-impl EngineImpl {
-    pub fn new() -> EngineImpl {
-        EngineImpl {
-            inner: Arc::new(EngineInner::default()),
+impl<S> EngineImpl<S> {
+    pub fn new(log_store: Arc<S>) -> Self {
+        Self {
+            inner: Arc::new(EngineInner::new(log_store)),
         }
     }
 }
 
-impl Default for EngineImpl {
-    fn default() -> Self {
-        Self::new()
+type RegionMap<S> = HashMap<String, RegionImpl<S>>;
+
+#[derive(Default)]
+struct EngineInner<S> {
+    log_store: Arc<S>,
+    regions: RwLock<RegionMap<S>>,
+}
+
+impl<S> EngineInner<S> {
+    pub fn new(log_store: Arc<S>) -> Self {
+        Self {
+            log_store,
+            regions: RwLock::new(Default::default()),
+        }
     }
 }
 
-type RegionMap = HashMap<String, RegionImpl>;
-
-#[derive(Default)]
-struct EngineInner {
-    regions: RwLock<RegionMap>,
-}
-
-impl EngineInner {
-    async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl> {
+impl<S: LogStore> EngineInner<S> {
+    async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl<S>> {
         {
             let regions = self.regions.read().unwrap();
             if let Some(region) = regions.get(&descriptor.name) {
@@ -81,7 +96,8 @@ impl EngineInner {
             .context(error::InvalidRegionDescSnafu {
                 region: &region_name,
             })?;
-        let region = RegionImpl::new(region_name.clone(), metadata);
+        let wal = Wal::new(region_name.clone(), self.log_store.clone());
+        let region = RegionImpl::new(region_name.clone(), metadata, wal);
 
         {
             let mut regions = self.regions.write().unwrap();
@@ -99,7 +115,7 @@ impl EngineInner {
         Ok(region)
     }
 
-    fn get_region(&self, name: &str) -> Option<RegionImpl> {
+    fn get_region(&self, name: &str) -> Option<RegionImpl<S>> {
         self.regions.read().unwrap().get(name).cloned()
     }
 }
@@ -107,6 +123,7 @@ impl EngineInner {
 #[cfg(test)]
 mod tests {
     use datatypes::type_id::LogicalTypeId;
+    use log_store::test_util::log_store_util;
     use store_api::storage::Region;
 
     use super::*;
@@ -114,7 +131,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_new_region() {
-        let engine = EngineImpl::new();
+        let (log_store, _tmp) =
+            log_store_util::create_tmp_local_file_log_store("test_engine_wal").await;
+        let engine = EngineImpl::new(Arc::new(log_store));
 
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)

@@ -15,16 +15,27 @@ use crate::metadata::{RegionMetaImpl, RegionMetadata};
 use crate::region::writer::RegionWriter;
 use crate::snapshot::SnapshotImpl;
 use crate::version::{VersionControl, VersionControlRef};
+use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
-#[derive(Clone)]
-pub struct RegionImpl {
-    inner: Arc<RegionInner>,
+pub struct RegionImpl<S> {
+    inner: Arc<RegionInner<S>>,
+}
+
+impl<S> Clone for RegionImpl<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 #[async_trait]
-impl Region for RegionImpl {
+impl<S> Region for RegionImpl<S>
+where
+    S: Send + Sync + 'static,
+{
     type Error = Error;
     type Meta = RegionMetaImpl;
     type WriteRequest = WriteBatch;
@@ -47,8 +58,8 @@ impl Region for RegionImpl {
     }
 }
 
-impl RegionImpl {
-    pub fn new(name: String, metadata: RegionMetadata) -> RegionImpl {
+impl<S> RegionImpl<S> {
+    pub fn new(name: String, metadata: RegionMetadata, _wal: Wal<S>) -> RegionImpl<S> {
         let memtable_builder = Arc::new(DefaultMemtableBuilder {});
         let memtable_schema = MemtableSchema::new(metadata.columns_row_key.clone());
         let mem = memtable_builder.build(memtable_schema);
@@ -59,6 +70,7 @@ impl RegionImpl {
             name,
             version: Arc::new(version),
             writer: Mutex::new(RegionWriter::new(memtable_builder)),
+            _wal,
         });
 
         RegionImpl { inner }
@@ -71,13 +83,14 @@ impl RegionImpl {
     }
 }
 
-struct RegionInner {
+struct RegionInner<S> {
     name: String,
     version: VersionControlRef,
     writer: Mutex<RegionWriter>,
+    _wal: Wal<S>,
 }
 
-impl RegionInner {
+impl<S> RegionInner<S> {
     fn in_memory_metadata(&self) -> RegionMetaImpl {
         let metadata = self.version.metadata();
 
@@ -92,6 +105,8 @@ impl RegionInner {
             schema.column_schemas() == request.schema().column_schemas(),
             error::InvalidInputSchemaSnafu { region: &self.name }
         );
+
+        // TODO(jiachun) write data to wal
 
         // Now altering schema is not allowed, so it is safe to validate schema outside of the lock.
         let mut writer = self.writer.lock().await;

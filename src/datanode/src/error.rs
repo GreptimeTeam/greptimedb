@@ -92,6 +92,12 @@ pub enum Error {
 
     #[snafu(display("Fail to start gRPC server, source: {}", source))]
     StartGrpc { source: tonic::transport::Error },
+
+    #[snafu(display("Failed to create directory {}, source: {}", dir, source))]
+    CreateDir { dir: String, source: std::io::Error },
+
+    #[snafu(display("Failed to open log store, source: {}", source))]
+    OpenLogStore { source: log_store::error::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -112,7 +118,9 @@ impl ErrorExt for Error {
             Error::StartHttp { .. }
             | Error::ParseAddr { .. }
             | Error::TcpBind { .. }
-            | Error::StartGrpc { .. } => StatusCode::Internal,
+            | Error::StartGrpc { .. }
+            | Error::CreateDir { .. } => StatusCode::Internal,
+            Error::OpenLogStore { source } => source.status_code(),
         }
     }
 
