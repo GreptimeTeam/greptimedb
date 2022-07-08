@@ -8,7 +8,6 @@ use arrow::datatypes::DataType;
 use arrow::scalar::{PrimitiveScalar, Scalar};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
-use datatypes::vectors::Vector;
 use datatypes::{
     value,
     vectors::{Helper, VectorBuilder, VectorRef},
@@ -257,15 +256,14 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn rsub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
+        fn arrow2_rsub(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
             // b - a => a * (-1) + b
-            self.scalar_arith_op(
-                PyInt::from(-1i64).into_pyobject(vm),
-                None,
-                arithmetics::mul_scalar,
-                vm,
-            )?
-            .scalar_arith_op(other, None, arithmetics::add_scalar, vm)
+            let neg =
+                arithmetics::mul_scalar(arr, &PrimitiveScalar::new(DataType::Int64, Some(-1i64)));
+            arithmetics::add_scalar(neg.as_ref(), val)
+        }
+        if is_pyobj_scalar(&other, vm) {
+            self.scalar_arith_op(other, None, arrow2_rsub, vm)
         } else {
             self.arith_op(other, None, |a, b| arithmetics::sub(b, a), vm)
         }
@@ -292,21 +290,25 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn rtruediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
-            let divisor = cast(self.vector.to_arrow_array(), &DataType::Float64, vm)?;
-            use datatypes::vectors::Float64Vector;
-            let dividend = Float64Vector::from_vec(vec![1.0; self.len()]).to_arrow_array();
-            let res = arithmetics::div(dividend.as_ref(), divisor.as_ref());
-            let res = PyVector {
-                vector: Helper::try_into_vector(&*res).map_err(|e| {
-                    vm.new_type_error(format!(
-                        "Can't cast result into vector, result: {:?}, err: {:?}",
-                        res, e
-                    ))
-                })?,
+        fn arrow2_rtruediv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
+            // val / arr => one_arr / arr * val (this is simpler to write)
+            use arrow::array::PrimitiveArray;
+            let one_arr: Box<dyn Array> = if is_float(arr.data_type()) {
+                Box::new(PrimitiveArray::from_values(vec![1f64; arr.len()]))
+            } else if is_integer(arr.data_type()) {
+                Box::new(PrimitiveArray::from_values(vec![1i64; arr.len()]))
+            } else {
+                unimplemented!(
+                    "truediv of {:?} Scalar with {:?} Array is not supported",
+                    val.data_type(),
+                    arr.data_type()
+                )
             };
-            // b / a => b * (1/a)
-            res.scalar_arith_op(other, Some(DataType::Float64), arithmetics::mul_scalar, vm)
+            let tmp = arithmetics::div(one_arr.as_ref(), arr);
+            arithmetics::mul_scalar(tmp.as_ref(), val)
+        }
+        if is_pyobj_scalar(&other, vm) {
+            self.scalar_arith_op(other, Some(DataType::Float64), arrow2_rtruediv, vm)
         } else {
             self.arith_op(
                 other,
@@ -328,12 +330,44 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn rfloordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.arith_op(
-            other,
-            Some(DataType::Int64),
-            |a, b| arithmetics::div(b, a),
-            vm,
-        )
+        fn arrow2_rfloordiv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
+            // val // arr => one_arr // arr * val (this is simpler to write)
+            use arrow::array::PrimitiveArray;
+            let one_arr: Box<dyn Array> = if is_float(arr.data_type()) {
+                Box::new(PrimitiveArray::from_values(vec![1f64; arr.len()]))
+            } else if is_integer(arr.data_type()) {
+                Box::new(PrimitiveArray::from_values(vec![1i64; arr.len()]))
+            } else {
+                unimplemented!(
+                    "truediv of {:?} Scalar with {:?} Array is not supported",
+                    val.data_type(),
+                    arr.data_type()
+                )
+            };
+            let tmp = arithmetics::mul_scalar(one_arr.as_ref(), val);
+            use arrow::compute::cast;
+            cast::cast(
+                arithmetics::div(tmp.as_ref(), arr).as_ref(),
+                &DataType::Int64,
+                cast::CastOptions {
+                    wrapped: false,
+                    partial: true,
+                },
+            )
+            .unwrap()
+            // how to floor?
+        }
+        if is_pyobj_scalar(&other, vm) {
+            // FIXME: DataType convert problem, target_type should be infered?
+            self.scalar_arith_op(other, Some(DataType::Int64), arrow2_rfloordiv, vm)
+        } else {
+            self.arith_op(
+                other,
+                Some(DataType::Int64),
+                |a, b| arithmetics::div(b, a),
+                vm,
+            )
+        }
     }
 
     #[pymethod(magic)]
@@ -800,6 +834,7 @@ pub mod tests {
             ("(a//2)[2]", Some(|v, vm| is_eq(v, 1i32, vm))),
             ("(2-a)[0]", Some(|v, vm| is_eq(v, 1i32, vm))),
             ("(3/a)[2]", Some(|v, vm| is_eq(v, 1.0, vm))),
+            ("(3//a)[1]", Some(|v, vm| is_eq(v, 1, vm))),
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None, pred);
