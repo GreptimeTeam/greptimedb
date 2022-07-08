@@ -292,25 +292,27 @@ impl PyVector {
     #[pymethod(magic)]
     fn rtruediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            use datatypes::vectors::Float64Vector;
             use std::sync::Arc;
+
+            use datatypes::vectors::Float64Vector;
             let divisor: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0; self.len()]));
             let divisor = PyVector::from(divisor);
             // b / a => b * (1/a)
-            divisor.arith_op(
-                self.clone().into_pyobject(vm),
-                Some(DataType::Float64),
-                arithmetics::div,
-                vm,
-            )?
-            .scalar_arith_op(other, None, arithmetics::mul_scalar, vm)
-        }else {
+            divisor
+                .arith_op(
+                    self.clone().into_pyobject(vm),
+                    Some(DataType::Float64),
+                    arithmetics::div,
+                    vm,
+                )?
+                .scalar_arith_op(other, None, arithmetics::mul_scalar, vm)
+        } else {
             self.arith_op(
-            other,
-            Some(DataType::Float64),
-            |a, b| arithmetics::div(b, a),
-            vm,
-        )
+                other,
+                Some(DataType::Float64),
+                |a, b| arithmetics::div(b, a),
+                vm,
+            )
         }
     }
 
