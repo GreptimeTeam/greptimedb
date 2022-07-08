@@ -6,7 +6,6 @@ use arrow::compute::cast;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
 use arrow::scalar::{PrimitiveScalar, Scalar};
-//use common_base::bytes::StringBytes;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
 use datatypes::{
@@ -51,7 +50,6 @@ fn is_float(datatype: &DataType) -> bool {
     matches!(datatype, Float16 | Float32 | Float64)
 }
 
-/// `ixx` or `uxx`
 fn is_integer(datatype: &DataType) -> bool {
     is_signed(datatype) || is_unsigned(datatype)
 }
@@ -101,10 +99,6 @@ impl PyVector {
     where
         F: Fn(&dyn Array, &dyn Scalar) -> Box<dyn Array>,
     {
-        // if other is PyInt and self is Int*
-        // other as Int*(what if fail to cast?)
-        // if other is PyFloat and self is Float*
-        // other as Float*(note loss of precision)
         let (right, right_type) = {
             let is_instance = |ty: &PyObject| other.is_instance(ty, vm).unwrap_or(false);
             if is_instance(PyInt::class(vm).into()) {
@@ -136,7 +130,6 @@ impl PyVector {
 
         let left_type = left.data_type();
         let right_type = &right_type;
-        //dbg!(left_type.clone(), right_type.clone());
         // TODO: found better way to cast between signed and unsigned type
         let target_type = target_type.unwrap_or_else(|| {
             if is_signed(left_type) && is_integer(right_type) {
@@ -147,8 +140,6 @@ impl PyVector {
                 DataType::Float64
             }
         });
-        //dbg!(target_type.clone());
-        // dbg!(target_type.clone());
         let left = cast(left, &target_type, vm)?;
         let right: Box<dyn Scalar> = if is_float(&target_type) {
             match right {
@@ -274,7 +265,6 @@ impl PyVector {
                 vm,
             )?
             .scalar_arith_op(other, None, arithmetics::add_scalar, vm)
-            //self.scalar_arith_op(other, None, arithmetics::sub_scalar, vm)
         } else {
             self.arith_op(other, None, |a, b| arithmetics::sub(b, a), vm)
         }
@@ -361,10 +351,8 @@ impl PyVector {
         slice: &SaturatedSlice,
         vm: &VirtualMachine,
     ) -> PyResult<PyObjectRef> {
-        // println!("{:?}", slice);
         // adjust_indices so negative number is transform to usize
         let (mut range, step, slice_len) = slice.adjust_indices(self.len());
-        // println!("{:?},{step},{slice_len}", range);
         let mut buf = VectorBuilder::with_capacity(self.vector.data_type(), slice_len);
         if slice_len == 0 {
             let v: PyVector = buf.finish().into();
@@ -528,10 +516,10 @@ fn pyobj_try_to_typed_val(
                 } else {
                     None
                 }
-            } //_ => unimplemented!("Unsupported data type of value {:?}", dtype),
+            }
         }
     } else if is_instance(PyNone::class(vm).into()) {
-        // Untyped so by default return types with highest precision
+        // if Untyped then by default return types with highest precision
         Some(Value::Null)
     } else if is_instance(PyBool::class(vm).into()) {
         Some(Value::Boolean(
@@ -560,7 +548,6 @@ fn pyobj_try_to_typed_val(
 fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
     use value::Value::*;
     match val {
-        // FIXME: properly init a `None`
         // This comes from:https://github.com/RustPython/RustPython/blob/8ab4e770351d451cfdff5dc2bf8cce8df76a60ab/vm/src/builtins/singletons.rs#L37
         // None in Python is universally singleton so
         Null => vm.ctx.none(),
@@ -590,11 +577,7 @@ impl Constructor for PyVector {
     /// TODO: found out how to make it work in python
     #[allow(unused)]
     fn py_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        //println!("Call constr: {:?}", args);
         todo!()
-        /*PyVector::default()
-        .into_ref_with_type(vm, cls)
-        .map(Into::into)*/
     }
 }
 
@@ -604,8 +587,7 @@ impl Initializer for PyVector {
     /// TODO: found out how to test it in python
     #[allow(unused)]
     fn init(zelf: PyRef<Self>, iterable: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
-        //println!("Call init: {:?}", iterable);
-        Ok(())
+        todo!()
     }
 }
 
@@ -653,7 +635,6 @@ pub mod tests {
             let ri = pyobj_try_to_typed_val(obj, vm, Some(dtype));
             let rj = pyobj_try_to_typed_val(obj_1, vm, Some(j.data_type()));
             let rn = pyobj_try_to_typed_val(obj_2, vm, None);
-            //println!("{:?}, {:?}, {:?}", ri, rj, rn);
             assert_eq!(rj, None);
             assert_eq!(rn, Some(value::Value::Float64(OrderedFloat(2.0))));
             assert_eq!(ri, Some(value::Value::Float32(OrderedFloat(2.0))));
@@ -678,10 +659,8 @@ pub mod tests {
             };
             for val in typed_lst {
                 let obj = val_to_pyobj(val.clone(), vm);
-                //println!("{:?}", obj);
                 let ret = pyobj_try_to_typed_val(obj, vm, Some(val.data_type()));
-                assert_eq!(ret, Some(val.clone()));
-                //println!("{:?}, {:?}", ret, Some(val));
+                assert_eq!(ret, Some(val));
             }
         })
     }
@@ -697,7 +676,6 @@ pub mod tests {
             PyVector::make_class(&vm.ctx);
             let a: VectorRef = Arc::new(Int32Vector::from_vec(vec![1, 2, 3, 4]));
             let a = PyVector::from(a);
-            //println!("{:?}", a.getitem_by_index(0, vm));
             assert_eq!(
                 1,
                 a.getitem_by_index(0, vm)
@@ -789,7 +767,6 @@ pub mod tests {
         let snippet: Vec<(&str, PredicateFn)> = vec![
             ("1", None),
             ("len(a)", Some(|v, vm| is_eq(v, 4i32, vm))),
-            //("a[0]=1#Unsupport?", Some(|v, _vm|v.is_err())),
             ("a[-1]", Some(|v, vm| is_eq(v, 4i32, vm))),
             ("a[0]*5", Some(|v, vm| is_eq(v, 5i32, vm))),
             ("list(a)", None),
@@ -804,7 +781,6 @@ pub mod tests {
             ("(a/2)[2]", Some(|v, vm| is_eq(v, 1.5f64, vm))),
             ("(a//2)[2]", Some(|v, vm| is_eq(v, 1i32, vm))),
             ("(2-a)[0]", Some(|v, vm| is_eq(v, 1i32, vm))),
-            //("vector", None),
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None, pred);
@@ -836,7 +812,5 @@ pub mod tests {
                 panic!("{code}: {:?}", result)
             }
         }
-
-        //assert!(false);
     }
 }
