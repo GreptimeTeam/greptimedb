@@ -1,7 +1,11 @@
 use std::any::Any;
+use std::io::Error as IoError;
+use std::str::Utf8Error;
 
 use common_error::prelude::*;
 use datatypes::arrow;
+use serde_json::error::Error as JsonError;
+use store_api::manifest::Version;
 
 use crate::metadata::Error as MetadataError;
 
@@ -38,6 +42,59 @@ pub enum Error {
         source: arrow::error::ArrowError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Fail to read object from path: {}, source: {}", path, source))]
+    ReadObject {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
+
+    #[snafu(display("Fail to write object into path: {}, source: {}", path, source))]
+    WriteObject {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
+
+    #[snafu(display("Fail to delete object from path: {}, source: {}", path, source))]
+    DeleteObject {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
+
+    #[snafu(display("Fail to list objects in path: {}, source: {}", path, source))]
+    ListObjects {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
+
+    #[snafu(display("Fail to create str from bytes, source: {}", source))]
+    Utf8 {
+        backtrace: Backtrace,
+        source: Utf8Error,
+    },
+
+    #[snafu(display("Fail to encode object into json , source: {}", source))]
+    EncodeJson {
+        backtrace: Backtrace,
+        source: JsonError,
+    },
+
+    #[snafu(display("Fail to decode object from json , source: {}", source))]
+    DecodeJson {
+        backtrace: Backtrace,
+        source: JsonError,
+    },
+
+    #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
+    InvalidScanIndex {
+        start: Version,
+        end: Version,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -47,12 +104,19 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            InvalidRegionDesc { .. } | InvalidInputSchema { .. } | BatchMissingColumn { .. } => {
-                StatusCode::InvalidArguments
-            }
-            // TODO(hl): IO related error should be categorized into StorageUnavailable
-            // when https://github.com/GrepTimeTeam/greptimedb/pull/57 is merged.
-            Error::FlushIo { .. } | Error::WriteParquet { .. } => StatusCode::Internal,
+            InvalidScanIndex { .. }
+            | InvalidRegionDesc { .. }
+            | InvalidInputSchema { .. }
+            | BatchMissingColumn { .. } => StatusCode::InvalidArguments,
+
+            Utf8 { .. } | EncodeJson { .. } | DecodeJson { .. } => StatusCode::Unexpected,
+
+            Error::FlushIo { .. }
+            | Error::WriteParquet { .. }
+            | ReadObject { .. }
+            | WriteObject { .. }
+            | ListObjects { .. }
+            | DeleteObject { .. } => StatusCode::StorageUnavailable,
         }
     }
 
@@ -68,7 +132,7 @@ impl ErrorExt for Error {
 #[cfg(test)]
 mod tests {
 
-    use common_error::prelude::StatusCode::Internal;
+    use common_error::prelude::StatusCode::*;
     use datatypes::arrow::error::ArrowError;
     use snafu::GenerateImplicitData;
 
@@ -102,7 +166,7 @@ mod tests {
         }
 
         let error = throw_io_error().context(FlushIoSnafu).err().unwrap();
-        assert_eq!(StatusCode::Internal, error.status_code());
+        assert_eq!(StatusCode::StorageUnavailable, error.status_code());
         assert!(error.backtrace_opt().is_some());
     }
 
@@ -116,7 +180,7 @@ mod tests {
             .context(WriteParquetSnafu)
             .err()
             .unwrap();
-        assert_eq!(Internal, error.status_code());
+        assert_eq!(StorageUnavailable, error.status_code());
         assert!(error.backtrace_opt().is_some());
     }
 }

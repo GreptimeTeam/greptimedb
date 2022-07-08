@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
 use common_base::bytes::StringBytes;
+use serde::{Deserialize, Serialize};
 
 use crate::data_type::{DataType, DataTypeRef};
 use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BinaryType;
 
 impl BinaryType {

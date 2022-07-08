@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
+use serde::{Deserialize, Serialize};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{Error, Result};
@@ -9,7 +10,7 @@ use crate::error::{Error, Result};
 // TODO(yingwen): consider assign a version to schema so compare schema can be
 // done by compare version.
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColumnSchema {
     pub name: String,
     pub data_type: ConcreteDataType,
@@ -30,7 +31,7 @@ impl ColumnSchema {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
     column_schemas: Vec<ColumnSchema>,
     name_to_index: HashMap<String, usize>,

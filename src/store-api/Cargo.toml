@@ -12,6 +12,8 @@ common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
+object-store = { path = "../object-store" }
+serde = { version = "1.0", features = ["derive"] }
 snafu = { version = "0.7", features = ["backtraces"] }
 
 [dev-dependencies]

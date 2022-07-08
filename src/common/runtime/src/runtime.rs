@@ -12,7 +12,7 @@ use crate::error::*;
 use crate::metric::*;
 
 /// A runtime to run future tasks
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Runtime {
     handle: Handle,
     // Used to receive a drop signal when dropper is dropped, inspired by databend
@@ -20,6 +20,7 @@ pub struct Runtime {
 }
 
 /// Dropping the dropper will cause runtime to shutdown.
+#[derive(Debug)]
 pub struct Dropper {
     close: Option<oneshot::Sender<()>>,
 }
