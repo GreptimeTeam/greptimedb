@@ -291,12 +291,27 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn rtruediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.arith_op(
+        if is_pyobj_scalar(&other, vm) {
+            use datatypes::vectors::Float64Vector;
+            use std::sync::Arc;
+            let divisor: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0; self.len()]));
+            let divisor = PyVector::from(divisor);
+            // b / a => b * (1/a)
+            divisor.arith_op(
+                self.clone().into_pyobject(vm),
+                Some(DataType::Float64),
+                arithmetics::div,
+                vm,
+            )?
+            .scalar_arith_op(other, None, arithmetics::mul_scalar, vm)
+        }else {
+            self.arith_op(
             other,
             Some(DataType::Float64),
             |a, b| arithmetics::div(b, a),
             vm,
         )
+        }
     }
 
     #[pymethod(magic)]
@@ -781,6 +796,7 @@ pub mod tests {
             ("(a/2)[2]", Some(|v, vm| is_eq(v, 1.5f64, vm))),
             ("(a//2)[2]", Some(|v, vm| is_eq(v, 1i32, vm))),
             ("(2-a)[0]", Some(|v, vm| is_eq(v, 1i32, vm))),
+            ("(3/a)[2]", Some(|v, vm| is_eq(v, 1.0, vm))),
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None, pred);
