@@ -6,6 +6,7 @@ use datatypes::prelude::*;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::Int64Vector;
 use log_store::fs::noop::NoopLogStore;
+use object_store::{backend::fs::Backend, ObjectStore};
 use store_api::storage::{
     consts, Chunk, ChunkReader, PutOperation, ReadContext, Region, RegionMeta, ScanRequest,
     SequenceNumber, Snapshot, WriteContext, WriteRequest, WriteResponse,
@@ -26,7 +27,9 @@ async fn new_region_for_rw(sst_dir: &str, enable_version_column: bool) -> Region
         .build();
     let metadata = desc.try_into().unwrap();
     let wal = Wal::new(region_name, Arc::new(NoopLogStore::default()));
-    let sst_layer = Arc::new(FsAccessLayer::new(sst_dir).await.unwrap());
+    let accessor = Backend::build().root(sst_dir).finish().await.unwrap();
+    let object_store = ObjectStore::new(accessor);
+    let sst_layer = Arc::new(FsAccessLayer::new(object_store));
 
     RegionImpl::new(region_name.to_string(), metadata, wal, sst_layer)
 }

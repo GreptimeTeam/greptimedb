@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_telemetry::logging::info;
+use object_store::{backend::fs::Backend, ObjectStore};
 use snafu::ResultExt;
 use store_api::{
     logstore::LogStore,
@@ -99,8 +100,16 @@ impl<S: LogStore> EngineInner<S> {
             })?;
         let wal = Wal::new(region_name.clone(), self.log_store.clone());
         // TODO(yingwen): [flush] Reuse backend of access layer.
-        let sst_layer = FsAccessLayer::new(&self.sst_dir()).await?;
-        let region = RegionImpl::new(region_name.clone(), metadata, wal, Arc::new(sst_layer));
+        let sst_dir = self.sst_dir();
+        let accessor = Backend::build()
+            .root(&sst_dir)
+            .finish()
+            .await
+            .context(error::InitBackendSnafu { dir: sst_dir })?;
+        let object_store = ObjectStore::new(accessor);
+        let sst_layer = Arc::new(FsAccessLayer::new(object_store));
+
+        let region = RegionImpl::new(region_name.clone(), metadata, wal, sst_layer);
 
         {
             let mut regions = self.regions.write().unwrap();

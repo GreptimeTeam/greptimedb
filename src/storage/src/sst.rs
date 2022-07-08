@@ -3,10 +3,9 @@ mod parquet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use object_store::{backend::fs::Backend, ObjectStore};
-use snafu::ResultExt;
+use object_store::ObjectStore;
 
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::memtable::BatchIteratorPtr;
 use crate::sst::parquet::ParquetWriter;
 
@@ -44,15 +43,8 @@ pub struct FsAccessLayer {
 }
 
 impl FsAccessLayer {
-    pub async fn new(dir: &str) -> Result<FsAccessLayer> {
-        let accessor = Backend::build()
-            .root(dir)
-            .finish()
-            .await
-            .context(error::InitBackendSnafu { dir })?;
-        Ok(FsAccessLayer {
-            object_store: ObjectStore::new(accessor),
-        })
+    pub fn new(object_store: ObjectStore) -> FsAccessLayer {
+        FsAccessLayer { object_store }
     }
 }
 

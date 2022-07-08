@@ -4,6 +4,7 @@ mod read_write;
 
 use datatypes::type_id::LogicalTypeId;
 use log_store::fs::noop::NoopLogStore;
+use object_store::{backend::fs::Backend, ObjectStore};
 use store_api::storage::consts;
 
 use super::*;
@@ -21,7 +22,10 @@ async fn test_new_region() {
 
     let wal = Wal::new(region_name, Arc::new(NoopLogStore::default()));
     // TODO(yingwen): temp dir
-    let sst_layer = Arc::new(FsAccessLayer::new("/tmp/test").await.unwrap());
+    let accessor = Backend::build().root("/tmp/test").finish().await.unwrap();
+    let object_store = ObjectStore::new(accessor);
+    let sst_layer = Arc::new(FsAccessLayer::new(object_store));
+
     let region = RegionImpl::new(region_name.to_string(), metadata, wal, sst_layer);
 
     let expect_schema = schema_util::new_schema_ref(&[

@@ -84,6 +84,7 @@ pub struct Batch {
     pub values: Vec<VectorRef>,
 }
 
+// TODO(yingwen): [flush] Let BatchIterator be a supertrait of Iterator.
 /// Iterator of memtable.
 pub trait BatchIterator: Send + Sync {
     /// Returns the schema of this iterator.
