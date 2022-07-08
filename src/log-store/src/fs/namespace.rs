@@ -19,6 +19,14 @@ struct LocalNamespaceInner {
 }
 
 impl Namespace for LocalNamespace {
+    fn new(name: &str, id: u64) -> Self {
+        let inner = Arc::new(LocalNamespaceInner {
+            name: name.to_string(),
+            id,
+        });
+        Self { inner }
+    }
+
     fn name(&self) -> &str {
         self.inner.name.as_str()
     }
@@ -28,13 +36,5 @@ impl Namespace for LocalNamespace {
 impl LocalNamespace {
     fn id(&self) -> u64 {
         self.inner.id
-    }
-
-    pub fn new(name: &str, id: u64) -> Self {
-        let inner = Arc::new(LocalNamespaceInner {
-            name: name.to_string(),
-            id,
-        });
-        Self { inner }
     }
 }

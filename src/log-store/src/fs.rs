@@ -1,14 +1,15 @@
 use store_api::logstore::entry::{Id, Offset};
 use store_api::logstore::AppendResponse;
 
-mod config;
+pub mod config;
 mod crc;
 mod entry;
 mod file;
 mod file_name;
 mod index;
-mod log;
+pub mod log;
 mod namespace;
+pub mod noop;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct AppendResponseImpl {
