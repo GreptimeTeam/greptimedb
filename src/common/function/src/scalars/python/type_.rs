@@ -354,8 +354,7 @@ impl PyVector {
                     partial: true,
                 },
             )
-            .unwrap()
-            // how to floor?
+            .expect("Can't cast to Int64: ")
         }
         if is_pyobj_scalar(&other, vm) {
             // FIXME: DataType convert problem, target_type should be infered?
@@ -816,12 +815,21 @@ pub mod tests {
                 .map(|v| v == i)
                 .unwrap_or(false)
         }
+        use rustpython_vm::builtins::PyList;
         let snippet: Vec<(&str, PredicateFn)> = vec![
-            ("1", None),
+            ("1", Some(|v, vm| is_eq(v, 1i32, vm))),
             ("len(a)", Some(|v, vm| is_eq(v, 4i32, vm))),
             ("a[-1]", Some(|v, vm| is_eq(v, 4i32, vm))),
             ("a[0]*5", Some(|v, vm| is_eq(v, 5i32, vm))),
-            ("list(a)", None),
+            (
+                "list(a)",
+                Some(|v, vm| {
+                    v.map_or(false, |obj| {
+                        obj.is_instance(PyList::class(vm).into(), vm)
+                            .unwrap_or(false)
+                    })
+                }),
+            ),
             (
                 "len(a[1:-1])#elem in [1,3)",
                 Some(|v, vm| is_eq(v, 2i64, vm)),
@@ -835,7 +843,10 @@ pub mod tests {
             ("(2-a)[0]", Some(|v, vm| is_eq(v, 1i32, vm))),
             ("(3/a)[2]", Some(|v, vm| is_eq(v, 1.0, vm))),
             ("(3//a)[1]", Some(|v, vm| is_eq(v, 1, vm))),
-            ("(a+1)[0] + (a-1)[0] * (a/2.0)[2]", Some(|v, vm| is_eq(v, 2.0, vm))),
+            (
+                "(a+1)[0] + (a-1)[0] * (a/2.0)[2]",
+                Some(|v, vm| is_eq(v, 2.0, vm)),
+            ),
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None, pred);
