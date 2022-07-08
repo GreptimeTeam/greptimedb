@@ -612,7 +612,10 @@ pub mod tests {
             let rj = pyobj_try_to_typed_val(obj_1, vm, Some(j.data_type()));
             let rn = pyobj_try_to_typed_val(obj_2, vm, None);
             //println!("{:?}, {:?}, {:?}", ri, rj, rn);
+            assert_eq!(rj, None);
+            assert_eq!(rn, Some(value::Value::Float64(OrderedFloat(2.0))));
             assert_eq!(ri, Some(value::Value::Float32(OrderedFloat(2.0))));
+            //assert_eq!(rj)
         })
     }
 
@@ -659,12 +662,8 @@ pub mod tests {
             let a: VectorRef = Arc::new(NullVector::new(42));
             let a = PyVector::from(a);
             let a = a.into_pyobject(vm);
-            if let Some(seq) = PySequence::find_methods(&a, vm) {
-                //println!("{:?}", seq)
-            }
-            if let Some(s) = PySequence::new(&a, vm) {
-                //println!("{:?}", s.length(vm))
-            }
+            assert!(PySequence::find_methods(&a, vm).is_some());
+            assert!(PySequence::new(&a, vm).is_some());
         })
     }
 
