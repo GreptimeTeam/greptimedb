@@ -5,13 +5,13 @@ use arrow::compute::arithmetics;
 use arrow::compute::cast;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
+//use common_base::bytes::StringBytes;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::value::{OrderedF32, OrderedFloat};
+use datatypes::value::OrderedFloat;
 use datatypes::{
     value,
     vectors::{Helper, VectorRef},
 };
-use rustpython_vm::types::{Constructor, PyComparisonOp};
 use rustpython_vm::{
     builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
     protocol::PySequenceMethods,
@@ -189,6 +189,7 @@ impl PyVector {
         Ok(into_py_obj(self.vector.get(i), vm).into())
     }
 
+    // Unsupport
     fn setitem_by_index(
         zelf: PyRef<Self>,
         i: isize,
@@ -206,7 +207,6 @@ fn into_datatypes_value(
     dtype: ConcreteDataType,
 ) -> Option<value::Value> {
     use value::Value;
-
     match dtype {
         ConcreteDataType::Null(_) => {
             if obj
@@ -313,7 +313,36 @@ fn into_datatypes_value(
                 None
             }
         }
-        _ => todo!(),
+
+        ConcreteDataType::String(_) => {
+            if obj
+                .is_instance(PyStr::class(vm).into(), vm)
+                .unwrap_or(false)
+            {
+                obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
+                    String::from_utf8(v)
+                        .ok()
+                        .and_then(|v| Some(Value::String(v.into())).into())
+                })
+            } else {
+                None
+            }
+        }
+        ConcreteDataType::Binary(_) => {
+            if obj
+                .is_instance(PyBytes::class(vm).into(), vm)
+                .unwrap_or(false)
+            {
+                obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
+                    String::from_utf8(v)
+                        .ok()
+                        .and_then(|v| Some(Value::String(v.into())).into())
+                })
+            } else {
+                None
+            }
+        }
+        _ => unimplemented!("Unsupported data type of value {:?}", dtype),
     }
 }
 /// convert a DataType `Value` into a `PyObjectRef`(is that ok?)
@@ -337,6 +366,7 @@ fn into_py_obj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         String(s) => PyStr::from(s.as_utf8()).into_pyobject(vm),
         // is this copy necessary?
         Binary(b) => PyBytes::from(b.deref().to_vec()).into_pyobject(vm),
+        // is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt
         Date(v) => PyInt::from(v).into_pyobject(vm),
         DateTime(v) => PyInt::from(v).into_pyobject(vm),
         _ => todo!(),
