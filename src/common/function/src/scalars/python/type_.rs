@@ -295,10 +295,10 @@ impl PyVector {
             use std::sync::Arc;
 
             use datatypes::vectors::Float64Vector;
-            let divisor: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0; self.len()]));
-            let divisor = PyVector::from(divisor);
+            let dividend: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0; self.len()]));
+            let dividend = PyVector::from(dividend);
             // b / a => b * (1/a)
-            divisor
+            dividend
                 .arith_op(
                     self.clone().into_pyobject(vm),
                     Some(DataType::Float64),
