@@ -108,9 +108,11 @@ impl PyVector {
         let (right, right_type) = {
             let is_instance = |ty: &PyObject| other.is_instance(ty, vm).unwrap_or(false);
             if is_instance(PyInt::class(vm).into()) {
-                other.clone().try_into_value::<i64>(vm).ok().map(|v| {
-                    (Value::Int64(v), DataType::Int64)
-                })
+                other
+                    .clone()
+                    .try_into_value::<i64>(vm)
+                    .ok()
+                    .map(|v| (Value::Int64(v), DataType::Int64))
             } else if is_instance(PyFloat::class(vm).into()) {
                 other
                     .clone()
@@ -137,10 +139,9 @@ impl PyVector {
         //dbg!(left_type.clone(), right_type.clone());
         // TODO: found better way to cast between signed and unsigned type
         let target_type = target_type.unwrap_or_else(|| {
-            if is_signed(left_type) && is_integer(right_type)
-            {
+            if is_signed(left_type) && is_integer(right_type) {
                 DataType::Int64
-            } else if is_unsigned(left_type) && is_integer(right_type){
+            } else if is_unsigned(left_type) && is_integer(right_type) {
                 DataType::UInt64
             } else {
                 DataType::Float64
@@ -264,7 +265,19 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn rsub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.arith_op(other, None, |a, b| arithmetics::sub(b, a), vm)
+        if is_pyobj_scalar(&other, vm) {
+            // b - a => a * (-1) + b
+            self.scalar_arith_op(
+                PyInt::from(-1i64).into_pyobject(vm),
+                None,
+                arithmetics::mul_scalar,
+                vm,
+            )?
+            .scalar_arith_op(other, None, arithmetics::add_scalar, vm)
+            //self.scalar_arith_op(other, None, arithmetics::sub_scalar, vm)
+        } else {
+            self.arith_op(other, None, |a, b| arithmetics::sub(b, a), vm)
+        }
     }
 
     #[pymethod(name = "__rmul__")]
@@ -790,11 +803,12 @@ pub mod tests {
             ("(a/2.0)[2]", Some(|v, vm| is_eq(v, 1.5f64, vm))),
             ("(a/2)[2]", Some(|v, vm| is_eq(v, 1.5f64, vm))),
             ("(a//2)[2]", Some(|v, vm| is_eq(v, 1i32, vm))),
+            ("(2-a)[0]", Some(|v, vm| is_eq(v, 1i32, vm))),
             //("vector", None),
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None, pred);
-            
+
             println!(
                 "\u{001B}[35m{code}\u{001B}[0m: {:?}{}",
                 result.clone().map(|v| v.0),
@@ -811,15 +825,14 @@ pub mod tests {
                     })
                     .unwrap()
             );
-            
 
             if let Ok(p) = result {
                 if let Some(v) = p.1 {
-                    if !v{
+                    if !v {
                         panic!("{code}: {:?}\u{001B}[12m...[failed]\u{001B}[0m", p.0)
                     }
                 }
-            }else{
+            } else {
                 panic!("{code}: {:?}", result)
             }
         }
