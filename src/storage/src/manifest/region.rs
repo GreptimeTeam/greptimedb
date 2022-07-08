@@ -38,13 +38,13 @@ impl Manifest for RegionManifest {
     }
 
     async fn load(&self) -> Result<Option<RegionManifestData>> {
-        let current_version = self.inner.last_version();
+        let last_version = self.inner.last_version();
 
-        let start_bound = if current_version == MIN_VERSION {
+        let start_bound = if last_version == MIN_VERSION {
             // No actions have ever saved
             MIN_VERSION
         } else {
-            current_version - 1
+            last_version - 1
         };
 
         let mut iter = self.inner.scan(start_bound, MAX_VERSION).await?;
