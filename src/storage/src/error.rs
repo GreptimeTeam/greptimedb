@@ -117,12 +117,8 @@ impl ErrorExt for Error {
             | ReadObject { .. }
             | WriteObject { .. }
             | ListObjects { .. }
-            | DeleteObject { .. } => StatusCode::StorageUnavailable,
-            // TODO(hl): IO related error should be categorized into StorageUnavailable
-            // when https://github.com/GrepTimeTeam/greptimedb/pull/57 is merged.
-            FlushIo { .. } | WriteParquet { .. } => StatusCode::Internal,
-            // TODO(jiachun) use `StatusCode::StorageUnavailable`
-            WriteWal { .. } => StatusCode::Internal,
+            | DeleteObject { .. }
+            | WriteWal { .. } => StatusCode::StorageUnavailable,
         }
     }
 
