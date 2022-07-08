@@ -3,7 +3,9 @@ use store_api::logstore::{entry::Id, LogStore};
 use crate::error::{Error, Result};
 use crate::fs::{entry::EntryImpl, namespace::LocalNamespace, AppendResponseImpl};
 
-/// Only for test
+/// A noop log store which only for test
+///
+/// TODO: Add a test feature
 #[derive(Default)]
 pub struct NoopLogStore {}
 
