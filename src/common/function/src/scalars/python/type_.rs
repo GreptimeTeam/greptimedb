@@ -91,6 +91,15 @@ impl PyVector {
     where
         F: Fn(&dyn Array, &dyn Scalar) -> Box<dyn Array>,
     {
+        let right = pyobj_try_to_typed_val(other, vm, None).ok_or_else(||{
+            vm.new_type_error(format!(
+                "Can't cast right operand into Scalar, actual: {}",
+                other.class().name()
+            ))
+        })?;
+        
+
+        let left = self.vector.to_arrow_array();
         todo!()
     }
     #[inline]
@@ -144,7 +153,12 @@ impl PyVector {
     #[pymethod(name = "__radd__")]
     #[pymethod(magic)]
     fn add(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.arith_op(other, None, arithmetics::add, vm)
+        if is_pyobj_scalar(&other, vm){
+            self.arith_op_scalar(other, None, arithmetics::add_scalar, vm)
+        }else{
+            self.arith_op(other, None, arithmetics::add, vm)
+        }
+        
     }
 
     #[pymethod(magic)]
@@ -277,14 +291,16 @@ fn is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
 
 /// convert a `PyObjectRef` into a `datatypess::Value`(is that ok?)
 /// if `obj` can be convert to given ConcreteDataType then return inner `Value` else return None
-fn pyobj_to_val(
+/// if dtype is None, return types with highest precision
+fn pyobj_try_to_typed_val(
     obj: PyObjectRef,
     vm: &VirtualMachine,
-    dtype: ConcreteDataType,
+    dtype: Option<ConcreteDataType>,
 ) -> Option<value::Value> {
     use value::Value;
     let is_instance = |ty: &PyObject| obj.is_instance(ty, vm).unwrap_or(false);
-    match dtype {
+    if let Some(dtype) = dtype{
+      match dtype {
         ConcreteDataType::Null(_) => {
             if is_instance(PyNone::class(vm).into())
             {
@@ -394,7 +410,41 @@ fn pyobj_to_val(
             }
         } //_ => unimplemented!("Unsupported data type of value {:?}", dtype),
     }
-}
+    }else
+        if is_instance(PyNone::class(vm).into())
+            {
+                Some(Value::Null)
+            }else if is_instance(PyBool::class(vm).into())
+            {
+                Some(Value::Boolean(
+                    obj.try_into_value::<bool>(vm).unwrap_or(false),
+                ))
+            }else if is_instance(PyInt::class(vm).into())
+            {
+                obj.try_into_value::<i64>(vm).ok().map(Value::Int64)
+            }
+            else if is_instance(PyFloat::class(vm).into()){
+                obj
+                        .try_into_value::<f64>(vm)
+                        .ok()
+                        .map(|v| Value::Float64(OrderedFloat(v)))
+            }else if is_instance(PyStr::class(vm).into())
+            {
+                obj.try_into_value::<Vec<u8>>(vm)
+                    .ok()
+                    .and_then(|v| String::from_utf8(v).ok().map(|v| Value::String(v.into())))
+            }else if is_instance(PyBytes::class(vm).into())
+            {
+                obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
+                    String::from_utf8(v)
+                        .ok()
+                        .map(|v| Value::String(v.into()))
+                })
+            }else {
+                None
+            }
+    }
+    
 
 /// convert a DataType `Value` into a `PyObjectRef`
 fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
@@ -511,9 +561,11 @@ pub mod tests {
             let obj = val_to_pyobj(i, vm);
             assert!(is_pyobj_scalar(&obj, vm));
             let obj_1 = obj.clone();
-            let ri = pyobj_to_val(obj, vm, dtype);
-            let rj = pyobj_to_val(obj_1, vm, j.data_type());
-            println!("{:?}, {:?}", ri, rj);
+            let obj_2 = obj.clone();
+            let ri = pyobj_try_to_typed_val(obj, vm, Some(dtype));
+            let rj = pyobj_try_to_typed_val(obj_1, vm, Some(j.data_type()));
+            let rn = pyobj_try_to_typed_val(obj_2, vm, None);
+            println!("{:?}, {:?}, {:?}", ri, rj, rn);
             assert_eq!(ri, Some(value::Value::Float32(OrderedFloat(2.0))));
             
         })
