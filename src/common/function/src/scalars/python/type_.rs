@@ -5,6 +5,7 @@ use arrow::compute::arithmetics;
 use arrow::compute::cast;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
+use arrow::scalar::Scalar;
 //use common_base::bytes::StringBytes;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
@@ -78,8 +79,23 @@ impl AsRef<PyVector> for PyVector {
     }
 }
 
+
+
 #[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
 impl PyVector {
+    #[inline]
+    fn arith_op_scalar<F>(
+        &self,
+        other: PyObjectRef,
+        target_type: Option<DataType>,
+        op: F,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyVector>
+    where
+        F: Fn(&dyn Array, &dyn Scalar) -> Box<dyn Array>,
+    {
+        todo!()
+    }
     #[inline]
     fn arith_op<F>(
         &self,
@@ -204,7 +220,7 @@ impl PyVector {
         let i = pythonic_index(i, self.len())
             .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_owned()))?;
         PyInt::from(1i32).into_ref(vm);
-        Ok(into_py_obj(self.vector.get(i), vm).into())
+        Ok(val_to_pyobj(self.vector.get(i), vm))
     }
 
     /// Return a `PyVector` in `PyObjectRef`
@@ -251,9 +267,16 @@ impl PyVector {
         unimplemented!()
     }
 }
+
+/// found out if this pyobj can be cast to a scalar value(i.e is a number(int or float))
+fn is_pyobj_scalar(obj: &PyObjectRef)->bool{
+    
+    false
+}
+
 /// convert a `PyObjectRef` into a `datatypess::Value`(is that ok?)
 /// if `obj` can be convert to given ConcreteDataType then return inner `Value` else return None
-fn into_datatypes_value(
+fn pyobj_to_val(
     obj: PyObjectRef,
     vm: &VirtualMachine,
     dtype: ConcreteDataType,
@@ -396,8 +419,10 @@ fn into_datatypes_value(
         } //_ => unimplemented!("Unsupported data type of value {:?}", dtype),
     }
 }
+
+
 /// convert a DataType `Value` into a `PyObjectRef`
-fn into_py_obj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
+fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
     use value::Value::*;
     match val {
         // FIXME: properly init a `None`
@@ -504,6 +529,20 @@ pub mod tests {
     use rustpython_vm::protocol::PySequence;
 
     use super::*;
+    /// test the paired `val_to_obj` and `pyobj_to_val` func
+    #[test]
+    fn test_val2pyobj2val() {
+        
+        use rustpython_vm as vm;
+        vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
+            let i = value::Value::Float32(OrderedFloat(2.0));
+            let dtype = i.data_type();
+            let obj = val_to_pyobj(i, vm);
+            let ri = pyobj_to_val(obj, vm, dtype);
+            println!("{:?}", ri);
+        })
+    }
+
     #[test]
     fn test_wrapped_at() {
         let i: isize = 1;
