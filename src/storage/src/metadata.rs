@@ -29,7 +29,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Implementation of [RegionMeta].
 ///
 /// Holds a snapshot of region metadata.
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct RegionMetaImpl {
     metadata: RegionMetadataRef,
 }

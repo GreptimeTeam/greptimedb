@@ -3238,6 +3238,7 @@ dependencies = [
  "common-error",
  "common-telemetry",
  "datatypes",
+ "futures",
  "futures-util",
  "lazy_static",
  "object-store",

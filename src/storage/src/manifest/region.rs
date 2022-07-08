@@ -38,7 +38,7 @@ impl Manifest for RegionManifest {
     }
 
     async fn load(&self) -> Result<Option<RegionManifestData>> {
-        let current_version = self.inner.next_version();
+        let current_version = self.inner.last_version();
 
         let start_bound = if current_version == MIN_VERSION {
             // No actions have ever saved
@@ -97,7 +97,7 @@ impl RegionManifestInner {
         Self {
             region_id,
             store: Arc::new(ManifestObjectStore::new(&path, object_store)),
-            // TODO(dennis): recover the version from history
+            // TODO(dennis): recover the last version from history
             version: AtomicU64::new(0),
         }
     }
@@ -108,7 +108,7 @@ impl RegionManifestInner {
     }
 
     #[inline]
-    fn next_version(&self) -> Version {
+    fn last_version(&self) -> Version {
         self.version.load(Ordering::Relaxed)
     }
 

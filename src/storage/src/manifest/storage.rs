@@ -3,8 +3,9 @@ use std::iter::Iterator;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{util, DirEntry, ObjectStore};
+use object_store::{DirEntry, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -138,14 +139,23 @@ impl ManifestLogStorage for ManifestObjectStore {
             .await
             .context(ListObjectsSnafu { path: &self.path })?;
 
-        let mut entries: Vec<(Version, DirEntry)> = util::collect(streamer)
+        let mut entries: Vec<(Version, DirEntry)> = streamer
+            .try_filter_map(|e| async move {
+                let file_name = e.name();
+                if is_delta_file(file_name) {
+                    let version = delta_version(file_name);
+                    if version >= start && version < end {
+                        Ok(Some((version, e)))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                }
+            })
+            .try_collect::<Vec<_>>()
             .await
-            .context(ListObjectsSnafu { path: &self.path })?
-            .into_iter()
-            .filter(|e| is_delta_file(e.name()))
-            .map(|e| (delta_version(e.name()), e))
-            .filter(|(v, _)| *v >= start && *v < end)
-            .collect();
+            .context(ListObjectsSnafu { path: &self.path })?;
 
         entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
 
