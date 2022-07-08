@@ -18,7 +18,7 @@ use rustpython_vm::{
     function::{FuncArgs, OptionalArg},
     protocol::{PyMappingMethods, PySequenceMethods},
     pyclass, pyimpl,
-    sliceable::{SaturatedSlice, SequenceIndex, wrap_index},
+    sliceable::{wrap_index, SaturatedSlice, SequenceIndex},
     types::{AsMapping, AsSequence, Constructor, Initializer},
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
@@ -44,6 +44,11 @@ impl std::fmt::Debug for PyVector {
             self.vector.len()
         )
     }
+}
+
+fn is_float(datatype: &DataType) -> bool {
+    use DataType::*;
+    matches!(datatype, Float16 | Float32 | Float64)
 }
 
 fn is_signed(datatype: &DataType) -> bool {
@@ -91,9 +96,33 @@ impl PyVector {
     where
         F: Fn(&dyn Array, &dyn Scalar) -> Box<dyn Array>,
     {
-        let right = pyobj_try_to_typed_val(other.clone(), vm, None).ok_or_else(|| {
+        // if other is PyInt and self is Int*
+        // other as Int*(what if fail to cast?)
+        // if other is PyFloat and self is Float*
+        // other as Float*(note loss of precision)
+        let (right, right_type) = {
+            let is_instance = |ty: &PyObject| other.is_instance(ty, vm).unwrap_or(false);
+            if is_instance(PyInt::class(vm).into()) {
+                other.clone().try_into_value::<i64>(vm).ok().map(|v| {
+                    if v >= 0 {
+                        (Value::UInt64(v as u64), DataType::UInt64)
+                    } else {
+                        (Value::Int64(v), DataType::Int64)
+                    }
+                })
+            } else if is_instance(PyFloat::class(vm).into()) {
+                other
+                    .clone()
+                    .try_into_value::<f64>(vm)
+                    .ok()
+                    .map(|v| (Value::Float64(OrderedFloat(v)), DataType::Float64))
+            } else {
+                None
+            }
+        }
+        .ok_or_else(|| {
             vm.new_type_error(format!(
-                "Can't cast right operand into Scalar, actual: {}",
+                "Can't cast right operand into Scalar of Int or Float, actual: {}",
                 other.class().name()
             ))
         })?;
@@ -102,38 +131,55 @@ impl PyVector {
 
         let left = self.vector.to_arrow_array();
 
-        let left_type = &left.data_type();
-        //let right_type = &right.data_type();
+        let left_type = left.data_type();
+        let right_type = &right_type;
 
         let target_type = target_type.unwrap_or_else(|| {
-            if is_signed(left_type) {
+            if is_signed(left_type) && is_signed(right_type) {
                 DataType::Int64
-            } else if is_unsigned(left_type) {
+            } else if is_unsigned(left_type) && is_unsigned(right_type) {
                 DataType::UInt64
             } else {
                 DataType::Float64
             }
         });
+        // dbg!(target_type.clone());
         let left = cast(left, &target_type, vm)?;
-        let right: Box<dyn Scalar> = if target_type == DataType::Float64 {
+        let right: Box<dyn Scalar> = if is_float(&target_type)
+        {
             match right {
-                Value::Int64(v) => {
-                    Box::new(PrimitiveScalar::new(DataType::Float64, Some(v as f64)))
-                }
+                Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v as f64))),
+                Value::UInt64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v as f64))),
                 Value::Float64(v) => {
-                    Box::new(PrimitiveScalar::new(DataType::Float64, Some(f64::from(v))))
+                    Box::new(PrimitiveScalar::new(target_type, Some(f64::from(v))))
                 }
                 _ => unreachable!(),
             }
-        } else {
+        } else if is_signed(&target_type) {
             match right {
-                Value::Int64(v) => Box::new(PrimitiveScalar::new(DataType::Int64, Some(v))),
+                Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
+                Value::UInt64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v as i64))),
                 Value::Float64(v) => Box::new(PrimitiveScalar::new(
                     DataType::Float64,
                     Some(f64::from(v) as i64),
                 )),
                 _ => unreachable!(),
             }
+        } else if is_unsigned(&target_type) {
+            match right {
+                Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
+                Value::UInt64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
+                Value::Float64(v) => {
+                    Box::new(PrimitiveScalar::new(target_type, Some(f64::from(v))))
+                }
+                _ => unreachable!(),
+            }
+        } else {
+            return Err(vm.new_type_error(format!(
+                "Can't cast right operand(Type: {:?}) into target type: {:?}",
+                right_type,
+                target_type
+            )));
         };
 
         let result = op(left.as_ref(), right.as_ref());
@@ -355,6 +401,8 @@ fn is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
 /// convert a `PyObjectRef` into a `datatypess::Value`(is that ok?)
 /// if `obj` can be convert to given ConcreteDataType then return inner `Value` else return None
 /// if dtype is None, return types with highest precision
+/// Not used for now but may be use in future
+#[allow(unused)]
 fn pyobj_try_to_typed_val(
     obj: PyObjectRef,
     vm: &VirtualMachine,
@@ -618,7 +666,6 @@ pub mod tests {
                 assert_eq!(ret, Some(val.clone()));
                 //println!("{:?}, {:?}", ret, Some(val));
             }
-            //assert_eq!(rj)
         })
     }
 
@@ -727,10 +774,10 @@ pub mod tests {
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None);
-            /*println!(
+            println!(
                 "\u{001B}[35m{code}\u{001B}[0m: \u{001B}[32m{:?}\u{001B}[0m",
                 result
-            );*/
+            );
             if let Some(p) = pred {
                 assert!(p(result))
             }
