@@ -18,7 +18,7 @@ use rustpython_vm::{
     function::{FuncArgs, OptionalArg},
     protocol::{PyMappingMethods, PySequenceMethods},
     pyclass, pyimpl,
-    sliceable::{SaturatedSlice, SequenceIndex},
+    sliceable::{SaturatedSlice, SequenceIndex, wrap_index},
     types::{AsMapping, AsSequence, Constructor, Initializer},
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
@@ -287,7 +287,8 @@ impl PyVector {
     }
 
     fn getitem_by_index(&self, i: isize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        let i = pythonic_index(i, self.len())
+        // in the newest version of rustpython_vm, wrapped_at for isize is replace by wrap_index(i, len)
+        let i = wrap_index(i, self.len())
             .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_owned()))?;
         PyInt::from(1i32).into_ref(vm);
         Ok(val_to_pyobj(self.vector.get(i), vm))
@@ -520,32 +521,6 @@ fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
     }
 }
 
-/// check `i` is in range of `len` in a Pythonic manner
-///
-/// note that using Python semantics `-1` means last elem in list
-/// So `i` is isize
-fn pythonic_index(i: isize, len: usize) -> Option<usize> {
-    if i >= 0 {
-        // This try_into should never return Err for isize->usize when isize>0 which should always fit
-        // but for the sake of do not panic, we set default value of len(So rustpython will panic for us if unthinkable happened and need to panic)
-        let i = i.try_into().unwrap_or(len);
-        if i < len {
-            Some(i)
-        } else {
-            None
-        }
-    } else {
-        // i < 0, count rev from last elem to first
-        let i = (-i).try_into().unwrap_or(len);
-        if i <= len {
-            // Starting from -1 so:
-            Some(len - i)
-        } else {
-            None
-        }
-    }
-}
-
 impl Constructor for PyVector {
     type Args = FuncArgs;
 
@@ -645,19 +620,6 @@ pub mod tests {
             }
             //assert_eq!(rj)
         })
-    }
-
-    #[test]
-    fn test_wrapped_at() {
-        let i: isize = 1;
-        let len: usize = 3;
-        assert_eq!(pythonic_index(i, len), Some(1));
-        let i: isize = -1;
-        assert_eq!(pythonic_index(i, len), Some(2));
-        let i: isize = -4;
-        assert_eq!(pythonic_index(i, len), None);
-        let i: isize = 4;
-        assert_eq!(pythonic_index(i, len), None);
     }
 
     #[test]
