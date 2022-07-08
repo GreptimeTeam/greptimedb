@@ -104,7 +104,11 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to write wal, region: {}, source: {}", region, source))]
-    WriteWal { region: String, source: BoxedError },
+    WriteWal {
+        region: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("Failed to join task, source: {}", source))]
     JoinTask {
