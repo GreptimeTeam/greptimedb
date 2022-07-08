@@ -3,6 +3,7 @@ use tempdir::TempDir;
 use crate::fs::{config::LogConfig, log::LocalFileLogStore};
 
 /// Create a tmp directory for write log, used for test.
+/// TODO: Add a test feature
 pub async fn create_tmp_local_file_log_store(dir: &str) -> (LocalFileLogStore, TempDir) {
     let dir = TempDir::new(dir).unwrap();
     let cfg = LogConfig {
