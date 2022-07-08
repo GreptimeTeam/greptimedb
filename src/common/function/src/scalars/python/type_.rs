@@ -51,6 +51,11 @@ fn is_float(datatype: &DataType) -> bool {
     matches!(datatype, Float16 | Float32 | Float64)
 }
 
+/// `ixx` or `uxx`
+fn is_integer(datatype: &DataType) -> bool {
+    is_signed(datatype) || is_unsigned(datatype)
+}
+
 fn is_signed(datatype: &DataType) -> bool {
     matches!(
         datatype,
@@ -104,11 +109,7 @@ impl PyVector {
             let is_instance = |ty: &PyObject| other.is_instance(ty, vm).unwrap_or(false);
             if is_instance(PyInt::class(vm).into()) {
                 other.clone().try_into_value::<i64>(vm).ok().map(|v| {
-                    if v >= 0 {
-                        (Value::UInt64(v as u64), DataType::UInt64)
-                    } else {
-                        (Value::Int64(v), DataType::Int64)
-                    }
+                    (Value::Int64(v), DataType::Int64)
                 })
             } else if is_instance(PyFloat::class(vm).into()) {
                 other
@@ -134,13 +135,12 @@ impl PyVector {
         let left_type = left.data_type();
         let right_type = &right_type;
         //dbg!(left_type.clone(), right_type.clone());
+        // TODO: found better way to cast between signed and unsigned type
         let target_type = target_type.unwrap_or_else(|| {
-            if is_signed(left_type) && is_signed(right_type)
-                || is_signed(left_type) && is_unsigned(right_type)
-                || is_unsigned(left_type) && is_signed(right_type)
+            if is_signed(left_type) && is_integer(right_type)
             {
                 DataType::Int64
-            } else if is_unsigned(left_type) && is_unsigned(right_type) {
+            } else if is_unsigned(left_type) && is_integer(right_type){
                 DataType::UInt64
             } else {
                 DataType::Float64
@@ -761,6 +761,8 @@ pub mod tests {
     }
 
     #[test]
+    #[allow(clippy::print_stdout)]
+    // for debug purpose, also this is already a test function so allow print_stdout shouldn't be a problem?
     fn test_execute_script() {
         fn is_eq<T: std::cmp::PartialEq + rustpython_vm::TryFromObject>(
             v: PyResult,
@@ -792,7 +794,7 @@ pub mod tests {
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None, pred);
-            /* 
+            
             println!(
                 "\u{001B}[35m{code}\u{001B}[0m: {:?}{}",
                 result.clone().map(|v| v.0),
@@ -809,7 +811,7 @@ pub mod tests {
                     })
                     .unwrap()
             );
-            */
+            
 
             if let Ok(p) = result {
                 if let Some(v) = p.1 {
