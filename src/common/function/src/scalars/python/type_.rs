@@ -5,7 +5,7 @@ use arrow::compute::arithmetics;
 use arrow::compute::cast;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
-use arrow::scalar::{BooleanScalar, NullScalar, PrimitiveScalar, Scalar};
+use arrow::scalar::{PrimitiveScalar, Scalar};
 //use common_base::bytes::StringBytes;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
@@ -300,7 +300,7 @@ impl PyVector {
     ) -> PyResult<PyObjectRef> {
         // println!("{:?}", slice);
         // adjust_indices so negative number is transform to usize
-        let (range, step, slice_len) = slice.adjust_indices(self.len());
+        let (mut range, step, slice_len) = slice.adjust_indices(self.len());
         // println!("{:?},{step},{slice_len}", range);
         let mut buf = VectorBuilder::with_capacity(self.vector.data_type(), slice_len);
         if slice_len == 0 {
@@ -309,7 +309,7 @@ impl PyVector {
         } else if step == 1 {
             let v: PyVector = self
                 .vector
-                .slice(range.clone().next().unwrap_or(0), slice_len)
+                .slice(range.next().unwrap_or(0), slice_len)
                 .into();
             Ok(v.into_pyobject(vm))
         } else if step.is_negative() {
@@ -328,7 +328,9 @@ impl PyVector {
         }
     }
 
-    // Unsupport
+    /// Unsupport
+    /// TODO: make it work
+    #[allow(unused)]
     fn setitem_by_index(
         zelf: PyRef<Self>,
         i: isize,
@@ -545,8 +547,10 @@ fn pythonic_index(i: isize, len: usize) -> Option<usize> {
 impl Constructor for PyVector {
     type Args = FuncArgs;
 
-    fn py_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        println!("Call constr: {:?}", _args);
+    /// TODO: found out how to make it work in python
+    #[allow(unused)]
+    fn py_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        println!("Call constr: {:?}", args);
         todo!()
         /*PyVector::default()
         .into_ref_with_type(vm, cls)
@@ -557,6 +561,8 @@ impl Constructor for PyVector {
 impl Initializer for PyVector {
     type Args = OptionalArg<PyObjectRef>;
 
+    /// TODO: found out how to test it in python
+    #[allow(unused)]
     fn init(zelf: PyRef<Self>, iterable: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
         println!("Call init: {:?}", iterable);
         Ok(())
@@ -578,7 +584,7 @@ impl AsSequence for PyVector {
             let zelf = Self::sequence_downcast(seq);
             zelf.getitem_by_index(i, vm)
         }),
-        ass_item: Some(|seq, i, value, vm| {
+        ass_item: Some(|_seq, _i, _value, vm| {
             Err(vm.new_type_error("PyVector object doesn't support item assigns".to_owned()))
         }),
         ..PySequenceMethods::NOT_IMPLEMENTED
@@ -586,8 +592,6 @@ impl AsSequence for PyVector {
 }
 #[cfg(test)]
 pub mod tests {
-
-    use std::fmt::Debug;
 
     use rustpython_vm::protocol::PySequence;
 
