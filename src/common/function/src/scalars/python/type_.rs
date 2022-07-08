@@ -304,8 +304,8 @@ impl PyVector {
                     arr.data_type()
                 )
             };
-            let tmp = arithmetics::div(one_arr.as_ref(), arr);
-            arithmetics::mul_scalar(tmp.as_ref(), val)
+            let tmp = arithmetics::mul_scalar(one_arr.as_ref(), val);
+            arithmetics::div(tmp.as_ref(), arr)
         }
         if is_pyobj_scalar(&other, vm) {
             self.scalar_arith_op(other, Some(DataType::Float64), arrow2_rtruediv, vm)
@@ -841,8 +841,9 @@ pub mod tests {
             ("(a/2)[2]", Some(|v, vm| is_eq(v, 1.5f64, vm))),
             ("(a//2)[2]", Some(|v, vm| is_eq(v, 1i32, vm))),
             ("(2-a)[0]", Some(|v, vm| is_eq(v, 1i32, vm))),
-            ("(3/a)[2]", Some(|v, vm| is_eq(v, 1.0, vm))),
+            ("(3/a)[1]", Some(|v, vm| is_eq(v, 1.5, vm))),
             ("(3//a)[1]", Some(|v, vm| is_eq(v, 1, vm))),
+            ("(3/a)[2]", Some(|v, vm| is_eq(v, 1.0, vm))),
             (
                 "(a+1)[0] + (a-1)[0] * (a/2.0)[2]",
                 Some(|v, vm| is_eq(v, 2.0, vm)),
