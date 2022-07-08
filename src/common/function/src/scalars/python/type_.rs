@@ -516,7 +516,7 @@ fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         Binary(b) => PyBytes::from(b.deref().to_vec()).into_pyobject(vm),
         // is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt
         Date(v) => PyInt::from(v).into_pyobject(vm),
-        DateTime(v) => PyInt::from(v).into_pyobject(vm)
+        DateTime(v) => PyInt::from(v).into_pyobject(vm),
     }
 }
 
@@ -628,12 +628,12 @@ pub mod tests {
                     Int32(2),
                     Int64(2),
                     UInt16(2),
-                    UInt32(2), 
+                    UInt32(2),
                     UInt64(2),
                     Float32(OrderedFloat(2.0)),
                     Float64(OrderedFloat(2.0)),
                     String("123".into()),
-                    // TODO: testBytes and Date/DateTime 
+                    // TODO: test Bytes and Date/DateTime
                 ]
             };
             for val in typed_lst {
@@ -765,10 +765,10 @@ pub mod tests {
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None);
-            println!(
+            /*println!(
                 "\u{001B}[35m{code}\u{001B}[0m: \u{001B}[32m{:?}\u{001B}[0m",
                 result
-            );
+            );*/
             if let Some(p) = pred {
                 assert!(p(result))
             }
