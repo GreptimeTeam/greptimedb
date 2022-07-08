@@ -550,7 +550,7 @@ impl Constructor for PyVector {
     /// TODO: found out how to make it work in python
     #[allow(unused)]
     fn py_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        println!("Call constr: {:?}", args);
+        //println!("Call constr: {:?}", args);
         todo!()
         /*PyVector::default()
         .into_ref_with_type(vm, cls)
@@ -564,7 +564,7 @@ impl Initializer for PyVector {
     /// TODO: found out how to test it in python
     #[allow(unused)]
     fn init(zelf: PyRef<Self>, iterable: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
-        println!("Call init: {:?}", iterable);
+        //println!("Call init: {:?}", iterable);
         Ok(())
     }
 }
@@ -611,7 +611,7 @@ pub mod tests {
             let ri = pyobj_try_to_typed_val(obj, vm, Some(dtype));
             let rj = pyobj_try_to_typed_val(obj_1, vm, Some(j.data_type()));
             let rn = pyobj_try_to_typed_val(obj_2, vm, None);
-            println!("{:?}, {:?}, {:?}", ri, rj, rn);
+            //println!("{:?}, {:?}, {:?}", ri, rj, rn);
             assert_eq!(ri, Some(value::Value::Float32(OrderedFloat(2.0))));
         })
     }
@@ -660,10 +660,10 @@ pub mod tests {
             let a = PyVector::from(a);
             let a = a.into_pyobject(vm);
             if let Some(seq) = PySequence::find_methods(&a, vm) {
-                println!("{:?}", seq)
+                //println!("{:?}", seq)
             }
             if let Some(s) = PySequence::new(&a, vm) {
-                println!("{:?}", s.length(vm))
+                //println!("{:?}", s.length(vm))
             }
         })
     }
@@ -729,9 +729,9 @@ pub mod tests {
             ("(a//2)[2]", Some(|v| v.is_ok())),
             (
                 "vector",
-                Some(|v| {
+                Some(|_v| {
                     // possibly need to load the module of PyVector, but how
-                    println!("{:?}", v);
+                    //println!("{:?}", v);
                     true
                 }),
             ),
