@@ -835,6 +835,7 @@ pub mod tests {
             ("(2-a)[0]", Some(|v, vm| is_eq(v, 1i32, vm))),
             ("(3/a)[2]", Some(|v, vm| is_eq(v, 1.0, vm))),
             ("(3//a)[1]", Some(|v, vm| is_eq(v, 1, vm))),
+            ("(a+1)[0] + (a-1)[0] * (a/2.0)[2]", Some(|v, vm| is_eq(v, 2.0, vm))),
         ];
         for (code, pred) in snippet {
             let result = execute_script(code, None, pred);
