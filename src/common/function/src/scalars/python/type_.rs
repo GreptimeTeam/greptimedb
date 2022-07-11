@@ -46,8 +46,10 @@ impl std::fmt::Debug for PyVector {
 }
 
 fn is_float(datatype: &DataType) -> bool {
-    use DataType::*;
-    matches!(datatype, Float16 | Float32 | Float64)
+    matches!(
+        datatype,
+        DataType::Float16 | DataType::Float32 | DataType::Float64
+    )
 }
 
 fn is_integer(datatype: &DataType) -> bool {
@@ -106,13 +108,13 @@ impl PyVector {
                     .clone()
                     .try_into_value::<i64>(vm)
                     .ok()
-                    .map(|v| (Value::Int64(v), DataType::Int64))
+                    .map(|v| (value::Value::Int64(v), DataType::Int64))
             } else if is_instance(PyFloat::class(vm).into()) {
                 other
                     .clone()
                     .try_into_value::<f64>(vm)
                     .ok()
-                    .map(|v| (Value::Float64(OrderedFloat(v)), DataType::Float64))
+                    .map(|v| (value::Value::Float64(OrderedFloat(v)), DataType::Float64))
             } else {
                 None
             }
@@ -123,7 +125,6 @@ impl PyVector {
                 other.class().name()
             ))
         })?;
-        use value::Value;
         // assuming they are all 64 bit type if possible
 
         let left = self.vector.to_arrow_array();
@@ -143,28 +144,34 @@ impl PyVector {
         let left = cast(left, &target_type, vm)?;
         let right: Box<dyn Scalar> = if is_float(&target_type) {
             match right {
-                Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v as f64))),
-                Value::UInt64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v as f64))),
-                Value::Float64(v) => {
+                value::Value::Int64(v) => {
+                    Box::new(PrimitiveScalar::new(target_type, Some(v as f64)))
+                }
+                value::Value::UInt64(v) => {
+                    Box::new(PrimitiveScalar::new(target_type, Some(v as f64)))
+                }
+                value::Value::Float64(v) => {
                     Box::new(PrimitiveScalar::new(target_type, Some(f64::from(v))))
                 }
                 _ => unreachable!(),
             }
         } else if is_signed(&target_type) {
             match right {
-                Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
-                Value::UInt64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v as i64))),
-                Value::Float64(v) => Box::new(PrimitiveScalar::new(
+                value::Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
+                value::Value::UInt64(v) => {
+                    Box::new(PrimitiveScalar::new(target_type, Some(v as i64)))
+                }
+                value::Value::Float64(v) => Box::new(PrimitiveScalar::new(
                     DataType::Float64,
-                    Some(f64::from(v) as i64),
+                    Some(v.0 as i64),
                 )),
                 _ => unreachable!(),
             }
         } else if is_unsigned(&target_type) {
             match right {
-                Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
-                Value::UInt64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
-                Value::Float64(v) => {
+                value::Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
+                value::Value::UInt64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
+                value::Value::Float64(v) => {
                     Box::new(PrimitiveScalar::new(target_type, Some(f64::from(v))))
                 }
                 _ => unreachable!(),
