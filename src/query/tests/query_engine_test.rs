@@ -1,13 +1,17 @@
+mod median;
 mod pow;
 
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
+use common_query::logical_plan::create_udaf;
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_recordbatch::util;
+use datafusion::arrow_print;
 use datafusion::field_util::FieldExt;
 use datafusion::field_util::SchemaExt;
 use datafusion::logical_plan::LogicalPlanBuilder;
+use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use query::catalog::memory;
 use query::error::Result;
@@ -16,6 +20,7 @@ use query::query_engine::{Output, QueryEngineFactory};
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
 
+use crate::median::Median;
 use crate::pow::pow;
 
 #[tokio::test]
@@ -108,5 +113,52 @@ async fn test_udf() -> Result<()> {
         UInt32Array::from_slice(&expected)
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_udaf() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+
+    let catalog_list = memory::new_memory_catalog_list()?;
+    let factory = QueryEngineFactory::new(catalog_list);
+    let engine = factory.query_engine();
+
+    let median_udaf = create_udaf(
+        "median",
+        ConcreteDataType::uint32_datatype(),
+        Arc::new(ConcreteDataType::uint32_datatype()),
+        Volatility::Immutable,
+        Arc::new(|| Ok(Box::new(Median::new()))),
+        Arc::new(vec![ConcreteDataType::string_datatype()]),
+    );
+
+    engine.register_udaf(median_udaf);
+
+    let plan = engine.sql_to_plan("select MEDIAN(number) as median from numbers")?;
+
+    let output = engine.execute(&plan).await?;
+    let recordbatch_stream = match output {
+        Output::RecordBatch(batch) => batch,
+        _ => unreachable!(),
+    };
+
+    let recordbatch = util::collect(recordbatch_stream).await.unwrap();
+    let df_recordbatch = recordbatch
+        .into_iter()
+        .map(|r| r.df_recordbatch)
+        .collect::<Vec<DfRecordBatch>>();
+
+    let pretty_print = arrow_print::write(&df_recordbatch);
+    let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
+    // numbers table will produce a stream of number 0 to 99(both inclusive), so the median is 49
+    let expected = vec![
+        "+--------+",
+        "| median |",
+        "+--------+",
+        "| 49     |",
+        "+--------+",
+    ];
+    assert_eq!(expected, pretty_print);
     Ok(())
 }
