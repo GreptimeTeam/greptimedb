@@ -23,3 +23,4 @@ table = { path = "../table" }
 [dev-dependencies]
 datatypes = { path = "../datatypes" }
 tokio = { version = "1.18", features = ["full"] }
+tempdir = "0.3"

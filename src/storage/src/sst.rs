@@ -39,12 +39,21 @@ pub type AccessLayerRef = Arc<dyn AccessLayer>;
 
 /// Sst access layer based on local file system.
 pub struct FsAccessLayer {
+    sst_dir: String,
     object_store: ObjectStore,
 }
 
 impl FsAccessLayer {
-    pub fn new(object_store: ObjectStore) -> FsAccessLayer {
-        FsAccessLayer { object_store }
+    pub fn new(sst_dir: &str, object_store: ObjectStore) -> FsAccessLayer {
+        FsAccessLayer {
+            sst_dir: sst_dir.to_string(),
+            object_store,
+        }
+    }
+
+    #[inline]
+    fn sst_file_name(&self, file_name: &str) -> String {
+        format!("{}/{}", self.sst_dir, file_name)
     }
 }
 
@@ -58,7 +67,11 @@ impl AccessLayer for FsAccessLayer {
     ) -> Result<()> {
         // Now we only supports parquet format. We may allow caller to specific sst format in
         // WriteOptions in the future.
-        let writer = ParquetWriter::new(file_name, iter, self.object_store.clone());
+        let writer = ParquetWriter::new(
+            &self.sst_file_name(file_name),
+            iter,
+            self.object_store.clone(),
+        );
 
         writer.write_sst(opts).await
     }

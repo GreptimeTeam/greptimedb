@@ -3379,6 +3379,7 @@ dependencies = [
  "storage",
  "store-api",
  "table",
+ "tempdir",
  "tokio",
 ]
 

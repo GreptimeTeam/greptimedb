@@ -27,7 +27,7 @@ pub trait Manifest: Send + Sync + Clone + 'static {
     type MetadataId: MetadataId;
     type Metadata: Metadata;
 
-    fn new(id: Self::MetadataId, object_store: ObjectStore) -> Self;
+    fn new(id: Self::MetadataId, manifest_dir: &str, object_store: ObjectStore) -> Self;
 
     /// Update metadata by the action
     async fn update(&self, action: Self::MetaAction) -> Result<(), Self::Error>;
