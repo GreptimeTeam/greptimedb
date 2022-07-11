@@ -644,6 +644,7 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "snafu",
+ "tokio",
 ]
 
 [[package]]
