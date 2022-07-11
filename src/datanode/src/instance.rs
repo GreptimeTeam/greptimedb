@@ -115,7 +115,10 @@ impl Instance {
                 CreateTableRequest {
                     name: table_name.to_string(),
                     desc: Some(" a test table".to_string()),
-                    schema: Arc::new(Schema::new(column_schemas)),
+                    schema: Arc::new(
+                        Schema::with_timestamp_index(column_schemas, 3)
+                            .expect("ts is expected to be timestamp column"),
+                    ),
                 },
             )
             .await

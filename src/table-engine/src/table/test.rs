@@ -26,7 +26,9 @@ pub async fn setup_test_engine_and_table(
     )));
 
     let table_name = "demo";
-    let schema = Arc::new(Schema::new(column_schemas));
+    let schema = Arc::new(
+        Schema::with_timestamp_index(column_schemas, 1).expect("ts must be timestamp column"),
+    );
     let table = table_engine
         .create_table(
             &EngineContext::default(),

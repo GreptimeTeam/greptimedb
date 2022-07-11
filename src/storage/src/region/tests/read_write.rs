@@ -36,16 +36,22 @@ async fn new_region_for_rw(sst_dir: &str, enable_version_column: bool) -> Region
 
 fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     if enable_version_column {
-        write_batch_util::new_write_batch(&[
-            (test_util::TIMESTAMP_NAME, LogicalTypeId::Int64, false),
-            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-            ("v1", LogicalTypeId::Int64, true),
-        ])
+        write_batch_util::new_write_batch(
+            &[
+                (test_util::TIMESTAMP_NAME, LogicalTypeId::Int64, false),
+                (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
+                ("v1", LogicalTypeId::Int64, true),
+            ],
+            Some(0),
+        )
     } else {
-        write_batch_util::new_write_batch(&[
-            (test_util::TIMESTAMP_NAME, LogicalTypeId::Int64, false),
-            ("v1", LogicalTypeId::Int64, true),
-        ])
+        write_batch_util::new_write_batch(
+            &[
+                (test_util::TIMESTAMP_NAME, LogicalTypeId::Int64, false),
+                ("v1", LogicalTypeId::Int64, true),
+            ],
+            Some(0),
+        )
     }
 }
 

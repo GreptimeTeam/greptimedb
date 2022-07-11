@@ -91,7 +91,7 @@ mod tests {
                 ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
             ];
 
-            Arc::new(Schema::new(column_schemas))
+            Arc::new(Schema::with_timestamp_index(column_schemas, 3).unwrap())
         }
         async fn scan(
             &self,
