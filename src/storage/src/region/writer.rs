@@ -1,21 +1,25 @@
 use std::sync::Arc;
 
+use common_error::prelude::BoxedError;
 use common_telemetry::logging;
 use common_time::RangeMillis;
 use snafu::ResultExt;
+use store_api::logstore::LogStore;
 use store_api::storage::{WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
-use crate::error::{InvalidTimestampSnafu, Result};
+use crate::codec::Encoder;
+use crate::error::{self, InvalidTimestampSnafu, Result};
 use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
+use crate::proto::{wal_header::MutationExt, WalHeader};
 use crate::region::RegionManifest;
 use crate::region::SharedDataRef;
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControlRef, VersionEdit};
-use crate::wal::Wal;
-use crate::write_batch::WriteBatch;
+use crate::wal::{Wal, WalHeaderEncoder};
+use crate::write_batch::{WriteBatch, WriteBatchArrowEncoder};
 
 pub type RegionWriterRef = Arc<RegionWriter>;
 
@@ -30,7 +34,7 @@ impl RegionWriter {
         }
     }
 
-    pub async fn write<S>(
+    pub async fn write<S: LogStore>(
         &self,
         ctx: &WriteContext,
         request: WriteBatch,
@@ -87,7 +91,7 @@ impl WriterInner {
     ///
     /// Mutable reference of writer ensure no other reference of this writer can modify the
     /// version control (write is exclusive).
-    async fn write<S>(
+    async fn write<S: LogStore>(
         &mut self,
         _ctx: &WriteContext,
         request: WriteBatch,
@@ -103,7 +107,9 @@ impl WriterInner {
         // Sequence for current write batch.
         let next_sequence = committed_sequence + 1;
 
-        // TODO(jiachun): [flush] write data to wal
+        // TODO(jiachun): [flush] wal header
+        let mut wal_header = WalHeader::default();
+        write_to_wal(writer_ctx.wal, &mut wal_header, &request).await?;
 
         // Insert batch into memtable.
         let mut inserter = Inserter::new(next_sequence, time_ranges, version.bucket_duration());
@@ -248,4 +254,30 @@ impl WriterInner {
         self.last_memtable_id += 1;
         self.last_memtable_id
     }
+}
+
+async fn write_to_wal<S: LogStore>(
+    wal: &Wal<S>,
+    header: &mut WalHeader,
+    request: &WriteBatch,
+) -> Result<(u64, usize)> {
+    header.mutation_exts = MutationExt::gen_mutation_exts(request);
+
+    let mut buf = vec![];
+
+    // header
+    let wal_header_encoder = WalHeaderEncoder {};
+    wal_header_encoder.encode(header, &mut buf)?;
+
+    // entry
+    let encoder = WriteBatchArrowEncoder::new(header.mutation_exts.clone());
+    encoder
+        .encode(request, &mut buf)
+        .map_err(BoxedError::new)
+        .context(error::WriteWalSnafu {
+            region: wal.region(),
+        })?;
+
+    // write to wal
+    wal.write_wal(&buf).await
 }

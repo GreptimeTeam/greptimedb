@@ -113,6 +113,18 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to encode wal header, source {}", source))]
+    EncodeWalHeader {
+        backtrace: Backtrace,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("Failed tocode wal header, source {}", source))]
+    DecodeWalHeader {
+        backtrace: Backtrace,
+        source: std::io::Error,
+    },
+
     #[snafu(display("Failed to join task, source: {}", source))]
     JoinTask {
         source: common_runtime::JoinError,
@@ -153,7 +165,9 @@ impl ErrorExt for Error {
             | WriteObject { .. }
             | ListObjects { .. }
             | DeleteObject { .. }
-            | WriteWal { .. } => StatusCode::StorageUnavailable,
+            | WriteWal { .. }
+            | DecodeWalHeader { .. }
+            | EncodeWalHeader { .. } => StatusCode::StorageUnavailable,
         }
     }
 

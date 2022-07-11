@@ -1,10 +1,15 @@
 use std::sync::Arc;
 
 use common_error::prelude::BoxedError;
+use prost::Message;
 use snafu::ResultExt;
 use store_api::logstore::{entry::Entry, namespace::Namespace, AppendResponse, LogStore};
 
-use crate::error::{Result, WriteWalSnafu};
+use crate::{
+    codec::{Decoder, Encoder},
+    error::{self, Error, Result},
+    proto::*,
+};
 
 #[derive(Clone)]
 pub struct Wal<S> {
@@ -19,6 +24,10 @@ impl<S> Wal<S> {
             store,
         }
     }
+
+    pub fn region(&self) -> &str {
+        &self.region
+    }
 }
 
 impl<S: LogStore> Wal<S> {
@@ -32,11 +41,45 @@ impl<S: LogStore> Wal<S> {
             .append(ns, e)
             .await
             .map_err(BoxedError::new)
-            .context(WriteWalSnafu {
+            .context(error::WriteWalSnafu {
                 region: &self.region,
             })?;
 
         Ok((res.entry_id(), res.offset()))
+    }
+}
+
+pub struct WalHeaderEncoder {}
+
+impl Encoder for WalHeaderEncoder {
+    type Item = WalHeader;
+    type Error = Error;
+
+    fn encode(&self, item: &WalHeader, dst: &mut Vec<u8>) -> Result<()> {
+        item.encode_length_delimited(dst)
+            .map_err(|err| err.into())
+            .context(error::EncodeWalHeaderSnafu)
+    }
+}
+
+pub struct WalHeaderDecoder {}
+
+impl Decoder for WalHeaderDecoder {
+    type Item = WalHeader;
+    type Error = Error;
+
+    fn decode(&self, src: &[u8]) -> Result<Option<WalHeader>> {
+        let mut data_pos = prost::decode_length_delimiter(src)
+            .map_err(|err| err.into())
+            .context(error::DecodeWalHeaderSnafu)?;
+        data_pos += prost::length_delimiter_len(data_pos);
+
+        let mut wal_header = WalHeader::decode_length_delimited(src)
+            .map_err(|err| err.into())
+            .context(error::DecodeWalHeaderSnafu)?;
+        wal_header.data_pos = data_pos as u64;
+
+        Ok(Some(wal_header))
     }
 }
 
@@ -61,5 +104,30 @@ mod tests {
 
         assert_eq!(1, res.0);
         assert_eq!(29, res.1);
+    }
+
+    #[test]
+    pub fn test_wal_header_codec() {
+        let wal_header = WalHeader {
+            last_manifest_version: 99999999,
+            data_pos: 0,
+            mutation_exts: vec![],
+        };
+
+        let mut buf: Vec<u8> = vec![];
+        let wal_encoder = WalHeaderEncoder {};
+        wal_encoder.encode(&wal_header, &mut buf).unwrap();
+
+        buf.push(1u8); // data
+        buf.push(2u8); // data
+        buf.push(3u8); // data
+
+        let decoder = WalHeaderDecoder {};
+        let res = decoder.decode(&buf).unwrap();
+
+        assert!(res.is_some());
+
+        let wal_header_encoded = res.unwrap();
+        assert_eq!(buf.len() - 3, wal_header_encoded.data_pos as usize);
     }
 }

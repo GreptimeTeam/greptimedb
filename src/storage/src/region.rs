@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use snafu::ensure;
+use store_api::logstore::LogStore;
 use store_api::storage::{ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse};
 
 use crate::background::JobPoolImpl;
@@ -35,7 +36,7 @@ impl<S> Clone for RegionImpl<S> {
 }
 
 #[async_trait]
-impl<S> Region for RegionImpl<S>
+impl<S: LogStore> Region for RegionImpl<S>
 where
     S: Send + Sync + 'static,
 {
@@ -133,6 +134,15 @@ impl<S> RegionInner<S> {
         RegionMetaImpl::new(metadata)
     }
 
+    fn create_snapshot(&self) -> SnapshotImpl {
+        let version = self.version_control().current();
+        let sequence = self.version_control().committed_sequence();
+
+        SnapshotImpl::new(version, sequence)
+    }
+}
+
+impl<S: LogStore> RegionInner<S> {
     async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
         let metadata = self.in_memory_metadata();
         let schema = metadata.schema();
@@ -155,12 +165,5 @@ impl<S> RegionInner<S> {
         };
         // Now altering schema is not allowed, so it is safe to validate schema outside of the lock.
         self.writer.write(ctx, request, writer_ctx).await
-    }
-
-    fn create_snapshot(&self) -> SnapshotImpl {
-        let version = self.version_control().current();
-        let sequence = self.version_control().committed_sequence();
-
-        SnapshotImpl::new(version, sequence)
     }
 }
