@@ -188,9 +188,9 @@ impl PyVector {
         let right_type = &right_type;
         // TODO: found better way to cast between signed and unsigned type
         let target_type = target_type.unwrap_or_else(|| {
-            if is_signed(left_type) && is_integer(right_type) {
+            if is_signed(left_type) && is_signed(right_type) {
                 DataType::Int64
-            } else if is_unsigned(left_type) && is_integer(right_type) {
+            } else if is_unsigned(left_type) && is_unsigned(right_type) {
                 DataType::UInt64
             } else {
                 DataType::Float64
