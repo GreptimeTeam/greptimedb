@@ -16,8 +16,12 @@ use store_api::storage::{SchemaRef, SequenceNumber};
 use crate::flush::ManifestVersion;
 use crate::memtable::{FreezeError, MemtableSchema, MemtableSet, MemtableVersion};
 use crate::metadata::{RegionMetadata, RegionMetadataRef};
-use crate::sst::FileMeta;
+use crate::sst::LevelMetas;
+use crate::sst::{FileHandle, FileMeta};
 use crate::sync::CowCell;
+
+/// Default bucket duration: 2 Hours.
+const DEFAULT_BUCKET_DURATION: Duration = Duration::from_secs(3600 * 2);
 
 /// Controls version of in memory state for a region.
 pub struct VersionControl {
@@ -75,7 +79,7 @@ impl VersionControl {
 
         let memtable_version = version_to_update.memtables();
         let merged = memtable_version.add_mutable(memtables_to_add);
-        version_to_update.set_memtables(Arc::new(merged));
+        version_to_update.memtables = Arc::new(merged);
 
         version_to_update.commit();
     }
@@ -86,16 +90,19 @@ impl VersionControl {
 
         let memtable_version = version_to_update.memtables();
         let freezed = memtable_version.try_freeze_mutable()?;
-        version_to_update.set_memtables(Arc::new(freezed));
+        version_to_update.memtables = Arc::new(freezed);
 
         version_to_update.commit();
 
         Ok(())
     }
 
-    pub fn apply_edit(&self, _edit: VersionEdit) {
-        // TODO(yingwen): [flush] Apply edit to version.
-        unimplemented!()
+    pub fn apply_edit(&self, edit: VersionEdit) {
+        let mut version_to_update = self.version.lock();
+
+        version_to_update.apply_edit(edit);
+
+        version_to_update.commit();
     }
 }
 
@@ -109,6 +116,7 @@ pub struct VersionEdit {
 pub type VersionControlRef = Arc<VersionControl>;
 pub type VersionRef = Arc<Version>;
 type MemtableVersionRef = Arc<MemtableVersion>;
+type LevelMetasRef = Arc<LevelMetas>;
 
 /// Version contains metadata and state of region.
 #[derive(Clone)]
@@ -122,6 +130,12 @@ pub struct Version {
     ///
     /// Wrapped in Arc to make clone of `Version` much cheaper.
     memtables: MemtableVersionRef,
+    /// SSTs of the region.
+    ssts: LevelMetasRef,
+    /// Inclusive max sequence of flushed data.
+    flushed_sequence: SequenceNumber,
+    /// Current version of manifest.
+    manifest_version: ManifestVersion,
     // TODO(yingwen): Maybe also store last sequence to this version when switching
     // version, so we can know the newest data can read from this version.
 }
@@ -131,6 +145,9 @@ impl Version {
         Version {
             metadata: Arc::new(metadata),
             memtables: Arc::new(memtables),
+            ssts: Arc::new(LevelMetas::new()),
+            flushed_sequence: 0,
+            manifest_version: 0,
         }
     }
 
@@ -150,7 +167,7 @@ impl Version {
 
     /// Returns duration used to partition the memtables and ssts by time.
     pub fn bucket_duration(&self) -> Duration {
-        unimplemented!()
+        DEFAULT_BUCKET_DURATION
     }
 
     #[inline]
@@ -158,9 +175,18 @@ impl Version {
         MemtableSchema::new(self.metadata.columns_row_key.clone())
     }
 
-    #[inline]
-    pub fn set_memtables(&mut self, memtables: MemtableVersionRef) {
-        self.memtables = memtables;
+    pub fn apply_edit(&mut self, edit: VersionEdit) {
+        let flushed_sequence = edit.flushed_sequence.unwrap_or(self.flushed_sequence);
+        if self.flushed_sequence < flushed_sequence {
+            self.flushed_sequence = flushed_sequence;
+        }
+        if self.manifest_version < edit.manifest_version {
+            self.manifest_version = edit.manifest_version;
+        }
+        let handles_to_add = edit.files_to_add.into_iter().map(FileHandle::new);
+        let merged_ssts = self.ssts.merge(handles_to_add);
+
+        self.ssts = Arc::new(merged_ssts);
     }
 }
 
