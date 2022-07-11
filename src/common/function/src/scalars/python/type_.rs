@@ -13,7 +13,7 @@ use datatypes::{
     vectors::{Helper, VectorBuilder, VectorRef},
 };
 use rustpython_vm::{
-    builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr, PyTypeRef},
+    builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr, PyTypeRef, PyBaseExceptionRef},
     function::{FuncArgs, OptionalArg},
     protocol::{PyMappingMethods, PySequenceMethods},
     pyclass, pyimpl,
@@ -44,7 +44,16 @@ impl std::fmt::Debug for PyVector {
         )
     }
 }
-
+fn emit_cast_error(
+    vm: &VirtualMachine,
+    src_ty: &DataType,
+    dst_ty: &DataType,
+) -> PyBaseExceptionRef {
+    vm.new_type_error(format!(
+        "Can't cast source operand of type {:?} into target type of {:?}",
+        src_ty, dst_ty
+    ))
+}
 fn arrow2_rsub(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
     // b - a => a * (-1) + b
     let neg = arithmetics::mul_scalar(arr, &PrimitiveScalar::new(DataType::Int64, Some(-1i64)));
@@ -231,10 +240,7 @@ impl PyVector {
                 _ => unreachable!(),
             }
         } else {
-            return Err(vm.new_type_error(format!(
-                "Can't cast right operand(Type: {:?}) into target type: {:?}",
-                right_type, target_type
-            )));
+            return Err(emit_cast_error(vm, right_type, &target_type));
         };
 
         let result = op(left.as_ref(), right.as_ref());
