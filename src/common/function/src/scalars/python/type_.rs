@@ -1,4 +1,5 @@
 use std::ops::Deref;
+
 use arrow::array::{Array, ArrayRef, PrimitiveArray};
 use arrow::compute::arithmetics;
 use arrow::compute::cast;
@@ -81,7 +82,7 @@ fn arrow2_rfloordiv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
         )
     };
     let tmp = arithmetics::mul_scalar(one_arr.as_ref(), val);
-    
+
     arrow::compute::cast::cast(
         arithmetics::div(tmp.as_ref(), arr).as_ref(),
         &DataType::Int64,
@@ -367,7 +368,6 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn rfloordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-
         if is_pyobj_scalar(&other, vm) {
             // FIXME: DataType convert problem, target_type should be infered?
             self.scalar_arith_op(other, Some(DataType::Int64), arrow2_rfloordiv, vm)
