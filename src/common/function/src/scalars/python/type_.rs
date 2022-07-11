@@ -13,7 +13,7 @@ use datatypes::{
     vectors::{Helper, VectorBuilder, VectorRef},
 };
 use rustpython_vm::{
-    builtins::{PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr, PyTypeRef, PyBaseExceptionRef},
+    builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr, PyTypeRef},
     function::{FuncArgs, OptionalArg},
     protocol::{PyMappingMethods, PySequenceMethods},
     pyclass, pyimpl,
