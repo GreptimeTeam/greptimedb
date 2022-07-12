@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{DirEntry, ObjectStore};
+use object_store::{util, DirEntry, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -81,16 +81,16 @@ impl ManifestObjectStore {
     pub fn new(path: &str, object_store: ObjectStore) -> Self {
         Self {
             object_store,
-            path: path.to_string(),
+            path: util::normalize_dir(path),
         }
     }
 
     fn delta_file_path(&self, version: Version) -> String {
-        format!("{}/{}", self.path, delta_file(version))
+        format!("{}{}", self.path, delta_file(version))
     }
 
     fn checkpoint_file_path(&self, version: Version) -> String {
-        format!("{}/{}", self.path, checkpoint_file(version))
+        format!("{}{}", self.path, checkpoint_file(version))
     }
 }
 
@@ -175,7 +175,6 @@ impl ManifestLogStorage for ManifestObjectStore {
 
     async fn delete(&self, start: Version, end: Version) -> Result<()> {
         //TODO(dennis): delete in batch or concurrently?
-
         for v in start..end {
             let object = self.object_store.object(&self.delta_file_path(v));
             object.delete().await.context(DeleteObjectSnafu {
@@ -196,7 +195,7 @@ impl ManifestLogStorage for ManifestObjectStore {
 
         let last_checkpoint = self
             .object_store
-            .object(&format!("{}/{}", self.path, LAST_CHECKPOINT_FILE));
+            .object(&format!("{}{}", self.path, LAST_CHECKPOINT_FILE));
 
         let checkpoint_metadata = CheckpointMetadata {
             size: bytes.len(),
@@ -222,7 +221,7 @@ impl ManifestLogStorage for ManifestObjectStore {
     async fn load_checkpoint(&self) -> Result<Option<(Version, Vec<u8>)>> {
         let last_checkpoint = self
             .object_store
-            .object(&format!("{}/{}", self.path, LAST_CHECKPOINT_FILE));
+            .object(&format!("{}{}", self.path, LAST_CHECKPOINT_FILE));
 
         let checkpoint_exists = last_checkpoint.is_exist().await.context(ReadObjectSnafu {
             path: last_checkpoint.path(),

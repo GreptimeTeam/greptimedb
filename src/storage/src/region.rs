@@ -6,11 +6,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use snafu::ensure;
-use store_api::storage::{ReadContext, Region, RegionMeta, WriteContext, WriteResponse};
+use store_api::storage::{ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse};
 
 use crate::background::JobPoolImpl;
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
+use crate::manifest::region::RegionManifest;
 use crate::memtable::{DefaultMemtableBuilder, MemtableVersion};
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{RegionWriter, RegionWriterRef, WriterContext};
@@ -62,10 +63,12 @@ where
 
 impl<S> RegionImpl<S> {
     pub fn new(
+        id: RegionId,
         name: String,
         metadata: RegionMetadata,
         wal: Wal<S>,
         sst_layer: AccessLayerRef,
+        manifest: RegionManifest,
     ) -> RegionImpl<S> {
         let memtable_builder = Arc::new(DefaultMemtableBuilder {});
         let memtable_version = MemtableVersion::new();
@@ -76,8 +79,10 @@ impl<S> RegionImpl<S> {
         let version_control = VersionControl::new(metadata, memtable_version);
         let inner = Arc::new(RegionInner {
             shared: Arc::new(SharedData {
+                id,
                 name,
                 version_control: Arc::new(version_control),
+                manifest,
             }),
             writer: Arc::new(RegionWriter::new(memtable_builder)),
             wal,
@@ -98,9 +103,11 @@ impl<S> RegionImpl<S> {
 
 /// Shared data of region.
 pub struct SharedData {
+    pub id: RegionId,
     pub name: String,
     // TODO(yingwen): Maybe no need to use Arc for version control.
     pub version_control: VersionControlRef,
+    pub manifest: RegionManifest,
 }
 
 pub type SharedDataRef = Arc<SharedData>;

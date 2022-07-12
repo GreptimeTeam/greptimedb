@@ -3,14 +3,17 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_telemetry::logging::info;
-use object_store::{backend::fs::Backend, ObjectStore};
+use object_store::{backend::fs::Backend, util, ObjectStore};
 use snafu::ResultExt;
 use store_api::{
     logstore::LogStore,
+    manifest::Manifest,
     storage::{EngineContext, RegionDescriptor, StorageEngine},
 };
 
+use crate::config::{EngineConfig, ObjectStoreConfig};
 use crate::error::{self, Error, Result};
+use crate::manifest::region::RegionManifest;
 use crate::region::RegionImpl;
 use crate::sst::FsAccessLayer;
 use crate::wal::Wal;
@@ -59,27 +62,70 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
 }
 
 impl<S> EngineImpl<S> {
-    pub fn new(log_store: Arc<S>) -> Self {
-        Self {
-            inner: Arc::new(EngineInner::new(log_store)),
-        }
+    pub async fn new(config: EngineConfig, log_store: Arc<S>) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(EngineInner::new(config, log_store).await?),
+        })
+    }
+}
+
+/// Engine share data
+/// TODO(dennis): merge to EngineInner?
+#[derive(Clone, Debug)]
+struct SharedData {
+    pub _config: EngineConfig,
+    pub store_dir: String,
+    pub object_store: ObjectStore,
+}
+
+impl SharedData {
+    async fn new(config: EngineConfig) -> Result<Self> {
+        // TODO(dennis): supports other backend
+        let store_dir = util::normalize_dir(match &config.store_config {
+            ObjectStoreConfig::File(file) => &file.store_dir,
+        });
+
+        let accessor = Backend::build()
+            .root(&store_dir)
+            .finish()
+            .await
+            .context(error::InitBackendSnafu { dir: &store_dir })?;
+
+        let object_store = ObjectStore::new(accessor);
+
+        Ok(Self {
+            _config: config,
+            store_dir,
+            object_store,
+        })
+    }
+
+    #[inline]
+    fn region_sst_dir(&self, region_name: &str) -> String {
+        format!("{}{}/", self.store_dir, region_name)
+    }
+
+    #[inline]
+    fn region_manifest_dir(&self, region_name: &str) -> String {
+        format!("{}{}/manifest/", self.store_dir, region_name)
     }
 }
 
 type RegionMap<S> = HashMap<String, RegionImpl<S>>;
 
-#[derive(Default)]
 struct EngineInner<S> {
     log_store: Arc<S>,
     regions: RwLock<RegionMap<S>>,
+    shared: SharedData,
 }
 
 impl<S> EngineInner<S> {
-    pub fn new(log_store: Arc<S>) -> Self {
-        Self {
+    pub async fn new(config: EngineConfig, log_store: Arc<S>) -> Result<Self> {
+        Ok(Self {
             log_store,
             regions: RwLock::new(Default::default()),
-        }
+            shared: SharedData::new(config).await?,
+        })
     }
 }
 
@@ -92,6 +138,7 @@ impl<S: LogStore> EngineInner<S> {
             }
         }
 
+        let region_id = descriptor.id;
         let region_name = descriptor.name.clone();
         let metadata = descriptor
             .try_into()
@@ -99,17 +146,23 @@ impl<S: LogStore> EngineInner<S> {
                 region: &region_name,
             })?;
         let wal = Wal::new(region_name.clone(), self.log_store.clone());
-        // TODO(yingwen): [flush] Reuse backend of access layer.
-        let sst_dir = self.sst_dir();
-        let accessor = Backend::build()
-            .root(&sst_dir)
-            .finish()
-            .await
-            .context(error::InitBackendSnafu { dir: sst_dir })?;
-        let object_store = ObjectStore::new(accessor);
-        let sst_layer = Arc::new(FsAccessLayer::new(object_store));
+        let sst_dir = &self.shared.region_sst_dir(&region_name);
+        let sst_layer = Arc::new(FsAccessLayer::new(
+            sst_dir,
+            self.shared.object_store.clone(),
+        ));
+        let manifest_dir = self.shared.region_manifest_dir(&region_name);
+        let manifest =
+            RegionManifest::new(region_id, &manifest_dir, self.shared.object_store.clone());
 
-        let region = RegionImpl::new(region_name.clone(), metadata, wal, sst_layer);
+        let region = RegionImpl::new(
+            region_id,
+            region_name.clone(),
+            metadata,
+            wal,
+            sst_layer,
+            manifest,
+        );
 
         {
             let mut regions = self.regions.write().unwrap();
@@ -130,11 +183,6 @@ impl<S: LogStore> EngineInner<S> {
     fn get_region(&self, name: &str) -> Option<RegionImpl<S>> {
         self.regions.read().unwrap().get(name).cloned()
     }
-
-    fn sst_dir(&self) -> String {
-        // TODO(yingwen): [flush] Format sst path.
-        unimplemented!()
-    }
 }
 
 #[cfg(test)]
@@ -142,6 +190,7 @@ mod tests {
     use datatypes::type_id::LogicalTypeId;
     use log_store::test_util::log_store_util;
     use store_api::storage::Region;
+    use tempdir::TempDir;
 
     use super::*;
     use crate::test_util::descriptor_util::RegionDescBuilder;
@@ -150,7 +199,11 @@ mod tests {
     async fn test_create_new_region() {
         let (log_store, _tmp) =
             log_store_util::create_tmp_local_file_log_store("test_engine_wal").await;
-        let engine = EngineImpl::new(Arc::new(log_store));
+        let dir = TempDir::new("test_create_new_region").unwrap();
+        let store_dir = dir.path().to_string_lossy();
+        let config = EngineConfig::with_store_dir(&store_dir);
+
+        let engine = EngineImpl::new(config, Arc::new(log_store)).await.unwrap();
 
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)

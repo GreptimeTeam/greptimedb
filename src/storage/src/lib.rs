@@ -2,8 +2,9 @@
 
 mod background;
 mod chunk;
+pub mod config;
 mod engine;
-mod error;
+pub mod error;
 mod flush;
 pub mod manifest;
 pub mod memtable;

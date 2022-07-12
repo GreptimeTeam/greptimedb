@@ -27,9 +27,9 @@ impl Manifest for RegionManifest {
     type MetadataId = RegionId;
     type Metadata = RegionManifestData;
 
-    fn new(id: Self::MetadataId, object_store: ObjectStore) -> Self {
+    fn new(id: Self::MetadataId, manifest_dir: &str, object_store: ObjectStore) -> Self {
         RegionManifest {
-            inner: Arc::new(RegionManifestInner::new(id, object_store)),
+            inner: Arc::new(RegionManifestInner::new(id, manifest_dir, object_store)),
         }
     }
 
@@ -90,13 +90,10 @@ impl RegionMetaActionIterator {
 }
 
 impl RegionManifestInner {
-    fn new(region_id: RegionId, object_store: ObjectStore) -> Self {
-        // TODO(dennis): make manifest dir configurable.
-        let path = format!("{}/manifest/", region_id);
-
+    fn new(region_id: RegionId, manifest_dir: &str, object_store: ObjectStore) -> Self {
         Self {
             region_id,
-            store: Arc::new(ManifestObjectStore::new(&path, object_store)),
+            store: Arc::new(ManifestObjectStore::new(manifest_dir, object_store)),
             // TODO(dennis): recover the last version from history
             version: AtomicU64::new(0),
         }
@@ -154,7 +151,7 @@ mod tests {
         );
         let region_id = 0;
 
-        let manifest = RegionManifest::new(region_id, object_store);
+        let manifest = RegionManifest::new(region_id, "/manifest/", object_store);
         assert_eq!(region_id, manifest.metadata_id());
 
         let region_name = "region-0";
