@@ -13,10 +13,12 @@ message DatabaseResponse {
 
 message ObjectExpr {
     ExprHeader header = 1;
-    InsertExpr insert = 2;
-    SelectExpr select = 3;
-    UpdateExpr update = 4;
-    DeleteExpr delete = 5;
+    oneof object_expr {    
+        InsertExpr insert = 2;
+        SelectExpr select = 3;
+        UpdateExpr update = 4;
+        DeleteExpr delete = 5;
+    }
 }
 
 message SelectExpr {
@@ -24,8 +26,7 @@ message SelectExpr {
 }
 
 message InsertExpr {
-    string table_name = 1;
-    repeated bytes values = 2;
+    repeated InsertBatch insert_batches = 1;
 }
 
 // TODO(jiachun)
@@ -50,3 +51,41 @@ message ResultHeader {
     uint32 code = 4;
     string err_msg = 5;
 }
+
+message InsertBatch {
+    string table_name = 1;
+    repeated Column columns = 2;    
+    uint32 row_count = 3;
+}
+
+message Column {
+    string column_name = 1;
+
+    enum SemanticType {
+        FIELD = 0;
+    }
+    SemanticType semanticType = 2;
+
+    message Values {
+        repeated int32 i8_values = 1;
+        repeated int32 i16_values = 2;
+        repeated int32 i32_values = 3;
+        repeated int64 i64_values = 4;
+
+        repeated uint32 u8_values = 5;
+        repeated uint32 u16_values = 6;
+        repeated uint32 u32_values = 7;
+        repeated uint64 u64_values = 8;
+
+        repeated float f32_values = 9;
+        repeated float f64_values = 10;
+
+        repeated bool bool_values = 11;
+        repeated bytes bytes_values = 12;
+        repeated string string_values = 13;
+    }
+    Values values = 3;
+
+    bytes null_mask = 4;
+}
+  
