@@ -1,11 +1,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_telemetry::logging;
 use common_time::RangeMillis;
+use store_api::manifest::Manifest;
+use store_api::manifest::ManifestVersion;
 use store_api::storage::SequenceNumber;
 
 use crate::background::{Context, Job, JobHandle, JobPoolRef};
 use crate::error::Result;
+use crate::manifest::action::*;
 use crate::memtable::MemtableRef;
 use crate::region::RegionWriterRef;
 use crate::region::SharedDataRef;
@@ -56,9 +60,6 @@ impl FlushScheduler for FlushSchedulerImpl {
 
 pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
 
-// TODO(yingwen): Use the Version number type in manifest.
-pub type ManifestVersion = u64;
-
 pub struct FlushJob {
     /// Memtables to be flushed.
     pub memtables: Vec<MemtableWithMeta>,
@@ -83,9 +84,18 @@ impl FlushJob {
         unimplemented!()
     }
 
-    async fn write_to_manifest(&self, _file_metas: &[FileMeta]) -> Result<ManifestVersion> {
-        // TODO(yingwen): [flush] Write all metadata to manifest.
-        unimplemented!()
+    async fn write_to_manifest(&self, file_metas: &[FileMeta]) -> Result<ManifestVersion> {
+        let edit = RegionEdit {
+            region_id: self.shared.id,
+            region_version: self.shared.version_control.metadata().version,
+            files_to_add: file_metas.to_vec(),
+            files_to_remove: None,
+        };
+        logging::debug!("Write region edit: {:?} to manifest.", edit);
+        self.shared
+            .manifest
+            .update(RegionMetaAction::Edit(edit))
+            .await
     }
 }
 

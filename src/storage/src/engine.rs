@@ -13,7 +13,9 @@ use store_api::{
 
 use crate::config::{EngineConfig, ObjectStoreConfig};
 use crate::error::{self, Error, Result};
+use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
+use crate::metadata::RegionMetadata;
 use crate::region::RegionImpl;
 use crate::sst::FsAccessLayer;
 use crate::wal::Wal;
@@ -140,11 +142,12 @@ impl<S: LogStore> EngineInner<S> {
 
         let region_id = descriptor.id;
         let region_name = descriptor.name.clone();
-        let metadata = descriptor
-            .try_into()
-            .context(error::InvalidRegionDescSnafu {
-                region: &region_name,
-            })?;
+        let metadata: RegionMetadata =
+            descriptor
+                .try_into()
+                .context(error::InvalidRegionDescSnafu {
+                    region: &region_name,
+                })?;
         let wal = Wal::new(region_name.clone(), self.log_store.clone());
         let sst_dir = &self.shared.region_sst_dir(&region_name);
         let sst_layer = Arc::new(FsAccessLayer::new(
@@ -158,11 +161,17 @@ impl<S: LogStore> EngineInner<S> {
         let region = RegionImpl::new(
             region_id,
             region_name.clone(),
-            metadata,
+            metadata.clone(),
             wal,
             sst_layer,
-            manifest,
+            manifest.clone(),
         );
+        // Persist region metadata
+        manifest
+            .update(RegionMetaAction::Change(RegionChange {
+                metadata: Arc::new(metadata),
+            }))
+            .await?;
 
         {
             let mut regions = self.regions.write().unwrap();
@@ -172,7 +181,6 @@ impl<S: LogStore> EngineInner<S> {
 
             regions.insert(region_name.clone(), region.clone());
         }
-        // TODO(yingwen): Persist region metadata to log.
 
         // TODO(yingwen): Impl Debug format for region and print region info briefly in log.
         info!("Storage engine create region {}", region_name);

@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
-use crate::flush::ManifestVersion;
 use crate::memtable::{FreezeError, MemtableSchema, MemtableSet, MemtableVersion};
 use crate::metadata::{RegionMetadata, RegionMetadataRef};
 use crate::sst::LevelMetas;

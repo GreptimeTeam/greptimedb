@@ -7,12 +7,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{DecodeJsonSnafu, EncodeJsonSnafu, Result, Utf8Snafu};
 use crate::metadata::{RegionMetadataRef, VersionNumber};
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct FileMeta {
-    path: String,
-    // TODO(dennis) keeps ObjectMetadata returned by object-store
-}
+use crate::sst::FileMeta;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RegionChange {
@@ -29,7 +24,7 @@ pub struct RegionEdit {
     pub region_id: RegionId,
     pub region_version: VersionNumber,
     pub files_to_add: Vec<FileMeta>,
-    pub files_to_remove: Vec<FileMeta>,
+    pub files_to_remove: Option<Vec<FileMeta>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

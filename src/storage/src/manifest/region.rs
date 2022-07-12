@@ -33,7 +33,7 @@ impl Manifest for RegionManifest {
         }
     }
 
-    async fn update(&self, action: RegionMetaAction) -> Result<()> {
+    async fn update(&self, action: RegionMetaAction) -> Result<Version> {
         self.inner.save(&action).await
     }
 
@@ -58,7 +58,7 @@ impl Manifest for RegionManifest {
         }
     }
 
-    async fn checkpoint(&self) -> Result<()> {
+    async fn checkpoint(&self) -> Result<Version> {
         unimplemented!();
     }
 
@@ -109,7 +109,7 @@ impl RegionManifestInner {
         self.version.load(Ordering::Relaxed)
     }
 
-    async fn save(&self, action: &RegionMetaAction) -> Result<()> {
+    async fn save(&self, action: &RegionMetaAction) -> Result<Version> {
         let version = self.inc_version();
 
         logging::debug!(
@@ -118,7 +118,9 @@ impl RegionManifestInner {
             version
         );
 
-        self.store.save(version, &action.encode()?).await
+        self.store.save(version, &action.encode()?).await?;
+
+        Ok(version)
     }
 
     async fn scan(&self, start: Version, end: Version) -> Result<RegionMetaActionIterator> {
