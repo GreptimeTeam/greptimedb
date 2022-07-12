@@ -80,7 +80,6 @@ struct SharedData {
 impl SharedData {
     async fn new(config: EngineConfig) -> Result<Self> {
         // TODO(dennis): supports other backend
-
         let store_dir = match &config.store_config {
             ObjectStoreConfig::File(file) => file.store_dir.clone(),
         };
