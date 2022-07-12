@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
+use snafu::ResultExt;
 use store_api::storage::{WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
-use crate::error::Result;
+use crate::error::{InvalidTimestampSnafu, Result};
 use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
 use crate::region::SharedDataRef;
@@ -133,7 +134,9 @@ impl WriterInner {
 
         let current_version = version_control.current();
         let duration = current_version.bucket_duration();
-        let time_ranges = request.time_ranges(duration);
+        let time_ranges = request
+            .time_ranges(duration)
+            .context(InvalidTimestampSnafu)?;
         let mutable = current_version.mutable_memtables();
         let mut memtables_to_add = MemtableSet::default();
 

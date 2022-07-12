@@ -115,6 +115,9 @@ pub enum Error {
         source: common_runtime::JoinError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Invalid timestamp in write batch, source: {}", source))]
+    InvalidTimestamp { source: crate::write_batch::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -127,7 +130,8 @@ impl ErrorExt for Error {
             InvalidScanIndex { .. }
             | InvalidRegionDesc { .. }
             | InvalidInputSchema { .. }
-            | BatchMissingColumn { .. } => StatusCode::InvalidArguments,
+            | BatchMissingColumn { .. }
+            | InvalidTimestamp { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. } | EncodeJson { .. } | DecodeJson { .. } | JoinTask { .. } => {
                 StatusCode::Unexpected
