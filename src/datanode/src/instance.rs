@@ -8,7 +8,7 @@ use query::catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
-use storage::EngineImpl;
+use storage::{config::EngineConfig, EngineImpl};
 use table::engine::EngineContext;
 use table::engine::TableEngine;
 use table::requests::CreateTableRequest;
@@ -53,7 +53,11 @@ impl Instance {
 
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine().clone();
-        let table_engine = DefaultEngine::new(EngineImpl::new(Arc::new(log_store)));
+        let table_engine = DefaultEngine::new(
+            EngineImpl::new(EngineConfig::default(), Arc::new(log_store))
+                .await
+                .context(error::OpenStorageEngineSnafu)?,
+        );
 
         Ok(Self {
             query_engine,
