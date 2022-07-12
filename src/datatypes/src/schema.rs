@@ -101,6 +101,11 @@ impl Schema {
     pub fn timestamp_index(&self) -> Option<usize> {
         self.timestamp_index
     }
+
+    #[inline]
+    pub fn timestamp_column(&self) -> Option<&ColumnSchema> {
+        self.timestamp_index.map(|idx| &self.column_schemas[idx])
+    }
 }
 
 fn collect_column_schemas(
@@ -219,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema() {
+    fn test_schema_no_timestamp() {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), false),
             ColumnSchema::new("col2", ConcreteDataType::float64_datatype(), true),
@@ -227,6 +232,8 @@ mod tests {
         let schema = Schema::new(column_schemas.clone());
 
         assert_eq!(2, schema.num_columns());
+        assert!(schema.timestamp_index().is_none());
+        assert!(schema.timestamp_column().is_none());
 
         for column_schema in &column_schemas {
             let found = schema.column_schema_by_name(&column_schema.name).unwrap();
@@ -243,5 +250,32 @@ mod tests {
         assert_eq!(column_schemas, schema.column_schemas());
         assert_eq!(arrow_schema, *schema.arrow_schema());
         assert_eq!(arrow_schema, *new_schema.arrow_schema());
+    }
+
+    #[test]
+    fn test_schema_with_timestamp() {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false),
+        ];
+        let schema = Schema::with_timestamp_index(column_schemas.clone(), 1).unwrap();
+
+        assert_eq!(1, schema.timestamp_index().unwrap());
+        assert_eq!(&column_schemas[1], schema.timestamp_column().unwrap());
+
+        let new_schema = Schema::try_from(schema.arrow_schema().clone()).unwrap();
+        assert_eq!(1, schema.timestamp_index().unwrap());
+        assert_eq!(schema, new_schema);
+    }
+
+    #[test]
+    fn test_schema_wrong_timestamp() {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("col2", ConcreteDataType::float64_datatype(), false),
+        ];
+        assert!(Schema::with_timestamp_index(column_schemas.clone(), 0).is_err());
+        assert!(Schema::with_timestamp_index(column_schemas.clone(), 1).is_err());
+        assert!(Schema::with_timestamp_index(column_schemas.clone(), 2).is_err());
     }
 }
