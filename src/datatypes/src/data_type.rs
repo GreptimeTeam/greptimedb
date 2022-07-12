@@ -71,6 +71,10 @@ impl ConcreteDataType {
         )
     }
 
+    pub fn is_timestamp(&self) -> bool {
+        matches!(self, ConcreteDataType::Int64(_))
+    }
+
     pub fn numerics() -> Vec<ConcreteDataType> {
         vec![
             ConcreteDataType::int8_datatype(),

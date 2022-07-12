@@ -45,12 +45,15 @@ async fn test_new_region() {
         manifest,
     );
 
-    let expect_schema = schema_util::new_schema_ref(&[
-        ("k1", LogicalTypeId::Int32, false),
-        (test_util::TIMESTAMP_NAME, LogicalTypeId::Int64, false),
-        (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-        ("v1", LogicalTypeId::Float32, true),
-    ]);
+    let expect_schema = schema_util::new_schema_ref(
+        &[
+            ("k1", LogicalTypeId::Int32, false),
+            (test_util::TIMESTAMP_NAME, LogicalTypeId::Int64, false),
+            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
+            ("v1", LogicalTypeId::Float32, true),
+        ],
+        Some(1),
+    );
 
     assert_eq!(region_name, region.name());
     assert_eq!(expect_schema, *region.in_memory_metadata().schema());

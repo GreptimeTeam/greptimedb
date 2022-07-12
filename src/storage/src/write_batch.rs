@@ -327,11 +327,14 @@ mod tests {
     }
 
     fn new_test_batch() -> WriteBatch {
-        write_batch_util::new_write_batch(&[
-            ("k1", LogicalTypeId::UInt64, false),
-            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-            ("v1", LogicalTypeId::Boolean, true),
-        ])
+        write_batch_util::new_write_batch(
+            &[
+                ("k1", LogicalTypeId::UInt64, false),
+                (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
+                ("v1", LogicalTypeId::Boolean, true),
+            ],
+            None,
+        )
     }
 
     #[test]
@@ -369,7 +372,8 @@ mod tests {
         let mut put_data = PutData::new();
         put_data.add_key_column("k1", boolv).unwrap();
 
-        let mut batch = write_batch_util::new_write_batch(&[("k1", LogicalTypeId::Boolean, false)]);
+        let mut batch =
+            write_batch_util::new_write_batch(&[("k1", LogicalTypeId::Boolean, false)], None);
         let err = batch.put(put_data).err().unwrap();
         check_err(err, "Request is too large");
     }
