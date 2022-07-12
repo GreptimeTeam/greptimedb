@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_telemetry::logging::info;
-use object_store::{backend::fs::Backend, ObjectStore};
+use object_store::{backend::fs::Backend, util, ObjectStore};
 use snafu::ResultExt;
 use store_api::{
     logstore::LogStore,
@@ -70,6 +70,7 @@ impl<S> EngineImpl<S> {
 }
 
 /// Engine share data
+/// TODO(dennis): merge to EngineInner?
 #[derive(Clone, Debug)]
 struct SharedData {
     pub _config: EngineConfig,
@@ -80,9 +81,9 @@ struct SharedData {
 impl SharedData {
     async fn new(config: EngineConfig) -> Result<Self> {
         // TODO(dennis): supports other backend
-        let store_dir = match &config.store_config {
-            ObjectStoreConfig::File(file) => file.store_dir.clone(),
-        };
+        let store_dir = util::normalize_dir(match &config.store_config {
+            ObjectStoreConfig::File(file) => &file.store_dir,
+        });
 
         let accessor = Backend::build()
             .root(&store_dir)
@@ -101,12 +102,12 @@ impl SharedData {
 
     #[inline]
     fn region_sst_dir(&self, region_name: &str) -> String {
-        format!("{}/{}/", self.store_dir, region_name)
+        format!("{}{}/", self.store_dir, region_name)
     }
 
     #[inline]
     fn region_manifest_dir(&self, region_name: &str) -> String {
-        format!("{}/{}/manifest/", self.store_dir, region_name)
+        format!("{}{}/manifest/", self.store_dir, region_name)
     }
 }
 

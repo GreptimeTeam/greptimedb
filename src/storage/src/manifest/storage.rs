@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{DirEntry, ObjectStore};
+use object_store::{util, DirEntry, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -79,13 +79,10 @@ pub struct ManifestObjectStore {
 
 impl ManifestObjectStore {
     pub fn new(path: &str, object_store: ObjectStore) -> Self {
-        let mut path = path.to_string();
-
-        if !path.ends_with('/') {
-            path.push('/');
+        Self {
+            object_store,
+            path: util::normalize_dir(path),
         }
-
-        Self { object_store, path }
     }
 
     fn delta_file_path(&self, version: Version) -> String {

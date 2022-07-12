@@ -54,12 +54,9 @@ impl Instance {
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine().clone();
         let table_engine = DefaultEngine::new(
-            EngineImpl::new(
-                EngineConfig::with_store_dir("/tmp/greptimedb"),
-                Arc::new(log_store),
-            )
-            .await
-            .context(error::OpenStorageEngineSnafu)?,
+            EngineImpl::new(EngineConfig::default(), Arc::new(log_store))
+                .await
+                .context(error::OpenStorageEngineSnafu)?,
         );
 
         Ok(Self {

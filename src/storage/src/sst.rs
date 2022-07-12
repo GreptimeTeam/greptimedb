@@ -3,7 +3,7 @@ mod parquet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use object_store::ObjectStore;
+use object_store::{util, ObjectStore};
 
 use crate::error::Result;
 use crate::memtable::BatchIteratorPtr;
@@ -46,14 +46,14 @@ pub struct FsAccessLayer {
 impl FsAccessLayer {
     pub fn new(sst_dir: &str, object_store: ObjectStore) -> FsAccessLayer {
         FsAccessLayer {
-            sst_dir: sst_dir.to_string(),
+            sst_dir: util::normalize_dir(sst_dir),
             object_store,
         }
     }
 
     #[inline]
-    fn sst_file_name(&self, file_name: &str) -> String {
-        format!("{}/{}", self.sst_dir, file_name)
+    fn sst_file_path(&self, file_name: &str) -> String {
+        format!("{}{}", self.sst_dir, file_name)
     }
 }
 
@@ -68,7 +68,7 @@ impl AccessLayer for FsAccessLayer {
         // Now we only supports parquet format. We may allow caller to specific sst format in
         // WriteOptions in the future.
         let writer = ParquetWriter::new(
-            &self.sst_file_name(file_name),
+            &self.sst_file_path(file_name),
             iter,
             self.object_store.clone(),
         );
