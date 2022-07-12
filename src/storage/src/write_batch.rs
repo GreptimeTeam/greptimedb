@@ -246,6 +246,22 @@ impl PutData {
     pub fn is_empty(&self) -> bool {
         self.num_rows() == 0
     }
+
+    /// Returns slice of [PutData] in range `[start, end)`.
+    ///
+    /// # Panics
+    /// Panics if `start > end`.
+    pub fn slice(&self, start: usize, end: usize) -> PutData {
+        assert!(start <= end);
+
+        let columns = self
+            .columns
+            .iter()
+            .map(|(k, v)| (k.clone(), v.slice(start, end - start)))
+            .collect();
+
+        PutData { columns }
+    }
 }
 
 impl WriteBatch {

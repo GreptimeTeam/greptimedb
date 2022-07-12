@@ -18,6 +18,22 @@ impl TimestampMillis {
     pub const fn new(ms: i64) -> TimestampMillis {
         TimestampMillis(ms)
     }
+
+    /// Returns the timestamp aligned by `bucket_duration` in milliseconds.
+    ///
+    /// # Panics
+    /// Panics if `bucket_duration <= 0`.
+    pub fn aligned_by_bucket(self, bucket_duration: i64) -> TimestampMillis {
+        assert!(bucket_duration > 0);
+
+        let ts = if self.0 >= 0 {
+            self.0 / bucket_duration * bucket_duration
+        } else {
+            (self.0 - (bucket_duration - 1)) / bucket_duration * bucket_duration
+        };
+
+        TimestampMillis(ts)
+    }
 }
 
 impl From<i64> for TimestampMillis {
