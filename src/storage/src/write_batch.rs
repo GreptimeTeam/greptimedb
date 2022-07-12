@@ -6,13 +6,11 @@ use std::time::Duration;
 use common_error::prelude::*;
 use common_time::RangeMillis;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::Value;
+use datatypes::prelude::ScalarVector;
 use datatypes::schema::SchemaRef;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{Int64Vector, VectorRef};
 use snafu::ensure;
 use store_api::storage::{consts, PutOperation, WriteRequest};
-
-use crate::write_batch::Error::TimestampOverflow;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -138,19 +136,16 @@ impl WriteRequest for WriteBatch {
                     let column = put_data
                         .column_by_name(ts_col_name)
                         .unwrap_or_else(|| panic!("Cannot find column by name: {}", ts_col_name));
-                    for i in 0..column.len() {
-                        match column.get(i) {
-                            Value::Null => {
-                                continue;
-                            }
-                            Value::Int64(ts) => {
+
+                    let ts_vector = column.as_any().downcast_ref::<Int64Vector>().unwrap(); // not expected to fail
+                    for ts in ts_vector.iter_data() {
+                        match ts {
+                            Some(ts) => {
                                 let aligned = align_timestamp(ts, durations_millis)
-                                    .ok_or(TimestampOverflow { ts })?;
+                                    .context(TimestampOverflowSnafu { ts })?;
                                 aligned_timestamps.insert(aligned);
                             }
-                            _ => {
-                                unreachable!()
-                            }
+                            None => {}
                         }
                     }
                 }
@@ -172,13 +167,13 @@ impl WriteRequest for WriteBatch {
 /// So timestamp within `[i64::MIN, i64::MIN + duration)` is not a valid input.
 fn align_timestamp(ts: i64, duration: i64) -> Option<i64> {
     let aligned_ts = if ts < 0 {
-        ts.checked_sub(duration - 1)
+        ts.checked_sub(duration - 1)?
     } else {
-        Some(ts)
+        ts
     };
 
     aligned_ts
-        .and_then(|v| v.checked_div(duration))
+        .checked_div(duration)
         .and_then(|v| v.checked_mul(duration))
 }
 
