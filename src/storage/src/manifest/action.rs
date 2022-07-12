@@ -24,7 +24,7 @@ pub struct RegionEdit {
     pub region_id: RegionId,
     pub region_version: VersionNumber,
     pub files_to_add: Vec<FileMeta>,
-    pub files_to_remove: Option<Vec<FileMeta>>,
+    pub files_to_remove: Vec<FileMeta>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -89,7 +89,7 @@ impl FlushJob {
             region_id: self.shared.id,
             region_version: self.shared.version_control.metadata().version,
             files_to_add: file_metas.to_vec(),
-            files_to_remove: None,
+            files_to_remove: Vec::default(),
         };
         logging::debug!("Write region edit: {:?} to manifest.", edit);
         self.shared
