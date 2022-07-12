@@ -221,7 +221,7 @@ impl ManifestLogStorage for ManifestObjectStore {
     async fn load_checkpoint(&self) -> Result<Option<(Version, Vec<u8>)>> {
         let last_checkpoint = self
             .object_store
-            .object(&format!("{}/{}", self.path, LAST_CHECKPOINT_FILE));
+            .object(&format!("{}{}", self.path, LAST_CHECKPOINT_FILE));
 
         let checkpoint_exists = last_checkpoint.is_exist().await.context(ReadObjectSnafu {
             path: last_checkpoint.path(),
