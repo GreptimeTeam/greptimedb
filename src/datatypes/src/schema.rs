@@ -276,6 +276,6 @@ mod tests {
         ];
         assert!(Schema::with_timestamp_index(column_schemas.clone(), 0).is_err());
         assert!(Schema::with_timestamp_index(column_schemas.clone(), 1).is_err());
-        assert!(Schema::with_timestamp_index(column_schemas.clone(), 2).is_err());
+        assert!(Schema::with_timestamp_index(column_schemas, 2).is_err());
     }
 }

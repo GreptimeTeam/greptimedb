@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use object_store::{util, ObjectStore};
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::memtable::BatchIteratorPtr;
@@ -106,9 +107,9 @@ impl FileHandleInner {
 }
 
 /// Immutable metadata of a sst file.
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FileMeta {
-    pub file_name: String,
+    pub file_path: String,
     /// SST level of the file.
     pub level: u8,
 }
