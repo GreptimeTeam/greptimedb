@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::background::{Context, Job, JobHandle, JobPoolRef};
 use crate::error::{CancelledSnafu, Result};
 use crate::manifest::action::*;
-use crate::memtable::{IterContext, MemtableRef};
+use crate::memtable::{IterContext, MemtableId, MemtableRef};
 use crate::region::RegionWriterRef;
 use crate::region::SharedDataRef;
 use crate::sst::{AccessLayerRef, FileMeta, WriteOptions};
@@ -103,6 +103,7 @@ impl FlushStrategy for SizeBasedStrategy {
     }
 }
 
+#[derive(Debug)]
 pub struct MemtableWithMeta {
     pub memtable: MemtableRef,
     pub bucket: RangeMillis,
@@ -134,6 +135,9 @@ impl FlushScheduler for FlushSchedulerImpl {
 pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
 
 pub struct FlushJob {
+    /// Max memtable id in these memtables,
+    /// used to remove immutable memtables in current version.
+    pub max_memtable_id: Option<MemtableId>,
     /// Memtables to be flushed.
     pub memtables: Vec<MemtableWithMeta>,
     /// Last sequence of data to be flushed.
@@ -189,6 +193,7 @@ impl FlushJob {
         let edit = RegionEdit {
             region_id: self.shared.id,
             region_version: self.shared.version_control.metadata().version,
+            flush_sequence: self.flush_sequence,
             files_to_add: file_metas.to_vec(),
             files_to_remove: Vec::default(),
         };
@@ -217,6 +222,7 @@ impl Job for FlushJob {
             files_to_add: file_metas,
             flushed_sequence: Some(self.flush_sequence),
             manifest_version,
+            max_memtable_id: self.max_memtable_id,
         };
 
         self.writer.apply_version_edit(edit, &self.shared).await?;

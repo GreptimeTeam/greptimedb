@@ -24,6 +24,7 @@ type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
 /// A simple memtable implementation based on std's [`BTreeMap`].
 ///
 /// Mainly for test purpose, don't use in production.
+#[derive(Debug)]
 pub struct BTreeMemtable {
     id: MemtableId,
     schema: MemtableSchema,

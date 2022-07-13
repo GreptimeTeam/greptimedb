@@ -195,9 +195,11 @@ impl WriterInner {
 
         let current_version = version_control.current();
         let duration = current_version.bucket_duration();
-        let mem_to_flush = current_version.memtables().memtables_to_flush(duration);
+        let (max_memtable_id, mem_to_flush) =
+            current_version.memtables().memtables_to_flush(duration);
 
         let flush_req = FlushJob {
+            max_memtable_id,
             memtables: mem_to_flush,
             // In write thread, safe to use current commited sequence.
             flush_sequence: version_control.committed_sequence(),
