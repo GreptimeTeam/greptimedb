@@ -13,7 +13,7 @@ message DatabaseResponse {
 
 message ObjectExpr {
     ExprHeader header = 1;
-    oneof object_expr {    
+    oneof expr {    
         InsertExpr insert = 2;
         SelectExpr select = 3;
         UpdateExpr update = 4;
@@ -26,7 +26,8 @@ message SelectExpr {
 }
 
 message InsertExpr {
-    repeated InsertBatch insert_batches = 1;
+    string table_name = 1;
+    repeated bytes values = 2;
 }
 
 // TODO(jiachun)
@@ -53,8 +54,7 @@ message ResultHeader {
 }
 
 message InsertBatch {
-    string table_name = 1;
-    repeated Column columns = 2;    
+    repeated Column columns = 2;
     uint32 row_count = 3;
 }
 
@@ -88,4 +88,3 @@ message Column {
 
     bytes null_mask = 4;
 }
-  

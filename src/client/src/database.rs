@@ -1,3 +1,4 @@
+use api::v1::object_expr;
 use api::v1::*;
 use snafu::ensure;
 
@@ -36,8 +37,7 @@ impl Database {
         };
         let expr = ObjectExpr {
             header: Some(header),
-            insert: Some(insert),
-            ..Default::default()
+            expr: Some(object_expr::Expr::Insert(insert)),
         };
 
         self.object(expr).await?;
