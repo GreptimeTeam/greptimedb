@@ -122,12 +122,13 @@ pub struct WriteOptions {
 /// Sst access layer.
 #[async_trait]
 pub trait AccessLayer: Send + Sync {
+    // Writes SST file with given name and returns the full path.
     async fn write_sst(
         &self,
-        file_name: &str,
+        file_name: String,
         iter: BatchIteratorPtr,
         opts: WriteOptions,
-    ) -> Result<()>;
+    ) -> Result<String>;
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
@@ -147,7 +148,7 @@ impl FsAccessLayer {
     }
 
     #[inline]
-    fn sst_file_path(&self, file_name: &str) -> String {
+    fn sst_file_path(&self, file_name: String) -> String {
         format!("{}{}", self.sst_dir, file_name)
     }
 }
@@ -156,18 +157,16 @@ impl FsAccessLayer {
 impl AccessLayer for FsAccessLayer {
     async fn write_sst(
         &self,
-        file_name: &str,
+        file_name: String,
         iter: BatchIteratorPtr,
         opts: WriteOptions,
-    ) -> Result<()> {
+    ) -> Result<String> {
         // Now we only supports parquet format. We may allow caller to specific sst format in
         // WriteOptions in the future.
-        let writer = ParquetWriter::new(
-            &self.sst_file_path(file_name),
-            iter,
-            self.object_store.clone(),
-        );
+        let file_path = self.sst_file_path(file_name);
+        let writer = ParquetWriter::new(file_path.clone(), iter, self.object_store.clone());
 
-        writer.write_sst(opts).await
+        writer.write_sst(opts).await?;
+        Ok(file_path)
     }
 }

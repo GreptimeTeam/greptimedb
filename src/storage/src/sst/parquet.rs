@@ -28,12 +28,12 @@ pub struct ParquetWriter {
 
 impl ParquetWriter {
     pub fn new(
-        file_name: &str,
+        file_name: String,
         iter: BatchIteratorPtr,
         object_store: ObjectStore,
     ) -> ParquetWriter {
         ParquetWriter {
-            file_name: file_name.to_string(),
+            file_name,
             iter,
             object_store,
         }
@@ -214,9 +214,9 @@ mod tests {
         let path = dir.path().to_str().unwrap();
         let backend = Backend::build().root(path).finish().await.unwrap();
         let object_store = ObjectStore::new(backend);
-        let sst_file_name = "test-flush.parquet";
+        let sst_file_name = "test-flush.parquet".to_string();
         let iter = memtable.iter(IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, iter, object_store);
+        let writer = ParquetWriter::new(sst_file_name.clone(), iter, object_store);
 
         writer
             .write_sst(sst::WriteOptions::default())
