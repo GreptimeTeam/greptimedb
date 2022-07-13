@@ -1,6 +1,7 @@
 //! Region tests.
 
-mod read_write;
+// TODO(yingwen): [flush] Uncomment this once we supports flush and scanning flushed data.
+// mod read_write;
 
 use datatypes::type_id::LogicalTypeId;
 use log_store::fs::noop::NoopLogStore;

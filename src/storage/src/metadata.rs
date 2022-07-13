@@ -252,10 +252,14 @@ impl RegionMetadataBuilder {
     }
 
     fn build(self) -> Result<RegionMetadata> {
-        let schema = Arc::new(
-            Schema::with_timestamp_index(self.column_schemas, self.row_key.timestamp_key_index)
-                .context(InvalidSchemaSnafu)?,
-        );
+        let schema = if self.column_schemas.is_empty() {
+            Arc::new(Schema::new(self.column_schemas))
+        } else {
+            Arc::new(
+                Schema::with_timestamp_index(self.column_schemas, self.row_key.timestamp_key_index)
+                    .context(InvalidSchemaSnafu)?,
+            )
+        };
         let columns = ColumnsMetadata {
             columns: self.columns,
             name_to_col_index: self.name_to_col_index,
