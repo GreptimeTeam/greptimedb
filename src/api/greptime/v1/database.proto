@@ -54,8 +54,8 @@ message ResultHeader {
 }
 
 message InsertBatch {
-  repeated Column columns = 2;
-  uint32 row_count = 3;
+  repeated Column columns = 1;
+  uint32 row_count = 2;
 }
 
 message Column {
