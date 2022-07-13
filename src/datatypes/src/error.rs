@@ -34,7 +34,7 @@ pub enum Error {
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        // Inner serialization and deserialization error should not be exposed to users.
+        // Inner encoding and decoding error should not be exposed to users.
         StatusCode::Internal
     }
 

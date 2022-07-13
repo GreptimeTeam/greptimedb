@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use arrow::array::Array;
 use arrow::datatypes::DataType as ArrowDataType;
 use datafusion_common::ScalarValue;
 use snafu::OptionExt;
@@ -151,8 +152,8 @@ impl Helper {
     ///
     /// # Panics
     /// Panic if given arrow data type is not supported.
-    pub fn try_into_vector(array: ArrayRef) -> Result<VectorRef> {
-        Ok(match array.data_type() {
+    pub fn try_into_vector(array: impl AsRef<dyn Array>) -> Result<VectorRef> {
+        Ok(match array.as_ref().data_type() {
             ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
             ArrowDataType::Boolean => Arc::new(BooleanVector::try_from_arrow_array(array)?),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => {
@@ -171,7 +172,7 @@ impl Helper {
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
                 Arc::new(StringVector::try_from_arrow_array(array)?)
             }
-            _ => unimplemented!("Arrow array datatype: {:?}", array.data_type()),
+            _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
         })
     }
 }

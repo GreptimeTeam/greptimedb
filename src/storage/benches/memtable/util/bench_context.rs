@@ -22,12 +22,16 @@ impl BenchContext {
         self.memtable.write(kvs).unwrap();
     }
 
-    pub fn read(&self, batch_size: usize) {
+    pub fn read(&self, batch_size: usize) -> usize {
+        let mut read_count = 0;
         let iter_ctx = IterContext {
             batch_size,
             visible_sequence: SequenceNumber::MAX,
         };
         let mut iter = self.memtable.iter(iter_ctx).unwrap();
-        while iter.next().unwrap().is_some() {}
+        while let Ok(Some(_)) = iter.next() {
+            read_count += batch_size;
+        }
+        read_count
     }
 }

@@ -17,17 +17,17 @@ use snafu::{ensure, Snafu};
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display(
-        "the length of the args is not enough,expect ate least :{},have: {}",
+        "The length of the args is not enough, expect at least: {}, have: {}",
         expect,
-        have
+        actual,
     ))]
-    ArgsLen { expect: usize, have: usize },
+    ArgsLenNotEnough { expect: usize, actual: usize },
 
-    #[snafu(display("the sample is empty"))]
-    SampleEmpty { len: usize },
+    #[snafu(display("The sample {} is empty", name))]
+    SampleEmpty { name: String },
 
     #[snafu(display(
-        "the length of the len1  {}  dost not match the length of the len2  {}",
+        "The length of the len1: {} don't match the length of the len2: {}",
         len1,
         len2,
     ))]
@@ -36,7 +36,8 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn linear_search(x: Value, xp: &PrimitiveVector<f64>) -> usize {
+/* search the biggest number that smaller than x in xp */
+fn linear_search_ascending_vector(x: Value, xp: &PrimitiveVector<f64>) -> usize {
     for i in 0..xp.len() {
         if x < xp.get(i) {
             return i - 1;
@@ -45,12 +46,13 @@ fn linear_search(x: Value, xp: &PrimitiveVector<f64>) -> usize {
     xp.len() - 1
 }
 
-fn binary_search(key: Value, xp: &PrimitiveVector<f64>) -> usize {
+/* search the biggest number that smaller than x in xp */
+fn binary_search_ascending_vector(key: Value, xp: &PrimitiveVector<f64>) -> usize {
     let mut left = 0;
     let mut right = xp.len();
     /* If len <= 4 use linear search. */
     if xp.len() <= 4 {
-        return linear_search(key, xp);
+        return linear_search_ascending_vector(key, xp);
     }
     /* find index by bisection */
     while left < right {
@@ -66,7 +68,7 @@ fn binary_search(key: Value, xp: &PrimitiveVector<f64>) -> usize {
 
 fn concrete_type_to_primitive_vector(arg: &VectorRef) -> Result<PrimitiveVector<f64>> {
     with_match_primitive_type_id!(arg.data_type().logical_type_id(), |$S| {
-        let tmp=arg.to_arrow_array();
+        let tmp = arg.to_arrow_array();
         let from = tmp.as_any().downcast_ref::<PrimitiveArray<$S>>().expect("cast failed");
         let array = primitive_to_primitive(from, &Float64);
         Ok(PrimitiveVector::new(array))
@@ -75,17 +77,16 @@ fn concrete_type_to_primitive_vector(arg: &VectorRef) -> Result<PrimitiveVector<
     })
 }
 
-/// https://github.com/numpy/numpy/blob/b101756ac02e390d605b2febcded30a1da50cc2c/numpy/core/src/multiarray/compiled_base.c
-// begin 492
+/// https://github.com/numpy/numpy/blob/b101756ac02e390d605b2febcded30a1da50cc2c/numpy/core/src/multiarray/compiled_base.c#L491
 pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
     let mut left = None;
     let mut right = None;
 
     ensure!(
         args.len() >= 3,
-        ArgsLenSnafu {
+        ArgsLenNotEnoughSnafu {
             expect: 3_usize,
-            have: args.len()
+            actual: args.len()
         }
     );
 
@@ -93,13 +94,13 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
     let xp = concrete_type_to_primitive_vector(&args[1])?;
     let fp = concrete_type_to_primitive_vector(&args[2])?;
 
-    // make the args.len() is 3 or 5
+    // make sure the args.len() is 3 or 5
     if args.len() > 3 {
         ensure!(
             args.len() == 5,
-            ArgsLenSnafu {
+            ArgsLenNotEnoughSnafu {
                 expect: 5_usize,
-                have: args.len()
+                actual: args.len()
             }
         );
 
@@ -111,9 +112,9 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
             .get_data(0);
     }
 
-    ensure!(x.len() != 0, SampleEmptySnafu { len: x.len() });
-    ensure!(xp.len() != 0, SampleEmptySnafu { len: x.len() });
-    ensure!(fp.len() != 0, SampleEmptySnafu { len: x.len() });
+    ensure!(x.len() != 0, SampleEmptySnafu { name: "x" });
+    ensure!(xp.len() != 0, SampleEmptySnafu { name: "xp" });
+    ensure!(fp.len() != 0, SampleEmptySnafu { name: "fp" });
     ensure!(
         xp.len() == fp.len(),
         LenNotEqualsSnafu {
@@ -160,7 +161,13 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
                     xp.get_data(i + 1),
                     xp.get_data(i),
                 ) {
-                    (Some(fp1), Some(fp2), Some(xp1), Some(xp2)) => Some((fp1 - fp2) / (xp1 - xp2)),
+                    (Some(fp1), Some(fp2), Some(xp1), Some(xp2)) => {
+                        if xp1 == xp2 {
+                            None
+                        } else {
+                            Some((fp1 - fp2) / (xp1 - xp2))
+                        }
+                    }
                     _ => None,
                 };
                 slopes_tmp.push(slope);
@@ -176,7 +183,7 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
                     } else if Value::from(xi) < xp.get(0) {
                         left
                     } else {
-                        j = binary_search(Value::from(xi), &xp);
+                        j = binary_search_ascending_vector(Value::from(xi), &xp);
                         if j == xp.len() - 1 || xp.get(j) == Value::from(xi) {
                             fp.get_data(j)
                         } else {
@@ -189,7 +196,11 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
                                     xp.get_data(j),
                                 ) {
                                     (Some(fp1), Some(fp2), Some(xp1), Some(xp2)) => {
-                                        Some((fp1 - fp2) / (xp1 - xp2))
+                                        if xp1 == xp2 {
+                                            None
+                                        } else {
+                                            Some((fp1 - fp2) / (xp1 - xp2))
+                                        }
                                     }
                                     _ => None,
                                 },
@@ -254,7 +265,6 @@ mod tests {
             Arc::new(Int64Vector::from_vec(fp.clone())),
         ];
         let vector = interp(&args).unwrap();
-        println!("successful interpret");
         assert_eq!(vector.len(), 1);
 
         assert!(matches!(vector.get(0), Value::Float64(v) if v==1.0));
@@ -266,7 +276,6 @@ mod tests {
             Arc::new(Int64Vector::from_vec(fp)),
         ];
         let vector = interp(&args).unwrap();
-        println!("successful interpret");
         assert_eq!(4, vector.len());
         let res = vec![3.0, 3.0, 2.5, 0.0];
         for (i, item) in res.iter().enumerate().take(vector.len()) {

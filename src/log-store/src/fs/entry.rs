@@ -1,13 +1,14 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use byteorder::{ByteOrder, LittleEndian};
+use bytes::{Bytes, BytesMut};
+use common_base::buffer::{Buffer, BufferMut};
 use futures::Stream;
-use snafu::{ensure, Backtrace, GenerateImplicitData};
-use store_api::logstore::entry::{Entry, Epoch, Id, Offset};
+use snafu::{ensure, ResultExt};
+use store_api::logstore::entry::{Encode, Entry, Epoch, Id, Offset};
 use store_api::logstore::entry_stream::{EntryStream, SendableEntryStream};
 
-use crate::error::{DeserializationSnafu, Error};
+use crate::error::{CorruptedSnafu, DecodeSnafu, EncodeSnafu, Error};
 use crate::fs::crc;
 
 // length+offset+epoch+crc
@@ -21,8 +22,101 @@ pub struct EntryImpl {
     pub epoch: Epoch,
 }
 
+impl Encode for EntryImpl {
+    type Error = Error;
+
+    /// Entry binary format (Little endian):
+    ///
+    /// +--------+--------+--------+--------+--------+
+    //  |entry id|  epoch | length |  data  |  CRC   |
+    //  +--------+--------+--------+--------+--------+
+    //  | 8 bytes| 8 bytes| 4 bytes|<length>| 4 bytes|
+    //  +--------+--------+--------+--------+--------+
+    ///
+    fn encode_to<T: BufferMut>(&self, buf: &mut T) -> Result<usize, Self::Error> {
+        let data_length = self.data.len();
+        buf.write_u64_le(self.id).context(EncodeSnafu)?;
+        buf.write_u64_le(self.epoch).context(EncodeSnafu)?;
+        buf.write_u32_le(data_length as u32).context(EncodeSnafu)?;
+        buf.write_from_slice(self.data.as_slice())
+            .context(EncodeSnafu)?;
+        let checksum = crc::CRC_ALGO.checksum(buf.as_slice());
+        buf.write_u32_le(checksum).context(EncodeSnafu)?;
+        Ok(data_length + ENTRY_MIN_LEN)
+    }
+
+    fn decode<T: Buffer>(buf: &mut T) -> Result<Self, Self::Error> {
+        ensure!(
+            buf.remaining_size() >= ENTRY_MIN_LEN,
+            DecodeSnafu {
+                size: buf.remaining_size(),
+            }
+        );
+
+        macro_rules! map_err {
+            ($stmt: expr, $var: ident) => {
+                $stmt.map_err(|_| {
+                    DecodeSnafu {
+                        size: $var.remaining_size(),
+                    }
+                    .build()
+                })
+            };
+        }
+
+        let mut digest = crc::CRC_ALGO.digest();
+        let id = map_err!(buf.read_u64_le(), buf)?;
+        digest.update(&id.to_le_bytes());
+        let epoch = map_err!(buf.read_u64_le(), buf)?;
+        digest.update(&epoch.to_le_bytes());
+        let data_len = map_err!(buf.read_u32_le(), buf)?;
+        digest.update(&data_len.to_le_bytes());
+        ensure!(
+            buf.remaining_size() >= data_len as usize,
+            DecodeSnafu {
+                size: buf.remaining_size()
+            }
+        );
+        let mut data = vec![0u8; data_len as usize];
+        map_err!(buf.read_to_slice(&mut data), buf)?;
+        digest.update(&data);
+        let crc_read = map_err!(buf.read_u32_le(), buf)?;
+        let crc_calc = digest.finalize();
+        ensure!(
+            crc_read == crc_calc,
+            CorruptedSnafu {
+                msg: format!(
+                    "CRC mismatch while decoding entry, read: {}, calc: {}",
+                    hex::encode_upper(crc_read.to_le_bytes()),
+                    hex::encode_upper(crc_calc.to_le_bytes())
+                )
+            }
+        );
+
+        Ok(Self {
+            id,
+            data,
+            epoch,
+            offset: 0,
+        })
+    }
+
+    fn encoded_size(&self) -> usize {
+        self.data.len() + ENTRY_MIN_LEN
+    }
+}
+
 impl Entry for EntryImpl {
     type Error = Error;
+
+    fn new(data: impl AsRef<[u8]>) -> Self {
+        Self {
+            id: 0,
+            data: data.as_ref().to_vec(),
+            offset: 0,
+            epoch: 0,
+        }
+    }
 
     fn data(&self) -> &[u8] {
         &self.data
@@ -55,98 +149,22 @@ impl Entry for EntryImpl {
     fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
-
-    fn serialize(&self) -> Vec<u8> {
-        let res: Vec<u8> = self.into();
-        res
-    }
-
-    fn deserialize(b: impl AsRef<[u8]>) -> Result<Self, Self::Error> {
-        EntryImpl::try_from(b.as_ref())
-    }
 }
 
-impl EntryImpl {
-    pub fn new(data: impl AsRef<[u8]>) -> Self {
-        let data = Vec::from(data.as_ref());
-        Self {
-            id: 0,
-            data,
-            offset: 0,
-            epoch: 0,
-        }
-    }
-}
-
-/// Entry binary format (Little endian):
-///
-/// +--------+--------+--------+--------+--------+
-//  |entry id|  epoch | length |  data  |  CRC   |
-//  +--------+--------+--------+--------+--------+
-//  | 8 bytes| 8 bytes| 4 bytes|<length>| 4 bytes|
-//  +--------+--------+--------+--------+--------+
-///
-impl TryFrom<&[u8]> for EntryImpl {
+impl TryFrom<Bytes> for EntryImpl {
     type Error = Error;
 
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        ensure!(value.len() >= ENTRY_MIN_LEN, DeserializationSnafu);
-
-        // TODO(hl): will use byteorder to simplify encoding/decoding.
-        let id_end_ofs = 8;
-        let epoch_end_ofs = id_end_ofs + 8;
-        let length_end_offset = epoch_end_ofs + 4;
-        let length = LittleEndian::read_u32(&value[epoch_end_ofs..length_end_offset]);
-        let data_end_ofs = length_end_offset + length as usize;
-        let crc_end_ofs = data_end_ofs + 4;
-        let data = Vec::from(&value[length_end_offset..data_end_ofs]);
-        let id = LittleEndian::read_u64(&value[0..id_end_ofs]);
-        let epoch = LittleEndian::read_u64(&value[id_end_ofs..epoch_end_ofs]);
-        let crc_read = LittleEndian::read_u32(&value[data_end_ofs..crc_end_ofs]);
-
-        // TODO(hl): add a config option to turn off CRC checksum.
-        let crc_calc = crc::CRC_ALGO.checksum(&value[0..data_end_ofs]);
-        if crc_calc != crc_read {
-            return Err(Error::Corrupted {
-                msg: format!("CRC mismatch, read: {}, calc: {}", crc_read, crc_calc),
-                backtrace: Backtrace::generate(),
-            });
-        }
-
-        Ok(Self {
-            data,
-            offset: 0usize,
-            id,
-            epoch,
-        })
+    fn try_from(mut value: Bytes) -> Result<Self, Self::Error> {
+        EntryImpl::decode(&mut value)
     }
 }
 
-impl From<&EntryImpl> for Vec<u8> {
+impl From<&EntryImpl> for BytesMut {
     fn from(e: &EntryImpl) -> Self {
-        let data_length = e.data.len();
-        let total_size = data_length + ENTRY_MIN_LEN;
-        let mut vec = vec![0u8; total_size];
-
-        let buf = vec.as_mut_slice();
-
-        let id_end_ofs = 8;
-        let epoch_end_ofs = id_end_ofs + 8;
-        let length_end_offset = epoch_end_ofs + 4;
-        let data_end_ofs = length_end_offset + data_length as usize;
-        let crc_end_ofs = data_end_ofs + 4;
-
-        LittleEndian::write_u64(buf, e.id);
-        LittleEndian::write_u64(&mut buf[id_end_ofs..epoch_end_ofs], e.epoch);
-        LittleEndian::write_u32(
-            &mut buf[epoch_end_ofs..length_end_offset],
-            data_length as u32,
-        ); // todo check this cast
-
-        buf[length_end_offset..data_end_ofs].copy_from_slice(e.data.as_slice());
-        let checksum = crc::CRC_ALGO.checksum(&buf[0..data_end_ofs]);
-        LittleEndian::write_u32(&mut buf[data_end_ofs..crc_end_ofs], checksum);
-        vec
+        let size = e.encoded_size();
+        let mut res = BytesMut::with_capacity(size);
+        e.encode_to(&mut res).unwrap(); // buffer is pre-allocated, so won't fail
+        res
     }
 }
 
@@ -174,34 +192,40 @@ impl<'a> EntryStream for StreamImpl<'a> {
 
 #[cfg(test)]
 mod tests {
+    use byteorder::{ByteOrder, LittleEndian};
+
     use super::*;
     use crate::fs::crc::CRC_ALGO;
 
     #[test]
     pub fn test_entry_deser() {
         let data = "hello, world";
-        let entry = EntryImpl::new(data.as_bytes());
-        let vec: Vec<u8> = (&entry).into();
-        assert_eq!(ENTRY_MIN_LEN + data.as_bytes().len(), vec.len());
-        let deserialized = EntryImpl::try_from(vec.as_slice()).unwrap();
-        assert_eq!(entry, deserialized);
+        let mut entry = EntryImpl::new(data.as_bytes());
+        entry.set_id(8);
+        entry.epoch = 9;
+        let mut buf = BytesMut::with_capacity(entry.encoded_size());
+        entry.encode_to(&mut buf).unwrap();
+        assert_eq!(ENTRY_MIN_LEN + data.as_bytes().len(), buf.len());
+        let decoded: EntryImpl = EntryImpl::decode(&mut buf.as_slice()).unwrap();
+        assert_eq!(entry, decoded);
     }
 
     #[test]
     pub fn test_rewrite_entry_id() {
         let data = "hello, world";
         let mut entry = EntryImpl::new(data.as_bytes());
-        let mut vec: Vec<u8> = (&entry).into();
+        let mut buffer = BytesMut::with_capacity(entry.encoded_size());
+        entry.encode_to(&mut buffer).unwrap();
         entry.set_id(123);
         assert_eq!(123, entry.id());
 
         // rewrite entry id.
-        LittleEndian::write_u64(&mut vec[0..8], 333);
-        let len = vec.len();
-        let checksum = CRC_ALGO.checksum(&vec[0..len - 4]);
-        LittleEndian::write_u32(&mut vec[len - 4..], checksum);
+        LittleEndian::write_u64(&mut buffer[0..8], 333);
+        let len = buffer.len();
+        let checksum = CRC_ALGO.checksum(&buffer[0..len - 4]);
+        LittleEndian::write_u32(&mut buffer[len - 4..], checksum);
 
-        let entry_impl = EntryImpl::deserialize(&vec).expect("Failed to deserialize");
+        let entry_impl = EntryImpl::decode(&mut buffer.freeze()).expect("Failed to deserialize");
         assert_eq!(333, entry_impl.id());
     }
 }

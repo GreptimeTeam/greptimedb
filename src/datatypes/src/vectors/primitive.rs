@@ -28,13 +28,15 @@ impl<T: Primitive> PrimitiveVector<T> {
     pub fn new(array: PrimitiveArray<T>) -> Self {
         Self { array }
     }
-    pub fn try_from_arrow_array(array: ArrayRef) -> Result<Self> {
+
+    pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> Result<Self> {
         Ok(Self::new(
             array
+                .as_ref()
                 .as_any()
                 .downcast_ref::<PrimitiveArray<T>>()
                 .with_context(|| ConversionSnafu {
-                    from: format!("{:?}", array.data_type()),
+                    from: format!("{:?}", array.as_ref().data_type()),
                 })?
                 .clone(),
         ))
@@ -82,6 +84,10 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
 
     fn validity(&self) -> Validity {
         vectors::impl_validity_for_vector!(self.array)
+    }
+
+    fn memory_size(&self) -> usize {
+        self.array.values().len() * std::mem::size_of::<T>()
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -283,6 +289,7 @@ impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
 
 #[cfg(test)]
 mod tests {
+
     use arrow::datatypes::DataType as ArrowDataType;
     use serde_json;
 
@@ -401,5 +408,13 @@ mod tests {
         for i in 0..4 {
             assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
         }
+    }
+
+    #[test]
+    fn test_memory_size() {
+        let v = PrimitiveVector::<i32>::from_slice((0..5).collect::<Vec<i32>>());
+        assert_eq!(20, v.memory_size());
+        let v = PrimitiveVector::<i64>::from(vec![Some(0i64), Some(1i64), Some(2i64), None, None]);
+        assert_eq!(40, v.memory_size());
     }
 }

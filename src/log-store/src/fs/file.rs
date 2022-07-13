@@ -1,18 +1,19 @@
 use std::fmt::{Debug, Formatter};
 use std::io::SeekFrom;
-use std::sync::atomic::Ordering::Acquire;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_stream::stream;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
+use bytes::BytesMut;
+use common_error::ext::BoxedError;
 use common_telemetry::logging::{error, info};
 use common_telemetry::warn;
 use futures_util::StreamExt;
 use memmap2::{Mmap, MmapOptions};
 use snafu::{Backtrace, GenerateImplicitData, ResultExt};
-use store_api::logstore::entry::{Entry, Id, Offset};
+use store_api::logstore::entry::{Encode, Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
 use store_api::logstore::namespace::Namespace;
 use tokio::fs::{File, OpenOptions};
@@ -25,7 +26,7 @@ use tokio::sync::{oneshot, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time;
 
-use crate::error::{Error, IoSnafu, OpenLogSnafu, Result};
+use crate::error::{AppendSnafu, Error, IoSnafu, OpenLogSnafu, Result};
 use crate::fs::config::LogConfig;
 use crate::fs::crc::CRC_ALGO;
 use crate::fs::entry::{EntryImpl, StreamImpl};
@@ -39,6 +40,7 @@ const LOG_WRITER_BATCH_SIZE: usize = 16;
 pub struct LogFile {
     name: FileName,
     file: Arc<RwLock<File>>,
+    path: String,
     write_offset: Arc<AtomicUsize>,
     flush_offset: Arc<AtomicUsize>,
     next_entry_id: Arc<AtomicU64>,
@@ -85,6 +87,7 @@ impl LogFile {
         let mut log = Self {
             name: file_name,
             file: Arc::new(RwLock::new(file)),
+            path: path.to_string(),
             write_offset: Arc::new(AtomicUsize::new(0)),
             flush_offset: Arc::new(AtomicUsize::new(0)),
             next_entry_id: Arc::new(AtomicU64::new(start_entry_id)),
@@ -220,7 +223,9 @@ impl LogFile {
                         info!("Flush task stop");
                         break;
                     }
+                    let prev = flush_offset.load(Ordering::Acquire);
                     flush_offset.store(write_offset_read, Ordering::Relaxed);
+                    info!("Flush offset: {} -> {}", prev, write_offset_read);
                     while let Some(req) = batch.pop() {
                         req.complete();
                     }
@@ -238,7 +243,7 @@ impl LogFile {
             });
 
             *self.join_handle.lock().unwrap() = Some(handle);
-            info!("Flush task started...");
+            info!("Flush task started: {}", self.name);
         }
         Ok(())
     }
@@ -309,27 +314,21 @@ impl LogFile {
     /// If the entry with start entry id is not present, the first generated entry will start with
     /// the first entry with an id greater than `start_entry_id`.
     pub fn create_stream(&self, _ns: impl Namespace, start_entry_id: u64) -> impl EntryStream + '_ {
-        let s = stream!({
-            let length = self.flush_offset.load(Ordering::Relaxed);
-            let mmap = self.map(0, length).await?;
+        let length = self.flush_offset.load(Ordering::Relaxed);
 
-            let mut buf: &[u8] = mmap.as_ref();
-            if buf.len() == 0 {
+        let s = stream!({
+            let mmap = self.map(0, length).await?;
+            let mut buf = &mmap[..];
+            if buf.is_empty() {
                 info!("File is just created!");
                 // file is newly created
                 return;
             }
 
-            loop {
-                let entry = EntryImpl::try_from(buf)?;
-                let entry_length = entry.len();
+            while !buf.is_empty() {
+                let entry = EntryImpl::decode(&mut buf)?;
                 if entry.id() >= start_entry_id {
                     yield Ok(vec![entry]);
-                }
-                if buf.len() > entry_length {
-                    buf = &buf[entry_length..];
-                } else {
-                    break;
                 }
             }
         });
@@ -341,12 +340,18 @@ impl LogFile {
     }
 
     /// Appends an entry to `LogFile` and return a `Result` containing the id of entry appended.
-    pub async fn append<T: Entry>(&self, e: &mut T) -> Result<AppendResponseImpl> {
+    pub async fn append<T: Entry>(&self, e: &mut T) -> Result<AppendResponseImpl>
+    where
+        T: Encode<Error = Error>,
+    {
         if self.stopped.load(Ordering::Acquire) {
             return Err(Error::Eof);
         }
         e.set_id(0);
-        let mut serialized = e.serialize();
+        let mut serialized = BytesMut::with_capacity(e.encoded_size());
+        e.encode_to(&mut serialized)
+            .map_err(BoxedError::new)
+            .context(AppendSnafu)?;
         let size = serialized.len();
 
         if size + self.write_offset.load(Ordering::Relaxed) > self.max_file_size {
@@ -360,8 +365,6 @@ impl LogFile {
             let mut file = self.file.write().await;
             // generate entry id
             entry_id = self.inc_entry_id();
-            // generate in-file offset
-            entry_offset = self.inc_offset(size);
             // rewrite encoded data
             LittleEndian::write_u64(&mut serialized[0..8], entry_id);
             // TODO(hl): CRC was calculated twice
@@ -370,7 +373,9 @@ impl LogFile {
 
             // write to file
             // TODO(hl): use io buffer and pwrite to reduce syscalls.
-            file.write(serialized.as_slice()).await.context(IoSnafu)?;
+            file.write(&serialized.freeze()).await.context(IoSnafu)?;
+            // generate in-file offset
+            entry_offset = self.inc_offset(size);
         }
 
         let (tx, rx) = oneshot::channel();
@@ -415,7 +420,7 @@ impl LogFile {
 
     #[inline]
     pub fn is_seal(&self) -> bool {
-        self.sealed.load(Acquire)
+        self.sealed.load(Ordering::Acquire)
     }
 
     #[inline]
@@ -431,8 +436,10 @@ impl LogFile {
 
 impl ToString for LogFile {
     fn to_string(&self) -> String {
-        format!("LogFile{{ name: {}, write_offset: {}, flush_offset: {}, start_entry_id: {}, entry_id_counter: {} }}",
-                self.name, self.write_offset.load(Ordering::Relaxed), self.flush_offset.load(Ordering::Relaxed), self.start_entry_id, self.next_entry_id.load(Ordering::Relaxed))
+        format!("LogFile{{ name: {}, path: {}, write_offset: {}, flush_offset: {}, start_entry_id: {}, entry_id_counter: {} }}",
+                self.name,
+                self.path,
+                self.write_offset.load(Ordering::Relaxed), self.flush_offset.load(Ordering::Relaxed), self.start_entry_id, self.next_entry_id.load(Ordering::Relaxed))
     }
 }
 
@@ -458,6 +465,8 @@ impl AppendRequest {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use common_telemetry::logging;
     use futures_util::StreamExt;
     use tempdir::TempDir;
@@ -465,19 +474,16 @@ mod tests {
     use super::*;
     use crate::fs::namespace::LocalNamespace;
 
-    pub async fn create_temp_dir(file_name: impl AsRef<str>) -> (String, TempDir) {
-        let dir = TempDir::new("greptimedb-store-test").unwrap();
-        let path_buf = dir.path().join(file_name.as_ref());
-        let path_str = path_buf.to_str().unwrap().to_string();
-        File::create(path_str.as_str()).await.unwrap();
-        (path_str, dir)
-    }
-
     #[tokio::test]
     pub async fn test_create_entry_stream() {
         logging::init_default_ut_logging();
         let config = LogConfig::default();
-        let (path, _dir) = create_temp_dir("0010.log").await;
+
+        let dir = TempDir::new("greptimedb-store-test").unwrap();
+        let path_buf = dir.path().join("0010.log");
+        let path = path_buf.to_str().unwrap().to_string();
+        File::create(path.as_str()).await.unwrap();
+
         let mut file = LogFile::open(path.clone(), &config)
             .await
             .unwrap_or_else(|_| panic!("Failed to open file: {}", path));
@@ -499,6 +505,23 @@ mod tests {
                 .entry_id
         );
 
+        let mut log_file = std::fs::File::open(path.clone()).expect("Test log file does not exist");
+        let metadata = log_file.metadata().expect("Failed to read file metadata");
+        info!("Log file metadata: {:?}", metadata);
+
+        assert_eq!(59, metadata.len()); // 24+5+24+6
+        let mut content = vec![0; metadata.len() as usize];
+        log_file
+            .read_exact(&mut content)
+            .expect("Read log file failed");
+
+        info!(
+            "Log file {:?} content: {}, size:{}",
+            dir,
+            hex::encode(content),
+            metadata.len()
+        );
+
         let mut stream = file.create_stream(LocalNamespace::default(), 0);
 
         let mut data = vec![];
@@ -507,6 +530,7 @@ mod tests {
             let entries = v.unwrap();
             let content = entries[0].data();
             let vec = content.to_vec();
+            info!("Read entry: {}", String::from_utf8_lossy(&vec));
             data.push(String::from_utf8(vec).unwrap());
         }
 

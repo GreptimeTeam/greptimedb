@@ -1,10 +1,13 @@
 [workspace]
 members = [
+    "src/api",
+    "src/client",
     "src/common/base",
     "src/common/error",
     "src/common/function",
     "src/common/runtime",
     "src/common/telemetry",
+    "src/common/time",
     "src/common/query",
     "src/common/recordbatch",
     "src/cmd",
