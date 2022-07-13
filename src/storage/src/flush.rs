@@ -35,12 +35,19 @@ pub struct SizeBasedStrategy {
     mutable_limitation: usize,
 }
 
+#[inline]
+fn get_mutable_limitation(max_write_buffer_size: usize) -> usize {
+    // Inspired by RocksDB
+    // https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L86
+    max_write_buffer_size * 7 / 8
+}
+
 impl Default for SizeBasedStrategy {
     fn default() -> Self {
         let max_write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE;
         Self {
             max_write_buffer_size,
-            mutable_limitation: max_write_buffer_size * 7 / 8,
+            mutable_limitation: get_mutable_limitation(max_write_buffer_size),
         }
     }
 }
@@ -163,5 +170,17 @@ impl Job for FlushJob {
         self.writer.apply_version_edit(edit, &self.shared).await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_mutable_limitation() {
+        assert_eq!(7, get_mutable_limitation(8));
+        assert_eq!(8, get_mutable_limitation(10));
+        assert_eq!(56, get_mutable_limitation(64));
     }
 }
