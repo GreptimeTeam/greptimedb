@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_time::RangeMillis;
@@ -19,8 +20,7 @@ pub struct FreezeError;
 pub struct MemtableVersion {
     mutable: MemtableSet,
     /// Immutable memtables.
-    // TODO(yingwen): [flush] Use Vec<MemtableSet> to hold immutable memtables.
-    immem: Option<MemtableSet>,
+    immem: Vec<Arc<MemtableSet>>,
 }
 
 impl MemtableVersion {
@@ -32,20 +32,18 @@ impl MemtableVersion {
         &self.mutable
     }
 
-    // FIXME(yingwen): [flush] Always freeze memtables.
     /// Clone current `MemtableVersion`, try to freeze mutable memtables in the new
     /// version then returns that version.
     ///
     /// Returns `Err` if immutable memtables already exists.
     pub fn try_freeze_mutable(&self) -> Result<MemtableVersion, FreezeError> {
-        match self.immem {
-            Some(_) => FreezeSnafu {}.fail(),
-            None => Ok(MemtableVersion {
-                mutable: MemtableSet::new(),
-                // TODO(yingwen): Consider using Arc<MemtableSet> since this structure is immutable.
-                immem: Some(self.mutable.clone()),
-            }),
-        }
+        let mut immem = self.immem.clone();
+        immem.push(Arc::new(self.mutable.clone()));
+
+        Ok(MemtableVersion {
+            mutable: MemtableSet::new(),
+            immem,
+        })
     }
 
     pub fn mutable_bytes_allocated(&self) -> usize {
@@ -53,7 +51,11 @@ impl MemtableVersion {
     }
 
     pub fn total_bytes_allocated(&self) -> usize {
-        self.immem.as_ref().map_or(0, MemtableSet::bytes_allocated) + self.mutable.bytes_allocated()
+        self.immem
+            .iter()
+            .map(|m| m.bytes_allocated())
+            .sum::<usize>()
+            + self.mutable.bytes_allocated()
     }
 
     /// Creates a new `MemtableVersion` that contains memtables both in this and `other`.
@@ -72,9 +74,10 @@ impl MemtableVersion {
     #[inline]
     pub fn memtables_to_flush(&self, bucket_duration: Duration) -> Vec<MemtableWithMeta> {
         self.immem
-            .as_ref()
+            .iter()
             .map(|immem| immem.to_memtable_with_metas(bucket_duration))
-            .unwrap_or_default()
+            .flatten()
+            .collect()
     }
 }
 
@@ -143,13 +146,21 @@ impl MemtableSet {
     ///
     /// # Panics
     /// Panics if there are memtables with same time ranges.
-    pub fn add(&self, _other: MemtableSet) -> MemtableSet {
-        // TODO(yingwen): [flush] Add mutable memtables.
-        unimplemented!()
+    pub fn add(&self, other: MemtableSet) -> MemtableSet {
+        let mut memtables = self.memtables.clone();
+        memtables.extend(other.memtables.into_iter());
+
+        MemtableSet { memtables }
     }
 
     pub fn to_memtable_with_metas(&self, _bucket_duration: Duration) -> Vec<MemtableWithMeta> {
-        // TODO(yingwen): [flush] Create MemtableWithMeta vec.
-        unimplemented!()
+        // TODO(dennis): adjust memtable bucket meta align to bucket_duration
+        self.memtables
+            .iter()
+            .map(|(range_key, memtable)| MemtableWithMeta {
+                memtable: memtable.clone(),
+                bucket: range_key.0.clone(),
+            })
+            .collect()
     }
 }
