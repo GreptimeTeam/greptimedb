@@ -112,7 +112,6 @@ struct Tester {
 
 impl Tester {
     async fn new(store_dir: &str) -> Tester {
-        // TODO(yingwen): Temp dir
         let region = new_region_for_rw(store_dir, false).await;
 
         Tester {
