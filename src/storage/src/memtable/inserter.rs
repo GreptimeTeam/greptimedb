@@ -35,11 +35,7 @@ impl Inserter {
         time_ranges: Vec<RangeMillis>,
         bucket_duration: Duration,
     ) -> Inserter {
-        let time_range_indexes = time_ranges
-            .iter()
-            .enumerate()
-            .map(|(i, range)| (*range.start(), i))
-            .collect();
+        let time_range_indexes = new_range_index_map(&time_ranges);
 
         Inserter {
             sequence,
@@ -168,6 +164,14 @@ impl Inserter {
     }
 }
 
+fn new_range_index_map(time_ranges: &[RangeMillis]) -> RangeIndexMap {
+    time_ranges
+        .iter()
+        .enumerate()
+        .map(|(i, range)| (*range.start(), i))
+        .collect()
+}
+
 fn clone_put_data_column_to(
     put_data: &PutData,
     desc: &ColumnDescriptor,
@@ -189,6 +193,9 @@ fn clone_put_data_column_to(
     Ok(())
 }
 
+/// Holds `start` and `end` indexes to get a slice `[start, end)` from the vector whose
+/// timestamps belong to same time range at `range_index`.
+#[derive(Debug, PartialEq)]
 struct SliceIndex {
     start: usize,
     end: usize,
@@ -196,7 +203,8 @@ struct SliceIndex {
     range_index: usize,
 }
 
-/// Compute `SliceIndex` for `timestamps`.
+/// Computes the indexes used to split timestamps into time ranges aligned by `duration`, stores
+/// the indexes in [`SliceIndex`].
 ///
 /// # Panics
 /// Panics if the duration is too large to be represented by i64, or `timestamps` are not all
@@ -210,16 +218,18 @@ fn compute_slice_indexes(
     let mut slice_indexes = Vec::with_capacity(time_range_indexes.len());
     // Current start and end of a valid `SliceIndex`.
     let (mut start, mut end) = (0, 0);
-    // Current range index of a valid `SliceIndex`.
+    // Time range index of the valid but unpushed `SliceIndex`.
     let mut last_range_index = None;
 
-    for (i, data) in timestamps.iter_data().enumerate() {
-        match data {
-            Some(v) => {
-                let aligned = TimestampMillis::new(v).aligned_by_bucket(duration_ms);
-                let current_range_index = *time_range_indexes
-                    .get(&aligned)
-                    .expect("Range for timestamp not found");
+    // Iterate all timestamps, split timestamps by its time range.
+    for (i, ts) in timestamps.iter_data().enumerate() {
+        // Find index for time range of the timestamp.
+        let current_range_index = ts
+            .and_then(|v| TimestampMillis::new(v).aligned_by_bucket(duration_ms))
+            .and_then(|aligned| time_range_indexes.get(&aligned).copied());
+
+        match current_range_index {
+            Some(current_range_index) => {
                 end = i;
 
                 match last_range_index {
@@ -242,7 +252,7 @@ fn compute_slice_indexes(
                 }
             }
             None => {
-                // Row with null timestamp will be skipped. This usually should no happen.
+                // Row without timestamp or out of time range will be skipped. This usually should no happen.
                 if let Some(last_index) = last_range_index {
                     // Need to store SliceIndex for last range.
                     slice_indexes.push(SliceIndex {
@@ -274,4 +284,423 @@ fn compute_slice_indexes(
     slice_indexes
 }
 
-// TODO(yingwen): Add tests for MemtableInserter.
+#[cfg(test)]
+mod tests {
+    use datatypes::{type_id::LogicalTypeId, value::Value};
+    use store_api::storage::{PutOperation, WriteRequest};
+
+    use super::*;
+    use crate::memtable::{
+        DefaultMemtableBuilder, IterContext, MemtableBuilder, MemtableId, MemtableSchema,
+    };
+    use crate::metadata::RegionMetadata;
+    use crate::test_util::descriptor_util::RegionDescBuilder;
+    use crate::test_util::write_batch_util;
+
+    fn new_time_ranges(starts: &[i64], duration: i64) -> Vec<RangeMillis> {
+        let mut ranges = Vec::with_capacity(starts.len());
+        for start in starts {
+            assert_eq!(*start, start / duration * duration);
+
+            ranges.push(RangeMillis::new(*start, start + duration).unwrap());
+        }
+
+        ranges
+    }
+
+    fn check_compute_slice_indexes(
+        timestamps: &[Option<i64>],
+        range_starts: &[i64],
+        duration: i64,
+        expect: &[SliceIndex],
+    ) {
+        assert!(duration > 0);
+
+        let timestamps = Int64Vector::from_iter(timestamps.iter());
+        let time_ranges = new_time_ranges(range_starts, duration);
+        let time_range_indexes = new_range_index_map(&time_ranges);
+
+        let slice_indexes = compute_slice_indexes(
+            &timestamps,
+            Duration::from_millis(duration as u64),
+            &time_range_indexes,
+        );
+
+        assert_eq!(expect, slice_indexes);
+    }
+
+    #[test]
+    fn test_compute_slice_indexes_valid() {
+        // Test empty input.
+        check_compute_slice_indexes(&[], &[], 100, &[]);
+
+        // One valid input.
+        check_compute_slice_indexes(
+            &[Some(99)],
+            &[0],
+            100,
+            &[SliceIndex {
+                start: 0,
+                end: 1,
+                range_index: 0,
+            }],
+        );
+
+        // 2 ranges.
+        check_compute_slice_indexes(
+            &[Some(99), Some(234)],
+            &[0, 200],
+            100,
+            &[
+                SliceIndex {
+                    start: 0,
+                    end: 1,
+                    range_index: 0,
+                },
+                SliceIndex {
+                    start: 1,
+                    end: 2,
+                    range_index: 1,
+                },
+            ],
+        );
+
+        // Multiple elements in first range.
+        check_compute_slice_indexes(
+            &[Some(99), Some(13), Some(18), Some(234)],
+            &[0, 200],
+            100,
+            &[
+                SliceIndex {
+                    start: 0,
+                    end: 3,
+                    range_index: 0,
+                },
+                SliceIndex {
+                    start: 3,
+                    end: 4,
+                    range_index: 1,
+                },
+            ],
+        );
+
+        // Multiple elements in last range.
+        check_compute_slice_indexes(
+            &[Some(99), Some(234), Some(271)],
+            &[0, 200],
+            100,
+            &[
+                SliceIndex {
+                    start: 0,
+                    end: 1,
+                    range_index: 0,
+                },
+                SliceIndex {
+                    start: 1,
+                    end: 3,
+                    range_index: 1,
+                },
+            ],
+        );
+
+        // Mulitple ranges.
+        check_compute_slice_indexes(
+            &[Some(99), Some(13), Some(234), Some(456)],
+            &[0, 200, 400],
+            100,
+            &[
+                SliceIndex {
+                    start: 0,
+                    end: 2,
+                    range_index: 0,
+                },
+                SliceIndex {
+                    start: 2,
+                    end: 3,
+                    range_index: 1,
+                },
+                SliceIndex {
+                    start: 3,
+                    end: 4,
+                    range_index: 2,
+                },
+            ],
+        );
+
+        // Different slices with same range.
+        check_compute_slice_indexes(
+            &[Some(99), Some(234), Some(15)],
+            &[0, 200],
+            100,
+            &[
+                SliceIndex {
+                    start: 0,
+                    end: 1,
+                    range_index: 0,
+                },
+                SliceIndex {
+                    start: 1,
+                    end: 2,
+                    range_index: 1,
+                },
+                SliceIndex {
+                    start: 2,
+                    end: 3,
+                    range_index: 0,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn test_compute_slice_indexes_null_timestamp() {
+        check_compute_slice_indexes(&[None], &[0], 100, &[]);
+
+        check_compute_slice_indexes(
+            &[None, None, Some(53)],
+            &[0],
+            100,
+            &[SliceIndex {
+                start: 2,
+                end: 3,
+                range_index: 0,
+            }],
+        );
+
+        check_compute_slice_indexes(
+            &[Some(53), None, None],
+            &[0],
+            100,
+            &[SliceIndex {
+                start: 0,
+                end: 1,
+                range_index: 0,
+            }],
+        );
+
+        check_compute_slice_indexes(
+            &[None, Some(53), None, Some(240), Some(13), None],
+            &[0, 200],
+            100,
+            &[
+                SliceIndex {
+                    start: 1,
+                    end: 2,
+                    range_index: 0,
+                },
+                SliceIndex {
+                    start: 3,
+                    end: 4,
+                    range_index: 1,
+                },
+                SliceIndex {
+                    start: 4,
+                    end: 5,
+                    range_index: 0,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn test_compute_slice_indexes_no_range() {
+        check_compute_slice_indexes(
+            &[Some(99), Some(234), Some(15)],
+            &[0],
+            100,
+            &[
+                SliceIndex {
+                    start: 0,
+                    end: 1,
+                    range_index: 0,
+                },
+                SliceIndex {
+                    start: 2,
+                    end: 3,
+                    range_index: 0,
+                },
+            ],
+        );
+
+        check_compute_slice_indexes(
+            &[Some(99), Some(15), Some(234)],
+            &[0],
+            100,
+            &[SliceIndex {
+                start: 0,
+                end: 2,
+                range_index: 0,
+            }],
+        );
+
+        check_compute_slice_indexes(
+            &[Some(i64::MIN), Some(99), Some(15)],
+            &[0],
+            100,
+            &[SliceIndex {
+                start: 1,
+                end: 3,
+                range_index: 0,
+            }],
+        );
+    }
+
+    fn new_test_write_batch() -> WriteBatch {
+        write_batch_util::new_write_batch(
+            &[
+                ("ts", LogicalTypeId::Int64, false),
+                ("value", LogicalTypeId::Int64, true),
+            ],
+            Some(0),
+        )
+    }
+
+    fn new_memtable_schema() -> MemtableSchema {
+        let desc = RegionDescBuilder::new("test")
+            .timestamp(("ts", LogicalTypeId::Int64, false))
+            .push_value_column(("value", LogicalTypeId::Int64, true))
+            .enable_version_column(false)
+            .build();
+        let metadata: RegionMetadata = desc.try_into().unwrap();
+
+        MemtableSchema::new(metadata.columns_row_key)
+    }
+
+    fn put_batch(batch: &mut WriteBatch, data: &[(i64, Option<i64>)]) {
+        let mut put_data = PutData::with_num_columns(2);
+        let ts = Int64Vector::from_values(data.iter().map(|v| v.0));
+        put_data.add_key_column("ts", Arc::new(ts)).unwrap();
+        let value = Int64Vector::from_iter(data.iter().map(|v| v.1));
+        put_data.add_value_column("value", Arc::new(value)).unwrap();
+
+        batch.put(put_data).unwrap();
+    }
+
+    fn new_memtable_set(time_ranges: &[RangeMillis], schema: &MemtableSchema) -> MemtableSet {
+        let mut set = MemtableSet::new();
+        for (id, range) in time_ranges.iter().enumerate() {
+            let mem = DefaultMemtableBuilder {}.build(id as MemtableId, schema.clone());
+            set.insert(*range, mem)
+        }
+
+        set
+    }
+
+    fn check_memtable_content(
+        mem: &dyn Memtable,
+        sequence: SequenceNumber,
+        data: &[(i64, Option<i64>)],
+    ) {
+        let mut iter = mem.iter(IterContext::default()).unwrap();
+
+        let mut index = 0;
+        while let Some(batch) = iter.next().unwrap() {
+            let row_num = batch.keys[0].len();
+            for i in 0..row_num {
+                let ts = batch.keys[0].get(i);
+                let v = batch.values[0].get(i);
+                assert_eq!(Value::from(data[index].0), ts);
+                assert_eq!(Value::from(data[index].1), v);
+                assert_eq!(sequence, batch.sequences.get_data(i).unwrap());
+
+                index += 1;
+            }
+        }
+
+        assert_eq!(data.len(), index);
+    }
+
+    #[test]
+    fn test_inserter_put_one_memtable() {
+        let sequence = 11111;
+        let bucket_duration = 100;
+        let time_ranges = new_time_ranges(&[0], bucket_duration);
+        let memtable_schema = new_memtable_schema();
+        let memtables = new_memtable_set(&time_ranges, &memtable_schema);
+        let mut inserter = Inserter::new(
+            sequence,
+            time_ranges,
+            Duration::from_millis(bucket_duration as u64),
+        );
+
+        let mut batch = new_test_write_batch();
+        put_batch(&mut batch, &[(1, Some(1)), (2, None)]);
+        // Also test multiple put data in one batch.
+        put_batch(
+            &mut batch,
+            &[
+                (3, None),
+                // Duplicate entries in same put data.
+                (2, None),
+                (2, Some(2)),
+                (4, Some(4)),
+            ],
+        );
+
+        inserter.insert_memtables(&batch, &memtables).unwrap();
+        let mem = memtables
+            .get_by_range(&RangeMillis::new(0, 100).unwrap())
+            .unwrap();
+        check_memtable_content(
+            &**mem,
+            sequence,
+            &[(1, Some(1)), (2, Some(2)), (3, None), (4, Some(4))],
+        );
+    }
+
+    #[test]
+    fn test_inserter_put_multiple() {
+        let sequence = 11111;
+        let bucket_duration = 100;
+        let time_ranges = new_time_ranges(&[0, 100, 200], bucket_duration);
+        let memtable_schema = new_memtable_schema();
+        let memtables = new_memtable_set(&time_ranges, &memtable_schema);
+        let mut inserter = Inserter::new(
+            sequence,
+            time_ranges,
+            Duration::from_millis(bucket_duration as u64),
+        );
+
+        let mut batch = new_test_write_batch();
+        put_batch(
+            &mut batch,
+            &[
+                (1, Some(1)),
+                (2, None),
+                (201, Some(201)),
+                (102, None),
+                (101, Some(101)),
+            ],
+        );
+        put_batch(
+            &mut batch,
+            &[
+                (180, Some(1)),
+                (3, Some(3)),
+                (1, None),
+                (211, Some(211)),
+                (180, Some(180)),
+            ],
+        );
+
+        inserter.insert_memtables(&batch, &memtables).unwrap();
+        let mem = memtables
+            .get_by_range(&RangeMillis::new(0, 100).unwrap())
+            .unwrap();
+        check_memtable_content(&**mem, sequence, &[(1, None), (2, None), (3, Some(3))]);
+
+        let mem = memtables
+            .get_by_range(&RangeMillis::new(100, 200).unwrap())
+            .unwrap();
+        check_memtable_content(
+            &**mem,
+            sequence,
+            &[(101, Some(101)), (102, None), (180, Some(180))],
+        );
+
+        let mem = memtables
+            .get_by_range(&RangeMillis::new(200, 300).unwrap())
+            .unwrap();
+        check_memtable_content(&**mem, sequence, &[(201, Some(201)), (211, Some(211))]);
+    }
+}

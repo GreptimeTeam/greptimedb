@@ -21,20 +21,22 @@ impl TimestampMillis {
         TimestampMillis(ms)
     }
 
-    /// Returns the timestamp aligned by `bucket_duration` in milliseconds.
+    /// Returns the timestamp aligned by `bucket_duration` in milliseconds or
+    /// `None` if overflow occurred.
     ///
     /// # Panics
     /// Panics if `bucket_duration <= 0`.
-    pub fn aligned_by_bucket(self, bucket_duration: i64) -> TimestampMillis {
+    pub fn aligned_by_bucket(self, bucket_duration: i64) -> Option<TimestampMillis> {
         assert!(bucket_duration > 0);
 
         let ts = if self.0 >= 0 {
-            self.0 / bucket_duration * bucket_duration
+            self.0
         } else {
-            (self.0 - (bucket_duration - 1)) / bucket_duration * bucket_duration
+            // `bucket_duration > 0` implies `bucket_duration - 1` won't overflow.
+            self.0.checked_sub(bucket_duration - 1)?
         };
 
-        TimestampMillis(ts)
+        Some(TimestampMillis(ts / bucket_duration * bucket_duration))
     }
 }
 
@@ -87,5 +89,38 @@ mod tests {
         assert_eq!(i64::MAX, TimestampMillis::INF);
         assert_eq!(i64::MAX - 1, TimestampMillis::MAX);
         assert_eq!(i64::MIN, TimestampMillis::MIN);
+    }
+
+    #[test]
+    fn test_aligned_by_bucket() {
+        let bucket = 100;
+        assert_eq!(
+            0,
+            TimestampMillis::new(0).aligned_by_bucket(bucket).unwrap()
+        );
+        assert_eq!(
+            0,
+            TimestampMillis::new(1).aligned_by_bucket(bucket).unwrap()
+        );
+        assert_eq!(
+            0,
+            TimestampMillis::new(99).aligned_by_bucket(bucket).unwrap()
+        );
+        assert_eq!(
+            100,
+            TimestampMillis::new(100).aligned_by_bucket(bucket).unwrap()
+        );
+        assert_eq!(
+            100,
+            TimestampMillis::new(199).aligned_by_bucket(bucket).unwrap()
+        );
+
+        assert_eq!(0, TimestampMillis::MAX.aligned_by_bucket(i64::MAX).unwrap());
+        assert_eq!(
+            i64::MAX,
+            TimestampMillis::INF.aligned_by_bucket(i64::MAX).unwrap()
+        );
+
+        assert_eq!(None, TimestampMillis::MIN.aligned_by_bucket(bucket));
     }
 }

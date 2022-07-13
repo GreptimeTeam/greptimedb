@@ -147,7 +147,7 @@ impl PartialEq for MemtableSet {
 impl Eq for MemtableSet {}
 
 impl MemtableSet {
-    fn new() -> MemtableSet {
+    pub fn new() -> MemtableSet {
         MemtableSet::default()
     }
 
