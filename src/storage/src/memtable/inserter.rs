@@ -252,7 +252,7 @@ fn compute_slice_indexes(
                 }
             }
             None => {
-                // Row without timestamp or out of time range will be skipped. This usually should no happen.
+                // Row without timestamp or out of time range will be skipped. This usually should not happen.
                 if let Some(last_index) = last_range_index {
                     // Need to store SliceIndex for last range.
                     slice_indexes.push(SliceIndex {
