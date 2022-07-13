@@ -122,7 +122,11 @@ impl WriterInner {
         let version_control = writer_ctx.version_control();
         // Check whether memtable is full or flush should be triggered. We need to do this first since
         // switching memtables will clear all mutable memtables.
-        if self.should_flush(version_control, writer_ctx.flush_strategy) {
+        if self.should_flush(
+            writer_ctx.shared,
+            version_control,
+            writer_ctx.flush_strategy,
+        ) {
             self.trigger_flush(
                 writer_ctx.shared,
                 writer_ctx.flush_scheduler,
@@ -162,12 +166,15 @@ impl WriterInner {
 
     fn should_flush(
         &self,
+        shared: &SharedDataRef,
         version_control: &VersionControlRef,
         flush_strategy: &FlushStrategyRef,
     ) -> bool {
-        let current_version = version_control.current();
-        let memtable_bytes_allocated = current_version.mutable_memtables().bytes_allocated();
-        flush_strategy.should_flush(memtable_bytes_allocated)
+        let current = version_control.current();
+        let memtables = current.memtables();
+        let mutable_bytes_allocated = memtables.mutable_bytes_allocated();
+        let total_bytes_allocated = memtables.total_bytes_allocated();
+        flush_strategy.should_flush(shared, mutable_bytes_allocated, total_bytes_allocated)
     }
 
     async fn trigger_flush(
