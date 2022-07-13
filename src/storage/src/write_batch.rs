@@ -139,12 +139,10 @@ impl WriteRequest for WriteBatch {
                         .unwrap_or_else(|| panic!("Cannot find column by name: {}", ts_col_name));
 
                     let ts_vector = column.as_any().downcast_ref::<Int64Vector>().unwrap(); // not expected to fail
-                    for ts in ts_vector.iter_data() {
-                        if let Some(ts) = ts {
-                            let aligned = align_timestamp(ts, durations_millis)
-                                .context(TimestampOverflowSnafu { ts })?;
-                            aligned_timestamps.insert(aligned);
-                        }
+                    for ts in ts_vector.iter_data().flatten() {
+                        let aligned = align_timestamp(ts, durations_millis)
+                            .context(TimestampOverflowSnafu { ts })?;
+                        aligned_timestamps.insert(aligned);
                     }
                 }
             }
