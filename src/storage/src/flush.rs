@@ -63,27 +63,36 @@ impl FlushStrategy for SizeBasedStrategy {
         // https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L94
 
         if bytes_mutable > self.mutable_limitation {
-            logging::info!("Region should flush, region: {}, bytes_mutable: {}, mutable_limitation: {}, bytes_total: {}, max_write_buffer_size: {} .",
-                            shared.name,
-                            bytes_mutable,
-                            self.mutable_limitation,
-                            bytes_total,
-                            self.max_write_buffer_size);
+            logging::info!(
+                "Region should flush, region: {}, bytes_mutable: {}, mutable_limitation: {}, \
+                 bytes_total: {}, max_write_buffer_size: {} .",
+                shared.name,
+                bytes_mutable,
+                self.mutable_limitation,
+                bytes_total,
+                self.max_write_buffer_size
+            );
 
             return true;
         }
 
         let buffer_size = self.max_write_buffer_size;
 
+        // If the memory exceeds the buffer size, we trigger more aggressive
+        // flush. But if already more than half memory is being flushed,
+        // triggering more flush may not help. We will hold it instead.
         let should_flush = bytes_total >= buffer_size && bytes_mutable >= buffer_size / 2;
 
         if should_flush {
-            logging::info!("Region should flush, region: {}, bytes_mutable: {}, mutable_limitation: {}, bytes_total: {}, max_write_buffer_size: {} .",
-                            shared.name,
-                            bytes_mutable,
-                            self.mutable_limitation,
-                            bytes_total,
-                            buffer_size);
+            logging::info!(
+                "Region should flush, region: {}, bytes_mutable: {}, mutable_limitation: {}, \
+                 bytes_total: {}, max_write_buffer_size: {} .",
+                shared.name,
+                bytes_mutable,
+                self.mutable_limitation,
+                bytes_total,
+                buffer_size
+            );
         }
 
         should_flush
