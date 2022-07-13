@@ -140,13 +140,10 @@ impl WriteRequest for WriteBatch {
 
                     let ts_vector = column.as_any().downcast_ref::<Int64Vector>().unwrap(); // not expected to fail
                     for ts in ts_vector.iter_data() {
-                        match ts {
-                            Some(ts) => {
-                                let aligned = align_timestamp(ts, durations_millis)
-                                    .context(TimestampOverflowSnafu { ts })?;
-                                aligned_timestamps.insert(aligned);
-                            }
-                            None => {}
+                        if let Some(ts) = ts {
+                            let aligned = align_timestamp(ts, durations_millis)
+                                .context(TimestampOverflowSnafu { ts })?;
+                            aligned_timestamps.insert(aligned);
                         }
                     }
                 }

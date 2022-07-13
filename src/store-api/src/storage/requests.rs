@@ -19,7 +19,7 @@ pub trait WriteRequest: Send {
     /// Returns all possible time ranges that contain the timestamp in this batch.
     ///
     /// Each time range is aligned to given `duration`.
-    fn time_ranges(&self, _duration: Duration) -> Result<Vec<RangeMillis>, Self::Error>;
+    fn time_ranges(&self, duration: Duration) -> Result<Vec<RangeMillis>, Self::Error>;
 }
 
 /// Put multiple rows.
