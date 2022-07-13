@@ -86,7 +86,17 @@ message Column {
     repeated bytes bytes_values = 12;
     repeated string string_values = 13;
   }
+  // The array of non-null values in this column.
+  //
+  // For example: suppose there is a column "foo" that contains some int32 values (1, 2, 3, 4, 5, null, 7, 8, 9, null);
+  //   column:
+  //     column_name: foo
+  //     semantic_type: Tag
+  //     values: 1, 2, 3, 4, 5, 7, 8, 9
+  //     null_masks: 00100000 00000010
   Values values = 3;
 
+  // Mask maps the positions of null values.
+  // If a bit in null_mask is 1, it indicates that the column value at that position is null.
   bytes null_mask = 4;
 }
