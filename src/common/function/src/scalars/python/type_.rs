@@ -17,7 +17,7 @@ use rustpython_vm::{
     function::{FuncArgs, OptionalArg},
     protocol::{PyMappingMethods, PySequenceMethods},
     pyclass, pyimpl,
-    sliceable::{wrap_index, SaturatedSlice, SequenceIndex},
+    sliceable::{SequenceIndexOp, SaturatedSlice, SequenceIndex},
     types::{AsMapping, AsSequence, Constructor, Initializer},
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
@@ -400,7 +400,7 @@ impl PyVector {
 
     fn getitem_by_index(&self, i: isize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         // in the newest version of rustpython_vm, wrapped_at for isize is replace by wrap_index(i, len)
-        let i = wrap_index(i, self.len())
+        let i = i.wrapped_at(self.len())
             .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_owned()))?;
         Ok(val_to_pyobj(self.vector.get(i), vm))
     }
