@@ -2538,6 +2538,8 @@ dependencies = [
  "futures",
  "futures-util",
  "metrics",
+ "num-traits",
+ "rand 0.8.5",
  "snafu",
  "sql",
  "table",
