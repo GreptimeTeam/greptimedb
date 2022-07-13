@@ -178,7 +178,7 @@ impl PyVector {
                 return Err(vm.new_type_error(format!(
                     "Can't cast right operand into Scalar of Int or Float, actual: {}",
                     other.class().name()
-                )))
+                )));
             }
         };
         // assuming they are all 64 bit type if possible
