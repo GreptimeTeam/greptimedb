@@ -168,17 +168,15 @@ impl WriteRequest for WriteBatch {
 /// So timestamp within `[i64::MIN, i64::MIN + duration)` or
 /// `[i64::MAX-(i64::MAX%duration), i64::MAX]` is not a valid input.
 fn align_timestamp(ts: i64, duration: i64) -> Option<i64> {
-    let aligned_ts = if ts < 0 {
-        ts.checked_sub(duration - 1)
-    } else if ts >= (i64::MAX - (i64::MAX % duration)) {
-        None
+    let normalized = if ts < 0 {
+        ts.checked_sub(duration - 1)?
     } else {
-        Some(ts)
-    }?;
+        ts
+    };
 
-    aligned_ts
-        .checked_div(duration)
-        .and_then(|v| v.checked_mul(duration))
+    let aligned = normalized / duration * duration;
+    aligned.checked_add(duration)?;
+    Some(aligned)
 }
 
 // WriteBatch pub methods.
