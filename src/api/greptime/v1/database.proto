@@ -62,7 +62,9 @@ message Column {
     string column_name = 1;
 
     enum SemanticType {
-        FIELD = 0;
+        TAG = 0;
+        FIELD = 1;
+        TIMESTAMP = 2;
     }
     SemanticType semanticType = 2;
 
