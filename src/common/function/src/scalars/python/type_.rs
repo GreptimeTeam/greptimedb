@@ -164,31 +164,23 @@ impl PyVector {
     where
         F: Fn(&dyn Array, &dyn Scalar) -> Box<dyn Array>,
     {
+        // the right operand only support PyInt or PyFloat,
         let (right, right_type) = {
             if is_instance(&other, PyInt::class(vm).into(), vm) {
                 other
-                    .clone()
                     .try_into_value::<i64>(vm)
-                    .ok()
-                    .map(|v| (value::Value::Int64(v), DataType::Int64))
+                    .map(|v| (value::Value::Int64(v), DataType::Int64))?
             } else if is_instance(&other, PyFloat::class(vm).into(), vm) {
                 other
-                    .clone()
                     .try_into_value::<f64>(vm)
-                    .ok()
-                    .map(|v| (value::Value::Float64(OrderedFloat(v)), DataType::Float64))
+                    .map(|v| (value::Value::Float64(OrderedFloat(v)), DataType::Float64))?
             } else {
-                None
+                return Err(vm.new_type_error(format!(
+                    "Can't cast right operand into Scalar of Int or Float, actual: {}",
+                    other.class().name()
+                )))
             }
-        }
-        .ok_or_else(|| {
-            // if above return a `None` then in here is wrapped as `PyResult::Err(...)
-            vm.new_type_error(format!(
-                "Can't cast right operand into Scalar of Int or Float, actual: {}",
-                other.class().name()
-            ))
-            // and return by `?` operator
-        })?;
+        };
         // assuming they are all 64 bit type if possible
 
         let left = self.vector.to_arrow_array();
