@@ -48,6 +48,14 @@ impl MemtableVersion {
         }
     }
 
+    pub fn mutable_bytes_allocated(&self) -> usize {
+        self.mutable.bytes_allocated()
+    }
+
+    pub fn total_bytes_allocated(&self) -> usize {
+        self.immem.as_ref().map_or(0, MemtableSet::bytes_allocated) + self.mutable.bytes_allocated()
+    }
+
     /// Creates a new `MemtableVersion` that contains memtables both in this and `other`.
     ///
     /// # Panics

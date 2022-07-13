@@ -86,7 +86,7 @@ impl<S> RegionImpl<S> {
             }),
             writer: Arc::new(RegionWriter::new(memtable_builder)),
             wal,
-            flush_strategy: Arc::new(SizeBasedStrategy),
+            flush_strategy: Arc::new(SizeBasedStrategy::default()),
             flush_scheduler,
             sst_layer,
         });
