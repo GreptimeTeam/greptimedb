@@ -80,7 +80,7 @@ message Column {
     repeated uint64 u64_values = 8;
 
     repeated float f32_values = 9;
-    repeated float f64_values = 10;
+    repeated double f64_values = 10;
 
     repeated bool bool_values = 11;
     repeated bytes bytes_values = 12;
