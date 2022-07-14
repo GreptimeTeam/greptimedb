@@ -67,7 +67,7 @@ impl Default for IterContext {
 }
 
 /// The ordering of the iterator output.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum RowOrdering {
     /// The output rows are unordered.
     Unordered,

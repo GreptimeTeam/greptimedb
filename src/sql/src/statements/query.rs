@@ -3,7 +3,7 @@ use sqlparser::ast::Query as SpQuery;
 use crate::error::Error;
 
 /// Query statement instance.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
     pub inner: SpQuery,
 }

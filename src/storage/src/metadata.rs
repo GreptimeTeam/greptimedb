@@ -149,7 +149,7 @@ pub struct ColumnMetadata {
     pub desc: ColumnDescriptor,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnsMetadata {
     /// All columns.
     ///
