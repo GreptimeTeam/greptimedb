@@ -12,7 +12,7 @@ message DatabaseResponse {
 }
 
 message ObjectExpr {
-  ExprHeader header = 1;
+  Header header = 1;
   oneof expr {
     InsertExpr insert = 2;
     SelectExpr select = 3;
@@ -41,7 +41,7 @@ message ObjectResult {
   repeated bytes results = 3;
 }
 
-message ExprHeader {
+message Header {
   uint32 version = 1;
 }
 
