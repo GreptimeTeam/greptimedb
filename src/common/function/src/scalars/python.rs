@@ -42,13 +42,20 @@ pub fn execute_script(script: &str) -> vm::PyResult {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Array, PrimitiveArray};
+    use arrow::array::{
+        Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+        Int8Array, PrimitiveArray,
+    };
     use arrow::chunk::Chunk;
     use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::types::NativeType;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+    use datatypes::vectors::{
+        BooleanVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
+        Int8Vector,
+    };
     use rustpython_parser::{ast, error::ParseError, parser};
     use snafu::{ensure, prelude::Snafu, OptionExt, ResultExt};
-    use datatypes::vectors::{Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector};
 
     #[derive(Debug)]
     struct Coprocessor {
@@ -60,10 +67,15 @@ mod tests {
     #[derive(Debug, Snafu)]
     pub enum CoprError {
         Format { reason: String },
+        TypeCast {error: datatypes::error::Error},
         PyParse { parse_error: ParseError },
         PyRuntime,
     }
-
+    impl From<datatypes::error::Error> for CoprError{
+        fn from(e: datatypes::error::Error) -> Self {
+            Self::TypeCast { error: e }
+        }
+    }
     /// turn a python list of string into a Vec<String>
     /// TODO: a lot of error handling
     fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>, CoprError> {
@@ -165,6 +177,12 @@ mod tests {
         todo!()
     }
 
+    /// cast a dyn Array into a dyn Vector
+    fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilder>(
+        arg: Arc<dyn Array>,
+    ) -> Result<Arc<dyn Vector>, datatypes::error::Error> {
+        PrimitiveVector::<T>::try_from_arrow_array(arg).map(|op| Arc::new(op) as Arc<dyn Vector>)
+    }
     pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, CoprError> {
         // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
         // 2. also check for exist of `args` in `rb`, if not found, return error
@@ -183,14 +201,32 @@ mod tests {
         for idx in fetch_idx {
             fetch_args.push(rb.column(idx).clone());
         }
-        // TODO: support int, float and bool
+        // PyVector now support int8/16/32/64, float32/64 and bool
         let mut args: Vec<PyVector> = Vec::new();
-        for arg in fetch_args{
-             match arg.data_type(){
-                DataType::Float32 => todo!(),
-                _ => return Err(CoprError::Format { reason: format!("Unsupport data type {:?} for coprocessor", arg.data_type()) })
-             }
-        };
+
+        for arg in fetch_args {
+            match arg.data_type() {
+                DataType::Float32 => args.push(PyVector::from(into_vector::<f32>(arg)?)),
+                DataType::Float64 => args.push(PyVector::from(into_vector::<f64>(arg)?)),
+                DataType::Int8 => args.push(PyVector::from(into_vector::<i8>(arg)?)),
+                DataType::Int16=> args.push(PyVector::from(into_vector::<i16>(arg)?)),
+                DataType::Int32 => args.push(PyVector::from(into_vector::<i32>(arg)?)),
+                DataType::Int32 => args.push(PyVector::from(into_vector::<i32>(arg)?)),
+                DataType::Boolean => {
+                    let v: VectorRef = Arc::new(BooleanVector::try_from_arrow_array(arg)?);
+                    args.push(PyVector::from(v))
+                }
+                _ => {
+                    return Err(CoprError::Format {
+                        reason: format!(
+                            "Unsupport data type {:?} for coprocessor",
+                            arg.data_type()
+                        ),
+                    })
+                }
+            }
+        }
+        dbg!(args);
         // 4. then `vm.invoke` function with given args,
         // 5. get returns as a PyList, and assign them according to `returns`
         // 6. return a assembled DfRecordBatch
