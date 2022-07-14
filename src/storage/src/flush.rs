@@ -157,11 +157,9 @@ impl FlushJob {
             let file_name = Self::generate_sst_file_name();
             // TODO(hl): Check if random file name already exists in meta.
 
-            let row_group_size = 128; // row group size should be same as iterator batch size.
             let iter_ctx = IterContext {
-                batch_size: row_group_size,
-                visible_sequence: 0, // not used if `for_flush` set to true.
                 for_flush: true,
+                ..Default::default()
             };
 
             let iter = m.memtable.iter(iter_ctx)?;
@@ -200,9 +198,9 @@ impl FlushJob {
             .await
     }
 
-    /// Generates random SST file name
+    /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`
     fn generate_sst_file_name() -> String {
-        Uuid::new_v4().urn().to_string() + ".parquet"
+        Uuid::new_v4().hyphenated().to_string() + ".parquet"
     }
 }
 
@@ -228,6 +226,8 @@ impl Job for FlushJob {
 
 #[cfg(test)]
 mod tests {
+    use regex::Regex;
+
     use super::*;
 
     #[test]
@@ -235,5 +235,16 @@ mod tests {
         assert_eq!(7, get_mutable_limitation(8));
         assert_eq!(8, get_mutable_limitation(10));
         assert_eq!(56, get_mutable_limitation(64));
+    }
+
+    #[test]
+    pub fn test_uuid_generate() {
+        let file_name = FlushJob::generate_sst_file_name();
+        let regex = Regex::new(r"^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$").unwrap();
+        assert!(
+            regex.is_match(&file_name),
+            "illegal sst file name: {}",
+            file_name
+        );
     }
 }
