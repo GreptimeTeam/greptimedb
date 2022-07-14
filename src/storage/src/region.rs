@@ -93,10 +93,13 @@ impl<S> RegionImpl<S> {
 
         RegionImpl { inner }
     }
+}
 
-    #[cfg(test)]
+// Private methods for tests.
+#[cfg(test)]
+impl<S> RegionImpl<S> {
     #[inline]
-    fn _committed_sequence(&self) -> store_api::storage::SequenceNumber {
+    fn committed_sequence(&self) -> store_api::storage::SequenceNumber {
         self.inner.version_control().committed_sequence()
     }
 }
