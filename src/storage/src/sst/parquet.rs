@@ -46,7 +46,7 @@ impl<'a> ParquetWriter<'a> {
     /// Iterates memtable and writes rows to Parquet file.
     /// A chunk of records yielded from each iteration with a size given
     /// in config will be written to a single row group.
-    async fn write_rows(mut self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
+    async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
         let schema = memtable_schema_to_arrow_schema(self.iter.schema());
         let object = self.object_store.object(self.file_name);
 
@@ -70,7 +70,8 @@ impl<'a> ParquetWriter<'a> {
         )
         .context(WriteParquetSnafu)?;
 
-        while let Some(batch) = self.iter.next()? {
+        for batch in self.iter {
+            let batch = batch?;
             sink.send(Chunk::new(
                 batch
                     .keys

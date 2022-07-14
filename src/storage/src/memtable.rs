@@ -84,20 +84,13 @@ pub struct Batch {
     pub values: Vec<VectorRef>,
 }
 
-// TODO(yingwen): [flush] Let BatchIterator be a supertrait of Iterator.
 /// Iterator of memtable.
-pub trait BatchIterator: Send + Sync {
+pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
     /// Returns the schema of this iterator.
     fn schema(&self) -> &MemtableSchema;
 
     /// Returns the ordering of the output rows from this iterator.
     fn ordering(&self) -> RowOrdering;
-
-    /// Fetch next batch from the memtable.
-    ///
-    /// # Panics
-    /// Panics if the iterator has already been exhausted.
-    fn next(&mut self) -> Result<Option<Batch>>;
 }
 
 pub type BatchIteratorPtr = Box<dyn BatchIterator>;

@@ -19,8 +19,8 @@ impl ChunkReader for ChunkReaderImpl {
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
-        let mut batch = match self.iter.next()? {
-            Some(b) => b,
+        let mut batch = match self.iter.next() {
+            Some(b) => b?,
             None => return Ok(None),
         };
 
