@@ -125,7 +125,7 @@ pub trait AccessLayer: Send + Sync {
     // Writes SST file with given name and returns the full path.
     async fn write_sst(
         &self,
-        file_name: String,
+        file_name: &str,
         iter: BatchIteratorPtr,
         opts: WriteOptions,
     ) -> Result<String>;
@@ -148,7 +148,7 @@ impl FsAccessLayer {
     }
 
     #[inline]
-    fn sst_file_path(&self, file_name: String) -> String {
+    fn sst_file_path(&self, file_name: &str) -> String {
         format!("{}{}", self.sst_dir, file_name)
     }
 }
@@ -157,14 +157,14 @@ impl FsAccessLayer {
 impl AccessLayer for FsAccessLayer {
     async fn write_sst(
         &self,
-        file_name: String,
+        file_name: &str,
         iter: BatchIteratorPtr,
         opts: WriteOptions,
     ) -> Result<String> {
         // Now we only supports parquet format. We may allow caller to specific sst format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(file_name);
-        let writer = ParquetWriter::new(file_path.clone(), iter, self.object_store.clone());
+        let writer = ParquetWriter::new(&file_path, iter, self.object_store.clone());
 
         writer.write_sst(opts).await?;
         Ok(file_path)

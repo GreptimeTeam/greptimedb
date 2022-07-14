@@ -120,7 +120,7 @@ pub enum Error {
     InvalidTimestamp { source: crate::write_batch::Error },
 
     #[snafu(display("Task already cancelled"))]
-    Canceled { backtrace: Backtrace },
+    Cancelled { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -140,7 +140,7 @@ impl ErrorExt for Error {
             | EncodeJson { .. }
             | DecodeJson { .. }
             | JoinTask { .. }
-            | Canceled { .. } => StatusCode::Unexpected,
+            | Cancelled { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | InitBackend { .. }

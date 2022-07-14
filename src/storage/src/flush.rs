@@ -9,7 +9,7 @@ use store_api::storage::SequenceNumber;
 use uuid::Uuid;
 
 use crate::background::{Context, Job, JobHandle, JobPoolRef};
-use crate::error::{CanceledSnafu, Result};
+use crate::error::{CancelledSnafu, Result};
 use crate::manifest::action::*;
 use crate::memtable::{IterContext, MemtableRef};
 use crate::region::RegionWriterRef;
@@ -149,7 +149,7 @@ pub struct FlushJob {
 impl FlushJob {
     async fn write_memtables_to_layer(&self, ctx: &Context) -> Result<Vec<FileMeta>> {
         if ctx.is_cancelled() {
-            return CanceledSnafu {}.fail();
+            return CancelledSnafu {}.fail();
         }
 
         let mut futures = Vec::with_capacity(self.memtables.len());
@@ -163,10 +163,11 @@ impl FlushJob {
             };
 
             let iter = m.memtable.iter(iter_ctx)?;
-            let future = self
-                .sst_layer
-                .write_sst(file_name.clone(), iter, WriteOptions::default());
-            futures.push(future);
+            futures.push(async move {
+                self.sst_layer
+                    .write_sst(&file_name, iter, WriteOptions::default())
+                    .await
+            });
         }
 
         let metas = futures_util::future::join_all(futures)
@@ -200,7 +201,7 @@ impl FlushJob {
 
     /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`
     fn generate_sst_file_name() -> String {
-        Uuid::new_v4().hyphenated().to_string() + ".parquet"
+        format!("{}.parquet", Uuid::new_v4().hyphenated())
     }
 }
 
