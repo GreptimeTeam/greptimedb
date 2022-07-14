@@ -1,3 +1,7 @@
+syntax = "proto3";
+
+package greptime.v1;
+
 message InsertBatch {
   repeated Column columns = 1;
   uint32 row_count = 2;
