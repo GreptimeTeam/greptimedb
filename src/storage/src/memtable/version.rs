@@ -187,8 +187,9 @@ impl MemtableSet {
     pub fn add(&self, mut other: MemtableSet) -> MemtableSet {
         // We use `other.memtables` to extend `self.memtables` since memtables
         // in other should be empty in usual, so overwriting it is okay.
-        let memtables = self.memtables.clone();
-        other.memtables.extend(memtables.into_iter());
+        other
+            .memtables
+            .extend(self.memtables.iter().map(|(k, v)| (k.clone(), v.clone())));
 
         MemtableSet {
             memtables: other.memtables,
