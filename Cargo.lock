@@ -618,6 +618,7 @@ dependencies = [
  "common-error",
  "common-query",
  "common-recordbatch",
+ "datafusion-common",
  "datatypes",
  "libc",
  "num",
