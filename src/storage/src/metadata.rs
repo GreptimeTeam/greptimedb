@@ -82,7 +82,7 @@ pub struct ColumnsMetadata {
     pub name_to_col_index: HashMap<String, usize>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RowKeyMetadata {
     /// Exclusive end index of row key columns.
     row_key_end: usize,

@@ -8,7 +8,7 @@ use crate::type_id::LogicalTypeId;
 use crate::types::primitive_traits::Primitive;
 use crate::value::Value;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PrimitiveType<T: Primitive> {
     _phantom: PhantomData<T>,
 }
