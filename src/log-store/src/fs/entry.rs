@@ -181,7 +181,7 @@ mod tests {
     pub fn test_entry_deser() {
         let data = "hello, world";
         let entry = EntryImpl::new(data.as_bytes());
-        let vec: Vec<u8> = (&entry).into();
+        let vec: Vec<u8> = Vec::from(&entry);
         assert_eq!(ENTRY_MIN_LEN + data.as_bytes().len(), vec.len());
         let deserialized = EntryImpl::try_from(vec.as_slice()).unwrap();
         assert_eq!(entry, deserialized);
@@ -191,7 +191,7 @@ mod tests {
     pub fn test_rewrite_entry_id() {
         let data = "hello, world";
         let mut entry = EntryImpl::new(data.as_bytes());
-        let mut vec: Vec<u8> = (&entry).into();
+        let mut vec: Vec<u8> = Vec::from(&entry);
         entry.set_id(123);
         assert_eq!(123, entry.id());
 
