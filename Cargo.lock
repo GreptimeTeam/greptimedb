@@ -3133,7 +3133,7 @@ dependencies = [
 [[package]]
 name = "rustpython-ast"
 version = "0.1.0"
-source = "git+https://github.com/RustPython/RustPython#bed4877f8d5e64e9173567c04d4f53b1b761709f"
+source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
  "num-bigint",
  "rustpython-common",
@@ -3142,7 +3142,7 @@ dependencies = [
 [[package]]
 name = "rustpython-bytecode"
 version = "0.1.2"
-source = "git+https://github.com/RustPython/RustPython#bed4877f8d5e64e9173567c04d4f53b1b761709f"
+source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
  "bincode",
  "bitflags",
@@ -3158,7 +3158,7 @@ dependencies = [
 [[package]]
 name = "rustpython-common"
 version = "0.0.0"
-source = "git+https://github.com/RustPython/RustPython#bed4877f8d5e64e9173567c04d4f53b1b761709f"
+source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
  "ascii",
  "cfg-if",
@@ -3181,7 +3181,7 @@ dependencies = [
 [[package]]
 name = "rustpython-compiler"
 version = "0.1.2"
-source = "git+https://github.com/RustPython/RustPython#bed4877f8d5e64e9173567c04d4f53b1b761709f"
+source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
  "rustpython-bytecode",
  "rustpython-compiler-core",
@@ -3192,7 +3192,7 @@ dependencies = [
 [[package]]
 name = "rustpython-compiler-core"
 version = "0.1.2"
-source = "git+https://github.com/RustPython/RustPython#bed4877f8d5e64e9173567c04d4f53b1b761709f"
+source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
  "ahash",
  "indexmap",
@@ -3207,7 +3207,7 @@ dependencies = [
 [[package]]
 name = "rustpython-derive"
 version = "0.1.2"
-source = "git+https://github.com/RustPython/RustPython#bed4877f8d5e64e9173567c04d4f53b1b761709f"
+source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
  "indexmap",
  "itertools",
@@ -3234,7 +3234,7 @@ dependencies = [
 [[package]]
 name = "rustpython-parser"
 version = "0.1.2"
-source = "git+https://github.com/RustPython/RustPython#bed4877f8d5e64e9173567c04d4f53b1b761709f"
+source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
  "ahash",
  "lalrpop-util",
@@ -3253,12 +3253,12 @@ dependencies = [
 [[package]]
 name = "rustpython-pylib"
 version = "0.1.0"
-source = "git+https://github.com/RustPython/RustPython#bed4877f8d5e64e9173567c04d4f53b1b761709f"
+source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 
 [[package]]
 name = "rustpython-vm"
 version = "0.1.2"
-source = "git+https://github.com/RustPython/RustPython#bed4877f8d5e64e9173567c04d4f53b1b761709f"
+source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
  "adler32",
  "ahash",
