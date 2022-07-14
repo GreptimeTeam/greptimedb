@@ -62,16 +62,17 @@ mod tests {
         name: String,
         args: Vec<String>,
         returns: Vec<String>,
+        func_text: String,
     }
 
     #[derive(Debug, Snafu)]
     pub enum CoprError {
         Format { reason: String },
-        TypeCast {error: datatypes::error::Error},
+        TypeCast { error: datatypes::error::Error },
         PyParse { parse_error: ParseError },
         PyRuntime,
     }
-    impl From<datatypes::error::Error> for CoprError{
+    impl From<datatypes::error::Error> for CoprError {
         fn from(e: datatypes::error::Error) -> Self {
             Self::TypeCast { error: e }
         }
@@ -98,7 +99,7 @@ mod tests {
         }
     }
 
-    /// TODO: a lot of error handling
+    /// TODO: a lot of error handling, write function body
     fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
         let python_ast = parser::parse_program(script).unwrap();
         ensure!(python_ast.len()==1, FormatSnafu { reason: "Expect one and only one python function with `@coprocessor` or `@cpor` decorator".to_string()});
@@ -111,6 +112,7 @@ mod tests {
             type_comment,
         } = &python_ast[0].node
         {
+            dbg!(&python_ast[0].node);
             //ensure!(args.len() == 2, FormatSnafu{ reason: "Expect two arguments: `args` and `returns`"})
             ensure!(
                 decorator_list.len() == 1,
@@ -164,6 +166,7 @@ mod tests {
                     name: name.to_string(),
                     args: args.unwrap()?,
                     returns: rets.unwrap()?,
+                    func_text: "".to_string(),
                 });
             }
         } else {
@@ -209,7 +212,7 @@ mod tests {
                 DataType::Float32 => args.push(PyVector::from(into_vector::<f32>(arg)?)),
                 DataType::Float64 => args.push(PyVector::from(into_vector::<f64>(arg)?)),
                 DataType::Int8 => args.push(PyVector::from(into_vector::<i8>(arg)?)),
-                DataType::Int16=> args.push(PyVector::from(into_vector::<i16>(arg)?)),
+                DataType::Int16 => args.push(PyVector::from(into_vector::<i16>(arg)?)),
                 DataType::Int32 => args.push(PyVector::from(into_vector::<i32>(arg)?)),
                 DataType::Int32 => args.push(PyVector::from(into_vector::<i32>(arg)?)),
                 DataType::Boolean => {
@@ -226,8 +229,46 @@ mod tests {
                 }
             }
         }
-        dbg!(args);
-        // 4. then `vm.invoke` function with given args,
+        // 4. then `vm.invoke` function with given args, or maybe scope set item? and just call
+        let run_res = vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
+            PyVector::make_class(&vm.ctx);
+            let scope = vm.new_scope_with_builtins();
+            for (name, vector) in copr.args.iter().zip(args) {
+                scope
+                    .locals
+                    .as_object()
+                    .set_item(name, vm.new_pyobj(vector), vm)
+                    .expect("failed");
+            }
+            let arg_list = copr.args.iter().fold("".to_string(), |state, x| {
+                let mut res = state;
+                if res.is_empty() {
+                    res.push(',')
+                }
+                res.push_str(x.as_str());
+                res
+            });
+            let decorator = format!(
+"
+def copr(args, returns):
+    def wrapped(fn):
+        def inner(args, returns):
+            return fn({})
+        return inner
+    return wrapped
+",
+                arg_list
+            );
+            let code_obj = vm
+                .compile(
+                    &(script.to_owned() + &decorator), //format!("\n{}()", copr.name).as_str()),
+                    vm::compile::Mode::BlockExpr,
+                    "<embedded>".to_owned(),
+                )
+                .map_err(|err| vm.new_syntax_error(&err))?;
+            vm.run_code_obj(code_obj, scope)
+        });
+        dbg!(run_res);
         // 5. get returns as a PyList, and assign them according to `returns`
         // 6. return a assembled DfRecordBatch
         Ok(rb)
@@ -236,8 +277,22 @@ mod tests {
 
     #[test]
     fn test_execute_script() {
-        let result = execute_script("a//b");
-        assert!(result.is_ok());
+        let result = execute_script(
+            "
+def copr(args, returns):
+    def wrapped(fn):
+        def inner(args, returns):
+            return fn(args)
+        return inner
+    return wrapped
+@copr(1,2)
+def a(b):
+    return b
+a(args=1, returns=0)
+",
+        );
+        dbg!(result);
+        //assert!(result.is_ok());
     }
 
     #[test]
