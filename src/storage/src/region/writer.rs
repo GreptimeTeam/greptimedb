@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use common_telemetry::logging;
 use snafu::ResultExt;
 use store_api::storage::{WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
@@ -194,10 +195,15 @@ impl WriterInner {
         assert!(self.flush_handle.is_none());
 
         let current_version = version_control.current();
-        let duration = current_version.bucket_duration();
-        let mem_to_flush = current_version.memtables().memtables_to_flush(duration);
+        let (max_memtable_id, mem_to_flush) = current_version.memtables().memtables_to_flush();
+
+        if max_memtable_id.is_none() {
+            logging::info!("No memtables to flush in region: {}", shared.name);
+            return Ok(());
+        }
 
         let flush_req = FlushJob {
+            max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
             // In write thread, safe to use current commited sequence.
             flush_sequence: version_control.committed_sequence(),

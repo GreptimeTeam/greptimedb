@@ -4,6 +4,7 @@ use snafu::ResultExt;
 use store_api::manifest::MetaAction;
 use store_api::manifest::Metadata;
 use store_api::storage::RegionId;
+use store_api::storage::SequenceNumber;
 
 use crate::error::{DecodeJsonSnafu, EncodeJsonSnafu, Result, Utf8Snafu};
 use crate::metadata::{RegionMetadataRef, VersionNumber};
@@ -23,6 +24,7 @@ pub struct RegionRemove {
 pub struct RegionEdit {
     pub region_id: RegionId,
     pub region_version: VersionNumber,
+    pub flush_sequence: SequenceNumber,
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
 }
