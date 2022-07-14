@@ -28,7 +28,7 @@ impl Database {
     }
 
     pub async fn insert(&self, table: impl Into<String>, values: Vec<Bytes>) -> Result<()> {
-        let header = ExprHeader {
+        let header = Header {
             version: PROTOCOL_VERSION,
         };
         let insert = InsertExpr {
