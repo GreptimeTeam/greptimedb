@@ -7,7 +7,9 @@ use object_store::ObjectStore;
 use serde::{de::DeserializeOwned, Serialize};
 pub use storage::*;
 
-pub type ManifestVersion = Version;
+pub type ManifestVersion = u64;
+pub const MIN_VERSION: u64 = 0;
+pub const MAX_VERSION: u64 = u64::MAX;
 
 pub trait Metadata: Clone {}
 
@@ -32,12 +34,12 @@ pub trait Manifest: Send + Sync + Clone + 'static {
     fn new(id: Self::MetadataId, manifest_dir: &str, object_store: ObjectStore) -> Self;
 
     /// Update metadata by the action
-    async fn update(&self, action: Self::MetaAction) -> Result<Version, Self::Error>;
+    async fn update(&self, action: Self::MetaAction) -> Result<ManifestVersion, Self::Error>;
 
     /// Retrieve the latest metadata
     async fn load(&self) -> Result<Option<Self::Metadata>, Self::Error>;
 
-    async fn checkpoint(&self) -> Result<Version, Self::Error>;
+    async fn checkpoint(&self) -> Result<ManifestVersion, Self::Error>;
 
     fn metadata_id(&self) -> Self::MetadataId;
 }

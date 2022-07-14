@@ -82,13 +82,13 @@ impl<S> RegionImpl<S> {
                 id,
                 name,
                 version_control: Arc::new(version_control),
-                manifest,
             }),
             writer: Arc::new(RegionWriter::new(memtable_builder)),
             wal,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
             flush_scheduler,
             sst_layer,
+            manifest,
         });
 
         RegionImpl { inner }
@@ -107,7 +107,6 @@ pub struct SharedData {
     pub name: String,
     // TODO(yingwen): Maybe no need to use Arc for version control.
     pub version_control: VersionControlRef,
-    pub manifest: RegionManifest,
 }
 
 pub type SharedDataRef = Arc<SharedData>;
@@ -119,6 +118,7 @@ struct RegionInner<S> {
     flush_strategy: FlushStrategyRef,
     flush_scheduler: FlushSchedulerRef,
     sst_layer: AccessLayerRef,
+    manifest: RegionManifest,
 }
 
 impl<S> RegionInner<S> {
@@ -151,6 +151,7 @@ impl<S> RegionInner<S> {
             sst_layer: &self.sst_layer,
             wal: &self.wal,
             writer: &self.writer,
+            manifest: &self.manifest,
         };
         // Now altering schema is not allowed, so it is safe to validate schema outside of the lock.
         self.writer.write(ctx, request, writer_ctx).await
