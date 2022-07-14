@@ -96,7 +96,7 @@ impl<S> RegionImpl<S> {
 
     #[cfg(test)]
     #[inline]
-    fn committed_sequence(&self) -> store_api::storage::SequenceNumber {
+    fn _committed_sequence(&self) -> store_api::storage::SequenceNumber {
         self.inner.version_control().committed_sequence()
     }
 }
