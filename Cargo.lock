@@ -625,6 +625,8 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
+ "rustpython-compiler",
+ "rustpython-compiler-core",
  "rustpython-parser",
  "rustpython-vm",
  "snafu",

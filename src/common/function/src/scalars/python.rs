@@ -72,6 +72,11 @@ mod tests {
         PyParse { parse_error: ParseError },
         PyRuntime,
     }
+    impl From<ParseError> for CoprError {
+        fn from(e: ParseError) -> Self {
+            Self::PyParse { parse_error: e }
+        }
+    }
     impl From<datatypes::error::Error> for CoprError {
         fn from(e: datatypes::error::Error) -> Self {
             Self::TypeCast { error: e }
@@ -100,7 +105,7 @@ mod tests {
     }
 
     /// TODO: a lot of error handling, write function body
-    fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
+    fn parse_copr(script: &str) -> Result<(Coprocessor, ast::Suite), CoprError> {
         let python_ast = parser::parse_program(script).unwrap();
         ensure!(python_ast.len()==1, FormatSnafu { reason: "Expect one and only one python function with `@coprocessor` or `@cpor` decorator".to_string()});
         if let ast::StmtKind::FunctionDef {
@@ -162,12 +167,15 @@ mod tests {
                         _ => todo!(),
                     }
                 }
-                return Ok(Coprocessor {
-                    name: name.to_string(),
-                    args: args.unwrap()?,
-                    returns: rets.unwrap()?,
-                    func_text: "".to_string(),
-                });
+                return Ok((
+                    Coprocessor {
+                        name: name.to_string(),
+                        args: args.unwrap()?,
+                        returns: rets.unwrap()?,
+                        func_text: "".to_string(),
+                    },
+                    parser::parse_program(script)?,
+                ));
             }
         } else {
             ensure!(
@@ -189,8 +197,24 @@ mod tests {
     pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, CoprError> {
         // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
         // 2. also check for exist of `args` in `rb`, if not found, return error
-        let copr = parse_copr(script)?;
-
+        let (copr, mut ast) = parse_copr(script)?;
+        // erase decorator
+        if let ast::StmtKind::FunctionDef {
+            name,
+            args,
+            body,
+            decorator_list,
+            returns,
+            type_comment,
+        } = &mut ast[0].node
+        {
+            *decorator_list = Vec::new();
+        }
+        rustpython_compiler_core::compile::compile_program(
+            &ast,
+            "<embedded>".to_owned(),
+            rustpython_compiler_core::compile::CompileOpts { optimize: 0 },
+        );
         // 3. get args from `rb`, and cast them into PyVector
         let mut fetch_idx = Vec::new();
         for (idx, field) in rb.schema().fields.iter().enumerate() {
@@ -249,7 +273,7 @@ mod tests {
                 res
             });
             let decorator = format!(
-"
+                "
 def copr(args, returns):
     def wrapped(fn):
         def inner(args, returns):
