@@ -18,7 +18,7 @@ const ENTRY_MIN_LEN: usize = HEADER_LENGTH + 4;
 // length + offset + namespace id + epoch
 const HEADER_LENGTH: usize = 4 + 8 + 8 + 8;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct EntryImpl {
     pub data: Vec<u8>,
     pub offset: Offset,
