@@ -38,6 +38,11 @@ impl TimestampMillis {
 
         Some(TimestampMillis(ts / bucket_duration * bucket_duration))
     }
+
+    /// Returns the timestamp value as i64.
+    pub fn as_i64(&self) -> i64 {
+        self.0
+    }
 }
 
 impl From<i64> for TimestampMillis {
@@ -80,6 +85,7 @@ mod tests {
         let timestamp = TimestampMillis::from(ts);
         assert_eq!(timestamp, ts);
         assert_eq!(ts, timestamp);
+        assert_eq!(ts, timestamp.as_i64());
 
         assert_ne!(TimestampMillis::new(0), timestamp);
         assert!(TimestampMillis::new(-123) < TimestampMillis::new(0));
