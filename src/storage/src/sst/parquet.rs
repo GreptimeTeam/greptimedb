@@ -20,20 +20,20 @@ use crate::metadata::ColumnMetadata;
 use crate::sst;
 
 /// Parquet sst writer.
-pub struct ParquetWriter {
-    file_name: String,
+pub struct ParquetWriter<'a> {
+    file_name: &'a str,
     iter: BatchIteratorPtr,
     object_store: ObjectStore,
 }
 
-impl ParquetWriter {
+impl<'a> ParquetWriter<'a> {
     pub fn new(
-        file_name: &str,
+        file_name: &'a str,
         iter: BatchIteratorPtr,
         object_store: ObjectStore,
     ) -> ParquetWriter {
         ParquetWriter {
-            file_name: file_name.to_string(),
+            file_name,
             iter,
             object_store,
         }
@@ -48,7 +48,7 @@ impl ParquetWriter {
     /// in config will be written to a single row group.
     async fn write_rows(mut self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
         let schema = memtable_schema_to_arrow_schema(self.iter.schema());
-        let object = self.object_store.object(&self.file_name);
+        let object = self.object_store.object(self.file_name);
 
         // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
         // but in s3/azblob backend the Content-Length field of HTTP request is set

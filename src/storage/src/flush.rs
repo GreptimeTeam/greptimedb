@@ -6,14 +6,15 @@ use common_time::RangeMillis;
 use store_api::manifest::Manifest;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::SequenceNumber;
+use uuid::Uuid;
 
 use crate::background::{Context, Job, JobHandle, JobPoolRef};
-use crate::error::Result;
+use crate::error::{CancelledSnafu, Result};
 use crate::manifest::action::*;
-use crate::memtable::MemtableRef;
+use crate::memtable::{IterContext, MemtableRef};
 use crate::region::RegionWriterRef;
 use crate::region::SharedDataRef;
-use crate::sst::{AccessLayerRef, FileMeta};
+use crate::sst::{AccessLayerRef, FileMeta, WriteOptions};
 use crate::version::VersionEdit;
 
 /// Default write buffer size (32M).
@@ -148,12 +149,40 @@ pub struct FlushJob {
 impl FlushJob {
     async fn write_memtables_to_layer(&self, ctx: &Context) -> Result<Vec<FileMeta>> {
         if ctx.is_cancelled() {
-            // TODO(yingwen): [flush] Returns an cancelled error.
-            unimplemented!();
+            return CancelledSnafu {}.fail();
         }
 
-        // TODO(yingwen): [flush] Flush memtables to sst layer.
-        unimplemented!()
+        let mut futures = Vec::with_capacity(self.memtables.len());
+        for m in &self.memtables {
+            let file_name = Self::generate_sst_file_name();
+            // TODO(hl): Check if random file name already exists in meta.
+
+            let iter_ctx = IterContext {
+                for_flush: true,
+                ..Default::default()
+            };
+
+            let iter = m.memtable.iter(iter_ctx)?;
+            futures.push(async move {
+                self.sst_layer
+                    .write_sst(&file_name, iter, WriteOptions::default())
+                    .await
+            });
+        }
+
+        let metas = futures_util::future::join_all(futures)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|f| FileMeta {
+                file_path: f,
+                level: 0,
+            })
+            .collect();
+
+        logging::info!("Successfully flush memtables to files: {:?}", metas);
+        Ok(metas)
     }
 
     async fn write_to_manifest(&self, file_metas: &[FileMeta]) -> Result<ManifestVersion> {
@@ -168,6 +197,11 @@ impl FlushJob {
             .manifest
             .update(RegionMetaAction::Edit(edit))
             .await
+    }
+
+    /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`
+    fn generate_sst_file_name() -> String {
+        format!("{}.parquet", Uuid::new_v4().hyphenated())
     }
 }
 
@@ -193,6 +227,8 @@ impl Job for FlushJob {
 
 #[cfg(test)]
 mod tests {
+    use regex::Regex;
+
     use super::*;
 
     #[test]
@@ -200,5 +236,16 @@ mod tests {
         assert_eq!(7, get_mutable_limitation(8));
         assert_eq!(8, get_mutable_limitation(10));
         assert_eq!(56, get_mutable_limitation(64));
+    }
+
+    #[test]
+    pub fn test_uuid_generate() {
+        let file_name = FlushJob::generate_sst_file_name();
+        let regex = Regex::new(r"^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$").unwrap();
+        assert!(
+            regex.is_match(&file_name),
+            "illegal sst file name: {}",
+            file_name
+        );
     }
 }

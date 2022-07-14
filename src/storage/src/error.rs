@@ -118,6 +118,9 @@ pub enum Error {
 
     #[snafu(display("Invalid timestamp in write batch, source: {}", source))]
     InvalidTimestamp { source: crate::write_batch::Error },
+
+    #[snafu(display("Task already cancelled"))]
+    Cancelled { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -133,9 +136,11 @@ impl ErrorExt for Error {
             | BatchMissingColumn { .. }
             | InvalidTimestamp { .. } => StatusCode::InvalidArguments,
 
-            Utf8 { .. } | EncodeJson { .. } | DecodeJson { .. } | JoinTask { .. } => {
-                StatusCode::Unexpected
-            }
+            Utf8 { .. }
+            | EncodeJson { .. }
+            | DecodeJson { .. }
+            | JoinTask { .. }
+            | Cancelled { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | InitBackend { .. }
