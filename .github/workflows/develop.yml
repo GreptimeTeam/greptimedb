@@ -3,7 +3,7 @@ on: [pull_request]
 name: Continuous integration for developing
 
 env:
-  RUST_TOOLCHAIN: nightly-2022-04-03
+  RUST_TOOLCHAIN: nightly-2022-07-14
 
 jobs:
   check:

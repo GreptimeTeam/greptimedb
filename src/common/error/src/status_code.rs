@@ -1,7 +1,7 @@
 use std::fmt;
 
 /// Common status code for public API.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusCode {
     // ====== Begin of common status code ==============
     /// Unknown error.

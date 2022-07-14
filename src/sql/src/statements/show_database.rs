@@ -1,7 +1,7 @@
 use crate::statements::show_kind::ShowKind;
 
 /// SQL structure for `SHOW DATABASES`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlShowDatabase {
     pub kind: ShowKind,
 }
