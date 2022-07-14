@@ -189,7 +189,7 @@ impl MemtableSet {
         // in other should be empty in usual, so overwriting it is okay.
         other
             .memtables
-            .extend(self.memtables.iter().map(|(k, v)| (k.clone(), v.clone())));
+            .extend(self.memtables.iter().map(|(k, v)| (*k, v.clone())));
 
         MemtableSet {
             memtables: other.memtables,
