@@ -26,7 +26,7 @@ impl TimestampMillis {
     ///
     /// # Panics
     /// Panics if `bucket_duration <= 0`.
-    pub fn aligned_by_bucket(self, bucket_duration: i64) -> Option<TimestampMillis> {
+    pub fn align_by_bucket(self, bucket_duration: i64) -> Option<TimestampMillis> {
         assert!(bucket_duration > 0);
 
         let ts = if self.0 >= 0 {
@@ -98,35 +98,26 @@ mod tests {
     }
 
     #[test]
-    fn test_aligned_by_bucket() {
+    fn test_align_by_bucket() {
         let bucket = 100;
+        assert_eq!(0, TimestampMillis::new(0).align_by_bucket(bucket).unwrap());
+        assert_eq!(0, TimestampMillis::new(1).align_by_bucket(bucket).unwrap());
+        assert_eq!(0, TimestampMillis::new(99).align_by_bucket(bucket).unwrap());
         assert_eq!(
-            0,
-            TimestampMillis::new(0).aligned_by_bucket(bucket).unwrap()
-        );
-        assert_eq!(
-            0,
-            TimestampMillis::new(1).aligned_by_bucket(bucket).unwrap()
-        );
-        assert_eq!(
-            0,
-            TimestampMillis::new(99).aligned_by_bucket(bucket).unwrap()
+            100,
+            TimestampMillis::new(100).align_by_bucket(bucket).unwrap()
         );
         assert_eq!(
             100,
-            TimestampMillis::new(100).aligned_by_bucket(bucket).unwrap()
-        );
-        assert_eq!(
-            100,
-            TimestampMillis::new(199).aligned_by_bucket(bucket).unwrap()
+            TimestampMillis::new(199).align_by_bucket(bucket).unwrap()
         );
 
-        assert_eq!(0, TimestampMillis::MAX.aligned_by_bucket(i64::MAX).unwrap());
+        assert_eq!(0, TimestampMillis::MAX.align_by_bucket(i64::MAX).unwrap());
         assert_eq!(
             i64::MAX,
-            TimestampMillis::INF.aligned_by_bucket(i64::MAX).unwrap()
+            TimestampMillis::INF.align_by_bucket(i64::MAX).unwrap()
         );
 
-        assert_eq!(None, TimestampMillis::MIN.aligned_by_bucket(bucket));
+        assert_eq!(None, TimestampMillis::MIN.align_by_bucket(bucket));
     }
 }

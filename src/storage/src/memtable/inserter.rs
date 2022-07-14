@@ -214,7 +214,10 @@ fn compute_slice_indexes(
     duration: Duration,
     time_range_indexes: &RangeIndexMap,
 ) -> Vec<SliceIndex> {
-    let duration_ms = duration.as_millis().try_into().expect("Duration too large");
+    let duration_ms = duration
+        .as_millis()
+        .try_into()
+        .unwrap_or_else(|e| panic!("Duration {:?} too large, {}", duration, e));
     let mut slice_indexes = Vec::with_capacity(time_range_indexes.len());
     // Current start and end of a valid `SliceIndex`.
     let (mut start, mut end) = (0, 0);
@@ -225,7 +228,7 @@ fn compute_slice_indexes(
     for (i, ts) in timestamps.iter_data().enumerate() {
         // Find index for time range of the timestamp.
         let current_range_index = ts
-            .and_then(|v| TimestampMillis::new(v).aligned_by_bucket(duration_ms))
+            .and_then(|v| TimestampMillis::new(v).align_by_bucket(duration_ms))
             .and_then(|aligned| time_range_indexes.get(&aligned).copied());
 
         match current_range_index {
