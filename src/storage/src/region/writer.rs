@@ -9,6 +9,7 @@ use crate::background::JobHandle;
 use crate::error::{InvalidTimestampSnafu, Result};
 use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
+use crate::region::RegionManifest;
 use crate::region::SharedDataRef;
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControlRef, VersionEdit};
@@ -55,6 +56,7 @@ pub struct WriterContext<'a, S> {
     pub sst_layer: &'a AccessLayerRef,
     pub wal: &'a Wal<S>,
     pub writer: &'a RegionWriterRef,
+    pub manifest: &'a RegionManifest,
 }
 
 impl<'a, S> WriterContext<'a, S> {
@@ -133,6 +135,7 @@ impl WriterInner {
                 writer_ctx.flush_scheduler,
                 writer_ctx.sst_layer,
                 writer_ctx.writer,
+                writer_ctx.manifest,
             )
             .await?;
         }
@@ -184,6 +187,7 @@ impl WriterInner {
         flush_scheduler: &FlushSchedulerRef,
         sst_layer: &AccessLayerRef,
         writer: &RegionWriterRef,
+        manifest: &RegionManifest,
     ) -> Result<()> {
         let version_control = &shared.version_control;
         if version_control.try_freeze_mutable().is_err() {
@@ -210,6 +214,7 @@ impl WriterInner {
             shared: shared.clone(),
             sst_layer: sst_layer.clone(),
             writer: writer.clone(),
+            manifest: manifest.clone(),
         };
 
         let flush_handle = flush_scheduler.schedule_flush(flush_req).await?;

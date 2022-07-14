@@ -5,7 +5,7 @@ use std::str::Utf8Error;
 use common_error::prelude::*;
 use datatypes::arrow;
 use serde_json::error::Error as JsonError;
-use store_api::manifest::Version;
+use store_api::manifest::ManifestVersion;
 
 use crate::metadata::Error as MetadataError;
 
@@ -98,8 +98,8 @@ pub enum Error {
 
     #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
     InvalidScanIndex {
-        start: Version,
-        end: Version,
+        start: ManifestVersion,
+        end: ManifestVersion,
         backtrace: Backtrace,
     },
 
