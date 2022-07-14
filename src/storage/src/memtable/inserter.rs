@@ -594,10 +594,11 @@ mod tests {
         sequence: SequenceNumber,
         data: &[(i64, Option<i64>)],
     ) {
-        let mut iter = mem.iter(IterContext::default()).unwrap();
+        let iter = mem.iter(IterContext::default()).unwrap();
 
         let mut index = 0;
-        while let Some(batch) = iter.next().unwrap() {
+        for batch in iter {
+            let batch = batch.unwrap();
             let row_num = batch.keys[0].len();
             for i in 0..row_num {
                 let ts = batch.keys[0].get(i);
