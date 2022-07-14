@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = ["python-udf"]
-python-udf = ["dep:rustpython-vm"]
+python-udf = ["dep:rustpython-vm", "dep:rustpython-parser"]
 
 [dependencies]
 chrono-tz = "0.6"
