@@ -9,7 +9,7 @@ use crate::type_id::LogicalTypeId;
 use crate::types::primitive_traits::Primitive;
 use crate::value::Value;
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Eq)]
 pub struct PrimitiveType<T: Primitive> {
     #[serde(skip)]
     _phantom: PhantomData<T>,

@@ -161,7 +161,7 @@ impl ColumnMetadata {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnsMetadata {
     /// All columns.
     ///
