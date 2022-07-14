@@ -103,7 +103,8 @@ fn check_iter_content(
     values: &[Option<u64>],
 ) {
     let mut index = 0;
-    while let Some(batch) = iter.next().unwrap() {
+    for batch in iter {
+        let batch = batch.unwrap();
         check_batch_valid(&batch);
 
         let row_num = batch.keys[0].len();
@@ -177,7 +178,9 @@ struct TestContext {
 fn write_iter_memtable_case(ctx: &TestContext) {
     // Test iterating an empty memtable.
     let mut iter = ctx.memtable.iter(IterContext::default()).unwrap();
-    assert!(iter.next().unwrap().is_none());
+    assert!(iter.next().is_none());
+    // Poll the empty iterator again.
+    assert!(iter.next().is_none());
     assert_eq!(0, ctx.memtable.bytes_allocated());
 
     // Init test data.
@@ -265,7 +268,8 @@ fn test_write_iter_memtable() {
 
 fn check_iter_batch_size(iter: &mut dyn BatchIterator, total: usize, batch_size: usize) {
     let mut remains = total;
-    while let Some(batch) = iter.next().unwrap() {
+    for batch in iter {
+        let batch = batch.unwrap();
         check_batch_valid(&batch);
 
         let row_num = batch.keys[0].len();
@@ -471,4 +475,26 @@ fn test_sequence_visibility() {
     });
 }
 
-// TODO(yingwen): Test key overwrite in same batch.
+#[test]
+fn test_iter_after_none() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_kvs(
+            &*ctx.memtable,
+            10, // sequence
+            ValueType::Put,
+            &[(1000, 0), (1001, 1), (1002, 2)], // keys
+            &[Some(0), Some(1), Some(2)],       // values
+        );
+
+        let iter_ctx = IterContext {
+            batch_size: 4,
+            ..Default::default()
+        };
+
+        let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+        assert!(iter.next().is_some());
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none());
+    });
+}

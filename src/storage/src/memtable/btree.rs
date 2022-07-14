@@ -93,9 +93,13 @@ impl BatchIterator for BTreeIterator {
     fn ordering(&self) -> RowOrdering {
         RowOrdering::Key
     }
+}
 
-    fn next(&mut self) -> Result<Option<Batch>> {
-        Ok(self.next_batch())
+impl Iterator for BTreeIterator {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Result<Batch>> {
+        self.next_batch().map(Ok)
     }
 }
 
