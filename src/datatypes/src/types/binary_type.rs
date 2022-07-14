@@ -7,7 +7,7 @@ use crate::data_type::{DataType, DataTypeRef};
 use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BinaryType;
 
 impl BinaryType {

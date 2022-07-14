@@ -13,7 +13,7 @@ use crate::fs::crc;
 // length+offset+epoch+crc
 const ENTRY_MIN_LEN: usize = 4 + 8 + 8 + 4;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct EntryImpl {
     pub data: Vec<u8>,
     pub offset: Offset,

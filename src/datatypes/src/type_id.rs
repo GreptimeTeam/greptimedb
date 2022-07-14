@@ -1,7 +1,7 @@
 use crate::data_type::ConcreteDataType;
 
 /// Unique identifier for logical data type.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogicalTypeId {
     Null,
 

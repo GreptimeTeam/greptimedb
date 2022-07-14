@@ -6,7 +6,7 @@ use store_api::logstore::entry::{Id, Offset};
 use crate::error::Result;
 use crate::fs::file_name::FileName;
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Location {
     pub file_name: FileName,
     pub offset: Offset,
