@@ -1,7 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common_time::RangeMillis;
 use snafu::Snafu;
@@ -87,11 +86,7 @@ impl MemtableVersion {
         }
     }
 
-    #[inline]
-    pub fn memtables_to_flush(
-        &self,
-        bucket_duration: Duration,
-    ) -> (Option<MemtableId>, Vec<MemtableWithMeta>) {
+    pub fn memtables_to_flush(&self) -> (Option<MemtableId>, Vec<MemtableWithMeta>) {
         let max_memtable_id = self
             .immutables
             .iter()
@@ -100,7 +95,7 @@ impl MemtableVersion {
         let memtables = self
             .immutables
             .iter()
-            .flat_map(|immem| immem.to_memtable_with_metas(bucket_duration))
+            .flat_map(|immem| immem.to_memtable_with_metas())
             .collect();
 
         (max_memtable_id, memtables)
@@ -189,21 +184,19 @@ impl MemtableSet {
 
     /// Creates a new `MemtableSet` that contains memtables both in `self` and
     /// `other`, let `self` unchanged.
-    ///
-    /// # Panics
-    /// Panics if there are memtables with same time ranges.
-    pub fn add(&self, other: MemtableSet) -> MemtableSet {
-        let mut memtables = self.memtables.clone();
-        memtables.extend(other.memtables.into_iter());
+    pub fn add(&self, mut other: MemtableSet) -> MemtableSet {
+        // We use `other.memtables` to extend `self.memtables` since memtables
+        // in other should be empty in usual, so overwriting it is okay.
+        let memtables = self.memtables.clone();
+        other.memtables.extend(memtables.into_iter());
 
         MemtableSet {
-            memtables,
+            memtables: other.memtables,
             max_memtable_id: MemtableId::max(self.max_memtable_id, other.max_memtable_id),
         }
     }
 
-    pub fn to_memtable_with_metas(&self, _bucket_duration: Duration) -> Vec<MemtableWithMeta> {
-        // TODO(dennis): adjust memtable bucket meta align to bucket_duration
+    pub fn to_memtable_with_metas(&self) -> Vec<MemtableWithMeta> {
         self.memtables
             .iter()
             .map(|(range_key, memtable)| MemtableWithMeta {
@@ -294,12 +287,11 @@ mod tests {
 
     #[test]
     fn test_add_memtableset() {
-        let duration = Duration::from_millis(1024);
         let s1 = create_test_memtableset(&[0, 1, 2]);
         let s2 = create_test_memtableset(&[3, 4, 5, 6]);
 
-        let mut s1_memtables = s1.to_memtable_with_metas(duration);
-        let s2_memtables = s2.to_memtable_with_metas(duration);
+        let mut s1_memtables = s1.to_memtable_with_metas();
+        let s2_memtables = s2.to_memtable_with_metas();
         s1_memtables.extend(s2_memtables);
 
         let empty = create_test_memtableset(&[]);
@@ -309,7 +301,7 @@ mod tests {
         assert_ne!(s1, s3);
 
         assert_eq!(7, s3.memtables.len());
-        let s3_memtables = s3.to_memtable_with_metas(duration);
+        let s3_memtables = s3.to_memtable_with_metas();
         assert_eq!(7, s3_memtables.len());
 
         for i in 0..7 {
@@ -321,7 +313,6 @@ mod tests {
 
     #[test]
     fn test_memtableversion() {
-        let duration = Duration::from_millis(1024);
         let s1 = create_test_memtableset(&[0, 1, 2]);
         let s2 = create_test_memtableset(&[3, 4, 5, 6]);
         let s3 = s1.add(s2.clone());
@@ -341,7 +332,7 @@ mod tests {
         assert_ne!(v2, v3);
         let mutables = v3.mutable_memtables();
         assert_eq!(s3, *mutables);
-        assert!(v3.memtables_to_flush(duration).1.is_empty());
+        assert!(v3.memtables_to_flush().1.is_empty());
 
         // Try to freeze s1, s2
         let v4 = v3.try_freeze_mutable().unwrap();
@@ -352,7 +343,7 @@ mod tests {
         assert_eq!(v4.immutables.len(), 1);
         assert_eq!(v4.immutables[0], Arc::new(s3.clone()));
 
-        let (max_id, tables) = v4.memtables_to_flush(duration);
+        let (max_id, tables) = v4.memtables_to_flush();
         assert_eq!(6, max_id.unwrap());
         assert_eq!(7, tables.len());
 
@@ -369,7 +360,7 @@ mod tests {
         assert_eq!(v6.immutables[0], Arc::new(s3));
         assert_eq!(v6.immutables[1], Arc::new(s4.clone()));
 
-        let (max_id, tables) = v6.memtables_to_flush(duration);
+        let (max_id, tables) = v6.memtables_to_flush();
         assert_eq!(8, max_id.unwrap());
         assert_eq!(9, tables.len());
         // verify tables

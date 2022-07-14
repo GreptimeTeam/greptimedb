@@ -137,7 +137,7 @@ pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
 pub struct FlushJob {
     /// Max memtable id in these memtables,
     /// used to remove immutable memtables in current version.
-    pub max_memtable_id: Option<MemtableId>,
+    pub max_memtable_id: MemtableId,
     /// Memtables to be flushed.
     pub memtables: Vec<MemtableWithMeta>,
     /// Last sequence of data to be flushed.
@@ -222,7 +222,7 @@ impl Job for FlushJob {
             files_to_add: file_metas,
             flushed_sequence: Some(self.flush_sequence),
             manifest_version,
-            max_memtable_id: self.max_memtable_id,
+            max_memtable_id: Some(self.max_memtable_id),
         };
 
         self.writer.apply_version_edit(edit, &self.shared).await?;
