@@ -14,7 +14,7 @@ use std::time::Duration;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
-use crate::memtable::{FreezeError, MemtableSchema, MemtableSet, MemtableVersion};
+use crate::memtable::{FreezeError, MemtableId, MemtableSchema, MemtableSet, MemtableVersion};
 use crate::metadata::{RegionMetadata, RegionMetadataRef};
 use crate::sst::LevelMetas;
 use crate::sst::{FileHandle, FileMeta};
@@ -100,6 +100,13 @@ impl VersionControl {
     pub fn apply_edit(&self, edit: VersionEdit) {
         let mut version_to_update = self.version.lock();
 
+        if let Some(max_memtable_id) = edit.max_memtable_id {
+            // Remove flushed memtables
+            let memtable_version = version_to_update.memtables();
+            let removed = memtable_version.remove_immutables(max_memtable_id);
+            version_to_update.memtables = Arc::new(removed);
+        }
+
         version_to_update.apply_edit(edit);
 
         version_to_update.commit();
@@ -111,6 +118,7 @@ pub struct VersionEdit {
     pub files_to_add: Vec<FileMeta>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub manifest_version: ManifestVersion,
+    pub max_memtable_id: Option<MemtableId>,
 }
 
 pub type VersionControlRef = Arc<VersionControl>;

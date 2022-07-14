@@ -20,7 +20,7 @@ pub use crate::memtable::version::{FreezeError, MemtableSet, MemtableVersion};
 pub type MemtableId = u32;
 
 /// In memory storage.
-pub trait Memtable: Send + Sync {
+pub trait Memtable: Send + Sync + std::fmt::Debug {
     fn id(&self) -> MemtableId;
 
     fn schema(&self) -> &MemtableSchema;
