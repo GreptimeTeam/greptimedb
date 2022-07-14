@@ -33,7 +33,7 @@ impl Manifest for RegionManifest {
         }
     }
 
-    async fn update(&self, action: RegionMetaAction) -> Result<Version> {
+    async fn update(&self, action: RegionMetaAction) -> Result<ManifestVersion> {
         self.inner.save(&action).await
     }
 
@@ -58,7 +58,7 @@ impl Manifest for RegionManifest {
         }
     }
 
-    async fn checkpoint(&self) -> Result<Version> {
+    async fn checkpoint(&self) -> Result<ManifestVersion> {
         unimplemented!();
     }
 
@@ -78,7 +78,7 @@ struct RegionMetaActionIterator {
 }
 
 impl RegionMetaActionIterator {
-    async fn next_action(&mut self) -> Result<Option<(Version, RegionMetaAction)>> {
+    async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaAction)>> {
         match self.log_iter.next_log().await? {
             Some((v, bytes)) => {
                 let action: RegionMetaAction = RegionMetaAction::decode(&bytes)?;
@@ -100,16 +100,16 @@ impl RegionManifestInner {
     }
 
     #[inline]
-    fn inc_version(&self) -> Version {
+    fn inc_version(&self) -> ManifestVersion {
         self.version.fetch_add(1, Ordering::Relaxed)
     }
 
     #[inline]
-    fn last_version(&self) -> Version {
+    fn last_version(&self) -> ManifestVersion {
         self.version.load(Ordering::Relaxed)
     }
 
-    async fn save(&self, action: &RegionMetaAction) -> Result<Version> {
+    async fn save(&self, action: &RegionMetaAction) -> Result<ManifestVersion> {
         let version = self.inc_version();
 
         logging::debug!(
@@ -123,7 +123,11 @@ impl RegionManifestInner {
         Ok(version)
     }
 
-    async fn scan(&self, start: Version, end: Version) -> Result<RegionMetaActionIterator> {
+    async fn scan(
+        &self,
+        start: ManifestVersion,
+        end: ManifestVersion,
+    ) -> Result<RegionMetaActionIterator> {
         Ok(RegionMetaActionIterator {
             log_iter: self.store.scan(start, end).await?,
         })

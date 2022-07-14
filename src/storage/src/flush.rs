@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::background::{Context, Job, JobHandle, JobPoolRef};
 use crate::error::{CancelledSnafu, Result};
 use crate::manifest::action::*;
+use crate::manifest::region::RegionManifest;
 use crate::memtable::{IterContext, MemtableId, MemtableRef};
 use crate::region::RegionWriterRef;
 use crate::region::SharedDataRef;
@@ -148,6 +149,8 @@ pub struct FlushJob {
     pub sst_layer: AccessLayerRef,
     /// Region writer, used to persist log entry that points to the latest manifest file.
     pub writer: RegionWriterRef,
+    /// Region manifest service, used to persist metadata.
+    pub manifest: RegionManifest,
 }
 
 impl FlushJob {
@@ -198,10 +201,7 @@ impl FlushJob {
             files_to_remove: Vec::default(),
         };
         logging::debug!("Write region edit: {:?} to manifest.", edit);
-        self.shared
-            .manifest
-            .update(RegionMetaAction::Edit(edit))
-            .await
+        self.manifest.update(RegionMetaAction::Edit(edit)).await
     }
 
     /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`

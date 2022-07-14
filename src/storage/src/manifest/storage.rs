@@ -9,7 +9,7 @@ use object_store::{util, DirEntry, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
-use store_api::manifest::{LogIterator, ManifestLogStorage, Version};
+use store_api::manifest::{LogIterator, ManifestLogStorage, ManifestVersion};
 
 use crate::error::{
     DecodeJsonSnafu, DeleteObjectSnafu, EncodeJsonSnafu, Error, InvalidScanIndexSnafu,
@@ -23,12 +23,12 @@ lazy_static! {
 const LAST_CHECKPOINT_FILE: &str = "_last_checkpoint";
 
 #[inline]
-pub fn delta_file(version: Version) -> String {
+pub fn delta_file(version: ManifestVersion) -> String {
     format!("{:020}.json", version)
 }
 
 #[inline]
-pub fn checkpoint_file(version: Version) -> String {
+pub fn checkpoint_file(version: ManifestVersion) -> String {
     format!("{:020}.checkpoint", version)
 }
 
@@ -37,7 +37,7 @@ pub fn checkpoint_file(version: Version) -> String {
 /// # Panics
 /// Panics if the file path is not a valid delta file.
 #[inline]
-pub fn delta_version(path: &str) -> Version {
+pub fn delta_version(path: &str) -> ManifestVersion {
     let s = path.split('.').next().unwrap();
     s.parse()
         .unwrap_or_else(|_| panic!("Invalid delta file: {}", path))
@@ -49,14 +49,14 @@ pub fn is_delta_file(file_name: &str) -> bool {
 }
 
 pub struct ObjectStoreLogIterator {
-    iter: Box<dyn Iterator<Item = (Version, DirEntry)> + Send + Sync>,
+    iter: Box<dyn Iterator<Item = (ManifestVersion, DirEntry)> + Send + Sync>,
 }
 
 #[async_trait]
 impl LogIterator for ObjectStoreLogIterator {
     type Error = Error;
 
-    async fn next_log(&mut self) -> Result<Option<(Version, Vec<u8>)>> {
+    async fn next_log(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         match self.iter.next() {
             Some((v, e)) => {
                 let object = e.into_object();
@@ -85,11 +85,11 @@ impl ManifestObjectStore {
         }
     }
 
-    fn delta_file_path(&self, version: Version) -> String {
+    fn delta_file_path(&self, version: ManifestVersion) -> String {
         format!("{}{}", self.path, delta_file(version))
     }
 
-    fn checkpoint_file_path(&self, version: Version) -> String {
+    fn checkpoint_file_path(&self, version: ManifestVersion) -> String {
         format!("{}{}", self.path, checkpoint_file(version))
     }
 }
@@ -97,7 +97,7 @@ impl ManifestObjectStore {
 #[derive(Serialize, Deserialize, Debug)]
 struct CheckpointMetadata {
     pub size: usize,
-    pub version: Version,
+    pub version: ManifestVersion,
     pub checksum: Option<String>,
     pub extend_metadata: Option<HashMap<String, String>>,
 }
@@ -119,7 +119,11 @@ impl ManifestLogStorage for ManifestObjectStore {
     type Error = Error;
     type Iter = ObjectStoreLogIterator;
 
-    async fn scan(&self, start: Version, end: Version) -> Result<ObjectStoreLogIterator> {
+    async fn scan(
+        &self,
+        start: ManifestVersion,
+        end: ManifestVersion,
+    ) -> Result<ObjectStoreLogIterator> {
         ensure!(start <= end, InvalidScanIndexSnafu { start, end });
 
         let dir = self.object_store.object(&self.path);
@@ -139,7 +143,7 @@ impl ManifestLogStorage for ManifestObjectStore {
             .await
             .context(ListObjectsSnafu { path: &self.path })?;
 
-        let mut entries: Vec<(Version, DirEntry)> = streamer
+        let mut entries: Vec<(ManifestVersion, DirEntry)> = streamer
             .try_filter_map(|e| async move {
                 let file_name = e.name();
                 if is_delta_file(file_name) {
@@ -164,7 +168,7 @@ impl ManifestLogStorage for ManifestObjectStore {
         })
     }
 
-    async fn save(&self, version: Version, bytes: &[u8]) -> Result<()> {
+    async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let object = self.object_store.object(&self.delta_file_path(version));
         object.write(bytes).await.context(WriteObjectSnafu {
             path: object.path(),
@@ -173,7 +177,7 @@ impl ManifestLogStorage for ManifestObjectStore {
         Ok(())
     }
 
-    async fn delete(&self, start: Version, end: Version) -> Result<()> {
+    async fn delete(&self, start: ManifestVersion, end: ManifestVersion) -> Result<()> {
         //TODO(dennis): delete in batch or concurrently?
         for v in start..end {
             let object = self.object_store.object(&self.delta_file_path(v));
@@ -185,7 +189,7 @@ impl ManifestLogStorage for ManifestObjectStore {
         Ok(())
     }
 
-    async fn save_checkpoint(&self, version: Version, bytes: &[u8]) -> Result<()> {
+    async fn save_checkpoint(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let object = self
             .object_store
             .object(&self.checkpoint_file_path(version));
@@ -218,7 +222,7 @@ impl ManifestLogStorage for ManifestObjectStore {
         Ok(())
     }
 
-    async fn load_checkpoint(&self) -> Result<Option<(Version, Vec<u8>)>> {
+    async fn load_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let last_checkpoint = self
             .object_store
             .object(&format!("{}{}", self.path, LAST_CHECKPOINT_FILE));
