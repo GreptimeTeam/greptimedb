@@ -54,7 +54,14 @@ mod tests {
         BooleanVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
         Int8Vector,
     };
-    use rustpython_parser::{ast, error::ParseError, parser};
+    use rustpython_bytecode::CodeObject;
+    use rustpython_compiler_core::{compile, error::CompileError};
+    use rustpython_parser::{
+        ast,
+        ast::{Located, Location},
+        error::ParseError,
+        parser,
+    };
     use snafu::{ensure, prelude::Snafu, OptionExt, ResultExt};
 
     #[derive(Debug)]
@@ -62,24 +69,29 @@ mod tests {
         name: String,
         args: Vec<String>,
         returns: Vec<String>,
-        func_text: String,
     }
 
     #[derive(Debug, Snafu)]
     pub enum CoprError {
         Format { reason: String },
         TypeCast { error: datatypes::error::Error },
-        PyParse { parse_error: ParseError },
+        PyParse { error: ParseError },
+        PyCompile { error: CompileError },
         PyRuntime,
     }
     impl From<ParseError> for CoprError {
         fn from(e: ParseError) -> Self {
-            Self::PyParse { parse_error: e }
+            Self::PyParse { error: e }
         }
     }
     impl From<datatypes::error::Error> for CoprError {
         fn from(e: datatypes::error::Error) -> Self {
             Self::TypeCast { error: e }
+        }
+    }
+    impl From<rustpython_compiler_core::error::CompileError> for CoprError {
+        fn from(err: CompileError) -> Self {
+            Self::PyCompile { error: err }
         }
     }
     /// turn a python list of string into a Vec<String>
@@ -117,7 +129,6 @@ mod tests {
             type_comment,
         } = &python_ast[0].node
         {
-            dbg!(&python_ast[0].node);
             //ensure!(args.len() == 2, FormatSnafu{ reason: "Expect two arguments: `args` and `returns`"})
             ensure!(
                 decorator_list.len() == 1,
@@ -172,7 +183,6 @@ mod tests {
                         name: name.to_string(),
                         args: args.unwrap()?,
                         returns: rets.unwrap()?,
-                        func_text: "".to_string(),
                     },
                     parser::parse_program(script)?,
                 ));
@@ -188,6 +198,66 @@ mod tests {
         todo!()
     }
 
+    fn default_loc<T>(node: T) -> Located<T> {
+        Located::new(Location::new(0, 0), node)
+    }
+    fn set_loc<T>(node: T, loc: Location) -> Located<T> {
+        Located::new(loc, node)
+    }
+    // stripe the decorator, add one line for call function with given parameter, and compiler into `CodeObject`
+    fn strip_append_and_compile(
+        mut code: ast::Suite,
+        copr: &Coprocessor,
+    ) -> Result<CodeObject, CompileError> {
+        // erase decorator
+        if let ast::StmtKind::FunctionDef {
+            name,
+            args,
+            body,
+            decorator_list,
+            returns,
+            type_comment,
+        } = &mut code[0].node
+        {
+            *decorator_list = Vec::new();
+        } else {
+            todo!()
+        }
+        let mut loc = code[0].location;
+        loc.newline();
+        let args: Vec<Located<ast::ExprKind>> = copr
+            .args
+            .iter()
+            .map(|v| {
+                let node = ast::ExprKind::Name {
+                    id: v.to_owned(),
+                    ctx: ast::ExprContext::Load,
+                };
+                set_loc(node, loc)
+            })
+            .collect();
+        let func = ast::ExprKind::Call {
+            func: Box::new(set_loc(
+                ast::ExprKind::Name {
+                    id: copr.name.to_owned(),
+                    ctx: ast::ExprContext::Load,
+                },
+                loc,
+            )),
+            args,
+            keywords: Vec::new(),
+        };
+        let stmt = ast::StmtKind::Expr {
+            value: Box::new(default_loc(func)),
+        };
+        code.push(default_loc(stmt));
+        dbg!(&code);
+        compile::compile_program(
+            &code,
+            "<embedded>".to_owned(),
+            compile::CompileOpts { optimize: 0 },
+        )
+    }
     /// cast a dyn Array into a dyn Vector
     fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilder>(
         arg: Arc<dyn Array>,
@@ -198,23 +268,7 @@ mod tests {
         // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
         // 2. also check for exist of `args` in `rb`, if not found, return error
         let (copr, mut ast) = parse_copr(script)?;
-        // erase decorator
-        if let ast::StmtKind::FunctionDef {
-            name,
-            args,
-            body,
-            decorator_list,
-            returns,
-            type_comment,
-        } = &mut ast[0].node
-        {
-            *decorator_list = Vec::new();
-        }
-        rustpython_compiler_core::compile::compile_program(
-            &ast,
-            "<embedded>".to_owned(),
-            rustpython_compiler_core::compile::CompileOpts { optimize: 0 },
-        );
+        let code_obj = strip_append_and_compile(ast, &copr)?;
         // 3. get args from `rb`, and cast them into PyVector
         let mut fetch_idx = Vec::new();
         for (idx, field) in rb.schema().fields.iter().enumerate() {
@@ -262,34 +316,9 @@ mod tests {
                     .locals
                     .as_object()
                     .set_item(name, vm.new_pyobj(vector), vm)
-                    .expect("failed");
+                    .unwrap_or_else(|_| panic!("fail to set item{} in python scope", name));
             }
-            let arg_list = copr.args.iter().fold("".to_string(), |state, x| {
-                let mut res = state;
-                if res.is_empty() {
-                    res.push(',')
-                }
-                res.push_str(x.as_str());
-                res
-            });
-            let decorator = format!(
-                "
-def copr(args, returns):
-    def wrapped(fn):
-        def inner(args, returns):
-            return fn({})
-        return inner
-    return wrapped
-",
-                arg_list
-            );
-            let code_obj = vm
-                .compile(
-                    &(script.to_owned() + &decorator), //format!("\n{}()", copr.name).as_str()),
-                    vm::compile::Mode::BlockExpr,
-                    "<embedded>".to_owned(),
-                )
-                .map_err(|err| vm.new_syntax_error(&err))?;
+            let code_obj = vm.ctx.new_code(code_obj);
             vm.run_code_obj(code_obj, scope)
         });
         dbg!(run_res);
@@ -301,30 +330,24 @@ def copr(args, returns):
 
     #[test]
     fn test_execute_script() {
-        let result = execute_script(
-            "
-def copr(args, returns):
-    def wrapped(fn):
-        def inner(args, returns):
-            return fn(args)
-        return inner
-    return wrapped
-@copr(1,2)
-def a(b):
-    return b
-a(args=1, returns=0)
-",
-        );
+        let python_source = "
+def a(a,b):
+    return 1
+a(2,3)
+";
+        let result = execute_script(python_source);
         dbg!(result);
         //assert!(result.is_ok());
+        let python_ast = parser::parse_program(python_source).unwrap();
+        dbg!(python_ast);
     }
 
     #[test]
     fn test_coprocessor() {
         let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf"])
-def a():
-    return
+def a(cpu, mem):
+    return 1
 "#;
         let python_ast = parser::parse_program(python_source).unwrap();
         //println!("{}, {:?}", python_source, python_ast);
