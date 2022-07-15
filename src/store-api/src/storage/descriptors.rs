@@ -134,7 +134,7 @@ impl RowKeyDescriptorBuilder {
         Self {
             columns: Vec::new(),
             timestamp,
-            enable_version_column: true,
+            enable_version_column: false,
         }
     }
 
@@ -257,7 +257,7 @@ mod tests {
 
         let desc = RowKeyDescriptorBuilder::new(timestamp.clone()).build();
         assert!(desc.columns.is_empty());
-        assert!(desc.enable_version_column);
+        assert!(!desc.enable_version_column);
 
         let desc = RowKeyDescriptorBuilder::new(timestamp.clone())
             .columns_capacity(1)
@@ -269,7 +269,7 @@ mod tests {
             )
             .build();
         assert_eq!(2, desc.columns.len());
-        assert!(desc.enable_version_column);
+        assert!(!desc.enable_version_column);
 
         let desc = RowKeyDescriptorBuilder::new(timestamp)
             .enable_version_column(false)

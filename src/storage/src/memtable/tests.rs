@@ -15,6 +15,7 @@ const MEMTABLE_ID: MemtableId = 1;
 pub fn schema_for_test() -> MemtableSchema {
     // Just build a region desc and use its columns_row_key metadata.
     let desc = RegionDescBuilder::new("test")
+        .enable_version_column(true)
         .push_value_column(("v1", LogicalTypeId::UInt64, true))
         .build();
     let metadata: RegionMetadata = desc.try_into().unwrap();
