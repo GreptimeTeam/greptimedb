@@ -1,33 +1,40 @@
 [package]
+edition = "2021"
 name = "common-function"
 version = "0.1.0"
-edition = "2021"
 
 [features]
 default = ["python-udf"]
-python-udf = ["dep:rustpython-vm", "dep:rustpython-parser", "dep:rustpython-compiler", "dep:rustpython-compiler-core", "dep:rustpython-bytecode", "dep:rustpython-ast"]
+python-udf = [
+  "dep:rustpython-vm",
+  "dep:rustpython-parser",
+  "dep:rustpython-compiler",
+  "dep:rustpython-compiler-core",
+  "dep:rustpython-bytecode",
+  "dep:rustpython-ast",
+]
 
 [dependencies]
 chrono-tz = "0.6"
-common-error = { path = "../error" }
-common-query = { path = "../query" }
-common-recordbatch = { path = "../recordbatch" }
-datatypes = { path = "../../datatypes" }
+common-error = {path = "../error"}
+common-query = {path = "../query"}
+common-recordbatch = {path = "../recordbatch"}
+datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}
+datatypes = {path = "../../datatypes"}
 libc = "0.2.126"
 num = "0.4.0"
 num-traits = "0.2.14"
 once_cell = "1.10"
 paste = "1.0"
-rustpython-ast = { git = "https://github.com/RustPython/RustPython", optional = true, rev="02a1d1d"}
-rustpython-bytecode = { git = "https://github.com/RustPython/RustPython", optional = true, rev="02a1d1d"}
-rustpython-vm = { git = "https://github.com/RustPython/RustPython", optional = true, rev="02a1d1d"}
-rustpython-parser = { git = "https://github.com/RustPython/RustPython", optional = true, rev="02a1d1d" }
-rustpython-compiler = { git = "https://github.com/RustPython/RustPython", optional = true, rev="02a1d1d" }
-rustpython-compiler-core = { git = "https://github.com/RustPython/RustPython", optional = true, rev="02a1d1d" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}
-snafu = { version = "0.7", features = ["backtraces"] }
+rustpython-ast = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
+rustpython-bytecode = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
+rustpython-compiler = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
+rustpython-compiler-core = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
+rustpython-parser = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
+rustpython-vm = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
+snafu = {version = "0.7", features = ["backtraces"]}
 
 [dependencies.arrow]
-package = "arrow2"
-version="0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+package = "arrow2"
+version = "0.10"
