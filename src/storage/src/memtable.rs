@@ -106,7 +106,8 @@ pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
 pub struct KeyValues {
     pub sequence: SequenceNumber,
     pub value_type: ValueType,
-    /// Start index of these key-value paris in batch.
+    /// Start index of these key-value paris in batch. Each row in the same batch has
+    /// a unique index to identify it.
     pub start_index_in_batch: usize,
     pub keys: Vec<VectorRef>,
     pub values: Vec<VectorRef>,

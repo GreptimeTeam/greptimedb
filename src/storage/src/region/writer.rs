@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use common_telemetry::logging;
+use common_time::RangeMillis;
 use snafu::ResultExt;
 use store_api::storage::{WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
@@ -92,7 +93,7 @@ impl WriterInner {
         request: WriteBatch,
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<WriteResponse> {
-        self.preprocess_write(&request, &writer_ctx).await?;
+        let time_ranges = self.preprocess_write(&request, &writer_ctx).await?;
 
         // TODO(yingwen): Write wal and get sequence.
         let version_control = writer_ctx.version_control();
@@ -105,7 +106,7 @@ impl WriterInner {
         // TODO(jiachun): [flush] write data to wal
 
         // Insert batch into memtable.
-        let mut inserter = Inserter::new(next_sequence);
+        let mut inserter = Inserter::new(next_sequence, time_ranges, version.bucket_duration());
         inserter.insert_memtables(&request, version.mutable_memtables())?;
 
         // Update committed_sequence to make current batch visible. The `&mut self` of WriterInner
@@ -115,13 +116,15 @@ impl WriterInner {
         Ok(WriteResponse {})
     }
 
-    // TODO(yingwen): [flush] Provide a method in CowCell that takes a closure which returns `Result`
-    // and commit on `Ok`, rollback on `Err`.
+    /// Preprocess before write.
+    ///
+    /// Creates needed mutable memtables, ensures there is enough capacity in memtable and trigger
+    /// flush if necessary. Returns time ranges of the input write batch.
     async fn preprocess_write<S>(
         &mut self,
         request: &WriteBatch,
         writer_ctx: &WriterContext<'_, S>,
-    ) -> Result<()> {
+    ) -> Result<Vec<RangeMillis>> {
         let version_control = writer_ctx.version_control();
         // Check whether memtable is full or flush should be triggered. We need to do this first since
         // switching memtables will clear all mutable memtables.
@@ -165,7 +168,7 @@ impl WriterInner {
             version_control.add_mutable(memtables_to_add);
         }
 
-        Ok(())
+        Ok(time_ranges)
     }
 
     fn should_flush(
