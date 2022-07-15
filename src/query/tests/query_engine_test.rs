@@ -1,5 +1,5 @@
-mod median;
 mod interp;
+mod median;
 mod pow;
 
 use std::sync::Arc;
