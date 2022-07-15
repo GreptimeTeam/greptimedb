@@ -24,7 +24,7 @@ pub struct TestingTable {
 impl TestingTable {
     pub fn new(column_name: &str, values: VectorRef) -> Self {
         let column_schemas = vec![ColumnSchema::new(column_name, values.data_type(), false)];
-        let schema = Arc::new(Schema::new(column_schemas.clone()));
+        let schema = Arc::new(Schema::new(column_schemas));
         Self {
             records: RecordBatch::new(schema, vec![values]).unwrap(),
         }

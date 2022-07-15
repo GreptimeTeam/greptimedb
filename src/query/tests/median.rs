@@ -1,12 +1,40 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
-use common_query::error::Result;
-use common_query::error::{Error, ExecuteFunctionSnafu};
-use common_query::logical_plan::Accumulator;
+use common_query::error::{ExecuteFunctionSnafu, Result};
+use common_query::logical_plan::{Accumulator, AccumulatorCreator};
+use common_query::prelude::AccumulatorCreatorFunc;
+use datafusion_common::DataFusionError;
 use datafusion_common::ScalarValue;
-use datatypes::vectors::VectorRef;
+use datatypes::prelude::*;
+use datatypes::vectors::{PrimitiveVector, StringVector, VectorRef};
+use num::NumCast;
 use snafu::ResultExt;
+
+macro_rules! with_match_ordered_primitive_type_id {
+    ($key_type:expr, | $_:tt $T:ident | $body:tt, $nbody:tt) => {{
+        macro_rules! __with_ty__ {
+            ( $_ $T:ident ) => {
+                $body
+            };
+        }
+
+        match $key_type {
+            LogicalTypeId::Int8 => __with_ty__! { i8 },
+            LogicalTypeId::Int16 => __with_ty__! { i16 },
+            LogicalTypeId::Int32 => __with_ty__! { i32 },
+            LogicalTypeId::Int64 => __with_ty__! { i64 },
+            LogicalTypeId::UInt8 => __with_ty__! { u8 },
+            LogicalTypeId::UInt16 => __with_ty__! { u16 },
+            LogicalTypeId::UInt32 => __with_ty__! { u32 },
+            LogicalTypeId::UInt64 => __with_ty__! { u64 },
+
+            _ => $nbody,
+        }
+    }};
+}
 
 // This median calculation algorithm's details can be found at
 // https://leetcode.cn/problems/find-median-from-data-stream/
@@ -23,43 +51,21 @@ use snafu::ResultExt;
 // calculate the median? Because both ways need to either modified the stored internal state in the
 // final `evaluate` in `Accumulator`, which requires a mutable `self` and is against the method's
 // signature; or worse, clone the whole stored numbers.
-#[derive(Debug)]
-pub struct Median {
-    greater: BinaryHeap<Reverse<u32>>,
-    not_greater: BinaryHeap<u32>,
+#[derive(Debug, Default)]
+pub struct Median<T>
+where
+    // Bound `FromStr` because we serialize state to string.
+    T: Primitive + Ord + FromStr,
+{
+    greater: BinaryHeap<Reverse<T>>,
+    not_greater: BinaryHeap<T>,
 }
 
-/// The implementation for this Median UDAF is modified from DataFusion's geometric mean UDAF
-/// example, the comments are left unchanged for future reference.
-impl Median {
-    pub fn new() -> Self {
-        Median {
-            greater: BinaryHeap::new(),
-            not_greater: BinaryHeap::new(),
-        }
-    }
-
-    // this function receives one entry per argument of this accumulator.
-    // DataFusion calls this function on every row, and expects this function to update the
-    // accumulator's state.
-    fn update(&mut self, values: &[ScalarValue]) -> Result<()> {
-        assert_eq!(1, values.len());
-        // this is a one-argument UDAF, and thus we use `0`.
-        let value = &values[0];
-        match value {
-            // here we map `ScalarValue` to our internal state. `UInt32` indicates that this function
-            // only accepts UInt32 as its argument (DataFusion does try to coerce arguments to this type)
-            //
-            // Note that `.map` here ensures that we ignore Nulls.
-            ScalarValue::UInt32(e) => e.map(|value| {
-                self.push(value);
-            }),
-            _ => unreachable!(""),
-        };
-        Ok(())
-    }
-
-    fn push(&mut self, value: u32) {
+impl<T> Median<T>
+where
+    T: Primitive + Ord + FromStr,
+{
+    fn push(&mut self, value: T) {
         if self.not_greater.is_empty() {
             self.not_greater.push(value);
             return;
@@ -77,35 +83,14 @@ impl Median {
             }
         }
     }
-
-    // this function receives states from other accumulators (Vec<ScalarValue>)
-    // and updates the accumulator.
-    fn merge(&mut self, states: Vec<ScalarValue>) -> Result<()> {
-        states
-            .into_iter()
-            .filter_map(|x| match x {
-                ScalarValue::LargeUtf8(e) => e,
-                _ => unreachable!(),
-            })
-            .for_each(|value| {
-                value
-                    .split(',')
-                    .filter_map(|n| n.parse::<u32>().ok())
-                    .for_each(|n| self.push(n))
-            });
-        Ok(())
-    }
-}
-
-impl Default for Median {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 // UDAFs are built using the trait `Accumulator`, that offers DataFusion the necessary functions
 // to use them.
-impl Accumulator for Median {
+impl<T> Accumulator for Median<T>
+where
+    T: Primitive + Ord + FromStr,
+{
     // This function serializes our state to `ScalarValue`, which DataFusion uses to pass this
     // state between execution stages. Note that this can be arbitrary data.
     //
@@ -123,50 +108,107 @@ impl Accumulator for Median {
     }
 
     // DataFusion calls this function to update the accumulator's state for a batch of inputs rows.
+    // It is expected this function to update the accumulator's state.
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<()> {
         if values.is_empty() {
             return Ok(());
         };
-        (0..values[0].len()).try_for_each(|index| {
-            let v = values
-                .iter()
-                .map(|array| {
-                    ScalarValue::try_from_array(&array.to_arrow_array(), index)
-                        .context(ExecuteFunctionSnafu)
-                        .map_err(Error::from)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            self.update(&v)
-        })
+
+        // This is a unary accumulator, so only one column is provided.
+        let column = &values[0];
+        // DataFusion does try to coerce arguments to Accumulator's return type.
+        let column = column
+            .as_any()
+            .downcast_ref::<PrimitiveVector<T>>()
+            .unwrap();
+        for v in column.iter().flatten() {
+            self.push(*v);
+        }
+        Ok(())
     }
 
-    // Optimization hint: this trait also supports `update_batch` and `merge_batch`,
-    // that can be used to perform these operations on arrays instead of single values.
-    // By default, these methods call `update` and `merge` row by row
+    // DataFusion executes accumulators in partitions. In some execution stage, DataFusion will
+    // merge states from other accumulators (returned by `state()` method).
     fn merge_batch(&mut self, states: &[VectorRef]) -> Result<()> {
         if states.is_empty() {
             return Ok(());
         };
-        (0..states[0].len()).try_for_each(|index| {
-            let v = states
-                .iter()
-                .map(|array| {
-                    ScalarValue::try_from_array(&array.to_arrow_array(), index)
-                        .context(ExecuteFunctionSnafu)
-                        .map_err(Error::from)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            self.merge(v)
-        })
+
+        let states = &states[0];
+        let states = states.as_any().downcast_ref::<StringVector>().unwrap();
+        for s in states.iter().flatten() {
+            s.split(',')
+                .filter_map(|n| n.parse::<T>().ok())
+                .for_each(|n| self.push(n));
+        }
+        Ok(())
     }
 
     // DataFusion expects this function to return the final value of this aggregator.
     fn evaluate(&self) -> Result<ScalarValue> {
         let median = if self.not_greater.len() > self.greater.len() {
-            *self.not_greater.peek().unwrap()
+            (*self.not_greater.peek().unwrap()).into()
         } else {
-            (*self.not_greater.peek().unwrap() >> 1) + (self.greater.peek().unwrap().0 >> 1)
+            let not_greater_v: f64 = NumCast::from(*self.not_greater.peek().unwrap()).unwrap();
+            let greater_v: f64 = NumCast::from(self.greater.peek().unwrap().0).unwrap();
+            let median: T = NumCast::from(not_greater_v / 2.0 + greater_v / 2.0).unwrap();
+            median.into()
         };
         Ok(ScalarValue::from(median))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct MedianAccumulatorCreator {
+    input_type: Arc<Mutex<Option<ConcreteDataType>>>,
+}
+
+impl AccumulatorCreator for MedianAccumulatorCreator {
+    fn creator(&self) -> AccumulatorCreatorFunc {
+        let creator: AccumulatorCreatorFunc = Arc::new(move |input_type: &ConcreteDataType| {
+            with_match_ordered_primitive_type_id!(
+                input_type.logical_type_id(),
+                |$S| {
+                    Ok(Box::new(Median::<$S>::default()))
+                },
+                {
+                    let err_msg = format!(
+                        "\"MEDIAN\" aggregate function not support date type {:?}",
+                        input_type.logical_type_id(),
+                    );
+                    let err: std::result::Result<(), DataFusionError> = Err(DataFusionError::Execution(err_msg));
+                    Err(err.context(ExecuteFunctionSnafu).err().unwrap().into())
+                }
+            )
+        });
+        creator
+    }
+
+    fn get_input_type(&self) -> ConcreteDataType {
+        self.input_type
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("input_type is not present, check if DataFusion has changed its UDAF execution logic")
+            .clone()
+    }
+
+    fn set_input_type(&self, input_type: ConcreteDataType) {
+        let mut input_type_holder = self.input_type.lock().unwrap();
+        if let Some(old) = input_type_holder.replace(input_type.clone()) {
+            assert_eq!(
+                old, input_type,
+                "input type {:?} != {:?}, check if DataFusion has changed its UDAF execution logic",
+                old, input_type
+            );
+        }
+    }
+
+    fn get_output_type(&self) -> ConcreteDataType {
+        self.get_input_type()
+    }
+
+    fn get_state_types(&self) -> Vec<ConcreteDataType> {
+        vec![ConcreteDataType::string_datatype()]
     }
 }

@@ -1,4 +1,5 @@
 use common_base::bytes::{Bytes, StringBytes};
+use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Serialize, Serializer};
 
@@ -153,6 +154,29 @@ impl Serialize for Value {
     }
 }
 
+impl From<Value> for ScalarValue {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Boolean(v) => ScalarValue::Boolean(Some(v)),
+            Value::UInt8(v) => ScalarValue::UInt8(Some(v)),
+            Value::UInt16(v) => ScalarValue::UInt16(Some(v)),
+            Value::UInt32(v) => ScalarValue::UInt32(Some(v)),
+            Value::UInt64(v) => ScalarValue::UInt64(Some(v)),
+            Value::Int8(v) => ScalarValue::Int8(Some(v)),
+            Value::Int16(v) => ScalarValue::Int16(Some(v)),
+            Value::Int32(v) => ScalarValue::Int32(Some(v)),
+            Value::Int64(v) => ScalarValue::Int64(Some(v)),
+            Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
+            Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
+            Value::String(v) => ScalarValue::LargeUtf8(Some(v.as_utf8().to_string())),
+            Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
+            Value::Date(v) => ScalarValue::Date32(Some(v)),
+            Value::DateTime(v) => ScalarValue::Date64(Some(v)),
+            Value::Null => ScalarValue::Boolean(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +320,77 @@ mod tests {
 
         let world: &[u8] = b"world";
         assert_eq!(Value::Binary(Bytes::from(world)), Value::from(world));
+    }
+
+    #[test]
+    fn test_value_into_scalar_value() {
+        assert_eq!(
+            ScalarValue::Boolean(Some(true)),
+            Value::Boolean(true).into()
+        );
+        assert_eq!(
+            ScalarValue::Boolean(Some(true)),
+            Value::Boolean(true).into()
+        );
+
+        assert_eq!(
+            ScalarValue::UInt8(Some(u8::MIN + 1)),
+            Value::UInt8(u8::MIN + 1).into()
+        );
+        assert_eq!(
+            ScalarValue::UInt16(Some(u16::MIN + 2)),
+            Value::UInt16(u16::MIN + 2).into()
+        );
+        assert_eq!(
+            ScalarValue::UInt32(Some(u32::MIN + 3)),
+            Value::UInt32(u32::MIN + 3).into()
+        );
+        assert_eq!(
+            ScalarValue::UInt64(Some(u64::MIN + 4)),
+            Value::UInt64(u64::MIN + 4).into()
+        );
+
+        assert_eq!(
+            ScalarValue::Int8(Some(i8::MIN + 4)),
+            Value::Int8(i8::MIN + 4).into()
+        );
+        assert_eq!(
+            ScalarValue::Int16(Some(i16::MIN + 5)),
+            Value::Int16(i16::MIN + 5).into()
+        );
+        assert_eq!(
+            ScalarValue::Int32(Some(i32::MIN + 6)),
+            Value::Int32(i32::MIN + 6).into()
+        );
+        assert_eq!(
+            ScalarValue::Int64(Some(i64::MIN + 7)),
+            Value::Int64(i64::MIN + 7).into()
+        );
+
+        assert_eq!(
+            ScalarValue::Float32(Some(8.0f32)),
+            Value::Float32(OrderedFloat(8.0f32)).into()
+        );
+        assert_eq!(
+            ScalarValue::Float64(Some(9.0f64)),
+            Value::Float64(OrderedFloat(9.0f64)).into()
+        );
+
+        assert_eq!(
+            ScalarValue::LargeUtf8(Some("hello".to_string())),
+            Value::String(StringBytes::from("hello")).into()
+        );
+        assert_eq!(
+            ScalarValue::LargeBinary(Some("world".as_bytes().to_vec())),
+            Value::Binary(Bytes::from("world".as_bytes())).into()
+        );
+
+        assert_eq!(ScalarValue::Date32(Some(10i32)), Value::Date(10i32).into());
+        assert_eq!(
+            ScalarValue::Date64(Some(20i64)),
+            Value::DateTime(20i64).into()
+        );
+
+        assert_eq!(ScalarValue::Boolean(None), Value::Null.into());
     }
 }

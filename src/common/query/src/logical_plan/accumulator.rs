@@ -1,17 +1,20 @@
 //! Accumulator module contains the trait definition for aggregation function's accumulators.
 
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use arrow::array::ArrayRef;
 use datafusion_common::Result as DfResult;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Accumulator as DfAccumulator;
 use datatypes::error::Result as DtResult;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::Helper as VectorHelper;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
 use crate::error::{Error, FromScalarValueSnafu, Result};
+use crate::prelude::*;
 
 /// An accumulator represents a stateful object that lives throughout the evaluation of multiple rows and
 /// generically accumulates values.
@@ -37,6 +40,45 @@ pub trait Accumulator: Send + Sync + Debug {
 
     /// returns its value based on its current state.
     fn evaluate(&self) -> Result<ScalarValue>;
+}
+
+/// An creator stores the input type, and knows the output and states types of an Accumulator,
+/// so it can create the Accumulator generically.
+pub trait AccumulatorCreator: Send + Sync + Debug {
+    fn creator(&self) -> AccumulatorCreatorFunc;
+
+    fn get_input_type(&self) -> ConcreteDataType;
+
+    fn set_input_type(&self, input_type: ConcreteDataType);
+
+    fn get_output_type(&self) -> ConcreteDataType;
+
+    fn get_state_types(&self) -> Vec<ConcreteDataType>;
+}
+
+pub fn make_accumulator_function(
+    creator: Arc<dyn AccumulatorCreator>,
+) -> AccumulatorFunctionImplementation {
+    Arc::new(move || {
+        let input_type = creator.get_input_type();
+        let creator = creator.creator();
+        creator(&input_type)
+    })
+}
+
+pub fn make_return_function(creator: Arc<dyn AccumulatorCreator>) -> ReturnTypeFunction {
+    let creator = creator.clone();
+    Arc::new(move |input_types: &[ConcreteDataType]| {
+        // There must be at least one column in the projection,
+        // and all UDAFs are unary for now.
+        creator.set_input_type(input_types[0].clone());
+
+        Ok(Arc::new(creator.get_output_type()))
+    })
+}
+
+pub fn make_state_function(creator: Arc<dyn AccumulatorCreator>) -> StateTypeFunction {
+    Arc::new(move |_| Ok(Arc::new(creator.get_state_types())))
 }
 
 /// A wrapper newtype for our Accumulator to DataFusion's Accumulator,

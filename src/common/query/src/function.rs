@@ -25,9 +25,13 @@ pub type ScalarFunctionImplementation =
 pub type ReturnTypeFunction =
     Arc<dyn Fn(&[ConcreteDataType]) -> Result<Arc<ConcreteDataType>> + Send + Sync>;
 
-/// the implementation of an aggregate function
+/// Accumulator creator that will be used by DataFusion
 pub type AccumulatorFunctionImplementation =
     Arc<dyn Fn() -> Result<Box<dyn Accumulator>> + Send + Sync>;
+
+/// Create Accumulator with the data type of input column.
+pub type AccumulatorCreatorFunc =
+    Arc<dyn Fn(&ConcreteDataType) -> Result<Box<dyn Accumulator>> + Sync + Send>;
 
 /// This signature corresponds to which types an aggregator serializes
 /// its state, given its return datatype.

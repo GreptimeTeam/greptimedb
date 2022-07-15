@@ -21,7 +21,7 @@ use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 /// Vector for primitive data types.
 #[derive(Debug, Clone)]
 pub struct PrimitiveVector<T: Primitive> {
-    array: PrimitiveArray<T>,
+    pub(crate) array: PrimitiveArray<T>,
 }
 
 impl<T: Primitive> PrimitiveVector<T> {
