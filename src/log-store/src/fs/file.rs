@@ -472,7 +472,8 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
-    use crate::fs::namespace::LocalNamespace;
+    use crate::fs::namespace::
+    LocalNamespace;
 
     #[tokio::test]
     pub async fn test_create_entry_stream() {
