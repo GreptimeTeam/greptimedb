@@ -165,7 +165,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
     );
     if let ast::StmtKind::FunctionDef {
         name,
-        args:fn_args,
+        args: fn_args,
         body: _,
         decorator_list,
         returns,
@@ -313,7 +313,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                 args: arg_names,
                 returns: ret_names,
                 arg_types,
-                return_types: Vec::new(),
+                return_types,
             })
         } else {
             Err(CoprError::Other {
@@ -370,15 +370,14 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
         } = &mut code[0].node
         {
             *decorator_list = Vec::new();
-            // strip type annotation 
+            // strip type annotation
             // def a(b: int, c:int) -> int
             // will became
             // def a(b, c)
             *returns = None;
-            for arg in &mut args.args{
+            for arg in &mut args.args {
                 arg.node.annotation = None;
             }
-
         } else {
             return Err(CoprError::Other { reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node) });
         }
@@ -434,13 +433,16 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 
 /// The coprocessor function
 /// first it extract columns according to `args` given in python decorator from [`DfRecordBatch`]
+///
 /// then execute python script given those `args`, return a tuple([`PyTuple`]) or one ([`PyVector`])
-/// the return vectors then is rename according to `returns` in decorator and form a new [`DfRecordBatch`] and return it
+/// the return vectors
+///
+/// in the end those vector is rename according to `returns` in decorator and form a new [`DfRecordBatch`] and return it
 ///
 /// # Example
 ///
 /// ```
-///         let python_source = r#"
+/// let python_source = r#"
 /// @copr(args=["cpu", "mem"], returns=["perf", "what"])
 /// def a(cpu, mem):
 ///     return cpu + mem, cpu - mem
@@ -500,6 +502,18 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
             }
         }
     }
+    for (idx, arg) in args.iter().enumerate(){
+        let anno_ty = copr.arg_types[idx].to_owned();
+        let real_ty = arg.to_arrow_array().data_type().to_owned();
+        ensure!(anno_ty== Some(real_ty.to_owned()), 
+            OtherSnafu{reason: 
+                format!(
+                    "column {}'s Type annotation is {:?}, but actual type is {:?}", 
+                    copr.args[idx], 
+                    anno_ty, 
+                    real_ty
+                )})
+    }
     // 4. then set args in scope and call by compiler and run `CodeObject` which already append `Call` node
     vm::Interpreter::without_stdlib(Default::default()).enter(
         |vm| -> Result<DfRecordBatch, CoprError> {
@@ -518,12 +532,7 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
             let run_res = vm.run_code_obj(code_obj, scope);
             let ret = run_res?;
 
-            let schema = Arc::new(Schema::from(
-                copr.returns
-                    .iter()
-                    .map(|name| Field::new(name, DataType::Float64, false))
-                    .collect::<Vec<Field>>(),
-            ));
+            
             // convert a tuple of `PyVector` or one `PyVector` to a `Vec<ArrayRef>` then finailly to a `DfRecordBatch`
             // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
             let mut cols: Vec<ArrayRef> = Vec::new();
@@ -547,6 +556,22 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                     )?;
                 cols.push(pyv.to_arrow_array())
             }
+            let schema = Arc::new(Schema::from(
+                copr.returns
+                    .iter()
+                    .enumerate()
+                    .map(|(idx,name)| 
+                    Field::new(
+                        name, 
+                        copr.return_types[idx]
+                            .to_owned()
+                            .unwrap_or_else(||
+                                cols[idx].data_type().to_owned()
+                            ), 
+                        false))
+                    .collect::<Vec<Field>>(),
+            ));
+            // TODO: if returns types is not match, first try convert it to given type, if not possible, return Err
             ensure!(
                 cols.len() == copr.returns.len(),
                 OtherSnafu {
