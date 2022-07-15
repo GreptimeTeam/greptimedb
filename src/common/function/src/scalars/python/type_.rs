@@ -873,7 +873,7 @@ pub mod tests {
                         if v {
                             "\u{001B}[32m...[ok]\u{001B}[0m".to_string()
                         } else {
-                            "\u{001B}[12m...[failed]\u{001B}[0m".to_string()
+                            "\u{001B}[31m...[failed]\u{001B}[0m".to_string()
                         }
                     } else {
                         "\u{001B}[36m...[unapplicable]\u{001B}[0m".to_string()

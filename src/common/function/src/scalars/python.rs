@@ -27,6 +27,8 @@ struct Coprocessor {
     name: String,
     args: Vec<String>,
     returns: Vec<String>,
+    arg_types: Vec<Option<DataType>>,
+    return_types: Vec<Option<DataType>>,
 }
 
 #[derive(Debug, Snafu)]
@@ -106,6 +108,50 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>, CoprError> {
     }
 }
 
+fn into_datatype(ty: &str) -> Option<DataType> {
+    match ty {
+        "u8" => Some(DataType::UInt8),
+        "u16" => Some(DataType::UInt16),
+        "u32" => Some(DataType::UInt32),
+        "u64" => Some(DataType::UInt64),
+        "i8" => Some(DataType::Int8),
+        "i16" => Some(DataType::Int16),
+        "i32" => Some(DataType::Int32),
+        "i64" => Some(DataType::Int64),
+        "f16" => Some(DataType::Float16),
+        "f32" => Some(DataType::Float32),
+        "f64" => Some(DataType::Float64),
+        _ => None,
+    }
+}
+fn get_from_subscript(sub: &ast::ExprKind) -> Result<DataType, CoprError> {
+    if let ast::ExprKind::Subscript {
+        value,
+        slice,
+        ctx: _,
+    } = sub
+    {
+        if let ast::ExprKind::Name { id, ctx: _ } = &value.node {
+            ensure!(
+                id == "vector",
+                OtherSnafu {
+                    reason: format!("Wrong type annotation, expect `vector[...]`, found {}", id)
+                }
+            )
+        } else {
+            todo!()
+        }
+        if let ast::ExprKind::Name { id, ctx: _ } = &slice.node {
+            into_datatype(id).ok_or(CoprError::Other {
+                reason: format!("unknown type: {id}"),
+            })
+        } else {
+            todo!()
+        }
+    } else {
+        todo!()
+    }
+}
 /// parse script and return `Coprocessor` struct with info extract from ast
 fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
     let python_ast = parser::parse_program(script)?;
@@ -119,10 +165,10 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
     );
     if let ast::StmtKind::FunctionDef {
         name,
-        args: _,
+        args:fn_args,
         body: _,
         decorator_list,
-        returns: __file__,
+        returns,
         type_comment: _,
     } = &python_ast[0].node
     {
@@ -133,6 +179,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                 reason: "Expect one decorator"
             }
         );
+
         if let ast::ExprKind::Call {
             func,
             args,
@@ -160,25 +207,25 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                     reason: "Expect two keyword argument of `args` and `returns`"
                 }
             );
-            let mut args = None;
-            let mut rets = None;
+            let mut arg_names = None;
+            let mut ret_names = None;
             for kw in keywords {
                 match &kw.node.arg {
                     Some(s) => {
                         let s = s.as_str();
                         match s {
                             "args" => {
-                                if args.is_none() {
-                                    args = Some(pylist_to_vec(&kw.node.value))
+                                if arg_names.is_none() {
+                                    arg_names = Some(pylist_to_vec(&kw.node.value))
                                 } else {
-                                    return Err(CoprError::Other { reason: "`args` occur multiple times in decorator's parameter list.".to_string() });
+                                    return Err(CoprError::Other { reason: "`args` occur multiple times in decorator's arguements' list.".to_string() });
                                 }
                             }
                             "returns" => {
-                                if rets.is_none() {
-                                    rets = Some(pylist_to_vec(&kw.node.value))
+                                if ret_names.is_none() {
+                                    ret_names = Some(pylist_to_vec(&kw.node.value))
                                 } else {
-                                    return Err(CoprError::Other { reason: "`returns` occur multiple times in decorator's parameter list.".to_string() });
+                                    return Err(CoprError::Other { reason: "`returns` occur multiple times in decorator's arguements' list.".to_string() });
                                 }
                             }
                             _ => {
@@ -198,24 +245,75 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                     }
                 }
             }
-            let args = if let Some(args) = args {
+            let arg_names = if let Some(args) = arg_names {
                 args?
             } else {
                 return Err(CoprError::Other {
                     reason: "Expect `args` keyword".to_string(),
                 });
             };
-            let rets = if let Some(rets) = rets {
+            let ret_names = if let Some(rets) = ret_names {
                 rets?
             } else {
                 return Err(CoprError::Other {
                     reason: "Expect `rets` keyword".to_string(),
                 });
             };
+            // get arg types from type annotation
+            let mut arg_types = Vec::new();
+            for arg in &fn_args.args {
+                if let Some(anno) = &arg.node.annotation {
+                    arg_types.push(Some(get_from_subscript(&anno.node)?))
+                } else {
+                    arg_types.push(None)
+                }
+            }
+
+            // get return types from type annotation
+            let mut return_types = Vec::new();
+            if let Some(rets) = returns {
+                if let ast::ExprKind::Tuple { elts, ctx: _ } = &rets.node {
+                    for elem in elts {
+                        return_types.push(Some(get_from_subscript(&elem.node)?))
+                    }
+                } else if let ast::ExprKind::Subscript {
+                    value: _,
+                    slice: _,
+                    ctx: _,
+                } = &rets.node
+                {
+                    return_types.push(Some(get_from_subscript(&rets.node)?))
+                }
+            } else {
+                // if no anntation at all, set it to all None
+                return_types.resize(ret_names.len(), None)
+            }
+            ensure!(
+                arg_names.len() == arg_types.len(),
+                OtherSnafu {
+                    reason: format!(
+                        "args number in decorator({}) and function({}) doesn't match",
+                        arg_names.len(),
+                        arg_types.len()
+                    )
+                }
+            );
+            ensure!(
+                ret_names.len() == return_types.len(),
+                OtherSnafu {
+                    reason: format!(
+                        "returns number in decorator( {} ) and function annotation( {} ) doesn't match",
+                        ret_names.len(),
+                        return_types.len()
+                    )
+                }
+            );
             Ok(Coprocessor {
                 name: name.to_string(),
-                args,
-                returns: rets,
+                args: arg_names,
+                returns: ret_names,
+                arg_types,
+                return_types: Vec::new(),
             })
         } else {
             Err(CoprError::Other {
@@ -241,13 +339,14 @@ fn default_loc<T>(node: T) -> Located<T> {
 fn set_loc<T>(node: T, loc: Location) -> Located<T> {
     Located::new(loc, node)
 }
-/// stripe the decorator(`@xxxx`), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
+/// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
 ///
 /// The conside is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
 /// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
 /// And add a function call in the end
+/// strip type annotation
 fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObject, CoprError> {
-    // note that is important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
+    // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
     let mut top = parser::parse(script, parser::Mode::Interactive)?;
     // erase decorator
     if let ast::Mod::Interactive { body } = &mut top {
@@ -263,14 +362,23 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
         );
         if let ast::StmtKind::FunctionDef {
             name: _,
-            args: _,
+            args,
             body: _,
             decorator_list,
-            returns: _,
+            returns,
             type_comment: __main__,
         } = &mut code[0].node
         {
             *decorator_list = Vec::new();
+            // strip type annotation 
+            // def a(b: int, c:int) -> int
+            // will became
+            // def a(b, c)
+            *returns = None;
+            for arg in &mut args.args{
+                arg.node.annotation = None;
+            }
+
         } else {
             return Err(CoprError::Other { reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node) });
         }
@@ -325,12 +433,12 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 }
 
 /// The coprocessor function
-/// first it extract columns according to `args` given in python decorator from [`DfRecordBatch`] 
+/// first it extract columns according to `args` given in python decorator from [`DfRecordBatch`]
 /// then execute python script given those `args`, return a tuple([`PyTuple`]) or one ([`PyVector`])
 /// the return vectors then is rename according to `returns` in decorator and form a new [`DfRecordBatch`] and return it
-/// 
+///
 /// # Example
-/// 
+///
 /// ```
 ///         let python_source = r#"
 /// @copr(args=["cpu", "mem"], returns=["perf", "what"])
@@ -417,7 +525,6 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                     .collect::<Vec<Field>>(),
             ));
             // convert a tuple of `PyVector` or one `PyVector` to a `Vec<ArrayRef>` then finailly to a `DfRecordBatch`
-            
             // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
             let mut cols: Vec<ArrayRef> = Vec::new();
             if is_instance(&ret, PyTuple::class(vm).into(), vm) {
@@ -495,11 +602,19 @@ mod tests {
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 
     use super::*;
-
+    #[test]
+    fn test_type_anno() {
+        let python_source = "
+def a(a: vector[f64],b: vector[f32])->(vector[f64], vector[f64]):
+    return a + b
+";
+        let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
+        dbg!(pyast);
+    }
     #[test]
     fn test_execute_script() {
         let python_source = "
-def a(a,b):
+def a(a: int,b: int)->int:
     return 1
 a(2,3)
 ";
@@ -513,7 +628,7 @@ a(2,3)
     fn test_coprocessor() {
         let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu, mem):
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64]):
     return cpu + mem, cpu - mem
 "#;
         //println!("{}, {:?}", python_source, python_ast);
