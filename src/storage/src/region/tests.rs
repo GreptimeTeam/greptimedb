@@ -20,6 +20,7 @@ async fn test_new_region() {
     let region_id = 0;
     let region_name = "region-0";
     let desc = RegionDescBuilder::new(region_name)
+        .enable_version_column(true)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
         .push_value_column(("v1", LogicalTypeId::Float32, true))
         .build();
