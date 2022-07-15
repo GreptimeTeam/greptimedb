@@ -32,6 +32,10 @@ pub fn execute_script(script: &str) -> vm::PyResult {
                 vm::compile::Mode::BlockExpr,
                 "<embedded>".to_owned(),
             )
+            .map(|obj| {
+                dbg!(&obj.instructions);
+                obj
+            })
             .map_err(|err| vm.new_syntax_error(&err))?;
         vm.run_code_obj(code_obj, scope)
     })
@@ -89,8 +93,9 @@ mod tests {
             Self::TypeCast { error: e }
         }
     }
+    // for there is multiple CompilerError struct in different crate of `rustpython` so use full path to diff
     impl From<rustpython_compiler_core::error::CompileError> for CoprError {
-        fn from(err: CompileError) -> Self {
+        fn from(err: rustpython_compiler_core::error::CompileError) -> Self {
             Self::PyCompile { error: err }
         }
     }
@@ -117,7 +122,7 @@ mod tests {
     }
 
     /// TODO: a lot of error handling, write function body
-    fn parse_copr(script: &str) -> Result<(Coprocessor, ast::Suite), CoprError> {
+    fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
         let python_ast = parser::parse_program(script).unwrap();
         ensure!(python_ast.len()==1, FormatSnafu { reason: "Expect one and only one python function with `@coprocessor` or `@cpor` decorator".to_string()});
         if let ast::StmtKind::FunctionDef {
@@ -178,14 +183,11 @@ mod tests {
                         _ => todo!(),
                     }
                 }
-                return Ok((
-                    Coprocessor {
-                        name: name.to_string(),
-                        args: args.unwrap()?,
-                        returns: rets.unwrap()?,
-                    },
-                    parser::parse_program(script)?,
-                ));
+                return Ok(Coprocessor {
+                    name: name.to_string(),
+                    args: args.unwrap()?,
+                    returns: rets.unwrap()?,
+                });
             }
         } else {
             ensure!(
@@ -206,55 +208,64 @@ mod tests {
     }
     // stripe the decorator, add one line for call function with given parameter, and compiler into `CodeObject`
     fn strip_append_and_compile(
-        mut code: ast::Suite,
+        script: &str,
         copr: &Coprocessor,
     ) -> Result<CodeObject, CompileError> {
+        let mut top = parser::parse(script, parser::Mode::Interactive).unwrap();
+        dbg!(&top);
         // erase decorator
-        if let ast::StmtKind::FunctionDef {
-            name,
-            args,
-            body,
-            decorator_list,
-            returns,
-            type_comment,
-        } = &mut code[0].node
-        {
-            *decorator_list = Vec::new();
+        if let ast::Mod::Interactive { body } = &mut top {
+            let mut code = body;
+            if let ast::StmtKind::FunctionDef {
+                name,
+                args,
+                body,
+                decorator_list,
+                returns,
+                type_comment,
+            } = &mut code[0].node
+            {
+                *decorator_list = Vec::new();
+            } else {
+                todo!()
+            }
+            let mut loc = code[0].location;
+            loc.newline();
+            let args: Vec<Located<ast::ExprKind>> = copr
+                .args
+                .iter()
+                .map(|v| {
+                    let node = ast::ExprKind::Name {
+                        id: v.to_owned(),
+                        ctx: ast::ExprContext::Load,
+                    };
+                    set_loc(node, loc)
+                })
+                .collect();
+            let func = ast::ExprKind::Call {
+                func: Box::new(set_loc(
+                    ast::ExprKind::Name {
+                        id: copr.name.to_owned(),
+                        ctx: ast::ExprContext::Load,
+                    },
+                    loc,
+                )),
+                args,
+                keywords: Vec::new(),
+            };
+            let stmt = ast::StmtKind::Expr {
+                value: Box::new(default_loc(func)),
+            };
+            code.push(default_loc(stmt));
         } else {
             todo!()
         }
-        let mut loc = code[0].location;
-        loc.newline();
-        let args: Vec<Located<ast::ExprKind>> = copr
-            .args
-            .iter()
-            .map(|v| {
-                let node = ast::ExprKind::Name {
-                    id: v.to_owned(),
-                    ctx: ast::ExprContext::Load,
-                };
-                set_loc(node, loc)
-            })
-            .collect();
-        let func = ast::ExprKind::Call {
-            func: Box::new(set_loc(
-                ast::ExprKind::Name {
-                    id: copr.name.to_owned(),
-                    ctx: ast::ExprContext::Load,
-                },
-                loc,
-            )),
-            args,
-            keywords: Vec::new(),
-        };
-        let stmt = ast::StmtKind::Expr {
-            value: Box::new(default_loc(func)),
-        };
-        code.push(default_loc(stmt));
-        dbg!(&code);
-        compile::compile_program(
-            &code,
+
+        dbg!(&top);
+        compile::compile_top(
+            &top,
             "<embedded>".to_owned(),
+            compile::Mode::BlockExpr,
             compile::CompileOpts { optimize: 0 },
         )
     }
@@ -264,11 +275,14 @@ mod tests {
     ) -> Result<Arc<dyn Vector>, datatypes::error::Error> {
         PrimitiveVector::<T>::try_from_arrow_array(arg).map(|op| Arc::new(op) as Arc<dyn Vector>)
     }
+
+    // TODO: it seem it returns None because it is in `exec` mode?
     pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, CoprError> {
         // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
         // 2. also check for exist of `args` in `rb`, if not found, return error
-        let (copr, mut ast) = parse_copr(script)?;
-        let code_obj = strip_append_and_compile(ast, &copr)?;
+        let copr = parse_copr(script)?;
+        let code_obj = strip_append_and_compile(script, &copr)?;
+        dbg!(&code_obj.instructions);
         // 3. get args from `rb`, and cast them into PyVector
         let mut fetch_idx = Vec::new();
         for (idx, field) in rb.schema().fields.iter().enumerate() {
@@ -347,11 +361,10 @@ a(2,3)
         let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf"])
 def a(cpu, mem):
-    return 1
+    return 2
 "#;
-        let python_ast = parser::parse_program(python_source).unwrap();
         //println!("{}, {:?}", python_source, python_ast);
-        let cpu_array = PrimitiveArray::from_slice([1.0f32, 0.8, 0.7, 0.6]);
+        let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
         let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
         let schema = Arc::new(Schema::from(vec![
             Field::new("cpu", DataType::Float32, false),
