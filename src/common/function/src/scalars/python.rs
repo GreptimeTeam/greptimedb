@@ -1,4 +1,5 @@
 //! python udf supports
+use arrow::error::ArrowError;
 use rustpython_vm as vm;
 mod type_;
 use std::sync::Arc;
@@ -30,11 +31,18 @@ struct Coprocessor {
 
 #[derive(Debug, Snafu)]
 pub enum CoprError {
-    Format { reason: String },
     TypeCast { error: datatypes::error::Error },
     PyParse { error: ParseError },
     PyCompile { error: CompileError },
     PyRuntime { error: PyBaseExceptionRef },
+    ArrowError { error: ArrowError },
+    // Consider change to `Whatever`
+    Other { reason: String },
+}
+impl From<ArrowError> for CoprError {
+    fn from(error: ArrowError) -> Self {
+        Self::ArrowError { error }
+    }
 }
 impl From<PyBaseExceptionRef> for CoprError {
     fn from(err: PyBaseExceptionRef) -> Self {
@@ -58,33 +66,39 @@ impl From<rustpython_compiler_core::error::CompileError> for CoprError {
     }
 }
 /// turn a python list of string into a Vec<String>
-/// TODO: a lot of error handling
 fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>, CoprError> {
     if let ast::ExprKind::List { elts, ctx: _ } = &lst.node {
         let mut ret = Vec::new();
         for s in elts {
-            if let ast::ExprKind::Constant { value, kind: _ } = &s.node {
-                if let ast::Constant::Str(v) = value {
-                    ret.push(v.to_owned())
-                } else {
-                    todo!()
-                }
+            if let ast::ExprKind::Constant {
+                value: ast::Constant::Str(v),
+                kind: _,
+            } = &s.node
+            {
+                ret.push(v.to_owned())
             } else {
-                todo!()
+                return Err(CoprError::Other {
+                    reason: format!(
+                        "Expect a list of String, found {:?} in list element",
+                        &s.node
+                    ),
+                });
             }
         }
         Ok(ret)
     } else {
-        todo!()
+        Err(CoprError::Other {
+            reason: format!("Expect a list, found {:?}", &lst.node),
+        })
     }
 }
 
 /// TODO: a lot of error handling, write function body
 fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
-    let python_ast = parser::parse_program(script).unwrap();
+    let python_ast = parser::parse_program(script)?;
     ensure!(
         python_ast.len() == 1,
-        FormatSnafu {
+        OtherSnafu {
             reason:
                 "Expect one and only one python function with `@coprocessor` or `@cpor` decorator"
                     .to_string()
@@ -102,7 +116,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
         //ensure!(args.len() == 2, FormatSnafu{ reason: "Expect two arguments: `args` and `returns`"})
         ensure!(
             decorator_list.len() == 1,
-            FormatSnafu {
+            OtherSnafu {
                 reason: "Expect one decorator"
             }
         );
@@ -123,13 +137,13 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                             id: "coprocessor".to_string(),
                             ctx: ast::ExprContext::Load
                         },
-                FormatSnafu {
+                OtherSnafu {
                     reason: "Expect decorator with name `copr` or `coprocessor`"
                 }
             );
             ensure!(
                 args.is_empty() && keywords.len() == 2,
-                FormatSnafu {
+                OtherSnafu {
                     reason: "Expect two keyword argument of `args` and `returns`"
                 }
             );
@@ -140,29 +154,72 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                     Some(s) => {
                         let s = s.as_str();
                         match s {
-                            "args" => args = Some(pylist_to_vec(&kw.node.value)),
-                            "returns" => rets = Some(pylist_to_vec(&kw.node.value)),
-                            _ => todo!(),
+                            "args" => {
+                                if args.is_none() {
+                                    args = Some(pylist_to_vec(&kw.node.value))
+                                } else {
+                                    return Err(CoprError::Other { reason: "`args` occur multiple times in decorator's parameter list.".to_string() });
+                                }
+                            }
+                            "returns" => {
+                                if rets.is_none() {
+                                    rets = Some(pylist_to_vec(&kw.node.value))
+                                } else {
+                                    return Err(CoprError::Other { reason: "`returns` occur multiple times in decorator's parameter list.".to_string() });
+                                }
+                            }
+                            _ => {
+                                return Err(CoprError::Other {
+                                    reason: format!("Expect `args` or `returns`, found `{}`", s),
+                                })
+                            }
                         }
                     }
-                    _ => todo!(),
+                    None => {
+                        return Err(CoprError::Other {
+                            reason: format!(
+                                "Expect explictly set both `args` and `returns`, found {:?}",
+                                &kw.node
+                            ),
+                        })
+                    }
                 }
             }
-            return Ok(Coprocessor {
+            let args = if let Some(args) = args {
+                args?
+            } else {
+                return Err(CoprError::Other {
+                    reason: "Expect `args` keyword".to_string(),
+                });
+            };
+            let rets = if let Some(rets) = rets {
+                rets?
+            } else {
+                return Err(CoprError::Other {
+                    reason: "Expect `rets` keyword".to_string(),
+                });
+            };
+            Ok(Coprocessor {
                 name: name.to_string(),
-                args: args.unwrap()?,
-                returns: rets.unwrap()?,
-            });
+                args,
+                returns: rets,
+            })
+        } else {
+            Err(CoprError::Other {
+                reason: format!(
+                    "Expect decorator to be a function call(like `@copr(...)`), found {:?}",
+                    &decorator_list[0].node
+                ),
+            })
         }
     } else {
-        ensure!(
-            false,
-            FormatSnafu {
-                reason: "Expect a function definition."
-            }
-        )
+        Err(CoprError::Other {
+            reason: format!(
+                "Expect a function definition, found a {:?}",
+                &python_ast[0].node
+            ),
+        })
     }
-    todo!()
 }
 
 fn default_loc<T>(node: T) -> Located<T> {
@@ -172,11 +229,20 @@ fn set_loc<T>(node: T, loc: Location) -> Located<T> {
     Located::new(loc, node)
 }
 /// stripe the decorator(`@xxxx`), add one line in the ast(note ) for call function with given parameter, and compiler into `CodeObject`
-fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObject, CompileError> {
-    let mut top = parser::parse(script, parser::Mode::Interactive).unwrap();
+fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObject, CoprError> {
+    let mut top = parser::parse(script, parser::Mode::Interactive)?;
     // erase decorator
     if let ast::Mod::Interactive { body } = &mut top {
         let code = body;
+        ensure!(
+            code.len() == 1,
+            OtherSnafu {
+                reason: format!(
+                    "Expect only one statement in script, found {} statement",
+                    code.len()
+                )
+            }
+        );
         if let ast::StmtKind::FunctionDef {
             name: _,
             args: _,
@@ -188,7 +254,7 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
         {
             *decorator_list = Vec::new();
         } else {
-            todo!()
+            return Err(CoprError::Other { reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node) });
         }
         let mut loc = code[0].location;
         loc.newline();
@@ -219,16 +285,17 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
         };
         code.push(default_loc(stmt));
     } else {
-        todo!()
+        return Err(CoprError::Other {
+            reason: format!("Expect statement in script, found: {:?}", top),
+        });
     }
-
-    dbg!(&top);
     compile::compile_top(
         &top,
         "<embedded>".to_owned(),
         compile::Mode::BlockExpr,
         compile::CompileOpts { optimize: 0 },
     )
+    .map_err(|err| err.into())
 }
 /// cast a dyn Array into a dyn Vector
 fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilder>(
@@ -272,7 +339,7 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                 args.push(PyVector::from(v))
             }
             _ => {
-                return Err(CoprError::Format {
+                return Err(CoprError::Other {
                     reason: format!("Unsupport data type {:?} for coprocessor", arg.data_type()),
                 })
             }
@@ -288,11 +355,12 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                     .locals
                     .as_object()
                     .set_item(name, vm.new_pyobj(vector), vm)
-                    .unwrap_or_else(|_| panic!("fail to set item{} in python scope", name));
+                    .map_err(|err|
+                        CoprError::Other { reason: format!("fail to set item{} in python scope, PyExpection: {:?}", name, err) }
+                    )?;
             }
             let code_obj = vm.ctx.new_code(code_obj);
             let run_res = vm.run_code_obj(code_obj, scope);
-            dbg!(&run_res);
             let ret = run_res?;
 
             let schema = Arc::new(Schema::from(
@@ -304,30 +372,37 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
             let mut cols: Vec<ArrayRef> = Vec::new();
             //let mut rb_ret = DfRecordBatch::new_empty(schema);
             if is_instance(&ret, PyTuple::class(vm).into(), vm) {
-                let tuple = ret.payload::<PyTuple>().unwrap();
+                let tuple = ret.payload::<PyTuple>().ok_or(
+                CoprError::Other { reason: format!("can't cast obj {:?} to tuple", ret) }
+                )?;
                 for obj in tuple {
                     if is_instance(obj, PyVector::class(vm).into(), vm) {
-                        let pyv = obj.payload::<PyVector>().unwrap();
+                        let pyv = obj.payload::<PyVector>().ok_or(
+                            CoprError::Other { reason: format!("can't cast obj {:?} to PyVector", obj) }
+                        )?;
                         cols.push(pyv.to_arrow_array())
                     } else {
-                        todo!()
+                        return Err(CoprError::Other { reason: format!("Expect all element in returning tuple to be vector, found one of the element is {:?}", obj) })
                     }
                 }
             } else if is_instance(&ret, PyVector::class(vm).into(), vm) {
-                let pyv = ret.payload::<PyVector>().unwrap();
+                let pyv = ret.payload::<PyVector>().ok_or(
+                    CoprError::Other { reason: format!("can't cast obj {:?} to PyVector", ret) }
+                    )?;
                 cols.push(pyv.to_arrow_array())
             }
             ensure!(
                 cols.len() == copr.returns.len(),
-                FormatSnafu {
+                OtherSnafu {
                     reason: format!(
-                        "The number of return Vector is wrong, expect{}, find{}",
+                        "The number of return Vector is wrong, expect{}, found{}",
                         copr.returns.len(),
                         cols.len()
                     )
                 }
             );
-            Ok(DfRecordBatch::try_new(schema, cols).unwrap())
+            let res_rb = DfRecordBatch::try_new(schema, cols)?;
+            Ok(res_rb)
         },
     )
     // 5. get returns as either a PyVector or a PyTuple, and assign them according to `returns`
@@ -358,10 +433,6 @@ pub fn execute_script(script: &str) -> vm::PyResult {
                 vm::compile::Mode::BlockExpr,
                 "<embedded>".to_owned(),
             )
-            .map(|obj| {
-                dbg!(&obj.instructions);
-                obj
-            })
             .map_err(|err| vm.new_syntax_error(&err))?;
         vm.run_code_obj(code_obj, scope)
     })

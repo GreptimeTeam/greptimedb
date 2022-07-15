@@ -154,7 +154,7 @@ impl AsRef<PyVector> for PyVector {
 #[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
 impl PyVector {
     #[inline]
-    pub fn to_arrow_array(&self)->ArrayRef{
+    pub fn to_arrow_array(&self) -> ArrayRef {
         self.vector.to_arrow_array()
     }
     #[inline]
