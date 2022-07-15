@@ -1,3 +1,4 @@
+mod interp;
 mod pow;
 
 use std::sync::Arc;
@@ -40,7 +41,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let output = engine.execute(&plan).await?;
 
     let recordbatch = match output {
-        Output::RecordBatch(recordbach) => recordbach,
+        Output::RecordBatch(recordbatch) => recordbatch,
         _ => unreachable!(),
     };
 
@@ -89,7 +90,7 @@ async fn test_udf() -> Result<()> {
 
     let output = engine.execute(&plan).await?;
     let recordbatch = match output {
-        Output::RecordBatch(recordbach) => recordbach,
+        Output::RecordBatch(recordbatch) => recordbatch,
         _ => unreachable!(),
     };
 
