@@ -76,7 +76,6 @@ impl<S> EngineImpl<S> {
 #[derive(Clone, Debug)]
 struct SharedData {
     pub _config: EngineConfig,
-    pub store_dir: String,
     pub object_store: ObjectStore,
 }
 
@@ -97,19 +96,18 @@ impl SharedData {
 
         Ok(Self {
             _config: config,
-            store_dir,
             object_store,
         })
     }
 
     #[inline]
     fn region_sst_dir(&self, region_name: &str) -> String {
-        format!("{}{}/", self.store_dir, region_name)
+        format!("{}/", region_name)
     }
 
     #[inline]
     fn region_manifest_dir(&self, region_name: &str) -> String {
-        format!("{}{}/manifest/", self.store_dir, region_name)
+        format!("{}/manifest/", region_name)
     }
 }
 
