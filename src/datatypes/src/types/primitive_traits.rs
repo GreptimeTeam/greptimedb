@@ -1,10 +1,20 @@
+use arrow::compute::arithmetics::basic::NativeArithmetics;
 use arrow::types::NativeType;
+use num::NumCast;
 
 use crate::value::Value;
 
 /// Primitive type.
 pub trait Primitive:
-    PartialOrd + Default + Clone + Copy + Into<Value> + NativeType + serde::Serialize
+    PartialOrd
+    + Default
+    + Clone
+    + Copy
+    + Into<Value>
+    + NativeType
+    + serde::Serialize
+    + NativeArithmetics
+    + NumCast
 {
     /// Largest numeric type this primitive type can be cast to.
     type LargestType: Primitive;

@@ -1,26 +1,34 @@
 mod pow;
+mod testing_table;
 
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
 use common_query::logical_plan::create_udaf;
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
-use common_recordbatch::util;
+use common_recordbatch::error::Result as RecordResult;
+use common_recordbatch::{util, RecordBatch};
 use datafusion::arrow_print;
 use datafusion::field_util::FieldExt;
 use datafusion::field_util::SchemaExt;
 use datafusion::logical_plan::LogicalPlanBuilder;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::types::DataTypeBuilder;
+use datatypes::types::Primitive;
+use datatypes::vectors::PrimitiveVector;
+use num::NumCast;
 use query::catalog::memory;
 use query::error::Result;
 use query::plan::LogicalPlan;
 use query::query_engine::{Output, QueryEngineFactory};
+use rand::Rng;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
 
-use crate::median::Median;
+use crate::median::MedianAccumulatorCreator;
 use crate::pow::pow;
+use crate::testing_table::TestingTable;
 
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {
@@ -116,33 +124,47 @@ async fn test_udf() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_udaf() -> Result<()> {
+async fn test_median_udaf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
-    let catalog_list = memory::new_memory_catalog_list()?;
-    let factory = QueryEngineFactory::new(catalog_list);
-    let engine = factory.query_engine();
+    test_median_udaf_failed(vec![1.0f32, 2.0f32, 3.0f32]).await?;
+    test_median_udaf_failed(vec![1.0f64, 2.0f64, 3.0f64]).await?;
 
-    let median_udaf = create_udaf(
-        "median",
-        ConcreteDataType::uint32_datatype(),
-        Arc::new(ConcreteDataType::uint32_datatype()),
-        Volatility::Immutable,
-        Arc::new(|| Ok(Box::new(Median::new()))),
-        Arc::new(vec![ConcreteDataType::string_datatype()]),
-    );
+    let mut rng = rand::thread_rng();
+    test_median_udaf_success(
+        (1..=100)
+            .map(|_| rng.gen_range(0..100))
+            .collect::<Vec<u16>>(),
+    )
+    .await?;
+    test_median_udaf_success(
+        (1..100)
+            .map(|_| rng.gen_range(0..100))
+            .collect::<Vec<u32>>(),
+    )
+    .await?;
+    test_median_udaf_success(
+        (1..100)
+            .map(|_| rng.gen_range(-100..100))
+            .collect::<Vec<i32>>(),
+    )
+    .await?;
+    test_median_udaf_success(
+        (1..=100)
+            .map(|_| rng.gen_range(-100..100))
+            .collect::<Vec<i64>>(),
+    )
+    .await?;
+    Ok(())
+}
 
-    engine.register_udaf(median_udaf);
+async fn test_median_udaf_success<T>(numbers: Vec<T>) -> Result<()>
+where
+    T: Primitive + DataTypeBuilder + Ord,
+{
+    let result = execute_udaf(&numbers).await;
 
-    let plan = engine.sql_to_plan("select MEDIAN(number) as median from numbers")?;
-
-    let output = engine.execute(&plan).await?;
-    let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
-        _ => unreachable!(),
-    };
-
-    let recordbatch = util::collect(recordbatch_stream).await.unwrap();
+    let recordbatch = result.unwrap();
     let df_recordbatch = recordbatch
         .into_iter()
         .map(|r| r.df_recordbatch)
@@ -150,14 +172,71 @@ async fn test_udaf() -> Result<()> {
 
     let pretty_print = arrow_print::write(&df_recordbatch);
     let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
-    // numbers table will produce a stream of number 0 to 99(both inclusive), so the median is 49
+
+    let numbers = &mut { numbers };
+    numbers.sort();
+    let len = numbers.len();
+    let expected_median = if len % 2 == 1 {
+        numbers[len / 2]
+    } else {
+        let a: f64 = NumCast::from(numbers[len / 2 - 1]).unwrap();
+        let b: f64 = NumCast::from(numbers[len / 2]).unwrap();
+        NumCast::from(a / 2.0 + b / 2.0).unwrap()
+    };
+    let expected_median = format!("| {:<6} |", expected_median);
     let expected = vec![
         "+--------+",
         "| median |",
         "+--------+",
-        "| 49     |",
+        &expected_median,
         "+--------+",
     ];
     assert_eq!(expected, pretty_print);
     Ok(())
+}
+
+async fn test_median_udaf_failed<T>(numbers: Vec<T>) -> Result<()>
+where
+    T: Primitive + DataTypeBuilder,
+{
+    let result = execute_udaf(&numbers).await;
+    assert!(result.is_err());
+    let error = result.unwrap_err();
+    assert!(error.to_string().contains(&format!(
+        "\"MEDIAN\" aggregate function not support date type {}",
+        T::type_name()
+    )));
+    Ok(())
+}
+
+async fn execute_udaf<T>(numbers: &[T]) -> RecordResult<Vec<RecordBatch>>
+where
+    T: Primitive + DataTypeBuilder,
+{
+    let table_name = format!("{}_numbers", std::any::type_name::<T>());
+    let column_name = format!("{}_number", std::any::type_name::<T>());
+
+    let testing_table = Arc::new(TestingTable::new(
+        &column_name,
+        Arc::new(PrimitiveVector::<T>::from_vec(numbers.to_vec())),
+    ));
+
+    let factory = testing_table::new_query_engine_factory(table_name.clone(), testing_table);
+    let engine = factory.query_engine();
+
+    let median_udaf = create_udaf("median", Arc::new(MedianAccumulatorCreator::default()));
+    engine.register_udaf(median_udaf);
+
+    let sql = format!(
+        "select MEDIAN({}) as median from {}",
+        column_name, table_name
+    );
+    let plan = engine.sql_to_plan(&sql).unwrap();
+
+    let output = engine.execute(&plan).await.unwrap();
+    let recordbatch_stream = match output {
+        Output::RecordBatch(batch) => batch,
+        _ => unreachable!(),
+    };
+    util::collect(recordbatch_stream).await
 }

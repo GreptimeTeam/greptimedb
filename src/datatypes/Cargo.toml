@@ -15,6 +15,8 @@ datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , b
 enum_dispatch = "0.3"
 ordered-float = "3.0"
 paste = "1.0"
+num = "0.4"
+num-traits = "0.2"
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }

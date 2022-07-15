@@ -7,6 +7,7 @@ pub mod mutable;
 pub mod null;
 pub mod primitive;
 mod string;
+pub mod iterator;
 
 use std::any::Any;
 use std::sync::Arc;

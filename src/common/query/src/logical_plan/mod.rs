@@ -7,14 +7,12 @@ use std::sync::Arc;
 
 use datatypes::prelude::ConcreteDataType;
 
-pub use self::accumulator::Accumulator;
+pub use self::accumulator::{Accumulator, AccumulatorCreator};
 pub use self::expr::Expr;
 pub use self::udaf::AggregateUdf;
 pub use self::udf::ScalarUdf;
-use crate::function::{
-    AccumulatorFunctionImplementation, ReturnTypeFunction, ScalarFunctionImplementation,
-    StateTypeFunction,
-};
+use crate::function::{ReturnTypeFunction, ScalarFunctionImplementation};
+use crate::logical_plan::accumulator::*;
 use crate::signature::{Signature, Volatility};
 
 /// Creates a new UDF with a specific signature and specific return type.
@@ -38,25 +36,16 @@ pub fn create_udf(
     )
 }
 
-/// Creates a new UDAF with a specific signature, state type and return type.
-/// The signature and state type must match the `Accumulator's implementation`.
-#[allow(clippy::rc_buffer)]
-pub fn create_udaf(
-    name: &str,
-    input_type: ConcreteDataType,
-    return_type: Arc<ConcreteDataType>,
-    volatility: Volatility,
-    accumulator: AccumulatorFunctionImplementation,
-    state_type: Arc<Vec<ConcreteDataType>>,
-) -> AggregateUdf {
-    let return_type: ReturnTypeFunction = Arc::new(move |_| Ok(return_type.clone()));
-    let state_type: StateTypeFunction = Arc::new(move |_| Ok(state_type.clone()));
+pub fn create_udaf(name: &str, creator: Arc<dyn AccumulatorCreator>) -> AggregateUdf {
+    let return_type_func = make_return_function(creator.clone());
+    let accumulator_creator = make_accumulator_function(creator.clone());
+    let state_type_func = make_state_function(creator.clone());
     AggregateUdf::new(
         name,
-        &Signature::exact(vec![input_type], volatility),
-        &return_type,
-        &accumulator,
-        &state_type,
+        &Signature::any(1, Volatility::Immutable),
+        &return_type_func,
+        &accumulator_creator,
+        &state_type_func,
     )
 }
 
@@ -75,7 +64,7 @@ mod tests {
 
     use super::*;
     use crate::error::Result;
-    use crate::function::make_scalar_function;
+    use crate::function::{make_scalar_function, AccumulatorCreatorFunc};
     use crate::prelude::ScalarValue;
     use crate::signature::TypeSignature;
 
@@ -180,34 +169,51 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct DummyAccumulatorCreator;
+
+    impl AccumulatorCreator for DummyAccumulatorCreator {
+        fn creator(&self) -> AccumulatorCreatorFunc {
+            Arc::new(|_| Ok(Box::new(DummyAccumulator)))
+        }
+
+        fn get_input_type(&self) -> ConcreteDataType {
+            ConcreteDataType::float64_datatype()
+        }
+
+        fn set_input_type(&self, _: ConcreteDataType) {}
+
+        fn get_output_type(&self) -> ConcreteDataType {
+            self.get_input_type()
+        }
+
+        fn get_state_types(&self) -> Vec<ConcreteDataType> {
+            vec![
+                ConcreteDataType::float64_datatype(),
+                ConcreteDataType::uint32_datatype(),
+            ]
+        }
+    }
+
     #[tokio::test]
     async fn test_create_udaf() -> Result<()> {
-        let input_type = ConcreteDataType::float64_datatype();
-        let return_type = ConcreteDataType::float64_datatype();
-        let state_type = vec![
-            ConcreteDataType::float64_datatype(),
-            ConcreteDataType::uint32_datatype(),
-        ];
-        let udaf = create_udaf(
-            "dummy_udaf",
-            input_type.clone(),
-            Arc::new(return_type.clone()),
-            Volatility::Immutable,
-            Arc::new(|| Ok(Box::new(DummyAccumulator))),
-            Arc::new(state_type.clone()),
-        );
+        let creator = DummyAccumulatorCreator;
+        let udaf = create_udaf("dummy_udaf", Arc::new(creator));
         assert_eq!("dummy_udaf", udaf.name);
 
         let signature = udaf.signature;
-        assert_eq!(
-            TypeSignature::Exact(vec![input_type]),
-            signature.type_signature
-        );
+        assert_eq!(TypeSignature::Any(1), signature.type_signature);
         assert_eq!(Volatility::Immutable, signature.volatility);
 
-        assert_eq!(Arc::new(return_type), (udaf.return_type)(&[]).unwrap());
         assert_eq!(
-            Arc::new(state_type),
+            Arc::new(ConcreteDataType::float64_datatype()),
+            (udaf.return_type)(&[ConcreteDataType::float64_datatype()]).unwrap()
+        );
+        assert_eq!(
+            Arc::new(vec![
+                ConcreteDataType::float64_datatype(),
+                ConcreteDataType::uint32_datatype(),
+            ]),
             (udaf.state_type)(&ConcreteDataType::float64_datatype()).unwrap()
         );
         Ok(())
