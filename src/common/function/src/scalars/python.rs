@@ -31,14 +31,27 @@ struct Coprocessor {
 
 #[derive(Debug, Snafu)]
 pub enum CoprError {
-    TypeCast { error: datatypes::error::Error },
-    PyParse { error: ParseError },
-    PyCompile { error: CompileError },
-    PyRuntime { error: PyBaseExceptionRef },
-    ArrowError { error: ArrowError },
-    // Consider change to `Whatever`
-    Other { reason: String },
+    TypeCast {
+        error: datatypes::error::Error,
+    },
+    PyParse {
+        error: ParseError,
+    },
+    PyCompile {
+        error: CompileError,
+    },
+    PyRuntime {
+        error: PyBaseExceptionRef,
+    },
+    ArrowError {
+        error: ArrowError,
+    },
+    /// Other types of error that isn't any of above
+    Other {
+        reason: String,
+    },
 }
+// impl from for those error so one can use question mark and implictly cast into `CoprError`
 impl From<ArrowError> for CoprError {
     fn from(error: ArrowError) -> Self {
         Self::ArrowError { error }
@@ -59,13 +72,13 @@ impl From<datatypes::error::Error> for CoprError {
         Self::TypeCast { error: e }
     }
 }
-// for there is multiple CompilerError struct in different crate of `rustpython` so use full path to diff
+// for there is multiple CompilerError struct in different crate of `rustpython`（`rustpython_compiler` & `rustpython_compiler_core` both have a `CompilerError` struct) so use full path to differentiate
 impl From<rustpython_compiler_core::error::CompileError> for CoprError {
     fn from(err: rustpython_compiler_core::error::CompileError) -> Self {
         Self::PyCompile { error: err }
     }
 }
-/// turn a python list of string into a Vec<String>
+/// turn a python list of string in ast form(a `ast::Expr`) of string into a `Vec<String>`
 fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>, CoprError> {
     if let ast::ExprKind::List { elts, ctx: _ } = &lst.node {
         let mut ret = Vec::new();
@@ -93,7 +106,7 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>, CoprError> {
     }
 }
 
-/// TODO: a lot of error handling, write function body
+/// parse script and return `Coprocessor` struct with info extract from ast
 fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
     let python_ast = parser::parse_program(script)?;
     ensure!(
@@ -228,8 +241,13 @@ fn default_loc<T>(node: T) -> Located<T> {
 fn set_loc<T>(node: T, loc: Location) -> Located<T> {
     Located::new(loc, node)
 }
-/// stripe the decorator(`@xxxx`), add one line in the ast(note ) for call function with given parameter, and compiler into `CodeObject`
+/// stripe the decorator(`@xxxx`), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
+///
+/// The conside is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
+/// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
+/// And add a function call in the end
 fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObject, CoprError> {
+    // note that is important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
     let mut top = parser::parse(script, parser::Mode::Interactive)?;
     // erase decorator
     if let ast::Mod::Interactive { body } = &mut top {
@@ -257,6 +275,7 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
             return Err(CoprError::Other { reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node) });
         }
         let mut loc = code[0].location;
+        // This manually construct ast has no corrsponding code in the script, so just give it a random location(which doesn't matter because it's usually for pretty print errors)
         loc.newline();
         let args: Vec<Located<ast::ExprKind>> = copr
             .args
@@ -289,6 +308,7 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
             reason: format!("Expect statement in script, found: {:?}", top),
         });
     }
+    // use `compile::Mode::BlockExpr` so it return the result of statement
     compile::compile_top(
         &top,
         "<embedded>".to_owned(),
@@ -297,14 +317,37 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
     )
     .map_err(|err| err.into())
 }
-/// cast a dyn Array into a dyn Vector
+/// cast a `dyn Array` of type unsigned/int/float into a `dyn Vector`
 fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilder>(
     arg: Arc<dyn Array>,
 ) -> Result<Arc<dyn Vector>, datatypes::error::Error> {
     PrimitiveVector::<T>::try_from_arrow_array(arg).map(|op| Arc::new(op) as Arc<dyn Vector>)
 }
 
-// TODO: it seem it returns None because it is in `exec` mode?
+/// The coprocessor function
+/// first it extract columns according to `args` given in python decorator from [`DfRecordBatch`] 
+/// then execute python script given those `args`, return a tuple([`PyTuple`]) or one ([`PyVector`])
+/// the return vectors then is rename according to `returns` in decorator and form a new [`DfRecordBatch`] and return it
+/// 
+/// # Example
+/// 
+/// ```
+///         let python_source = r#"
+/// @copr(args=["cpu", "mem"], returns=["perf", "what"])
+/// def a(cpu, mem):
+///     return cpu + mem, cpu - mem
+/// "#;
+/// let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
+/// let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
+/// let schema = Arc::new(Schema::from(vec![
+/// Field::new("cpu", DataType::Float32, false),
+///  Field::new("mem", DataType::Float64, false),
+/// ]));
+/// let rb =
+/// DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
+/// let ret = coprocessor(python_source, rb).unwrap();
+/// assert_eq!(ret.column(0).len(), 4);
+/// ```
 pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, CoprError> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
@@ -323,13 +366,17 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
     for idx in fetch_idx {
         fetch_args.push(rb.column(idx).clone());
     }
-    // PyVector now support int8/16/32/64, float32/64 and bool
+    // PyVector now only support unsigned&int8/16/32/64, float32/64 and bool when doing meanful arithmetics operation
     let mut args: Vec<PyVector> = Vec::new();
-
+    // for readability so not using a macro?
     for arg in fetch_args {
         match arg.data_type() {
             DataType::Float32 => args.push(PyVector::from(into_vector::<f32>(arg)?)),
             DataType::Float64 => args.push(PyVector::from(into_vector::<f64>(arg)?)),
+            DataType::UInt8 => args.push(PyVector::from(into_vector::<u8>(arg)?)),
+            DataType::UInt16 => args.push(PyVector::from(into_vector::<u16>(arg)?)),
+            DataType::UInt32 => args.push(PyVector::from(into_vector::<u32>(arg)?)),
+            DataType::UInt64 => args.push(PyVector::from(into_vector::<u64>(arg)?)),
             DataType::Int8 => args.push(PyVector::from(into_vector::<i8>(arg)?)),
             DataType::Int16 => args.push(PyVector::from(into_vector::<i16>(arg)?)),
             DataType::Int32 => args.push(PyVector::from(into_vector::<i32>(arg)?)),
@@ -369,11 +416,13 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                     .map(|name| Field::new(name, DataType::Float64, false))
                     .collect::<Vec<Field>>(),
             ));
+            // convert a tuple of `PyVector` or one `PyVector` to a `Vec<ArrayRef>` then finailly to a `DfRecordBatch`
+            
+            // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
             let mut cols: Vec<ArrayRef> = Vec::new();
-            //let mut rb_ret = DfRecordBatch::new_empty(schema);
             if is_instance(&ret, PyTuple::class(vm).into(), vm) {
                 let tuple = ret.payload::<PyTuple>().ok_or(
-                CoprError::Other { reason: format!("can't cast obj {:?} to tuple", ret) }
+                CoprError::Other { reason: format!("can't cast obj {:?} to PyTuple)", ret) }
                 )?;
                 for obj in tuple {
                     if is_instance(obj, PyVector::class(vm).into(), vm) {
@@ -401,12 +450,11 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                     )
                 }
             );
+            // 6. return a assembled DfRecordBatch
             let res_rb = DfRecordBatch::try_new(schema, cols)?;
             Ok(res_rb)
         },
     )
-    // 5. get returns as either a PyVector or a PyTuple, and assign them according to `returns`
-    // 6. return a assembled DfRecordBatch
 }
 pub fn execute_script(script: &str) -> vm::PyResult {
     vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
@@ -478,7 +526,8 @@ def a(cpu, mem):
         let rb =
             DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
         let ret = coprocessor(python_source, rb);
-        println!("{:?}", ret);
+        dbg!(&ret);
         assert!(ret.is_ok());
+        assert_eq!(ret.unwrap().column(0).len(), 4);
     }
 }
