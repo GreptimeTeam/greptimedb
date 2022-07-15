@@ -4,7 +4,7 @@ use std::slice;
 use std::time::Duration;
 
 use common_error::prelude::*;
-use common_time::RangeMillis;
+use common_time::{RangeMillis, TimestampMillis};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::schema::SchemaRef;
@@ -163,13 +163,8 @@ impl WriteRequest for WriteBatch {
 /// So timestamp within `[i64::MIN, i64::MIN + duration)` or
 /// `[i64::MAX-(i64::MAX%duration), i64::MAX]` is not a valid input.
 fn align_timestamp(ts: i64, duration: i64) -> Option<i64> {
-    let normalized = if ts < 0 {
-        ts.checked_sub(duration - 1)?
-    } else {
-        ts
-    };
-
-    let aligned = normalized / duration * duration;
+    let aligned = TimestampMillis::new(ts).align_by_bucket(duration)?.as_i64();
+    // Also ensure end timestamp won't overflow.
     aligned.checked_add(duration)?;
     Some(aligned)
 }
@@ -245,6 +240,22 @@ impl PutData {
     /// `PutData` with empty column will also be considered as empty.
     pub fn is_empty(&self) -> bool {
         self.num_rows() == 0
+    }
+
+    /// Returns slice of [PutData] in range `[start, end)`.
+    ///
+    /// # Panics
+    /// Panics if `start > end`.
+    pub fn slice(&self, start: usize, end: usize) -> PutData {
+        assert!(start <= end);
+
+        let columns = self
+            .columns
+            .iter()
+            .map(|(k, v)| (k.clone(), v.slice(start, end - start)))
+            .collect();
+
+        PutData { columns }
     }
 }
 

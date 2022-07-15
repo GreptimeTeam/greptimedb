@@ -147,7 +147,7 @@ impl PartialEq for MemtableSet {
 impl Eq for MemtableSet {}
 
 impl MemtableSet {
-    fn new() -> MemtableSet {
+    pub fn new() -> MemtableSet {
         MemtableSet::default()
     }
 
@@ -170,6 +170,12 @@ impl MemtableSet {
         assert!(old.is_none());
     }
 
+    /// Returns number of memtables in the set.
+    pub fn len(&self) -> usize {
+        self.memtables.len()
+    }
+
+    /// Returns true if there is no memtable in the set.
     pub fn is_empty(&self) -> bool {
         self.memtables.is_empty()
     }
@@ -205,6 +211,10 @@ impl MemtableSet {
                 bucket: range_key.0,
             })
             .collect()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&RangeMillis, &MemtableRef)> {
+        self.memtables.iter().map(|(k, v)| (&k.0, v))
     }
 }
 
@@ -254,6 +264,13 @@ mod tests {
         );
 
         set.insert(RangeMillis::new(20, 30).unwrap(), memtable.clone());
+
+        for (i, (range, _)) in set.iter().enumerate() {
+            assert_eq!(
+                *range,
+                RangeMillis::new(i as i64 * 10, i as i64 * 10 + 10).unwrap()
+            );
+        }
 
         assert!(!set.is_empty());
         assert_eq!(2, set.max_memtable_id());

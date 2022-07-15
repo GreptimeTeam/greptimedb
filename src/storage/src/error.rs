@@ -31,6 +31,9 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Missing timestamp in write batch"))]
+    BatchMissingTimestamp { backtrace: Backtrace },
+
     #[snafu(display("Failed to write columns, source: {}", source))]
     FlushIo {
         source: std::io::Error,
@@ -134,6 +137,7 @@ impl ErrorExt for Error {
             | InvalidRegionDesc { .. }
             | InvalidInputSchema { .. }
             | BatchMissingColumn { .. }
+            | BatchMissingTimestamp { .. }
             | InvalidTimestamp { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. }
