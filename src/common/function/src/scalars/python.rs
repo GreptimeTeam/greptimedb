@@ -47,8 +47,8 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{
-        Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-        Int8Array, PrimitiveArray,
+        Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
+        Int64Array, Int8Array, PrimitiveArray,
     };
     use arrow::chunk::Chunk;
     use arrow::datatypes::{DataType, Field, Schema};
@@ -67,6 +67,9 @@ mod tests {
         parser,
     };
     use snafu::{ensure, prelude::Snafu, OptionExt, ResultExt};
+    use type_::{is_instance, pyobj_try_to_typed_val, PyVector};
+    use vm::builtins::{PyBaseExceptionRef, PyTuple};
+    use vm::PyPayload;
 
     #[derive(Debug)]
     struct Coprocessor {
@@ -81,7 +84,12 @@ mod tests {
         TypeCast { error: datatypes::error::Error },
         PyParse { error: ParseError },
         PyCompile { error: CompileError },
-        PyRuntime,
+        PyRuntime { error: PyBaseExceptionRef },
+    }
+    impl From<PyBaseExceptionRef> for CoprError {
+        fn from(err: PyBaseExceptionRef) -> Self {
+            Self::PyRuntime { error: err }
+        }
     }
     impl From<ParseError> for CoprError {
         fn from(e: ParseError) -> Self {
@@ -282,7 +290,6 @@ mod tests {
         // 2. also check for exist of `args` in `rb`, if not found, return error
         let copr = parse_copr(script)?;
         let code_obj = strip_append_and_compile(script, &copr)?;
-        dbg!(&code_obj.instructions);
         // 3. get args from `rb`, and cast them into PyVector
         let mut fetch_idx = Vec::new();
         for (idx, field) in rb.schema().fields.iter().enumerate() {
@@ -321,24 +328,60 @@ mod tests {
                 }
             }
         }
-        // 4. then `vm.invoke` function with given args, or maybe scope set item? and just call
-        let run_res = vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
-            PyVector::make_class(&vm.ctx);
-            let scope = vm.new_scope_with_builtins();
-            for (name, vector) in copr.args.iter().zip(args) {
-                scope
-                    .locals
-                    .as_object()
-                    .set_item(name, vm.new_pyobj(vector), vm)
-                    .unwrap_or_else(|_| panic!("fail to set item{} in python scope", name));
-            }
-            let code_obj = vm.ctx.new_code(code_obj);
-            vm.run_code_obj(code_obj, scope)
-        });
-        dbg!(run_res);
-        // 5. get returns as a PyList, and assign them according to `returns`
+        // 4. then set args in scope and call by compiler and run `CodeObject` which already append `Call` node
+        vm::Interpreter::without_stdlib(Default::default()).enter(
+            |vm| -> Result<DfRecordBatch, CoprError> {
+                PyVector::make_class(&vm.ctx);
+                let scope = vm.new_scope_with_builtins();
+                for (name, vector) in copr.args.iter().zip(args) {
+                    scope
+                        .locals
+                        .as_object()
+                        .set_item(name, vm.new_pyobj(vector), vm)
+                        .unwrap_or_else(|_| panic!("fail to set item{} in python scope", name));
+                }
+                let code_obj = vm.ctx.new_code(code_obj);
+                let run_res = vm.run_code_obj(code_obj, scope);
+                dbg!(&run_res);
+                let ret = run_res?;
+
+                let schema = Arc::new(Schema::from(
+                    copr.returns
+                        .iter()
+                        .map(|name| Field::new(name, DataType::Float64, false))
+                        .collect::<Vec<Field>>(),
+                ));
+                let mut cols: Vec<ArrayRef> = Vec::new();
+                //let mut rb_ret = DfRecordBatch::new_empty(schema);
+                if is_instance(&ret, PyTuple::class(vm).into(), vm) {
+                    let tuple = ret.payload::<PyTuple>().unwrap();
+                    for (idx, obj) in tuple.iter().enumerate() {
+                        if is_instance(obj, PyVector::class(vm).into(), vm) {
+                            let pyv = obj.payload::<PyVector>().unwrap();
+                            cols.push(pyv.to_arrow_array())
+                        } else {
+                            todo!()
+                        }
+                    }
+                } else if is_instance(&ret, PyVector::class(vm).into(), vm) {
+                    let pyv = ret.payload::<PyVector>().unwrap();
+                    cols.push(pyv.to_arrow_array())
+                }
+                ensure!(
+                    cols.len() == copr.returns.len(),
+                    FormatSnafu {
+                        reason: format!(
+                            "The number of return Vector is wrong, expect{}, find{}",
+                            copr.returns.len(),
+                            cols.len()
+                        )
+                    }
+                );
+                Ok(DfRecordBatch::try_new(schema, cols).unwrap())
+            },
+        )
+        // 5. get returns as either a PyVector or a PyTuple, and assign them according to `returns`
         // 6. return a assembled DfRecordBatch
-        Ok(rb)
     }
     use super::*;
 
@@ -361,7 +404,7 @@ a(2,3)
         let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf"])
 def a(cpu, mem):
-    return 2
+    return cpu + mem
 "#;
         //println!("{}, {:?}", python_source, python_ast);
         let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
