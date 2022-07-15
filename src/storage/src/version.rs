@@ -14,7 +14,7 @@ use std::time::Duration;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
-use crate::memtable::{FreezeError, MemtableId, MemtableSchema, MemtableSet, MemtableVersion};
+use crate::memtable::{MemtableId, MemtableSchema, MemtableSet, MemtableVersion};
 use crate::metadata::{RegionMetadata, RegionMetadataRef};
 use crate::sst::LevelMetas;
 use crate::sst::{FileHandle, FileMeta};
@@ -84,17 +84,15 @@ impl VersionControl {
         version_to_update.commit();
     }
 
-    /// Try to freeze mutable memtables.
-    pub fn try_freeze_mutable(&self) -> Result<(), FreezeError> {
+    /// Freeze all mutable memtables.
+    pub fn freeze_mutable(&self) {
         let mut version_to_update = self.version.lock();
 
         let memtable_version = version_to_update.memtables();
-        let freezed = memtable_version.try_freeze_mutable()?;
+        let freezed = memtable_version.freeze_mutable();
         version_to_update.memtables = Arc::new(freezed);
 
         version_to_update.commit();
-
-        Ok(())
     }
 
     pub fn apply_edit(&self, edit: VersionEdit) {
