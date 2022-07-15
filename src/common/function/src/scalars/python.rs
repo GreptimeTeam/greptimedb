@@ -462,7 +462,6 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     let copr = parse_copr(script)?;
-    let code_obj = strip_append_and_compile(script, &copr)?;
     // 3. get args from `rb`, and cast them into PyVector
     let mut fetch_idx = Vec::new();
     for (idx, field) in rb.schema().fields.iter().enumerate() {
@@ -528,6 +527,8 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                         CoprError::Other { reason: format!("fail to set item{} in python scope, PyExpection: {:?}", name, err) }
                     )?;
             }
+
+            let code_obj = strip_append_and_compile(script, &copr)?;
             let code_obj = vm.ctx.new_code(code_obj);
             let run_res = vm.run_code_obj(code_obj, scope);
             let ret = run_res?;
