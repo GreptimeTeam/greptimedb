@@ -25,10 +25,18 @@ use vm::PyPayload;
 #[derive(Debug)]
 struct Coprocessor {
     name: String,
+    // get from python decorator args&returns
     args: Vec<String>,
     returns: Vec<String>,
-    arg_types: Vec<Option<DataType>>,
-    return_types: Vec<Option<DataType>>,
+    // get from python function args& returns' annotation, first is type, second is is_nullable
+    arg_types: Vec<Option<AnnotationInfo>>,
+    return_types: Vec<Option<AnnotationInfo>>
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnnotationInfo{
+    datatype: DataType,
+    is_nullable: bool
 }
 
 #[derive(Debug, Snafu)]
@@ -124,7 +132,7 @@ fn into_datatype(ty: &str) -> Option<DataType> {
         _ => None,
     }
 }
-fn get_from_subscript(sub: &ast::ExprKind) -> Result<DataType, CoprError> {
+fn get_from_subscript(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
     if let ast::ExprKind::Subscript {
         value,
         slice,
@@ -141,12 +149,42 @@ fn get_from_subscript(sub: &ast::ExprKind) -> Result<DataType, CoprError> {
         } else {
             todo!()
         }
-        if let ast::ExprKind::Name { id, ctx: _ } = &slice.node {
-            into_datatype(id).ok_or(CoprError::Other {
-                reason: format!("unknown type: {id}"),
-            })
-        } else {
-            todo!()
+        // i.e: vector[f64]
+        match &slice.node{
+            ast::ExprKind::Name { id, ctx: _ } => {
+                let ty = into_datatype(id).ok_or(CoprError::Other {
+                    reason: format!("unknown type: {id}"),
+                })?;
+                Ok(AnnotationInfo{
+                    datatype: ty, 
+                    is_nullable:false
+                })
+                
+            }
+            ast::ExprKind::BinOp { left, op, right } => {
+                let mut is_nullable = false;
+                let mut ty = None;
+                for i in [left, right]{
+                    match &i.node{
+                        ast::ExprKind::Constant { value, kind } => {
+                            ensure!(
+                                matches!(value, ast::Constant::None),
+                                OtherSnafu{reason: format!("Expect only typenames and `None`, found{:?}", i.node)}
+                            );
+                            is_nullable = true;
+                        }
+                        ast::ExprKind::Name { id, ctx: _ } => {
+                            ty = Some(into_datatype(id).ok_or(CoprError::Other {
+                                reason: format!("unknown type: {id}"),
+                            }));
+                        }
+                        _ => todo!()
+                    }
+                }
+                ensure!(ty.is_some(), OtherSnafu{reason: "Expect type, not two `None`"});
+                Ok(AnnotationInfo{datatype: ty.unwrap()?, is_nullable})
+            }
+            _ => todo!()
         }
     } else {
         todo!()
@@ -263,7 +301,9 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
             let mut arg_types = Vec::new();
             for arg in &fn_args.args {
                 if let Some(anno) = &arg.node.annotation {
-                    arg_types.push(Some(get_from_subscript(&anno.node)?))
+                    arg_types.push(Some(
+                        get_from_subscript(&anno.node)?
+                    ))
                 } else {
                     arg_types.push(None)
                 }
@@ -274,7 +314,11 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
             if let Some(rets) = returns {
                 if let ast::ExprKind::Tuple { elts, ctx: _ } = &rets.node {
                     for elem in elts {
-                        return_types.push(Some(get_from_subscript(&elem.node)?))
+                        return_types.push(
+                            Some(
+                                get_from_subscript(&elem.node)?
+                            )
+                        )
                     }
                 } else if let ast::ExprKind::Subscript {
                     value: _,
@@ -282,7 +326,11 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                     ctx: _,
                 } = &rets.node
                 {
-                    return_types.push(Some(get_from_subscript(&rets.node)?))
+                    return_types.push(
+                        Some(
+                            get_from_subscript(&rets.node)?
+                        )
+                    )
                 }
             } else {
                 // if no anntation at all, set it to all None
@@ -313,7 +361,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                 args: arg_names,
                 returns: ret_names,
                 arg_types,
-                return_types,
+                return_types
             })
         } else {
             Err(CoprError::Other {
@@ -504,7 +552,8 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
     for (idx, arg) in args.iter().enumerate(){
         let anno_ty = copr.arg_types[idx].to_owned();
         let real_ty = arg.to_arrow_array().data_type().to_owned();
-        ensure!(anno_ty== Some(real_ty.to_owned()), 
+        let nullable = &rb.schema().fields[idx];
+        ensure!(anno_ty== Some(AnnotationInfo{datatype: real_ty.to_owned(), is_nullable: nullable.is_nullable}), 
             OtherSnafu{reason: 
                 format!(
                     "column {}'s Type annotation is {:?}, but actual type is {:?}", 
@@ -561,15 +610,22 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                 copr.returns
                     .iter()
                     .enumerate()
-                    .map(|(idx,name)| 
-                    Field::new(
-                        name, 
-                        copr.return_types[idx]
-                            .to_owned()
-                            .unwrap_or_else(||
-                                cols[idx].data_type().to_owned()
-                            ), 
-                        false))
+                    .map(|(idx,name)| {
+                        let AnnotationInfo { datatype: ty, is_nullable } = copr.return_types[idx]
+                        .to_owned()
+                        .unwrap_or_else(||
+                            // default to be not nullable and useDataType infered by PyVector
+                            AnnotationInfo{
+                                datatype: cols[idx].data_type().to_owned(), 
+                                is_nullable: false
+                            }
+                        );
+                        Field::new(
+                            name, 
+                            ty, 
+                            is_nullable)
+                    }
+                    )
                     .collect::<Vec<Field>>(),
             ));
             // TODO: if returns types is not match, first try convert it to given type, if not possible, return Err
@@ -631,7 +687,7 @@ mod tests {
     #[test]
     fn test_type_anno() {
         let python_source = "
-def a(a: vector[f64],b: vector[f32])->(vector[f64], vector[f64]):
+def a(a: vector[f64],b: vector[f32])->(vector[f64|None], vector[f64]):
     return a + b
 ";
         let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
@@ -654,7 +710,7 @@ a(2,3)
     fn test_coprocessor() {
         let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64]):
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64]):
     return cpu + mem, cpu - mem
 "#;
         //println!("{}, {:?}", python_source, python_ast);
