@@ -8,11 +8,10 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use bytes::{Bytes, BytesMut};
 use common_error::ext::BoxedError;
-use common_error::status_code::StatusCode::Internal;
 use common_telemetry::logging::{error, info};
 use common_telemetry::warn;
 use futures_util::StreamExt;
-use memmap2::Mmap;
+use memmap2::{Mmap, MmapOptions};
 use snafu::{Backtrace, GenerateImplicitData, ResultExt};
 use store_api::logstore::entry::{Encode, Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
@@ -21,7 +20,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver as MpscReceiver;
 use tokio::sync::mpsc::Sender as MpscSender;
 use tokio::sync::oneshot::Sender as OneshotSender;
-use tokio::sync::{oneshot, Notify, RwLock};
+use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinHandle;
 use tokio::time;
 
@@ -148,16 +147,14 @@ impl LogFile {
 
     /// Creates a file mmap region.
     async fn map(&self, start: u64, length: usize) -> Result<Mmap> {
-        // TODO(hl): reimplement read function
-        unimplemented!()
-        // unsafe {
-        //     let file = self.file.clone();
-        //     MmapOptions::new()
-        //         .offset(start)
-        //         .len(length)
-        //         .map(&file)
-        //         .context(IoSnafu)
-        // }
+        unsafe {
+            let file = self.file.inner.clone();
+            MmapOptions::new()
+                .offset(start)
+                .len(length)
+                .map(&*file)
+                .context(IoSnafu)
+        }
     }
 
     /// Returns the persisted size of current log file.
@@ -228,10 +225,8 @@ impl LogFile {
                         }
                     }
 
-                    Self::write_batch(&file, &batch).await.unwrap();
-
+                    let max_offset = Self::write_batch(&file, &batch).await.unwrap();
                     // flush all pending data to disk
-                    let write_offset_read = write_offset.load(Ordering::Relaxed);
                     if let Err(flush_err) = file.flush().await {
                         error!("Failed to flush log file: {}", flush_err);
                         error_occurred = true;
@@ -240,10 +235,8 @@ impl LogFile {
                         info!("Flush task stop");
                         break;
                     }
-
-                    let prev = flush_offset.load(Ordering::Acquire);
-                    flush_offset.store(write_offset_read, Ordering::Relaxed);
-                    info!("Flush offset: {} -> {}", prev, write_offset_read);
+                    let prev = flush_offset.swap(max_offset, Ordering::Relaxed);
+                    info!("Flush offset: {} -> {}", prev, max_offset);
                     while let Some(req) = batch.pop() {
                         req.complete();
                     }
@@ -289,11 +282,13 @@ impl LogFile {
     }
 
     /// Writes a batch of `AppendRequest` to file.
-    async fn write_batch(writer: &Arc<FileWriter>, batch: &Vec<AppendRequest>) -> Result<()> {
+    async fn write_batch(writer: &Arc<FileWriter>, batch: &Vec<AppendRequest>) -> Result<usize> {
         let mut futures = Vec::with_capacity(batch.len());
 
+        let mut max_offset = 0;
         for req in batch {
             let offset = req.offset;
+            max_offset = max_offset.max(offset);
             let future = writer.write(req.data.clone(), offset as u64);
             futures.push(future);
         }
@@ -304,7 +299,7 @@ impl LogFile {
             .into_iter()
             .collect::<Result<Vec<_>>>()
         {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(max_offset),
             Err(e) => Err(e),
         }
     }
@@ -418,7 +413,7 @@ impl LogFile {
                 id: entry_id,
             })
             .await
-            .map_err(|e| {
+            .map_err(|_| {
                 InternalSnafu {
                     msg: "Send append request",
                 }

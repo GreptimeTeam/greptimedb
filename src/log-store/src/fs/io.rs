@@ -5,6 +5,6 @@ mod unix;
 mod fallback;
 
 #[cfg(any(all(not(unix), not(windows)), miri))]
-pub use fallback::{pread_exact, pread_exact_or_eof, pwrite_all};
+pub use fallback::{pread_exact, pwrite_all};
 #[cfg(all(unix, not(miri)))]
-pub use unix::{pread_exact, pread_exact_or_eof, pwrite_all};
+pub use unix::{pread_exact, pwrite_all};
