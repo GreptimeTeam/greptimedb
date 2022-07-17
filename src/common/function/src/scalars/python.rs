@@ -31,15 +31,15 @@ struct Coprocessor {
     returns: Vec<String>,
     // get from python function args& returns' annotation, first is type, second is is_nullable
     arg_types: Vec<Option<AnnotationInfo>>,
-    return_types: Vec<Option<AnnotationInfo>>
+    return_types: Vec<Option<AnnotationInfo>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AnnotationInfo{
+struct AnnotationInfo {
     datatype: DataType,
     is_nullable: bool,
     /// if the result type need to be coerced to given type in `into(<datatype>)`
-    need_coerced: bool
+    need_coerced: bool,
 }
 
 #[derive(Debug, Snafu)]
@@ -85,7 +85,8 @@ impl From<datatypes::error::Error> for CoprError {
         Self::TypeCast { error: e }
     }
 }
-// for there is multiple CompilerError struct in different crate of `rustpython`（`rustpython_compiler` & `rustpython_compiler_core` both have a `CompilerError` struct) so use full path to differentiate
+/// for there is multiple CompilerError struct in different crate of `rustpython`]
+///（`rustpython_compiler` & `rustpython_compiler_core` both have a `CompilerError` struct) so use full path to differentiate
 impl From<rustpython_compiler_core::error::CompileError> for CoprError {
     fn from(err: rustpython_compiler_core::error::CompileError) -> Self {
         Self::PyCompile { error: err }
@@ -138,55 +139,64 @@ fn into_datatype(ty: &str) -> Option<DataType> {
 
 /// return AnnotationInfo with is_nullable and need_coerced both set to false
 fn parse_type(node: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
-    match node{
-        ast::ExprKind::Name { id, ctx:_ }=>{
+    match node {
+        ast::ExprKind::Name { id, ctx: _ } => {
             let ty = into_datatype(id).ok_or(CoprError::Other {
                 reason: format!("unknown type: {id}"),
             })?;
-            Ok(AnnotationInfo{
-                datatype: ty, 
-                is_nullable:false,
+            Ok(AnnotationInfo {
+                datatype: ty,
+                is_nullable: false,
                 need_coerced: false,
             })
         }
-        _ => todo!()
+        _ => todo!(),
     }
 }
 
 /// Item => NativeType | into `(` NativeType `)`
 fn parse_item(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
-    match sub{
+    match sub {
         ast::ExprKind::Name { id: _, ctx: _ } => Ok(parse_type(sub)?),
-        ast::ExprKind::Call { func, args, keywords:_ }=>{
-            
-            let need_coerced = if let ast::ExprKind::Name { id, ctx: _ } = &func.node{
+        ast::ExprKind::Call {
+            func,
+            args,
+            keywords: _,
+        } => {
+            let need_coerced = if let ast::ExprKind::Name { id, ctx: _ } = &func.node {
                 ensure!(
-                    id.as_str() =="into", 
-                    OtherSnafu{
-                        reason: format!("Expect only `into(datatype)` or datatype or `None`, found {id}")
+                    id.as_str() == "into",
+                    OtherSnafu {
+                        reason: format!(
+                            "Expect only `into(datatype)` or datatype or `None`, found {id}"
+                        )
                     }
                 );
                 true
-            }else{
+            } else {
                 todo!()
             };
-            ensure!(args.len()==1, OtherSnafu{reason: "Expect only one arguement for `into`"});
+            ensure!(
+                args.len() == 1,
+                OtherSnafu {
+                    reason: "Expect only one arguement for `into`"
+                }
+            );
             let mut anno = parse_type(&args[0].node)?;
             anno.need_coerced = need_coerced;
             Ok(anno)
         }
-        _ => todo!()
+        _ => todo!(),
     }
 }
 
-
 /// where:
-/// 
+///
 /// Start => vector`[`TYPE`]`
-/// 
+///
 /// TYPE => Item | Item `|` None
-/// 
-/// Item => NativeType | into(NativeType) 
+///
+/// Item => NativeType | into(NativeType)
 fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
     if let ast::ExprKind::Subscript {
         value,
@@ -205,42 +215,62 @@ fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
             todo!()
         }
         // i.e: vector[f64]
-        match &slice.node{
+        match &slice.node {
             ast::ExprKind::Name { id: _, ctx: _ } => parse_item(&slice.node),
-            ast::ExprKind::Call { func: _, args: _, keywords: _ }=> parse_item(&slice.node),
+            ast::ExprKind::Call {
+                func: _,
+                args: _,
+                keywords: _,
+            } => parse_item(&slice.node),
             ast::ExprKind::BinOp { left, op: _, right } => {
                 let mut is_nullable = false;
                 let mut tmp_anno = None;
-                for i in [left, right]{
-                    match &i.node{
+                for i in [left, right] {
+                    match &i.node {
                         ast::ExprKind::Constant { value, kind: _ } => {
                             ensure!(
                                 matches!(value, ast::Constant::None),
-                                OtherSnafu{reason: format!("Expect only typenames and `None`, found{:?}", i.node)}
+                                OtherSnafu {
+                                    reason: format!(
+                                        "Expect only typenames and `None`, found{:?}",
+                                        i.node
+                                    )
+                                }
                             );
                             is_nullable = true;
                         }
-                        ast::ExprKind::Name { id: _, ctx: _ } => 
-                        if tmp_anno.is_none() {
-                            tmp_anno=Some(parse_item(&i.node)?)
-                        }else{
-                            todo!()
+                        ast::ExprKind::Name { id: _, ctx: _ } => {
+                            if tmp_anno.is_none() {
+                                tmp_anno = Some(parse_item(&i.node)?)
+                            } else {
+                                todo!()
+                            }
                         }
-                        ast::ExprKind::Call { func: _, args: _, keywords:_ }=>
-                        if tmp_anno.is_none() {
-                            tmp_anno=Some(parse_item(&i.node)?)
-                        }else{
-                            todo!()
+                        ast::ExprKind::Call {
+                            func: _,
+                            args: _,
+                            keywords: _,
+                        } => {
+                            if tmp_anno.is_none() {
+                                tmp_anno = Some(parse_item(&i.node)?)
+                            } else {
+                                todo!()
+                            }
                         }
-                        _ => todo!()
+                        _ => todo!(),
                     }
                 }
-                ensure!(tmp_anno.is_some(), OtherSnafu{reason: "Expect type, not two `None`"});
+                ensure!(
+                    tmp_anno.is_some(),
+                    OtherSnafu {
+                        reason: "Expect type, not two `None`"
+                    }
+                );
                 let mut tmp_anno = tmp_anno.unwrap();
                 tmp_anno.is_nullable = is_nullable;
                 Ok(tmp_anno)
             }
-            _ => todo!()
+            _ => todo!(),
         }
     } else {
         todo!()
@@ -357,9 +387,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
             let mut arg_types = Vec::new();
             for arg in &fn_args.args {
                 if let Some(anno) = &arg.node.annotation {
-                    arg_types.push(Some(
-                        parse_annotation(&anno.node)?
-                    ))
+                    arg_types.push(Some(parse_annotation(&anno.node)?))
                 } else {
                     arg_types.push(None)
                 }
@@ -370,11 +398,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
             if let Some(rets) = returns {
                 if let ast::ExprKind::Tuple { elts, ctx: _ } = &rets.node {
                     for elem in elts {
-                        return_types.push(
-                            Some(
-                                parse_annotation(&elem.node)?
-                            )
-                        )
+                        return_types.push(Some(parse_annotation(&elem.node)?))
                     }
                 } else if let ast::ExprKind::Subscript {
                     value: _,
@@ -382,11 +406,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                     ctx: _,
                 } = &rets.node
                 {
-                    return_types.push(
-                        Some(
-                            parse_annotation(&rets.node)?
-                        )
-                    )
+                    return_types.push(Some(parse_annotation(&rets.node)?))
                 }
             } else {
                 // if no anntation at all, set it to all None
@@ -417,7 +437,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                 args: arg_names,
                 returns: ret_names,
                 arg_types,
-                return_types
+                return_types,
             })
         } else {
             Err(CoprError::Other {
@@ -605,20 +625,22 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
             }
         }
     }
-    for (idx, arg) in args.iter().enumerate(){
+    for (idx, arg) in args.iter().enumerate() {
         let anno_ty = copr.arg_types[idx].to_owned();
         let real_ty = arg.to_arrow_array().data_type().to_owned();
         let is_nullable: bool = rb.schema().fields[idx].is_nullable;
-        ensure!(anno_ty.to_owned().map(
-            |v|v.datatype==real_ty && 
-            v.is_nullable == is_nullable).unwrap_or(true),
-            OtherSnafu{reason: 
-                format!(
-                    "column {}'s Type annotation is {:?}, but actual type is {:?}", 
-                    copr.args[idx], 
-                    anno_ty, 
-                    real_ty
-                )})
+        ensure!(
+            anno_ty
+                .to_owned()
+                .map(|v| v.datatype == real_ty && v.is_nullable == is_nullable)
+                .unwrap_or(true),
+            OtherSnafu {
+                reason: format!(
+                    "column {}'s Type annotation is {:?}, but actual type is {:?}",
+                    copr.args[idx], anno_ty, real_ty
+                )
+            }
+        )
     }
     // 4. then set args in scope and call by compiler and run `CodeObject` which already append `Call` node
     vm::Interpreter::without_stdlib(Default::default()).enter(
@@ -640,7 +662,6 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
             let run_res = vm.run_code_obj(code_obj, scope);
             let ret = run_res?;
 
-            
             // convert a tuple of `PyVector` or one `PyVector` to a `Vec<ArrayRef>` then finailly to a `DfRecordBatch`
             // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
             let mut cols: Vec<ArrayRef> = Vec::new();
@@ -674,20 +695,20 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                         .unwrap_or_else(||
                             // default to be not nullable and use DataType infered by PyVector
                             AnnotationInfo{
-                                datatype: cols[idx].data_type().to_owned(), 
+                                datatype: cols[idx].data_type().to_owned(),
                                 is_nullable: false,
                                 need_coerced: false
                             }
                         );
                         Field::new(
-                            name, 
-                            ty, 
-                            is_nullable)
+                            name,
+                            ty,
+                            is_nullable
+                        )
                     }
                     )
                     .collect::<Vec<Field>>(),
             ));
-            
             ensure!(
                 cols.len() == copr.returns.len(),
                 OtherSnafu {
@@ -705,8 +726,8 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                 if let Some(anno) = anno{
                     if anno.need_coerced && real_ty != anno_ty{
                         *col = arrow::compute::cast::cast(
-                            col.as_ref(), 
-                            anno_ty, 
+                            col.as_ref(),
+                            anno_ty,
                             CastOptions { wrapped: true, partial: true })
                             .unwrap().into();
                     }else{
