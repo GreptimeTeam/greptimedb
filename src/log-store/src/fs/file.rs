@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
+use std::sync::atomic::Ordering::Acquire;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -8,11 +9,11 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use bytes::{Bytes, BytesMut};
 use common_error::ext::BoxedError;
+use common_telemetry::debug;
 use common_telemetry::logging::{error, info};
-use common_telemetry::warn;
 use futures_util::StreamExt;
 use memmap2::{Mmap, MmapOptions};
-use snafu::{Backtrace, GenerateImplicitData, ResultExt};
+use snafu::ResultExt;
 use store_api::logstore::entry::{Encode, Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
 use store_api::logstore::namespace::Namespace;
@@ -53,6 +54,30 @@ impl FileWriter {
         handle.await.unwrap() // TODO(hl): remove this unwrap
     }
 
+    /// Writes a batch of `AppendRequest` to file.
+    pub async fn write_batch(self: &Arc<Self>, batch: &Vec<AppendRequest>) -> Result<usize> {
+        let mut futures = Vec::with_capacity(batch.len());
+
+        let mut max_offset = 0;
+        for req in batch {
+            let offset = req.offset;
+            let end = req.data.len() + offset;
+            max_offset = max_offset.max(end);
+            let future = self.write(req.data.clone(), offset as u64);
+            futures.push(future);
+        }
+
+        // TODO(hl): convenient to convert Result<Vec<()>> to Result<()>
+        match futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+        {
+            Ok(_) => Ok(max_offset),
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn flush(&self) -> Result<()> {
         let file = self.inner.clone();
         let handle =
@@ -64,7 +89,7 @@ impl FileWriter {
 // TODO(hl): use pwrite polyfill in different platforms, avoid write syscall in each append request.
 pub struct LogFile {
     name: FileName,
-    file: Arc<FileWriter>, // TODO(hl): do we need two arc here
+    writer: Arc<FileWriter>, // TODO(hl): do we need two arc here
     path: String,
     write_offset: Arc<AtomicUsize>,
     flush_offset: Arc<AtomicUsize>,
@@ -110,7 +135,7 @@ impl LogFile {
 
         let mut log = Self {
             name: file_name,
-            file: Arc::new(FileWriter::new(Arc::new(file))),
+            writer: Arc::new(FileWriter::new(Arc::new(file))),
             path: path.to_string(),
             write_offset: Arc::new(AtomicUsize::new(0)),
             flush_offset: Arc::new(AtomicUsize::new(0)),
@@ -125,7 +150,7 @@ impl LogFile {
             stopped: Arc::new(AtomicBool::new(false)),
         };
 
-        let metadata = log.file.inner.metadata().context(IoSnafu)?;
+        let metadata = log.writer.inner.metadata().context(IoSnafu)?;
         let expect_length = metadata.len() as usize;
         log.write_offset.store(expect_length, Ordering::Relaxed);
         log.flush_offset.store(expect_length, Ordering::Relaxed);
@@ -148,7 +173,7 @@ impl LogFile {
     /// Creates a file mmap region.
     async fn map(&self, start: u64, length: usize) -> Result<Mmap> {
         unsafe {
-            let file = self.file.inner.clone();
+            let file = self.writer.inner.clone();
             MmapOptions::new()
                 .offset(start)
                 .len(length)
@@ -169,14 +194,6 @@ impl LogFile {
         self.next_entry_id.load(Ordering::Relaxed)
     }
 
-    /// Increases write offset field by `delta` and return the previous value.
-    #[inline]
-    fn inc_offset(&self, delta: usize) -> usize {
-        // Relaxed order is enough since no sync-with relationship
-        // between `offset` and any other field.
-        self.write_offset.fetch_add(delta, Ordering::Relaxed)
-    }
-
     /// Increases next entry field by `delta` and return the previous value.
     fn inc_entry_id(&self) -> u64 {
         // Relaxed order is enough since no sync-with relationship
@@ -187,7 +204,7 @@ impl LogFile {
     /// Starts log file and it's internal components(including flush task, etc.).
     pub async fn start(&mut self) -> Result<()> {
         let notify = self.notify.clone();
-        let file = self.file.clone();
+        let writer = self.writer.clone();
 
         let write_offset = self.write_offset.clone();
         let flush_offset = self.flush_offset.clone();
@@ -196,7 +213,6 @@ impl LogFile {
 
         if let Some(mut rx) = self.pending_request_rx.take() {
             let handle = tokio::spawn(async move {
-                let mut error_occurred = false;
                 while !stopped.load(Ordering::Acquire) {
                     let mut batch: Vec<AppendRequest> = Vec::with_capacity(LOG_WRITER_BATCH_SIZE);
 
@@ -218,38 +234,50 @@ impl LogFile {
                                 }
                                 TryRecvError::Disconnected => {
                                     info!("Channel disconnected...");
-                                    error_occurred = true;
                                     break;
                                 }
                             },
                         }
                     }
 
-                    let max_offset = Self::write_batch(&file, &batch).await.unwrap();
-                    // flush all pending data to disk
-                    if let Err(flush_err) = file.flush().await {
-                        error!("Failed to flush log file: {}", flush_err);
-                        error_occurred = true;
+                    let prev_write_offset = write_offset.load(Ordering::Acquire);
+                    info!("Batch size: {}", batch.len());
+                    for mut req in &mut batch {
+                        req.offset = write_offset.fetch_add(req.data.len(), Ordering::AcqRel);
+                        info!(
+                            "Write offset, {}->{}",
+                            req.offset,
+                            write_offset.load(Ordering::Acquire)
+                        );
                     }
-                    if error_occurred {
-                        info!("Flush task stop");
-                        break;
-                    }
-                    let prev = flush_offset.swap(max_offset, Ordering::Relaxed);
-                    info!("Flush offset: {} -> {}", prev, max_offset);
-                    while let Some(req) = batch.pop() {
-                        req.complete();
+
+                    match writer.write_batch(&batch).await {
+                        Ok(max_offset) => match writer.flush().await {
+                            Ok(_) => {
+                                let prev = flush_offset.swap(max_offset, Ordering::Acquire);
+                                debug!(
+                                    "Flush offset: {} -> {}, max offset in batch: {}",
+                                    prev,
+                                    flush_offset.load(Acquire),
+                                    max_offset
+                                );
+                                batch.into_iter().for_each(AppendRequest::complete);
+                            }
+                            Err(e) => {
+                                error!("Failed to flush log file: {}", e);
+                                batch.into_iter().for_each(|r| r.fail());
+                                write_offset.store(prev_write_offset, Ordering::Release);
+                            }
+                        },
+                        Err(e) => {
+                            error!("Failed to write append requests, error: {}", e);
+                            batch.into_iter().for_each(|r| r.fail());
+                            write_offset.store(prev_write_offset, Ordering::Release);
+                        }
                     }
                 }
 
-                // drain all pending request on stopping.
-                let write_offset_read = write_offset.load(Ordering::Relaxed);
-                if file.flush().await.is_ok() {
-                    flush_offset.store(write_offset_read, Ordering::Release);
-                    while let Ok(req) = rx.try_recv() {
-                        req.complete()
-                    }
-                }
+                // TODO(hl): drain all request on stop
                 Ok(())
             });
 
@@ -279,29 +307,6 @@ impl LogFile {
     #[inline]
     pub fn start_entry_id(&self) -> Id {
         self.start_entry_id
-    }
-
-    /// Writes a batch of `AppendRequest` to file.
-    async fn write_batch(writer: &Arc<FileWriter>, batch: &Vec<AppendRequest>) -> Result<usize> {
-        let mut futures = Vec::with_capacity(batch.len());
-
-        let mut max_offset = 0;
-        for req in batch {
-            let offset = req.offset;
-            max_offset = max_offset.max(offset);
-            let future = writer.write(req.data.clone(), offset as u64);
-            futures.push(future);
-        }
-
-        // TODO(hl): convenient to convert Result<Vec<()>> to Result<()>
-        match futures::future::join_all(futures)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()
-        {
-            Ok(_) => Ok(max_offset),
-            Err(e) => Err(e),
-        }
     }
 
     /// Replays current file til last entry read
@@ -397,8 +402,6 @@ impl LogFile {
         }
 
         let entry_id = self.inc_entry_id();
-        let entry_offset = self.inc_offset(size);
-
         // rewrite encoded data
         LittleEndian::write_u64(&mut serialized[0..8], entry_id);
         let checksum = CRC_ALGO.checksum(&serialized[0..size - 4]);
@@ -409,7 +412,7 @@ impl LogFile {
             .send(AppendRequest {
                 data: Arc::new(serialized.freeze()),
                 tx,
-                offset: entry_offset,
+                offset: 0,
                 id: entry_id,
             })
             .await
@@ -422,17 +425,14 @@ impl LogFile {
 
         self.notify.notify_one(); // notify write thread.
 
-        rx.await.map_err(|e| {
-            warn!(
-                "Error while waiting for append result:{}, file {}",
-                e,
-                self.name.to_string()
-            );
-            Error::Internal {
-                msg: "Sender already dropped".to_string(),
-                backtrace: Backtrace::generate(),
-            }
-        })
+        rx.await
+            .expect("Sender dropped while waiting for append result")
+            .map_err(|_| {
+                InternalSnafu {
+                    msg: "Failed to write request".to_string(),
+                }
+                .build()
+            })
     }
 
     #[inline]
@@ -472,19 +472,25 @@ pub type LogFileRef = Arc<LogFile>;
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct AppendRequest {
-    tx: OneshotSender<AppendResponseImpl>,
+    tx: OneshotSender<std::result::Result<AppendResponseImpl, ()>>,
     offset: Offset,
     id: Id,
     data: Arc<Bytes>,
 }
 
 impl AppendRequest {
+    #[inline]
     pub fn complete(self) {
         // TODO(hl): use this result.
-        let _ = self.tx.send(AppendResponseImpl {
+        let _ = self.tx.send(Ok(AppendResponseImpl {
             offset: self.offset,
             entry_id: self.id,
-        });
+        }));
+    }
+
+    #[inline]
+    pub fn fail(self) {
+        let _ = self.tx.send(Err(()));
     }
 }
 
