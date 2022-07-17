@@ -494,28 +494,21 @@ impl Decoder for WriteBatchArrowDecoder {
         let mut reader = ArrowStreamReader::new(reader, metadata);
         let schema = reader.metadata().schema.clone();
 
-        let mut chunks = Vec::with_capacity(self.mutation_exts.len());
-
         let stream_states = self
             .mutation_exts
             .iter()
             .map(|ext| reader.maybe_next(&ext.null_mask).context(DecodeArrowSnafu))
             .collect::<Result<Vec<_>>>()?;
 
-        // check if finished
+        // check if exactly finished
         ensure!(
-            !reader.is_finished(),
+            reader.check_exactly_finished().context(DecodeArrowSnafu)?,
             DataCorruptionSnafu {
-                message: "Impossible, there are less data chunks than expected."
+                message: "Impossible, the num of data chunks is different than expected."
             }
         );
-        let _ = reader.maybe_next(&vec![]).context(DecodeArrowSnafu)?;
-        ensure!(
-            reader.is_finished(),
-            DataCorruptionSnafu {
-                message: "Impossible, there are more data chunks than expected."
-            }
-        );
+
+        let mut chunks = Vec::with_capacity(self.mutation_exts.len());
 
         for state_opt in stream_states {
             match state_opt {

@@ -43,6 +43,17 @@ impl<R: Read> ArrowStreamReader<R> {
         self.finished
     }
 
+    /// Check if the stream is exactly finished
+    pub fn check_exactly_finished(&mut self) -> Result<bool> {
+        if self.is_finished() {
+            return Ok(false);
+        }
+
+        let _ = self.maybe_next(&vec![])?;
+
+        Ok(self.is_finished())
+    }
+
     pub fn maybe_next(&mut self, null_mask: &Vec<u8>) -> Result<Option<StreamState>> {
         if self.finished {
             return Ok(None);
