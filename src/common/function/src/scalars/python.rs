@@ -135,7 +135,59 @@ fn into_datatype(ty: &str) -> Option<DataType> {
         _ => None,
     }
 }
-fn get_from_subscript(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
+
+/// Item => NativeType | into `(` NativeType `)`
+fn parse_item(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
+    match sub{
+        ast::ExprKind::Name { id, ctx: _ } => {
+            let ty = into_datatype(id).ok_or(CoprError::Other {
+                reason: format!("unknown type: {id}"),
+            })?;
+            Ok(AnnotationInfo{
+                datatype: ty, 
+                is_nullable:false,
+                need_coerced: false,
+            })
+        }
+        ast::ExprKind::Call { func, args, keywords:_ }=>{
+            
+            let need_coerced = if let ast::ExprKind::Name { id, ctx: _ } = &func.node{
+                ensure!(
+                    id.as_str() =="into", 
+                    OtherSnafu{
+                        reason: format!("Expect only `into(datatype)` or datatype or `None`, found {id}")
+                    }
+                );
+                true
+            }else{
+                todo!()
+            };
+            let ty = if let ast::ExprKind::Name { id, ctx: _ } = &args[0].node{
+                into_datatype(id).ok_or(CoprError::Other {
+                    reason: format!("unknown type: {id}"),
+                })
+            }else{
+                todo!()
+            };
+            Ok(AnnotationInfo{
+                datatype: ty?,
+                is_nullable: false,
+                need_coerced
+            })
+        }
+        _ => todo!()
+    }
+}
+
+
+/// where:
+/// 
+/// Start => vector`[`TYPE`]`
+/// 
+/// TYPE => Item | Item `|` None
+/// 
+/// Item => NativeType | into(NativeType) 
+fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
     if let ast::ExprKind::Subscript {
         value,
         slice,
@@ -154,21 +206,11 @@ fn get_from_subscript(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> 
         }
         // i.e: vector[f64]
         match &slice.node{
-            ast::ExprKind::Name { id, ctx: _ } => {
-                let ty = into_datatype(id).ok_or(CoprError::Other {
-                    reason: format!("unknown type: {id}"),
-                })?;
-                Ok(AnnotationInfo{
-                    datatype: ty, 
-                    is_nullable:false,
-                    need_coerced: false,
-                })
-                
-            }
+            ast::ExprKind::Name { id: _, ctx: _ } => parse_item(&slice.node),
+            ast::ExprKind::Call { func: _, args: _, keywords: _ }=> parse_item(&slice.node),
             ast::ExprKind::BinOp { left, op: _, right } => {
                 let mut is_nullable = false;
-                let mut ty = None;
-                let mut need_cast = false;
+                let mut tmp_anno = None;
                 for i in [left, right]{
                     match &i.node{
                         ast::ExprKind::Constant { value, kind: _ } => {
@@ -178,38 +220,25 @@ fn get_from_subscript(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> 
                             );
                             is_nullable = true;
                         }
-                        ast::ExprKind::Name { id, ctx: _ } => {
-                            ty = Some(into_datatype(id).ok_or(CoprError::Other {
-                                reason: format!("unknown type: {id}"),
-                            }));
+                        ast::ExprKind::Name { id: _, ctx: _ } => 
+                        if tmp_anno.is_none() {
+                            tmp_anno=Some(parse_item(&i.node)?)
+                        }else{
+                            todo!()
                         }
-                        ast::ExprKind::Call { func, args, keywords:_ }=>{
-                            if let ast::ExprKind::Name { id, ctx: _ } = &func.node{
-                                ensure!(
-                                    id.as_str() =="into", 
-                                    OtherSnafu{
-                                        reason: format!("Expect only `into(datatype)` or datatype or `None`, found {id}")
-                                    }
-                                );
-                                need_cast = true;
-                            }else{
-                                todo!()
-                            }
-                            if let ast::ExprKind::Name { id, ctx: _ } = &args[0].node{
-                                ty = Some(into_datatype(id).ok_or(CoprError::Other {
-                                    reason: format!("unknown type: {id}"),
-                                }));
-                            }
+                        ast::ExprKind::Call { func: _, args: _, keywords:_ }=>
+                        if tmp_anno.is_none() {
+                            tmp_anno=Some(parse_item(&i.node)?)
+                        }else{
+                            todo!()
                         }
                         _ => todo!()
                     }
                 }
-                ensure!(ty.is_some(), OtherSnafu{reason: "Expect type, not two `None`"});
-                Ok(AnnotationInfo{
-                    datatype: ty.unwrap()?, 
-                    is_nullable,
-                    need_coerced: need_cast
-                })
+                ensure!(tmp_anno.is_some(), OtherSnafu{reason: "Expect type, not two `None`"});
+                let mut tmp_anno = tmp_anno.unwrap();
+                tmp_anno.is_nullable = is_nullable;
+                Ok(tmp_anno)
             }
             _ => todo!()
         }
@@ -329,7 +358,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
             for arg in &fn_args.args {
                 if let Some(anno) = &arg.node.annotation {
                     arg_types.push(Some(
-                        get_from_subscript(&anno.node)?
+                        parse_annotation(&anno.node)?
                     ))
                 } else {
                     arg_types.push(None)
@@ -343,7 +372,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                     for elem in elts {
                         return_types.push(
                             Some(
-                                get_from_subscript(&elem.node)?
+                                parse_annotation(&elem.node)?
                             )
                         )
                     }
@@ -355,7 +384,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                 {
                     return_types.push(
                         Some(
-                            get_from_subscript(&rets.node)?
+                            parse_annotation(&rets.node)?
                         )
                     )
                 }
@@ -734,9 +763,9 @@ mod tests {
     #[allow(unused)]
     fn test_type_anno() {
         let python_source = r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[f64]):
-    return cpu + mem, cpu - mem
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#;
         let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
         //dbg!(pyast);
@@ -761,7 +790,7 @@ a(2,3)
     fn test_coprocessor() {
         let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64]):
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[into(f32)]):
     return cpu + mem, cpu - mem
 "#;
         //println!("{}, {:?}", python_source, python_ast);
