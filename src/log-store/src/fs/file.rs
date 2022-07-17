@@ -1,23 +1,22 @@
 use std::fmt::{Debug, Formatter};
-use std::io::SeekFrom;
+use std::fs::{File, OpenOptions};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_stream::stream;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use common_error::ext::BoxedError;
+use common_error::status_code::StatusCode::Internal;
 use common_telemetry::logging::{error, info};
 use common_telemetry::warn;
 use futures_util::StreamExt;
-use memmap2::{Mmap, MmapOptions};
+use memmap2::Mmap;
 use snafu::{Backtrace, GenerateImplicitData, ResultExt};
 use store_api::logstore::entry::{Encode, Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
 use store_api::logstore::namespace::Namespace;
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver as MpscReceiver;
 use tokio::sync::mpsc::Sender as MpscSender;
@@ -26,7 +25,7 @@ use tokio::sync::{oneshot, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time;
 
-use crate::error::{AppendSnafu, Error, IoSnafu, OpenLogSnafu, Result};
+use crate::error::{AppendSnafu, Error, InternalSnafu, IoSnafu, OpenLogSnafu, Result};
 use crate::fs::config::LogConfig;
 use crate::fs::crc::CRC_ALGO;
 use crate::fs::entry::{EntryImpl, StreamImpl};
@@ -36,10 +35,37 @@ use crate::fs::AppendResponseImpl;
 
 const LOG_WRITER_BATCH_SIZE: usize = 16;
 
+/// Wraps File operation to get rid of `&mut self` requirements
+struct FileWriter {
+    inner: Arc<File>,
+}
+
+impl FileWriter {
+    pub fn new(file: Arc<File>) -> Self {
+        let inner = file.clone();
+        Self { inner }
+    }
+
+    pub async fn write(&self, data: Arc<Bytes>, offset: u64) -> Result<()> {
+        let file = self.inner.clone();
+        let handle = common_runtime::spawn_blocking_write(move || {
+            crate::fs::io::pwrite_all(&file, &data, offset)
+        });
+        handle.await.unwrap() // TODO(hl): remove this unwrap
+    }
+
+    pub async fn flush(&self) -> Result<()> {
+        let file = self.inner.clone();
+        let handle =
+            common_runtime::spawn_blocking_write(move || file.sync_data().context(IoSnafu));
+        handle.await.unwrap() // TODO(hl): remove this unwrap
+    }
+}
+
 // TODO(hl): use pwrite polyfill in different platforms, avoid write syscall in each append request.
 pub struct LogFile {
     name: FileName,
-    file: Arc<RwLock<File>>,
+    file: Arc<FileWriter>, // TODO(hl): do we need two arc here
     path: String,
     write_offset: Arc<AtomicUsize>,
     flush_offset: Arc<AtomicUsize>,
@@ -77,7 +103,6 @@ impl LogFile {
             .read(true)
             .create(true)
             .open(path.clone())
-            .await
             .context(OpenLogSnafu { file_name: &path })?;
 
         let file_name: FileName = path.as_str().try_into()?;
@@ -86,7 +111,7 @@ impl LogFile {
 
         let mut log = Self {
             name: file_name,
-            file: Arc::new(RwLock::new(file)),
+            file: Arc::new(FileWriter::new(Arc::new(file))),
             path: path.to_string(),
             write_offset: Arc::new(AtomicUsize::new(0)),
             flush_offset: Arc::new(AtomicUsize::new(0)),
@@ -101,7 +126,7 @@ impl LogFile {
             stopped: Arc::new(AtomicBool::new(false)),
         };
 
-        let metadata = log.file.read().await.metadata().await.context(IoSnafu)?;
+        let metadata = log.file.inner.metadata().context(IoSnafu)?;
         let expect_length = metadata.len() as usize;
         log.write_offset.store(expect_length, Ordering::Relaxed);
         log.flush_offset.store(expect_length, Ordering::Relaxed);
@@ -118,30 +143,21 @@ impl LogFile {
         log.write_offset.store(actual_offset, Ordering::Relaxed);
         log.flush_offset.store(actual_offset, Ordering::Relaxed);
         log.next_entry_id.store(next_entry_id, Ordering::Relaxed);
-        log.seek(actual_offset).await?;
         Ok(log)
-    }
-
-    /// Advances file cursor to given offset.
-    async fn seek(&mut self, offset: usize) -> Result<u64> {
-        self.file
-            .write()
-            .await
-            .seek(SeekFrom::Start(offset as u64))
-            .await
-            .context(IoSnafu)
     }
 
     /// Creates a file mmap region.
     async fn map(&self, start: u64, length: usize) -> Result<Mmap> {
-        unsafe {
-            let file = self.file.read().await.try_clone().await.context(IoSnafu)?;
-            MmapOptions::new()
-                .offset(start)
-                .len(length)
-                .map(&file)
-                .context(IoSnafu)
-        }
+        // TODO(hl): reimplement read function
+        unimplemented!()
+        // unsafe {
+        //     let file = self.file.clone();
+        //     MmapOptions::new()
+        //         .offset(start)
+        //         .len(length)
+        //         .map(&file)
+        //         .context(IoSnafu)
+        // }
     }
 
     /// Returns the persisted size of current log file.
@@ -174,7 +190,7 @@ impl LogFile {
     /// Starts log file and it's internal components(including flush task, etc.).
     pub async fn start(&mut self) -> Result<()> {
         let notify = self.notify.clone();
-        let file = self.file.write().await.try_clone().await.context(IoSnafu)?;
+        let file = self.file.clone();
 
         let write_offset = self.write_offset.clone();
         let flush_offset = self.flush_offset.clone();
@@ -183,10 +199,10 @@ impl LogFile {
 
         if let Some(mut rx) = self.pending_request_rx.take() {
             let handle = tokio::spawn(async move {
-                let mut batch: Vec<AppendRequest> = Vec::with_capacity(LOG_WRITER_BATCH_SIZE);
-
                 let mut error_occurred = false;
                 while !stopped.load(Ordering::Acquire) {
+                    let mut batch: Vec<AppendRequest> = Vec::with_capacity(LOG_WRITER_BATCH_SIZE);
+
                     for _ in 0..LOG_WRITER_BATCH_SIZE {
                         match rx.try_recv() {
                             Ok(req) => {
@@ -212,10 +228,11 @@ impl LogFile {
                         }
                     }
 
+                    Self::write_batch(&file, &batch).await.unwrap();
+
                     // flush all pending data to disk
                     let write_offset_read = write_offset.load(Ordering::Relaxed);
-                    // TODO(hl): add flush metrics
-                    if let Err(flush_err) = file.sync_all().await {
+                    if let Err(flush_err) = file.flush().await {
                         error!("Failed to flush log file: {}", flush_err);
                         error_occurred = true;
                     }
@@ -223,6 +240,7 @@ impl LogFile {
                         info!("Flush task stop");
                         break;
                     }
+
                     let prev = flush_offset.load(Ordering::Acquire);
                     flush_offset.store(write_offset_read, Ordering::Relaxed);
                     info!("Flush offset: {} -> {}", prev, write_offset_read);
@@ -233,7 +251,7 @@ impl LogFile {
 
                 // drain all pending request on stopping.
                 let write_offset_read = write_offset.load(Ordering::Relaxed);
-                if file.sync_all().await.is_ok() {
+                if file.flush().await.is_ok() {
                     flush_offset.store(write_offset_read, Ordering::Release);
                     while let Ok(req) = rx.try_recv() {
                         req.complete()
@@ -268,6 +286,27 @@ impl LogFile {
     #[inline]
     pub fn start_entry_id(&self) -> Id {
         self.start_entry_id
+    }
+
+    /// Writes a batch of `AppendRequest` to file.
+    async fn write_batch(writer: &Arc<FileWriter>, batch: &Vec<AppendRequest>) -> Result<()> {
+        let mut futures = Vec::with_capacity(batch.len());
+
+        for req in batch {
+            let offset = req.offset;
+            let future = writer.write(req.data.clone(), offset as u64);
+            futures.push(future);
+        }
+
+        // TODO(hl): convenient to convert Result<Vec<()>> to Result<()>
+        match futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+        {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Replays current file til last entry read
@@ -362,57 +401,43 @@ impl LogFile {
             return Err(Error::Eof);
         }
 
-        let entry_offset;
-        let entry_id;
+        let entry_id = self.inc_entry_id();
+        let entry_offset = self.inc_offset(size);
 
-        {
-            let mut file = self.file.write().await;
-            // generate entry id
-            entry_id = self.inc_entry_id();
-            // rewrite encoded data
-            LittleEndian::write_u64(&mut serialized[0..8], entry_id);
-            // TODO(hl): CRC was calculated twice
-            let checksum = CRC_ALGO.checksum(&serialized[0..size - 4]);
-            LittleEndian::write_u32(&mut serialized[size - 4..], checksum);
-
-            // write to file
-            // TODO(hl): use io buffer and pwrite to reduce syscalls.
-            file.write(&serialized.freeze()).await.context(IoSnafu)?;
-            // generate in-file offset
-            entry_offset = self.inc_offset(size);
-        }
+        // rewrite encoded data
+        LittleEndian::write_u64(&mut serialized[0..8], entry_id);
+        let checksum = CRC_ALGO.checksum(&serialized[0..size - 4]);
+        LittleEndian::write_u32(&mut serialized[size - 4..], checksum);
 
         let (tx, rx) = oneshot::channel();
-
-        if self
-            .pending_request_tx
+        self.pending_request_tx
             .send(AppendRequest {
+                data: Arc::new(serialized.freeze()),
                 tx,
                 offset: entry_offset,
                 id: entry_id,
             })
             .await
-            .is_err()
-        {
-            self.file.write().await.sync_all().await.context(IoSnafu)?;
-            Ok(AppendResponseImpl {
-                offset: entry_offset,
-                entry_id,
-            })
-        } else {
-            self.notify.notify_one(); // notify flush thread.
-            rx.await.map_err(|e| {
-                warn!(
-                    "Error while waiting for append result:{}, file {}",
-                    e,
-                    self.name.to_string()
-                );
-                Error::Internal {
-                    msg: "Sender already dropped".to_string(),
-                    backtrace: Backtrace::generate(),
+            .map_err(|e| {
+                InternalSnafu {
+                    msg: "Send append request",
                 }
-            })
-        }
+                .build()
+            })?;
+
+        self.notify.notify_one(); // notify write thread.
+
+        rx.await.map_err(|e| {
+            warn!(
+                "Error while waiting for append result:{}, file {}",
+                e,
+                self.name.to_string()
+            );
+            Error::Internal {
+                msg: "Sender already dropped".to_string(),
+                backtrace: Backtrace::generate(),
+            }
+        })
     }
 
     #[inline]
@@ -455,6 +480,7 @@ pub(crate) struct AppendRequest {
     tx: OneshotSender<AppendResponseImpl>,
     offset: Offset,
     id: Id,
+    data: Arc<Bytes>,
 }
 
 impl AppendRequest {
@@ -467,82 +493,81 @@ impl AppendRequest {
     }
 }
 
-// TODO(hl): uncomment this test once log file read visibility issue fixed.
-// #[cfg(test)]
-// mod tests {
-//     use std::io::Read;
-//
-//     use common_telemetry::logging;
-//     use futures_util::StreamExt;
-//     use tempdir::TempDir;
-//
-//     use super::*;
-//     use crate::fs::namespace::LocalNamespace;
-//
-//     #[tokio::test]
-//     pub async fn test_create_entry_stream() {
-//         logging::init_default_ut_logging();
-//         let config = LogConfig::default();
-//
-//         let dir = TempDir::new("greptimedb-store-test").unwrap();
-//         let path_buf = dir.path().join("0010.log");
-//         let path = path_buf.to_str().unwrap().to_string();
-//         File::create(path.as_str()).await.unwrap();
-//
-//         let mut file = LogFile::open(path.clone(), &config)
-//             .await
-//             .unwrap_or_else(|_| panic!("Failed to open file: {}", path));
-//         file.start().await.expect("Failed to start log file");
-//
-//         assert_eq!(
-//             10,
-//             file.append(&mut EntryImpl::new("test1".as_bytes()))
-//                 .await
-//                 .expect("Failed to append entry 1")
-//                 .entry_id
-//         );
-//
-//         assert_eq!(
-//             11,
-//             file.append(&mut EntryImpl::new("test-2".as_bytes()))
-//                 .await
-//                 .expect("Failed to append entry 2")
-//                 .entry_id
-//         );
-//
-//         let mut log_file = std::fs::File::open(path.clone()).expect("Test log file does not exist");
-//         let metadata = log_file.metadata().expect("Failed to read file metadata");
-//         info!("Log file metadata: {:?}", metadata);
-//
-//         assert_eq!(59, metadata.len()); // 24+5+24+6
-//         let mut content = vec![0; metadata.len() as usize];
-//         log_file
-//             .read_exact(&mut content)
-//             .expect("Read log file failed");
-//
-//         info!(
-//             "Log file {:?} content: {}, size:{}",
-//             dir,
-//             hex::encode(content),
-//             metadata.len()
-//         );
-//
-//         let mut stream = file.create_stream(LocalNamespace::default(), 0);
-//
-//         let mut data = vec![];
-//
-//         while let Some(v) = stream.next().await {
-//             let entries = v.unwrap();
-//             let content = entries[0].data();
-//             let vec = content.to_vec();
-//             info!("Read entry: {}", String::from_utf8_lossy(&vec));
-//             data.push(String::from_utf8(vec).unwrap());
-//         }
-//
-//         assert_eq!(vec!["test1".to_string(), "test-2".to_string()], data);
-//         drop(stream);
-//
-//         let result = file.stop().await;
-//         info!("Stop file res: {:?}", result);
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+
+    use common_telemetry::logging;
+    use futures_util::StreamExt;
+    use tempdir::TempDir;
+
+    use super::*;
+    use crate::fs::namespace::LocalNamespace;
+
+    #[tokio::test]
+    pub async fn test_create_entry_stream() {
+        logging::init_default_ut_logging();
+        let config = LogConfig::default();
+
+        let dir = TempDir::new("greptimedb-store-test").unwrap();
+        let path_buf = dir.path().join("0010.log");
+        let path = path_buf.to_str().unwrap().to_string();
+        File::create(path.as_str()).unwrap();
+
+        let mut file = LogFile::open(path.clone(), &config)
+            .await
+            .unwrap_or_else(|_| panic!("Failed to open file: {}", path));
+        file.start().await.expect("Failed to start log file");
+
+        assert_eq!(
+            10,
+            file.append(&mut EntryImpl::new("test1".as_bytes()))
+                .await
+                .expect("Failed to append entry 1")
+                .entry_id
+        );
+
+        assert_eq!(
+            11,
+            file.append(&mut EntryImpl::new("test-2".as_bytes()))
+                .await
+                .expect("Failed to append entry 2")
+                .entry_id
+        );
+
+        let mut log_file = std::fs::File::open(path.clone()).expect("Test log file does not exist");
+        let metadata = log_file.metadata().expect("Failed to read file metadata");
+        info!("Log file metadata: {:?}", metadata);
+
+        assert_eq!(59, metadata.len()); // 24+5+24+6
+        let mut content = vec![0; metadata.len() as usize];
+        log_file
+            .read_exact(&mut content)
+            .expect("Read log file failed");
+
+        info!(
+            "Log file {:?} content: {}, size:{}",
+            dir,
+            hex::encode(content),
+            metadata.len()
+        );
+
+        let mut stream = file.create_stream(LocalNamespace::default(), 0);
+
+        let mut data = vec![];
+
+        while let Some(v) = stream.next().await {
+            let entries = v.unwrap();
+            let content = entries[0].data();
+            let vec = content.to_vec();
+            info!("Read entry: {}", String::from_utf8_lossy(&vec));
+            data.push(String::from_utf8(vec).unwrap());
+        }
+
+        assert_eq!(vec!["test1".to_string(), "test-2".to_string()], data);
+        drop(stream);
+
+        let result = file.stop().await;
+        info!("Stop file res: {:?}", result);
+    }
+}
