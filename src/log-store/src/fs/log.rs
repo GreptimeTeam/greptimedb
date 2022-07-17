@@ -67,7 +67,7 @@ impl LocalFileLogStore {
             .expect("Not expected to fail when initing log store");
 
         active_file.unseal();
-        let active_file_name = active_file.to_string();
+        let active_file_name = active_file.file_name();
         info!("Log store active log file: {}", active_file_name);
 
         // Start active log file
