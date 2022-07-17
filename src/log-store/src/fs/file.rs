@@ -17,7 +17,7 @@ use store_api::logstore::entry::{Encode, Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
 use store_api::logstore::namespace::Namespace;
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::Receiver as MpscReceiver;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender as MpscSender;
 use tokio::sync::oneshot::Sender as OneshotSender;
 use tokio::sync::{oneshot, Notify};
@@ -41,8 +41,7 @@ struct FileWriter {
 
 impl FileWriter {
     pub fn new(file: Arc<File>) -> Self {
-        let inner = file.clone();
-        Self { inner }
+        Self { inner: file }
     }
 
     pub async fn write(&self, data: Arc<Bytes>, offset: u64) -> Result<()> {
@@ -78,7 +77,7 @@ impl FileWriter {
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()
-            .and_then(|_| Ok(max_offset))
+            .map(|_| max_offset)
     }
 
     pub async fn flush(&self) -> Result<()> {
@@ -97,27 +96,27 @@ impl FileWriter {
     }
 }
 
-pub struct LogFile {
-    name: FileName,
-    writer: Arc<FileWriter>,
-    start_entry_id: u64,
-    pending_request_rx: Option<MpscReceiver<AppendRequest>>,
-    pending_request_tx: MpscSender<AppendRequest>,
-    notify: Arc<Notify>,
-    max_file_size: usize,
-    join_handle: Mutex<Option<JoinHandle<Result<()>>>>,
-    state: Arc<State>,
-}
+pub type LogFileRef = Arc<LogFile>;
 
-impl Debug for LogFile {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LogFile")
-            .field("name", &self.name)
-            .field("start_entry_id", &self.start_entry_id)
-            .field("max_file_size", &self.max_file_size)
-            .field("state", &self.state)
-            .finish()
-    }
+pub struct LogFile {
+    // name of log file
+    name: FileName,
+    // file writer
+    writer: Arc<FileWriter>,
+    // append request channel
+    pending_request_tx: Option<MpscSender<AppendRequest>>,
+    // flush task notifier
+    notify: Arc<Notify>,
+    // flush task join handle
+    join_handle: Mutex<Option<JoinHandle<Result<()>>>>,
+    // internal state(offset, id counter...)
+    state: Arc<State>,
+    // the start entry id of current log file
+    start_entry_id: u64,
+    // max file size of current log file
+    max_file_size: usize,
+    // buffer size for append request channel. read from config on start.
+    append_buffer_size: usize,
 }
 
 impl LogFile {
@@ -133,18 +132,17 @@ impl LogFile {
 
         let file_name: FileName = path.as_str().try_into()?;
         let start_entry_id = file_name.entry_id();
-        let (tx, rx) = tokio::sync::mpsc::channel(config.append_buffer_size);
 
         let mut log = Self {
             name: file_name,
             writer: Arc::new(FileWriter::new(Arc::new(file))),
             start_entry_id,
-            pending_request_tx: tx,
-            pending_request_rx: Some(rx),
+            pending_request_tx: None,
             notify: Arc::new(Notify::new()),
             max_file_size: config.max_log_file_size,
             join_handle: Mutex::new(None),
             state: Arc::new(State::default()),
+            append_buffer_size: config.append_buffer_size,
         };
 
         let metadata = log.writer.inner.metadata().context(IoSnafu)?;
@@ -214,85 +212,29 @@ impl LogFile {
         let writer = self.writer.clone();
         let state = self.state.clone();
 
-        if let Some(mut rx) = self.pending_request_rx.take() {
-            let handle = tokio::spawn(async move {
-                while !state.stopped.load(Ordering::Acquire) {
-                    let mut batch: Vec<AppendRequest> = Vec::with_capacity(LOG_WRITER_BATCH_SIZE);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(self.append_buffer_size);
 
-                    for _ in 0..LOG_WRITER_BATCH_SIZE {
-                        match rx.try_recv() {
-                            Ok(req) => {
-                                batch.push(req);
-                            }
-                            Err(e) => match e {
-                                TryRecvError::Empty => {
-                                    if batch.is_empty() {
-                                        notify.notified().await;
-                                        if state.stopped.load(Ordering::Acquire) {
-                                            break;
-                                        }
-                                    } else {
-                                        break;
-                                    }
-                                }
-                                TryRecvError::Disconnected => {
-                                    info!("Channel disconnected...");
-                                    break;
-                                }
-                            },
-                        }
-                    }
-
-                    let prev_write_offset = state.write_offset.load(Ordering::Acquire);
-                    debug!("Batch size: {}", batch.len());
-                    for mut req in &mut batch {
-                        req.offset = state
-                            .write_offset
-                            .fetch_add(req.data.len(), Ordering::AcqRel);
-                        info!(
-                            "Write offset, {}->{}",
-                            req.offset,
-                            state.write_offset.load(Ordering::Acquire)
-                        );
-                    }
-
-                    match writer.write_batch(&batch).await {
-                        Ok(max_offset) => match writer.flush().await {
-                            Ok(_) => {
-                                let prev = state.flush_offset.swap(max_offset, Ordering::Acquire);
-                                debug!(
-                                    "Flush offset: {} -> {}, max offset in batch: {}",
-                                    prev,
-                                    state.flush_offset.load(Acquire),
-                                    max_offset
-                                );
-                                batch.into_iter().for_each(AppendRequest::complete);
-                            }
-                            Err(e) => {
-                                error!("Failed to flush log file: {}", e);
-                                batch.into_iter().for_each(|r| r.fail());
-                                state
-                                    .write_offset
-                                    .store(prev_write_offset, Ordering::Release);
-                            }
-                        },
-                        Err(e) => {
-                            error!("Failed to write append requests, error: {}", e);
-                            batch.into_iter().for_each(|r| r.fail());
-                            state
-                                .write_offset
-                                .store(prev_write_offset, Ordering::Release);
-                        }
-                    }
+        let handle = tokio::spawn(async move {
+            while !state.stopped.load(Ordering::Acquire) {
+                let batch = Self::recv_batch(&mut rx, &state, &notify, true).await;
+                debug!("Receive write request, size: {}", batch.len());
+                if !batch.is_empty() {
+                    Self::handle_batch(batch, &state, &writer).await;
                 }
+            }
 
-                // TODO(hl): drain all request on stop
-                Ok(())
-            });
+            // log file stopped
+            let batch = Self::recv_batch(&mut rx, &state, &notify, false).await;
+            if !batch.is_empty() {
+                Self::handle_batch(batch, &state, &writer).await;
+            }
+            info!("Writer task finished");
+            Ok(())
+        });
 
-            *self.join_handle.lock().unwrap() = Some(handle);
-            info!("Flush task started: {}", self.name);
-        }
+        self.pending_request_tx = Some(tx);
+        *self.join_handle.lock().unwrap() = Some(handle);
+        info!("Flush task started: {}", self.name);
         Ok(())
     }
 
@@ -311,6 +253,88 @@ impl LogFile {
         let res = join_handle.await.unwrap();
         info!("LogFile task finished: {:?}", res);
         res
+    }
+
+    async fn handle_batch(
+        mut batch: Vec<AppendRequest>,
+        state: &Arc<State>,
+        writer: &Arc<FileWriter>,
+    ) {
+        // preserve previous write offset
+        let prev_write_offset = state.write_offset.load(Ordering::Acquire);
+
+        for mut req in &mut batch {
+            req.offset = state
+                .write_offset
+                .fetch_add(req.data.len(), Ordering::AcqRel);
+            info!(
+                "Write offset, {}->{}",
+                req.offset,
+                state.write_offset.load(Ordering::Acquire)
+            );
+        }
+
+        match writer.write_batch(&batch).await {
+            Ok(max_offset) => match writer.flush().await {
+                Ok(_) => {
+                    let prev = state.flush_offset.swap(max_offset, Ordering::Acquire);
+                    debug!(
+                        "Flush offset: {} -> {}, max offset in batch: {}",
+                        prev,
+                        state.flush_offset.load(Ordering::Acquire),
+                        max_offset
+                    );
+                    batch.into_iter().for_each(AppendRequest::complete);
+                }
+                Err(e) => {
+                    error!("Failed to flush log file: {}", e);
+                    batch.into_iter().for_each(|r| r.fail());
+                    state
+                        .write_offset
+                        .store(prev_write_offset, Ordering::Release);
+                }
+            },
+            Err(e) => {
+                error!("Failed to write append requests, error: {}", e);
+                batch.into_iter().for_each(|r| r.fail());
+                state
+                    .write_offset
+                    .store(prev_write_offset, Ordering::Release);
+            }
+        }
+    }
+
+    async fn recv_batch(
+        rx: &mut Receiver<AppendRequest>,
+        state: &Arc<State>,
+        notify: &Arc<Notify>,
+        wait_on_empty: bool,
+    ) -> Vec<AppendRequest> {
+        let mut batch: Vec<AppendRequest> = Vec::with_capacity(LOG_WRITER_BATCH_SIZE);
+        for _ in 0..LOG_WRITER_BATCH_SIZE {
+            match rx.try_recv() {
+                Ok(req) => {
+                    batch.push(req);
+                }
+                Err(e) => match e {
+                    TryRecvError::Empty => {
+                        if batch.is_empty() && wait_on_empty {
+                            notify.notified().await;
+                            if state.stopped.load(Ordering::Acquire) {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    TryRecvError::Disconnected => {
+                        error!("Channel unexpectedly disconnected!");
+                        break;
+                    }
+                },
+            }
+        }
+        batch
     }
 
     #[inline]
@@ -418,6 +442,8 @@ impl LogFile {
 
         let (tx, rx) = oneshot::channel();
         self.pending_request_tx
+            .as_ref()
+            .expect("Call start before write to LogFile!")
             .send(AppendRequest {
                 data: Arc::new(serialized.freeze()),
                 tx,
@@ -468,9 +494,17 @@ impl LogFile {
     }
 }
 
-pub type LogFileRef = Arc<LogFile>;
+impl Debug for LogFile {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogFile")
+            .field("name", &self.name)
+            .field("start_entry_id", &self.start_entry_id)
+            .field("max_file_size", &self.max_file_size)
+            .field("state", &self.state)
+            .finish()
+    }
+}
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct AppendRequest {
     tx: OneshotSender<std::result::Result<AppendResponseImpl, ()>>,
