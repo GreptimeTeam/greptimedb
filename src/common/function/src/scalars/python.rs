@@ -36,7 +36,8 @@ struct Coprocessor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AnnotationInfo{
     datatype: DataType,
-    is_nullable: bool
+    is_nullable: bool,
+    need_cast: bool
 }
 
 #[derive(Debug, Snafu)]
@@ -157,16 +158,18 @@ fn get_from_subscript(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> 
                 })?;
                 Ok(AnnotationInfo{
                     datatype: ty, 
-                    is_nullable:false
+                    is_nullable:false,
+                    need_cast: false,
                 })
                 
             }
-            ast::ExprKind::BinOp { left, op, right } => {
+            ast::ExprKind::BinOp { left, op: _, right } => {
                 let mut is_nullable = false;
                 let mut ty = None;
+                let mut need_cast = false;
                 for i in [left, right]{
                     match &i.node{
-                        ast::ExprKind::Constant { value, kind } => {
+                        ast::ExprKind::Constant { value, kind: _ } => {
                             ensure!(
                                 matches!(value, ast::Constant::None),
                                 OtherSnafu{reason: format!("Expect only typenames and `None`, found{:?}", i.node)}
@@ -178,11 +181,33 @@ fn get_from_subscript(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> 
                                 reason: format!("unknown type: {id}"),
                             }));
                         }
+                        ast::ExprKind::Call { func, args, keywords:_ }=>{
+                            if let ast::ExprKind::Name { id, ctx: _ } = &func.node{
+                                ensure!(
+                                    id.as_str() =="into", 
+                                    OtherSnafu{
+                                        reason: format!("Expect only `into(datatype)` or datatype or `None`, found {id}")
+                                    }
+                                );
+                                need_cast = true;
+                            }else{
+                                todo!()
+                            }
+                            if let ast::ExprKind::Name { id, ctx: _ } = &args[0].node{
+                                ty = Some(into_datatype(id).ok_or(CoprError::Other {
+                                    reason: format!("unknown type: {id}"),
+                                }));
+                            }
+                        }
                         _ => todo!()
                     }
                 }
                 ensure!(ty.is_some(), OtherSnafu{reason: "Expect type, not two `None`"});
-                Ok(AnnotationInfo{datatype: ty.unwrap()?, is_nullable})
+                Ok(AnnotationInfo{
+                    datatype: ty.unwrap()?, 
+                    is_nullable,
+                    need_cast
+                })
             }
             _ => todo!()
         }
@@ -552,8 +577,10 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
     for (idx, arg) in args.iter().enumerate(){
         let anno_ty = copr.arg_types[idx].to_owned();
         let real_ty = arg.to_arrow_array().data_type().to_owned();
-        let nullable = &rb.schema().fields[idx];
-        ensure!(anno_ty== Some(AnnotationInfo{datatype: real_ty.to_owned(), is_nullable: nullable.is_nullable}), 
+        let is_nullable: bool = rb.schema().fields[idx].is_nullable;
+        ensure!(anno_ty.to_owned().map(
+            |v|v.datatype==real_ty && 
+            v.is_nullable == is_nullable).unwrap_or(true),
             OtherSnafu{reason: 
                 format!(
                     "column {}'s Type annotation is {:?}, but actual type is {:?}", 
@@ -611,13 +638,14 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                     .iter()
                     .enumerate()
                     .map(|(idx,name)| {
-                        let AnnotationInfo { datatype: ty, is_nullable } = copr.return_types[idx]
+                        let AnnotationInfo { datatype: ty, is_nullable , need_cast: _} = copr.return_types[idx]
                         .to_owned()
                         .unwrap_or_else(||
-                            // default to be not nullable and useDataType infered by PyVector
+                            // default to be not nullable and use DataType infered by PyVector
                             AnnotationInfo{
                                 datatype: cols[idx].data_type().to_owned(), 
-                                is_nullable: false
+                                is_nullable: false,
+                                need_cast: false
                             }
                         );
                         Field::new(
@@ -686,12 +714,16 @@ mod tests {
     use super::*;
     #[test]
     fn test_type_anno() {
-        let python_source = "
-def a(a: vector[f64],b: vector[f32])->(vector[f64|None], vector[f64]):
-    return a + b
-";
+        let python_source = r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[f64]):
+    return cpu + mem, cpu - mem
+"#;
         let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
         dbg!(pyast);
+        let copr = parse_copr(python_source);
+        //dbg!(&copr);
+        assert!(copr.is_ok());
     }
     #[test]
     fn test_execute_script() {
