@@ -1,4 +1,5 @@
 //! python udf supports
+use arrow::compute::cast::CastOptions;
 use arrow::error::ArrowError;
 use rustpython_vm as vm;
 mod type_;
@@ -37,7 +38,8 @@ struct Coprocessor {
 struct AnnotationInfo{
     datatype: DataType,
     is_nullable: bool,
-    need_cast: bool
+    /// if the result type need to be coerced to given type in `into(<datatype>)`
+    need_coerced: bool
 }
 
 #[derive(Debug, Snafu)]
@@ -159,7 +161,7 @@ fn get_from_subscript(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> 
                 Ok(AnnotationInfo{
                     datatype: ty, 
                     is_nullable:false,
-                    need_cast: false,
+                    need_coerced: false,
                 })
                 
             }
@@ -206,7 +208,7 @@ fn get_from_subscript(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> 
                 Ok(AnnotationInfo{
                     datatype: ty.unwrap()?, 
                     is_nullable,
-                    need_cast
+                    need_coerced: need_cast
                 })
             }
             _ => todo!()
@@ -638,14 +640,14 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                     .iter()
                     .enumerate()
                     .map(|(idx,name)| {
-                        let AnnotationInfo { datatype: ty, is_nullable , need_cast: _} = copr.return_types[idx]
+                        let AnnotationInfo { datatype: ty, is_nullable , need_coerced: _} = copr.return_types[idx]
                         .to_owned()
                         .unwrap_or_else(||
                             // default to be not nullable and use DataType infered by PyVector
                             AnnotationInfo{
                                 datatype: cols[idx].data_type().to_owned(), 
                                 is_nullable: false,
-                                need_cast: false
+                                need_coerced: false
                             }
                         );
                         Field::new(
@@ -656,7 +658,7 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                     )
                     .collect::<Vec<Field>>(),
             ));
-            // TODO: if returns types is not match, first try convert it to given type, if not possible, return Err
+            
             ensure!(
                 cols.len() == copr.returns.len(),
                 OtherSnafu {
@@ -667,6 +669,22 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                     )
                 }
             );
+            // if cols and schema's data types is not match, first try coerced it to given type(if annotated), if not possible, return Err
+            for ((col, field), anno) in cols.iter_mut().zip(&schema.fields).zip(copr.return_types){
+                let real_ty = col.data_type();
+                let anno_ty = field.data_type();
+                if let Some(anno) = anno{
+                    if anno.need_coerced && real_ty != anno_ty{
+                        *col = arrow::compute::cast::cast(
+                            col.as_ref(), 
+                            anno_ty, 
+                            CastOptions { wrapped: true, partial: true })
+                            .unwrap().into();
+                    }else{
+                        continue;
+                    }
+                }
+            }
             // 6. return a assembled DfRecordBatch
             let res_rb = DfRecordBatch::try_new(schema, cols)?;
             Ok(res_rb)
@@ -713,6 +731,7 @@ mod tests {
 
     use super::*;
     #[test]
+    #[allow(unused)]
     fn test_type_anno() {
         let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
@@ -720,9 +739,9 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[f64])
     return cpu + mem, cpu - mem
 "#;
         let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
-        dbg!(pyast);
+        //dbg!(pyast);
         let copr = parse_copr(python_source);
-        //dbg!(&copr);
+        dbg!(&copr);
         assert!(copr.is_ok());
     }
     #[test]
