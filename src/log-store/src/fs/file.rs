@@ -1,6 +1,5 @@
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
-use std::sync::atomic::Ordering::Acquire;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -51,7 +50,15 @@ impl FileWriter {
         let handle = common_runtime::spawn_blocking_write(move || {
             crate::fs::io::pwrite_all(&file, &data, offset)
         });
-        handle.await.unwrap() // TODO(hl): remove this unwrap
+        handle
+            .await
+            .map_err(|e| {
+                InternalSnafu {
+                    msg: format!("Error while waiting for write finish, error:{}", e),
+                }
+                .build()
+            })
+            .and_then(|e| e) // Result::flatten is unstable now
     }
 
     /// Writes a batch of `AppendRequest` to file.
@@ -67,26 +74,29 @@ impl FileWriter {
             futures.push(future);
         }
 
-        // TODO(hl): convenient to convert Result<Vec<()>> to Result<()>
-        match futures::future::join_all(futures)
+        futures::future::join_all(futures)
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()
-        {
-            Ok(_) => Ok(max_offset),
-            Err(e) => Err(e),
-        }
+            .and_then(|_| Ok(max_offset))
     }
 
     pub async fn flush(&self) -> Result<()> {
         let file = self.inner.clone();
         let handle =
             common_runtime::spawn_blocking_write(move || file.sync_data().context(IoSnafu));
-        handle.await.unwrap() // TODO(hl): remove this unwrap
+        handle
+            .await
+            .map_err(|e| {
+                InternalSnafu {
+                    msg: format!("Error while waiting for flush finish, error: {}", e),
+                }
+                .build()
+            })
+            .and_then(|e| e)
     }
 }
 
-// TODO(hl): use pwrite polyfill in different platforms, avoid write syscall in each append request.
 pub struct LogFile {
     name: FileName,
     writer: Arc<FileWriter>,
@@ -202,7 +212,6 @@ impl LogFile {
     pub async fn start(&mut self) -> Result<()> {
         let notify = self.notify.clone();
         let writer = self.writer.clone();
-
         let state = self.state.clone();
 
         if let Some(mut rx) = self.pending_request_rx.take() {
@@ -235,7 +244,7 @@ impl LogFile {
                     }
 
                     let prev_write_offset = state.write_offset.load(Ordering::Acquire);
-                    info!("Batch size: {}", batch.len());
+                    debug!("Batch size: {}", batch.len());
                     for mut req in &mut batch {
                         req.offset = state
                             .write_offset
@@ -473,7 +482,6 @@ pub(crate) struct AppendRequest {
 impl AppendRequest {
     #[inline]
     pub fn complete(self) {
-        // TODO(hl): use this result.
         let _ = self.tx.send(Ok(AppendResponseImpl {
             offset: self.offset,
             entry_id: self.id,
