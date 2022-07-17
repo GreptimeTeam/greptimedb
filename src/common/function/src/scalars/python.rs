@@ -136,10 +136,10 @@ fn into_datatype(ty: &str) -> Option<DataType> {
     }
 }
 
-/// Item => NativeType | into `(` NativeType `)`
-fn parse_item(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
-    match sub{
-        ast::ExprKind::Name { id, ctx: _ } => {
+/// return AnnotationInfo with is_nullable and need_coerced both set to false
+fn parse_type(node: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
+    match node{
+        ast::ExprKind::Name { id, ctx:_ }=>{
             let ty = into_datatype(id).ok_or(CoprError::Other {
                 reason: format!("unknown type: {id}"),
             })?;
@@ -149,6 +149,14 @@ fn parse_item(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
                 need_coerced: false,
             })
         }
+        _ => todo!()
+    }
+}
+
+/// Item => NativeType | into `(` NativeType `)`
+fn parse_item(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
+    match sub{
+        ast::ExprKind::Name { id: _, ctx: _ } => Ok(parse_type(sub)?),
         ast::ExprKind::Call { func, args, keywords:_ }=>{
             
             let need_coerced = if let ast::ExprKind::Name { id, ctx: _ } = &func.node{
@@ -162,18 +170,10 @@ fn parse_item(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
             }else{
                 todo!()
             };
-            let ty = if let ast::ExprKind::Name { id, ctx: _ } = &args[0].node{
-                into_datatype(id).ok_or(CoprError::Other {
-                    reason: format!("unknown type: {id}"),
-                })
-            }else{
-                todo!()
-            };
-            Ok(AnnotationInfo{
-                datatype: ty?,
-                is_nullable: false,
-                need_coerced
-            })
+            ensure!(args.len()==1, OtherSnafu{reason: "Expect only one arguement for `into`"});
+            let mut anno = parse_type(&args[0].node)?;
+            anno.need_coerced = need_coerced;
+            Ok(anno)
         }
         _ => todo!()
     }
@@ -486,7 +486,7 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
             return Err(CoprError::Other { reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node) });
         }
         let mut loc = code[0].location;
-        // This manually construct ast has no corrsponding code in the script, so just give it a random location(which doesn't matter because it's usually for pretty print errors)
+        // This manually construct ast has no corrsponding code in the script, so just give it a random location(which doesn't matter because Location usually only used in pretty print errors)
         loc.newline();
         let args: Vec<Located<ast::ExprKind>> = copr
             .args
