@@ -10,6 +10,7 @@ use bytes::{Bytes, BytesMut};
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use common_telemetry::logging::{error, info};
+use futures::Stream;
 use futures_util::StreamExt;
 use memmap2::{Mmap, MmapOptions};
 use snafu::ResultExt;
@@ -24,7 +25,9 @@ use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinHandle;
 use tokio::time;
 
+use crate::error::Error::Eof;
 use crate::error::{AppendSnafu, Error, InternalSnafu, IoSnafu, OpenLogSnafu, Result};
+use crate::fs::chunk::Chunk;
 use crate::fs::config::LogConfig;
 use crate::fs::crc::CRC_ALGO;
 use crate::fs::entry::{EntryImpl, StreamImpl};
@@ -32,6 +35,7 @@ use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
 use crate::fs::AppendResponseImpl;
 
+pub const CHUNK_SIZE: usize = 4096;
 const LOG_WRITER_BATCH_SIZE: usize = 16;
 
 /// Wraps File operation to get rid of `&mut self` requirements
@@ -535,6 +539,41 @@ struct State {
     next_entry_id: AtomicU64,
     sealed: AtomicBool,
     stopped: AtomicBool,
+}
+
+fn file_chunk_stream(
+    file: Arc<File>,
+    mut offset: usize,
+    file_size: usize,
+) -> impl Stream<Item = Result<Chunk<CHUNK_SIZE>>> {
+    stream!({
+        loop {
+            if offset >= file_size {
+                return;
+            }
+
+            let data = read_at(&file, offset, file_size)?;
+            let data_len = data.len();
+            yield Ok(data);
+            offset += data_len;
+        }
+    })
+}
+
+fn read_at(file: &Arc<File>, offset: usize, file_length: usize) -> Result<Chunk<CHUNK_SIZE>> {
+    let mut data = [0u8; CHUNK_SIZE];
+    if offset > file_length {
+        return Err(Eof);
+    }
+
+    let end_ofs = data.len().min((file_length - offset) as usize);
+
+    crate::fs::io::pread_exact(&file, &mut data[0..end_ofs], offset as u64)?;
+    Ok(Chunk {
+        data,
+        write: end_ofs,
+        read: 0,
+    })
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use store_api::logstore::entry::{Id, Offset};
 use store_api::logstore::AppendResponse;
 
+mod chunk;
 pub mod config;
 mod crc;
 mod entry;

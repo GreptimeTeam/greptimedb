@@ -197,6 +197,7 @@ mod tests {
     use byteorder::{ByteOrder, LittleEndian};
 
     use super::*;
+    use crate::fs::chunk::{Chunk, CompositeChunk};
     use crate::fs::crc::CRC_ALGO;
 
     #[test]
@@ -229,5 +230,50 @@ mod tests {
 
         let entry_impl = EntryImpl::decode(&mut buffer.freeze()).expect("Failed to deserialize");
         assert_eq!(333, entry_impl.id());
+    }
+
+    fn prepare_entry_bytes(data: &str) -> Bytes {
+        let entry = EntryImpl::new(data.as_bytes());
+        let mut buffer = BytesMut::with_capacity(entry.encoded_size());
+        entry.encode_to(&mut buffer).unwrap();
+        LittleEndian::write_u64(&mut buffer[0..8], 333);
+        let len = buffer.len();
+        let checksum = CRC_ALGO.checksum(&buffer[0..len - 4]);
+        LittleEndian::write_u32(&mut buffer[len - 4..], checksum);
+        buffer.freeze()
+    }
+
+    /// Test decode entry from a composite buffer.
+    #[test]
+    pub fn test_composite_buffer() {
+        let data_1 = "hello, world";
+        let mut c1 = Chunk::default();
+        let bytes = prepare_entry_bytes(data_1);
+        EntryImpl::decode(&mut bytes.clone()).unwrap();
+        c1.write(&bytes);
+
+        let data_2 = "LoremIpsumDolor";
+        let mut c2 = Chunk::default();
+        c2.write(&prepare_entry_bytes(data_2));
+
+        let mut chunks = CompositeChunk::new();
+        chunks.add(c1);
+        chunks.add(c2);
+
+        assert_eq!(
+            ENTRY_MIN_LEN * 2 + data_2.len() + data_1.len(),
+            chunks.remaining_size()
+        );
+
+        let mut decoded = vec![];
+        while chunks.remaining_size() > 0 {
+            let entry_impl = EntryImpl::decode(&mut chunks).unwrap();
+            decoded.push(entry_impl.data);
+        }
+
+        assert_eq!(
+            vec![data_1.as_bytes().to_vec(), data_2.as_bytes().to_vec()],
+            decoded
+        );
     }
 }

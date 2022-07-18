@@ -19,6 +19,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Buffer underflow"))]
+    Underflow {},
     #[snafu(display("IO operation reach EOF, source: {}", source))]
     Eof {
         source: std::io::Error,
@@ -65,12 +67,8 @@ macro_rules! impl_write_le {
     }
 }
 
-pub trait Buffer: AsRef<[u8]> {
-    fn remaining_slice(&self) -> &[u8];
-
-    fn remaining_size(&self) -> usize {
-        self.remaining_slice().len()
-    }
+pub trait Buffer {
+    fn remaining_size(&self) -> usize;
 
     fn is_empty(&self) -> bool {
         self.remaining_size() == 0
@@ -91,9 +89,8 @@ macro_rules! impl_buffer_for_bytes {
     ( $($buf_ty:ty), *) => {
         $(
         impl Buffer for $buf_ty {
-            #[inline]
-            fn remaining_slice(&self) -> &[u8] {
-                &self
+            fn remaining_size(&self) -> usize{
+                self.len()
             }
 
             fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {
@@ -118,8 +115,8 @@ macro_rules! impl_buffer_for_bytes {
 impl_buffer_for_bytes![bytes::Bytes, bytes::BytesMut];
 
 impl Buffer for &[u8] {
-    fn remaining_slice(&self) -> &[u8] {
-        self
+    fn remaining_size(&self) -> usize {
+        self.len()
     }
 
     fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {

@@ -4,7 +4,7 @@
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use bytes::{Buf, BytesMut};
+    use bytes::{Buf, Bytes, BytesMut};
     use common_base::buffer::Error::Overflow;
     use common_base::buffer::{Buffer, BufferMut};
     use paste::paste;
@@ -24,6 +24,14 @@ mod tests {
 
         // after read, buffer should still have 7 bytes to read.
         assert_eq!(7, buf.remaining());
+    }
+
+    #[test]
+    pub fn test_buffer_read() {
+        let mut bytes = Bytes::from_static("hello".as_bytes());
+        assert_eq!(5, bytes.remaining_size());
+        assert_eq!(b'h', bytes.read_u8_le().unwrap());
+        assert_eq!(4, bytes.remaining_size());
     }
 
     macro_rules! test_primitive_read_write {
