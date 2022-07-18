@@ -9,7 +9,7 @@ use crate::{
     codec::{Decoder, Encoder},
     error::{self, Error, Result},
     proto::{self, *},
-    write_batch::{WriteBatch, WriteBatchArrowEncoder},
+    write_batch::{codec::WriteBatchArrowEncoder, WriteBatch},
 };
 
 #[derive(Clone)]

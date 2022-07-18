@@ -54,12 +54,12 @@ impl<R: Read> ArrowStreamReader<R> {
         Ok(self.is_finished())
     }
 
-    pub fn maybe_next(&mut self, null_mask: &[u8]) -> Result<Option<StreamState>> {
+    pub fn maybe_next(&mut self, column_null_mask: &[u8]) -> Result<Option<StreamState>> {
         if self.finished {
             return Ok(None);
         }
 
-        let batch = if null_mask.is_empty() {
+        let batch = if column_null_mask.is_empty() {
             read_next(
                 &mut self.reader,
                 &self.metadata,
@@ -70,7 +70,7 @@ impl<R: Read> ArrowStreamReader<R> {
         } else {
             read_next(
                 &mut self.reader,
-                &valid_metadata(&self.metadata, null_mask),
+                &valid_metadata(&self.metadata, column_null_mask),
                 &mut self.dictionaries,
                 &mut self.message_buffer,
                 &mut self.data_buffer,
@@ -85,15 +85,15 @@ impl<R: Read> ArrowStreamReader<R> {
     }
 }
 
-fn valid_metadata(metadata: &StreamMetadata, null_mask: &[u8]) -> StreamMetadata {
-    let null_mask = bit_vec::BitVec::from_bytes(null_mask);
+fn valid_metadata(metadata: &StreamMetadata, column_null_mask: &[u8]) -> StreamMetadata {
+    let column_null_mask = bit_vec::BitVec::from_bytes(column_null_mask);
 
     let schema = Schema::from(
         metadata
             .schema
             .fields
             .iter()
-            .zip(&null_mask)
+            .zip(&column_null_mask)
             .filter(|(_, mask)| !*mask)
             .map(|(field, _)| field.clone())
             .collect::<Vec<_>>(),
@@ -105,7 +105,7 @@ fn valid_metadata(metadata: &StreamMetadata, null_mask: &[u8]) -> StreamMetadata
             .ipc_schema
             .fields
             .iter()
-            .zip(&null_mask)
+            .zip(&column_null_mask)
             .filter(|(_, mask)| !*mask)
             .map(|(ipc_field, _)| ipc_field.clone())
             .collect::<Vec<_>>(),
