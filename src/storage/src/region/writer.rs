@@ -193,8 +193,9 @@ impl WriterInner {
         manifest: &RegionManifest,
     ) -> Result<()> {
         let version_control = &shared.version_control;
-        // Mutable memtables are full, freeze them.
+        // Freeze all mutable memtables so we can flush them later.
         version_control.freeze_mutable();
+
         if let Some(flush_handle) = self.flush_handle.take() {
             // Previous flush job is incomplete, wait util it is finished (write stall).
             // However the last flush job may fail, in which case, we just return error
