@@ -3,14 +3,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common_time::RangeMillis;
-use snafu::Snafu;
 
 use crate::flush::MemtableWithMeta;
 use crate::memtable::{MemtableId, MemtableRef};
-
-#[derive(Debug, Snafu)]
-#[snafu(display("Failed to freeze mutable memtable, immutable memtable already exists"))]
-pub struct FreezeError;
 
 /// A version of all memtables.
 ///
@@ -31,18 +26,16 @@ impl MemtableVersion {
         &self.mutable
     }
 
-    /// Clone current `MemtableVersion`, try to freeze mutable memtables in the new
-    /// version then returns that version.
-    ///
-    /// Returns `Err` if immutable memtables already exists.
-    pub fn try_freeze_mutable(&self) -> Result<MemtableVersion, FreezeError> {
+    /// Clone current memtable version and freeze its mutable memtables, which moves
+    /// all mutable memtables to immutable memtable list.
+    pub fn freeze_mutable(&self) -> MemtableVersion {
         let mut immutables = self.immutables.clone();
         immutables.push(Arc::new(self.mutable.clone()));
 
-        Ok(MemtableVersion {
+        MemtableVersion {
             mutable: MemtableSet::new(),
             immutables,
-        })
+        }
     }
 
     pub fn mutable_bytes_allocated(&self) -> usize {
@@ -353,7 +346,7 @@ mod tests {
         assert!(v3.memtables_to_flush().1.is_empty());
 
         // Try to freeze s1, s2
-        let v4 = v3.try_freeze_mutable().unwrap();
+        let v4 = v3.freeze_mutable();
         assert_ne!(v1, v4);
         assert_ne!(v2, v4);
         assert_ne!(v3, v4);
@@ -373,7 +366,7 @@ mod tests {
         assert_eq!(v4.immutables, v5.immutables);
 
         // Try to freeze s4
-        let v6 = v5.try_freeze_mutable().unwrap();
+        let v6 = v5.freeze_mutable();
         assert_eq!(v6.immutables.len(), 2);
         assert_eq!(v6.immutables[0], Arc::new(s3));
         assert_eq!(v6.immutables[1], Arc::new(s4.clone()));
