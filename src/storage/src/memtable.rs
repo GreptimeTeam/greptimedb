@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::memtable::btree::BTreeMemtable;
 pub use crate::memtable::inserter::Inserter;
 pub use crate::memtable::schema::MemtableSchema;
-pub use crate::memtable::version::{FreezeError, MemtableSet, MemtableVersion};
+pub use crate::memtable::version::{MemtableSet, MemtableVersion};
 
 /// Unique id for memtables under same region.
 pub type MemtableId = u32;

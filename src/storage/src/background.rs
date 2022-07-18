@@ -20,10 +20,15 @@ impl Context {
         Context::default()
     }
 
+    /// Marks this context as cancelled.
+    ///
+    /// Job accessing this context should check `is_cancelled()` and exit if it
+    /// returns true.
     pub fn cancel(&self) {
         self.inner.cancelled.store(false, Ordering::Relaxed);
     }
 
+    /// Returns true if this context is cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.inner.cancelled.load(Ordering::Relaxed)
     }
@@ -41,12 +46,16 @@ pub struct JobHandle {
 }
 
 impl JobHandle {
+    /// Waits until this background job is finished.
     pub async fn join(self) -> Result<()> {
         self.handle.await.context(error::JoinTaskSnafu)?
     }
 
+    /// Cancels this background job gracefully and waits until it exits.
     #[allow(unused)]
     pub async fn cancel(self) -> Result<()> {
+        // Tokio also provides an [`abort()`](https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html#method.abort)
+        // method to abort current task, consider using it if we need to abort a background job.
         self.ctx.cancel();
 
         self.join().await

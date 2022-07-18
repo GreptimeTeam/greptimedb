@@ -193,13 +193,23 @@ impl WriterInner {
         manifest: &RegionManifest,
     ) -> Result<()> {
         let version_control = &shared.version_control;
-        if version_control.try_freeze_mutable().is_err() {
-            // TODO(yingwen): [flush] Write stall, wait for last flush.
-            unimplemented!()
-        }
+        // Freeze all mutable memtables so we can flush them later.
+        version_control.freeze_mutable();
 
-        // TODO(yingwen): [flush] Flush may fail, so we need to flush both old and new immutable memtables.
-        assert!(self.flush_handle.is_none());
+        if let Some(flush_handle) = self.flush_handle.take() {
+            // Previous flush job is incomplete, wait util it is finished (write stall).
+            // However the last flush job may fail, in which case, we just return error
+            // and abort current write request. The flush handle is left empty, so the next
+            // time we still have chance to trigger a new flush.
+            flush_handle.join().await.map_err(|e| {
+                logging::error!(
+                    "Previous flush job failed, region: {}, err: {}",
+                    shared.name,
+                    e
+                );
+                e
+            })?;
+        }
 
         let current_version = version_control.current();
         let (max_memtable_id, mem_to_flush) = current_version.memtables().memtables_to_flush();
