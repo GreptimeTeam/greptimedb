@@ -6,7 +6,6 @@ use std::sync::Arc;
 use arrow::array::ArrayRef;
 use datafusion_common::Result as DfResult;
 use datafusion_expr::Accumulator as DfAccumulator;
-use datatypes::error::Result as DtResult;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::Helper as VectorHelper;
 use datatypes::vectors::VectorRef;
@@ -91,25 +90,20 @@ impl DfAccumulator for DfAccumulatorAdaptor {
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> DfResult<()> {
-        let vectors = try_into_vectors(values)?;
+        let vectors = VectorHelper::try_into_vectors(values)
+            .context(FromScalarValueSnafu)
+            .map_err(Error::from)?;
         self.0.update_batch(&vectors).map_err(|e| e.into())
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> DfResult<()> {
-        let vectors = try_into_vectors(states)?;
+        let vectors = VectorHelper::try_into_vectors(states)
+            .context(FromScalarValueSnafu)
+            .map_err(Error::from)?;
         self.0.merge_batch(&vectors).map_err(|e| e.into())
     }
 
     fn evaluate(&self) -> DfResult<ScalarValue> {
         self.0.evaluate().map_err(|e| e.into())
     }
-}
-
-fn try_into_vectors(arrays: &[ArrayRef]) -> Result<Vec<VectorRef>> {
-    arrays
-        .iter()
-        .map(VectorHelper::try_into_vector)
-        .collect::<DtResult<Vec<VectorRef>>>()
-        .context(FromScalarValueSnafu)
-        .map_err(Error::from)
 }

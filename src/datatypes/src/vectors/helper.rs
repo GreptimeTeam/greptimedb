@@ -175,4 +175,31 @@ impl Helper {
             _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
         })
     }
+
+    pub fn try_into_vectors(arrays: &[ArrayRef]) -> Result<Vec<VectorRef>> {
+        arrays.iter().map(Self::try_into_vector).try_collect::<_>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::Int32Array;
+
+    use super::*;
+
+    #[test]
+    fn test_try_into_vectors() {
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int32Array::from_vec(vec![1])),
+            Arc::new(Int32Array::from_vec(vec![2])),
+            Arc::new(Int32Array::from_vec(vec![3])),
+        ];
+        let vectors = Helper::try_into_vectors(&arrays);
+        assert!(vectors.is_ok());
+        let vectors = vectors.unwrap();
+        vectors.iter().for_each(|v| assert_eq!(1, v.len()));
+        assert_eq!(Value::Int32(1), vectors[0].get(0));
+        assert_eq!(Value::Int32(2), vectors[1].get(0));
+        assert_eq!(Value::Int32(3), vectors[2].get(0));
+    }
 }
