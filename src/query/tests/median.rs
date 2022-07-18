@@ -93,7 +93,9 @@ where
     // This function serializes our state to `ScalarValue`, which DataFusion uses to pass this
     // state between execution stages. Note that this can be arbitrary data.
     //
-    // TODO(LFC) Use List datatype if there's one.
+    // The `ScalarValue`s returned here will be passed in as argument `states: &[VectorRef]` to
+    // `merge_batch` function, so we cannot use "`ScalarValue::List`" here because there are no
+    // corresponding vectors.
     fn state(&self) -> Result<Vec<ScalarValue>> {
         let nums = self
             .greater
