@@ -14,7 +14,7 @@ use datatypes::prelude::{ConcreteDataType, DataType};
 use crate::function::{
     to_df_return_type, AccumulatorFunctionImplementation, ReturnTypeFunction, StateTypeFunction,
 };
-use crate::logical_plan::accumulator::DfAccumulatorWrapper;
+use crate::logical_plan::accumulator::DfAccumulatorAdaptor;
 use crate::signature::Signature;
 
 /// Logical representation of a user-defined aggregate function (UDAF)
@@ -85,7 +85,7 @@ fn to_df_accumulator_func(
 ) -> DfAccumulatorFunctionImplementation {
     Arc::new(move || {
         let acc = func()?;
-        Ok(Box::new(DfAccumulatorWrapper(acc)))
+        Ok(Box::new(DfAccumulatorAdaptor(acc)))
     })
 }
 

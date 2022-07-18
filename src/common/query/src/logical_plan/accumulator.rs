@@ -83,9 +83,9 @@ pub fn make_state_function(creator: Arc<dyn AccumulatorCreator>) -> StateTypeFun
 /// A wrapper newtype for our Accumulator to DataFusion's Accumulator,
 /// so to make our Accumulator able to be executed by DataFusion query engine.
 #[derive(Debug)]
-pub struct DfAccumulatorWrapper(pub Box<dyn Accumulator>);
+pub struct DfAccumulatorAdaptor(pub Box<dyn Accumulator>);
 
-impl DfAccumulator for DfAccumulatorWrapper {
+impl DfAccumulator for DfAccumulatorAdaptor {
     fn state(&self) -> DfResult<Vec<ScalarValue>> {
         self.0.state().map_err(|e| e.into())
     }
