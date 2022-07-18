@@ -28,48 +28,44 @@ fn insert_batches() -> Vec<Vec<u8>> {
         ],
         ..Default::default()
     };
-    let host_null_mask = vec![0];
     let host_column = Column {
         column_name: "host".to_string(),
         semantic_type: SEMANTIC_TAG,
         values: Some(host_vals),
-        null_mask: host_null_mask,
+        null_mask: vec![0],
     };
 
     let cpu_vals = column::Values {
         f64_values: vec![0.31, 0.41, 0.2],
         ..Default::default()
     };
-    let cpu_null_mask = vec![2];
     let cpu_column = Column {
         column_name: "cpu".to_string(),
         semantic_type: SEMANTIC_FEILD,
         values: Some(cpu_vals),
-        null_mask: cpu_null_mask,
+        null_mask: vec![2],
     };
 
     let mem_vals = column::Values {
         f64_values: vec![0.1, 0.2, 0.3],
         ..Default::default()
     };
-    let mem_null_mask = vec![4];
     let mem_column = Column {
         column_name: "memory".to_string(),
         semantic_type: SEMANTIC_FEILD,
         values: Some(mem_vals),
-        null_mask: mem_null_mask,
+        null_mask: vec![4],
     };
 
     let ts_vals = column::Values {
         i64_values: vec![100, 101, 102, 103],
         ..Default::default()
     };
-    let ts_null_mask = vec![0];
     let ts_column = Column {
         column_name: "ts".to_string(),
         semantic_type: SEMANTIC_TS,
         values: Some(ts_vals),
-        null_mask: ts_null_mask,
+        null_mask: vec![0],
     };
 
     let insert_batch = InsertBatch {
