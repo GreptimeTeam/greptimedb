@@ -30,7 +30,7 @@ pub type AccumulatorFunctionImplementation =
     Arc<dyn Fn() -> Result<Box<dyn Accumulator>> + Send + Sync>;
 
 /// Create Accumulator with the data type of input column.
-pub type AccumulatorCreatorFunc =
+pub type AccumulatorCreatorFunction =
     Arc<dyn Fn(&ConcreteDataType) -> Result<Box<dyn Accumulator>> + Sync + Send>;
 
 /// This signature corresponds to which types an aggregator serializes
@@ -86,7 +86,7 @@ pub fn to_df_return_type(func: ReturnTypeFunction) -> DfReturnTypeFunction {
         let concrete_data_types = data_types
             .iter()
             .map(ConcreteDataType::from_arrow_type)
-            .collect::<Vec<ConcreteDataType>>();
+            .collect::<Vec<_>>();
 
         // evaluate ConcreteDataType
         let eval_result = (func)(&concrete_data_types);

@@ -60,8 +60,8 @@ struct MySumAccumulatorCreator {
 }
 
 impl AccumulatorCreator for MySumAccumulatorCreator {
-    fn creator(&self) -> AccumulatorCreatorFunc {
-        let creator: AccumulatorCreatorFunc = Arc::new(move |input_type: &ConcreteDataType| {
+    fn creator(&self) -> AccumulatorCreatorFunction {
+        let creator: AccumulatorCreatorFunction = Arc::new(move |input_type: &ConcreteDataType| {
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
@@ -80,7 +80,7 @@ impl AccumulatorCreator for MySumAccumulatorCreator {
         creator
     }
 
-    fn get_input_type(&self) -> ConcreteDataType {
+    fn input_type(&self) -> ConcreteDataType {
         self.input_type
             .lock()
             .unwrap()
@@ -100,8 +100,8 @@ impl AccumulatorCreator for MySumAccumulatorCreator {
         }
     }
 
-    fn get_output_type(&self) -> ConcreteDataType {
-        let input_type = self.get_input_type();
+    fn output_type(&self) -> ConcreteDataType {
+        let input_type = self.input_type();
         with_match_primitive_type_id!(
             input_type.logical_type_id(),
             |$S| {
@@ -113,8 +113,8 @@ impl AccumulatorCreator for MySumAccumulatorCreator {
         )
     }
 
-    fn get_state_types(&self) -> Vec<ConcreteDataType> {
-        vec![self.get_output_type()]
+    fn state_types(&self) -> Vec<ConcreteDataType> {
+        vec![self.output_type()]
     }
 }
 

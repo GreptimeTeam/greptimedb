@@ -37,15 +37,15 @@ pub fn create_udf(
 }
 
 pub fn create_udaf(name: &str, creator: Arc<dyn AccumulatorCreator>) -> AggregateUdf {
-    let return_type_func = make_return_function(creator.clone());
-    let accumulator_creator = make_accumulator_function(creator.clone());
-    let state_type_func = make_state_function(creator.clone());
+    let return_type = make_return_function(creator.clone());
+    let accumulator = make_accumulator_function(creator.clone());
+    let state_type = make_state_function(creator.clone());
     AggregateUdf::new(
         name,
-        &Signature::any(1, Volatility::Immutable),
-        &return_type_func,
-        &accumulator_creator,
-        &state_type_func,
+        Signature::any(1, Volatility::Immutable),
+        return_type,
+        accumulator,
+        state_type,
     )
 }
 
@@ -64,7 +64,7 @@ mod tests {
 
     use super::*;
     use crate::error::Result;
-    use crate::function::{make_scalar_function, AccumulatorCreatorFunc};
+    use crate::function::{make_scalar_function, AccumulatorCreatorFunction};
     use crate::prelude::ScalarValue;
     use crate::signature::TypeSignature;
 
@@ -173,21 +173,21 @@ mod tests {
     struct DummyAccumulatorCreator;
 
     impl AccumulatorCreator for DummyAccumulatorCreator {
-        fn creator(&self) -> AccumulatorCreatorFunc {
+        fn creator(&self) -> AccumulatorCreatorFunction {
             Arc::new(|_| Ok(Box::new(DummyAccumulator)))
         }
 
-        fn get_input_type(&self) -> ConcreteDataType {
+        fn input_type(&self) -> ConcreteDataType {
             ConcreteDataType::float64_datatype()
         }
 
         fn set_input_type(&self, _: ConcreteDataType) {}
 
-        fn get_output_type(&self) -> ConcreteDataType {
-            self.get_input_type()
+        fn output_type(&self) -> ConcreteDataType {
+            self.input_type()
         }
 
-        fn get_state_types(&self) -> Vec<ConcreteDataType> {
+        fn state_types(&self) -> Vec<ConcreteDataType> {
             vec![
                 ConcreteDataType::float64_datatype(),
                 ConcreteDataType::uint32_datatype(),

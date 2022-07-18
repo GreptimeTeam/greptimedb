@@ -53,17 +53,17 @@ impl AggregateUdf {
     /// Create a new AggregateUDF
     pub fn new(
         name: &str,
-        signature: &Signature,
-        return_type: &ReturnTypeFunction,
-        accumulator: &AccumulatorFunctionImplementation,
-        state_type: &StateTypeFunction,
+        signature: Signature,
+        return_type: ReturnTypeFunction,
+        accumulator: AccumulatorFunctionImplementation,
+        state_type: StateTypeFunction,
     ) -> Self {
         Self {
             name: name.to_owned(),
-            signature: signature.clone(),
-            return_type: return_type.clone(),
-            accumulator: accumulator.clone(),
-            state_type: state_type.clone(),
+            signature,
+            return_type,
+            accumulator,
+            state_type,
         }
     }
 }

@@ -9,37 +9,15 @@ use common_query::prelude::*;
 use datafusion_common::DataFusionError;
 use datatypes::prelude::*;
 use datatypes::vectors::{PrimitiveVector, StringVector, VectorRef};
+use datatypes::with_match_ordered_primitive_type_id;
 use num::NumCast;
 use snafu::ResultExt;
-
-macro_rules! with_match_ordered_primitive_type_id {
-    ($key_type:expr, | $_:tt $T:ident | $body:tt, $nbody:tt) => {{
-        macro_rules! __with_ty__ {
-            ( $_ $T:ident ) => {
-                $body
-            };
-        }
-
-        match $key_type {
-            LogicalTypeId::Int8 => __with_ty__! { i8 },
-            LogicalTypeId::Int16 => __with_ty__! { i16 },
-            LogicalTypeId::Int32 => __with_ty__! { i32 },
-            LogicalTypeId::Int64 => __with_ty__! { i64 },
-            LogicalTypeId::UInt8 => __with_ty__! { u8 },
-            LogicalTypeId::UInt16 => __with_ty__! { u16 },
-            LogicalTypeId::UInt32 => __with_ty__! { u32 },
-            LogicalTypeId::UInt64 => __with_ty__! { u64 },
-
-            _ => $nbody,
-        }
-    }};
-}
 
 // This median calculation algorithm's details can be found at
 // https://leetcode.cn/problems/find-median-from-data-stream/
 //
 // Basically, it uses two heaps, a maximum heap and a minimum. The maximum heap stores numbers that
-// are not greater than the median, and the minimum heap stores the greater. In a steaming of
+// are not greater than the median, and the minimum heap stores the greater. In a streaming of
 // numbers, when a number is arrived, we adjust the heaps' tops, so that either one top is the
 // median or both tops can be averaged to get the median.
 //
@@ -100,10 +78,10 @@ where
         let nums = self
             .greater
             .iter()
-            .map(|x| x.0)
-            .chain(self.not_greater.iter().copied())
+            .map(|x| &x.0)
+            .chain(self.not_greater.iter())
             .map(|n| n.to_string())
-            .collect::<Vec<String>>()
+            .collect::<Vec<_>>()
             .join(",");
         Ok(vec![ScalarValue::LargeUtf8(Some(nums))])
     }
@@ -135,6 +113,8 @@ where
             return Ok(());
         };
 
+        // The states here are returned by the `state` method. Since we only returned a vector
+        // with one value in that method, `states[0]` is fine.
         let states = &states[0];
         let states = states.as_any().downcast_ref::<StringVector>().unwrap();
         for s in states.iter().flatten() {
@@ -152,7 +132,7 @@ where
         } else {
             let not_greater_v: f64 = NumCast::from(*self.not_greater.peek().unwrap()).unwrap();
             let greater_v: f64 = NumCast::from(self.greater.peek().unwrap().0).unwrap();
-            let median: T = NumCast::from(not_greater_v / 2.0 + greater_v / 2.0).unwrap();
+            let median: T = NumCast::from((not_greater_v + greater_v) / 2.0).unwrap();
             median.into()
         };
         Ok(ScalarValue::from(median))
@@ -165,8 +145,8 @@ pub struct MedianAccumulatorCreator {
 }
 
 impl AccumulatorCreator for MedianAccumulatorCreator {
-    fn creator(&self) -> AccumulatorCreatorFunc {
-        let creator: AccumulatorCreatorFunc = Arc::new(move |input_type: &ConcreteDataType| {
+    fn creator(&self) -> AccumulatorCreatorFunction {
+        let creator: AccumulatorCreatorFunction = Arc::new(move |input_type: &ConcreteDataType| {
             with_match_ordered_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
@@ -185,7 +165,7 @@ impl AccumulatorCreator for MedianAccumulatorCreator {
         creator
     }
 
-    fn get_input_type(&self) -> ConcreteDataType {
+    fn input_type(&self) -> ConcreteDataType {
         self.input_type
             .lock()
             .unwrap()
@@ -205,11 +185,11 @@ impl AccumulatorCreator for MedianAccumulatorCreator {
         }
     }
 
-    fn get_output_type(&self) -> ConcreteDataType {
-        self.get_input_type()
+    fn output_type(&self) -> ConcreteDataType {
+        self.input_type()
     }
 
-    fn get_state_types(&self) -> Vec<ConcreteDataType> {
+    fn state_types(&self) -> Vec<ConcreteDataType> {
         vec![ConcreteDataType::string_datatype()]
     }
 }
