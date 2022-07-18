@@ -1,3 +1,7 @@
+//! Forked from [arrow2](https://github.com/jorgecarleitao/arrow2/blob/v0.10.1/src/io/ipc/read/stream.rs),
+//! and I made a slight change because arrow2 can only use the same schema to read all data chunks,
+//! which doesn't solve the none column problem, so I added a `column_null_mask` parameter to the
+//! `StreamReader#maybe_next` method to solve the none column problem.
 use std::io::Read;
 
 use arrow_format::{self, ipc::planus::ReadAsRoot};

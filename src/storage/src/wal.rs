@@ -58,7 +58,7 @@ impl<S: LogStore> Wal<S> {
         wal_header_encoder.encode(&header, &mut buf)?;
 
         // entry
-        let encoder = WriteBatchArrowEncoder::new(header.mutation_extras.clone());
+        let encoder = WriteBatchArrowEncoder::new(header.mutation_extras);
         encoder
             .encode(batch, &mut buf)
             .map_err(BoxedError::new)
@@ -66,7 +66,7 @@ impl<S: LogStore> Wal<S> {
                 region: self.region(),
             })?;
 
-        // write to wal
+        // write bytes to wal
         self.write(&buf).await
     }
 
@@ -104,21 +104,20 @@ impl Encoder for WalHeaderEncoder {
 pub struct WalHeaderDecoder {}
 
 impl Decoder for WalHeaderDecoder {
-    type Item = WalHeader;
+    type Item = (usize, WalHeader);
     type Error = Error;
 
-    fn decode(&self, src: &[u8]) -> Result<Option<WalHeader>> {
+    fn decode(&self, src: &[u8]) -> Result<Option<(usize, WalHeader)>> {
         let mut data_pos = prost::decode_length_delimiter(src)
             .map_err(|err| err.into())
             .context(error::DecodeWalHeaderSnafu)?;
         data_pos += prost::length_delimiter_len(data_pos);
 
-        let mut wal_header = WalHeader::decode_length_delimited(src)
+        let wal_header = WalHeader::decode_length_delimited(src)
             .map_err(|err| err.into())
             .context(error::DecodeWalHeaderSnafu)?;
-        wal_header.data_pos = data_pos as u64;
 
-        Ok(Some(wal_header))
+        Ok(Some((data_pos, wal_header)))
     }
 }
 
@@ -149,7 +148,6 @@ mod tests {
     pub fn test_wal_header_codec() {
         let wal_header = WalHeader {
             last_manifest_version: 99999999,
-            data_pos: 0,
             mutation_extras: vec![],
         };
 
@@ -166,7 +164,7 @@ mod tests {
 
         assert!(res.is_some());
 
-        let wal_header_encoded = res.unwrap();
-        assert_eq!(buf.len() - 3, wal_header_encoded.data_pos as usize);
+        let data_pos = res.unwrap().0;
+        assert_eq!(buf.len() - 3, data_pos);
     }
 }
