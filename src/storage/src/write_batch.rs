@@ -418,7 +418,7 @@ pub mod codec {
         codec::{Decoder, Encoder},
     };
     use crate::{
-        proto::wal_header::{mutation_extra::MutationType, MutationExtra},
+        proto::{MutationExtra, MutationType},
         write_batch::PutData,
     };
 

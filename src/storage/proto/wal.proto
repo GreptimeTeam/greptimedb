@@ -4,16 +4,15 @@ package greptime.storage.wal.v1;
 
 message WalHeader {
   uint64 last_manifest_version = 1;
-
-  message MutationExtra {
-    enum MutationType {
-      PUT = 0;
-      DELETE = 1;
-    }
-    
-    MutationType mutation_type = 1;
-    bytes column_null_mask = 2;
-  }
-
   repeated MutationExtra mutation_extras = 2;
+}
+
+message MutationExtra {
+  MutationType mutation_type = 1;
+  bytes column_null_mask = 2;
+}
+
+enum MutationType {
+  PUT = 0;
+  DELETE = 1;
 }

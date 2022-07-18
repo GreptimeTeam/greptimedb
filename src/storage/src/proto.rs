@@ -2,7 +2,6 @@
 
 tonic::include_proto!("greptime.storage.wal.v1");
 
-use crate::proto::wal_header::{mutation_extra::MutationType, MutationExtra};
 use crate::write_batch::{Mutation, WriteBatch};
 
 pub fn gen_mutation_extras(write_batch: &WriteBatch) -> Vec<MutationExtra> {
