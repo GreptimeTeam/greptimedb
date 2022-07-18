@@ -6,7 +6,7 @@ message WalHeader {
   uint64 last_manifest_version = 1;
   uint64 data_pos = 2;
 
-  message MutationExt {
+  message MutationExtra {
     enum MutationType {
       PUT = 0;
       DELETE = 1;
@@ -16,5 +16,5 @@ message WalHeader {
     bytes null_mask = 2;
   }
 
-  repeated MutationExt mutation_exts = 3;
+  repeated MutationExtra mutation_extras = 3;
 }

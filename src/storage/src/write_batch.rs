@@ -28,7 +28,7 @@ use datatypes::{
 use snafu::ensure;
 use store_api::storage::{consts, PutOperation, WriteRequest};
 
-use crate::proto::wal_header::{mutation_ext::MutationType, MutationExt};
+use crate::proto::wal_header::{mutation_extra::MutationType, MutationExtra};
 use crate::{
     arrow_stream::ArrowStreamReader,
     codec::{Decoder, Encoder},
@@ -407,12 +407,12 @@ impl PutData {
 }
 
 pub struct WriteBatchArrowEncoder {
-    mutation_exts: Vec<MutationExt>,
+    mutation_extras: Vec<MutationExtra>,
 }
 
 impl WriteBatchArrowEncoder {
-    pub fn new(mutation_exts: Vec<MutationExt>) -> Self {
-        Self { mutation_exts }
+    pub fn new(mutation_extras: Vec<MutationExtra>) -> Self {
+        Self { mutation_extras }
     }
 }
 
@@ -421,7 +421,7 @@ impl Encoder for WriteBatchArrowEncoder {
     type Error = Error;
 
     fn encode(&self, item: &WriteBatch, dst: &mut Vec<u8>) -> Result<()> {
-        let schema = item.schema().arrow_schema().clone();
+        let schema = item.schema().arrow_schema();
 
         let column_names = item
             .schema()
@@ -432,7 +432,7 @@ impl Encoder for WriteBatchArrowEncoder {
 
         let data = item
             .iter()
-            .zip(self.mutation_exts.iter())
+            .zip(self.mutation_extras.iter())
             .map(|(mtn, ext)| match mtn {
                 Mutation::Put(put) => {
                     let arrays = column_names
@@ -449,7 +449,7 @@ impl Encoder for WriteBatchArrowEncoder {
         let mut writer = StreamWriter::new(dst, opts);
         let ipc_fields = ipc::write::default_ipc_fields(&schema.fields);
         writer
-            .start(&schema, Some(ipc_fields.clone()))
+            .start(schema, Some(ipc_fields.clone()))
             .context(EncodeArrowSnafu)?;
         for (arrays, null_mask) in data {
             let chunk = ArrowChunk::try_new(arrays).context(EncodeArrowSnafu)?;
@@ -474,13 +474,13 @@ impl Encoder for WriteBatchArrowEncoder {
 }
 
 pub struct WriteBatchArrowDecoder {
-    mutation_exts: Vec<MutationExt>,
+    mutation_extras: Vec<MutationExtra>,
 }
 
 impl WriteBatchArrowDecoder {
     #[allow(dead_code)]
-    pub fn new(mutation_exts: Vec<MutationExt>) -> Self {
-        Self { mutation_exts }
+    pub fn new(mutation_extras: Vec<MutationExtra>) -> Self {
+        Self { mutation_extras }
     }
 }
 
@@ -495,7 +495,7 @@ impl Decoder for WriteBatchArrowDecoder {
         let schema = reader.metadata().schema.clone();
 
         let stream_states = self
-            .mutation_exts
+            .mutation_extras
             .iter()
             .map(|ext| reader.maybe_next(&ext.null_mask).context(DecodeArrowSnafu))
             .collect::<Result<Vec<_>>>()?;
@@ -508,7 +508,7 @@ impl Decoder for WriteBatchArrowDecoder {
             }
         );
 
-        let mut chunks = Vec::with_capacity(self.mutation_exts.len());
+        let mut chunks = Vec::with_capacity(self.mutation_extras.len());
 
         for state_opt in stream_states {
             match state_opt {
@@ -534,11 +534,11 @@ impl Decoder for WriteBatchArrowDecoder {
             .collect::<Result<Vec<_>>>()?;
 
         ensure!(
-            chunks.len() == self.mutation_exts.len(),
+            chunks.len() == self.mutation_extras.len(),
             DataCorruptionSnafu {
                 message: &format!(
                     "expected {} mutations, but got {}",
-                    self.mutation_exts.len(),
+                    self.mutation_extras.len(),
                     chunks.len()
                 )
             }
@@ -553,7 +553,7 @@ impl Decoder for WriteBatchArrowDecoder {
             .collect::<Vec<_>>();
 
         let mutations = self
-            .mutation_exts
+            .mutation_extras
             .iter()
             .zip(chunks.iter())
             .map(|(ext, mtn)| match ext.mutation_type {
@@ -609,6 +609,7 @@ mod tests {
     use datatypes::vectors::{BooleanVector, Int32Vector, Int64Vector, UInt64Vector};
 
     use super::*;
+    use crate::proto;
     use crate::test_util::write_batch_util;
 
     #[test]
@@ -847,13 +848,13 @@ mod tests {
         batch.put(put_data).unwrap();
         assert!(!batch.is_empty());
 
-        let encoder = WriteBatchArrowEncoder::new(MutationExt::gen_mutation_exts(&batch));
+        let encoder = WriteBatchArrowEncoder::new(proto::gen_mutation_extras(&batch));
         let mut dst = vec![];
         let result = encoder.encode(&batch, &mut dst);
         assert!(result.is_ok());
 
         let decoder = WriteBatchArrowDecoder {
-            mutation_exts: MutationExt::gen_mutation_exts(&batch),
+            mutation_extras: proto::gen_mutation_extras(&batch),
         };
         let result = decoder.decode(&dst);
         let batch2 = result?.unwrap();
@@ -877,13 +878,13 @@ mod tests {
         batch.put(put_data).unwrap();
         assert!(!batch.is_empty());
 
-        let encoder = WriteBatchArrowEncoder::new(MutationExt::gen_mutation_exts(&batch));
+        let encoder = WriteBatchArrowEncoder::new(proto::gen_mutation_extras(&batch));
         let mut dst = vec![];
         let result = encoder.encode(&batch, &mut dst);
         assert!(result.is_ok());
 
         let decoder = WriteBatchArrowDecoder {
-            mutation_exts: MutationExt::gen_mutation_exts(&batch),
+            mutation_extras: proto::gen_mutation_extras(&batch),
         };
         let result = decoder.decode(&dst);
         let batch2 = result?.unwrap();

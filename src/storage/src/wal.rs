@@ -8,7 +8,8 @@ use store_api::logstore::{entry::Entry, namespace::Namespace, AppendResponse, Lo
 use crate::{
     codec::{Decoder, Encoder},
     error::{self, Error, Result},
-    proto::*,
+    proto::{self, *},
+    write_batch::{WriteBatch, WriteBatchArrowEncoder},
 };
 
 #[derive(Clone)]
@@ -31,7 +32,45 @@ impl<S> Wal<S> {
 }
 
 impl<S: LogStore> Wal<S> {
-    pub async fn write_wal(&self, bytes: &[u8]) -> Result<(u64, usize)> {
+    /// Data format:
+    ///
+    /// |                                                                                  |
+    /// |--------------------------------->   Header Len    <------------------------------|                    Arrow encoded
+    /// |                                                                                  |
+    /// v                                                                                  v
+    /// +---------------------+------------------------------------------------------------+--------------+-------------+--------------+
+    /// |                     |                                                            |              |             |              |
+    /// | Header Len(varint)  | Header(last_manifest_version + mutation_type + null_mask)  | Data Chunk0  | Data Chunk1 |     ...      |
+    /// |                     |                                                            |              |             |              |
+    /// +---------------------+------------------------------------------------------------+--------------+-------------+--------------+
+    ///
+    pub async fn write_to_wal(
+        &self,
+        mut header: WalHeader,
+        batch: &WriteBatch,
+    ) -> Result<(u64, usize)> {
+        header.mutation_extras = proto::gen_mutation_extras(batch);
+
+        let mut buf = vec![];
+
+        // header
+        let wal_header_encoder = WalHeaderEncoder {};
+        wal_header_encoder.encode(&header, &mut buf)?;
+
+        // entry
+        let encoder = WriteBatchArrowEncoder::new(header.mutation_extras.clone());
+        encoder
+            .encode(batch, &mut buf)
+            .map_err(BoxedError::new)
+            .context(error::WriteWalSnafu {
+                region: self.region(),
+            })?;
+
+        // write to wal
+        self.write(&buf).await
+    }
+
+    async fn write(&self, bytes: &[u8]) -> Result<(u64, usize)> {
         // TODO(jiachun): region id
         let ns = S::Namespace::new(&self.region, 0);
         let e = S::Entry::new(bytes);
@@ -95,12 +134,12 @@ mod tests {
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
         let wal = Wal::new("test_region", Arc::new(log_store));
 
-        let res = wal.write_wal(b"test1").await.unwrap();
+        let res = wal.write(b"test1").await.unwrap();
 
         assert_eq!(0, res.0);
         assert_eq!(0, res.1);
 
-        let res = wal.write_wal(b"test2").await.unwrap();
+        let res = wal.write(b"test2").await.unwrap();
 
         assert_eq!(1, res.0);
         assert_eq!(29, res.1);
@@ -111,7 +150,7 @@ mod tests {
         let wal_header = WalHeader {
             last_manifest_version: 99999999,
             data_pos: 0,
-            mutation_exts: vec![],
+            mutation_extras: vec![],
         };
 
         let mut buf: Vec<u8> = vec![];

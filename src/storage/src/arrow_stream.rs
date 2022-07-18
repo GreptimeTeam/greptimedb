@@ -49,12 +49,12 @@ impl<R: Read> ArrowStreamReader<R> {
             return Ok(false);
         }
 
-        let _ = self.maybe_next(&vec![])?;
+        let _ = self.maybe_next(&[])?;
 
         Ok(self.is_finished())
     }
 
-    pub fn maybe_next(&mut self, null_mask: &Vec<u8>) -> Result<Option<StreamState>> {
+    pub fn maybe_next(&mut self, null_mask: &[u8]) -> Result<Option<StreamState>> {
         if self.finished {
             return Ok(None);
         }

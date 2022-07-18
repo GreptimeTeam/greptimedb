@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use common_error::prelude::BoxedError;
 use common_telemetry::logging;
 use common_time::RangeMillis;
 use snafu::ResultExt;
@@ -9,17 +8,16 @@ use store_api::storage::{WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
-use crate::codec::Encoder;
-use crate::error::{self, InvalidTimestampSnafu, Result};
+use crate::error::{InvalidTimestampSnafu, Result};
 use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
-use crate::proto::{wal_header::MutationExt, WalHeader};
+use crate::proto::WalHeader;
 use crate::region::RegionManifest;
 use crate::region::SharedDataRef;
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControlRef, VersionEdit};
-use crate::wal::{Wal, WalHeaderEncoder};
-use crate::write_batch::{WriteBatch, WriteBatchArrowEncoder};
+use crate::wal::Wal;
+use crate::write_batch::WriteBatch;
 
 pub type RegionWriterRef = Arc<RegionWriter>;
 
@@ -108,8 +106,8 @@ impl WriterInner {
         let next_sequence = committed_sequence + 1;
 
         // TODO(jiachun): [flush] wal header
-        let mut wal_header = WalHeader::default();
-        write_to_wal(writer_ctx.wal, &mut wal_header, &request).await?;
+        let wal_header = WalHeader::default();
+        writer_ctx.wal.write_to_wal(wal_header, &request).await?;
 
         // Insert batch into memtable.
         let mut inserter = Inserter::new(next_sequence, time_ranges, version.bucket_duration());
@@ -254,42 +252,4 @@ impl WriterInner {
         self.last_memtable_id += 1;
         self.last_memtable_id
     }
-}
-
-/// Data format:
-///
-/// |                                                                                  |
-/// |--------------------------------->   Header Len    <------------------------------|                    Arrow encoded
-/// |                                                                                  |
-/// v                                                                                  v
-/// +---------------------+------------------------------------------------------------+--------------+-------------+--------------+
-/// |                     |                                                            |              |             |              |
-/// | Header Len(varint)  | Header(last_manifest_version + mutation_type + null_mask)  | Data Chunk0  | Data Chunk1 |     ...      |
-/// |                     |                                                            |              |             |              |
-/// +---------------------+------------------------------------------------------------+--------------+-------------+--------------+
-///
-async fn write_to_wal<S: LogStore>(
-    wal: &Wal<S>,
-    header: &mut WalHeader,
-    request: &WriteBatch,
-) -> Result<(u64, usize)> {
-    header.mutation_exts = MutationExt::gen_mutation_exts(request);
-
-    let mut buf = vec![];
-
-    // header
-    let wal_header_encoder = WalHeaderEncoder {};
-    wal_header_encoder.encode(header, &mut buf)?;
-
-    // entry
-    let encoder = WriteBatchArrowEncoder::new(header.mutation_exts.clone());
-    encoder
-        .encode(request, &mut buf)
-        .map_err(BoxedError::new)
-        .context(error::WriteWalSnafu {
-            region: wal.region(),
-        })?;
-
-    // write to wal
-    wal.write_wal(&buf).await
 }

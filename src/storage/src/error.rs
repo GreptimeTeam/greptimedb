@@ -106,20 +106,20 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to write wal, region: {}, source: {}", region, source))]
+    #[snafu(display("Failed to write WAL, region: {}, source: {}", region, source))]
     WriteWal {
         region: String,
         #[snafu(backtrace)]
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to encode wal header, source {}", source))]
+    #[snafu(display("Failed to encode WAL header, source {}", source))]
     EncodeWalHeader {
         backtrace: Backtrace,
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed tocode wal header, source {}", source))]
+    #[snafu(display("Failed to decode WAL header, source {}", source))]
     DecodeWalHeader {
         backtrace: Backtrace,
         source: std::io::Error,
