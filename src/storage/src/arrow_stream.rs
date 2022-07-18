@@ -105,7 +105,7 @@ fn valid_metadata(metadata: &StreamMetadata, null_mask: &[u8]) -> StreamMetadata
             .ipc_schema
             .fields
             .iter()
-            .zip(null_mask)
+            .zip(&null_mask)
             .filter(|(_, mask)| !*mask)
             .map(|(ipc_field, _)| ipc_field.clone())
             .collect::<Vec<_>>(),
