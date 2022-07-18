@@ -621,6 +621,7 @@ dependencies = [
 name = "common-function"
 version = "0.1.0"
 dependencies = [
+ "arrow2",
  "chrono-tz",
  "common-error",
  "common-query",
@@ -2708,7 +2709,6 @@ dependencies = [
  "futures",
  "futures-util",
  "metrics",
- "num-traits",
  "snafu",
  "sql",
  "table",

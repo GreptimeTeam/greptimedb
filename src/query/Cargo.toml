@@ -21,7 +21,6 @@ datatypes = {path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"
 metrics = "0.18"
-num-traits = "0.2"
 snafu = { version = "0.7", features = ["backtraces"] }
 table = { path = "../table" }
 tokio = "1.0"

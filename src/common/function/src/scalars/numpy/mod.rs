@@ -1,4 +1,6 @@
 mod clip;
+#[allow(unused)]
+mod interp;
 
 use std::sync::Arc;
 
