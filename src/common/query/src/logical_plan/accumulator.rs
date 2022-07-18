@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use arrow::array::ArrayRef;
 use datafusion_common::Result as DfResult;
-use datafusion_common::ScalarValue;
 use datafusion_expr::Accumulator as DfAccumulator;
 use datatypes::error::Result as DtResult;
 use datatypes::prelude::ConcreteDataType;

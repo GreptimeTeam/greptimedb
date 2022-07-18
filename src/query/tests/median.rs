@@ -5,9 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use common_query::error::{ExecuteFunctionSnafu, Result};
 use common_query::logical_plan::{Accumulator, AccumulatorCreator};
-use common_query::prelude::AccumulatorCreatorFunc;
+use common_query::prelude::*;
 use datafusion_common::DataFusionError;
-use datafusion_common::ScalarValue;
 use datatypes::prelude::*;
 use datatypes::vectors::{PrimitiveVector, StringVector, VectorRef};
 use num::NumCast;
