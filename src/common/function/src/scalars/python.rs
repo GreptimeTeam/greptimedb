@@ -905,7 +905,7 @@ mod tests {
     use super::*;
     type PredicateFn = Option<fn(Result<Coprocessor, CoprError>) -> bool>;
     type ExecResPredicateFn = Option<fn(Result<DfRecordBatch, CoprError>)>;
-    
+
     #[test]
     fn testsuite_parse() {
         let testcases: Vec<(&'static str, PredicateFn)> = vec![
