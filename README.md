@@ -4,6 +4,27 @@
 
 GreptimeDB: the next-generation hybrid timeseries/analytics processing database in the cloud.
 
+## Getting Started
+### Prerequisites
+To compile GreptimeDB from source, you'll need the following:
+- Rust
+- C++ toolchain
+- cmake
+
+#### Rust
+The easiest way to install Rust is to use [`rustup`](https://rustup.rs/), which will check our `rust-toolchain` file and install correct Rust version for you.
+
+#### C++ toolchain
+The [`prost-build`](https://github.com/tokio-rs/prost/tree/master/prost-build) dependency requires `C++ toolchain` and `cmake` to build its bundled `protoc`. For more info on what the required dependencies are check [`here`](https://github.com/protocolbuffers/protobuf/blob/master/src/README.md).
+
+#### cmake
+Follow the instructions for your operating system on the [`cmake`](https://cmake.org/install/) site.
+
+For MacOS users, you can also use `homebrew` to install `cmake`.
+```bash
+brew install cmake
+```
+
 ## Usage
 
 ```
@@ -20,3 +41,4 @@ OR
 // Start datanode with `log-dir` and `log-level` options.
 cargo run -- --log-dir=logs --log-level=debug datanode start
 ```
+
