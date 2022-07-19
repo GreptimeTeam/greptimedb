@@ -17,7 +17,7 @@ use snafu::ResultExt;
 use store_api::logstore::entry::{Encode, Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
 use store_api::logstore::namespace::Namespace;
-use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::mpsc::error::{SendError, TryRecvError};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender as MpscSender;
 use tokio::sync::oneshot::Sender as OneshotSender;
@@ -27,7 +27,7 @@ use tokio::time;
 
 use crate::error::Error::Eof;
 use crate::error::{AppendSnafu, Error, InternalSnafu, IoSnafu, OpenLogSnafu, Result};
-use crate::fs::chunk::Chunk;
+use crate::fs::chunk::{Chunk, CompositeChunk};
 use crate::fs::config::LogConfig;
 use crate::fs::crc::CRC_ALGO;
 use crate::fs::entry::{EntryImpl, StreamImpl};
@@ -545,33 +545,44 @@ fn file_chunk_stream(
     file: Arc<File>,
     mut offset: usize,
     file_size: usize,
-) -> impl Stream<Item = Result<Chunk<CHUNK_SIZE>>> {
-    stream!({
-        loop {
-            if offset >= file_size {
-                return;
-            }
-            let file = file.clone();
-            let data = read_at(file, offset, file_size).await?;
-            let data_len = data.len();
-            yield Ok(data);
-            offset += data_len;
+) -> tokio::sync::mpsc::Receiver<Result<Chunk<CHUNK_SIZE>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel(1024);
+    common_runtime::spawn_blocking_read(move || loop {
+        if offset >= file_size {
+            return;
         }
-    })
+        let file = file.clone();
+        match read_at(file, offset, file_size) {
+            Ok(data) => {
+                let data_len = data.len();
+                if let Err(e) = common_runtime::block_on_read(async { tx.send(Ok(data)).await }) {
+                    // Rx dropped
+                    break;
+                }
+
+                offset += data_len;
+                continue;
+            }
+            Err(e) => {
+                error!("Failed to read file chunk, error: {}", &e);
+                if let Err(e) = common_runtime::block_on_read(async { tx.send(Err(e)).await }) {
+                    // Rx dropped
+                    break;
+                }
+                break;
+            }
+        }
+    });
+    rx
 }
 
-async fn read_at(file: Arc<File>, offset: usize, file_length: usize) -> Result<Chunk<CHUNK_SIZE>> {
+fn read_at(file: Arc<File>, offset: usize, file_length: usize) -> Result<Chunk<CHUNK_SIZE>> {
     if offset > file_length {
         return Err(Eof);
     }
     let size = CHUNK_SIZE.min((file_length - offset) as usize);
     let mut data = [0u8; CHUNK_SIZE];
-    let data = common_runtime::spawn_blocking_read(move || {
-        crate::fs::io::pread_exact(file.as_ref(), &mut data[0..size], offset as u64)?;
-        Ok(data)
-    })
-    .await
-    .expect("Join error")?;
+    crate::fs::io::pread_exact(file.as_ref(), &mut data[0..size], offset as u64)?;
     Ok(Chunk::new(data, size))
 }
 
@@ -670,7 +681,7 @@ mod tests {
         file.flush().await.unwrap();
 
         let file = Arc::new(file.into_std().await);
-        let result = read_at(file, 0, 12).await.unwrap();
+        let result = read_at(file, 0, 12).unwrap();
 
         assert_eq!(12, result.len());
         assert_eq!("1234567890ab".as_bytes(), &result.data[0..result.len()]);
@@ -696,7 +707,7 @@ mod tests {
         pin_mut!(stream);
 
         let mut chunks = vec![];
-        while let Some(r) = stream.next().await {
+        while let Some(r) = stream.recv().await {
             chunks.push(r.unwrap());
         }
         assert_eq!(
