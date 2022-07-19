@@ -89,7 +89,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to decode, in stream waiting state"))]
-    StreamWaiting {},
+    StreamWaiting,
 
     #[snafu(display("Failed to decode, data corruption {}", message))]
     DataCorruption {
@@ -538,7 +538,7 @@ pub mod codec {
                 match state_opt {
                     Some(s) => match s {
                         StreamState::Some(chunk) => chunks.push(chunk),
-                        StreamState::Waiting => return Err(WriteBatchError::StreamWaiting {}),
+                        StreamState::Waiting => return Err(WriteBatchError::StreamWaiting),
                     },
                     None => (),
                 }

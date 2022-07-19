@@ -8,7 +8,7 @@ use store_api::logstore::{entry::Entry, namespace::Namespace, AppendResponse, Lo
 use crate::{
     codec::{Decoder, Encoder},
     error::{self, Error, Result},
-    proto::{self, *},
+    proto::{self, WalHeader},
     write_batch::{codec::WriteBatchArrowEncoder, WriteBatch},
 };
 
@@ -34,15 +34,17 @@ impl<S> Wal<S> {
 impl<S: LogStore> Wal<S> {
     /// Data format:
     ///
-    /// |                                                                                  |
-    /// |--------------------------------->   Header Len    <------------------------------|                    Arrow encoded
-    /// |                                                                                  |
-    /// v                                                                                  v
-    /// +---------------------+------------------------------------------------------------+--------------+-------------+--------------+
-    /// |                     |                                                            |              |             |              |
-    /// | Header Len(varint)  | Header(last_manifest_version + mutation_type + null_mask)  | Data Chunk0  | Data Chunk1 |     ...      |
-    /// |                     |                                                            |              |             |              |
-    /// +---------------------+------------------------------------------------------------+--------------+-------------+--------------+
+    /// ```text
+    /// |                                                                          |
+    /// |-------------------------->    Header Len   <-----------------------------|          Arrow/Protobuf/... encoded
+    /// |                                                                          |
+    /// v                                                                          v
+    /// +---------------------+----------------------------------------------------+--------------+-------------+--------------+
+    /// |                     |                       Header                       |              |             |              |
+    /// | Header Len(varint)  |  (last_manifest_version + mutation_extras + ...)   | Data Chunk0  | Data Chunk1 |     ...      |
+    /// |                     |                                                    |              |             |              |
+    /// +---------------------+----------------------------------------------------+--------------+-------------+--------------+
+    /// ```
     ///
     pub async fn write_to_wal(
         &self,
@@ -59,6 +61,7 @@ impl<S: LogStore> Wal<S> {
 
         // entry
         let encoder = WriteBatchArrowEncoder::new(header.mutation_extras);
+        // TODO(jiachun): provide some way to compute data size before encode, so we can preallocate an exactly sized buf.
         encoder
             .encode(batch, &mut buf)
             .map_err(BoxedError::new)
