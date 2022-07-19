@@ -382,7 +382,7 @@ impl LogFile {
     ) -> impl EntryStream<Entry = EntryImpl, Error = Error> + '_ {
         let length = self.state.flush_offset.load(Ordering::Relaxed);
 
-        let mut chunk_stream = file_chunk_stream(self.writer.inner.clone(), 0, length);
+        let mut chunk_stream = file_chunk_stream(self.writer.inner.clone(), 0, length, 1024);
         let mut chunks = CompositeChunk::new();
         let s = stream!({
             while let Some(chunk) = chunk_stream.recv().await {
@@ -538,12 +538,16 @@ struct State {
     stopped: AtomicBool,
 }
 
+/// Creates a stream of chunks of data from file. The returned stream has a bounded buffer
+/// so that when consumer cannot catch up with spawned reader loop, the reader will be blocked
+/// and wait until buffer has enough capacity.
 fn file_chunk_stream(
     file: Arc<File>,
     mut offset: usize,
     file_size: usize,
+    buffer_size: usize,
 ) -> tokio::sync::mpsc::Receiver<Result<Chunk<CHUNK_SIZE>>> {
-    let (tx, rx) = tokio::sync::mpsc::channel(1024);
+    let (tx, rx) = tokio::sync::mpsc::channel(buffer_size);
     common_runtime::spawn_blocking_read(move || loop {
         if offset >= file_size {
             return;
@@ -556,18 +560,13 @@ fn file_chunk_stream(
                     // Rx dropped
                     break;
                 }
-
-                debug!("Read chunk");
-
                 offset += data_len;
                 continue;
             }
             Err(e) => {
                 error!("Failed to read file chunk, error: {}", &e);
-                if common_runtime::block_on_read(async { tx.send(Err(e)).await }).is_err() {
-                    // Rx dropped
-                    break;
-                }
+                // we're going to break any way so just forget the join result.
+                let _ = common_runtime::block_on_read(async { tx.send(Err(e)).await });
                 break;
             }
         }
@@ -575,6 +574,9 @@ fn file_chunk_stream(
     rx
 }
 
+/// Reads a chunk of data from file in a blocking manner.
+/// The file may not contain enough data to fulfill the whole chunk so only data available
+/// is read into chunk. The `write` field of `Chunk` indicates the end of valid data.  
 fn read_at(file: Arc<File>, offset: usize, file_length: usize) -> Result<Chunk<CHUNK_SIZE>> {
     if offset > file_length {
         return Err(Eof);
@@ -703,7 +705,7 @@ mod tests {
 
         let file_size = file.metadata().await.unwrap().len();
         let file = Arc::new(file.into_std().await);
-        let stream = file_chunk_stream(file, 0, file_size as usize);
+        let stream = file_chunk_stream(file, 0, file_size as usize, 1024);
         pin_mut!(stream);
 
         let mut chunks = vec![];
