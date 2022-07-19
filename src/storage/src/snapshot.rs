@@ -8,6 +8,7 @@ use store_api::storage::{
 
 use crate::chunk::ChunkReaderImpl;
 use crate::error::{Error, Result};
+use crate::memtable::IterContext;
 use crate::version::VersionRef;
 
 /// [Snapshot] implementation.
@@ -28,14 +29,42 @@ impl Snapshot for SnapshotImpl {
 
     async fn scan(
         &self,
-        _ctx: &ReadContext,
+        ctx: &ReadContext,
         request: ScanRequest,
     ) -> Result<ScanResponse<ChunkReaderImpl>> {
-        let _visible_sequence = self.sequence_to_read(request.sequence);
-        let _mem = self.version.memtables();
+        let visible_sequence = self.sequence_to_read(request.sequence);
+        let memtable_version = self.version.memtables();
 
-        // TODO(yingwen): [flush] Scan and merge results from mutable memtables.
-        unimplemented!()
+        let mutables = memtable_version.mutable_memtables();
+        let immutables = memtable_version.immutable_memtables();
+        let mut batch_iters = Vec::with_capacity(memtable_version.num_memtables());
+
+        let iter_ctx = IterContext {
+            batch_size: ctx.batch_size,
+            visible_sequence,
+            ..Default::default()
+        };
+
+        for (_range, mem) in mutables.iter() {
+            let iter = mem.iter(iter_ctx.clone())?;
+
+            batch_iters.push(iter);
+        }
+
+        for mem_set in immutables {
+            for (_range, mem) in mem_set.iter() {
+                let iter = mem.iter(iter_ctx.clone())?;
+
+                batch_iters.push(iter);
+            }
+        }
+
+        // Now we just simply chain all iterators together, ignore duplications/ordering.
+        let iter = Box::new(batch_iters.into_iter().flatten());
+
+        let reader = ChunkReaderImpl::new(self.version.schema().clone(), iter);
+
+        Ok(ScanResponse { reader })
     }
 
     async fn get(&self, _ctx: &ReadContext, _request: GetRequest) -> Result<GetResponse> {

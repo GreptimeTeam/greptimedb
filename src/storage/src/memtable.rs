@@ -32,7 +32,7 @@ pub trait Memtable: Send + Sync + std::fmt::Debug {
     fn write(&self, kvs: &KeyValues) -> Result<()>;
 
     /// Iterates the memtable.
-    // TODO(yingwen): Consider passing a projector (does column projection).
+    // TODO(yingwen): 1. Use reference of IterContext? 2. Consider passing a projector (does column projection).
     fn iter(&self, ctx: IterContext) -> Result<BatchIteratorPtr>;
 
     /// Returns the estimated bytes allocated by this memtable from heap.

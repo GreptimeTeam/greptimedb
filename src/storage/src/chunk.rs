@@ -2,12 +2,14 @@ use async_trait::async_trait;
 use store_api::storage::{Chunk, ChunkReader, SchemaRef};
 
 use crate::error::{Error, Result};
-use crate::memtable::BatchIteratorPtr;
+use crate::memtable::Batch;
+
+type IteratorPtr = Box<dyn Iterator<Item = Result<Batch>> + Send>;
 
 pub struct ChunkReaderImpl {
     schema: SchemaRef,
-    // Now we only read data from one memtable, so we just holds the memtable iterator here.
-    iter: BatchIteratorPtr,
+    // Now we only read data from memtables, so we just holds the iterator here.
+    iter: IteratorPtr,
 }
 
 #[async_trait]
@@ -35,7 +37,7 @@ impl ChunkReader for ChunkReaderImpl {
 }
 
 impl ChunkReaderImpl {
-    pub fn new(schema: SchemaRef, iter: BatchIteratorPtr) -> ChunkReaderImpl {
+    pub fn new(schema: SchemaRef, iter: IteratorPtr) -> ChunkReaderImpl {
         ChunkReaderImpl { schema, iter }
     }
 }
