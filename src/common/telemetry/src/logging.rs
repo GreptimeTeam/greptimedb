@@ -73,6 +73,7 @@ pub fn init_global_logging(
         .with_target("tower", Level::WARN)
         .with_target("datafusion", Level::WARN)
         .with_target("reqwest", Level::WARN)
+        .with_target("sqlparser", Level::WARN)
         .with_default(
             directives
                 .parse::<filter::LevelFilter>()
