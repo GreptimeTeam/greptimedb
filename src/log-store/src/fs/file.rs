@@ -551,8 +551,8 @@ fn file_chunk_stream(
             if offset >= file_size {
                 return;
             }
-
-            let data = read_at(&file, offset, file_size)?;
+            let file = file.clone();
+            let data = read_at(file, offset, file_size).await?;
             let data_len = data.len();
             yield Ok(data);
             offset += data_len;
@@ -560,20 +560,19 @@ fn file_chunk_stream(
     })
 }
 
-fn read_at(file: &Arc<File>, offset: usize, file_length: usize) -> Result<Chunk<CHUNK_SIZE>> {
-    let mut data = [0u8; CHUNK_SIZE];
+async fn read_at(file: Arc<File>, offset: usize, file_length: usize) -> Result<Chunk<CHUNK_SIZE>> {
     if offset > file_length {
         return Err(Eof);
     }
-
-    let end_ofs = data.len().min((file_length - offset) as usize);
-
-    crate::fs::io::pread_exact(&file, &mut data[0..end_ofs], offset as u64)?;
-    Ok(Chunk {
-        data,
-        write: end_ofs,
-        read: 0,
+    let size = CHUNK_SIZE.min((file_length - offset) as usize);
+    let mut data = [0u8; CHUNK_SIZE];
+    let data = common_runtime::spawn_blocking_read(move || {
+        crate::fs::io::pread_exact(file.as_ref(), &mut data[0..size], offset as u64)?;
+        Ok(data)
     })
+    .await
+    .expect("Join error")?;
+    Ok(Chunk::new(data, size))
 }
 
 #[cfg(test)]
@@ -581,8 +580,10 @@ mod tests {
     use std::io::Read;
 
     use common_telemetry::logging;
+    use futures::pin_mut;
     use futures_util::StreamExt;
     use tempdir::TempDir;
+    use tokio::io::AsyncWriteExt;
 
     use super::*;
     use crate::fs::namespace::LocalNamespace;
@@ -652,5 +653,62 @@ mod tests {
 
         let result = file.stop().await;
         info!("Stop file res: {:?}", result);
+    }
+
+    #[tokio::test]
+    pub async fn test_read_at() {
+        let dir = tempdir::TempDir::new("greptimedb-store-test").unwrap();
+        let file_path = dir.path().join("chunk-stream-file-test");
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&file_path)
+            .await
+            .unwrap();
+        file.write_all("1234567890ab".as_bytes()).await.unwrap();
+        file.flush().await.unwrap();
+
+        let file = Arc::new(file.into_std().await);
+        let result = read_at(file, 0, 12).await.unwrap();
+
+        assert_eq!(12, result.len());
+        assert_eq!("1234567890ab".as_bytes(), &result.data[0..result.len()]);
+    }
+
+    #[tokio::test]
+    pub async fn test_file_chunk_stream() {
+        let dir = tempdir::TempDir::new("greptimedb-store-test").unwrap();
+        let file_path = dir.path().join("chunk-stream-file-test");
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&file_path)
+            .await
+            .unwrap();
+        file.write_all(&vec![42].repeat(4096 + 1024)).await.unwrap();
+        file.flush().await.unwrap();
+
+        let file_size = file.metadata().await.unwrap().len();
+        let file = Arc::new(file.into_std().await);
+        let stream = file_chunk_stream(file, 0, file_size as usize);
+        pin_mut!(stream);
+
+        let mut chunks = vec![];
+        while let Some(r) = stream.next().await {
+            chunks.push(r.unwrap());
+        }
+        assert_eq!(
+            vec![4096, 1024],
+            chunks.iter().map(|c| c.write).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![vec![42].repeat(4096), vec![42].repeat(1024)],
+            chunks
+                .iter()
+                .map(|c| &c.data[0..c.write])
+                .collect::<Vec<_>>()
+        );
     }
 }
