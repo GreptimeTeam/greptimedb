@@ -198,7 +198,9 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
                 );
                 true
             } else {
-                todo!()
+                return Err(CoprError::Other {
+                    reason: format!("Expect type names, found {:?}", &func.node),
+                });
             };
             ensure!(
                 args.len() == 1,
@@ -211,7 +213,12 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
             anno.coerce_into = need_coerced;
             Ok(anno)
         }
-        _ => todo!(),
+        _ => Err(CoprError::Other {
+            reason: format!(
+                "Expect types' name or into(<typename>), found {:?}",
+                &sub.node
+            ),
+        }),
     }
 }
 
@@ -222,12 +229,12 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
 /// TYPE => Item | Item `|` None
 ///
 /// Item => NativeType | into(NativeType)
-fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
+fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
     if let ast::ExprKind::Subscript {
         value,
         slice,
         ctx: _,
-    } = sub
+    } = &sub.node
     {
         if let ast::ExprKind::Name { id, ctx: _ } = &value.node {
             ensure!(
@@ -241,7 +248,9 @@ fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
                 }
             )
         } else {
-            todo!()
+            return Err(CoprError::Other {
+                reason: format!("Expect \"vector\", found {:?}", &value.node),
+            });
         }
         // i.e: vector[f64]
         match &slice.node {
@@ -273,7 +282,7 @@ fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
                             if tmp_anno.is_none() {
                                 tmp_anno = Some(parse_item(i)?)
                             } else {
-                                todo!()
+                                return Err(CoprError::Other { reason: "Expect one typenames(or `into(<typename>)`) and one `None`, not two type names".into() });
                             }
                         }
                         ast::ExprKind::Call {
@@ -284,10 +293,17 @@ fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
                             if tmp_anno.is_none() {
                                 tmp_anno = Some(parse_item(i)?)
                             } else {
-                                todo!()
+                                return Err(CoprError::Other { reason: "Expect one typenames(or `into(<typename>)`) and one `None`, not two type names".into() });
                             }
                         }
-                        _ => todo!(),
+                        _ => {
+                            return Err(CoprError::Other {
+                                reason: format!(
+                                    "Expect typename or `None` or `into(<typename>)`, found {:?}",
+                                    &i.node
+                                ),
+                            })
+                        }
                     }
                 }
                 ensure!(
@@ -301,10 +317,10 @@ fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
                 tmp_anno.is_nullable = is_nullable;
                 Ok(tmp_anno)
             }
-            _ => todo!(),
+            _ => Err(CoprError::Other { reason: format!("Expect type in `vector[...]`, found {:?}", &slice.node) }),
         }
     } else {
-        todo!()
+        Err(CoprError::Other { reason: format!("Expect type annotation, found {:?}", &sub) })
     }
 }
 /// parse script and return `Coprocessor` struct with info extract from ast
@@ -442,7 +458,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
             let mut arg_types = Vec::new();
             for arg in &fn_args.args {
                 if let Some(anno) = &arg.node.annotation {
-                    arg_types.push(Some(parse_annotation(&anno.node)?))
+                    arg_types.push(Some(parse_annotation(anno)?))
                 } else {
                     arg_types.push(None)
                 }
@@ -453,7 +469,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
             if let Some(rets) = returns {
                 if let ast::ExprKind::Tuple { elts, ctx: _ } = &rets.node {
                     for elem in elts {
-                        return_types.push(Some(parse_annotation(&elem.node)?))
+                        return_types.push(Some(parse_annotation(elem)?))
                     }
                 } else if let ast::ExprKind::Subscript {
                     value: _,
@@ -461,7 +477,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                     ctx: _,
                 } = &rets.node
                 {
-                    return_types.push(Some(parse_annotation(&rets.node)?))
+                    return_types.push(Some(parse_annotation(rets)?))
                 }
             } else {
                 // if no anntation at all, set it to all None
@@ -1242,7 +1258,7 @@ def a(cpu: vector[_], mem: vector[f64])->(vector[into(f64)|None], vector[into(f6
         let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
         //dbg!(pyast);
         let copr = parse_copr(python_source);
-        dbg!(&copr);
+        // dbg!(&copr);
         //assert!(copr.is_ok());
     }
     #[test]
@@ -1276,7 +1292,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         let rb =
             DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
         let ret = coprocessor(python_source, &rb);
-        dbg!(&ret);
+        // dbg!(&ret);
         assert!(ret.is_ok());
         assert_eq!(ret.unwrap().column(0).len(), 4);
     }
