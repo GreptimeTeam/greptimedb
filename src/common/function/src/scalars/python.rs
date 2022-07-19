@@ -39,7 +39,7 @@ struct AnnotationInfo {
     datatype: DataType,
     is_nullable: bool,
     /// if the result type need to be coerced to given type in `into(<datatype>)`
-    need_coerced: bool,
+    coerce_into: bool,
 }
 
 #[derive(Debug, Snafu)]
@@ -64,6 +64,7 @@ pub enum CoprError {
         reason: String,
     },
 }
+
 // impl from for those error so one can use question mark and implictly cast into `CoprError`
 impl From<ArrowError> for CoprError {
     fn from(error: ArrowError) -> Self {
@@ -106,8 +107,8 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>, CoprError> {
             } else {
                 return Err(CoprError::Other {
                     reason: format!(
-                        "Expect a list of String, found {:?} in list element",
-                        &s.node
+                        "Expect a list of String, found {:?} in list element at {:?}",
+                        &s.node, lst.location
                     ),
                 });
             }
@@ -138,8 +139,8 @@ fn into_datatype(ty: &str) -> Option<DataType> {
 }
 
 /// return AnnotationInfo with is_nullable and need_coerced both set to false
-fn parse_type(node: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
-    match node {
+fn parse_type(node: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
+    match &node.node {
         ast::ExprKind::Name { id, ctx: _ } => {
             let ty = into_datatype(id).ok_or(CoprError::Other {
                 reason: format!("unknown type: {id}"),
@@ -147,16 +148,16 @@ fn parse_type(node: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
             Ok(AnnotationInfo {
                 datatype: ty,
                 is_nullable: false,
-                need_coerced: false,
+                coerce_into: false,
             })
         }
-        _ => todo!(),
+        _ => Err(CoprError::Other { reason: format!("Expect a type's name, found {:?}", node) }),
     }
 }
 
 /// Item => NativeType | into `(` NativeType `)`
-fn parse_item(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
-    match sub {
+fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
+    match &sub.node {
         ast::ExprKind::Name { id: _, ctx: _ } => Ok(parse_type(sub)?),
         ast::ExprKind::Call {
             func,
@@ -182,8 +183,8 @@ fn parse_item(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
                     reason: "Expect only one arguement for `into`"
                 }
             );
-            let mut anno = parse_type(&args[0].node)?;
-            anno.need_coerced = need_coerced;
+            let mut anno = parse_type(&args[0])?;
+            anno.coerce_into = need_coerced;
             Ok(anno)
         }
         _ => todo!(),
@@ -216,12 +217,12 @@ fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
         }
         // i.e: vector[f64]
         match &slice.node {
-            ast::ExprKind::Name { id: _, ctx: _ } => parse_item(&slice.node),
+            ast::ExprKind::Name { id: _, ctx: _ } => parse_item(slice),
             ast::ExprKind::Call {
                 func: _,
                 args: _,
                 keywords: _,
-            } => parse_item(&slice.node),
+            } => parse_item(slice),
             ast::ExprKind::BinOp { left, op: _, right } => {
                 let mut is_nullable = false;
                 let mut tmp_anno = None;
@@ -241,7 +242,7 @@ fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
                         }
                         ast::ExprKind::Name { id: _, ctx: _ } => {
                             if tmp_anno.is_none() {
-                                tmp_anno = Some(parse_item(&i.node)?)
+                                tmp_anno = Some(parse_item(i)?)
                             } else {
                                 todo!()
                             }
@@ -252,7 +253,7 @@ fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
                             keywords: _,
                         } => {
                             if tmp_anno.is_none() {
-                                tmp_anno = Some(parse_item(&i.node)?)
+                                tmp_anno = Some(parse_item(i)?)
                             } else {
                                 todo!()
                             }
@@ -690,14 +691,14 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                     .iter()
                     .enumerate()
                     .map(|(idx,name)| {
-                        let AnnotationInfo { datatype: ty, is_nullable , need_coerced: _} = copr.return_types[idx]
+                        let AnnotationInfo { datatype: ty, is_nullable , coerce_into: _} = copr.return_types[idx]
                         .to_owned()
                         .unwrap_or_else(||
                             // default to be not nullable and use DataType infered by PyVector
                             AnnotationInfo{
                                 datatype: cols[idx].data_type().to_owned(),
                                 is_nullable: false,
-                                need_coerced: false
+                                coerce_into: false
                             }
                         );
                         Field::new(
@@ -724,7 +725,7 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                 let real_ty = col.data_type();
                 let anno_ty = field.data_type();
                 if let Some(anno) = anno{
-                    if anno.need_coerced && real_ty != anno_ty{
+                    if anno.coerce_into && real_ty != anno_ty{
                         *col = arrow::compute::cast::cast(
                             col.as_ref(),
                             anno_ty,
