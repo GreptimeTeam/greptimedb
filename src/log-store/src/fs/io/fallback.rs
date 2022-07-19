@@ -6,7 +6,7 @@ use snafu::ResultExt;
 use crate::error::Error;
 
 // TODO(hl): Implement pread/pwrite for non-Unix platforms
-pub fn pread_exact(file: &File, _buf: &mut [u8],_ offset: u64) -> Result<(), Error> {
+pub fn pread_exact(file: &File, _buf: &mut [u8], _offset: u64) -> Result<(), Error> {
     unimplemented!()
 }
 

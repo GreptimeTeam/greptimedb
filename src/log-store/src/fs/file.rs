@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -10,6 +11,7 @@ use bytes::{Bytes, BytesMut};
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use common_telemetry::logging::{error, info};
+use futures::Stream;
 use futures_util::StreamExt;
 use snafu::ResultExt;
 use store_api::logstore::entry::{Encode, Entry, Id, Offset};
@@ -84,9 +86,7 @@ impl FileWriter {
 
     pub async fn flush(&self) -> Result<()> {
         let file = self.inner.clone();
-        let handle =
-            common_runtime::spawn_blocking_write(move || file.sync_data().context(IoSnafu));
-        handle
+        common_runtime::spawn_blocking_write(move || file.sync_all().context(IoSnafu))
             .await
             .map_err(|e| {
                 InternalSnafu {
@@ -382,10 +382,10 @@ impl LogFile {
     ) -> impl EntryStream<Entry = EntryImpl, Error = Error> + '_ {
         let length = self.state.flush_offset.load(Ordering::Relaxed);
 
-        let mut chunk_stream = file_chunk_stream(self.writer.inner.clone(), 0, length, 1024);
-        let mut chunks = CompositeChunk::new();
-        let s = stream!({
-            while let Some(chunk) = chunk_stream.recv().await {
+        let mut chunk_stream = file_chunk_stream(self.writer.inner.clone(), 0, length, 0);
+        let entry_stream = stream!({
+            let mut chunks = CompositeChunk::new();
+            while let Some(chunk) = chunk_stream.next().await {
                 chunks.add(chunk.unwrap());
                 let mut batch = vec![];
                 loop {
@@ -411,7 +411,7 @@ impl LogFile {
         });
 
         StreamImpl {
-            inner: Box::pin(s),
+            inner: Box::pin(entry_stream),
             start_entry_id,
         }
     }
@@ -538,16 +538,26 @@ struct State {
     stopped: AtomicBool,
 }
 
-/// Creates a stream of chunks of data from file. The returned stream has a bounded buffer
-/// so that when consumer cannot catch up with spawned reader loop, the reader will be blocked
-/// and wait until buffer has enough capacity.
+type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk<CHUNK_SIZE>>> + Send>>;
+
+/// Creates a stream of chunks of data from file. If `buffer_size` is not 0, the returned stream
+/// will have a bounded buffer and a background thread will do prefetching. When consumer cannot
+/// catch up with spawned prefetch loop, the prefetch thread will be blocked and wait until buffer
+/// has enough capacity.
+///
+/// If the `buffer_size` is 0, there will not be a prefetching thread. File chunks will not be read
+/// until stream consumer asks for next chunk.
 fn file_chunk_stream(
     file: Arc<File>,
     mut offset: usize,
     file_size: usize,
     buffer_size: usize,
-) -> tokio::sync::mpsc::Receiver<Result<Chunk<CHUNK_SIZE>>> {
-    let (tx, rx) = tokio::sync::mpsc::channel(buffer_size);
+) -> SendableChunkStream {
+    if buffer_size == 0 {
+        return file_chunk_stream_sync(file, offset, file_size);
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(buffer_size);
     common_runtime::spawn_blocking_read(move || loop {
         if offset >= file_size {
             return;
@@ -570,7 +580,41 @@ fn file_chunk_stream(
             }
         }
     });
-    rx
+    Box::pin(stream!({
+        while let Some(v) = rx.recv().await {
+            yield v;
+        }
+    }))
+}
+
+fn file_chunk_stream_sync(
+    file: Arc<File>,
+    mut offset: usize,
+    file_size: usize,
+) -> SendableChunkStream {
+    let s = stream!({
+        loop {
+            if offset >= file_size {
+                return;
+            }
+            let file = file.clone();
+            match read_at(file, offset, file_size) {
+                Ok(data) => {
+                    let data_len = data.len();
+                    yield Ok(data);
+                    offset += data_len;
+                    continue;
+                }
+                Err(e) => {
+                    error!("Failed to read file chunk, error: {}", &e);
+                    yield Err(e);
+                    break;
+                }
+            }
+        }
+    });
+
+    Box::pin(s)
 }
 
 /// Reads a chunk of data from file in a blocking manner.
@@ -708,7 +752,43 @@ mod tests {
         pin_mut!(stream);
 
         let mut chunks = vec![];
-        while let Some(r) = stream.recv().await {
+        while let Some(r) = stream.next().await {
+            chunks.push(r.unwrap());
+        }
+        assert_eq!(
+            vec![4096, 1024],
+            chunks.iter().map(|c| c.write).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![vec![42].repeat(4096), vec![42].repeat(1024)],
+            chunks
+                .iter()
+                .map(|c| &c.data[0..c.write])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    pub async fn test_sync_chunk_stream() {
+        let dir = tempdir::TempDir::new("greptimedb-store-test").unwrap();
+        let file_path = dir.path().join("chunk-stream-file-test");
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&file_path)
+            .await
+            .unwrap();
+        file.write_all(&vec![42].repeat(4096 + 1024)).await.unwrap();
+        file.flush().await.unwrap();
+
+        let file_size = file.metadata().await.unwrap().len();
+        let file = Arc::new(file.into_std().await);
+        let stream = file_chunk_stream_sync(file, 0, file_size as usize);
+        pin_mut!(stream);
+
+        let mut chunks = vec![];
+        while let Some(r) = stream.next().await {
             chunks.push(r.unwrap());
         }
         assert_eq!(
