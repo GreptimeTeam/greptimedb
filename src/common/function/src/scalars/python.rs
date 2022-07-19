@@ -317,10 +317,14 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
                 tmp_anno.is_nullable = is_nullable;
                 Ok(tmp_anno)
             }
-            _ => Err(CoprError::Other { reason: format!("Expect type in `vector[...]`, found {:?}", &slice.node) }),
+            _ => Err(CoprError::Other {
+                reason: format!("Expect type in `vector[...]`, found {:?}", &slice.node),
+            }),
         }
     } else {
-        Err(CoprError::Other { reason: format!("Expect type annotation, found {:?}", &sub) })
+        Err(CoprError::Other {
+            reason: format!("Expect type annotation, found {:?}", &sub),
+        })
     }
 }
 /// parse script and return `Coprocessor` struct with info extract from ast
