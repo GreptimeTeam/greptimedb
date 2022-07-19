@@ -15,12 +15,14 @@ mod tests {
         buf.write_u64_le(1234u64).unwrap();
         let result = buf.read_u64_le().unwrap();
         assert_eq!(1234u64, result);
+        buf.advance_by(8);
 
         buf.write_from_slice("hello, world".as_bytes()).unwrap();
         let mut content = vec![0u8; 5];
         buf.read_to_slice(&mut content).unwrap();
         let read = String::from_utf8_lossy(&content);
         assert_eq!("hello", read);
+        buf.advance_by(5);
 
         // after read, buffer should still have 7 bytes to read.
         assert_eq!(7, buf.remaining());
@@ -31,6 +33,7 @@ mod tests {
         let mut bytes = Bytes::from_static("hello".as_bytes());
         assert_eq!(5, bytes.remaining_size());
         assert_eq!(b'h', bytes.read_u8_le().unwrap());
+        bytes.advance_by(1);
         assert_eq!(4, bytes.remaining_size());
     }
 
@@ -54,10 +57,15 @@ mod tests {
     pub fn test_read_write_from_slice_buffer() {
         let mut buf = "hello".as_bytes();
         assert_eq!(104, buf.read_u8_le().unwrap());
+        buf.advance_by(1);
         assert_eq!(101, buf.read_u8_le().unwrap());
+        buf.advance_by(1);
         assert_eq!(108, buf.read_u8_le().unwrap());
+        buf.advance_by(1);
         assert_eq!(108, buf.read_u8_le().unwrap());
+        buf.advance_by(1);
         assert_eq!(111, buf.read_u8_le().unwrap());
+        buf.advance_by(1);
         assert_matches!(buf.read_u8_le(), Err(Overflow { .. }));
     }
 
@@ -84,10 +92,15 @@ mod tests {
         assert!(buf.write_from_slice("hello".as_bytes()).is_ok());
         let mut slice = buf.as_slice();
         assert_eq!(104, slice.read_u8_le().unwrap());
+        slice.advance_by(1);
         assert_eq!(101, slice.read_u8_le().unwrap());
+        slice.advance_by(1);
         assert_eq!(108, slice.read_u8_le().unwrap());
+        slice.advance_by(1);
         assert_eq!(108, slice.read_u8_le().unwrap());
+        slice.advance_by(1);
         assert_eq!(111, slice.read_u8_le().unwrap());
+        slice.advance_by(1);
         assert_matches!(slice.read_u8_le(), Err(Overflow { .. }));
     }
 
