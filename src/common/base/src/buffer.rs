@@ -7,6 +7,7 @@ use paste::paste;
 use snafu::{ensure, Backtrace, ErrorCompat, Snafu};
 
 #[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display(
         "Destination buffer overflow, src_len: {}, dst_len: {}",
@@ -21,6 +22,7 @@ pub enum Error {
 
     #[snafu(display("Buffer underflow"))]
     Underflow {},
+
     #[snafu(display("IO operation reach EOF, source: {}", source))]
     Eof {
         source: std::io::Error,

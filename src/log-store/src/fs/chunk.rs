@@ -1,7 +1,8 @@
 use std::collections::LinkedList;
 
 use common_base::buffer::Buffer;
-use common_base::buffer::Error::Underflow;
+use common_base::buffer::UnderflowSnafu;
+use snafu::ensure;
 
 #[derive(Debug)]
 pub(crate) struct Chunk<const N: usize> {
@@ -93,9 +94,7 @@ impl Buffer for CompositeChunk {
     }
 
     fn read_to_slice(&mut self, mut dst: &mut [u8]) -> common_base::buffer::Result<()> {
-        if self.remaining_size() < dst.len() {
-            return Err(Underflow {});
-        }
+        ensure!(self.remaining_size() >= dst.len(), UnderflowSnafu);
 
         for c in &self.chunks {
             if dst.is_empty() {
@@ -105,9 +104,7 @@ impl Buffer for CompositeChunk {
             dst = &mut dst[read..];
         }
 
-        if !dst.is_empty() {
-            return Err(Underflow {});
-        }
+        ensure!(dst.is_empty(), UnderflowSnafu);
         Ok(())
     }
 
