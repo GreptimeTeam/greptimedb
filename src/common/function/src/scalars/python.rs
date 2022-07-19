@@ -362,7 +362,10 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                             ctx: ast::ExprContext::Load
                         },
                 CoprParseSnafu {
-                    reason: format!("Expect decorator with name `copr` or `coprocessor`, found {:?}", &func.node),
+                    reason: format!(
+                        "Expect decorator with name `copr` or `coprocessor`, found {:?}",
+                        &func.node
+                    ),
                     loc: Some(func.location)
                 }
             );
@@ -621,12 +624,10 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 }
 
 /// The coprocessor function accept a python script and a Record Batch:
-/// first it extract columns according to `args` given in python decorator from [`DfRecordBatch`]
-///
-/// then execute python script given those `args`, return a tuple([`PyTuple`]) or one ([`PyVector`])
-/// the return vectors
-///
-/// in the end those vector is rename according to `returns` in decorator and form a new [`DfRecordBatch`] and return it
+/// ## What it does
+/// 1. it take a python script and a [`DfRecordBatch`], extract columns and annotation info according to `args` given in decorator in python script
+/// 2. execute python code and return a vector or a tuple of vector,
+/// 3. the returning vector(s) is assembled into a new [`DfRecordBatch`] according to `returns` in python decorator and return to caller
 ///
 /// # Example
 ///
@@ -823,7 +824,7 @@ pub fn coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch, Co
                             anno_ty,
                             CastOptions { wrapped: true, partial: true })?.into();
                         }else{
-                        return Err(CoprError::Other { 
+                        return Err(CoprError::Other {
                             reason: format!("Anntation type is {:?}, but real type is {:?}(Maybe add a `into()`?)", anno_ty, real_ty)
                             });
                         }
@@ -1135,8 +1136,9 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)]
                     assert!(
                         r.is_err()
                             && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                                reason.contains("Expect decorator with name `copr` or `coprocessor`, found")
-                                    && loc.is_some()
+                                reason.contains(
+                                    "Expect decorator with name `copr` or `coprocessor`, found",
+                                ) && loc.is_some()
                             } else {
                                 false
                             }
@@ -1156,7 +1158,8 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
                     assert!(
                         r.is_err()
                             && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                                reason.contains("Expect two keyword argument of `args` and `returns`")
+                                reason
+                                    .contains("Expect two keyword argument of `args` and `returns`")
                                     && loc.is_some()
                             } else {
                                 false
@@ -1166,7 +1169,6 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
                 }),
             ),
             // ... More `Other` errors
-            
         ];
 
         for (script, predicate) in testcases {
@@ -1191,12 +1193,14 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
                     // dbg!(&r);
                     // assert in here seems to be more readable
                     assert!(
-                        r.is_err() && 
-                        if let CoprError::Other{reason} = r.unwrap_err(){
-                            reason.contains("Anntation type is ")
-                        }else{false}
+                        r.is_err()
+                            && if let CoprError::Other { reason } = r.unwrap_err() {
+                                reason.contains("Anntation type is ")
+                            } else {
+                                false
+                            }
                     );
-                })
+                }),
             ),
             (
                 // cast to bool
@@ -1207,11 +1211,8 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
 "#,
                 Some(|r| {
                     // assert in here seems to be more readable
-                    assert!(
-                        r.is_ok() && 
-                        *r.unwrap().column(4).data_type()==DataType::Boolean
-                    );
-                })
+                    assert!(r.is_ok() && *r.unwrap().column(4).data_type() == DataType::Boolean);
+                }),
             ),
         ];
         let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
@@ -1222,7 +1223,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
         ]));
         let rb =
             DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
-        
+
         for (script, predicate) in test_cases {
             if let Some(predicate) = predicate {
                 predicate(coprocessor(script, &rb));
@@ -1261,7 +1262,8 @@ a(2,3)
     fn test_coprocessor() {
         let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[into(f32)]):
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+    vector[into(f32)]):
     return cpu + mem, cpu - mem
 "#;
         //println!("{}, {:?}", python_source, python_ast);
