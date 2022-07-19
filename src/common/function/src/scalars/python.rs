@@ -1,4 +1,5 @@
 //! python udf supports
+//! use the function `coprocessor` to parse and run a python function with arguments from recordBatch, and return a newly assembled RecordBatch
 use arrow::compute::cast::CastOptions;
 use arrow::error::ArrowError;
 use rustpython_vm as vm;
@@ -23,7 +24,7 @@ use snafu::{ensure, prelude::Snafu};
 use type_::{is_instance, PyVector};
 use vm::builtins::{PyBaseExceptionRef, PyTuple};
 use vm::PyPayload;
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct Coprocessor {
     name: String,
     // get from python decorator args&returns
@@ -63,7 +64,7 @@ pub enum CoprError {
     CoprParse {
         reason: String,
         // location is option because maybe errors can't give a clear location?
-        loc: Option<Location>
+        loc: Option<Location>,
     },
     /// Other types of error that isn't any of above
     Other {
@@ -372,7 +373,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                                 if arg_names.is_none() {
                                     arg_names = Some(pylist_to_vec(&kw.node.value))
                                 } else {
-                                    return Err(CoprError::CoprParse { 
+                                    return Err(CoprError::CoprParse {
                                         reason: "`args` occur multiple times in decorator's arguements' list.".to_string(),
                                         loc: Some(kw.location)
                                     });
@@ -382,7 +383,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                                 if ret_names.is_none() {
                                     ret_names = Some(pylist_to_vec(&kw.node.value))
                                 } else {
-                                    return Err(CoprError::CoprParse { 
+                                    return Err(CoprError::CoprParse {
                                         reason: "`returns` occur multiple times in decorator's arguements' list.".to_string(),
                                         loc: Some(kw.location)
                                     });
@@ -391,7 +392,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                             _ => {
                                 return Err(CoprError::CoprParse {
                                     reason: format!("Expect `args` or `returns`, found `{}`", s),
-                                    loc: Some(kw.location)
+                                    loc: Some(kw.location),
                                 })
                             }
                         }
@@ -402,7 +403,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                                 "Expect explictly set both `args` and `returns`, found {:?}",
                                 &kw.node
                             ),
-                            loc: Some(kw.location)
+                            loc: Some(kw.location),
                         })
                     }
                 }
@@ -412,7 +413,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
             } else {
                 return Err(CoprError::CoprParse {
                     reason: "Expect `args` keyword".to_string(),
-                    loc: Some(decorator.location)
+                    loc: Some(decorator.location),
                 });
             };
             let ret_names = if let Some(rets) = ret_names {
@@ -420,7 +421,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
             } else {
                 return Err(CoprError::CoprParse {
                     reason: "Expect `rets` keyword".to_string(),
-                    loc: Some(decorator.location)
+                    loc: Some(decorator.location),
                 });
             };
             // get arg types from type annotation
@@ -487,7 +488,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                     "Expect decorator to be a function call(like `@copr(...)`), found {:?}",
                     decorator.node
                 ),
-                loc: Some(decorator.location)
+                loc: Some(decorator.location),
             })
         }
     } else {
@@ -496,7 +497,7 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
                 "Expect a function definition, found a {:?}",
                 &python_ast[0].node
             ),
-            loc: Some(python_ast[0].location)
+            loc: Some(python_ast[0].location),
         })
     }
 }
@@ -526,7 +527,11 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
                     "Expect only one statement in script, found {} statement",
                     code.len()
                 ),
-                loc: if code.is_empty(){None}else{Some(code[0].location)}
+                loc: if code.is_empty() {
+                    None
+                } else {
+                    Some(code[0].location)
+                }
             }
         );
         if let ast::StmtKind::FunctionDef {
@@ -548,7 +553,7 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
                 arg.node.annotation = None;
             }
         } else {
-            return Err(CoprError::CoprParse { 
+            return Err(CoprError::CoprParse {
                 reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
                 loc: Some(code[0].location)
             });
@@ -585,7 +590,7 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
     } else {
         return Err(CoprError::CoprParse {
             reason: format!("Expect statement in script, found: {:?}", top),
-            loc: None
+            loc: None,
         });
     }
     // use `compile::Mode::BlockExpr` so it return the result of statement
@@ -614,7 +619,7 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 ///
 /// # Example
 ///
-/// ```
+/// ```rust
 /// let python_source = r#"
 /// @copr(args=["cpu", "mem"], returns=["perf", "what"])
 /// def a(cpu, mem):
@@ -630,6 +635,24 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 /// DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
 /// let ret = coprocessor(python_source, rb).unwrap();
 /// assert_eq!(ret.column(0).len(), 4);
+/// ```
+/// 
+/// # Type Annotation
+/// you can use type annotations in args and returns to designate types, so coprocessor will check for corrsponding types.
+/// 
+/// using `into()` can convert whatever types python function returns into given types.
+/// 
+/// Currently support types are `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64` and `f16`, `f32`, `f64`
+/// 
+/// use `f64 | None` to mark if returning column is nullable like in [`DfRecordBatch`]'s schema's [`Field`]'s is_nullable
+/// 
+/// use `into(f64)` to convert returning PyVector into float 64. You can also combine them like `into(f64) | None` to declare a nullable column that types is cast to f64
+/// 
+/// a example given below:
+/// ```python
+/// @copr(args=["cpu", "mem"], returns=["perf", "minus", "mul", "div"])
+/// def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+///     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 /// ```
 pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, CoprError> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
@@ -669,7 +692,10 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
             }
             _ => {
                 return Err(CoprError::Other {
-                    reason: format!("Unsupport data type at column {idx}: {:?} for coprocessor", arg.data_type())
+                    reason: format!(
+                        "Unsupport data type at column {idx}: {:?} for coprocessor",
+                        arg.data_type()
+                    ),
                 })
             }
         }
@@ -777,8 +803,7 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                         *col = arrow::compute::cast::cast(
                             col.as_ref(),
                             anno_ty,
-                            CastOptions { wrapped: true, partial: true })
-                            .unwrap().into();
+                            CastOptions { wrapped: true, partial: true })?.into();
                     }else{
                         continue;
                     }
@@ -829,6 +854,92 @@ mod tests {
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 
     use super::*;
+    type PredicateFn = Option<fn(Result<Coprocessor, CoprError>) -> bool>;
+    #[test]
+    fn testsuite_parse() {
+        let testcases: Vec<(&'static str, PredicateFn)> = vec![
+            (
+                // for correct parse
+                r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    //dbg!(&r);
+                    r.is_ok()
+                        && r.unwrap()
+                            == Coprocessor {
+                                name: "a".into(),
+                                args: vec!["cpu".into(), "mem".into()],
+                                returns: vec![
+                                    "perf".into(),
+                                    "what".into(),
+                                    "how".into(),
+                                    "why".into(),
+                                ],
+                                arg_types: vec![
+                                    Some(AnnotationInfo {
+                                        datatype: DataType::Float32,
+                                        is_nullable: false,
+                                        coerce_into: false,
+                                    }),
+                                    Some(AnnotationInfo {
+                                        datatype: DataType::Float64,
+                                        is_nullable: false,
+                                        coerce_into: false,
+                                    }),
+                                ],
+                                return_types: vec![
+                                    Some(AnnotationInfo {
+                                        datatype: DataType::Float64,
+                                        is_nullable: true,
+                                        coerce_into: true,
+                                    }),
+                                    Some(AnnotationInfo {
+                                        datatype: DataType::Float64,
+                                        is_nullable: false,
+                                        coerce_into: true,
+                                    }),
+                                    Some(AnnotationInfo {
+                                        datatype: DataType::Float64,
+                                        is_nullable: false,
+                                        coerce_into: false,
+                                    }),
+                                    Some(AnnotationInfo {
+                                        datatype: DataType::Float64,
+                                        is_nullable: true,
+                                        coerce_into: false,
+                                    }),
+                                ],
+                            }
+                }),
+            ),
+            (
+                // missing decrator
+                r#"
+def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    //dbg!(&r);
+                    r.is_err()
+                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
+                            reason == "Expect one decorator" && loc == None
+                        } else {
+                            false
+                        }
+                }),
+            ),
+        ];
+
+        for (script, predicate) in testcases {
+            let copr = parse_copr(script);
+            if let Some(predicate) = predicate {
+                assert!(predicate(copr));
+            }
+        }
+    }
 
     #[test]
     #[allow(unused)]
