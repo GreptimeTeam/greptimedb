@@ -3,7 +3,6 @@ pub mod boolean;
 mod builder;
 pub mod constant;
 mod helper;
-pub mod iterator;
 pub mod mutable;
 pub mod null;
 pub mod primitive;

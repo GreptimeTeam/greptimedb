@@ -177,14 +177,14 @@ mod tests {
             Arc::new(|_| Ok(Box::new(DummyAccumulator)))
         }
 
-        fn input_type(&self) -> ConcreteDataType {
-            ConcreteDataType::float64_datatype()
+        fn input_types(&self) -> Vec<ConcreteDataType> {
+            vec![ConcreteDataType::float64_datatype()]
         }
 
-        fn set_input_type(&self, _: ConcreteDataType) {}
+        fn set_input_types(&self, _: Vec<ConcreteDataType>) {}
 
         fn output_type(&self) -> ConcreteDataType {
-            self.input_type()
+            self.input_types().into_iter().next().unwrap()
         }
 
         fn state_types(&self) -> Vec<ConcreteDataType> {

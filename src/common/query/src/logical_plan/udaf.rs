@@ -9,7 +9,7 @@ use arrow::datatypes::DataType as ArrowDataType;
 use datafusion_expr::AccumulatorFunctionImplementation as DfAccumulatorFunctionImplementation;
 use datafusion_expr::AggregateUDF as DfAggregateUdf;
 use datafusion_expr::StateTypeFunction as DfStateTypeFunction;
-use datatypes::prelude::{ConcreteDataType, DataType};
+use datatypes::prelude::*;
 
 use crate::function::{
     to_df_return_type, AccumulatorFunctionImplementation, ReturnTypeFunction, StateTypeFunction,

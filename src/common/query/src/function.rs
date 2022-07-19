@@ -31,7 +31,7 @@ pub type AccumulatorFunctionImplementation =
 
 /// Create Accumulator with the data type of input column.
 pub type AccumulatorCreatorFunction =
-    Arc<dyn Fn(&ConcreteDataType) -> Result<Box<dyn Accumulator>> + Sync + Send>;
+    Arc<dyn Fn(&[ConcreteDataType]) -> Result<Box<dyn Accumulator>> + Sync + Send>;
 
 /// This signature corresponds to which types an aggregator serializes
 /// its state, given its return datatype.

@@ -13,11 +13,8 @@ use common_recordbatch::util;
 use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datafusion_common::DataFusionError;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::VectorRef;
-use datatypes::prelude::{DataType, LogicalTypeId};
+use datatypes::prelude::*;
 use datatypes::types::DataTypeBuilder;
-use datatypes::types::Primitive;
 use datatypes::types::PrimitiveType;
 use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
@@ -56,12 +53,13 @@ where
 
 #[derive(Debug, Default)]
 struct MySumAccumulatorCreator {
-    input_type: Arc<Mutex<Option<ConcreteDataType>>>,
+    input_type: Arc<Mutex<Option<Vec<ConcreteDataType>>>>,
 }
 
 impl AccumulatorCreator for MySumAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
-        let creator: AccumulatorCreatorFunction = Arc::new(move |input_type: &ConcreteDataType| {
+        let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
+            let input_type = &types[0];
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
@@ -80,7 +78,7 @@ impl AccumulatorCreator for MySumAccumulatorCreator {
         creator
     }
 
-    fn input_type(&self) -> ConcreteDataType {
+    fn input_types(&self) -> Vec<ConcreteDataType> {
         self.input_type
             .lock()
             .unwrap()
@@ -89,19 +87,19 @@ impl AccumulatorCreator for MySumAccumulatorCreator {
             .clone()
     }
 
-    fn set_input_type(&self, input_type: ConcreteDataType) {
-        let mut input_type_holder = self.input_type.lock().unwrap();
-        if let Some(old) = input_type_holder.replace(input_type.clone()) {
-            assert_eq!(
-                old, input_type,
-                "input type {:?} != {:?}, check if DataFusion has changed its UDAF execution logic",
-                old, input_type
+    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) {
+        let mut holder = self.input_type.lock().unwrap();
+        if let Some(old) = holder.as_ref() {
+            assert_eq!(old.len(), input_types.len());
+            old.iter().zip(input_types.iter()).for_each(|(x, y)|
+                assert_eq!(x, y, "input type {:?} != {:?}, check if DataFusion has changed its UDAF execution logic", x, y)
             );
         }
+        let _ = holder.insert(input_types);
     }
 
     fn output_type(&self) -> ConcreteDataType {
-        let input_type = self.input_type();
+        let input_type = &self.input_types()[0];
         with_match_primitive_type_id!(
             input_type.logical_type_id(),
             |$S| {
@@ -121,7 +119,9 @@ impl AccumulatorCreator for MySumAccumulatorCreator {
 impl<T, SumT> Accumulator for MySumAccumulator<T, SumT>
 where
     T: Primitive + AsPrimitive<SumT>,
+    for<'a> T: Scalar<RefType<'a> = T>,
     SumT: Primitive + std::ops::AddAssign,
+    for<'a> SumT: Scalar<RefType<'a> = SumT>,
 {
     fn state(&self) -> QueryResult<Vec<ScalarValue>> {
         Ok(vec![ScalarValue::from(self.sum.into())])
@@ -132,12 +132,9 @@ where
             return Ok(());
         };
         let column = &values[0];
-        let column = column
-            .as_any()
-            .downcast_ref::<PrimitiveVector<T>>()
-            .unwrap();
-        for v in column.iter().flatten() {
-            self.add(*v)
+        let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(column) };
+        for v in column.iter_data().flatten() {
+            self.add(v)
         }
         Ok(())
     }
@@ -147,12 +144,9 @@ where
             return Ok(());
         };
         let states = &states[0];
-        let states = states
-            .as_any()
-            .downcast_ref::<PrimitiveVector<SumT>>()
-            .unwrap();
-        for s in states.iter().flatten() {
-            self.merge(*s)
+        let states: &<SumT as Scalar>::VectorType = unsafe { VectorHelper::static_cast(states) };
+        for s in states.iter_data().flatten() {
+            self.merge(s)
         }
         Ok(())
     }

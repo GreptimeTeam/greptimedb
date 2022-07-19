@@ -55,7 +55,7 @@ impl QueryEngineState {
             .insert(udf.name.clone(), Arc::new(udf.into_df_udf()));
     }
 
-    // TODO(LFC) Same as UDF, manage UDAFs by ourself.
+    // TODO(LFC): Same as UDF, manage UDAFs by ourself.
     pub fn register_udaf(&self, udaf: AggregateUdf) {
         self.df_context
             .state

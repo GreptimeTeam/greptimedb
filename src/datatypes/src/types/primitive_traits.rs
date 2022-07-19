@@ -2,6 +2,7 @@ use arrow::compute::arithmetics::basic::NativeArithmetics;
 use arrow::types::NativeType;
 use num::NumCast;
 
+use crate::prelude::Scalar;
 use crate::value::Value;
 
 /// Primitive type.
@@ -15,6 +16,7 @@ pub trait Primitive:
     + serde::Serialize
     + NativeArithmetics
     + NumCast
+    + Scalar
 {
     /// Largest numeric type this primitive type can be cast to.
     type LargestType: Primitive;

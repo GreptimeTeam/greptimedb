@@ -47,10 +47,10 @@ pub trait AccumulatorCreator: Send + Sync + Debug {
     fn creator(&self) -> AccumulatorCreatorFunction;
 
     /// Get the input data type of the Accumulator.
-    fn input_type(&self) -> ConcreteDataType;
+    fn input_types(&self) -> Vec<ConcreteDataType>;
 
     /// Store the input data type that is provided by DataFusion at runtime.
-    fn set_input_type(&self, input_type: ConcreteDataType);
+    fn set_input_types(&self, input_types: Vec<ConcreteDataType>);
 
     /// Get the Accumulator's output data type.
     fn output_type(&self) -> ConcreteDataType;
@@ -63,17 +63,15 @@ pub fn make_accumulator_function(
     creator: Arc<dyn AccumulatorCreator>,
 ) -> AccumulatorFunctionImplementation {
     Arc::new(move || {
-        let input_type = creator.input_type();
+        let input_types = creator.input_types();
         let creator = creator.creator();
-        creator(&input_type)
+        creator(&input_types)
     })
 }
 
 pub fn make_return_function(creator: Arc<dyn AccumulatorCreator>) -> ReturnTypeFunction {
     Arc::new(move |input_types| {
-        // There must be at least one column in the projection,
-        // and all UDAFs are unary for now.
-        creator.set_input_type(input_types[0].clone());
+        creator.set_input_types(input_types.to_vec());
 
         Ok(Arc::new(creator.output_type()))
     })

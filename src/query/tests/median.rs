@@ -8,7 +8,7 @@ use common_query::logical_plan::{Accumulator, AccumulatorCreator};
 use common_query::prelude::*;
 use datafusion_common::DataFusionError;
 use datatypes::prelude::*;
-use datatypes::vectors::{PrimitiveVector, StringVector, VectorRef};
+use datatypes::vectors::StringVector;
 use datatypes::with_match_ordered_primitive_type_id;
 use num::NumCast;
 use snafu::ResultExt;
@@ -24,10 +24,13 @@ use snafu::ResultExt;
 // The time complexity to update the median is O(logn), O(1) to get the median; and the space
 // complexity is O(n). (Ignore the costs for heap expansion.)
 //
-// Why not use the [quick select](https://en.wikipedia.org/wiki/Quickselect) or just simply sort to
-// calculate the median? Because both ways need to either modified the stored internal state in the
-// final `evaluate` in `Accumulator`, which requires a mutable `self` and is against the method's
-// signature; or worse, clone the whole stored numbers.
+// From the point of algorithm, [quick select](https://en.wikipedia.org/wiki/Quickselect) might be
+// better. But to use quick select here, we need a mutable self in the final calculation(`evaluate`)
+// to swap stored numbers in the states vector. Though we can make our `evaluate` received
+// `&mut self`, DataFusion calls our accumulator with `&self` (see `DfAccumulatorAdaptor`). That
+// means we have to introduce some kinds of interior mutability, and the overhead is not neglectable.
+//
+// TODO(LFC): Use quick select to get median when we can modify DataFusion's code, and benchmark with two-heap algorithm.
 #[derive(Debug, Default)]
 pub struct Median<T>
 where
@@ -67,6 +70,7 @@ where
 impl<T> Accumulator for Median<T>
 where
     T: Primitive + Ord + FromStr,
+    for<'a> T: Scalar<RefType<'a> = T>,
 {
     // This function serializes our state to `ScalarValue`, which DataFusion uses to pass this
     // state between execution stages. Note that this can be arbitrary data.
@@ -95,13 +99,9 @@ where
 
         // This is a unary accumulator, so only one column is provided.
         let column = &values[0];
-        // DataFusion does try to coerce arguments to Accumulator's return type.
-        let column = column
-            .as_any()
-            .downcast_ref::<PrimitiveVector<T>>()
-            .unwrap();
-        for v in column.iter().flatten() {
-            self.push(*v);
+        let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(column) };
+        for v in column.iter_data().flatten() {
+            self.push(v);
         }
         Ok(())
     }
@@ -117,7 +117,7 @@ where
         // with one value in that method, `states[0]` is fine.
         let states = &states[0];
         let states = states.as_any().downcast_ref::<StringVector>().unwrap();
-        for s in states.iter().flatten() {
+        for s in states.iter_data().flatten() {
             s.split(',')
                 .filter_map(|n| n.parse::<T>().ok())
                 .for_each(|n| self.push(n));
@@ -141,12 +141,13 @@ where
 
 #[derive(Debug, Default)]
 pub struct MedianAccumulatorCreator {
-    input_type: Arc<Mutex<Option<ConcreteDataType>>>,
+    input_type: Arc<Mutex<Option<Vec<ConcreteDataType>>>>,
 }
 
 impl AccumulatorCreator for MedianAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
-        let creator: AccumulatorCreatorFunction = Arc::new(move |input_type: &ConcreteDataType| {
+        let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
+            let input_type = &types[0];
             with_match_ordered_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
@@ -165,7 +166,7 @@ impl AccumulatorCreator for MedianAccumulatorCreator {
         creator
     }
 
-    fn input_type(&self) -> ConcreteDataType {
+    fn input_types(&self) -> Vec<ConcreteDataType> {
         self.input_type
             .lock()
             .unwrap()
@@ -174,19 +175,19 @@ impl AccumulatorCreator for MedianAccumulatorCreator {
             .clone()
     }
 
-    fn set_input_type(&self, input_type: ConcreteDataType) {
-        let mut input_type_holder = self.input_type.lock().unwrap();
-        if let Some(old) = input_type_holder.replace(input_type.clone()) {
-            assert_eq!(
-                old, input_type,
-                "input type {:?} != {:?}, check if DataFusion has changed its UDAF execution logic",
-                old, input_type
+    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) {
+        let mut holder = self.input_type.lock().unwrap();
+        if let Some(old) = holder.as_ref() {
+            assert_eq!(old.len(), input_types.len());
+            old.iter().zip(input_types.iter()).for_each(|(x, y)|
+                assert_eq!(x, y, "input type {:?} != {:?}, check if DataFusion has changed its UDAF execution logic", x, y)
             );
         }
+        let _ = holder.insert(input_types);
     }
 
     fn output_type(&self) -> ConcreteDataType {
-        self.input_type()
+        self.input_types().into_iter().next().unwrap()
     }
 
     fn state_types(&self) -> Vec<ConcreteDataType> {

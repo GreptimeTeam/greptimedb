@@ -19,7 +19,7 @@ use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 /// String array wrapper
 #[derive(Debug, Clone)]
 pub struct StringVector {
-    pub(crate) array: StringArray,
+    array: StringArray,
 }
 
 impl From<StringArray> for StringVector {
