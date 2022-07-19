@@ -224,7 +224,7 @@ fn parse_annotation(sub: &ast::ExprKind) -> Result<AnnotationInfo, CoprError> {
             ensure!(
                 id == "vector",
                 CoprParseSnafu {
-                    reason: format!("Wrong type annotation, expect `vector[...]`, found {}", id),
+                    reason: format!("Wrong type annotation, expect `vector[...]`, found \"{}\"", id),
                     loc: Some(value.location)
                 }
             )
@@ -636,18 +636,18 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 /// let ret = coprocessor(python_source, rb).unwrap();
 /// assert_eq!(ret.column(0).len(), 4);
 /// ```
-/// 
+///
 /// # Type Annotation
 /// you can use type annotations in args and returns to designate types, so coprocessor will check for corrsponding types.
-/// 
+///
 /// using `into()` can convert whatever types python function returns into given types.
-/// 
+///
 /// Currently support types are `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64` and `f16`, `f32`, `f64`
-/// 
+///
 /// use `f64 | None` to mark if returning column is nullable like in [`DfRecordBatch`]'s schema's [`Field`]'s is_nullable
-/// 
+///
 /// use `into(f64)` to convert returning PyVector into float 64. You can also combine them like `into(f64) | None` to declare a nullable column that types is cast to f64
-/// 
+///
 /// a example given below:
 /// ```python
 /// @copr(args=["cpu", "mem"], returns=["perf", "minus", "mul", "div"])
@@ -768,7 +768,7 @@ pub fn coprocessor(script: &str, rb: DfRecordBatch) -> Result<DfRecordBatch, Cop
                         let AnnotationInfo { datatype: ty, is_nullable , coerce_into: _} = copr.return_types[idx]
                         .to_owned()
                         .unwrap_or_else(||
-                            // default to be not nullable and use DataType infered by PyVector
+                            // default to be not nullable and use DataType infered by PyVector itself
                             AnnotationInfo{
                                 datatype: cols[idx].data_type().to_owned(),
                                 is_nullable: false,
@@ -925,7 +925,119 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
                     //dbg!(&r);
                     r.is_err()
                         && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                            reason == "Expect one decorator" && loc == None
+                            reason.contains("Expect one decorator") && loc == None
+                        } else {
+                            false
+                        }
+                }),
+            ),
+            (
+                r#"
+@copr(args=["cpu", 3], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    r.is_err()
+                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
+                            reason.contains("Expect a list of String, found ") && loc.is_some()
+                        } else {
+                            false
+                        }
+                }),
+            ),
+            (
+                r#"
+@copr(args=42, returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    r.is_err()
+                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
+                            reason.contains("Expect a list, found ") && loc.is_some()
+                        } else {
+                            false
+                        }
+                }),
+            ),
+            (
+                // unknown type names
+                r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[g32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    r.is_err()
+                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
+                            reason.contains("unknown type: ") && loc.is_some()
+                        } else {
+                            false
+                        }
+                }),
+            ),
+            (
+                // Expect a Types name
+                r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[into(f64|None)], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    r.is_err()
+                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
+                            reason.contains("Expect a type's name, found ") && loc.is_some()
+                        } else {
+                            false
+                        }
+                }),
+            ),
+            (
+                // not into
+                r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[cast(f64)], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    r.is_err()
+                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
+                            reason.contains(
+                                "Expect only `into(datatype)` or datatype or `None`, found ",
+                            ) && loc.is_some()
+                        } else {
+                            false
+                        }
+                }),
+            ),
+            (
+                // Expect one arg in into
+                r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[into(f64, f32)], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    r.is_err()
+                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
+                            reason.contains("Expect only one arguement for `into`") && loc.is_some()
+                        } else {
+                            false
+                        }
+                }),
+            ),
+            (
+                // Expect `vector` not `vec`
+                r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vec[into(f64)], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    r.is_err()
+                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
+                            reason.contains("Wrong type annotation, expect `vector[...]`, found ") && loc.is_some()
                         } else {
                             false
                         }
