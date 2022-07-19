@@ -652,6 +652,10 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 /// # Example
 ///
 /// ```rust
+/// use std::sync::Arc;
+/// use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+/// use arrow::array::PrimitiveArray;
+/// use arrow::datatypes::{DataType, Field, Schema};
 /// let python_source = r#"
 /// @copr(args=["cpu", "mem"], returns=["perf", "what"])
 /// def a(cpu, mem):
@@ -660,7 +664,7 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 /// let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
 /// let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
 /// let schema = Arc::new(Schema::from(vec![
-/// Field::new("cpu", DataType::Float32, false),
+///  Field::new("cpu", DataType::Float32, false),
 ///  Field::new("mem", DataType::Float64, false),
 /// ]));
 /// let rb =
