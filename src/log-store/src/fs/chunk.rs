@@ -25,6 +25,7 @@ impl<const N: usize> Default for Chunk<N> {
 }
 
 impl<const N: usize> Chunk<N> {
+    #[cfg(test)]
     pub fn copy_from_slice(s: &[u8]) -> Self {
         let src_len = s.len();
         let mut data = [0u8; N];

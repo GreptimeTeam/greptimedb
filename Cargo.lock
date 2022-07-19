@@ -1993,7 +1993,6 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
- "memmap2",
  "rand 0.8.5",
  "snafu",
  "store-api",
@@ -2075,15 +2074,6 @@ name = "memchr"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
-
-[[package]]
-name = "memmap2"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5172b50c23043ff43dd53e51392f36519d9b35a8f3a410d30ece5d1aedd58ae"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "memoffset"

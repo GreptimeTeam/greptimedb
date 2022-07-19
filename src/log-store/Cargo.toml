@@ -19,7 +19,6 @@ crc = "3.0"
 futures = "0.3"
 futures-util = "0.3"
 hex = "0.4"
-memmap2 = "0.5"
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
 tempdir = "0.3"

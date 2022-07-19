@@ -10,14 +10,12 @@ use bytes::{Bytes, BytesMut};
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use common_telemetry::logging::{error, info};
-use futures::Stream;
 use futures_util::StreamExt;
-use memmap2::{Mmap, MmapOptions};
 use snafu::ResultExt;
 use store_api::logstore::entry::{Encode, Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
 use store_api::logstore::namespace::Namespace;
-use tokio::sync::mpsc::error::{SendError, TryRecvError};
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender as MpscSender;
 use tokio::sync::oneshot::Sender as OneshotSender;
@@ -177,18 +175,6 @@ impl LogFile {
             .next_entry_id
             .store(next_entry_id, Ordering::Relaxed);
         Ok(log)
-    }
-
-    /// Creates a file mmap region.
-    async fn map(&self, start: u64, length: usize) -> Result<Mmap> {
-        unsafe {
-            let file = self.writer.inner.clone();
-            MmapOptions::new()
-                .offset(start)
-                .len(length)
-                .map(&*file)
-                .context(IoSnafu)
-        }
     }
 
     /// Returns the persisted size of current log file.
@@ -396,20 +382,31 @@ impl LogFile {
     ) -> impl EntryStream<Entry = EntryImpl, Error = Error> + '_ {
         let length = self.state.flush_offset.load(Ordering::Relaxed);
 
+        let mut chunk_stream = file_chunk_stream(self.writer.inner.clone(), 0, length);
+        let mut chunks = CompositeChunk::new();
         let s = stream!({
-            let mmap = self.map(0, length).await?;
-            let mut buf = &mmap[..];
-            if buf.is_empty() {
-                info!("File is just created!");
-                // file is newly created
-                return;
-            }
-
-            while !buf.is_empty() {
-                let entry = EntryImpl::decode(&mut buf)?;
-                if entry.id() >= start_entry_id {
-                    yield Ok(vec![entry]);
+            while let Some(chunk) = chunk_stream.recv().await {
+                chunks.add(chunk.unwrap());
+                let mut batch = vec![];
+                loop {
+                    match EntryImpl::decode(&mut chunks) {
+                        Ok(e) => {
+                            if e.id() >= start_entry_id {
+                                batch.push(e);
+                            }
+                        }
+                        Err(Error::DecodeAgain { .. }) => {
+                            // no more data for decoding
+                            break;
+                        }
+                        Err(e) => {
+                            yield Err(e);
+                            break;
+                        }
+                    }
                 }
+                debug!("Yield batch size: {}", batch.len());
+                yield Ok(batch);
             }
         });
 
@@ -555,17 +552,19 @@ fn file_chunk_stream(
         match read_at(file, offset, file_size) {
             Ok(data) => {
                 let data_len = data.len();
-                if let Err(e) = common_runtime::block_on_read(async { tx.send(Ok(data)).await }) {
+                if common_runtime::block_on_read(async { tx.send(Ok(data)).await }).is_err() {
                     // Rx dropped
                     break;
                 }
+
+                debug!("Read chunk");
 
                 offset += data_len;
                 continue;
             }
             Err(e) => {
                 error!("Failed to read file chunk, error: {}", &e);
-                if let Err(e) = common_runtime::block_on_read(async { tx.send(Err(e)).await }) {
+                if common_runtime::block_on_read(async { tx.send(Err(e)).await }).is_err() {
                     // Rx dropped
                     break;
                 }
@@ -653,10 +652,11 @@ mod tests {
 
         while let Some(v) = stream.next().await {
             let entries = v.unwrap();
-            let content = entries[0].data();
-            let vec = content.to_vec();
-            info!("Read entry: {}", String::from_utf8_lossy(&vec));
-            data.push(String::from_utf8(vec).unwrap());
+            for e in entries {
+                let vec = e.data().to_vec();
+                info!("Read entry: {}", String::from_utf8_lossy(&vec));
+                data.push(String::from_utf8(vec).unwrap());
+            }
         }
 
         assert_eq!(vec!["test1".to_string(), "test-2".to_string()], data);
