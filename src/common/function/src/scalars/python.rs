@@ -656,6 +656,7 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 /// use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 /// use arrow::array::PrimitiveArray;
 /// use arrow::datatypes::{DataType, Field, Schema};
+/// use common_function::scalars::python::coprocessor;
 /// let python_source = r#"
 /// @copr(args=["cpu", "mem"], returns=["perf", "what"])
 /// def a(cpu, mem):
