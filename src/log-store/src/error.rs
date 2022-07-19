@@ -13,6 +13,9 @@ pub enum Error {
     #[snafu(display("Failed to decode entry, remain size: {}", size))]
     Decode { size: usize, backtrace: Backtrace },
 
+    #[snafu(display("No enough data to decode, try again"))]
+    DecodeAgain {},
+
     #[snafu(display("Failed to append entry, source: {}", source))]
     Append {
         #[snafu(backtrace)]

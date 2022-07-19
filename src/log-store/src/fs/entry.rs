@@ -8,11 +8,13 @@ use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::{Encode, Entry, Epoch, Id, Offset};
 use store_api::logstore::entry_stream::{EntryStream, SendableEntryStream};
 
-use crate::error::{CorruptedSnafu, DecodeSnafu, EncodeSnafu, Error};
+use crate::error::{CorruptedSnafu, DecodeAgainSnafu, DecodeSnafu, EncodeSnafu, Error};
 use crate::fs::crc;
 
 // length+offset+epoch+crc
 const ENTRY_MIN_LEN: usize = 4 + 8 + 8 + 4;
+// length+offset+epoch
+const HEADER_LENGTH: usize = 4 + 8 + 8;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct EntryImpl {
@@ -46,12 +48,7 @@ impl Encode for EntryImpl {
     }
 
     fn decode<T: Buffer>(buf: &mut T) -> Result<Self, Self::Error> {
-        ensure!(
-            buf.remaining_size() >= ENTRY_MIN_LEN,
-            DecodeSnafu {
-                size: buf.remaining_size(),
-            }
-        );
+        ensure!(buf.remaining_size() >= HEADER_LENGTH, DecodeAgainSnafu);
 
         macro_rules! map_err {
             ($stmt: expr, $var: ident) => {
@@ -65,23 +62,36 @@ impl Encode for EntryImpl {
         }
 
         let mut digest = crc::CRC_ALGO.digest();
-        let id = map_err!(buf.read_u64_le(), buf)?;
+        let mut header = [0u8; HEADER_LENGTH];
+        buf.read_to_slice(&mut header).unwrap();
+
+        let mut header = &header[..];
+        let id = header.read_u64_le().unwrap(); // unwrap here is safe because header bytes must be present
         digest.update(&id.to_le_bytes());
-        let epoch = map_err!(buf.read_u64_le(), buf)?;
+        header.advance_by(8);
+
+        let epoch = header.read_u64_le().unwrap();
         digest.update(&epoch.to_le_bytes());
-        let data_len = map_err!(buf.read_u32_le(), buf)?;
+        header.advance_by(8);
+
+        let data_len = header.read_u32_le().unwrap();
         digest.update(&data_len.to_le_bytes());
+
         ensure!(
-            buf.remaining_size() >= data_len as usize,
-            DecodeSnafu {
-                size: buf.remaining_size()
-            }
+            buf.remaining_size() >= ENTRY_MIN_LEN + data_len as usize,
+            DecodeAgainSnafu
         );
+
+        buf.advance_by(HEADER_LENGTH);
+
         let mut data = vec![0u8; data_len as usize];
         map_err!(buf.read_to_slice(&mut data), buf)?;
         digest.update(&data);
+        buf.advance_by(data_len as usize);
+
         let crc_read = map_err!(buf.read_u32_le(), buf)?;
         let crc_calc = digest.finalize();
+
         ensure!(
             crc_read == crc_calc,
             CorruptedSnafu {
@@ -92,6 +102,8 @@ impl Encode for EntryImpl {
                 )
             }
         );
+
+        buf.advance_by(4);
 
         Ok(Self {
             id,
@@ -233,10 +245,11 @@ mod tests {
     }
 
     fn prepare_entry_bytes(data: &str) -> Bytes {
-        let entry = EntryImpl::new(data.as_bytes());
+        let mut entry = EntryImpl::new(data.as_bytes());
+        entry.set_id(123);
+        entry.set_offset(456);
         let mut buffer = BytesMut::with_capacity(entry.encoded_size());
         entry.encode_to(&mut buffer).unwrap();
-        LittleEndian::write_u64(&mut buffer[0..8], 333);
         let len = buffer.len();
         let checksum = CRC_ALGO.checksum(&buffer[0..len - 4]);
         LittleEndian::write_u32(&mut buffer[len - 4..], checksum);
@@ -254,7 +267,9 @@ mod tests {
 
         let data_2 = "LoremIpsumDolor";
         let mut c2 = Chunk::default();
-        c2.write(&prepare_entry_bytes(data_2));
+        let bytes = prepare_entry_bytes(data_2);
+        EntryImpl::decode(&mut bytes.clone()).unwrap();
+        c2.write(&bytes);
 
         let mut chunks = CompositeChunk::new();
         chunks.add(c1);
@@ -275,5 +290,36 @@ mod tests {
             vec![data_1.as_bytes().to_vec(), data_2.as_bytes().to_vec()],
             decoded
         );
+    }
+
+    // split an encoded entry to two different chunk and try decode from this composite chunk
+    #[test]
+    pub fn test_decode_split_data_from_composite_chunk() {
+        let data = "hello, world";
+        let bytes = prepare_entry_bytes(data);
+        assert_eq!(
+            hex::decode("7B0000000000000000000000000000000C00000068656C6C6F2C20776F726C645B2EEC0F")
+                .unwrap()
+                .as_slice(),
+            &bytes[..]
+        );
+        let original = EntryImpl::decode(&mut bytes.clone()).unwrap();
+        let split_point = bytes.len() / 2;
+        let (left, right) = bytes.split_at(split_point);
+
+        let mut chunks = CompositeChunk::new();
+        let mut c1 = Chunk::default();
+        c1.write(left);
+
+        let mut chunks = CompositeChunk::new();
+        let mut c2 = Chunk::default();
+        c2.write(right);
+
+        chunks.add(c1);
+        chunks.add(c2);
+
+        assert_eq!(bytes.len(), chunks.remaining_size());
+        let decoded = EntryImpl::decode(&mut chunks).unwrap();
+        assert_eq!(original, decoded);
     }
 }

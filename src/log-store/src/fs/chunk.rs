@@ -90,17 +90,14 @@ impl Buffer for CompositeChunk {
             return Err(Underflow {});
         }
 
-        let mut total_advance = 0;
         for c in &self.chunks {
             if dst.is_empty() {
                 break;
             }
             let read = c.read(dst);
-            total_advance += read;
             dst = &mut dst[read..];
         }
 
-        self.advance_by(total_advance);
         if !dst.is_empty() {
             return Err(Underflow {});
         }
@@ -207,17 +204,20 @@ mod tests {
 
         let mut dst = [0u8; 2];
         chunks.read_to_slice(&mut dst).unwrap();
+        chunks.advance_by(2);
         assert_eq!([b'a', b'b'], dst);
         assert_eq!(2, chunks.chunks.len());
 
         let mut dst = [0u8; 3];
         chunks.read_to_slice(&mut dst).unwrap();
+        chunks.advance_by(3);
         assert_eq!([b'c', b'd', b'1'], dst);
         assert_eq!(4, chunks.remaining_size());
         assert_eq!(1, chunks.chunks.len());
 
         let mut dst = [0u8; 4];
         chunks.read_to_slice(&mut dst).unwrap();
+        chunks.advance_by(4);
         assert_eq!([b'2', b'3', b'4', b'5'], dst);
         assert_eq!(0, chunks.remaining_size());
         assert_eq!(0, chunks.chunks.len());

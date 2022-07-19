@@ -1,10 +1,10 @@
 use std::any::Any;
-use std::io::{Read, Write};
+use std::io::Write;
 
 use bytes::{Buf, BufMut, BytesMut};
 use common_error::prelude::ErrorExt;
 use paste::paste;
-use snafu::{ensure, Backtrace, ErrorCompat, ResultExt, Snafu};
+use snafu::{ensure, Backtrace, ErrorCompat, Snafu};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -68,16 +68,21 @@ macro_rules! impl_write_le {
 }
 
 pub trait Buffer {
+    /// Returns remaining data size for read.
     fn remaining_size(&self) -> usize;
 
+    /// Returns true if buffer has no data for read.
     fn is_empty(&self) -> bool {
         self.remaining_size() == 0
     }
 
+    /// Reads data into dst. This method should  not change internal cursor,
+    /// invoke `advance_by` if needed.
     /// # Panics
     /// This method **may** panic if buffer does not have enough data to be copied to dst.
     fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()>;
 
+    /// Advances internal cursor for next read.
     /// # Panics
     /// This method **may** panic if the offset after advancing exceeds the length of underlying buffer.
     fn advance_by(&mut self, by: usize);
@@ -94,12 +99,13 @@ macro_rules! impl_buffer_for_bytes {
             }
 
             fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {
+                let dst_len = dst.len();
                 ensure!(self.remaining() >= dst.len(), OverflowSnafu {
                         src_len: self.remaining_size(),
-                        dst_len: dst.len(),
+                        dst_len,
                     }
                 );
-                self.copy_to_slice(dst);
+                dst.copy_from_slice(&self[0..dst_len]);
                 Ok(())
             }
 
@@ -120,14 +126,16 @@ impl Buffer for &[u8] {
     }
 
     fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {
+        let dst_len = dst.len();
         ensure!(
             self.len() >= dst.len(),
             OverflowSnafu {
                 src_len: self.remaining_size(),
-                dst_len: dst.len(),
+                dst_len,
             }
         );
-        self.read_exact(dst).context(EofSnafu)
+        dst.copy_from_slice(&self[0..dst_len]);
+        Ok(())
     }
 
     fn advance_by(&mut self, by: usize) {
