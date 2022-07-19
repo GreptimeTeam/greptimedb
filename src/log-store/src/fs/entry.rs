@@ -206,7 +206,11 @@ impl<'a> EntryStream for StreamImpl<'a> {
 
 #[cfg(test)]
 mod tests {
+    use async_stream::stream;
     use byteorder::{ByteOrder, LittleEndian};
+    use futures::pin_mut;
+    use futures_util::StreamExt;
+    use tokio::time::Duration;
 
     use super::*;
     use crate::fs::chunk::{Chunk, CompositeChunk};
@@ -321,5 +325,55 @@ mod tests {
         assert_eq!(bytes.len(), chunks.remaining_size());
         let decoded = EntryImpl::decode(&mut chunks).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    // Tests decode entry from encoded entry data as two chunks
+    #[tokio::test]
+    pub async fn test_decode_from_chunk_stream() {
+        // prepare entry
+        let data = "hello, world";
+        let bytes = prepare_entry_bytes(data);
+        assert_eq!(
+            hex::decode("7B0000000000000000000000000000000C00000068656C6C6F2C20776F726C645B2EEC0F")
+                .unwrap()
+                .as_slice(),
+            &bytes[..]
+        );
+        let original = EntryImpl::decode(&mut bytes.clone()).unwrap();
+        let split_point = bytes.len() / 2;
+        let (left, right) = bytes.split_at(split_point);
+
+        // prepare chunk stream
+        let chunk_stream = stream!({
+            let mut chunk = Chunk::default();
+            chunk.write(left);
+            yield chunk;
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let mut chunk = Chunk::default();
+            chunk.write(right);
+            yield chunk;
+        });
+
+        pin_mut!(chunk_stream);
+
+        let mut chunks = CompositeChunk::new();
+        let mut decoded = vec![];
+        while let Some(c) = chunk_stream.next().await {
+            chunks.add(c);
+            match EntryImpl::decode(&mut chunks) {
+                Ok(e) => {
+                    decoded.push(e);
+                }
+                Err(Error::DecodeAgain { .. }) => {
+                    continue;
+                }
+                _ => {
+                    panic!()
+                }
+            }
+        }
+        assert_eq!(1, decoded.len());
+        assert_eq!(original, decoded.into_iter().next().unwrap());
     }
 }
