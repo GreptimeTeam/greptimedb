@@ -3,6 +3,7 @@ use std::sync::Arc;
 use common_telemetry::logging;
 use common_time::RangeMillis;
 use snafu::ResultExt;
+use store_api::logstore::LogStore;
 use store_api::storage::{WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
@@ -10,6 +11,7 @@ use crate::background::JobHandle;
 use crate::error::{InvalidTimestampSnafu, Result};
 use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
+use crate::proto::WalHeader;
 use crate::region::RegionManifest;
 use crate::region::SharedDataRef;
 use crate::sst::AccessLayerRef;
@@ -30,7 +32,7 @@ impl RegionWriter {
         }
     }
 
-    pub async fn write<S>(
+    pub async fn write<S: LogStore>(
         &self,
         ctx: &WriteContext,
         request: WriteBatch,
@@ -87,7 +89,7 @@ impl WriterInner {
     ///
     /// Mutable reference of writer ensure no other reference of this writer can modify the
     /// version control (write is exclusive).
-    async fn write<S>(
+    async fn write<S: LogStore>(
         &mut self,
         _ctx: &WriteContext,
         request: WriteBatch,
@@ -103,7 +105,9 @@ impl WriterInner {
         // Sequence for current write batch.
         let next_sequence = committed_sequence + 1;
 
-        // TODO(jiachun): [flush] write data to wal
+        // TODO(jiachun): [flush] wal header
+        let wal_header = WalHeader::default();
+        writer_ctx.wal.write_to_wal(wal_header, &request).await?;
 
         // Insert batch into memtable.
         let mut inserter = Inserter::new(next_sequence, time_ranges, version.bucket_duration());
