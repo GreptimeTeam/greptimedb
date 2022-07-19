@@ -5,8 +5,11 @@ use common_base::buffer::Error::Underflow;
 
 #[derive(Debug)]
 pub(crate) struct Chunk<const N: usize> {
+    // internal data
     pub data: [u8; N],
+    // read offset
     pub read: usize,
+    // write offset
     pub write: usize,
 }
 
@@ -22,10 +25,21 @@ impl<const N: usize> Default for Chunk<N> {
 }
 
 impl<const N: usize> Chunk<N> {
-    pub fn new(data: [u8; N], read: usize) -> Self {
+    pub fn copy_from_slice(s: &[u8]) -> Self {
+        let src_len = s.len();
+        let mut data = [0u8; N];
+        data[0..src_len].copy_from_slice(s);
         Self {
-            write: 0,
-            read,
+            read: 0,
+            write: src_len,
+            data,
+        }
+    }
+
+    pub fn new(data: [u8; N], write: usize) -> Self {
+        Self {
+            write,
+            read: 0,
             data,
         }
     }
@@ -36,14 +50,6 @@ impl<const N: usize> Chunk<N> {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// Calling write will advance write cursor.
-    pub fn write(&mut self, src: &[u8]) -> usize {
-        let size = src.len().min(N - self.write);
-        (&mut self.data[self.write..(self.write + size)]).copy_from_slice(&src[0..size]);
-        self.write += size;
-        size
     }
 
     /// allows short read.
@@ -132,13 +138,7 @@ mod tests {
 
     #[test]
     pub fn test_chunk() {
-        let mut chunk = Chunk {
-            data: [0u8; 4096],
-            read: 0,
-            write: 0,
-        };
-        assert_eq!(0, chunk.len());
-        assert_eq!(5, chunk.write("hello".as_bytes()));
+        let chunk: Chunk<4096> = Chunk::copy_from_slice("hello".as_bytes());
         assert_eq!(5, chunk.write);
         assert_eq!(0, chunk.read);
         assert_eq!(5, chunk.len());
@@ -152,12 +152,7 @@ mod tests {
 
     #[test]
     pub fn test_chunk_short_read() {
-        let mut chunk = Chunk {
-            data: [0u8; 4096],
-            read: 0,
-            write: 0,
-        };
-        assert_eq!(5, chunk.write("hello".as_bytes()));
+        let chunk: Chunk<4096> = Chunk::copy_from_slice("hello".as_bytes());
 
         let mut dst = vec![0u8; 8];
         let read = chunk.read(&mut dst);
@@ -167,12 +162,7 @@ mod tests {
 
     #[test]
     pub fn test_chunk_advance() {
-        let mut chunk = Chunk {
-            data: [0u8; 4096],
-            read: 0,
-            write: 0,
-        };
-        assert_eq!(5, chunk.write("hello".as_bytes()));
+        let mut chunk: Chunk<4096> = Chunk::copy_from_slice("hello".as_bytes());
         let mut dst = vec![0u8; 8];
         assert_eq!(5, chunk.read(&mut dst));
         assert_eq!(0, chunk.read);
@@ -193,14 +183,9 @@ mod tests {
             chunks: LinkedList::new(),
         };
 
-        let mut c1 = Chunk::default();
-        assert_eq!(4, c1.write("abcd".as_bytes()));
-
-        let mut c2 = Chunk::default();
-        assert_eq!(5, c2.write("12345".as_bytes()));
-
-        chunks.add(c1);
-        chunks.add(c2);
+        chunks.add(Chunk::copy_from_slice("abcd".as_bytes()));
+        chunks.add(Chunk::copy_from_slice("12345".as_bytes()));
+        assert_eq!(9, chunks.remaining_size());
 
         let mut dst = [0u8; 2];
         chunks.read_to_slice(&mut dst).unwrap();
@@ -222,9 +207,7 @@ mod tests {
         assert_eq!(0, chunks.remaining_size());
         assert_eq!(0, chunks.chunks.len());
 
-        let mut c3 = Chunk::default();
-        c3.write("uvwxyz".as_bytes());
-        chunks.add(c3);
+        chunks.add(Chunk::copy_from_slice("uvwxyz".as_bytes()));
         assert_eq!(6, chunks.remaining_size());
         assert_eq!(1, chunks.chunks.len());
     }

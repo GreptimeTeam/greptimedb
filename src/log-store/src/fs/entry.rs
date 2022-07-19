@@ -264,16 +264,14 @@ mod tests {
     #[test]
     pub fn test_composite_buffer() {
         let data_1 = "hello, world";
-        let mut c1 = Chunk::default();
         let bytes = prepare_entry_bytes(data_1);
         EntryImpl::decode(&mut bytes.clone()).unwrap();
-        c1.write(&bytes);
+        let c1 = Chunk::copy_from_slice(&bytes);
 
         let data_2 = "LoremIpsumDolor";
-        let mut c2 = Chunk::default();
         let bytes = prepare_entry_bytes(data_2);
         EntryImpl::decode(&mut bytes.clone()).unwrap();
-        c2.write(&bytes);
+        let c2 = Chunk::copy_from_slice(&bytes);
 
         let mut chunks = CompositeChunk::new();
         chunks.add(c1);
@@ -312,15 +310,8 @@ mod tests {
         let (left, right) = bytes.split_at(split_point);
 
         let mut chunks = CompositeChunk::new();
-        let mut c1 = Chunk::default();
-        c1.write(left);
-
-        let mut chunks = CompositeChunk::new();
-        let mut c2 = Chunk::default();
-        c2.write(right);
-
-        chunks.add(c1);
-        chunks.add(c2);
+        chunks.add(Chunk::copy_from_slice(left));
+        chunks.add(Chunk::copy_from_slice(right));
 
         assert_eq!(bytes.len(), chunks.remaining_size());
         let decoded = EntryImpl::decode(&mut chunks).unwrap();
@@ -345,14 +336,9 @@ mod tests {
 
         // prepare chunk stream
         let chunk_stream = stream!({
-            let mut chunk = Chunk::default();
-            chunk.write(left);
-            yield chunk;
-
+            yield Chunk::copy_from_slice(left);
             tokio::time::sleep(Duration::from_millis(10)).await;
-            let mut chunk = Chunk::default();
-            chunk.write(right);
-            yield chunk;
+            yield Chunk::copy_from_slice(right);
         });
 
         pin_mut!(chunk_stream);
