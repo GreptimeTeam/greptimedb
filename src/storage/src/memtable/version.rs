@@ -14,7 +14,7 @@ use crate::memtable::{MemtableId, MemtableRef};
 pub struct MemtableVersion {
     mutable: MemtableSet,
     /// Immutable memtables.
-    immutables: Vec<Arc<MemtableSet>>,
+    immutables: Vec<MemtableSetRef>,
 }
 
 impl MemtableVersion {
@@ -22,8 +22,18 @@ impl MemtableVersion {
         MemtableVersion::default()
     }
 
+    #[inline]
     pub fn mutable_memtables(&self) -> &MemtableSet {
         &self.mutable
+    }
+
+    #[inline]
+    pub fn immutable_memtables(&self) -> &[MemtableSetRef] {
+        &self.immutables
+    }
+
+    pub fn num_memtables(&self) -> usize {
+        self.mutable.len() + self.immutables.iter().map(|set| set.len()).sum::<usize>()
     }
 
     /// Clone current memtable version and freeze its mutable memtables, which moves
@@ -125,6 +135,8 @@ pub struct MemtableSet {
     max_memtable_id: MemtableId,
 }
 
+pub type MemtableSetRef = Arc<MemtableSet>;
+
 impl PartialEq for MemtableSet {
     fn eq(&self, other: &MemtableSet) -> bool {
         self.max_memtable_id == other.max_memtable_id
@@ -164,11 +176,13 @@ impl MemtableSet {
     }
 
     /// Returns number of memtables in the set.
+    #[inline]
     pub fn len(&self) -> usize {
         self.memtables.len()
     }
 
     /// Returns true if there is no memtable in the set.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.memtables.is_empty()
     }
@@ -330,12 +344,14 @@ mod tests {
 
         let v1 = MemtableVersion::new();
         assert!(v1.mutable_memtables().is_empty());
+        assert_eq!(0, v1.num_memtables());
 
         // Add one mutable
         let v2 = v1.add_mutable(s1.clone());
         assert_ne!(v1, v2);
         let mutables = v2.mutable_memtables();
         assert_eq!(s1, *mutables);
+        assert_eq!(3, v2.num_memtables());
 
         // Add another mutable
         let v3 = v2.add_mutable(s2);
@@ -344,6 +360,7 @@ mod tests {
         let mutables = v3.mutable_memtables();
         assert_eq!(s3, *mutables);
         assert!(v3.memtables_to_flush().1.is_empty());
+        assert_eq!(7, v3.num_memtables());
 
         // Try to freeze s1, s2
         let v4 = v3.freeze_mutable();
@@ -357,6 +374,7 @@ mod tests {
         let (max_id, tables) = v4.memtables_to_flush();
         assert_eq!(6, max_id.unwrap());
         assert_eq!(7, tables.len());
+        assert_eq!(7, v4.num_memtables());
 
         // Add another mutable
         let s4 = create_test_memtableset(&[7, 8]);
@@ -374,6 +392,7 @@ mod tests {
         let (max_id, tables) = v6.memtables_to_flush();
         assert_eq!(8, max_id.unwrap());
         assert_eq!(9, tables.len());
+        assert_eq!(9, v6.num_memtables());
         // verify tables
         for (i, table) in tables.iter().enumerate() {
             assert_eq!(i as u32, table.memtable.id());
@@ -391,5 +410,6 @@ mod tests {
 
         let v8 = v7.remove_immutables(8);
         assert_eq!(v8.immutables.len(), 0);
+        assert_eq!(0, v8.num_memtables());
     }
 }
