@@ -1206,7 +1206,6 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem, cpu, mem
 "#,
                 Some(|r| {
-                    dbg!(&r);
                     // assert in here seems to be more readable
                     assert!(
                         r.is_ok() && 
