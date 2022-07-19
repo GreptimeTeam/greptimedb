@@ -12,7 +12,7 @@ pub fn gen_mutation_extras(write_batch: &WriteBatch) -> Vec<MutationExtra> {
             Mutation::Put(put) => {
                 if put.num_columns() == column_schemas.len() {
                     MutationExtra {
-                        mutation_type: MutationType::Put as i32,
+                        mutation_type: MutationType::Put.into(),
                         column_null_mask: Default::default(),
                     }
                 } else {
@@ -24,11 +24,21 @@ pub fn gen_mutation_extras(write_batch: &WriteBatch) -> Vec<MutationExtra> {
                         }
                     }
                     MutationExtra {
-                        mutation_type: MutationType::Put as i32,
+                        mutation_type: MutationType::Put.into(),
                         column_null_mask: column_null_mask.to_bytes(),
                     }
                 }
             }
         })
         .collect::<Vec<_>>()
+}
+
+impl WalHeader {
+    pub fn with_last_manifest_version(last_manifest_version: u64) -> Self {
+        Self {
+            payload_type: Default::default(),
+            last_manifest_version,
+            mutation_extras: Default::default(),
+        }
+    }
 }

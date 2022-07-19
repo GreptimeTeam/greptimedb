@@ -65,6 +65,10 @@ impl Manifest for RegionManifest {
     fn metadata_id(&self) -> RegionId {
         self.inner.region_id
     }
+
+    fn last_version(&self) -> ManifestVersion {
+        self.inner.last_version()
+    }
 }
 
 struct RegionManifestInner {

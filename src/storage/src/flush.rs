@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_telemetry::logging;
 use common_time::RangeMillis;
+use store_api::logstore::LogStore;
 use store_api::manifest::Manifest;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::SequenceNumber;
@@ -17,6 +18,7 @@ use crate::region::RegionWriterRef;
 use crate::region::SharedDataRef;
 use crate::sst::{AccessLayerRef, FileMeta, WriteOptions};
 use crate::version::VersionEdit;
+use crate::wal::Wal;
 
 /// Default write buffer size (32M).
 const DEFAULT_WRITE_BUFFER_SIZE: usize = 32 * 1024 * 1024;
@@ -112,7 +114,7 @@ pub struct MemtableWithMeta {
 
 #[async_trait]
 pub trait FlushScheduler: Send + Sync {
-    async fn schedule_flush(&self, flush_job: FlushJob) -> Result<JobHandle>;
+    async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle>;
 }
 
 pub struct FlushSchedulerImpl {
@@ -127,15 +129,15 @@ impl FlushSchedulerImpl {
 
 #[async_trait]
 impl FlushScheduler for FlushSchedulerImpl {
-    async fn schedule_flush(&self, flush_job: FlushJob) -> Result<JobHandle> {
+    async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle> {
         // TODO(yingwen): [flush] Implements flush schedule strategy, controls max background flushes.
-        self.job_pool.submit(Box::new(flush_job)).await
+        self.job_pool.submit(flush_job).await
     }
 }
 
 pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
 
-pub struct FlushJob {
+pub struct FlushJob<S> {
     /// Max memtable id in these memtables,
     /// used to remove immutable memtables in current version.
     pub max_memtable_id: MemtableId,
@@ -149,11 +151,13 @@ pub struct FlushJob {
     pub sst_layer: AccessLayerRef,
     /// Region writer, used to persist log entry that points to the latest manifest file.
     pub writer: RegionWriterRef,
+    /// Region write-ahead logging, used to write data/meta to the log file.
+    pub wal: Wal<S>,
     /// Region manifest service, used to persist metadata.
     pub manifest: RegionManifest,
 }
 
-impl FlushJob {
+impl<S> FlushJob<S> {
     async fn write_memtables_to_layer(&self, ctx: &Context) -> Result<Vec<FileMeta>> {
         if ctx.is_cancelled() {
             return CancelledSnafu {}.fail();
@@ -211,7 +215,7 @@ impl FlushJob {
 }
 
 #[async_trait]
-impl Job for FlushJob {
+impl<S: LogStore> Job for FlushJob<S> {
     // TODO(yingwen): [flush] Support in-job parallelism (Flush memtables concurrently)
     async fn run(&mut self, ctx: &Context) -> Result<()> {
         let file_metas = self.write_memtables_to_layer(ctx).await?;
@@ -225,7 +229,9 @@ impl Job for FlushJob {
             max_memtable_id: Some(self.max_memtable_id),
         };
 
-        self.writer.apply_version_edit(edit, &self.shared).await?;
+        self.writer
+            .apply_version_edit(&self.wal, edit, &self.shared)
+            .await?;
 
         Ok(())
     }
@@ -233,6 +239,7 @@ impl Job for FlushJob {
 
 #[cfg(test)]
 mod tests {
+    use log_store::fs::noop::NoopLogStore;
     use regex::Regex;
 
     use super::*;
@@ -246,7 +253,7 @@ mod tests {
 
     #[test]
     pub fn test_uuid_generate() {
-        let file_name = FlushJob::generate_sst_file_name();
+        let file_name = FlushJob::<NoopLogStore>::generate_sst_file_name();
         let regex = Regex::new(r"^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$").unwrap();
         assert!(
             regex.is_match(&file_name),

@@ -146,7 +146,7 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let wal = Wal::new(region_name.clone(), self.log_store.clone());
+        let wal = Wal::new(region_id, region_name.clone(), self.log_store.clone());
         let sst_dir = &self.shared.region_sst_dir(&region_name);
         let sst_layer = Arc::new(FsAccessLayer::new(
             sst_dir,

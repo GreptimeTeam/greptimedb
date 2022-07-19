@@ -8,26 +8,43 @@ use store_api::logstore::{entry::Entry, namespace::Namespace, AppendResponse, Lo
 use crate::{
     codec::{Decoder, Encoder},
     error::{self, Error, Result},
-    proto::{self, WalHeader},
+    proto::{self, PayloadType, WalHeader},
     write_batch::{codec::WriteBatchArrowEncoder, WriteBatch},
 };
 
-#[derive(Clone)]
 pub struct Wal<S> {
-    region: String,
+    region_id: u32,
+    region_name: String,
     store: Arc<S>,
 }
 
-impl<S> Wal<S> {
-    pub fn new(region: impl Into<String>, store: Arc<S>) -> Self {
+impl<S> Clone for Wal<S> {
+    fn clone(&self) -> Self {
         Self {
-            region: region.into(),
+            region_id: self.region_id,
+            region_name: self.region_name.clone(),
+            store: self.store.clone(),
+        }
+    }
+}
+
+impl<S> Wal<S> {
+    pub fn new(region_id: u32, region_name: impl Into<String>, store: Arc<S>) -> Self {
+        Self {
+            region_id,
+            region_name: region_name.into(),
             store,
         }
     }
 
-    pub fn region(&self) -> &str {
-        &self.region
+    #[inline]
+    pub fn region_id(&self) -> u32 {
+        self.region_id
+    }
+
+    #[inline]
+    pub fn region_name(&self) -> &str {
+        &self.region_name
     }
 }
 
@@ -46,12 +63,21 @@ impl<S: LogStore> Wal<S> {
     /// +---------------------+----------------------------------------------------+--------------+-------------+--------------+
     /// ```
     ///
-    pub async fn write_to_wal(
+    pub async fn write_to_wal<'a>(
         &self,
         mut header: WalHeader,
-        batch: &WriteBatch,
+        payload: Payload<'a>,
     ) -> Result<(u64, usize)> {
-        header.mutation_extras = proto::gen_mutation_extras(batch);
+        match payload {
+            Payload::None => header.payload_type = PayloadType::None.into(),
+            Payload::WriteBatchArrow(batch) => {
+                header.payload_type = PayloadType::WriteBatchArrow.into();
+                header.mutation_extras = proto::gen_mutation_extras(batch);
+            }
+            Payload::WriteBatchProto(_) => {
+                header.payload_type = PayloadType::WriteBatchProto.into()
+            }
+        }
 
         let mut buf = vec![];
 
@@ -59,23 +85,27 @@ impl<S: LogStore> Wal<S> {
         let wal_header_encoder = WalHeaderEncoder {};
         wal_header_encoder.encode(&header, &mut buf)?;
 
-        // entry
-        let encoder = WriteBatchArrowEncoder::new(header.mutation_extras);
-        // TODO(jiachun): provide some way to compute data size before encode, so we can preallocate an exactly sized buf.
-        encoder
-            .encode(batch, &mut buf)
-            .map_err(BoxedError::new)
-            .context(error::WriteWalSnafu {
-                region: self.region(),
-            })?;
+        if let Payload::WriteBatchArrow(batch) = payload {
+            // entry
+            let encoder = WriteBatchArrowEncoder::new(header.mutation_extras);
+            // TODO(jiachun): provide some way to compute data size before encode, so we can preallocate an exactly sized buf.
+            encoder
+                .encode(batch, &mut buf)
+                .map_err(BoxedError::new)
+                .context(error::WriteWalSnafu {
+                    region_id: self.region_id(),
+                    region_name: self.region_name(),
+                })?;
+        }
+
+        // TODO(jiachun): encode protobuf payload
 
         // write bytes to wal
         self.write(&buf).await
     }
 
     async fn write(&self, bytes: &[u8]) -> Result<(u64, usize)> {
-        // TODO(jiachun): region id
-        let ns = S::Namespace::new(&self.region, 0);
+        let ns = S::Namespace::new(&self.region_name, self.region_id as u64);
         let e = S::Entry::new(bytes);
 
         let res = self
@@ -84,11 +114,18 @@ impl<S: LogStore> Wal<S> {
             .await
             .map_err(BoxedError::new)
             .context(error::WriteWalSnafu {
-                region: &self.region,
+                region_id: self.region_id(),
+                region_name: self.region_name(),
             })?;
 
         Ok((res.entry_id(), res.offset()))
     }
+}
+
+pub enum Payload<'a> {
+    None, // only header
+    WriteBatchArrow(&'a WriteBatch),
+    WriteBatchProto(&'a WriteBatch),
 }
 
 pub struct WalHeaderEncoder {}
@@ -134,7 +171,7 @@ mod tests {
     pub async fn test_write_wal() {
         let (log_store, _tmp) =
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
-        let wal = Wal::new("test_region", Arc::new(log_store));
+        let wal = Wal::new(0, "test_region", Arc::new(log_store));
 
         let res = wal.write(b"test1").await.unwrap();
 

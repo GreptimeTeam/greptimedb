@@ -25,7 +25,7 @@ async fn test_new_region() {
         .build();
     let metadata = desc.try_into().unwrap();
 
-    let wal = Wal::new(region_name, Arc::new(NoopLogStore::default()));
+    let wal = Wal::new(region_id, region_name, Arc::new(NoopLogStore::default()));
     let store_dir = TempDir::new("test_new_region")
         .unwrap()
         .path()
