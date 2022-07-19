@@ -1,4 +1,5 @@
 //! metadata service
+pub mod action;
 mod storage;
 
 use async_trait::async_trait;
@@ -15,12 +16,8 @@ pub trait Metadata: Clone {}
 
 pub trait MetadataId: Clone + Copy {}
 
-/// The action to apply on metadata
 pub trait MetaAction: Serialize + DeserializeOwned {
-    type MetadataId: MetadataId;
-
-    /// Returns the metadata id of the action
-    fn metadata_id(&self) -> Self::MetadataId;
+    fn set_prev_version(&mut self, version: ManifestVersion);
 }
 
 /// Manifest service

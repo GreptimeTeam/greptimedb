@@ -107,7 +107,7 @@ impl FileHandleInner {
 }
 
 /// Immutable metadata of a sst file.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct FileMeta {
     pub file_path: String,
     /// SST level of the file.

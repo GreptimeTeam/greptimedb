@@ -205,7 +205,11 @@ impl<S: LogStore> FlushJob<S> {
             files_to_remove: Vec::default(),
         };
         logging::debug!("Write region edit: {:?} to manifest.", edit);
-        self.manifest.update(RegionMetaAction::Edit(edit)).await
+        self.manifest
+            .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
+                edit,
+            )))
+            .await
     }
 
     /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`
