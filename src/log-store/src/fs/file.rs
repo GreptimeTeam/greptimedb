@@ -556,8 +556,7 @@ fn file_chunk_stream(
         match read_at(file, offset, file_size) {
             Ok(data) => {
                 let data_len = data.len();
-                if common_runtime::block_on_read(async { tx.send(Ok(data)).await }).is_err() {
-                    // Rx dropped
+                if tx.blocking_send(Ok(data)).is_err() {
                     break;
                 }
                 offset += data_len;
@@ -566,7 +565,7 @@ fn file_chunk_stream(
             Err(e) => {
                 error!("Failed to read file chunk, error: {}", &e);
                 // we're going to break any way so just forget the join result.
-                let _ = common_runtime::block_on_read(async { tx.send(Err(e)).await });
+                let _ = tx.blocking_send(Err(e));
                 break;
             }
         }
