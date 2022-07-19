@@ -1,14 +1,19 @@
-use std::any::Any;
-use std::collections::{BTreeSet, HashMap};
-use std::slice;
-use std::time::Duration;
+use std::{
+    any::Any,
+    collections::{BTreeSet, HashMap},
+    slice,
+    time::Duration,
+};
 
 use common_error::prelude::*;
 use common_time::{RangeMillis, TimestampMillis};
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::ScalarVector;
-use datatypes::schema::SchemaRef;
-use datatypes::vectors::{Int64Vector, VectorRef};
+use datatypes::{
+    arrow::error::ArrowError,
+    data_type::ConcreteDataType,
+    prelude::ScalarVector,
+    schema::SchemaRef,
+    vectors::{Int64Vector, VectorRef},
+};
 use snafu::ensure;
 use store_api::storage::{consts, PutOperation, WriteRequest};
 
@@ -64,6 +69,39 @@ pub enum Error {
 
     #[snafu(display("Cannot align timestamp: {}", ts))]
     TimestampOverflow { ts: i64 },
+
+    #[snafu(display("Failed to encode, source: {}", source))]
+    EncodeArrow {
+        backtrace: Backtrace,
+        source: ArrowError,
+    },
+
+    #[snafu(display("Failed to decode, source: {}", source))]
+    DecodeArrow {
+        backtrace: Backtrace,
+        source: ArrowError,
+    },
+
+    #[snafu(display("Failed to parse schema, source: {}", source))]
+    ParseSchema {
+        backtrace: Backtrace,
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to decode, in stream waiting state"))]
+    StreamWaiting,
+
+    #[snafu(display("Failed to decode, data corruption {}", message))]
+    DataCorruption {
+        message: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to decode vector, source {}", source))]
+    DecodeVector {
+        backtrace: Backtrace,
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -226,6 +264,11 @@ impl PutData {
         self.columns.get(name)
     }
 
+    /// Returns number of columns in data.
+    pub fn num_columns(&self) -> usize {
+        self.columns.len()
+    }
+
     /// Returns number of rows in data.
     pub fn num_rows(&self) -> usize {
         self.columns
@@ -346,6 +389,242 @@ impl PutData {
     }
 }
 
+pub mod codec {
+    use std::{io::Cursor, sync::Arc};
+
+    use common_error::prelude::*;
+    use datatypes::{
+        arrow::{
+            chunk::Chunk as ArrowChunk,
+            io::ipc::{
+                self,
+                read::{self, StreamState},
+                write::{StreamWriter, WriteOptions},
+            },
+        },
+        error::Result as DataTypesResult,
+        schema::Schema,
+        vectors::Helper,
+    };
+    use snafu::ensure;
+    use store_api::storage::{PutOperation, WriteRequest};
+
+    use super::{
+        DataCorruptionSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
+        Error as WriteBatchError, Mutation, ParseSchemaSnafu, Result, WriteBatch,
+    };
+    use crate::{
+        arrow_stream::ArrowStreamReader,
+        codec::{Decoder, Encoder},
+    };
+    use crate::{
+        proto::{MutationExtra, MutationType},
+        write_batch::PutData,
+    };
+
+    // TODO(jiachun): The codec logic is too complex, maybe we should use protobuf to
+    // serialize/deserialize all our data.
+    // And we can make a comparison with protobuf, including performance, storage cost,
+    // CPU consumption, etc
+    pub struct WriteBatchArrowEncoder {
+        mutation_extras: Vec<MutationExtra>,
+    }
+
+    impl WriteBatchArrowEncoder {
+        pub fn new(mutation_extras: Vec<MutationExtra>) -> Self {
+            Self { mutation_extras }
+        }
+    }
+
+    impl Encoder for WriteBatchArrowEncoder {
+        type Item = WriteBatch;
+        type Error = WriteBatchError;
+
+        fn encode(&self, item: &WriteBatch, dst: &mut Vec<u8>) -> Result<()> {
+            let schema = item.schema().arrow_schema();
+
+            let column_names = item
+                .schema()
+                .column_schemas()
+                .iter()
+                .map(|column_schema| column_schema.name.clone())
+                .collect::<Vec<_>>();
+
+            let data = item
+                .iter()
+                .zip(self.mutation_extras.iter())
+                .map(|(mtn, ext)| match mtn {
+                    Mutation::Put(put) => {
+                        let arrays = column_names
+                            .iter()
+                            .filter_map(|column_name| put.column_by_name(column_name))
+                            .map(|vector| vector.to_arrow_array())
+                            .collect::<Vec<_>>();
+
+                        (arrays, &ext.column_null_mask)
+                    }
+                });
+
+            let opts = WriteOptions { compression: None };
+            let mut writer = StreamWriter::new(dst, opts);
+            let ipc_fields = ipc::write::default_ipc_fields(&schema.fields);
+            writer
+                .start(schema, Some(ipc_fields.clone()))
+                .context(EncodeArrowSnafu)?;
+            for (arrays, column_null_mask) in data {
+                let chunk = ArrowChunk::try_new(arrays).context(EncodeArrowSnafu)?;
+                if column_null_mask.is_empty() {
+                    writer.write(&chunk, None).context(EncodeArrowSnafu)?;
+                } else {
+                    let valid_ipc_fields = ipc_fields
+                        .iter()
+                        .zip(bit_vec::BitVec::from_bytes(column_null_mask))
+                        .filter(|(_, mask)| !*mask)
+                        .map(|(ipc_field, _)| ipc_field.clone())
+                        .collect::<Vec<_>>();
+                    writer
+                        .write(&chunk, Some(&valid_ipc_fields))
+                        .context(EncodeArrowSnafu)?;
+                }
+            }
+            writer.finish().context(EncodeArrowSnafu)?;
+
+            Ok(())
+        }
+    }
+
+    pub struct WriteBatchArrowDecoder {
+        mutation_extras: Vec<MutationExtra>,
+    }
+
+    impl WriteBatchArrowDecoder {
+        #[allow(dead_code)]
+        pub fn new(mutation_extras: Vec<MutationExtra>) -> Self {
+            Self { mutation_extras }
+        }
+    }
+
+    impl Decoder for WriteBatchArrowDecoder {
+        type Item = WriteBatch;
+        type Error = WriteBatchError;
+
+        fn decode(&self, src: &[u8]) -> Result<Option<WriteBatch>> {
+            let mut reader = Cursor::new(src);
+            let metadata = read::read_stream_metadata(&mut reader).context(DecodeArrowSnafu)?;
+            let mut reader = ArrowStreamReader::new(reader, metadata);
+            let schema = reader.metadata().schema.clone();
+
+            let stream_states = self
+                .mutation_extras
+                .iter()
+                .map(|ext| {
+                    reader
+                        .maybe_next(&ext.column_null_mask)
+                        .context(DecodeArrowSnafu)
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            // check if exactly finished
+            ensure!(
+                reader.check_exactly_finished().context(DecodeArrowSnafu)?,
+                DataCorruptionSnafu {
+                    message: "Impossible, the num of data chunks is different than expected."
+                }
+            );
+
+            let mut chunks = Vec::with_capacity(self.mutation_extras.len());
+
+            for state_opt in stream_states {
+                match state_opt {
+                    Some(s) => match s {
+                        StreamState::Some(chunk) => chunks.push(chunk),
+                        StreamState::Waiting => return Err(WriteBatchError::StreamWaiting),
+                    },
+                    None => (),
+                }
+            }
+
+            // chunks -> mutations
+            let chunks = chunks
+                .iter()
+                .map(|chunk| chunk.arrays())
+                .map(|arrays| {
+                    arrays
+                        .iter()
+                        .map(Helper::try_into_vector)
+                        .collect::<DataTypesResult<Vec<_>>>()
+                        .context(DecodeVectorSnafu)
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            ensure!(
+                chunks.len() == self.mutation_extras.len(),
+                DataCorruptionSnafu {
+                    message: &format!(
+                        "expected {} mutations, but got {}",
+                        self.mutation_extras.len(),
+                        chunks.len()
+                    )
+                }
+            );
+
+            let schema = Schema::try_from(Arc::new(schema)).context(ParseSchemaSnafu)?;
+
+            let column_names = schema
+                .column_schemas()
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+
+            let mutations = self
+                .mutation_extras
+                .iter()
+                .zip(chunks.iter())
+                .map(|(ext, mtn)| match ext.mutation_type {
+                    x if x == MutationType::Put as i32 => {
+                        let valid_column_names = if ext.column_null_mask.is_empty() {
+                            column_names.clone()
+                        } else {
+                            bit_vec::BitVec::from_bytes(&ext.column_null_mask)
+                                .iter()
+                                .zip(column_names.iter())
+                                .filter(|(mask, _)| !*mask)
+                                .map(|(_, column_name)| column_name.clone())
+                                .collect::<Vec<_>>()
+                        };
+
+                        let mut put_data = PutData::with_num_columns(valid_column_names.len());
+
+                        let res = valid_column_names
+                            .iter()
+                            .zip(mtn)
+                            .map(|(name, vector)| put_data.add_column_by_name(name, vector.clone()))
+                            .collect::<Result<Vec<_>>>();
+
+                        res.map(|_| Mutation::Put(put_data))
+                    }
+                    x if x == MutationType::Delete as i32 => {
+                        todo!()
+                    }
+                    _ => {
+                        unreachable!()
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let mut write_batch = WriteBatch::new(Arc::new(schema));
+
+            mutations
+                .into_iter()
+                .try_for_each(|mutation| match mutation {
+                    Mutation::Put(put_data) => write_batch.put(put_data),
+                })?;
+
+            Ok(Some(write_batch))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::iter;
@@ -355,6 +634,8 @@ mod tests {
     use datatypes::vectors::{BooleanVector, Int32Vector, Int64Vector, UInt64Vector};
 
     use super::*;
+    use crate::codec::{Decoder, Encoder};
+    use crate::proto;
     use crate::test_util::write_batch_util;
 
     #[test]
@@ -574,5 +855,63 @@ mod tests {
             [-40, -20, 0, 20].map(|v| RangeMillis::new(v, v + duration_millis).unwrap()),
             ranges.as_slice()
         )
+    }
+
+    #[test]
+    fn test_codec() -> Result<()> {
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
+        let boolv = Arc::new(BooleanVector::from(vec![Some(true), Some(false), None]));
+        let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
+
+        let mut put_data = PutData::new();
+        put_data.add_key_column("k1", intv.clone()).unwrap();
+        put_data.add_version_column(intv).unwrap();
+        put_data.add_value_column("v1", boolv).unwrap();
+        put_data.add_key_column("ts", tsv).unwrap();
+
+        let mut batch = new_test_batch();
+        assert!(batch.is_empty());
+        batch.put(put_data).unwrap();
+        assert!(!batch.is_empty());
+
+        let encoder = codec::WriteBatchArrowEncoder::new(proto::gen_mutation_extras(&batch));
+        let mut dst = vec![];
+        let result = encoder.encode(&batch, &mut dst);
+        assert!(result.is_ok());
+
+        let decoder = codec::WriteBatchArrowDecoder::new(proto::gen_mutation_extras(&batch));
+        let result = decoder.decode(&dst);
+        let batch2 = result?.unwrap();
+        assert_eq!(batch.num_rows, batch2.num_rows);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_codec_with_none_column() -> Result<()> {
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
+        let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
+
+        let mut put_data = PutData::new();
+        put_data.add_key_column("k1", intv.clone()).unwrap();
+        put_data.add_version_column(intv).unwrap();
+        put_data.add_key_column("ts", tsv).unwrap();
+
+        let mut batch = new_test_batch();
+        assert!(batch.is_empty());
+        batch.put(put_data).unwrap();
+        assert!(!batch.is_empty());
+
+        let encoder = codec::WriteBatchArrowEncoder::new(proto::gen_mutation_extras(&batch));
+        let mut dst = vec![];
+        let result = encoder.encode(&batch, &mut dst);
+        assert!(result.is_ok());
+
+        let decoder = codec::WriteBatchArrowDecoder::new(proto::gen_mutation_extras(&batch));
+        let result = decoder.decode(&dst);
+        let batch2 = result?.unwrap();
+        assert_eq!(batch.num_rows, batch2.num_rows);
+
+        Ok(())
     }
 }
