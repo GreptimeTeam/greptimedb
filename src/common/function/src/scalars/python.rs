@@ -669,7 +669,7 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 /// ]));
 /// let rb =
 /// DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
-/// let ret = coprocessor(python_source, rb).unwrap();
+/// let ret = coprocessor(python_source, &rb).unwrap();
 /// assert_eq!(ret.column(0).len(), 4);
 /// ```
 ///
@@ -905,6 +905,7 @@ mod tests {
     use super::*;
     type PredicateFn = Option<fn(Result<Coprocessor, CoprError>) -> bool>;
     type ExecResPredicateFn = Option<fn(Result<DfRecordBatch, CoprError>)>;
+    
     #[test]
     fn testsuite_parse() {
         let testcases: Vec<(&'static str, PredicateFn)> = vec![
