@@ -10,6 +10,7 @@ To compile GreptimeDB from source, you'll need the following:
 - Rust
 - C++ toolchain
 - cmake
+- OpenSSL
 
 #### Rust
 The easiest way to install Rust is to use [`rustup`](https://rustup.rs/), which will check our `rust-toolchain` file and install correct Rust version for you.
@@ -20,9 +21,26 @@ The [`prost-build`](https://github.com/tokio-rs/prost/tree/master/prost-build) d
 #### cmake
 Follow the instructions for your operating system on the [`cmake`](https://cmake.org/install/) site.
 
-For MacOS users, you can also use `homebrew` to install `cmake`.
+For macOS users, you can also use `homebrew` to install `cmake`.
 ```bash
 brew install cmake
+```
+
+#### OpenSSL
+
+For Ubuntu:
+```bash
+sudo apt install libssl-dev
+```
+
+For RedHat-based: Fedora, Oracle Linux, etc:
+```bash
+sudo dnf install openssl-devel
+```
+
+For macOS:
+```bash
+brew install openssl
 ```
 
 ## Usage
