@@ -58,6 +58,7 @@ pub enum RegionMetaAction {
 }
 
 const NEW_LINE: &str = "\r\n";
+const PREV_VERSION_KEY: &str = "prev_version";
 
 impl RegionMetaActionList {
     pub fn with_action(action: RegionMetaAction) -> Self {
@@ -81,7 +82,7 @@ impl RegionMetaActionList {
         {
             // Encode prev_version
             let mut m = HashMap::new();
-            m.insert("prev_version".to_string(), self.prev_version);
+            m.insert(PREV_VERSION_KEY.to_string(), self.prev_version);
             s.push_str(&json::to_string(&m).context(EncodeJsonSnafu)?);
             s.push_str(NEW_LINE);
         }
@@ -122,7 +123,7 @@ impl RegionMetaActionList {
             let m: HashMap<String, ManifestVersion> =
                 json::from_str(lines[0]).context(DecodeJsonSnafu)?;
             action_list.prev_version =
-                *m.get("prev_version")
+                *m.get(PREV_VERSION_KEY)
                     .context(DecodeRegionMetaActionListSnafu {
                         msg: "missing prev_version",
                     })?;
