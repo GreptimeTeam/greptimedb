@@ -8,7 +8,7 @@ use arc_swap::ArcSwapOption;
 use common_query::error::ExecuteFunctionSnafu;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Accumulator;
-use common_query::logical_plan::{create_udaf, AccumulatorCreator};
+use common_query::logical_plan::{create_aggregate_function, AccumulatorCreator};
 use common_query::prelude::*;
 use common_recordbatch::util;
 use datafusion::arrow_print;
@@ -222,7 +222,8 @@ where
     let factory = testing_table::new_query_engine_factory(table_name.clone(), testing_table);
     let engine = factory.query_engine();
 
-    let my_sum_udaf = create_udaf("my_sum", Arc::new(MySumAccumulatorCreator::default()));
+    let my_sum_udaf =
+        create_aggregate_function("my_sum", Arc::new(MySumAccumulatorCreator::default()));
     engine.register_udaf(my_sum_udaf);
 
     let sql = format!(

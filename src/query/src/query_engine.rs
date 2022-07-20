@@ -4,7 +4,7 @@ mod state;
 use std::sync::Arc;
 
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
-use common_query::prelude::AggregateUdf;
+use common_query::prelude::AggregateFunction;
 use common_query::prelude::ScalarUdf;
 use common_recordbatch::SendableRecordBatchStream;
 use sql::statements::statement::Statement;
@@ -36,7 +36,7 @@ pub trait QueryEngine: Send + Sync {
 
     fn register_udf(&self, udf: ScalarUdf);
 
-    fn register_udaf(&self, udaf: AggregateUdf);
+    fn register_udaf(&self, udaf: AggregateFunction);
 
     fn register_function(&self, func: FunctionRef);
 }

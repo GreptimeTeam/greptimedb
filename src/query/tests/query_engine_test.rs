@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arrow::array::UInt32Array;
 use common_function::scalars::MedianAccumulatorCreator;
-use common_query::logical_plan::create_udaf;
+use common_query::logical_plan::create_aggregate_function;
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
@@ -224,7 +224,8 @@ where
     let factory = testing_table::new_query_engine_factory(table_name.clone(), testing_table);
     let engine = factory.query_engine();
 
-    let median_udaf = create_udaf("median", Arc::new(MedianAccumulatorCreator::default()));
+    let median_udaf =
+        create_aggregate_function("median", Arc::new(MedianAccumulatorCreator::default()));
     engine.register_udaf(median_udaf);
 
     let sql = format!(

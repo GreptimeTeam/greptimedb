@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::prelude::AggregateUdf;
+use common_query::prelude::AggregateFunction;
 use common_query::prelude::ScalarUdf;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 
@@ -56,7 +56,7 @@ impl QueryEngineState {
     }
 
     // TODO(LFC): Same as UDF, manage UDAFs by ourself.
-    pub fn register_udaf(&self, udaf: AggregateUdf) {
+    pub fn register_udaf(&self, udaf: AggregateFunction) {
         self.df_context
             .state
             .lock()

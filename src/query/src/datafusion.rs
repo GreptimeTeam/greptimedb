@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
-use common_query::prelude::AggregateUdf;
+use common_query::prelude::AggregateFunction;
 use common_query::prelude::ScalarUdf;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
@@ -95,7 +95,7 @@ impl QueryEngine for DatafusionQueryEngine {
     /// `SELECT "my_UDAF"(x)` will look for an aggregate named `"my_UDAF"`
     ///
     /// So it's better to make UDAF name lowercase when creating one.
-    fn register_udaf(&self, udaf: AggregateUdf) {
+    fn register_udaf(&self, udaf: AggregateFunction) {
         self.state.register_udaf(udaf);
     }
 

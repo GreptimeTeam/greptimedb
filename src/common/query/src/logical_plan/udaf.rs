@@ -20,7 +20,7 @@ use crate::signature::Signature;
 /// Logical representation of a user-defined aggregate function (UDAF)
 /// A UDAF is different from a UDF in that it is stateful across batches.
 #[derive(Clone)]
-pub struct AggregateUdf {
+pub struct AggregateFunction {
     /// name
     pub name: String,
     /// signature
@@ -33,7 +33,7 @@ pub struct AggregateUdf {
     pub state_type: StateTypeFunction,
 }
 
-impl Debug for AggregateUdf {
+impl Debug for AggregateFunction {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct("AggregateUDF")
             .field("name", &self.name)
@@ -43,13 +43,13 @@ impl Debug for AggregateUdf {
     }
 }
 
-impl PartialEq for AggregateUdf {
+impl PartialEq for AggregateFunction {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name && self.signature == other.signature
     }
 }
 
-impl AggregateUdf {
+impl AggregateFunction {
     /// Create a new AggregateUDF
     pub fn new(
         name: &str,
@@ -68,8 +68,8 @@ impl AggregateUdf {
     }
 }
 
-impl From<AggregateUdf> for DfAggregateUdf {
-    fn from(udaf: AggregateUdf) -> Self {
+impl From<AggregateFunction> for DfAggregateUdf {
+    fn from(udaf: AggregateFunction) -> Self {
         DfAggregateUdf::new(
             &udaf.name,
             &udaf.signature.into(),

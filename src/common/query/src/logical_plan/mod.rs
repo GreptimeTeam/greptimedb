@@ -9,7 +9,7 @@ use datatypes::prelude::ConcreteDataType;
 
 pub use self::accumulator::{Accumulator, AccumulatorCreator};
 pub use self::expr::Expr;
-pub use self::udaf::AggregateUdf;
+pub use self::udaf::AggregateFunction;
 pub use self::udf::ScalarUdf;
 use crate::function::{ReturnTypeFunction, ScalarFunctionImplementation};
 use crate::logical_plan::accumulator::*;
@@ -36,11 +36,14 @@ pub fn create_udf(
     )
 }
 
-pub fn create_udaf(name: &str, creator: Arc<dyn AccumulatorCreator>) -> AggregateUdf {
+pub fn create_aggregate_function(
+    name: &str,
+    creator: Arc<dyn AccumulatorCreator>,
+) -> AggregateFunction {
     let return_type = make_return_function(creator.clone());
     let accumulator = make_accumulator_function(creator.clone());
     let state_type = make_state_function(creator.clone());
-    AggregateUdf::new(
+    AggregateFunction::new(
         name,
         Signature::any(1, Volatility::Immutable),
         return_type,
@@ -198,7 +201,7 @@ mod tests {
     #[test]
     fn test_create_udaf() {
         let creator = DummyAccumulatorCreator;
-        let udaf = create_udaf("dummy_udaf", Arc::new(creator));
+        let udaf = create_aggregate_function("dummy_udaf", Arc::new(creator));
         assert_eq!("dummy_udaf", udaf.name);
 
         let signature = udaf.signature;
