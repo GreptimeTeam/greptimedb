@@ -41,11 +41,9 @@ impl Instance {
 
         info!("The wal directory is: {}", &opts.wal_dir);
 
-        // TODO(jiachun): log store config
         let log_config = LogConfig {
-            append_buffer_size: 128,
-            max_log_file_size: 128,
             log_file_dir: opts.wal_dir.clone(),
+            ..Default::default()
         };
         let log_store = LocalFileLogStore::open(&log_config)
             .await
