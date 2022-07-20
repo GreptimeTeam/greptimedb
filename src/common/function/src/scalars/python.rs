@@ -1,556 +1,42 @@
 //! python udf supports
 //! use the function `coprocessor` to parse and run a python function with arguments from recordBatch, and return a newly assembled RecordBatch
-use arrow::compute::cast::CastOptions;
-use arrow::error::ArrowError;
-use rustpython_vm as vm;
+mod copr_parse;
+mod error;
 mod type_;
+#[cfg(test)]
+mod test;
+mod coprocessor;
+
 use std::sync::Arc;
 
+use copr_parse::parse_copr;
+use coprocessor::AnnotationInfo;
 use arrow::array::{Array, ArrayRef};
+use arrow::compute::cast::CastOptions;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::vectors::{
     BooleanVector, Float32Vector, Int32Vector, PrimitiveVector, Vector, VectorRef,
 };
+use error::{CoprParseSnafu, Error, OtherSnafu, Result};
 use rustpython_bytecode::CodeObject;
-use rustpython_compiler_core::error::CompileError as CoreCompileError;
-use rustpython_compiler_core::{compile, error::CompileError};
+use rustpython_compiler_core::compile;
 use rustpython_parser::{
     ast,
     ast::{Located, Location},
-    error::ParseError,
     parser,
 };
+use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
-use snafu::{ensure, prelude::Snafu};
+use snafu::ensure;
 use type_::{is_instance, PyVector};
-use vm::builtins::{PyBaseExceptionRef, PyTuple};
+use vm::builtins::PyTuple;
 use vm::PyPayload;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-struct Coprocessor {
-    name: String,
-    // get from python decorator args&returns
-    args: Vec<String>,
-    returns: Vec<String>,
-    // get from python function args& returns' annotation, first is type, second is is_nullable
-    arg_types: Vec<Option<AnnotationInfo>>,
-    return_types: Vec<Option<AnnotationInfo>>,
-}
+use coprocessor::Coprocessor;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AnnotationInfo {
-    /// if None, use types infered by PyVector
-    datatype: Option<DataType>,
-    is_nullable: bool,
-    /// if the result type need to be coerced to given type in `into(<datatype>)`
-    coerce_into: bool,
-}
 
-#[derive(Debug, Snafu)]
-pub enum CoprError {
-    TypeCast {
-        error: datatypes::error::Error,
-    },
-    PyParse {
-        error: ParseError,
-    },
-    PyCompile {
-        error: CompileError,
-    },
-    PyRuntime {
-        error: PyBaseExceptionRef,
-    },
-    ArrowError {
-        error: ArrowError,
-    },
-    /// errors in coprocessors' parse check for types and etc.
-    CoprParse {
-        reason: String,
-        // location is option because maybe errors can't give a clear location?
-        loc: Option<Location>,
-    },
-    /// Other types of error that isn't any of above
-    Other {
-        reason: String,
-    },
-}
 
-// impl from for those error so one can use question mark and implictly cast into `CoprError`
-impl From<ArrowError> for CoprError {
-    fn from(error: ArrowError) -> Self {
-        Self::ArrowError { error }
-    }
-}
-impl From<PyBaseExceptionRef> for CoprError {
-    fn from(err: PyBaseExceptionRef) -> Self {
-        Self::PyRuntime { error: err }
-    }
-}
-impl From<ParseError> for CoprError {
-    fn from(e: ParseError) -> Self {
-        Self::PyParse { error: e }
-    }
-}
-impl From<datatypes::error::Error> for CoprError {
-    fn from(e: datatypes::error::Error) -> Self {
-        Self::TypeCast { error: e }
-    }
-}
-
-impl From<CoreCompileError> for CoprError {
-    fn from(err: rustpython_compiler_core::error::CompileError) -> Self {
-        Self::PyCompile { error: err }
-    }
-}
-
-/// turn a python list of string in ast form(a `ast::Expr`) of string into a `Vec<String>`
-fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>, CoprError> {
-    if let ast::ExprKind::List { elts, ctx: _ } = &lst.node {
-        let mut ret = Vec::new();
-        for s in elts {
-            if let ast::ExprKind::Constant {
-                value: ast::Constant::Str(v),
-                kind: _,
-            } = &s.node
-            {
-                ret.push(v.to_owned())
-            } else {
-                return Err(CoprError::CoprParse {
-                    reason: format!(
-                        "Expect a list of String, found {:?} in list element",
-                        &s.node
-                    ),
-                    loc: Some(lst.location),
-                });
-            }
-        }
-        Ok(ret)
-    } else {
-        Err(CoprError::CoprParse {
-            reason: format!("Expect a list, found {:?}", &lst.node),
-            loc: Some(lst.location),
-        })
-    }
-}
-
-fn into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>, CoprError> {
-    match ty {
-        "bool" => Ok(Some(DataType::Boolean)),
-        "u8" => Ok(Some(DataType::UInt8)),
-        "u16" => Ok(Some(DataType::UInt16)),
-        "u32" => Ok(Some(DataType::UInt32)),
-        "u64" => Ok(Some(DataType::UInt64)),
-        "i8" => Ok(Some(DataType::Int8)),
-        "i16" => Ok(Some(DataType::Int16)),
-        "i32" => Ok(Some(DataType::Int32)),
-        "i64" => Ok(Some(DataType::Int64)),
-        "f16" => Ok(Some(DataType::Float16)),
-        "f32" => Ok(Some(DataType::Float32)),
-        "f64" => Ok(Some(DataType::Float64)),
-        // for any datatype
-        "_" => Ok(None),
-        _ => Err(CoprError::CoprParse {
-            reason: format!("Unknown datatype: {ty} at {}", loc),
-            loc: Some(loc.to_owned()),
-        }),
-    }
-}
-
-/// return AnnotationInfo with is_nullable and need_coerced both set to false
-/// if type is `_` return datatype is None
-fn parse_type(node: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
-    match &node.node {
-        ast::ExprKind::Name { id, ctx: _ } => Ok(AnnotationInfo {
-            datatype: into_datatype(id, &node.location)?,
-            is_nullable: false,
-            coerce_into: false,
-        }),
-        _ => Err(CoprError::CoprParse {
-            reason: format!("Expect a type's name, found {:?}", node),
-            loc: Some(node.location),
-        }),
-    }
-}
-
-/// Item => NativeType | into `(` NativeType `)`
-fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
-    match &sub.node {
-        ast::ExprKind::Name { id: _, ctx: _ } => Ok(parse_type(sub)?),
-        ast::ExprKind::Call {
-            func,
-            args,
-            keywords: _,
-        } => {
-            if let ast::ExprKind::Name { id, ctx: _ } = &func.node {
-                ensure!(
-                    id.as_str() == "into",
-                    CoprParseSnafu {
-                        reason: format!(
-                            "Expect only `into(datatype)` or datatype or `None`, found {id}"
-                        ),
-                        loc: Some(sub.location)
-                    }
-                );
-            } else {
-                return Err(CoprError::Other {
-                    reason: format!("Expect type names, found {:?}", &func.node),
-                });
-            };
-            ensure!(
-                args.len() == 1,
-                CoprParseSnafu {
-                    reason: "Expect only one arguement for `into`",
-                    loc: Some(sub.location)
-                }
-            );
-            let mut anno = parse_type(&args[0])?;
-            anno.coerce_into = true;
-            Ok(anno)
-        }
-        _ => Err(CoprError::Other {
-            reason: format!(
-                "Expect types' name or into(<typename>), found {:?}",
-                &sub.node
-            ),
-        }),
-    }
-}
-
-/// where:
-///
-/// Start => vector`[`TYPE`]`
-///
-/// TYPE => Item | Item `|` None
-///
-/// Item => NativeType | into(NativeType)
-fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
-    if let ast::ExprKind::Subscript {
-        value,
-        slice,
-        ctx: _,
-    } = &sub.node
-    {
-        if let ast::ExprKind::Name { id, ctx: _ } = &value.node {
-            ensure!(
-                id == "vector",
-                CoprParseSnafu {
-                    reason: format!(
-                        "Wrong type annotation, expect `vector[...]`, found \"{}\"",
-                        id
-                    ),
-                    loc: Some(value.location)
-                }
-            )
-        } else {
-            return Err(CoprError::Other {
-                reason: format!("Expect \"vector\", found {:?}", &value.node),
-            });
-        }
-        // i.e: vector[f64]
-        match &slice.node {
-            ast::ExprKind::Name { id: _, ctx: _ }
-            | ast::ExprKind::Call {
-                func: _,
-                args: _,
-                keywords: _,
-            } => parse_item(slice),
-            ast::ExprKind::BinOp { left, op: _, right } => {
-                // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
-                let mut has_ty = false;
-                for i in [left, right] {
-                    match &i.node {
-                        ast::ExprKind::Constant { value, kind: _ } => {
-                            ensure!(
-                                matches!(value, ast::Constant::None),
-                                CoprParseSnafu {
-                                    reason: format!(
-                                        "Expect only typenames and `None`, found {:?}",
-                                        i.node
-                                    ),
-                                    loc: Some(i.location)
-                                }
-                            );
-                        }
-                        ast::ExprKind::Name { id: _, ctx: _ }
-                        | ast::ExprKind::Call {
-                            func: _,
-                            args: _,
-                            keywords: _,
-                        } => {
-                            if has_ty {
-                                return Err(CoprError::Other { reason: "Expect one typenames(or `into(<typename>)`) and one `None`, not two type names".into() });
-                            } else {
-                                has_ty = true;
-                            }
-                        }
-                        _ => {
-                            return Err(CoprError::Other {
-                                reason: format!(
-                                    "Expect typename or `None` or `into(<typename>)`, found {:?}",
-                                    &i.node
-                                ),
-                            })
-                        }
-                    }
-                }
-                if !has_ty {
-                    return Err(CoprError::Other {
-                        reason: "Expect a type name, not two `None`".into(),
-                    });
-                }
-
-                // then get types from this BinOp
-                let mut is_nullable = false;
-                let mut tmp_anno = None;
-                for i in [left, right] {
-                    match &i.node {
-                        ast::ExprKind::Constant { value: _, kind: _ } => {
-                            // already check Constant to be `None`
-                            is_nullable = true;
-                        }
-                        ast::ExprKind::Name { id: _, ctx: _ }
-                        | ast::ExprKind::Call {
-                            func: _,
-                            args: _,
-                            keywords: _,
-                        } => tmp_anno = Some(parse_item(i)?),
-                        _ => {
-                            return Err(CoprError::Other {
-                                reason: format!(
-                                    "Expect typename or `None` or `into(<typename>)`, found {:?}",
-                                    &i.node
-                                ),
-                            })
-                        }
-                    }
-                }
-                // deal with errors anyway in case code above changed but forget to modify
-                let mut tmp_anno = tmp_anno.ok_or(CoprError::Other {
-                    reason: "Expect a type name, not two `None`".into(),
-                })?;
-                tmp_anno.is_nullable = is_nullable;
-                Ok(tmp_anno)
-            }
-            _ => Err(CoprError::Other {
-                reason: format!("Expect type in `vector[...]`, found {:?}", &slice.node),
-            }),
-        }
-    } else {
-        Err(CoprError::Other {
-            reason: format!("Expect type annotation, found {:?}", &sub),
-        })
-    }
-}
-
-/// parse script and return `Coprocessor` struct with info extract from ast
-fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
-    let python_ast = parser::parse_program(script)?;
-    ensure!(
-        python_ast.len() == 1,
-        CoprParseSnafu {
-            reason:
-                "Expect one and only one python function with `@coprocessor` or `@cpor` decorator"
-                    .to_string(),
-            loc: if python_ast.is_empty() {
-                None
-            } else {
-                Some(python_ast[0].location)
-            }
-        }
-    );
-    if let ast::StmtKind::FunctionDef {
-        name,
-        args: fn_args,
-        body: _,
-        decorator_list,
-        returns,
-        type_comment: _,
-    } = &python_ast[0].node
-    {
-        ensure!(
-            decorator_list.len() == 1,
-            CoprParseSnafu {
-                reason: "Expect one decorator",
-                loc: if decorator_list.is_empty() {
-                    None
-                } else {
-                    Some(decorator_list[0].location)
-                }
-            }
-        );
-        let decorator = &decorator_list[0];
-        if let ast::ExprKind::Call {
-            func,
-            args,
-            keywords,
-        } = &decorator.node
-        {
-            ensure!(
-                func.node
-                    == ast::ExprKind::Name {
-                        id: "copr".to_string(),
-                        ctx: ast::ExprContext::Load
-                    }
-                    || func.node
-                        == ast::ExprKind::Name {
-                            id: "coprocessor".to_string(),
-                            ctx: ast::ExprContext::Load
-                        },
-                CoprParseSnafu {
-                    reason: format!(
-                        "Expect decorator with name `copr` or `coprocessor`, found {:?}",
-                        &func.node
-                    ),
-                    loc: Some(func.location)
-                }
-            );
-            ensure!(
-                args.is_empty() && keywords.len() == 2,
-                CoprParseSnafu {
-                    reason: "Expect two keyword argument of `args` and `returns`",
-                    loc: Some(func.location)
-                }
-            );
-            let mut arg_names = None;
-            let mut ret_names = None;
-            for kw in keywords {
-                match &kw.node.arg {
-                    Some(s) => {
-                        let s = s.as_str();
-                        match s {
-                            "args" => {
-                                if arg_names.is_none() {
-                                    arg_names = Some(pylist_to_vec(&kw.node.value))
-                                } else {
-                                    return Err(CoprError::CoprParse {
-                                        reason: "`args` occur multiple times in decorator's arguements' list.".to_string(),
-                                        loc: Some(kw.location)
-                                    });
-                                }
-                            }
-                            "returns" => {
-                                if ret_names.is_none() {
-                                    ret_names = Some(pylist_to_vec(&kw.node.value))
-                                } else {
-                                    return Err(CoprError::CoprParse {
-                                        reason: "`returns` occur multiple times in decorator's arguements' list.".to_string(),
-                                        loc: Some(kw.location)
-                                    });
-                                }
-                            }
-                            _ => {
-                                return Err(CoprError::CoprParse {
-                                    reason: format!("Expect `args` or `returns`, found `{}`", s),
-                                    loc: Some(kw.location),
-                                })
-                            }
-                        }
-                    }
-                    None => {
-                        return Err(CoprError::CoprParse {
-                            reason: format!(
-                                "Expect explictly set both `args` and `returns`, found {:?}",
-                                &kw.node
-                            ),
-                            loc: Some(kw.location),
-                        })
-                    }
-                }
-            }
-            let arg_names = if let Some(args) = arg_names {
-                args?
-            } else {
-                return Err(CoprError::CoprParse {
-                    reason: "Expect `args` keyword".to_string(),
-                    loc: Some(decorator.location),
-                });
-            };
-            let ret_names = if let Some(rets) = ret_names {
-                rets?
-            } else {
-                return Err(CoprError::CoprParse {
-                    reason: "Expect `rets` keyword".to_string(),
-                    loc: Some(decorator.location),
-                });
-            };
-            // get arg types from type annotation
-            let mut arg_types = Vec::new();
-            for arg in &fn_args.args {
-                if let Some(anno) = &arg.node.annotation {
-                    arg_types.push(Some(parse_annotation(anno)?))
-                } else {
-                    arg_types.push(None)
-                }
-            }
-
-            // get return types from type annotation
-            let mut return_types = Vec::new();
-            if let Some(rets) = returns {
-                if let ast::ExprKind::Tuple { elts, ctx: _ } = &rets.node {
-                    for elem in elts {
-                        return_types.push(Some(parse_annotation(elem)?))
-                    }
-                } else if let ast::ExprKind::Subscript {
-                    value: _,
-                    slice: _,
-                    ctx: _,
-                } = &rets.node
-                {
-                    return_types.push(Some(parse_annotation(rets)?))
-                }
-            } else {
-                // if no anntation at all, set it to all None
-                return_types.resize(ret_names.len(), None)
-            }
-            ensure!(
-                arg_names.len() == arg_types.len(),
-                CoprParseSnafu {
-                    reason: format!(
-                        "args number in decorator({}) and function({}) doesn't match",
-                        arg_names.len(),
-                        arg_types.len()
-                    ),
-                    loc: None
-                }
-            );
-            ensure!(
-                ret_names.len() == return_types.len(),
-                CoprParseSnafu {
-                    reason: format!(
-                        "returns number in decorator( {} ) and function annotation( {} ) doesn't match",
-                        ret_names.len(),
-                        return_types.len()
-                    ),
-                    loc: None
-                }
-            );
-            Ok(Coprocessor {
-                name: name.to_string(),
-                args: arg_names,
-                returns: ret_names,
-                arg_types,
-                return_types,
-            })
-        } else {
-            Err(CoprError::CoprParse {
-                reason: format!(
-                    "Expect decorator to be a function call(like `@copr(...)`), found {:?}",
-                    decorator.node
-                ),
-                loc: Some(decorator.location),
-            })
-        }
-    } else {
-        Err(CoprError::CoprParse {
-            reason: format!(
-                "Expect a function definition, found a {:?}",
-                &python_ast[0].node
-            ),
-            loc: Some(python_ast[0].location),
-        })
-    }
-}
 
 fn set_loc<T>(node: T, loc: Location) -> Located<T> {
     Located::new(loc, node)
@@ -562,7 +48,7 @@ fn set_loc<T>(node: T, loc: Location) -> Located<T> {
 /// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
 /// And add a function call in the end
 /// strip type annotation
-fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObject, CoprError> {
+fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObject> {
     // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
     let mut top = parser::parse(script, parser::Mode::Interactive)?;
     // erase decorator
@@ -601,7 +87,7 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
                 arg.node.annotation = None;
             }
         } else {
-            return Err(CoprError::CoprParse {
+            return Err(Error::CoprParse {
                 reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
                 loc: Some(code[0].location)
             });
@@ -636,7 +122,7 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
         };
         code.push(set_loc(stmt, loc));
     } else {
-        return Err(CoprError::CoprParse {
+        return Err(Error::CoprParse {
             reason: format!("Expect statement in script, found: {:?}", top),
             loc: None,
         });
@@ -650,11 +136,15 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
     )
     .map_err(|err| err.into())
 }
+
 /// cast a `dyn Array` of type unsigned/int/float into a `dyn Vector`
 fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilder>(
     arg: Arc<dyn Array>,
-) -> Result<Arc<dyn Vector>, datatypes::error::Error> {
-    PrimitiveVector::<T>::try_from_arrow_array(arg).map(|op| Arc::new(op) as Arc<dyn Vector>)
+) -> Result<Arc<dyn Vector>> {
+    PrimitiveVector::<T>::try_from_arrow_array(arg)
+        .map(|op| Arc::new(op) as Arc<dyn Vector>)
+        // to cast datatypes::Error to python::Error
+        .map_err(|err| err.into())
 }
 
 /// The coprocessor function accept a python script and a Record Batch:
@@ -707,7 +197,7 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 /// def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
 ///     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 /// ```
-pub fn coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch, CoprError> {
+pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     let copr = parse_copr(script)?;
@@ -744,7 +234,7 @@ pub fn coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch, Co
                 args.push(PyVector::from(v))
             }
             _ => {
-                return Err(CoprError::Other {
+                return Err(Error::Other {
                     reason: format!(
                         "Unsupport data type at column {idx}: {:?} for coprocessor",
                         arg.data_type()
@@ -772,7 +262,7 @@ pub fn coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch, Co
     }
     // 4. then set args in scope and call by compiler and run `CodeObject` which already append `Call` node
     vm::Interpreter::without_stdlib(Default::default()).enter(
-        |vm| -> Result<DfRecordBatch, CoprError> {
+        |vm| -> Result<DfRecordBatch> {
             PyVector::make_class(&vm.ctx);
             let scope = vm.new_scope_with_builtins();
             for (name, vector) in copr.args.iter().zip(args) {
@@ -781,7 +271,7 @@ pub fn coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch, Co
                     .as_object()
                     .set_item(name, vm.new_pyobj(vector), vm)
                     .map_err(|err|
-                        CoprError::Other { reason: format!("fail to set item{} in python scope, PyExpection: {:?}", name, err) }
+                        Error::Other { reason: format!("fail to set item{} in python scope, PyExpection: {:?}", name, err) }
                     )?;
             }
 
@@ -795,21 +285,21 @@ pub fn coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch, Co
             let mut cols: Vec<ArrayRef> = Vec::new();
             if is_instance(&ret, PyTuple::class(vm).into(), vm) {
                 let tuple = ret.payload::<PyTuple>().ok_or(
-                CoprError::Other { reason: format!("can't cast obj {:?} to PyTuple)", ret) }
+                Error::Other { reason: format!("can't cast obj {:?} to PyTuple)", ret) }
                 )?;
                 for obj in tuple {
                     if is_instance(obj, PyVector::class(vm).into(), vm) {
                         let pyv = obj.payload::<PyVector>().ok_or(
-                            CoprError::Other { reason: format!("can't cast obj {:?} to PyVector", obj) }
+                            Error::Other { reason: format!("can't cast obj {:?} to PyVector", obj) }
                         )?;
                         cols.push(pyv.to_arrow_array())
                     } else {
-                        return Err(CoprError::Other { reason: format!("Expect all element in returning tuple to be vector, found one of the element is {:?}", obj) })
+                        return Err(Error::Other { reason: format!("Expect all element in returning tuple to be vector, found one of the element is {:?}", obj) })
                     }
                 }
             } else if is_instance(&ret, PyVector::class(vm).into(), vm) {
                 let pyv = ret.payload::<PyVector>().ok_or(
-                    CoprError::Other { reason: format!("can't cast obj {:?} to PyVector", ret) }
+                    Error::Other { reason: format!("can't cast obj {:?} to PyVector", ret) }
                     )?;
                 cols.push(pyv.to_arrow_array())
             }
@@ -863,7 +353,7 @@ pub fn coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch, Co
                             anno_ty,
                             CastOptions { wrapped: true, partial: true })?.into();
                         }else{
-                        return Err(CoprError::Other {
+                        return Err(Error::Other {
                             reason: format!("Anntation type is {:?}, but real type is {:?}(Maybe add a `into()`?)", anno_ty, real_ty)
                             });
                         }
@@ -909,460 +399,3 @@ pub fn execute_script(script: &str) -> vm::PyResult {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use arrow::array::PrimitiveArray;
-    use arrow::datatypes::{DataType, Field, Schema};
-    use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-
-    use super::*;
-    type PredicateFn = Option<fn(Result<Coprocessor, CoprError>) -> bool>;
-    type ExecResPredicateFn = Option<fn(Result<DfRecordBatch, CoprError>)>;
-
-    #[test]
-    fn testsuite_parse() {
-        let testcases: Vec<(&'static str, PredicateFn)> = vec![
-            (
-                // for correct parse with all possible type annotation
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why", "whatever", "nihilism"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem, cpu, mem
-"#,
-                Some(|r| {
-                    //dbg!(&r);
-                    r.is_ok()
-                        && r.unwrap()
-                            == Coprocessor {
-                                name: "a".into(),
-                                args: vec!["cpu".into(), "mem".into()],
-                                returns: vec![
-                                    "perf".into(),
-                                    "what".into(),
-                                    "how".into(),
-                                    "why".into(),
-                                    "whatever".into(),
-                                    "nihilism".into(),
-                                ],
-                                arg_types: vec![
-                                    Some(AnnotationInfo {
-                                        datatype: Some(DataType::Float32),
-                                        is_nullable: false,
-                                        coerce_into: false,
-                                    }),
-                                    Some(AnnotationInfo {
-                                        datatype: Some(DataType::Float64),
-                                        is_nullable: false,
-                                        coerce_into: false,
-                                    }),
-                                ],
-                                return_types: vec![
-                                    Some(AnnotationInfo {
-                                        datatype: Some(DataType::Float64),
-                                        is_nullable: true,
-                                        coerce_into: true,
-                                    }),
-                                    Some(AnnotationInfo {
-                                        datatype: Some(DataType::Float64),
-                                        is_nullable: false,
-                                        coerce_into: true,
-                                    }),
-                                    Some(AnnotationInfo {
-                                        datatype: Some(DataType::Float64),
-                                        is_nullable: false,
-                                        coerce_into: false,
-                                    }),
-                                    Some(AnnotationInfo {
-                                        datatype: Some(DataType::Float64),
-                                        is_nullable: true,
-                                        coerce_into: false,
-                                    }),
-                                    Some(AnnotationInfo {
-                                        datatype: None,
-                                        is_nullable: false,
-                                        coerce_into: false,
-                                    }),
-                                    Some(AnnotationInfo {
-                                        datatype: None,
-                                        is_nullable: true,
-                                        coerce_into: false,
-                                    }),
-                                ],
-                            }
-                }),
-            ),
-            (
-                // missing decrator
-                r#"
-def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    //dbg!(&r);
-                    r.is_err()
-                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                            reason.contains("Expect one decorator") && loc == None
-                        } else {
-                            false
-                        }
-                }),
-            ),
-            (
-                // illegal list(not all is string)
-                r#"
-@copr(args=["cpu", 3], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    r.is_err()
-                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                            reason.contains("Expect a list of String, found ") && loc.is_some()
-                        } else {
-                            false
-                        }
-                }),
-            ),
-            (
-                // not even a list
-                r#"
-@copr(args=42, returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    r.is_err()
-                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                            reason.contains("Expect a list, found ") && loc.is_some()
-                        } else {
-                            false
-                        }
-                }),
-            ),
-            (
-                // unknown type names
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[g32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    assert!(
-                        r.is_err()
-                            && if let CoprError::CoprParse { reason, loc: _ } = r.unwrap_err() {
-                                reason.contains("Unknown datatype:")
-                            } else {
-                                false
-                            }
-                    );
-                    true
-                }),
-            ),
-            (
-                // two type name
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f32 | f64], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    assert!(
-                        r.is_err()
-                            && if let CoprError::Other { reason } = r.unwrap_err() {
-                                reason.contains("Expect one typenames(or `into(<typename>)`) and one `None`, not two type names")
-                            } else {
-                                false
-                            }
-                    );
-                    true
-                }),
-            ),
-            (
-                // two `None`
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[None | None], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    assert!(
-                        r.is_err()
-                            && if let CoprError::Other { reason } = r.unwrap_err() {
-                                reason.contains("Expect a type name, not two `None`")
-                            } else {
-                                false
-                            }
-                    );
-                    true
-                }),
-            ),
-            (
-                // Expect a Types name
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[into(f64|None)], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    r.is_err()
-                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                            reason.contains("Expect a type's name, found ") && loc.is_some()
-                        } else {
-                            false
-                        }
-                }),
-            ),
-            (
-                // not into
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[cast(f64)], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    r.is_err()
-                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                            reason.contains(
-                                "Expect only `into(datatype)` or datatype or `None`, found ",
-                            ) && loc.is_some()
-                        } else {
-                            false
-                        }
-                }),
-            ),
-            (
-                // Expect one arg in into
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[into(f64, f32)], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    r.is_err()
-                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                            reason.contains("Expect only one arguement for `into`") && loc.is_some()
-                        } else {
-                            false
-                        }
-                }),
-            ),
-            (
-                // Expect `vector` not `vec`
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vec[into(f64)], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    r.is_err()
-                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                            reason.contains("Wrong type annotation, expect `vector[...]`, found")
-                                && loc.is_some()
-                        } else {
-                            false
-                        }
-                }),
-            ),
-            (
-                // Expect `None`
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[into(f64)|1], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    assert!(
-                        r.is_err()
-                            && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                                reason.contains("Expect only typenames and `None`, found")
-                                    && loc.is_some()
-                            } else {
-                                false
-                            }
-                    );
-                    true
-                }),
-            ),
-            (
-                // more than one statement
-                r#"
-print("hello world")
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    // assert in here seems to be more readable
-                    assert!(
-                        r.is_err()
-                            && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                                reason.contains("Expect one and only one python function with `@coprocessor` or `@cpor` decorator")
-                                    && loc.is_some()
-                            } else {
-                                false
-                            }
-                    );
-                    true
-                }),
-            ),
-            (
-                // wrong decorator name
-                r#"
-@corp(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    // assert in here seems to be more readable
-                    assert!(
-                        r.is_err()
-                            && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                                reason.contains(
-                                    "Expect decorator with name `copr` or `coprocessor`, found",
-                                ) && loc.is_some()
-                            } else {
-                                false
-                            }
-                    );
-                    true
-                }),
-            ),
-            (
-                // not enough keyword arguements
-                r#"
-@copr(args=["cpu", "mem"])
-def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-                Some(|r| {
-                    // assert in here seems to be more readable
-                    assert!(
-                        r.is_err()
-                            && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                                reason
-                                    .contains("Expect two keyword argument of `args` and `returns`")
-                                    && loc.is_some()
-                            } else {
-                                false
-                            }
-                    );
-                    true
-                }),
-            ),
-            // ... More `Other` errors
-        ];
-
-        for (script, predicate) in testcases {
-            let copr = parse_copr(script);
-            if let Some(predicate) = predicate {
-                if !predicate(copr) {
-                    panic!("Error on {script}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_all_types_error() {
-        let test_cases: Vec<(&'static str, ExecResPredicateFn)> = vec![
-            (
-                // cast errors
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why", "whatever", "nihilism"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None], vector[bool], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem, cpu, mem
-"#,
-                Some(|r| {
-                    // dbg!(&r);
-                    // assert in here seems to be more readable
-                    assert!(
-                        r.is_err()
-                            && if let CoprError::Other { reason } = r.unwrap_err() {
-                                reason.contains("Anntation type is ")
-                            } else {
-                                false
-                            }
-                    );
-                }),
-            ),
-            (
-                // cast to bool
-                r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why", "whatever", "nihilism"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None], vector[into(bool)], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem, cpu, mem
-"#,
-                Some(|r| {
-                    // assert in here seems to be more readable
-                    assert!(r.is_ok() && *r.unwrap().column(4).data_type() == DataType::Boolean);
-                }),
-            ),
-        ];
-        let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
-        let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
-        let schema = Arc::new(Schema::from(vec![
-            Field::new("cpu", DataType::Float32, false),
-            Field::new("mem", DataType::Float64, false),
-        ]));
-        let rb =
-            DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
-
-        for (script, predicate) in test_cases {
-            if let Some(predicate) = predicate {
-                predicate(coprocessor(script, &rb));
-            }
-        }
-    }
-
-    #[test]
-    #[allow(unused)]
-    fn test_type_anno() {
-        let python_source = r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[_], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[_], vector[ _ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#;
-        let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
-        //dbg!(pyast);
-        let copr = parse_copr(python_source);
-        // dbg!(&copr);
-        //assert!(copr.is_ok());
-    }
-    #[test]
-    fn test_execute_script() {
-        let python_source = "
-def a(a: int,b: int)->int:
-    return 1
-a(2,3)
-";
-        let result = execute_script(python_source);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[allow(clippy::print_stdout)]
-    // allow print in test function for debug purpose
-    fn test_coprocessor() {
-        let python_source = r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
-    vector[into(f32)]):
-    return cpu + mem, cpu - mem
-"#;
-        //println!("{}, {:?}", python_source, python_ast);
-        let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
-        let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
-        let schema = Arc::new(Schema::from(vec![
-            Field::new("cpu", DataType::Float32, false),
-            Field::new("mem", DataType::Float64, false),
-        ]));
-        let rb =
-            DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
-        let ret = coprocessor(python_source, &rb);
-        // dbg!(&ret);
-        assert!(ret.is_ok());
-        assert_eq!(ret.unwrap().column(0).len(), 4);
-    }
-}
