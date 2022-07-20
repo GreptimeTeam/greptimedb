@@ -13,6 +13,7 @@ use datatypes::vectors::{
     BooleanVector, Float32Vector, Int32Vector, PrimitiveVector, Vector, VectorRef,
 };
 use rustpython_bytecode::CodeObject;
+use rustpython_compiler_core::error::CompileError as CoreCompileError;
 use rustpython_compiler_core::{compile, error::CompileError};
 use rustpython_parser::{
     ast,
@@ -25,9 +26,8 @@ use snafu::{ensure, prelude::Snafu};
 use type_::{is_instance, PyVector};
 use vm::builtins::{PyBaseExceptionRef, PyTuple};
 use vm::PyPayload;
-use rustpython_compiler_core::error::CompileError as CoreCompileError;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Coprocessor {
     name: String,
     // get from python decorator args&returns
@@ -103,6 +103,7 @@ impl From<CoreCompileError> for CoprError {
         Self::PyCompile { error: err }
     }
 }
+
 /// turn a python list of string in ast form(a `ast::Expr`) of string into a `Vec<String>`
 fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>, CoprError> {
     if let ast::ExprKind::List { elts, ctx: _ } = &lst.node {
@@ -133,7 +134,7 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>, CoprError> {
     }
 }
 
-fn into_datatype(ty: &str) -> Result<Option<DataType>, CoprError> {
+fn into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>, CoprError> {
     match ty {
         "bool" => Ok(Some(DataType::Boolean)),
         "u8" => Ok(Some(DataType::UInt8)),
@@ -149,7 +150,10 @@ fn into_datatype(ty: &str) -> Result<Option<DataType>, CoprError> {
         "f64" => Ok(Some(DataType::Float64)),
         // for any datatype
         "_" => Ok(None),
-        _ => Err(CoprError::Other { reason: format!("Unknown datatype {ty}") }),
+        _ => Err(CoprError::CoprParse {
+            reason: format!("Unknown datatype: {ty} at {}", loc),
+            loc: Some(loc.to_owned()),
+        }),
     }
 }
 
@@ -157,13 +161,11 @@ fn into_datatype(ty: &str) -> Result<Option<DataType>, CoprError> {
 /// if type is `_` return datatype is None
 fn parse_type(node: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
     match &node.node {
-        ast::ExprKind::Name { id, ctx: _ } => {
-            Ok(AnnotationInfo {
-                datatype: into_datatype(id)?,
-                is_nullable: false,
-                coerce_into: false,
-            })
-        }
+        ast::ExprKind::Name { id, ctx: _ } => Ok(AnnotationInfo {
+            datatype: into_datatype(id, &node.location)?,
+            is_nullable: false,
+            coerce_into: false,
+        }),
         _ => Err(CoprError::CoprParse {
             reason: format!("Expect a type's name, found {:?}", node),
             loc: Some(node.location),
@@ -254,8 +256,8 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
                 keywords: _,
             } => parse_item(slice),
             ast::ExprKind::BinOp { left, op: _, right } => {
-                let mut is_nullable = false;
-                let mut tmp_anno = None;
+                // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
+                let mut has_ty = false;
                 for i in [left, right] {
                     match &i.node {
                         ast::ExprKind::Constant { value, kind: _ } => {
@@ -269,24 +271,17 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
                                     loc: Some(i.location)
                                 }
                             );
-                            is_nullable = true;
                         }
-                        ast::ExprKind::Name { id: _, ctx: _ } => {
-                            if tmp_anno.is_none() {
-                                tmp_anno = Some(parse_item(i)?)
-                            } else {
-                                return Err(CoprError::Other { reason: "Expect one typenames(or `into(<typename>)`) and one `None`, not two type names".into() });
-                            }
-                        }
-                        ast::ExprKind::Call {
+                        ast::ExprKind::Name { id: _, ctx: _ }
+                        | ast::ExprKind::Call {
                             func: _,
                             args: _,
                             keywords: _,
                         } => {
-                            if tmp_anno.is_none() {
-                                tmp_anno = Some(parse_item(i)?)
-                            } else {
+                            if has_ty {
                                 return Err(CoprError::Other { reason: "Expect one typenames(or `into(<typename>)`) and one `None`, not two type names".into() });
+                            } else {
+                                has_ty = true;
                             }
                         }
                         _ => {
@@ -299,14 +294,41 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
                         }
                     }
                 }
-                ensure!(
-                    tmp_anno.is_some(),
-                    CoprParseSnafu {
-                        reason: "Expect type, not two `None`",
-                        loc: Some(slice.location)
+                if !has_ty {
+                    return Err(CoprError::Other {
+                        reason: "Expect a type name, not two `None`".into(),
+                    });
+                }
+
+                // then get types from this BinOp
+                let mut is_nullable = false;
+                let mut tmp_anno = None;
+                for i in [left, right] {
+                    match &i.node {
+                        ast::ExprKind::Constant { value: _, kind: _ } => {
+                            // already check Constant to be `None`
+                            is_nullable = true;
+                        }
+                        ast::ExprKind::Name { id: _, ctx: _ }
+                        | ast::ExprKind::Call {
+                            func: _,
+                            args: _,
+                            keywords: _,
+                        } => tmp_anno = Some(parse_item(i)?),
+                        _ => {
+                            return Err(CoprError::Other {
+                                reason: format!(
+                                    "Expect typename or `None` or `into(<typename>)`, found {:?}",
+                                    &i.node
+                                ),
+                            })
+                        }
                     }
-                );
-                let mut tmp_anno = tmp_anno.unwrap();
+                }
+                // deal with errors anyway in case code above changed but forget to modify
+                let mut tmp_anno = tmp_anno.ok_or(CoprError::Other {
+                    reason: "Expect a type name, not two `None`".into(),
+                })?;
                 tmp_anno.is_nullable = is_nullable;
                 Ok(tmp_anno)
             }
@@ -320,6 +342,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
         })
     }
 }
+
 /// parse script and return `Coprocessor` struct with info extract from ast
 fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
     let python_ast = parser::parse_program(script)?;
@@ -529,12 +552,10 @@ fn parse_copr(script: &str) -> Result<Coprocessor, CoprError> {
     }
 }
 
-fn default_loc<T>(node: T) -> Located<T> {
-    Located::new(Location::new(0, 0), node)
-}
 fn set_loc<T>(node: T, loc: Location) -> Located<T> {
     Located::new(loc, node)
 }
+
 /// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
 ///
 /// The conside is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
@@ -611,9 +632,9 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
             keywords: Vec::new(),
         };
         let stmt = ast::StmtKind::Expr {
-            value: Box::new(default_loc(func)),
+            value: Box::new(set_loc(func, loc)),
         };
-        code.push(default_loc(stmt));
+        code.push(set_loc(stmt, loc));
     } else {
         return Err(CoprError::CoprParse {
             reason: format!("Expect statement in script, found: {:?}", top),
@@ -989,6 +1010,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
                 }),
             ),
             (
+                // illegal list(not all is string)
                 r#"
 @copr(args=["cpu", 3], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
@@ -1004,6 +1026,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
                 }),
             ),
             (
+                // not even a list
                 r#"
 @copr(args=42, returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
@@ -1026,12 +1049,53 @@ def a(cpu: vector[g32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
                 Some(|r| {
-                    r.is_err()
-                        && if let CoprError::CoprParse { reason, loc } = r.unwrap_err() {
-                            reason.contains("unknown type: ") && loc.is_some()
-                        } else {
-                            false
-                        }
+                    assert!(
+                        r.is_err()
+                            && if let CoprError::CoprParse { reason, loc: _ } = r.unwrap_err() {
+                                reason.contains("Unknown datatype:")
+                            } else {
+                                false
+                            }
+                    );
+                    true
+                }),
+            ),
+            (
+                // two type name
+                r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32 | f64], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    assert!(
+                        r.is_err()
+                            && if let CoprError::Other { reason } = r.unwrap_err() {
+                                reason.contains("Expect one typenames(or `into(<typename>)`) and one `None`, not two type names")
+                            } else {
+                                false
+                            }
+                    );
+                    true
+                }),
+            ),
+            (
+                // two `None`
+                r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[None | None], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+                Some(|r| {
+                    assert!(
+                        r.is_err()
+                            && if let CoprError::Other { reason } = r.unwrap_err() {
+                                reason.contains("Expect a type name, not two `None`")
+                            } else {
+                                false
+                            }
+                    );
+                    true
                 }),
             ),
             (
@@ -1193,7 +1257,9 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
         for (script, predicate) in testcases {
             let copr = parse_copr(script);
             if let Some(predicate) = predicate {
-                assert!(predicate(copr));
+                if !predicate(copr) {
+                    panic!("Error on {script}");
+                }
             }
         }
     }
