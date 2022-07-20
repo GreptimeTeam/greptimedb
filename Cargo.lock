@@ -2699,6 +2699,7 @@ dependencies = [
 name = "query"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "arrow2",
  "async-trait",
  "common-error",

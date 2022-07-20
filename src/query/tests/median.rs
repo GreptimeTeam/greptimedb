@@ -1,7 +1,8 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use arc_swap::ArcSwapOption;
 use common_query::error::{ExecuteFunctionSnafu, FromScalarValueSnafu, Result};
 use common_query::logical_plan::{Accumulator, AccumulatorCreator};
 use common_query::prelude::*;
@@ -141,7 +142,7 @@ where
 
 #[derive(Debug, Default)]
 pub struct MedianAccumulatorCreator {
-    input_type: Arc<Mutex<Option<Vec<ConcreteDataType>>>>,
+    input_type: ArcSwapOption<Vec<ConcreteDataType>>,
 }
 
 impl AccumulatorCreator for MedianAccumulatorCreator {
@@ -168,22 +169,21 @@ impl AccumulatorCreator for MedianAccumulatorCreator {
 
     fn input_types(&self) -> Vec<ConcreteDataType> {
         self.input_type
-            .lock()
-            .unwrap()
+            .load()
             .as_ref()
             .expect("input_type is not present, check if DataFusion has changed its UDAF execution logic")
+            .as_ref()
             .clone()
     }
 
     fn set_input_types(&self, input_types: Vec<ConcreteDataType>) {
-        let mut holder = self.input_type.lock().unwrap();
-        if let Some(old) = holder.as_ref() {
+        let old = self.input_type.swap(Some(Arc::new(input_types.clone())));
+        if let Some(old) = old {
             assert_eq!(old.len(), input_types.len());
             old.iter().zip(input_types.iter()).for_each(|(x, y)|
                 assert_eq!(x, y, "input type {:?} != {:?}, check if DataFusion has changed its UDAF execution logic", x, y)
             );
         }
-        let _ = holder.insert(input_types);
     }
 
     fn output_type(&self) -> ConcreteDataType {

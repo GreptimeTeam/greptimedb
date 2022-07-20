@@ -1,9 +1,10 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 mod testing_table;
 
+use arc_swap::ArcSwapOption;
 use common_query::error::ExecuteFunctionSnafu;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Accumulator;
@@ -53,7 +54,7 @@ where
 
 #[derive(Debug, Default)]
 struct MySumAccumulatorCreator {
-    input_type: Arc<Mutex<Option<Vec<ConcreteDataType>>>>,
+    input_type: ArcSwapOption<Vec<ConcreteDataType>>,
 }
 
 impl AccumulatorCreator for MySumAccumulatorCreator {
@@ -80,22 +81,21 @@ impl AccumulatorCreator for MySumAccumulatorCreator {
 
     fn input_types(&self) -> Vec<ConcreteDataType> {
         self.input_type
-            .lock()
-            .unwrap()
+            .load()
             .as_ref()
             .expect("input_type is not present, check if DataFusion has changed its UDAF execution logic")
+            .as_ref()
             .clone()
     }
 
     fn set_input_types(&self, input_types: Vec<ConcreteDataType>) {
-        let mut holder = self.input_type.lock().unwrap();
-        if let Some(old) = holder.as_ref() {
+        let old = self.input_type.swap(Some(Arc::new(input_types.clone())));
+        if let Some(old) = old {
             assert_eq!(old.len(), input_types.len());
             old.iter().zip(input_types.iter()).for_each(|(x, y)|
                 assert_eq!(x, y, "input type {:?} != {:?}, check if DataFusion has changed its UDAF execution logic", x, y)
             );
         }
-        let _ = holder.insert(input_types);
     }
 
     fn output_type(&self) -> ConcreteDataType {

@@ -9,6 +9,7 @@ version="0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
 
 [dependencies]
+arc-swap = "1.0"
 async-trait = "0.1"
 common-error = { path = "../common/error" }
 common-function = { path = "../common/function" }
