@@ -15,21 +15,21 @@ use snafu::ResultExt;
 use store_api::storage::consts;
 
 use crate::error::{FlushIoSnafu, Result, WriteParquetSnafu};
-use crate::memtable::{BatchIteratorPtr, MemtableSchema};
+use crate::memtable::{BoxedBatchIterator, MemtableSchema};
 use crate::metadata::ColumnMetadata;
 use crate::sst;
 
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
     file_name: &'a str,
-    iter: BatchIteratorPtr,
+    iter: BoxedBatchIterator,
     object_store: ObjectStore,
 }
 
 impl<'a> ParquetWriter<'a> {
     pub fn new(
         file_name: &'a str,
-        iter: BatchIteratorPtr,
+        iter: BoxedBatchIterator,
         object_store: ObjectStore,
     ) -> ParquetWriter {
         ParquetWriter {
@@ -39,7 +39,7 @@ impl<'a> ParquetWriter<'a> {
         }
     }
 
-    pub async fn write_sst(self, _opts: sst::WriteOptions) -> Result<()> {
+    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<()> {
         self.write_rows(None).await
     }
 
@@ -220,7 +220,7 @@ mod tests {
         let writer = ParquetWriter::new(sst_file_name, iter, object_store);
 
         writer
-            .write_sst(sst::WriteOptions::default())
+            .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
 

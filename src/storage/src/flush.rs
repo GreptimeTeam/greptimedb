@@ -176,7 +176,7 @@ impl<S: LogStore> FlushJob<S> {
             let iter = m.memtable.iter(iter_ctx)?;
             futures.push(async move {
                 self.sst_layer
-                    .write_sst(&file_name, iter, WriteOptions::default())
+                    .write_sst(&file_name, iter, &WriteOptions::default())
                     .await
             });
         }

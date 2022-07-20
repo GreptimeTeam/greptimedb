@@ -15,9 +15,10 @@ use store_api::storage::{SequenceNumber, ValueType};
 
 use crate::error::Result;
 use crate::memtable::{
-    Batch, BatchIterator, BatchIteratorPtr, IterContext, KeyValues, Memtable, MemtableId,
+    BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId,
     MemtableSchema, RowOrdering,
 };
+use crate::read::Batch;
 
 type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
 
@@ -65,7 +66,7 @@ impl Memtable for BTreeMemtable {
         Ok(())
     }
 
-    fn iter(&self, ctx: IterContext) -> Result<BatchIteratorPtr> {
+    fn iter(&self, ctx: IterContext) -> Result<BoxedBatchIterator> {
         assert!(ctx.batch_size > 0);
 
         let iter = BTreeIterator::new(ctx, self.schema.clone(), self.map.clone());
