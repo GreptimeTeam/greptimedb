@@ -4,6 +4,7 @@ mod testing_table;
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
+use common_function::scalars::MedianAccumulatorCreator;
 use common_query::logical_plan::create_udaf;
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_recordbatch::error::Result as RecordResult;
@@ -26,7 +27,6 @@ use rand::Rng;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
 
-use crate::median::MedianAccumulatorCreator;
 use crate::pow::pow;
 use crate::testing_table::TestingTable;
 

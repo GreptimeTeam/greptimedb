@@ -621,10 +621,11 @@ dependencies = [
 name = "common-function"
 version = "0.1.0"
 dependencies = [
- "arrow2",
+ "arc-swap",
  "chrono-tz",
  "common-error",
  "common-query",
+ "datafusion-common",
  "datatypes",
  "num",
  "num-traits",
