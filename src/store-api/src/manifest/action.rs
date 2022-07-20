@@ -42,7 +42,7 @@ impl ProtocolAction {
         reader_version >= self.min_reader_version
     }
 
-    pub fn is_writeable(&self, writer_version: ProtocolVersion) -> bool {
+    pub fn is_writable(&self, writer_version: ProtocolVersion) -> bool {
         writer_version >= self.min_writer_version
     }
 }
@@ -58,25 +58,25 @@ mod tests {
         let mut action = ProtocolAction::new();
 
         assert!(action.is_readable(0));
-        assert!(action.is_writeable(0));
+        assert!(action.is_writable(0));
         action.min_reader_version = 2;
         action.min_writer_version = 3;
         assert!(!action.is_readable(0));
-        assert!(!action.is_writeable(0));
+        assert!(!action.is_writable(0));
         assert!(action.is_readable(2));
-        assert!(action.is_writeable(3));
+        assert!(action.is_writable(3));
         assert!(action.is_readable(3));
-        assert!(action.is_writeable(4));
+        assert!(action.is_writable(4));
 
         let s = json::to_string(&action).unwrap();
         assert_eq!("{\"min_reader_version\":2,\"min_writer_version\":3}", s);
 
         let action_decoded: ProtocolAction = json::from_str(&s).unwrap();
         assert!(!action_decoded.is_readable(0));
-        assert!(!action_decoded.is_writeable(0));
+        assert!(!action_decoded.is_writable(0));
         assert!(action_decoded.is_readable(2));
-        assert!(action_decoded.is_writeable(3));
+        assert!(action_decoded.is_writable(3));
         assert!(action_decoded.is_readable(3));
-        assert!(action_decoded.is_writeable(4));
+        assert!(action_decoded.is_writable(4));
     }
 }

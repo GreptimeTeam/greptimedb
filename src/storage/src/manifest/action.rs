@@ -137,7 +137,7 @@ impl RegionMetaActionList {
 
             if let RegionMetaAction::Protocol(p) = &action {
                 ensure!(
-                    reader_version >= p.min_reader_version,
+                    p.is_readable(reader_version),
                     ManifestProtocolForbideReadSnafu {
                         min_version: p.min_reader_version,
                         supported_version: reader_version,

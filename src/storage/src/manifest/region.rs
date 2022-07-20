@@ -130,12 +130,12 @@ impl RegionManifestInner {
 
     async fn save(&self, mut action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         let curr_writer_version = self.supported_protocol.1;
-        let min_writer_version = self.protocol.load().min_writer_version;
+        let protocol = self.protocol.load();
 
         ensure!(
-            curr_writer_version <= min_writer_version,
+            protocol.is_writable(curr_writer_version),
             ManifestProtocolForbideWriteSnafu {
-                min_version: min_writer_version,
+                min_version: protocol.min_writer_version,
                 supported_version: curr_writer_version,
             }
         );
