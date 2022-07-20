@@ -5,7 +5,7 @@ use common_time::RangeMillis;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::Manifest;
-use store_api::storage::{WriteContext, WriteRequest, WriteResponse};
+use store_api::storage::{SequenceNumber, WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
@@ -110,7 +110,11 @@ impl WriterInner {
         let wal_header = WalHeader::with_last_manifest_version(writer_ctx.manifest.last_version());
         writer_ctx
             .wal
-            .write_to_wal(wal_header, Payload::WriteBatchArrow(&request))
+            .write_to_wal(
+                next_sequence,
+                wal_header,
+                Payload::WriteBatchArrow(&request),
+            )
             .await?;
 
         // Insert batch into memtable.
@@ -253,9 +257,16 @@ impl WriterInner {
         edit: VersionEdit,
         shared: &SharedDataRef,
     ) -> Result<()> {
-        self.persist_version_edit_log(wal, &edit).await?;
+        let version_control = &shared.version_control;
 
-        shared.version_control.apply_edit(edit);
+        let next_sequence = version_control.committed_sequence() + 1;
+
+        self.persist_version_edit_log(wal, next_sequence, &edit)
+            .await?;
+
+        version_control.apply_edit(edit);
+
+        version_control.set_committed_sequence(next_sequence);
 
         Ok(())
     }
@@ -263,11 +274,12 @@ impl WriterInner {
     async fn persist_version_edit_log<S: LogStore>(
         &self,
         wal: &Wal<S>,
+        seq: SequenceNumber,
         edit: &VersionEdit,
     ) -> Result<()> {
         let header = WalHeader::with_last_manifest_version(edit.manifest_version);
 
-        wal.write_to_wal(header, Payload::None).await?;
+        wal.write_to_wal(seq, header, Payload::None).await?;
 
         Ok(())
     }

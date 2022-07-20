@@ -3,7 +3,10 @@ use std::sync::Arc;
 use common_error::prelude::BoxedError;
 use prost::Message;
 use snafu::ResultExt;
-use store_api::logstore::{entry::Entry, namespace::Namespace, AppendResponse, LogStore};
+use store_api::{
+    logstore::{entry::Entry, namespace::Namespace, AppendResponse, LogStore},
+    storage::SequenceNumber,
+};
 
 use crate::{
     codec::{Decoder, Encoder},
@@ -65,6 +68,7 @@ impl<S: LogStore> Wal<S> {
     ///
     pub async fn write_to_wal<'a>(
         &self,
+        seq: SequenceNumber,
         mut header: WalHeader,
         payload: Payload<'a>,
     ) -> Result<(u64, usize)> {
@@ -101,12 +105,13 @@ impl<S: LogStore> Wal<S> {
         // TODO(jiachun): encode protobuf payload
 
         // write bytes to wal
-        self.write(&buf).await
+        self.write(seq, &buf).await
     }
 
-    async fn write(&self, bytes: &[u8]) -> Result<(u64, usize)> {
+    async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
         let ns = S::Namespace::new(&self.region_name, self.region_id as u64);
-        let e = S::Entry::new(bytes);
+        let mut e = S::Entry::new(bytes);
+        e.set_id(seq);
 
         let res = self
             .store
@@ -173,12 +178,12 @@ mod tests {
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
         let wal = Wal::new(0, "test_region", Arc::new(log_store));
 
-        let res = wal.write(b"test1").await.unwrap();
+        let res = wal.write(0, b"test1").await.unwrap();
 
         assert_eq!(0, res.0);
         assert_eq!(0, res.1);
 
-        let res = wal.write(b"test2").await.unwrap();
+        let res = wal.write(1, b"test2").await.unwrap();
 
         assert_eq!(1, res.0);
         assert_eq!(29, res.1);
@@ -187,6 +192,7 @@ mod tests {
     #[test]
     pub fn test_wal_header_codec() {
         let wal_header = WalHeader {
+            payload_type: 1,
             last_manifest_version: 99999999,
             mutation_extras: vec![],
         };
