@@ -39,7 +39,6 @@ sudo dnf install openssl-devel
 ```
 
 For macOS:
-
 ```bash
 brew install openssl
 ```
