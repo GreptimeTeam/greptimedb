@@ -1,5 +1,5 @@
 //! python udf supports
-//! use the function `coprocessor` to p&arse and run a python function with arguments from recordBatch, and return a newly assembled RecordBatch
+//! use the function `coprocessor` to parse and run a python function with arguments from recordBatch, and return a newly assembled RecordBatch
 use arrow::compute::cast::CastOptions;
 use arrow::error::ArrowError;
 use rustpython_vm as vm;
@@ -9,8 +9,9 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef};
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-use datatypes::vectors::*;
-use datatypes::vectors::{BooleanVector, Float32Vector, Int32Vector};
+use datatypes::vectors::{
+    BooleanVector, Float32Vector, Int32Vector, PrimitiveVector, Vector, VectorRef,
+};
 use rustpython_bytecode::CodeObject;
 use rustpython_compiler_core::{compile, error::CompileError};
 use rustpython_parser::{
@@ -24,6 +25,8 @@ use snafu::{ensure, prelude::Snafu};
 use type_::{is_instance, PyVector};
 use vm::builtins::{PyBaseExceptionRef, PyTuple};
 use vm::PyPayload;
+use rustpython_compiler_core::error::CompileError as CoreCompileError;
+
 #[derive(Debug, PartialEq, Eq)]
 struct Coprocessor {
     name: String,
@@ -94,9 +97,8 @@ impl From<datatypes::error::Error> for CoprError {
         Self::TypeCast { error: e }
     }
 }
-/// for there is multiple CompilerError struct in different crate of `rustpython`]
-///（`rustpython_compiler` & `rustpython_compiler_core` both have a `CompilerError` struct) so use full path to differentiate
-impl From<rustpython_compiler_core::error::CompileError> for CoprError {
+
+impl From<CoreCompileError> for CoprError {
     fn from(err: rustpython_compiler_core::error::CompileError) -> Self {
         Self::PyCompile { error: err }
     }
@@ -131,21 +133,23 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>, CoprError> {
     }
 }
 
-fn into_datatype(ty: &str) -> Option<DataType> {
+fn into_datatype(ty: &str) -> Result<Option<DataType>, CoprError> {
     match ty {
-        "bool" => Some(DataType::Boolean),
-        "u8" => Some(DataType::UInt8),
-        "u16" => Some(DataType::UInt16),
-        "u32" => Some(DataType::UInt32),
-        "u64" => Some(DataType::UInt64),
-        "i8" => Some(DataType::Int8),
-        "i16" => Some(DataType::Int16),
-        "i32" => Some(DataType::Int32),
-        "i64" => Some(DataType::Int64),
-        "f16" => Some(DataType::Float16),
-        "f32" => Some(DataType::Float32),
-        "f64" => Some(DataType::Float64),
-        _ => None,
+        "bool" => Ok(Some(DataType::Boolean)),
+        "u8" => Ok(Some(DataType::UInt8)),
+        "u16" => Ok(Some(DataType::UInt16)),
+        "u32" => Ok(Some(DataType::UInt32)),
+        "u64" => Ok(Some(DataType::UInt64)),
+        "i8" => Ok(Some(DataType::Int8)),
+        "i16" => Ok(Some(DataType::Int16)),
+        "i32" => Ok(Some(DataType::Int32)),
+        "i64" => Ok(Some(DataType::Int64)),
+        "f16" => Ok(Some(DataType::Float16)),
+        "f32" => Ok(Some(DataType::Float32)),
+        "f64" => Ok(Some(DataType::Float64)),
+        // for any datatype
+        "_" => Ok(None),
+        _ => Err(CoprError::Other { reason: format!("Unknown datatype {ty}") }),
     }
 }
 
@@ -154,18 +158,8 @@ fn into_datatype(ty: &str) -> Option<DataType> {
 fn parse_type(node: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
     match &node.node {
         ast::ExprKind::Name { id, ctx: _ } => {
-            let ty = if id.as_str() == "_" {
-                None
-            } else {
-                let ty = into_datatype(id).ok_or(CoprError::CoprParse {
-                    reason: format!("unknown type: {id}"),
-                    loc: Some(node.location),
-                })?;
-                Some(ty)
-            };
-
             Ok(AnnotationInfo {
-                datatype: ty,
+                datatype: into_datatype(id)?,
                 is_nullable: false,
                 coerce_into: false,
             })
@@ -186,7 +180,7 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
             args,
             keywords: _,
         } => {
-            let need_coerced = if let ast::ExprKind::Name { id, ctx: _ } = &func.node {
+            if let ast::ExprKind::Name { id, ctx: _ } = &func.node {
                 ensure!(
                     id.as_str() == "into",
                     CoprParseSnafu {
@@ -196,7 +190,6 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
                         loc: Some(sub.location)
                     }
                 );
-                true
             } else {
                 return Err(CoprError::Other {
                     reason: format!("Expect type names, found {:?}", &func.node),
@@ -210,7 +203,7 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
                 }
             );
             let mut anno = parse_type(&args[0])?;
-            anno.coerce_into = need_coerced;
+            anno.coerce_into = true;
             Ok(anno)
         }
         _ => Err(CoprError::Other {
