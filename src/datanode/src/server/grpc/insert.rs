@@ -22,37 +22,36 @@ pub fn insert_to_request(
 
     let mut columns_values = HashMap::new();
 
-    for value in insert.values {
-        if let Ok(InsertBatch { columns, row_count }) = value.try_into() {
-            for Column {
-                column_name,
+    let insert_batches = insert_batches(insert.values);
+
+    for InsertBatch { columns, row_count } in insert_batches {
+        for Column {
+            column_name,
+            values,
+            null_mask,
+            ..
+        } in columns
+        {
+            let column_schema = schema
+                .column_schema_by_name(&column_name)
+                .with_context(|| ColumnNotFoundSnafu {
+                    column_name: column_name.clone(),
+                    table_name: table_name.clone(),
+                })?;
+            let data_type = &column_schema.data_type;
+
+            let mut vector_builder =
+                VectorBuilder::with_capacity(data_type.clone(), row_count as usize);
+
+            add_values_to_builder(
+                &mut vector_builder,
+                data_type,
                 values,
-                null_mask,
-                ..
-            } in columns
-            {
-                let column_schema =
-                    schema
-                        .column_schema_by_name(&column_name)
-                        .with_context(|| ColumnNotFoundSnafu {
-                            column_name: column_name.clone(),
-                            table_name: table_name.clone(),
-                        })?;
-                let data_type = &column_schema.data_type;
+                row_count as usize,
+                &null_mask,
+            );
 
-                let mut vector_builder =
-                    VectorBuilder::with_capacity(data_type.clone(), row_count as usize);
-
-                add_values_to_builder(
-                    &mut vector_builder,
-                    data_type,
-                    values,
-                    row_count as usize,
-                    null_mask,
-                );
-
-                columns_values.insert(column_name, vector_builder.finish());
-            }
+            columns_values.insert(column_name, vector_builder.finish());
         }
     }
 
@@ -62,54 +61,59 @@ pub fn insert_to_request(
     })
 }
 
+fn insert_batches(bytes_vec: Vec<Vec<u8>>) -> Vec<InsertBatch> {
+    let mut insert_batches = Vec::new();
+
+    for bytes in bytes_vec {
+        if let Ok(insert_batch) = bytes.try_into() {
+            insert_batches.push(insert_batch);
+        }
+    }
+    insert_batches
+}
+
 fn add_values_to_builder(
     builder: &mut VectorBuilder,
     data_type: &ConcreteDataType,
     values: Option<Values>,
     row_count: usize,
-    null_masks: Vec<u8>,
+    null_mask: &[u8],
 ) {
-    let vals = if let Some(vals) = values {
-        vals
-    } else {
-        return;
-    };
+    if let Some(vals) = values {
+        let mut idx = 0;
+
+        convert_values(data_type, vals).iter().for_each(|val| {
+            if get_bit(null_mask, row_count, idx) {
+                builder.push(&Value::Null);
+                idx += 1;
+            }
+            builder.push(val);
+            idx += 1;
+        })
+    }
+}
+
+fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
+    let mut vals: Vec<Value> = Vec::new();
     match data_type {
         ConcreteDataType::Int64(_) => {
-            let mut i = 0;
-            for val in vals.i64_values {
-                if get_bit(&null_masks, row_count, i) {
-                    builder.push(&Value::Null);
-                    i += 1;
-                }
-                builder.push(&Value::Int64(val));
-                i += 1;
-            }
+            values.i64_values.into_iter().for_each(|val| {
+                vals.push(val.into());
+            });
         }
         ConcreteDataType::Float64(_) => {
-            let mut i = 0;
-            for val in vals.f64_values {
-                if get_bit(&null_masks, row_count, i) {
-                    builder.push(&Value::Null);
-                    i += 1;
-                }
-                builder.push(&Value::Float64(val.into()));
-                i += 1;
-            }
+            values.f64_values.into_iter().for_each(|val| {
+                vals.push(val.into());
+            });
         }
         ConcreteDataType::String(_) => {
-            let mut i = 0;
-            for val in vals.string_values {
-                if get_bit(&null_masks, row_count, i) {
-                    builder.push(&Value::Null);
-                    i += 1;
-                }
-                builder.push(&Value::String(val.into()));
-                i += 1;
-            }
+            values.string_values.into_iter().for_each(|val| {
+                vals.push(val.into());
+            });
         }
         _ => unimplemented!(),
     }
+    vals
 }
 
 fn get_bit(data: &[u8], bit_len: usize, idx: usize) -> bool {
@@ -122,24 +126,49 @@ fn get_bit(data: &[u8], bit_len: usize, idx: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::server::grpc::insert::get_bit;
+    use api::v1::column::Values;
+    use datatypes::{data_type::ConcreteDataType, value::Value};
+
+    use crate::server::grpc::insert::{convert_values, get_bit};
+
+    #[test]
+    fn test_convert_values() {
+        let data_type = ConcreteDataType::float64_datatype();
+        let values = Values {
+            f64_values: vec![0.1, 0.2, 0.3],
+            ..Default::default()
+        };
+
+        let result = convert_values(&data_type, values);
+
+        assert_eq!(
+            vec![
+                Value::Float64(0.1.into()),
+                Value::Float64(0.2.into()),
+                Value::Float64(0.3.into())
+            ],
+            result
+        );
+    }
 
     #[test]
     fn test_get_bit_right() {
-        let data: Vec<u8> = vec![1, 8];
+        let null_mask = vec![1, 8];
         let bit_len = 16;
-        assert_eq!(get_bit(&data, bit_len, 0), true);
-        assert_eq!(get_bit(&data, bit_len, 1), false);
-        assert_eq!(get_bit(&data, bit_len, 10), false);
-        assert_eq!(get_bit(&data, bit_len, 11), true);
-        assert_eq!(get_bit(&data, bit_len, 12), false);
+
+        assert_eq!(get_bit(&null_mask, bit_len, 0), true);
+        assert_eq!(get_bit(&null_mask, bit_len, 1), false);
+        assert_eq!(get_bit(&null_mask, bit_len, 10), false);
+        assert_eq!(get_bit(&null_mask, bit_len, 11), true);
+        assert_eq!(get_bit(&null_mask, bit_len, 12), false);
     }
 
     #[should_panic]
     #[test]
     fn test_get_bit_wrong() {
-        let data: Vec<u8> = vec![1, 8];
+        let null_mask = vec![1, 8];
         let bit_len = 16;
-        assert_eq!(get_bit(&data, bit_len, 16), true);
+
+        assert_eq!(get_bit(&null_mask, bit_len, 16), true);
     }
 }
