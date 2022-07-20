@@ -562,8 +562,7 @@ fn file_chunk_stream(
         if offset >= file_size {
             return;
         }
-        let file = file.clone();
-        match read_at(file, offset, file_size) {
+        match read_at(&file, offset, file_size) {
             Ok(data) => {
                 let data_len = data.len();
                 if tx.blocking_send(Ok(data)).is_err() {
@@ -597,8 +596,7 @@ fn file_chunk_stream_sync(
             if offset >= file_size {
                 return;
             }
-            let file = file.clone();
-            match read_at(file, offset, file_size) {
+            match read_at(&file, offset, file_size) {
                 Ok(data) => {
                     let data_len = data.len();
                     yield Ok(data);
@@ -620,7 +618,7 @@ fn file_chunk_stream_sync(
 /// Reads a chunk of data from file in a blocking manner.
 /// The file may not contain enough data to fulfill the whole chunk so only data available
 /// is read into chunk. The `write` field of `Chunk` indicates the end of valid data.  
-fn read_at(file: Arc<File>, offset: usize, file_length: usize) -> Result<Chunk<CHUNK_SIZE>> {
+fn read_at(file: &Arc<File>, offset: usize, file_length: usize) -> Result<Chunk<CHUNK_SIZE>> {
     if offset > file_length {
         return Err(Eof);
     }
@@ -726,7 +724,7 @@ mod tests {
         file.flush().await.unwrap();
 
         let file = Arc::new(file.into_std().await);
-        let result = read_at(file, 0, 12).unwrap();
+        let result = read_at(&file, 0, 12).unwrap();
 
         assert_eq!(12, result.len());
         assert_eq!("1234567890ab".as_bytes(), &result.data[0..result.len()]);
