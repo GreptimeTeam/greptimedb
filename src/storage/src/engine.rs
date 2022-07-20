@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use common_telemetry::logging::info;
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use snafu::ResultExt;
+use store_api::manifest::action::ProtocolAction;
 use store_api::{
     logstore::LogStore,
     manifest::Manifest,
@@ -166,9 +167,12 @@ impl<S: LogStore> EngineInner<S> {
         );
         // Persist region metadata
         manifest
-            .update(RegionMetaAction::Change(RegionChange {
-                metadata: Arc::new(metadata),
-            }))
+            .update(RegionMetaActionList::new(vec![
+                RegionMetaAction::Protocol(ProtocolAction::new()),
+                RegionMetaAction::Change(RegionChange {
+                    metadata: Arc::new(metadata),
+                }),
+            ]))
             .await?;
 
         {

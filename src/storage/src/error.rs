@@ -5,6 +5,7 @@ use std::str::Utf8Error;
 use common_error::prelude::*;
 use datatypes::arrow;
 use serde_json::error::Error as JsonError;
+use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
 
 use crate::metadata::Error as MetadataError;
@@ -136,6 +137,31 @@ pub enum Error {
 
     #[snafu(display("Task already cancelled"))]
     Cancelled { backtrace: Backtrace },
+
+    #[snafu(display(
+        "Manifest protocol forbide to read, min_version: {}, supported_version: {}",
+        min_version,
+        supported_version
+    ))]
+    ManifestProtocolForbideRead {
+        min_version: ProtocolVersion,
+        supported_version: ProtocolVersion,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Manifest protocol forbide to write, min_version: {}, supported_version: {}",
+        min_version,
+        supported_version
+    ))]
+    ManifestProtocolForbideWrite {
+        min_version: ProtocolVersion,
+        supported_version: ProtocolVersion,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to decode region action list, {}", msg))]
+    DecodeRegionMetaActionList { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -156,7 +182,8 @@ impl ErrorExt for Error {
             | EncodeJson { .. }
             | DecodeJson { .. }
             | JoinTask { .. }
-            | Cancelled { .. } => StatusCode::Unexpected,
+            | Cancelled { .. }
+            | DecodeRegionMetaActionList { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | InitBackend { .. }
@@ -167,7 +194,9 @@ impl ErrorExt for Error {
             | DeleteObject { .. }
             | WriteWal { .. }
             | DecodeWalHeader { .. }
-            | EncodeWalHeader { .. } => StatusCode::StorageUnavailable,
+            | EncodeWalHeader { .. }
+            | ManifestProtocolForbideRead { .. }
+            | ManifestProtocolForbideWrite { .. } => StatusCode::StorageUnavailable,
         }
     }
 
