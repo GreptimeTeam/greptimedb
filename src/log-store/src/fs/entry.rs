@@ -24,6 +24,13 @@ pub struct EntryImpl {
     pub epoch: Epoch,
 }
 
+impl EntryImpl {
+    #[cfg(test)]
+    fn set_offset(&mut self, offset: Offset) {
+        self.offset = offset;
+    }
+}
+
 impl Encode for EntryImpl {
     type Error = Error;
 
@@ -142,10 +149,6 @@ impl Entry for EntryImpl {
 
     fn offset(&self) -> Offset {
         self.offset
-    }
-
-    fn set_offset(&mut self, offset: Offset) {
-        self.offset = offset;
     }
 
     fn set_id(&mut self, id: Id) {
