@@ -7,7 +7,7 @@ mod version;
 
 use std::sync::Arc;
 
-use datatypes::vectors::{UInt64Vector, UInt8Vector, VectorRef};
+use datatypes::vectors::VectorRef;
 use store_api::storage::{consts, SequenceNumber, ValueType};
 
 use crate::error::Result;
@@ -15,6 +15,7 @@ use crate::memtable::btree::BTreeMemtable;
 pub use crate::memtable::inserter::Inserter;
 pub use crate::memtable::schema::MemtableSchema;
 pub use crate::memtable::version::{MemtableSet, MemtableVersion};
+use crate::read::Batch;
 
 /// Unique id for memtables under same region.
 pub type MemtableId = u32;
@@ -33,7 +34,7 @@ pub trait Memtable: Send + Sync + std::fmt::Debug {
 
     /// Iterates the memtable.
     // TODO(yingwen): 1. Use reference of IterContext? 2. Consider passing a projector (does column projection).
-    fn iter(&self, ctx: IterContext) -> Result<BatchIteratorPtr>;
+    fn iter(&self, ctx: IterContext) -> Result<BoxedBatchIterator>;
 
     /// Returns the estimated bytes allocated by this memtable from heap.
     fn bytes_allocated(&self) -> usize;
@@ -76,15 +77,10 @@ pub enum RowOrdering {
     Key,
 }
 
-// TODO(yingwen): Maybe pack value_type with sequence (reserve 8bits in u64 for value type) like RocksDB.
-pub struct Batch {
-    pub keys: Vec<VectorRef>,
-    pub sequences: UInt64Vector,
-    pub value_types: UInt8Vector,
-    pub values: Vec<VectorRef>,
-}
-
 /// Iterator of memtable.
+///
+/// Since data of memtable are stored in memory, so avoid defining this trait
+/// as an async trait.
 pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
     /// Returns the schema of this iterator.
     fn schema(&self) -> &MemtableSchema;
@@ -93,7 +89,7 @@ pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
     fn ordering(&self) -> RowOrdering;
 }
 
-pub type BatchIteratorPtr = Box<dyn BatchIterator>;
+pub type BoxedBatchIterator = Box<dyn BatchIterator>;
 
 pub trait MemtableBuilder: Send + Sync + std::fmt::Debug {
     fn build(&self, id: MemtableId, schema: MemtableSchema) -> MemtableRef;

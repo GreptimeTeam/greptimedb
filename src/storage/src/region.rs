@@ -148,7 +148,7 @@ impl<S: LogStore> RegionInner<S> {
         let version = self.version_control().current();
         let sequence = self.version_control().committed_sequence();
 
-        SnapshotImpl::new(version, sequence)
+        SnapshotImpl::new(version, sequence, self.sst_layer.clone())
     }
 
     async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {

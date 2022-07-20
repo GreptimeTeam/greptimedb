@@ -159,8 +159,14 @@ impl Version {
         self.memtables.mutable_memtables()
     }
 
+    #[inline]
     pub fn memtables(&self) -> &MemtableVersionRef {
         &self.memtables
+    }
+
+    #[inline]
+    pub fn ssts(&self) -> &LevelMetasRef {
+        &self.ssts
     }
 
     /// Returns duration used to partition the memtables and ssts by time.
