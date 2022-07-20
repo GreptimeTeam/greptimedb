@@ -257,34 +257,40 @@ fn gen_schema(
     )))
 }
 
-
 /// check type to be correct, if not try cast it to annotated type
 fn check_cast_type(
     cols: &mut [ArrayRef],
     schema: &Schema,
     return_types: &[Option<AnnotationInfo>],
-) -> Result<()>{
-    for ((col, field), anno) in cols.iter_mut().zip(&schema.fields).zip(return_types){
+) -> Result<()> {
+    for ((col, field), anno) in cols.iter_mut().zip(&schema.fields).zip(return_types) {
         let real_ty = col.data_type();
         let anno_ty = field.data_type();
-        if let Some(anno) = anno{
-            if real_ty != anno_ty{
+        if let Some(anno) = anno {
+            if real_ty != anno_ty {
                 if anno.coerce_into {
                     *col = arrow::compute::cast::cast(
-                    col.as_ref(),
-                    anno_ty,
-                    CastOptions { wrapped: true, partial: true })?.into();
-                }else{
-                return Err(Error::Other {
-                    reason: format!("Anntation type is {:?}, but real type is {:?}(Maybe add a `into()`?)", anno_ty, real_ty)
+                        col.as_ref(),
+                        anno_ty,
+                        CastOptions {
+                            wrapped: true,
+                            partial: true,
+                        },
+                    )?
+                    .into();
+                } else {
+                    return Err(Error::Other {
+                        reason: format!(
+                            "Anntation type is {:?}, but real type is {:?}(Maybe add a `into()`?)",
+                            anno_ty, real_ty
+                        ),
                     });
                 }
-            }
-            else{
+            } else {
                 continue;
             }
         }
-    };
+    }
     Ok(())
 }
 
@@ -376,43 +382,44 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         )
     }
     // 4. then set args in scope and call by compiler and run `CodeObject` which already append `Call` node
-    vm::Interpreter::without_stdlib(Default::default()).enter(
-        |vm| -> Result<DfRecordBatch> {
-            PyVector::make_class(&vm.ctx);
-            let scope = vm.new_scope_with_builtins();
-            for (name, vector) in copr.args.iter().zip(args) {
-                scope
-                    .locals
-                    .as_object()
-                    .set_item(name, vm.new_pyobj(vector), vm)
-                    .map_err(|err|
-                        Error::Other { reason: format!("fail to set item{} in python scope, PyExpection: {:?}", name, err) }
-                    )?;
-            }
-
-            let code_obj = strip_append_and_compile(script, &copr)?;
-            let code_obj = vm.ctx.new_code(code_obj);
-            let run_res = vm.run_code_obj(code_obj, scope);
-            let ret = run_res?;
-
-            // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
-            let mut cols: Vec<ArrayRef> = into_columns(&ret, vm)?;
-            ensure!(
-                cols.len() == copr.returns.len(),
-                OtherSnafu {
+    vm::Interpreter::without_stdlib(Default::default()).enter(|vm| -> Result<DfRecordBatch> {
+        PyVector::make_class(&vm.ctx);
+        let scope = vm.new_scope_with_builtins();
+        for (name, vector) in copr.args.iter().zip(args) {
+            scope
+                .locals
+                .as_object()
+                .set_item(name, vm.new_pyobj(vector), vm)
+                .map_err(|err| Error::Other {
                     reason: format!(
-                        "The number of return Vector is wrong, expect{}, found{}",
-                        copr.returns.len(),
-                        cols.len()
-                    )
-                }
-            );
-            let schema = gen_schema(&cols, &copr.returns, &copr.return_types)?;
-            // if cols and schema's data types is not match, first try coerced it to given type(if annotated), if not possible, return Err
-            check_cast_type(&mut cols, &schema, &copr.return_types)?;
-            // 6. return a assembled DfRecordBatch
-            let res_rb = DfRecordBatch::try_new(schema, cols)?;
-            Ok(res_rb)
-        },
-    )
+                        "fail to set item{} in python scope, PyExpection: {:?}",
+                        name, err
+                    ),
+                })?;
+        }
+
+        let code_obj = strip_append_and_compile(script, &copr)?;
+        let code_obj = vm.ctx.new_code(code_obj);
+        let run_res = vm.run_code_obj(code_obj, scope);
+        let ret = run_res?;
+
+        // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
+        let mut cols: Vec<ArrayRef> = into_columns(&ret, vm)?;
+        ensure!(
+            cols.len() == copr.returns.len(),
+            OtherSnafu {
+                reason: format!(
+                    "The number of return Vector is wrong, expect{}, found{}",
+                    copr.returns.len(),
+                    cols.len()
+                )
+            }
+        );
+        let schema = gen_schema(&cols, &copr.returns, &copr.return_types)?;
+        // if cols and schema's data types is not match, first try coerced it to given type(if annotated), if not possible, return Err
+        check_cast_type(&mut cols, &schema, &copr.return_types)?;
+        // 6. return a assembled DfRecordBatch
+        let res_rb = DfRecordBatch::try_new(schema, cols)?;
+        Ok(res_rb)
+    })
 }
