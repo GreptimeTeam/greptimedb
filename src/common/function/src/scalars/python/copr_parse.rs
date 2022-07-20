@@ -1,5 +1,9 @@
 use arrow::datatypes::DataType;
-use rustpython_parser::{ast, ast::{Location, Arguments}, parser};
+use rustpython_parser::{
+    ast,
+    ast::{Arguments, Location},
+    parser,
+};
 
 use crate::scalars::python::coprocessor::Coprocessor;
 use crate::scalars::python::error::{ensure, CoprParseSnafu, Error, Result};
@@ -353,7 +357,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
 }
 
 // get type annotaion in arguments
-fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>>{
+fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> {
     // get arg types from type annotation>
     let mut arg_types = Vec::new();
     for arg in &args.args {
@@ -366,22 +370,22 @@ fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>>{
     Ok(arg_types)
 }
 
-fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationInfo>>>{
+fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationInfo>>> {
     let mut return_types = Vec::new();
     match &rets.node {
         // python: ->(vector[...], vector[...], ...)
-        ast::ExprKind::Tuple { elts, ctx: _ }=>{
+        ast::ExprKind::Tuple { elts, ctx: _ } => {
             for elem in elts {
                 return_types.push(Some(parse_annotation(elem)?))
             }
         }
         // python: -> vector[...]
-        ast::ExprKind::Subscript{
+        ast::ExprKind::Subscript {
             value: _,
             slice: _,
             ctx: _,
-        }=>return_types.push(Some(parse_annotation(rets)?)),
-        _ => todo!()
+        } => return_types.push(Some(parse_annotation(rets)?)),
+        _ => todo!(),
     }
     Ok(return_types)
 }
@@ -429,8 +433,7 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
         let arg_types = get_arg_annotations(fn_args)?;
 
         // get return types from type annotation
-        let return_types = 
-        if let Some(rets) = returns {
+        let return_types = if let Some(rets) = returns {
             get_return_annotations(rets)?
         } else {
             // if no anntation at all, set it to all None

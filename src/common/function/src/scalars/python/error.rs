@@ -1,10 +1,10 @@
 use arrow::error::ArrowError;
 // use common_error::prelude::ErrorExt;
 use rustpython_compiler_core::error::CompileError as CoreCompileError;
-use rustpython_parser::{error::ParseError, ast::Location};
+use rustpython_parser::{ast::Location, error::ParseError};
 use rustpython_vm::builtins::PyBaseExceptionRef;
-use snafu::prelude::Snafu;
 pub use snafu::ensure;
+use snafu::prelude::Snafu;
 
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Snafu)]

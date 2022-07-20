@@ -3,8 +3,14 @@ use std::sync::Arc;
 use arrow::array::PrimitiveArray;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use rustpython_parser::parser;
 
 use super::*;
+use crate::scalars::python::{
+    copr_parse::parse_copr,
+    coprocessor::Coprocessor,
+    error::{Error, Result},
+};
 type PredicateFn = Option<fn(Result<Coprocessor>) -> bool>;
 type ExecResPredicateFn = Option<fn(Result<DfRecordBatch>)>;
 
