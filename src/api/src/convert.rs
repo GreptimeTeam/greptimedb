@@ -42,6 +42,32 @@ mod tests {
         );
     }
 
+    #[should_panic]
+    #[test]
+    fn test_convert_insert_batch_wrong() {
+        let insert_batch = mock_insert_batch();
+
+        let mut bytes: Vec<u8> = insert_batch.into();
+
+        // modify some bytes
+        bytes[0] = 0b1;
+        bytes[1] = 0b1;
+
+        let insert: InsertBatch = bytes.try_into().unwrap();
+
+        assert_eq!(8, insert.row_count);
+        assert_eq!(1, insert.columns.len());
+
+        let column = &insert.columns[0];
+        assert_eq!("foo", column.column_name);
+        assert_eq!(SEMANTIC_TAG, column.semantic_type);
+        assert_eq!(vec![1], column.null_mask);
+        assert_eq!(
+            vec![2, 3, 4, 5, 6, 7, 8],
+            column.values.as_ref().unwrap().i32_values
+        );
+    }
+
     fn mock_insert_batch() -> InsertBatch {
         let mut values = column::Values::default();
         values.i32_values = vec![2, 3, 4, 5, 6, 7, 8];
