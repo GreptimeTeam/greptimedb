@@ -3482,6 +3482,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "arrow-format",
+ "async-stream",
  "async-trait",
  "atomic_float",
  "bit-vec",
