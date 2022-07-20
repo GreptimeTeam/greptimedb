@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use common_telemetry::{error, info, warn};
 use snafu::{OptionExt, ResultExt};
-use store_api::logstore::entry::Id;
+use store_api::logstore::entry::{Encode, Id};
 use store_api::logstore::LogStore;
 use tokio::sync::RwLock;
 
@@ -167,17 +167,20 @@ impl LogStore for LocalFileLogStore {
     async fn append(
         &self,
         _ns: Self::Namespace,
-        mut e: Self::Entry,
+        mut entry: Self::Entry,
     ) -> Result<Self::AppendResponse> {
         // TODO(hl): configurable retry times
         for _ in 0..3 {
             let current_active_file = self.active_file();
-            match current_active_file.append(&mut e).await {
+            match current_active_file.append(&mut entry).await {
                 Ok(r) => return Ok(r),
                 Err(e) => match e {
                     Error::Eof => {
                         self.roll_next(current_active_file.clone()).await?;
-                        info!("Rolled to next file, retry append");
+                        info!(
+                            "Rolled to next file, retry append, entry size: {}",
+                            entry.encoded_size()
+                        );
                         continue;
                     }
                     Error::Internal { .. } => {
