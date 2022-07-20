@@ -3,7 +3,7 @@ use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Serialize, Serializer};
 
-use crate::data_type::ConcreteDataType;
+use crate::prelude::*;
 
 pub type OrderedF32 = OrderedFloat<f32>;
 pub type OrderedF64 = OrderedFloat<f64>;
@@ -13,7 +13,7 @@ pub type OrderedF64 = OrderedFloat<f64>;
 /// Although compare Value with different data type is allowed, it is recommended to only
 /// compare Value with same data type. Comparing Value with different data type may not
 /// behaves as what you expect.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Null,
 
@@ -37,6 +37,8 @@ pub enum Value {
     // Date & Time types:
     Date(i32),
     DateTime(i64),
+
+    List(ListValue),
 }
 
 impl Value {
@@ -60,7 +62,7 @@ impl Value {
             Value::Float64(_) => ConcreteDataType::float64_datatype(),
             Value::String(_) => ConcreteDataType::string_datatype(),
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
-            Value::Date(_) | Value::DateTime(_) => {
+            Value::Date(_) | Value::DateTime(_) | Value::List(_) => {
                 unimplemented!("Unsupported data type of value {:?}", self)
             }
         }
@@ -128,6 +130,22 @@ impl From<&[u8]> for Value {
     }
 }
 
+impl From<Vec<Value>> for Value {
+    fn from(vs: Vec<Value>) -> Self {
+        match vs.len() {
+            0 => Value::Null,
+            _ => {
+                assert!(
+                    vs.windows(2).all(|w| w[0].data_type() == w[1].data_type()),
+                    "All values' datatypes are not the same!"
+                );
+                let datatype = vs[0].data_type();
+                Value::List(ListValue::new(Some(Box::new(vs)), datatype))
+            }
+        }
+    }
+}
+
 impl Serialize for Value {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -150,6 +168,7 @@ impl Serialize for Value {
             Value::Binary(bytes) => bytes.serialize(serializer),
             Value::Date(v) => v.serialize(serializer),
             Value::DateTime(v) => v.serialize(serializer),
+            Value::List(_) => unimplemented!(),
         }
     }
 }
@@ -173,7 +192,28 @@ impl From<Value> for ScalarValue {
             Value::Date(v) => ScalarValue::Date32(Some(v)),
             Value::DateTime(v) => ScalarValue::Date64(Some(v)),
             Value::Null => ScalarValue::Boolean(None),
+            Value::List(v) => ScalarValue::List(
+                v.items
+                    .map(|vs| Box::new(vs.into_iter().map(|v| ScalarValue::from(v)).collect())),
+                Box::new(v.datatype.as_arrow_type()),
+            ),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListValue {
+    items: Option<Box<Vec<Value>>>,
+    /// Inner values datatype, to distinguish empty lists of different datatypes.
+    /// Restricted by DataFusion, cannot use null datatype for empty list.
+    datatype: ConcreteDataType,
+}
+
+impl Eq for ListValue {}
+
+impl ListValue {
+    pub fn new(items: Option<Box<Vec<Value>>>, datatype: ConcreteDataType) -> Self {
+        Self { items, datatype }
     }
 }
 
@@ -236,6 +276,23 @@ mod tests {
 
         let bytes = Bytes::from(b"world".as_slice());
         assert_eq!(Value::Binary(bytes.clone()), Value::from(bytes));
+    }
+
+    #[test]
+    fn test_from_values_vec() {
+        let vs: Vec<Value> = vec![];
+        let v = Value::from(vs);
+        assert_eq!(Value::Null, v);
+
+        let vs = vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)];
+        let v = Value::from(vs.clone());
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vs)),
+                ConcreteDataType::int32_datatype()
+            )),
+            v
+        );
     }
 
     #[test]

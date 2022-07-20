@@ -78,6 +78,7 @@ impl VectorBuilder {
             ConcreteDataType::Binary(_) => {
                 VectorBuilder::Binary(BinaryVectorBuilder::with_capacity(capacity))
             }
+            _ => unimplemented!(),
         }
     }
 

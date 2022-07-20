@@ -6,12 +6,12 @@ use std::sync::Arc;
 use arrow::array::ArrayRef;
 use datafusion_common::Result as DfResult;
 use datafusion_expr::Accumulator as DfAccumulator;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::*;
 use datatypes::vectors::Helper as VectorHelper;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
-use crate::error::{Error, FromScalarValueSnafu, Result};
+use crate::error::{Error, FromScalarValueSnafu, IntoVectorSnafu, Result};
 use crate::prelude::*;
 
 /// An accumulator represents a stateful object that lives throughout the evaluation of multiple rows and
@@ -28,7 +28,7 @@ pub trait Accumulator: Send + Sync + Debug {
     /// Returns the state of the accumulator at the end of the accumulation.
     // in the case of an average on which we track `sum` and `n`, this function should return a vector
     // of two values, sum and n.
-    fn state(&self) -> Result<Vec<ScalarValue>>;
+    fn state(&self) -> Result<Vec<Value>>;
 
     /// updates the accumulator's state from a vector of arrays.
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<()>;
@@ -37,7 +37,7 @@ pub trait Accumulator: Send + Sync + Debug {
     fn merge_batch(&mut self, states: &[VectorRef]) -> Result<()>;
 
     /// returns its value based on its current state.
-    fn evaluate(&self) -> Result<ScalarValue>;
+    fn evaluate(&self) -> Result<Value>;
 }
 
 /// A creator stores the input type, and knows the output and states types of an Accumulator,
@@ -88,7 +88,8 @@ pub struct DfAccumulatorAdaptor(pub Box<dyn Accumulator>);
 
 impl DfAccumulator for DfAccumulatorAdaptor {
     fn state(&self) -> DfResult<Vec<ScalarValue>> {
-        self.0.state().map_err(|e| e.into())
+        let state = self.0.state()?;
+        Ok(state.into_iter().map(|x| ScalarValue::from(x)).collect())
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> DfResult<()> {
@@ -99,13 +100,20 @@ impl DfAccumulator for DfAccumulatorAdaptor {
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> DfResult<()> {
-        let vectors = VectorHelper::try_into_vectors(states)
-            .context(FromScalarValueSnafu)
-            .map_err(Error::from)?;
+        let mut vectors = Vec::with_capacity(states.len());
+        for array in states.iter() {
+            vectors.push(
+                VectorHelper::try_into_vector(array)
+                    .context(IntoVectorSnafu {
+                        data_type: array.data_type().clone(),
+                    })
+                    .map_err(Error::from)?,
+            );
+        }
         self.0.merge_batch(&vectors).map_err(|e| e.into())
     }
 
     fn evaluate(&self) -> DfResult<ScalarValue> {
-        self.0.evaluate().map_err(|e| e.into())
+        Ok(ScalarValue::from(self.0.evaluate()?))
     }
 }

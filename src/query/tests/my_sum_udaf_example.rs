@@ -123,8 +123,8 @@ where
     SumT: Primitive + std::ops::AddAssign,
     for<'a> SumT: Scalar<RefType<'a> = SumT>,
 {
-    fn state(&self) -> QueryResult<Vec<ScalarValue>> {
-        Ok(vec![ScalarValue::from(self.sum.into())])
+    fn state(&self) -> QueryResult<Vec<Value>> {
+        Ok(vec![self.sum.into()])
     }
 
     fn update_batch(&mut self, values: &[VectorRef]) -> QueryResult<()> {
@@ -151,8 +151,8 @@ where
         Ok(())
     }
 
-    fn evaluate(&self) -> QueryResult<ScalarValue> {
-        Ok(ScalarValue::from(self.sum.into()))
+    fn evaluate(&self) -> QueryResult<Value> {
+        Ok(self.sum.into())
     }
 }
 

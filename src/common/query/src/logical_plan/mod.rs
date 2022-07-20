@@ -58,7 +58,7 @@ mod tests {
     use datafusion_expr::ColumnarValue as DfColumnarValue;
     use datafusion_expr::ScalarUDF as DfScalarUDF;
     use datafusion_expr::TypeSignature as DfTypeSignature;
-    use datatypes::prelude::ScalarVector;
+    use datatypes::prelude::*;
     use datatypes::vectors::BooleanVector;
     use datatypes::vectors::VectorRef;
 
@@ -152,7 +152,7 @@ mod tests {
     struct DummyAccumulator;
 
     impl Accumulator for DummyAccumulator {
-        fn state(&self) -> Result<Vec<ScalarValue>> {
+        fn state(&self) -> Result<Vec<Value>> {
             Ok(vec![])
         }
 
@@ -164,8 +164,8 @@ mod tests {
             Ok(())
         }
 
-        fn evaluate(&self) -> Result<ScalarValue> {
-            Ok(ScalarValue::Int32(Some(0)))
+        fn evaluate(&self) -> Result<Value> {
+            Ok(Value::Int32(0))
         }
     }
 
@@ -195,8 +195,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_create_udaf() -> Result<()> {
+    #[test]
+    fn test_create_udaf() {
         let creator = DummyAccumulatorCreator;
         let udaf = create_udaf("dummy_udaf", Arc::new(creator));
         assert_eq!("dummy_udaf", udaf.name);
@@ -216,6 +216,5 @@ mod tests {
             ]),
             (udaf.state_type)(&ConcreteDataType::float64_datatype()).unwrap()
         );
-        Ok(())
     }
 }

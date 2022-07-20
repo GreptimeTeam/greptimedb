@@ -172,6 +172,7 @@ impl Helper {
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
                 Arc::new(StringVector::try_from_arrow_array(array)?)
             }
+            ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
         })
     }

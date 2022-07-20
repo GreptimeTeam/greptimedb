@@ -1,14 +1,14 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use common_query::error::{ExecuteFunctionSnafu, Result};
+use common_query::error::{ExecuteFunctionSnafu, FromScalarValueSnafu, Result};
 use common_query::logical_plan::{Accumulator, AccumulatorCreator};
 use common_query::prelude::*;
 use datafusion_common::DataFusionError;
 use datatypes::prelude::*;
-use datatypes::vectors::StringVector;
+use datatypes::value::ListValue;
+use datatypes::vectors::ListVector;
 use datatypes::with_match_ordered_primitive_type_id;
 use num::NumCast;
 use snafu::ResultExt;
@@ -34,8 +34,7 @@ use snafu::ResultExt;
 #[derive(Debug, Default)]
 pub struct Median<T>
 where
-    // Bound `FromStr` because we serialize state to string.
-    T: Primitive + Ord + FromStr,
+    T: Primitive + Ord,
 {
     greater: BinaryHeap<Reverse<T>>,
     not_greater: BinaryHeap<T>,
@@ -43,7 +42,7 @@ where
 
 impl<T> Median<T>
 where
-    T: Primitive + Ord + FromStr,
+    T: Primitive + Ord,
 {
     fn push(&mut self, value: T) {
         if self.not_greater.is_empty() {
@@ -69,25 +68,26 @@ where
 // to use them.
 impl<T> Accumulator for Median<T>
 where
-    T: Primitive + Ord + FromStr,
+    T: Primitive + Ord,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     // This function serializes our state to `ScalarValue`, which DataFusion uses to pass this
     // state between execution stages. Note that this can be arbitrary data.
     //
     // The `ScalarValue`s returned here will be passed in as argument `states: &[VectorRef]` to
-    // `merge_batch` function, so we cannot use "`ScalarValue::List`" here because there are no
-    // corresponding vectors.
-    fn state(&self) -> Result<Vec<ScalarValue>> {
+    // `merge_batch` function.
+    fn state(&self) -> Result<Vec<Value>> {
         let nums = self
             .greater
             .iter()
             .map(|x| &x.0)
             .chain(self.not_greater.iter())
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        Ok(vec![ScalarValue::LargeUtf8(Some(nums))])
+            .map(|&n| n.into())
+            .collect::<Vec<Value>>();
+        Ok(vec![Value::List(ListValue::new(
+            Some(Box::new(nums)),
+            T::default().into().data_type(),
+        ))])
     }
 
     // DataFusion calls this function to update the accumulator's state for a batch of inputs rows.
@@ -116,17 +116,17 @@ where
         // The states here are returned by the `state` method. Since we only returned a vector
         // with one value in that method, `states[0]` is fine.
         let states = &states[0];
-        let states = states.as_any().downcast_ref::<StringVector>().unwrap();
-        for s in states.iter_data().flatten() {
-            s.split(',')
-                .filter_map(|n| n.parse::<T>().ok())
-                .for_each(|n| self.push(n));
+        let states = states.as_any().downcast_ref::<ListVector>().unwrap();
+        for state in states.values_iter() {
+            let state = state.context(FromScalarValueSnafu)?;
+            // merging state is simply accumulate stored numbers from others', so just call update
+            self.update_batch(&vec![state])?
         }
         Ok(())
     }
 
     // DataFusion expects this function to return the final value of this aggregator.
-    fn evaluate(&self) -> Result<ScalarValue> {
+    fn evaluate(&self) -> Result<Value> {
         let median = if self.not_greater.len() > self.greater.len() {
             (*self.not_greater.peek().unwrap()).into()
         } else {
@@ -135,7 +135,7 @@ where
             let median: T = NumCast::from((not_greater_v + greater_v) / 2.0).unwrap();
             median.into()
         };
-        Ok(ScalarValue::from(median))
+        Ok(median)
     }
 }
 
@@ -191,6 +191,6 @@ impl AccumulatorCreator for MedianAccumulatorCreator {
     }
 
     fn state_types(&self) -> Vec<ConcreteDataType> {
-        vec![ConcreteDataType::string_datatype()]
+        vec![ConcreteDataType::list_datatype(self.output_type())]
     }
 }
