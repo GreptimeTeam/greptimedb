@@ -69,8 +69,10 @@ mod tests {
     }
 
     fn mock_insert_batch() -> InsertBatch {
-        let mut values = column::Values::default();
-        values.i32_values = vec![2, 3, 4, 5, 6, 7, 8];
+        let values = column::Values {
+            i32_values: vec![2, 3, 4, 5, 6, 7, 8],
+            ..Default::default()
+        };
         let null_mask = vec![1];
         let column = Column {
             column_name: "foo".to_string(),

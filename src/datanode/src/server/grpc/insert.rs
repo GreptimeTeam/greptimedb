@@ -156,11 +156,11 @@ mod tests {
         let null_mask = vec![1, 8];
         let bit_len = 16;
 
-        assert_eq!(get_bit(&null_mask, bit_len, 0), true);
-        assert_eq!(get_bit(&null_mask, bit_len, 1), false);
-        assert_eq!(get_bit(&null_mask, bit_len, 10), false);
-        assert_eq!(get_bit(&null_mask, bit_len, 11), true);
-        assert_eq!(get_bit(&null_mask, bit_len, 12), false);
+        assert!(get_bit(&null_mask, bit_len, 0));
+        assert!(!get_bit(&null_mask, bit_len, 1));
+        assert!(!get_bit(&null_mask, bit_len, 10));
+        assert!(get_bit(&null_mask, bit_len, 11));
+        assert!(!get_bit(&null_mask, bit_len, 12));
     }
 
     #[should_panic]
@@ -169,6 +169,6 @@ mod tests {
         let null_mask = vec![1, 8];
         let bit_len = 16;
 
-        assert_eq!(get_bit(&null_mask, bit_len, 16), true);
+        assert!(get_bit(&null_mask, bit_len, 16));
     }
 }
