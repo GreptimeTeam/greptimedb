@@ -17,16 +17,15 @@ use crate::{
 
 pub struct Wal<S: LogStore> {
     region_id: u32,
-    region_name: String,
     namespace: S::Namespace,
     store: Arc<S>,
 }
 
+// wal should be cheap to clone
 impl<S: LogStore> Clone for Wal<S> {
     fn clone(&self) -> Self {
         Self {
             region_id: self.region_id,
-            region_name: self.region_name.clone(),
             namespace: self.namespace.clone(),
             store: self.store.clone(),
         }
@@ -40,7 +39,6 @@ impl<S: LogStore> Wal<S> {
 
         Self {
             region_id,
-            region_name,
             namespace,
             store,
         }
@@ -52,8 +50,8 @@ impl<S: LogStore> Wal<S> {
     }
 
     #[inline]
-    pub fn region_name(&self) -> &str {
-        &self.region_name
+    pub fn name(&self) -> &str {
+        self.namespace.name()
     }
 }
 
@@ -99,7 +97,7 @@ impl<S: LogStore> Wal<S> {
                 .map_err(BoxedError::new)
                 .context(error::WriteWalSnafu {
                     region_id: self.region_id(),
-                    region_name: self.region_name(),
+                    name: self.name(),
                 })?;
         }
 
@@ -121,7 +119,7 @@ impl<S: LogStore> Wal<S> {
             .map_err(BoxedError::new)
             .context(error::WriteWalSnafu {
                 region_id: self.region_id(),
-                region_name: self.region_name(),
+                name: self.name(),
             })?;
 
         Ok((res.entry_id(), res.offset()))

@@ -107,14 +107,14 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to write WAL, region: {}-{}, source: {}",
+        "Failed to write WAL, region id: {}, WAL name: {}, source: {}",
         region_id,
-        region_name,
+        name,
         source
     ))]
     WriteWal {
         region_id: u32,
-        region_name: String,
+        name: String,
         #[snafu(backtrace)]
         source: BoxedError,
     },
