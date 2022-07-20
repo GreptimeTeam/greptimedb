@@ -249,8 +249,8 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo, CoprError> {
         }
         // i.e: vector[f64]
         match &slice.node {
-            ast::ExprKind::Name { id: _, ctx: _ } => parse_item(slice),
-            ast::ExprKind::Call {
+            ast::ExprKind::Name { id: _, ctx: _ }
+            | ast::ExprKind::Call {
                 func: _,
                 args: _,
                 keywords: _,
