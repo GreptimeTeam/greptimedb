@@ -42,6 +42,4 @@ pub trait Manifest: Send + Sync + Clone + 'static {
     async fn checkpoint(&self) -> Result<ManifestVersion, Self::Error>;
 
     fn metadata_id(&self) -> Self::MetadataId;
-
-    fn last_version(&self) -> ManifestVersion;
 }

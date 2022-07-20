@@ -23,11 +23,11 @@ use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
-pub struct RegionImpl<S> {
+pub struct RegionImpl<S: LogStore> {
     inner: Arc<RegionInner<S>>,
 }
 
-impl<S> Clone for RegionImpl<S> {
+impl<S: LogStore> Clone for RegionImpl<S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -36,10 +36,7 @@ impl<S> Clone for RegionImpl<S> {
 }
 
 #[async_trait]
-impl<S: LogStore> Region for RegionImpl<S>
-where
-    S: Send + Sync + 'static,
-{
+impl<S: LogStore> Region for RegionImpl<S> {
     type Error = Error;
     type Meta = RegionMetaImpl;
     type WriteRequest = WriteBatch;
@@ -62,7 +59,7 @@ where
     }
 }
 
-impl<S> RegionImpl<S> {
+impl<S: LogStore> RegionImpl<S> {
     pub fn new(
         id: RegionId,
         name: String,
@@ -98,7 +95,7 @@ impl<S> RegionImpl<S> {
 
 // Private methods for tests.
 #[cfg(test)]
-impl<S> RegionImpl<S> {
+impl<S: LogStore> RegionImpl<S> {
     #[inline]
     fn committed_sequence(&self) -> store_api::storage::SequenceNumber {
         self.inner.version_control().committed_sequence()
@@ -115,7 +112,7 @@ pub struct SharedData {
 
 pub type SharedDataRef = Arc<SharedData>;
 
-struct RegionInner<S> {
+struct RegionInner<S: LogStore> {
     shared: SharedDataRef,
     writer: RegionWriterRef,
     wal: Wal<S>,
@@ -125,7 +122,7 @@ struct RegionInner<S> {
     manifest: RegionManifest,
 }
 
-impl<S> RegionInner<S> {
+impl<S: LogStore> RegionInner<S> {
     #[inline]
     fn version_control(&self) -> &VersionControl {
         &*self.shared.version_control
@@ -143,9 +140,7 @@ impl<S> RegionInner<S> {
 
         SnapshotImpl::new(version, sequence)
     }
-}
 
-impl<S: LogStore> RegionInner<S> {
     async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
         let metadata = self.in_memory_metadata();
         let schema = metadata.schema();

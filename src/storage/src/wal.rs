@@ -15,27 +15,33 @@ use crate::{
     write_batch::{codec::WriteBatchArrowEncoder, WriteBatch},
 };
 
-pub struct Wal<S> {
+pub struct Wal<S: LogStore> {
     region_id: u32,
     region_name: String,
+    namespace: S::Namespace,
     store: Arc<S>,
 }
 
-impl<S> Clone for Wal<S> {
+impl<S: LogStore> Clone for Wal<S> {
     fn clone(&self) -> Self {
         Self {
             region_id: self.region_id,
             region_name: self.region_name.clone(),
+            namespace: self.namespace.clone(),
             store: self.store.clone(),
         }
     }
 }
 
-impl<S> Wal<S> {
+impl<S: LogStore> Wal<S> {
     pub fn new(region_id: u32, region_name: impl Into<String>, store: Arc<S>) -> Self {
+        let region_name = region_name.into();
+        let namespace = S::Namespace::new(&region_name, region_id as u64);
+
         Self {
             region_id,
-            region_name: region_name.into(),
+            region_name,
+            namespace,
             store,
         }
     }
@@ -72,15 +78,10 @@ impl<S: LogStore> Wal<S> {
         mut header: WalHeader,
         payload: Payload<'a>,
     ) -> Result<(u64, usize)> {
-        match payload {
-            Payload::None => header.payload_type = PayloadType::None.into(),
-            Payload::WriteBatchArrow(batch) => {
-                header.payload_type = PayloadType::WriteBatchArrow.into();
-                header.mutation_extras = proto::gen_mutation_extras(batch);
-            }
-            Payload::WriteBatchProto(_) => {
-                header.payload_type = PayloadType::WriteBatchProto.into()
-            }
+        header.payload_type = payload.payload_type();
+
+        if let Payload::WriteBatchArrow(batch) = payload {
+            header.mutation_extras = proto::gen_mutation_extras(batch);
         }
 
         let mut buf = vec![];
@@ -109,7 +110,7 @@ impl<S: LogStore> Wal<S> {
     }
 
     async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
-        let ns = S::Namespace::new(&self.region_name, self.region_id as u64);
+        let ns = self.namespace.clone();
         let mut e = S::Entry::new(bytes);
         e.set_id(seq);
 
@@ -131,6 +132,16 @@ pub enum Payload<'a> {
     None, // only header
     WriteBatchArrow(&'a WriteBatch),
     WriteBatchProto(&'a WriteBatch),
+}
+
+impl<'a> Payload<'a> {
+    pub fn payload_type(&self) -> i32 {
+        match self {
+            Payload::None => PayloadType::None.into(),
+            Payload::WriteBatchArrow(_) => PayloadType::WriteBatchArrow.into(),
+            Payload::WriteBatchProto(_) => PayloadType::WriteBatchProto.into(),
+        }
+    }
 }
 
 pub struct WalHeaderEncoder {}

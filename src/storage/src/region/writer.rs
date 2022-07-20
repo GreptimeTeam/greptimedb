@@ -4,7 +4,6 @@ use common_telemetry::logging;
 use common_time::RangeMillis;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::manifest::Manifest;
 use store_api::storage::{SequenceNumber, WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
@@ -54,7 +53,7 @@ impl RegionWriter {
     }
 }
 
-pub struct WriterContext<'a, S> {
+pub struct WriterContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub flush_strategy: &'a FlushStrategyRef,
     pub flush_scheduler: &'a FlushSchedulerRef,
@@ -64,7 +63,7 @@ pub struct WriterContext<'a, S> {
     pub manifest: &'a RegionManifest,
 }
 
-impl<'a, S> WriterContext<'a, S> {
+impl<'a, S: LogStore> WriterContext<'a, S> {
     #[inline]
     fn version_control(&self) -> &VersionControlRef {
         &self.shared.version_control
@@ -107,7 +106,7 @@ impl WriterInner {
         // Sequence for current write batch.
         let next_sequence = committed_sequence + 1;
 
-        let wal_header = WalHeader::with_last_manifest_version(writer_ctx.manifest.last_version());
+        let wal_header = WalHeader::with_last_manifest_version(version.manifest_version());
         writer_ctx
             .wal
             .write_to_wal(
@@ -261,7 +260,7 @@ impl WriterInner {
 
         let next_sequence = version_control.committed_sequence() + 1;
 
-        self.persist_version_edit_log(wal, next_sequence, &edit)
+        self.persist_manifest_version(wal, next_sequence, &edit)
             .await?;
 
         version_control.apply_edit(edit);
@@ -271,7 +270,7 @@ impl WriterInner {
         Ok(())
     }
 
-    async fn persist_version_edit_log<S: LogStore>(
+    async fn persist_manifest_version<S: LogStore>(
         &self,
         wal: &Wal<S>,
         seq: SequenceNumber,

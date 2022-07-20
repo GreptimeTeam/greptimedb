@@ -137,7 +137,7 @@ impl FlushScheduler for FlushSchedulerImpl {
 
 pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
 
-pub struct FlushJob<S> {
+pub struct FlushJob<S: LogStore> {
     /// Max memtable id in these memtables,
     /// used to remove immutable memtables in current version.
     pub max_memtable_id: MemtableId,
@@ -157,7 +157,7 @@ pub struct FlushJob<S> {
     pub manifest: RegionManifest,
 }
 
-impl<S> FlushJob<S> {
+impl<S: LogStore> FlushJob<S> {
     async fn write_memtables_to_layer(&self, ctx: &Context) -> Result<Vec<FileMeta>> {
         if ctx.is_cancelled() {
             return CancelledSnafu {}.fail();

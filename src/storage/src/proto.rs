@@ -36,9 +36,8 @@ pub fn gen_mutation_extras(write_batch: &WriteBatch) -> Vec<MutationExtra> {
 impl WalHeader {
     pub fn with_last_manifest_version(last_manifest_version: u64) -> Self {
         Self {
-            payload_type: Default::default(),
             last_manifest_version,
-            mutation_extras: Default::default(),
+            ..Default::default()
         }
     }
 }
