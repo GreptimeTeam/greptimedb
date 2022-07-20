@@ -59,9 +59,7 @@ pub trait AccumulatorCreator: Send + Sync + Debug {
     fn state_types(&self) -> Vec<ConcreteDataType>;
 }
 
-pub fn make_accumulator_function(
-    creator: Arc<dyn AccumulatorCreator>,
-) -> AccumulatorFunctionImplementation {
+pub fn make_accumulator_function(creator: Arc<dyn AccumulatorCreator>) -> AccumulatorFunctionImpl {
     Arc::new(move || {
         let input_types = creator.input_types();
         let creator = creator.creator();

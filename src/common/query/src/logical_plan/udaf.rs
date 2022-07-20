@@ -12,7 +12,7 @@ use datafusion_expr::StateTypeFunction as DfStateTypeFunction;
 use datatypes::prelude::*;
 
 use crate::function::{
-    to_df_return_type, AccumulatorFunctionImplementation, ReturnTypeFunction, StateTypeFunction,
+    to_df_return_type, AccumulatorFunctionImpl, ReturnTypeFunction, StateTypeFunction,
 };
 use crate::logical_plan::accumulator::DfAccumulatorAdaptor;
 use crate::signature::Signature;
@@ -28,7 +28,7 @@ pub struct AggregateUdf {
     /// Return type
     pub return_type: ReturnTypeFunction,
     /// actual implementation
-    pub accumulator: AccumulatorFunctionImplementation,
+    pub accumulator: AccumulatorFunctionImpl,
     /// the accumulator's state's description as a function of the return type
     pub state_type: StateTypeFunction,
 }
@@ -55,7 +55,7 @@ impl AggregateUdf {
         name: &str,
         signature: Signature,
         return_type: ReturnTypeFunction,
-        accumulator: AccumulatorFunctionImplementation,
+        accumulator: AccumulatorFunctionImpl,
         state_type: StateTypeFunction,
     ) -> Self {
         Self {
@@ -80,9 +80,7 @@ impl From<AggregateUdf> for DfAggregateUdf {
     }
 }
 
-fn to_df_accumulator_func(
-    func: AccumulatorFunctionImplementation,
-) -> DfAccumulatorFunctionImplementation {
+fn to_df_accumulator_func(func: AccumulatorFunctionImpl) -> DfAccumulatorFunctionImplementation {
     Arc::new(move || {
         let acc = func()?;
         Ok(Box::new(DfAccumulatorAdaptor(acc)))
