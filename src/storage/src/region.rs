@@ -9,11 +9,10 @@ use snafu::ensure;
 use store_api::logstore::LogStore;
 use store_api::storage::{ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse};
 
-use crate::background::JobPoolImpl;
 use crate::error::{self, Error, Result};
-use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
+use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::region::RegionManifest;
-use crate::memtable::{DefaultMemtableBuilder, MemtableVersion};
+use crate::memtable::{MemtableBuilderRef, MemtableVersion};
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{RegionWriter, RegionWriterRef, WriterContext};
 use crate::snapshot::SnapshotImpl;
@@ -59,34 +58,42 @@ impl<S: LogStore> Region for RegionImpl<S> {
     }
 }
 
+/// Storage related config for region.
+///
+/// Contains all necessary storage related components needed by the region, such as logstore,
+/// manifest, memtable builder.
+pub struct StoreConfig<S> {
+    pub log_store: Arc<S>,
+    pub sst_layer: AccessLayerRef,
+    pub manifest: RegionManifest,
+    pub memtable_builder: MemtableBuilderRef,
+    pub flush_scheduler: FlushSchedulerRef,
+    pub flush_strategy: FlushStrategyRef,
+}
+
 impl<S: LogStore> RegionImpl<S> {
     pub fn new(
         id: RegionId,
         name: String,
         metadata: RegionMetadata,
-        wal: Wal<S>,
-        sst_layer: AccessLayerRef,
-        manifest: RegionManifest,
+        store_config: StoreConfig<S>,
     ) -> RegionImpl<S> {
-        let memtable_builder = Arc::new(DefaultMemtableBuilder {});
         let memtable_version = MemtableVersion::new();
-        // TODO(yingwen): Pass flush scheduler to `RegionImpl::new`.
-        let job_pool = Arc::new(JobPoolImpl {});
-        let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
-
         let version_control = VersionControl::new(metadata, memtable_version);
+        let wal = Wal::new(id, name.clone(), store_config.log_store.clone());
+
         let inner = Arc::new(RegionInner {
             shared: Arc::new(SharedData {
                 id,
                 name,
                 version_control: Arc::new(version_control),
             }),
-            writer: Arc::new(RegionWriter::new(memtable_builder)),
+            writer: Arc::new(RegionWriter::new(store_config.memtable_builder)),
             wal,
-            flush_strategy: Arc::new(SizeBasedStrategy::default()),
-            flush_scheduler,
-            sst_layer,
-            manifest,
+            flush_strategy: store_config.flush_strategy,
+            flush_scheduler: store_config.flush_scheduler,
+            sst_layer: store_config.sst_layer,
+            manifest: store_config.manifest,
         });
 
         RegionImpl { inner }
