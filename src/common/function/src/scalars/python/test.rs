@@ -454,7 +454,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
     let ret = exec_coprocessor(python_source, &rb);
     dbg!(&ret);
-    println!("{}", ret.unwrap_err());
-    // assert!(ret.is_ok());
-    // assert_eq!(ret.unwrap().column(0).len(), 4);
+    // println!("{}", ret.unwrap_err());
+    assert!(ret.is_ok());
+    assert_eq!(ret.unwrap().column(0).len(), 4);
 }
