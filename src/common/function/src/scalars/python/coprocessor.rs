@@ -213,7 +213,7 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
     Ok(cols)
 }
 
-/// generate [`Schema`] according to names, types and
+/// generate [`Schema`] according to names, types or
 /// datatypes of the actual columns when no annotation
 fn gen_schema(
     cols: &[ArrayRef],
@@ -322,20 +322,16 @@ fn check_cast_type(cols: &mut [ArrayRef], return_types: &[Option<AnnotationInfo>
 /// # Type Annotation
 /// you can use type annotations in args and returns to designate types, so coprocessor will check for corrsponding types.
 ///
-/// using `into()` can convert whatever types python function returns into given types.
-///
 /// Currently support types are `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64` and `f16`, `f32`, `f64`
 ///
 /// use `f64 | None` to mark if returning column is nullable like in [`DfRecordBatch`]'s schema's [`Field`]'s is_nullable
-///
-/// use `into(f64)` to convert returning PyVector into float 64. You can also combine them like `into(f64) | None` to declare a nullable column that types is cast to f64
 ///
 /// you can also use single underscore `_` to let coprocessor infer what type it is, so `_` and `_ | None` are both valid in type annotation.
 ///
 /// a example (of python script) given below:
 /// ```python
 /// @copr(args=["cpu", "mem"], returns=["perf", "minus", "mul", "div"])
-/// def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+/// def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[_ | None]):
 ///     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 /// ```
 pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
@@ -357,7 +353,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     }
     let args: Vec<PyVector> = into_py_vector(fetch_args)?;
 
-    // match between arguments real type and annotation types
+    // match between arguments' real type and annotation types
     for (idx, arg) in args.iter().enumerate() {
         let anno_ty = copr.arg_types[idx].to_owned();
         let real_ty = arg.to_arrow_array().data_type().to_owned();
@@ -375,7 +371,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
             }
         )
     }
-    // 4. then set args in scope and call by compiler and run `CodeObject` which already append `Call` node
+    // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
     vm::Interpreter::without_stdlib(Default::default()).enter(|vm| -> Result<DfRecordBatch> {
         PyVector::make_class(&vm.ctx);
         let scope = vm.new_scope_with_builtins();
@@ -421,7 +417,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
             }
         );
 
-        // if cols and schema's data types is not match, first try coerced it to given type(if annotated), if not possible, return Err
+        // if cols and schema's data types is not match, try coerced it to given type(if annotated)(if error occur, return relevant error with question mark)
         check_cast_type(&mut cols, &copr.return_types)?;
         // 6. return a assembled DfRecordBatch
         let schema = gen_schema(&cols, &copr.returns, &copr.return_types)?;
