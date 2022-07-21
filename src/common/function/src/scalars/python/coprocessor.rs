@@ -144,10 +144,7 @@ impl Coprocessor {
 
     /// generate [`Schema`] according to return names, types or
     /// datatypes of the actual columns if no annotation
-    fn gen_schema(
-        &self,
-        cols: &[ArrayRef]
-    ) -> Result<Arc<Schema>> {
+    fn gen_schema(&self, cols: &[ArrayRef]) -> Result<Arc<Schema>> {
         let names = &self.returns;
         let anno = &self.return_types;
         ensure!(
@@ -185,6 +182,41 @@ impl Coprocessor {
                 })
                 .collect::<Vec<Field>>(),
         )))
+    }
+
+    /// check real types and annotation types(if have) is the same, if not try cast columns to annotated type
+    fn check_cast_type(
+        &self,
+        cols: &mut [ArrayRef]
+    ) -> Result<()> {
+        let return_types = &self.return_types;
+        for (col, anno) in cols.iter_mut().zip(return_types) {
+            if let Some(AnnotationInfo {
+                datatype: Some(datatype),
+                is_nullable: _,
+            }) = anno
+            {
+                let real_ty = col.data_type();
+                let anno_ty = datatype;
+                if real_ty != anno_ty {
+                    {
+                        *col = arrow::compute::cast::cast(
+                            col.as_ref(),
+                            anno_ty,
+                            CastOptions {
+                                wrapped: true,
+                                partial: true,
+                            },
+                        )
+                        .context(ArrowSnafu)?
+                        .into();
+                    }
+                } else {
+                    continue;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -261,37 +293,6 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
         cols.push(pyv.to_arrow_array())
     }
     Ok(cols)
-}
-
-/// check real types and annotation types(if have) is the same, if not try cast columns to annotated type
-fn check_cast_type(cols: &mut [ArrayRef], return_types: &[Option<AnnotationInfo>]) -> Result<()> {
-    for (col, anno) in cols.iter_mut().zip(return_types) {
-        if let Some(AnnotationInfo {
-            datatype: Some(datatype),
-            is_nullable: _,
-        }) = anno
-        {
-            let real_ty = col.data_type();
-            let anno_ty = datatype;
-            if real_ty != anno_ty {
-                {
-                    *col = arrow::compute::cast::cast(
-                        col.as_ref(),
-                        anno_ty,
-                        CastOptions {
-                            wrapped: true,
-                            partial: true,
-                        },
-                    )
-                    .context(ArrowSnafu)?
-                    .into();
-                }
-            } else {
-                continue;
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The coprocessor function accept a python script and a Record Batch:
@@ -424,7 +425,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         );
 
         // if cols and schema's data types is not match, try coerced it to given type(if annotated)(if error occur, return relevant error with question mark)
-        check_cast_type(&mut cols, &copr.return_types)?;
+        copr.check_cast_type(&mut cols)?;
         // 6. return a assembled DfRecordBatch
         let schema = copr.gen_schema(&cols)?;
         let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
