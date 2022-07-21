@@ -141,6 +141,51 @@ impl Coprocessor {
         )
         .map_err(|err| err.into())
     }
+
+    /// generate [`Schema`] according to return names, types or
+    /// datatypes of the actual columns if no annotation
+    fn gen_schema(
+        &self,
+        cols: &[ArrayRef]
+    ) -> Result<Arc<Schema>> {
+        let names = &self.returns;
+        let anno = &self.return_types;
+        ensure!(
+            cols.len() == names.len() && names.len() == anno.len(),
+            OtherSnafu {
+                reason: format!(
+                    "Unmatched length for cols({}), names({}) and anno({})",
+                    cols.len(),
+                    names.len(),
+                    anno.len()
+                )
+            }
+        );
+        Ok(Arc::new(Schema::from(
+            names
+                .iter()
+                .enumerate()
+                .map(|(idx, name)| {
+                    let real_ty = cols[idx].data_type().to_owned();
+                    let AnnotationInfo {
+                        datatype: ty,
+                        is_nullable,
+                    } = anno[idx].to_owned().unwrap_or_else(||
+                    // default to be not nullable and use DataType infered by PyVector itself
+                    AnnotationInfo{
+                        datatype: Some(real_ty.to_owned()),
+                        is_nullable: false
+                    });
+                    Field::new(
+                        name,
+                        // if type is like `_` or `_ | None`
+                        if let Some(ty) = ty { ty } else { real_ty },
+                        is_nullable,
+                    )
+                })
+                .collect::<Vec<Field>>(),
+        )))
+    }
 }
 
 fn set_loc<T>(node: T, loc: Location) -> Located<T> {
@@ -216,50 +261,6 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
         cols.push(pyv.to_arrow_array())
     }
     Ok(cols)
-}
-
-/// generate [`Schema`] according to names, types or
-/// datatypes of the actual columns when no annotation
-fn gen_schema(
-    cols: &[ArrayRef],
-    names: &[String],
-    anno: &[Option<AnnotationInfo>],
-) -> Result<Arc<Schema>> {
-    ensure!(
-        cols.len() == names.len() && names.len() == anno.len(),
-        OtherSnafu {
-            reason: format!(
-                "Unmatched length for cols({}), names({}) and anno({})",
-                cols.len(),
-                names.len(),
-                anno.len()
-            )
-        }
-    );
-    Ok(Arc::new(Schema::from(
-        names
-            .iter()
-            .enumerate()
-            .map(|(idx, name)| {
-                let real_ty = cols[idx].data_type().to_owned();
-                let AnnotationInfo {
-                    datatype: ty,
-                    is_nullable,
-                } = anno[idx].to_owned().unwrap_or_else(||
-                    // default to be not nullable and use DataType infered by PyVector itself
-                    AnnotationInfo{
-                        datatype: Some(real_ty.to_owned()),
-                        is_nullable: false
-                    });
-                Field::new(
-                    name,
-                    // if type is like `_` or `_ | None`
-                    if let Some(ty) = ty { ty } else { real_ty },
-                    is_nullable,
-                )
-            })
-            .collect::<Vec<Field>>(),
-    )))
 }
 
 /// check real types and annotation types(if have) is the same, if not try cast columns to annotated type
@@ -425,7 +426,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         // if cols and schema's data types is not match, try coerced it to given type(if annotated)(if error occur, return relevant error with question mark)
         check_cast_type(&mut cols, &copr.return_types)?;
         // 6. return a assembled DfRecordBatch
-        let schema = gen_schema(&cols, &copr.returns, &copr.return_types)?;
+        let schema = copr.gen_schema(&cols)?;
         let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
         Ok(res_rb)
     })
