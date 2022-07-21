@@ -16,14 +16,15 @@ type ExecResPredicateFn = Option<fn(Result<DfRecordBatch>)>;
 
 #[test]
 fn testsuite_parse() {
-    let testcases: Vec<(&'static str, PredicateFn)> = vec![
-        (
-            // for correct parse with all possible type annotation
-            r#"
+    let correct_script =             r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
+"#;
+    let testcases: Vec<(&'static str, PredicateFn)> = vec![
+        (
+            // for correct parse with all possible type annotation
+            correct_script,
             Some(|r| {
                 r.is_ok()
                     && r.unwrap()
@@ -59,6 +60,11 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
                                     is_nullable: true,
                                 }),
                             ],
+                            script: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#.to_owned()
                         }
             }),
         ),

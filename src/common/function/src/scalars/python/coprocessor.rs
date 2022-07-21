@@ -41,105 +41,110 @@ pub struct Coprocessor {
     // get from python function args& returns' annotation, first is type, second is is_nullable
     pub arg_types: Vec<Option<AnnotationInfo>>,
     pub return_types: Vec<Option<AnnotationInfo>>,
+    pub script: String,
+}
+
+impl Coprocessor {
+    /// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
+    ///
+    /// The conside is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
+    /// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
+    /// And add a function call in the end and also
+    /// strip type annotation
+    fn strip_append_and_compile(&self) -> Result<CodeObject> {
+        let copr = &self;
+        let script = &self.script;
+        // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
+        let mut top = parser::parse(script, parser::Mode::Interactive).context(PyParseSnafu)?;
+        // erase decorator
+        if let ast::Mod::Interactive { body } = &mut top {
+            let code = body;
+            ensure!(
+                code.len() == 1,
+                CoprParseSnafu {
+                    reason: format!(
+                        "Expect only one statement in script, found {} statement",
+                        code.len()
+                    ),
+                    loc: if code.is_empty() {
+                        None
+                    } else {
+                        Some(code[0].location)
+                    }
+                }
+            );
+            if let ast::StmtKind::FunctionDef {
+                name: _,
+                args,
+                body: _,
+                decorator_list,
+                returns,
+                type_comment: __main__,
+            } = &mut code[0].node
+            {
+                *decorator_list = Vec::new();
+                // strip type annotation
+                // def a(b: int, c:int) -> int
+                // will became
+                // def a(b, c)
+                *returns = None;
+                for arg in &mut args.args {
+                    arg.node.annotation = None;
+                }
+            } else {
+                return Err(InnerError::CoprParse {
+                reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
+                loc: Some(code[0].location)
+            });
+            }
+            let mut loc = code[0].location;
+            // This manually construct ast has no corrsponding code in the script, so just give it a random location(which doesn't matter because Location usually only used in pretty print errors)
+            loc.newline();
+            let args: Vec<Located<ast::ExprKind>> = copr
+                .args
+                .iter()
+                .map(|v| {
+                    let node = ast::ExprKind::Name {
+                        id: v.to_owned(),
+                        ctx: ast::ExprContext::Load,
+                    };
+                    set_loc(node, loc)
+                })
+                .collect();
+            let func = ast::ExprKind::Call {
+                func: Box::new(set_loc(
+                    ast::ExprKind::Name {
+                        id: copr.name.to_owned(),
+                        ctx: ast::ExprContext::Load,
+                    },
+                    loc,
+                )),
+                args,
+                keywords: Vec::new(),
+            };
+            let stmt = ast::StmtKind::Expr {
+                value: Box::new(set_loc(func, loc)),
+            };
+            code.push(set_loc(stmt, loc));
+        } else {
+            return Err(InnerError::CoprParse {
+                reason: format!("Expect statement in script, found: {:?}", top),
+                loc: None,
+            });
+        }
+        // use `compile::Mode::BlockExpr` so it return the result of statement
+        compile::compile_top(
+            &top,
+            "<embedded>".to_owned(),
+            compile::Mode::BlockExpr,
+            compile::CompileOpts { optimize: 0 },
+        )
+        .map_err(|err| err.into())
+    }
 }
 
 fn set_loc<T>(node: T, loc: Location) -> Located<T> {
     Located::new(loc, node)
-}
-
-/// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
-///
-/// The conside is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
-/// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
-/// And add a function call in the end and also
-/// strip type annotation
-fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObject> {
-    // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
-    let mut top = parser::parse(script, parser::Mode::Interactive).context(PyParseSnafu)?;
-    // erase decorator
-    if let ast::Mod::Interactive { body } = &mut top {
-        let code = body;
-        ensure!(
-            code.len() == 1,
-            CoprParseSnafu {
-                reason: format!(
-                    "Expect only one statement in script, found {} statement",
-                    code.len()
-                ),
-                loc: if code.is_empty() {
-                    None
-                } else {
-                    Some(code[0].location)
-                }
-            }
-        );
-        if let ast::StmtKind::FunctionDef {
-            name: _,
-            args,
-            body: _,
-            decorator_list,
-            returns,
-            type_comment: __main__,
-        } = &mut code[0].node
-        {
-            *decorator_list = Vec::new();
-            // strip type annotation
-            // def a(b: int, c:int) -> int
-            // will became
-            // def a(b, c)
-            *returns = None;
-            for arg in &mut args.args {
-                arg.node.annotation = None;
-            }
-        } else {
-            return Err(InnerError::CoprParse {
-                reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
-                loc: Some(code[0].location)
-            });
-        }
-        let mut loc = code[0].location;
-        // This manually construct ast has no corrsponding code in the script, so just give it a random location(which doesn't matter because Location usually only used in pretty print errors)
-        loc.newline();
-        let args: Vec<Located<ast::ExprKind>> = copr
-            .args
-            .iter()
-            .map(|v| {
-                let node = ast::ExprKind::Name {
-                    id: v.to_owned(),
-                    ctx: ast::ExprContext::Load,
-                };
-                set_loc(node, loc)
-            })
-            .collect();
-        let func = ast::ExprKind::Call {
-            func: Box::new(set_loc(
-                ast::ExprKind::Name {
-                    id: copr.name.to_owned(),
-                    ctx: ast::ExprContext::Load,
-                },
-                loc,
-            )),
-            args,
-            keywords: Vec::new(),
-        };
-        let stmt = ast::StmtKind::Expr {
-            value: Box::new(set_loc(func, loc)),
-        };
-        code.push(set_loc(stmt, loc));
-    } else {
-        return Err(InnerError::CoprParse {
-            reason: format!("Expect statement in script, found: {:?}", top),
-            loc: None,
-        });
-    }
-    // use `compile::Mode::BlockExpr` so it return the result of statement
-    compile::compile_top(
-        &top,
-        "<embedded>".to_owned(),
-        compile::Mode::BlockExpr,
-        compile::CompileOpts { optimize: 0 },
-    )
-    .map_err(|err| err.into())
 }
 
 /// cast a `dyn Array` of type unsigned/int/float into a `dyn Vector`
@@ -388,7 +393,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
                 })?;
         }
 
-        let code_obj = strip_append_and_compile(script, &copr)?;
+        let code_obj = copr.strip_append_and_compile()?;
         let code_obj = vm.ctx.new_code(code_obj);
         let run_res = vm.run_code_obj(code_obj, scope);
         let ret = if let Err(excep) = run_res {
