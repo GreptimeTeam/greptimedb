@@ -36,7 +36,7 @@ async fn new_region_for_rw(
         .push_value_column(("v1", LogicalTypeId::Int64, true))
         .build();
     let metadata = desc.try_into().unwrap();
-    let wal = Wal::new(region_name, Arc::new(NoopLogStore::default()));
+    let wal = Wal::new(region_id, region_name, Arc::new(NoopLogStore::default()));
     let accessor = Backend::build().root(store_dir).finish().await.unwrap();
     let object_store = ObjectStore::new(accessor);
     let sst_layer = Arc::new(FsAccessLayer::new(&sst_dir, object_store.clone()));

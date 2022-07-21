@@ -4,7 +4,7 @@ use common_telemetry::logging;
 use common_time::RangeMillis;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::storage::{WriteContext, WriteRequest, WriteResponse};
+use store_api::storage::{SequenceNumber, WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
@@ -16,7 +16,7 @@ use crate::region::RegionManifest;
 use crate::region::SharedDataRef;
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControlRef, VersionEdit};
-use crate::wal::Wal;
+use crate::wal::{Payload, Wal};
 use crate::write_batch::WriteBatch;
 
 pub type RegionWriterRef = Arc<RegionWriter>;
@@ -42,17 +42,18 @@ impl RegionWriter {
         inner.write(ctx, request, writer_ctx).await
     }
 
-    pub async fn apply_version_edit(
+    pub async fn apply_version_edit<S: LogStore>(
         &self,
+        wal: &Wal<S>,
         edit: VersionEdit,
         shared: &SharedDataRef,
     ) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        inner.apply_version_edit(edit, shared).await
+        inner.apply_version_edit(wal, edit, shared).await
     }
 }
 
-pub struct WriterContext<'a, S> {
+pub struct WriterContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub flush_strategy: &'a FlushStrategyRef,
     pub flush_scheduler: &'a FlushSchedulerRef,
@@ -62,7 +63,7 @@ pub struct WriterContext<'a, S> {
     pub manifest: &'a RegionManifest,
 }
 
-impl<'a, S> WriterContext<'a, S> {
+impl<'a, S: LogStore> WriterContext<'a, S> {
     #[inline]
     fn version_control(&self) -> &VersionControlRef {
         &self.shared.version_control
@@ -105,9 +106,15 @@ impl WriterInner {
         // Sequence for current write batch.
         let next_sequence = committed_sequence + 1;
 
-        // TODO(jiachun): [flush] wal header
-        let wal_header = WalHeader::default();
-        writer_ctx.wal.write_to_wal(wal_header, &request).await?;
+        let wal_header = WalHeader::with_last_manifest_version(version.manifest_version());
+        writer_ctx
+            .wal
+            .write_to_wal(
+                next_sequence,
+                wal_header,
+                Payload::WriteBatchArrow(&request),
+            )
+            .await?;
 
         // Insert batch into memtable.
         let mut inserter = Inserter::new(next_sequence, time_ranges, version.bucket_duration());
@@ -124,7 +131,7 @@ impl WriterInner {
     ///
     /// Creates needed mutable memtables, ensures there is enough capacity in memtable and trigger
     /// flush if necessary. Returns time ranges of the input write batch.
-    async fn preprocess_write<S>(
+    async fn preprocess_write<S: LogStore>(
         &mut self,
         request: &WriteBatch,
         writer_ctx: &WriterContext<'_, S>,
@@ -142,6 +149,7 @@ impl WriterInner {
                 writer_ctx.flush_scheduler,
                 writer_ctx.sst_layer,
                 writer_ctx.writer,
+                writer_ctx.wal,
                 writer_ctx.manifest,
             )
             .await?;
@@ -188,12 +196,13 @@ impl WriterInner {
         flush_strategy.should_flush(shared, mutable_bytes_allocated, total_bytes_allocated)
     }
 
-    async fn trigger_flush(
+    async fn trigger_flush<S: LogStore>(
         &mut self,
         shared: &SharedDataRef,
         flush_scheduler: &FlushSchedulerRef,
         sst_layer: &AccessLayerRef,
         writer: &RegionWriterRef,
+        wal: &Wal<S>,
         manifest: &RegionManifest,
     ) -> Result<()> {
         let version_control = &shared.version_control;
@@ -231,30 +240,47 @@ impl WriterInner {
             shared: shared.clone(),
             sst_layer: sst_layer.clone(),
             writer: writer.clone(),
+            wal: wal.clone(),
             manifest: manifest.clone(),
         };
 
-        let flush_handle = flush_scheduler.schedule_flush(flush_req).await?;
+        let flush_handle = flush_scheduler.schedule_flush(Box::new(flush_req)).await?;
         self.flush_handle = Some(flush_handle);
 
         Ok(())
     }
 
-    pub async fn apply_version_edit(
+    async fn apply_version_edit<S: LogStore>(
         &mut self,
+        wal: &Wal<S>,
         edit: VersionEdit,
         shared: &SharedDataRef,
     ) -> Result<()> {
-        self.persist_version_edit_log(&edit).await?;
+        let version_control = &shared.version_control;
 
-        shared.version_control.apply_edit(edit);
+        let next_sequence = version_control.committed_sequence() + 1;
+
+        self.persist_manifest_version(wal, next_sequence, &edit)
+            .await?;
+
+        version_control.apply_edit(edit);
+
+        version_control.set_committed_sequence(next_sequence);
 
         Ok(())
     }
 
-    pub async fn persist_version_edit_log(&self, _edit: &VersionEdit) -> Result<()> {
-        // TODO(yingwen): [flush] Write meta log that points to the manifest file to log store.
-        unimplemented!()
+    async fn persist_manifest_version<S: LogStore>(
+        &self,
+        wal: &Wal<S>,
+        seq: SequenceNumber,
+        edit: &VersionEdit,
+    ) -> Result<()> {
+        let header = WalHeader::with_last_manifest_version(edit.manifest_version);
+
+        wal.write_to_wal(seq, header, Payload::None).await?;
+
+        Ok(())
     }
 
     #[inline]

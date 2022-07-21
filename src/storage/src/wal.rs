@@ -3,31 +3,55 @@ use std::sync::Arc;
 use common_error::prelude::BoxedError;
 use prost::Message;
 use snafu::ResultExt;
-use store_api::logstore::{entry::Entry, namespace::Namespace, AppendResponse, LogStore};
+use store_api::{
+    logstore::{entry::Entry, namespace::Namespace, AppendResponse, LogStore},
+    storage::SequenceNumber,
+};
 
 use crate::{
     codec::{Decoder, Encoder},
     error::{self, Error, Result},
-    proto::{self, WalHeader},
+    proto::{self, PayloadType, WalHeader},
     write_batch::{codec::WriteBatchArrowEncoder, WriteBatch},
 };
 
-#[derive(Clone)]
-pub struct Wal<S> {
-    region: String,
+pub struct Wal<S: LogStore> {
+    region_id: u32,
+    namespace: S::Namespace,
     store: Arc<S>,
 }
 
-impl<S> Wal<S> {
-    pub fn new(region: impl Into<String>, store: Arc<S>) -> Self {
+// wal should be cheap to clone
+impl<S: LogStore> Clone for Wal<S> {
+    fn clone(&self) -> Self {
         Self {
-            region: region.into(),
+            region_id: self.region_id,
+            namespace: self.namespace.clone(),
+            store: self.store.clone(),
+        }
+    }
+}
+
+impl<S: LogStore> Wal<S> {
+    pub fn new(region_id: u32, region_name: impl Into<String>, store: Arc<S>) -> Self {
+        let region_name = region_name.into();
+        let namespace = S::Namespace::new(&region_name, region_id as u64);
+
+        Self {
+            region_id,
+            namespace,
             store,
         }
     }
 
-    pub fn region(&self) -> &str {
-        &self.region
+    #[inline]
+    pub fn region_id(&self) -> u32 {
+        self.region_id
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        self.namespace.name()
     }
 }
 
@@ -46,12 +70,17 @@ impl<S: LogStore> Wal<S> {
     /// +---------------------+----------------------------------------------------+--------------+-------------+--------------+
     /// ```
     ///
-    pub async fn write_to_wal(
+    pub async fn write_to_wal<'a>(
         &self,
+        seq: SequenceNumber,
         mut header: WalHeader,
-        batch: &WriteBatch,
+        payload: Payload<'a>,
     ) -> Result<(u64, usize)> {
-        header.mutation_extras = proto::gen_mutation_extras(batch);
+        header.payload_type = payload.payload_type();
+
+        if let Payload::WriteBatchArrow(batch) = payload {
+            header.mutation_extras = proto::gen_mutation_extras(batch);
+        }
 
         let mut buf = vec![];
 
@@ -59,24 +88,29 @@ impl<S: LogStore> Wal<S> {
         let wal_header_encoder = WalHeaderEncoder {};
         wal_header_encoder.encode(&header, &mut buf)?;
 
-        // entry
-        let encoder = WriteBatchArrowEncoder::new(header.mutation_extras);
-        // TODO(jiachun): provide some way to compute data size before encode, so we can preallocate an exactly sized buf.
-        encoder
-            .encode(batch, &mut buf)
-            .map_err(BoxedError::new)
-            .context(error::WriteWalSnafu {
-                region: self.region(),
-            })?;
+        if let Payload::WriteBatchArrow(batch) = payload {
+            // entry
+            let encoder = WriteBatchArrowEncoder::new(header.mutation_extras);
+            // TODO(jiachun): provide some way to compute data size before encode, so we can preallocate an exactly sized buf.
+            encoder
+                .encode(batch, &mut buf)
+                .map_err(BoxedError::new)
+                .context(error::WriteWalSnafu {
+                    region_id: self.region_id(),
+                    name: self.name(),
+                })?;
+        }
+
+        // TODO(jiachun): encode protobuf payload
 
         // write bytes to wal
-        self.write(&buf).await
+        self.write(seq, &buf).await
     }
 
-    async fn write(&self, bytes: &[u8]) -> Result<(u64, usize)> {
-        // TODO(jiachun): region id
-        let ns = S::Namespace::new(&self.region, 0);
-        let e = S::Entry::new(bytes);
+    async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
+        let ns = self.namespace.clone();
+        let mut e = S::Entry::new(bytes);
+        e.set_id(seq);
 
         let res = self
             .store
@@ -84,10 +118,27 @@ impl<S: LogStore> Wal<S> {
             .await
             .map_err(BoxedError::new)
             .context(error::WriteWalSnafu {
-                region: &self.region,
+                region_id: self.region_id(),
+                name: self.name(),
             })?;
 
         Ok((res.entry_id(), res.offset()))
+    }
+}
+
+pub enum Payload<'a> {
+    None, // only header
+    WriteBatchArrow(&'a WriteBatch),
+    WriteBatchProto(&'a WriteBatch),
+}
+
+impl<'a> Payload<'a> {
+    pub fn payload_type(&self) -> i32 {
+        match self {
+            Payload::None => PayloadType::None.into(),
+            Payload::WriteBatchArrow(_) => PayloadType::WriteBatchArrow.into(),
+            Payload::WriteBatchProto(_) => PayloadType::WriteBatchProto.into(),
+        }
     }
 }
 
@@ -134,14 +185,14 @@ mod tests {
     pub async fn test_write_wal() {
         let (log_store, _tmp) =
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
-        let wal = Wal::new("test_region", Arc::new(log_store));
+        let wal = Wal::new(0, "test_region", Arc::new(log_store));
 
-        let res = wal.write(b"test1").await.unwrap();
+        let res = wal.write(0, b"test1").await.unwrap();
 
         assert_eq!(0, res.0);
         assert_eq!(0, res.1);
 
-        let res = wal.write(b"test2").await.unwrap();
+        let res = wal.write(1, b"test2").await.unwrap();
 
         assert_eq!(1, res.0);
         assert_eq!(29, res.1);
@@ -150,6 +201,7 @@ mod tests {
     #[test]
     pub fn test_wal_header_codec() {
         let wal_header = WalHeader {
+            payload_type: 1,
             last_manifest_version: 99999999,
             mutation_extras: vec![],
         };
