@@ -361,6 +361,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     let args: Vec<PyVector> = into_py_vector(fetch_args)?;
 
     // match between arguments' real type and annotation types
+    // so as to double check you extract correct columns(with correct type) from RecordBatch
     for (idx, arg) in args.iter().enumerate() {
         let anno_ty = copr.arg_types[idx].to_owned();
         let real_ty = arg.to_arrow_array().data_type().to_owned();
@@ -398,17 +399,16 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         let code_obj = copr.strip_append_and_compile()?;
         let code_obj = vm.ctx.new_code(code_obj);
         let run_res = vm.run_code_obj(code_obj, scope);
-        let ret = if let Err(excep) = run_res {
-            let mut chain = String::new();
-            vm.write_exception(&mut chain, &excep)
-                .map_err(|_| InnerError::Other {
-                    reason: "Fail to write to string".into(),
-                })?;
-            return Err(PyExceptionSerde { output: chain }.into());
-        } else if let Ok(ret) = run_res {
-            ret
-        } else {
-            unreachable!()
+        let ret = match run_res {
+            Err(excep) => {
+                let mut chain = String::new();
+                vm.write_exception(&mut chain, &excep)
+                    .map_err(|_| InnerError::Other {
+                        reason: "Fail to write to string".into(),
+                    })?;
+                return Err(PyExceptionSerde { output: chain }.into());
+            }
+            Ok(ret) => ret
         };
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
