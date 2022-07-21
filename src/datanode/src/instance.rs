@@ -34,21 +34,7 @@ pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
     pub async fn new(opts: &DatanodeOptions, catalog_list: CatalogListRef) -> Result<Self> {
-        // create wal directory
-        fs::create_dir_all(path::Path::new(&opts.wal_dir)).context(error::CreateDirSnafu {
-            dir: &opts.wal_dir.clone(),
-        })?;
-
-        info!("The wal directory is: {}", &opts.wal_dir);
-
-        let log_config = LogConfig {
-            log_file_dir: opts.wal_dir.clone(),
-            ..Default::default()
-        };
-        let log_store = LocalFileLogStore::open(&log_config)
-            .await
-            .context(error::OpenLogStoreSnafu)?;
-
+        let log_store = create_local_file_log_store(opts).await?;
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine().clone();
         let table_engine = DefaultEngine::new(
@@ -139,6 +125,25 @@ impl Instance {
 
         Ok(())
     }
+}
+
+async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFileLogStore> {
+    // create WAL directory
+    fs::create_dir_all(path::Path::new(&opts.wal_dir))
+        .context(error::CreateDirSnafu { dir: &opts.wal_dir })?;
+
+    info!("The WAL directory is: {}", &opts.wal_dir);
+
+    let log_config = LogConfig {
+        log_file_dir: opts.wal_dir.clone(),
+        ..Default::default()
+    };
+
+    let log_store = LocalFileLogStore::open(&log_config)
+        .await
+        .context(error::OpenLogStoreSnafu)?;
+
+    Ok(log_store)
 }
 
 #[cfg(test)]
