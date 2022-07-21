@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use common_base::bytes::{Bytes, StringBytes};
 use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
@@ -13,7 +15,7 @@ pub type OrderedF64 = OrderedFloat<f64>;
 /// Although compare Value with different data type is allowed, it is recommended to only
 /// compare Value with same data type. Comparing Value with different data type may not
 /// behaves as what you expect.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Value {
     Null,
 
@@ -214,6 +216,22 @@ impl Eq for ListValue {}
 impl ListValue {
     pub fn new(items: Option<Box<Vec<Value>>>, datatype: ConcreteDataType) -> Self {
         Self { items, datatype }
+    }
+}
+
+impl PartialOrd for ListValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ListValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        assert_eq!(
+            self.datatype, other.datatype,
+            "Cannot compare different datatypes!"
+        );
+        self.items.cmp(&other.items)
     }
 }
 

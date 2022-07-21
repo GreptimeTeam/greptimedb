@@ -622,6 +622,7 @@ name = "common-function"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "arrow2",
  "chrono-tz",
  "common-error",
  "common-query",
