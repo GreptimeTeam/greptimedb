@@ -39,6 +39,23 @@ macro_rules! for_all_primitive_types{
 }
 
 #[macro_export]
+macro_rules! for_all_ordered_primitive_types {
+    ($macro:tt $(, $x:tt)*) => {
+        $macro! {
+            [$($x),*],
+            { i8 },
+            { i16 },
+            { i32 },
+            { i64 },
+            { u8 },
+            { u16 },
+            { u32 },
+            { u64 }
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! with_match_primitive_type_id {
     ($key_type:expr, | $_:tt $T:ident | $body:tt, $nbody:tt) => {{
         macro_rules! __with_ty__ {

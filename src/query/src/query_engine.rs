@@ -3,8 +3,8 @@ mod state;
 
 use std::sync::Arc;
 
+use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
-use common_query::prelude::AggregateFunction;
 use common_query::prelude::ScalarUdf;
 use common_recordbatch::SendableRecordBatchStream;
 use sql::statements::statement::Statement;
@@ -36,7 +36,7 @@ pub trait QueryEngine: Send + Sync {
 
     fn register_udf(&self, udf: ScalarUdf);
 
-    fn register_udaf(&self, udaf: AggregateFunction);
+    fn register_aggregate_function(&self, func: AggregateFunctionMetaRef);
 
     fn register_function(&self, func: FunctionRef);
 }
@@ -51,6 +51,10 @@ impl QueryEngineFactory {
 
         for func in FUNCTION_REGISTRY.functions() {
             query_engine.register_function(func);
+        }
+
+        for accumulator in FUNCTION_REGISTRY.aggregate_functions() {
+            query_engine.register_aggregate_function(accumulator);
         }
 
         Self { query_engine }

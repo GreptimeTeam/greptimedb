@@ -5,10 +5,11 @@ use std::sync::Arc;
 mod testing_table;
 
 use arc_swap::ArcSwapOption;
+use common_function::scalars::aggregate::AggregateFunctionMeta;
 use common_query::error::ExecuteFunctionSnafu;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Accumulator;
-use common_query::logical_plan::{create_aggregate_function, AccumulatorCreator};
+use common_query::logical_plan::AggregateFunctionCreator;
 use common_query::prelude::*;
 use common_recordbatch::util;
 use datafusion::arrow_print;
@@ -57,7 +58,7 @@ struct MySumAccumulatorCreator {
     input_type: ArcSwapOption<Vec<ConcreteDataType>>,
 }
 
-impl AccumulatorCreator for MySumAccumulatorCreator {
+impl AggregateFunctionCreator for MySumAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
         let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
             let input_type = &types[0];
@@ -222,9 +223,10 @@ where
     let factory = testing_table::new_query_engine_factory(table_name.clone(), testing_table);
     let engine = factory.query_engine();
 
-    let my_sum_udaf =
-        create_aggregate_function("my_sum", Arc::new(MySumAccumulatorCreator::default()));
-    engine.register_udaf(my_sum_udaf);
+    engine.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
+        "my_sum",
+        Arc::new(|| Arc::new(MySumAccumulatorCreator::default())),
+    )));
 
     let sql = format!(
         "select MY_SUM({}) as my_sum from {}",

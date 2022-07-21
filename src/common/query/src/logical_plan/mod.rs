@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use datatypes::prelude::ConcreteDataType;
 
-pub use self::accumulator::{Accumulator, AccumulatorCreator};
+pub use self::accumulator::{Accumulator, AggregateFunctionCreator, AggregateFunctionCreatorRef};
 pub use self::expr::Expr;
 pub use self::udaf::AggregateFunction;
 pub use self::udf::ScalarUdf;
@@ -37,8 +37,8 @@ pub fn create_udf(
 }
 
 pub fn create_aggregate_function(
-    name: &str,
-    creator: Arc<dyn AccumulatorCreator>,
+    name: String,
+    creator: Arc<dyn AggregateFunctionCreator>,
 ) -> AggregateFunction {
     let return_type = make_return_function(creator.clone());
     let accumulator = make_accumulator_function(creator.clone());
@@ -175,7 +175,7 @@ mod tests {
     #[derive(Debug)]
     struct DummyAccumulatorCreator;
 
-    impl AccumulatorCreator for DummyAccumulatorCreator {
+    impl AggregateFunctionCreator for DummyAccumulatorCreator {
         fn creator(&self) -> AccumulatorCreatorFunction {
             Arc::new(|_| Ok(Box::new(DummyAccumulator)))
         }
@@ -201,8 +201,8 @@ mod tests {
     #[test]
     fn test_create_udaf() {
         let creator = DummyAccumulatorCreator;
-        let udaf = create_aggregate_function("dummy_udaf", Arc::new(creator));
-        assert_eq!("dummy_udaf", udaf.name);
+        let udaf = create_aggregate_function("dummy".to_string(), Arc::new(creator));
+        assert_eq!("dummy", udaf.name);
 
         let signature = udaf.signature;
         assert_eq!(TypeSignature::Any(1), signature.type_signature);

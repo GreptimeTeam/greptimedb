@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use common_query::error::{ExecuteFunctionSnafu, FromScalarValueSnafu, Result};
-use common_query::logical_plan::{Accumulator, AccumulatorCreator};
+use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datafusion_common::DataFusionError;
 use datatypes::prelude::*;
@@ -145,7 +145,7 @@ pub struct MedianAccumulatorCreator {
     input_type: ArcSwapOption<Vec<ConcreteDataType>>,
 }
 
-impl AccumulatorCreator for MedianAccumulatorCreator {
+impl AggregateFunctionCreator for MedianAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
         let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
             let input_type = &types[0];

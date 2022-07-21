@@ -14,6 +14,8 @@ use snafu::ResultExt;
 use crate::error::{Error, FromScalarValueSnafu, IntoVectorSnafu, Result};
 use crate::prelude::*;
 
+pub type AggregateFunctionCreatorRef = Arc<dyn AggregateFunctionCreator>;
+
 /// An accumulator represents a stateful object that lives throughout the evaluation of multiple rows and
 /// generically accumulates values.
 ///
@@ -40,9 +42,12 @@ pub trait Accumulator: Send + Sync + Debug {
     fn evaluate(&self) -> Result<Value>;
 }
 
-/// A creator stores the input type, and knows the output and states types of an Accumulator,
-/// so it can create the Accumulator generically.
-pub trait AccumulatorCreator: Send + Sync + Debug {
+/// An `AggregateFunctionCreator` dynamically creates `Accumulator`.
+/// DataFusion does not provide the input data's types when creating Accumulator, we have to stores
+/// it somewhere else ourself. So an `AggregateFunctionCreator` often has a companion struct, that
+/// can store the input data types, and knows the output and states types of an Accumulator.
+/// That's how we create the Accumulator generically.
+pub trait AggregateFunctionCreator: Send + Sync + Debug {
     /// Create a function that can create a new accumulator with some input data type.
     fn creator(&self) -> AccumulatorCreatorFunction;
 
@@ -59,7 +64,9 @@ pub trait AccumulatorCreator: Send + Sync + Debug {
     fn state_types(&self) -> Vec<ConcreteDataType>;
 }
 
-pub fn make_accumulator_function(creator: Arc<dyn AccumulatorCreator>) -> AccumulatorFunctionImpl {
+pub fn make_accumulator_function(
+    creator: Arc<dyn AggregateFunctionCreator>,
+) -> AccumulatorFunctionImpl {
     Arc::new(move || {
         let input_types = creator.input_types();
         let creator = creator.creator();
@@ -67,7 +74,7 @@ pub fn make_accumulator_function(creator: Arc<dyn AccumulatorCreator>) -> Accumu
     })
 }
 
-pub fn make_return_function(creator: Arc<dyn AccumulatorCreator>) -> ReturnTypeFunction {
+pub fn make_return_function(creator: Arc<dyn AggregateFunctionCreator>) -> ReturnTypeFunction {
     Arc::new(move |input_types| {
         creator.set_input_types(input_types.to_vec());
 
@@ -75,7 +82,7 @@ pub fn make_return_function(creator: Arc<dyn AccumulatorCreator>) -> ReturnTypeF
     })
 }
 
-pub fn make_state_function(creator: Arc<dyn AccumulatorCreator>) -> StateTypeFunction {
+pub fn make_state_function(creator: Arc<dyn AggregateFunctionCreator>) -> StateTypeFunction {
     Arc::new(move |_| Ok(Arc::new(creator.state_types())))
 }
 

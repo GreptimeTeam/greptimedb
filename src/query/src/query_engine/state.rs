@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use common_query::prelude::AggregateFunction;
+use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 
@@ -17,6 +18,7 @@ use crate::executor::Runtime;
 pub struct QueryEngineState {
     df_context: ExecutionContext,
     catalog_list: CatalogListRef,
+    aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -42,6 +44,7 @@ impl QueryEngineState {
         Self {
             df_context,
             catalog_list,
+            aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -55,13 +58,21 @@ impl QueryEngineState {
             .insert(udf.name.clone(), Arc::new(udf.into_df_udf()));
     }
 
-    // TODO(LFC): Same as UDF, manage UDAFs by ourself.
-    pub fn register_udaf(&self, udaf: AggregateFunction) {
-        self.df_context
-            .state
-            .lock()
-            .aggregate_functions
-            .insert(udaf.name.clone(), Arc::new(udaf.into()));
+    pub fn aggregate_function(&self, function_name: &str) -> Option<AggregateFunctionMetaRef> {
+        self.aggregate_functions
+            .read()
+            .unwrap()
+            .get(function_name)
+            .cloned()
+    }
+
+    pub fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {
+        // TODO(LFC): Return some error if there exists an aggregate function with the same name.
+        // Simply overwrite the old value for now.
+        self.aggregate_functions
+            .write()
+            .unwrap()
+            .insert(func.name(), func);
     }
 
     #[inline]

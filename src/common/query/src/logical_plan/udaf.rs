@@ -52,14 +52,14 @@ impl PartialEq for AggregateFunction {
 impl AggregateFunction {
     /// Create a new AggregateUDF
     pub fn new(
-        name: &str,
+        name: String,
         signature: Signature,
         return_type: ReturnTypeFunction,
         accumulator: AccumulatorFunctionImpl,
         state_type: StateTypeFunction,
     ) -> Self {
         Self {
-            name: name.to_owned(),
+            name,
             signature,
             return_type,
             accumulator,
