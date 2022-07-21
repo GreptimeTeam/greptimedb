@@ -63,62 +63,17 @@ fn into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
     }
 }
 
-/// return AnnotationInfo with is_nullable and need_coerced both set to false
-/// if type is `_` return datatype is None
-fn parse_type(node: &ast::Expr<()>) -> Result<AnnotationInfo> {
-    match &node.node {
-        ast::ExprKind::Name { id, ctx: _ } => Ok(AnnotationInfo {
-            datatype: into_datatype(id, &node.location)?,
-            is_nullable: false,
-            coerce_into: false,
-        }),
-        _ => Err(InnerError::CoprParse {
-            reason: format!("Expect a type's name, found {:?}", node),
-            loc: Some(node.location),
-        }),
-    }
-}
-
-/// Item => NativeType | into `(` NativeType `)`
+/// Item => NativeType
+/// default to be not nullable
 fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
     match &sub.node {
-        ast::ExprKind::Name { id: _, ctx: _ } => Ok(parse_type(sub)?),
-        ast::ExprKind::Call {
-            func,
-            args,
-            keywords: _,
-        } => {
-            if let ast::ExprKind::Name { id, ctx: _ } = &func.node {
-                ensure!(
-                    id.as_str() == "into",
-                    CoprParseSnafu {
-                        reason: format!(
-                            "Expect only `into(datatype)` or datatype or `None`, found {id}"
-                        ),
-                        loc: Some(sub.location)
-                    }
-                );
-            } else {
-                return Err(InnerError::Other {
-                    reason: format!("Expect type names, found {:?}", &func.node),
-                });
-            };
-            ensure!(
-                args.len() == 1,
-                CoprParseSnafu {
-                    reason: "Expect only one arguement for `into`",
-                    loc: Some(sub.location)
-                }
-            );
-            let mut anno = parse_type(&args[0])?;
-            anno.coerce_into = true;
-            Ok(anno)
-        }
-        _ => Err(InnerError::Other {
-            reason: format!(
-                "Expect types' name or into(<typename>), found {:?}",
-                &sub.node
-            ),
+        ast::ExprKind::Name { id, ctx: _ } => Ok(AnnotationInfo {
+            datatype: into_datatype(id, &sub.location)?,
+            is_nullable: false,
+        }),
+        _ => Err(InnerError::CoprParse {
+            reason: format!("Expect types' name, found {:?}", &sub.node),
+            loc: Some(sub.location),
         }),
     }
 }
@@ -129,7 +84,7 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 ///
 /// TYPE => Item | Item `|` None
 ///
-/// Item => NativeType | into(NativeType)
+/// Item => NativeType
 fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
     if let ast::ExprKind::Subscript {
         value,
@@ -149,8 +104,9 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 }
             )
         } else {
-            return Err(InnerError::Other {
+            return Err(InnerError::CoprParse {
                 reason: format!("Expect \"vector\", found {:?}", &value.node),
+                loc: Some(value.location),
             });
         }
         // i.e: vector[f64]
@@ -185,24 +141,28 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                             keywords: _,
                         } => {
                             if has_ty {
-                                return Err(InnerError::Other { reason: "Expect one typenames(or `into(<typename>)`) and one `None`, not two type names".into() });
+                                return Err(InnerError::CoprParse {
+                                    reason:
+                                        "Expect one typenames and one `None`, not two type names"
+                                            .into(),
+                                    loc: Some(i.location),
+                                });
                             } else {
                                 has_ty = true;
                             }
                         }
                         _ => {
-                            return Err(InnerError::Other {
-                                reason: format!(
-                                    "Expect typename or `None` or `into(<typename>)`, found {:?}",
-                                    &i.node
-                                ),
+                            return Err(InnerError::CoprParse {
+                                reason: format!("Expect typename or `None`, found {:?}", &i.node),
+                                loc: Some(i.location),
                             })
                         }
                     }
                 }
                 if !has_ty {
-                    return Err(InnerError::Other {
+                    return Err(InnerError::CoprParse {
                         reason: "Expect a type name, not two `None`".into(),
+                        loc: Some(slice.location),
                     });
                 }
 
@@ -222,29 +182,30 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                             keywords: _,
                         } => tmp_anno = Some(parse_item(i)?),
                         _ => {
-                            return Err(InnerError::Other {
-                                reason: format!(
-                                    "Expect typename or `None` or `into(<typename>)`, found {:?}",
-                                    &i.node
-                                ),
+                            return Err(InnerError::CoprParse {
+                                reason: format!("Expect typename or `None`, found {:?}", &i.node),
+                                loc: Some(i.location),
                             })
                         }
                     }
                 }
                 // deal with errors anyway in case code above changed but forget to modify
-                let mut tmp_anno = tmp_anno.ok_or(InnerError::Other {
+                let mut tmp_anno = tmp_anno.ok_or(InnerError::CoprParse {
                     reason: "Expect a type name, not two `None`".into(),
+                    loc: Some(slice.location),
                 })?;
                 tmp_anno.is_nullable = is_nullable;
                 Ok(tmp_anno)
             }
-            _ => Err(InnerError::Other {
+            _ => Err(InnerError::CoprParse {
                 reason: format!("Expect type in `vector[...]`, found {:?}", &slice.node),
+                loc: Some(slice.location),
             }),
         }
     } else {
-        Err(InnerError::Other {
+        Err(InnerError::CoprParse {
             reason: format!("Expect type annotation, found {:?}", &sub),
+            loc: Some(sub.location),
         })
     }
 }

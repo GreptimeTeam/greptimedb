@@ -30,8 +30,6 @@ pub struct AnnotationInfo {
     /// if None, use types infered by PyVector
     pub datatype: Option<DataType>,
     pub is_nullable: bool,
-    /// if the result type need to be coerced to given type in `into(<datatype>)`
-    pub coerce_into: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -242,13 +240,11 @@ fn gen_schema(
                 let AnnotationInfo {
                     datatype: ty,
                     is_nullable,
-                    coerce_into: _,
                 } = anno[idx].to_owned().unwrap_or_else(||
                     // default to be not nullable and use DataType infered by PyVector itself
                     AnnotationInfo{
                         datatype: Some(real_ty.to_owned()),
-                        is_nullable: false,
-                        coerce_into: false
+                        is_nullable: false
                     });
                 Field::new(
                     name,
@@ -261,18 +257,18 @@ fn gen_schema(
     )))
 }
 
-/// check type to be correct, if not try cast it to annotated type
-fn check_cast_type(
-    cols: &mut [ArrayRef],
-    schema: &Schema,
-    return_types: &[Option<AnnotationInfo>],
-) -> Result<()> {
-    for ((col, field), anno) in cols.iter_mut().zip(&schema.fields).zip(return_types) {
-        let real_ty = col.data_type();
-        let anno_ty = field.data_type();
-        if let Some(anno) = anno {
+/// check real types and annotation types(if have) is the same, if not try cast columns to annotated type
+fn check_cast_type(cols: &mut [ArrayRef], return_types: &[Option<AnnotationInfo>]) -> Result<()> {
+    for (col, anno) in cols.iter_mut().zip(return_types) {
+        if let Some(AnnotationInfo {
+            datatype: Some(datatype),
+            is_nullable: _,
+        }) = anno
+        {
+            let real_ty = col.data_type();
+            let anno_ty = datatype;
             if real_ty != anno_ty {
-                if anno.coerce_into {
+                {
                     *col = arrow::compute::cast::cast(
                         col.as_ref(),
                         anno_ty,
@@ -283,13 +279,6 @@ fn check_cast_type(
                     )
                     .context(ArrowSnafu)?
                     .into();
-                } else {
-                    return Err(InnerError::Other {
-                        reason: format!(
-                            "Anntation type is {:?}, but real type is {:?}(Maybe add a `into()`?)",
-                            anno_ty, real_ty
-                        ),
-                    });
                 }
             } else {
                 continue;
@@ -431,10 +420,11 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
                 )
             }
         );
-        let schema = gen_schema(&cols, &copr.returns, &copr.return_types)?;
+
         // if cols and schema's data types is not match, first try coerced it to given type(if annotated), if not possible, return Err
-        check_cast_type(&mut cols, &schema, &copr.return_types)?;
+        check_cast_type(&mut cols, &copr.return_types)?;
         // 6. return a assembled DfRecordBatch
+        let schema = gen_schema(&cols, &copr.returns, &copr.return_types)?;
         let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
         Ok(res_rb)
     })
