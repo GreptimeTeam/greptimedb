@@ -4,9 +4,10 @@ use rustpython_parser::{
     ast::{Arguments, Location},
     parser,
 };
+use snafu::ResultExt;
 
 use crate::scalars::python::coprocessor::Coprocessor;
-use crate::scalars::python::error::{ensure, CoprParseSnafu, InnerError, Result};
+use crate::scalars::python::error::{ensure, CoprParseSnafu, InnerError, PyParseSnafu, Result};
 use crate::scalars::python::AnnotationInfo;
 
 /// turn a python list of string in ast form(a `ast::Expr`) of string into a `Vec<String>`
@@ -392,7 +393,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
 
 /// parse script and return `Coprocessor` struct with info extract from ast
 pub fn parse_copr(script: &str) -> Result<Coprocessor> {
-    let python_ast = parser::parse_program(script)?;
+    let python_ast = parser::parse_program(script).context(PyParseSnafu)?;
     ensure!(
         python_ast.len() == 1,
         CoprParseSnafu {

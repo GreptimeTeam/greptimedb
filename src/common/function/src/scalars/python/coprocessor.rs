@@ -14,11 +14,15 @@ use rustpython_parser::{
 };
 use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
+use snafu::ResultExt;
 use vm::builtins::PyTuple;
 use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
 use crate::scalars::python::copr_parse::parse_copr;
-use crate::scalars::python::error::{ensure, CoprParseSnafu, InnerError, OtherSnafu, Result};
+use crate::scalars::python::error::{
+    ensure, ArrowSnafu, CoprParseSnafu, InnerError, OtherSnafu, PyExceptionSerde, PyParseSnafu,
+    Result,
+};
 use crate::scalars::python::type_::{is_instance, PyVector};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +57,7 @@ fn set_loc<T>(node: T, loc: Location) -> Located<T> {
 /// strip type annotation
 fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObject> {
     // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
-    let mut top = parser::parse(script, parser::Mode::Interactive)?;
+    let mut top = parser::parse(script, parser::Mode::Interactive).context(PyParseSnafu)?;
     // erase decorator
     if let ast::Mod::Interactive { body } = &mut top {
         let code = body;
@@ -276,7 +280,8 @@ fn check_cast_type(
                             wrapped: true,
                             partial: true,
                         },
-                    )?
+                    )
+                    .context(ArrowSnafu)?
                     .into();
                 } else {
                     return Err(InnerError::Other {
@@ -407,7 +412,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
                 .map_err(|_| InnerError::Other {
                     reason: "Fail to write to string".into(),
                 })?;
-            return Err(chain.into());
+            return Err(PyExceptionSerde { output: chain }.into());
         } else if let Ok(ret) = run_res {
             ret
         } else {
@@ -430,7 +435,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         // if cols and schema's data types is not match, first try coerced it to given type(if annotated), if not possible, return Err
         check_cast_type(&mut cols, &schema, &copr.return_types)?;
         // 6. return a assembled DfRecordBatch
-        let res_rb = DfRecordBatch::try_new(schema, cols)?;
+        let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
         Ok(res_rb)
     })
 }
