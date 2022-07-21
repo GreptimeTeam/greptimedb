@@ -6,7 +6,7 @@ use rustpython_parser::{
 };
 
 use crate::scalars::python::coprocessor::Coprocessor;
-use crate::scalars::python::error::{ensure, CoprParseSnafu, Error, Result};
+use crate::scalars::python::error::{ensure, CoprParseSnafu, InnerError, Result};
 use crate::scalars::python::AnnotationInfo;
 
 /// turn a python list of string in ast form(a `ast::Expr`) of string into a `Vec<String>`
@@ -21,7 +21,7 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
             {
                 ret.push(v.to_owned())
             } else {
-                return Err(Error::CoprParse {
+                return Err(InnerError::CoprParse {
                     reason: format!(
                         "Expect a list of String, found {:?} in list element",
                         &s.node
@@ -32,7 +32,7 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
         }
         Ok(ret)
     } else {
-        Err(Error::CoprParse {
+        Err(InnerError::CoprParse {
             reason: format!("Expect a list, found {:?}", &lst.node),
             loc: Some(lst.location),
         })
@@ -55,7 +55,7 @@ fn into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
         "f64" => Ok(Some(DataType::Float64)),
         // for any datatype
         "_" => Ok(None),
-        _ => Err(Error::CoprParse {
+        _ => Err(InnerError::CoprParse {
             reason: format!("Unknown datatype: {ty} at {}", loc),
             loc: Some(loc.to_owned()),
         }),
@@ -71,7 +71,7 @@ fn parse_type(node: &ast::Expr<()>) -> Result<AnnotationInfo> {
             is_nullable: false,
             coerce_into: false,
         }),
-        _ => Err(Error::CoprParse {
+        _ => Err(InnerError::CoprParse {
             reason: format!("Expect a type's name, found {:?}", node),
             loc: Some(node.location),
         }),
@@ -98,7 +98,7 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                     }
                 );
             } else {
-                return Err(Error::Other {
+                return Err(InnerError::Other {
                     reason: format!("Expect type names, found {:?}", &func.node),
                 });
             };
@@ -113,7 +113,7 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
             anno.coerce_into = true;
             Ok(anno)
         }
-        _ => Err(Error::Other {
+        _ => Err(InnerError::Other {
             reason: format!(
                 "Expect types' name or into(<typename>), found {:?}",
                 &sub.node
@@ -148,7 +148,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 }
             )
         } else {
-            return Err(Error::Other {
+            return Err(InnerError::Other {
                 reason: format!("Expect \"vector\", found {:?}", &value.node),
             });
         }
@@ -184,13 +184,13 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                             keywords: _,
                         } => {
                             if has_ty {
-                                return Err(Error::Other { reason: "Expect one typenames(or `into(<typename>)`) and one `None`, not two type names".into() });
+                                return Err(InnerError::Other { reason: "Expect one typenames(or `into(<typename>)`) and one `None`, not two type names".into() });
                             } else {
                                 has_ty = true;
                             }
                         }
                         _ => {
-                            return Err(Error::Other {
+                            return Err(InnerError::Other {
                                 reason: format!(
                                     "Expect typename or `None` or `into(<typename>)`, found {:?}",
                                     &i.node
@@ -200,7 +200,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                     }
                 }
                 if !has_ty {
-                    return Err(Error::Other {
+                    return Err(InnerError::Other {
                         reason: "Expect a type name, not two `None`".into(),
                     });
                 }
@@ -221,7 +221,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                             keywords: _,
                         } => tmp_anno = Some(parse_item(i)?),
                         _ => {
-                            return Err(Error::Other {
+                            return Err(InnerError::Other {
                                 reason: format!(
                                     "Expect typename or `None` or `into(<typename>)`, found {:?}",
                                     &i.node
@@ -231,18 +231,18 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                     }
                 }
                 // deal with errors anyway in case code above changed but forget to modify
-                let mut tmp_anno = tmp_anno.ok_or(Error::Other {
+                let mut tmp_anno = tmp_anno.ok_or(InnerError::Other {
                     reason: "Expect a type name, not two `None`".into(),
                 })?;
                 tmp_anno.is_nullable = is_nullable;
                 Ok(tmp_anno)
             }
-            _ => Err(Error::Other {
+            _ => Err(InnerError::Other {
                 reason: format!("Expect type in `vector[...]`, found {:?}", &slice.node),
             }),
         }
     } else {
-        Err(Error::Other {
+        Err(InnerError::Other {
             reason: format!("Expect type annotation, found {:?}", &sub),
         })
     }
@@ -293,7 +293,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                             if arg_names.is_none() {
                                 arg_names = Some(pylist_to_vec(&kw.node.value))
                             } else {
-                                return Err(Error::CoprParse {
+                                return Err(InnerError::CoprParse {
                                     reason: "`args` occur multiple times in decorator's arguements' list.".to_string(),
                                     loc: Some(kw.location)
                                 });
@@ -303,14 +303,14 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                             if ret_names.is_none() {
                                 ret_names = Some(pylist_to_vec(&kw.node.value))
                             } else {
-                                return Err(Error::CoprParse {
+                                return Err(InnerError::CoprParse {
                                     reason: "`returns` occur multiple times in decorator's arguements' list.".to_string(),
                                     loc: Some(kw.location)
                                 });
                             }
                         }
                         _ => {
-                            return Err(Error::CoprParse {
+                            return Err(InnerError::CoprParse {
                                 reason: format!("Expect `args` or `returns`, found `{}`", s),
                                 loc: Some(kw.location),
                             })
@@ -318,7 +318,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                     }
                 }
                 None => {
-                    return Err(Error::CoprParse {
+                    return Err(InnerError::CoprParse {
                         reason: format!(
                             "Expect explictly set both `args` and `returns`, found {:?}",
                             &kw.node
@@ -331,7 +331,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
         let arg_names = if let Some(args) = arg_names {
             args?
         } else {
-            return Err(Error::CoprParse {
+            return Err(InnerError::CoprParse {
                 reason: "Expect `args` keyword".to_string(),
                 loc: Some(decorator.location),
             });
@@ -339,14 +339,14 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
         let ret_names = if let Some(rets) = ret_names {
             rets?
         } else {
-            return Err(Error::CoprParse {
+            return Err(InnerError::CoprParse {
                 reason: "Expect `rets` keyword".to_string(),
                 loc: Some(decorator.location),
             });
         };
         Ok((arg_names, ret_names))
     } else {
-        Err(Error::CoprParse {
+        Err(InnerError::CoprParse {
             reason: format!(
                 "Expect decorator to be a function call(like `@copr(...)`), found {:?}",
                 decorator.node
@@ -471,7 +471,7 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             return_types,
         })
     } else {
-        Err(Error::CoprParse {
+        Err(InnerError::CoprParse {
             reason: format!(
                 "Expect a function definition, found a {:?}",
                 &python_ast[0].node

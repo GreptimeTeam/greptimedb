@@ -9,7 +9,7 @@ use super::*;
 use crate::scalars::python::{
     copr_parse::parse_copr,
     coprocessor::Coprocessor,
-    error::{Error, Result},
+    error::{InnerError, Result},
 };
 type PredicateFn = Option<fn(Result<Coprocessor>) -> bool>;
 type ExecResPredicateFn = Option<fn(Result<DfRecordBatch>)>;
@@ -95,7 +95,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
             Some(|r| {
                 //dbg!(&r);
                 r.is_err()
-                    && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                    && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                         reason.contains("Expect one decorator") && loc == None
                     } else {
                         false
@@ -111,7 +111,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
 "#,
             Some(|r| {
                 r.is_err()
-                    && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                    && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                         reason.contains("Expect a list of String, found ") && loc.is_some()
                     } else {
                         false
@@ -127,7 +127,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
 "#,
             Some(|r| {
                 r.is_err()
-                    && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                    && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                         reason.contains("Expect a list, found ") && loc.is_some()
                     } else {
                         false
@@ -144,7 +144,7 @@ def a(cpu: vector[g32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
             Some(|r| {
                 assert!(
                     r.is_err()
-                        && if let Error::CoprParse { reason, loc: _ } = r.unwrap_err() {
+                        && if let InnerError::CoprParse { reason, loc: _ } = r.unwrap_err() {
                             reason.contains("Unknown datatype:")
                         } else {
                             false
@@ -163,7 +163,7 @@ def a(cpu: vector[f32 | f64], mem: vector[f64])->(vector[into(f64)|None], vector
             Some(|r| {
                 assert!(
                     r.is_err()
-                        && if let Error::Other { reason } = r.unwrap_err() {
+                        && if let InnerError::Other { reason } = r.unwrap_err() {
                             reason.contains("Expect one typenames(or `into(<typename>)`) and one `None`, not two type names")
                         } else {
                             false
@@ -182,7 +182,7 @@ def a(cpu: vector[None | None], mem: vector[f64])->(vector[into(f64)|None], vect
             Some(|r| {
                 assert!(
                     r.is_err()
-                        && if let Error::Other { reason } = r.unwrap_err() {
+                        && if let InnerError::Other { reason } = r.unwrap_err() {
                             reason.contains("Expect a type name, not two `None`")
                         } else {
                             false
@@ -200,7 +200,7 @@ def a(cpu: vector[into(f64|None)], mem: vector[f64])->(vector[into(f64)|None], v
 "#,
             Some(|r| {
                 r.is_err()
-                    && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                    && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                         reason.contains("Expect a type's name, found ") && loc.is_some()
                     } else {
                         false
@@ -216,7 +216,7 @@ def a(cpu: vector[cast(f64)], mem: vector[f64])->(vector[into(f64)|None], vector
 "#,
             Some(|r| {
                 r.is_err()
-                    && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                    && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                         reason
                             .contains("Expect only `into(datatype)` or datatype or `None`, found ")
                             && loc.is_some()
@@ -234,7 +234,7 @@ def a(cpu: vector[into(f64, f32)], mem: vector[f64])->(vector[into(f64)|None], v
 "#,
             Some(|r| {
                 r.is_err()
-                    && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                    && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                         reason.contains("Expect only one arguement for `into`") && loc.is_some()
                     } else {
                         false
@@ -250,7 +250,7 @@ def a(cpu: vec[into(f64)], mem: vector[f64])->(vector[into(f64)|None], vector[in
 "#,
             Some(|r| {
                 r.is_err()
-                    && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                    && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                         reason.contains("Wrong type annotation, expect `vector[...]`, found")
                             && loc.is_some()
                     } else {
@@ -268,7 +268,7 @@ def a(cpu: vector[into(f64)|1], mem: vector[f64])->(vector[into(f64)|None], vect
             Some(|r| {
                 assert!(
                     r.is_err()
-                        && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                        && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                             reason.contains("Expect only typenames and `None`, found")
                                 && loc.is_some()
                         } else {
@@ -290,7 +290,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)]
                 // assert in here seems to be more readable
                 assert!(
                     r.is_err()
-                        && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                        && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                             reason.contains("Expect one and only one python function with `@coprocessor` or `@cpor` decorator")
                                     && loc.is_some()
                         } else {
@@ -311,7 +311,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)]
                 // assert in here seems to be more readable
                 assert!(
                     r.is_err()
-                        && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                        && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                             reason.contains(
                                 "Expect decorator with name `copr` or `coprocessor`, found",
                             ) && loc.is_some()
@@ -333,7 +333,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
                 // assert in here seems to be more readable
                 assert!(
                     r.is_err()
-                        && if let Error::CoprParse { reason, loc } = r.unwrap_err() {
+                        && if let InnerError::CoprParse { reason, loc } = r.unwrap_err() {
                             reason.contains("Expect two keyword argument of `args` and `returns`")
                                 && loc.is_some()
                         } else {
@@ -371,7 +371,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[into(f64)|None], vector[into(
                 // assert in here seems to be more readable
                 assert!(
                     r.is_err()
-                        && if let Error::Other { reason } = r.unwrap_err() {
+                        && if let InnerError::Other { reason } = r.unwrap_err() {
                             reason.contains("Anntation type is ")
                         } else {
                             false

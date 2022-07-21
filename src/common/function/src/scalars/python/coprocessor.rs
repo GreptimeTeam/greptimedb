@@ -18,7 +18,7 @@ use vm::builtins::PyTuple;
 use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
 use crate::scalars::python::copr_parse::parse_copr;
-use crate::scalars::python::error::{ensure, CoprParseSnafu, Error, OtherSnafu, Result};
+use crate::scalars::python::error::{ensure, CoprParseSnafu, InnerError, OtherSnafu, Result};
 use crate::scalars::python::type_::{is_instance, PyVector};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +49,7 @@ fn set_loc<T>(node: T, loc: Location) -> Located<T> {
 ///
 /// The conside is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
 /// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
-/// And add a function call in the end
+/// And add a function call in the end and also
 /// strip type annotation
 fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObject> {
     // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
@@ -90,7 +90,7 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
                 arg.node.annotation = None;
             }
         } else {
-            return Err(Error::CoprParse {
+            return Err(InnerError::CoprParse {
                 reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
                 loc: Some(code[0].location)
             });
@@ -125,7 +125,7 @@ fn strip_append_and_compile(script: &str, copr: &Coprocessor) -> Result<CodeObje
         };
         code.push(set_loc(stmt, loc));
     } else {
-        return Err(Error::CoprParse {
+        return Err(InnerError::CoprParse {
             reason: format!("Expect statement in script, found: {:?}", top),
             loc: None,
         });
@@ -171,7 +171,7 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
                 v
             }
             _ => {
-                return Err(Error::Other {
+                return Err(InnerError::Other {
                     reason: format!(
                         "Unsupport data type at column {idx}: {:?} for coprocessor",
                         arg.data_type()
@@ -189,21 +189,21 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
 fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>> {
     let mut cols: Vec<ArrayRef> = Vec::new();
     if is_instance(obj, PyTuple::class(vm).into(), vm) {
-        let tuple = obj.payload::<PyTuple>().ok_or(Error::Other {
+        let tuple = obj.payload::<PyTuple>().ok_or(InnerError::Other {
             reason: format!("can't cast obj {:?} to PyTuple)", obj),
         })?;
         for obj in tuple {
             if is_instance(obj, PyVector::class(vm).into(), vm) {
-                let pyv = obj.payload::<PyVector>().ok_or(Error::Other {
+                let pyv = obj.payload::<PyVector>().ok_or(InnerError::Other {
                     reason: format!("can't cast obj {:?} to PyVector", obj),
                 })?;
                 cols.push(pyv.to_arrow_array())
             } else {
-                return Err(Error::Other { reason: format!("Expect all element in returning tuple to be vector, found one of the element is {:?}", obj) });
+                return Err(InnerError::Other { reason: format!("Expect all element in returning tuple to be vector, found one of the element is {:?}", obj) });
             }
         }
     } else if is_instance(obj, PyVector::class(vm).into(), vm) {
-        let pyv = obj.payload::<PyVector>().ok_or(Error::Other {
+        let pyv = obj.payload::<PyVector>().ok_or(InnerError::Other {
             reason: format!("can't cast obj {:?} to PyVector", obj),
         })?;
         cols.push(pyv.to_arrow_array())
@@ -279,7 +279,7 @@ fn check_cast_type(
                     )?
                     .into();
                 } else {
-                    return Err(Error::Other {
+                    return Err(InnerError::Other {
                         reason: format!(
                             "Anntation type is {:?}, but real type is {:?}(Maybe add a `into()`?)",
                             anno_ty, real_ty
@@ -390,7 +390,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
                 .locals
                 .as_object()
                 .set_item(name, vm.new_pyobj(vector), vm)
-                .map_err(|err| Error::Other {
+                .map_err(|err| InnerError::Other {
                     reason: format!(
                         "fail to set item{} in python scope, PyExpection: {:?}",
                         name, err
@@ -401,7 +401,18 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         let code_obj = strip_append_and_compile(script, &copr)?;
         let code_obj = vm.ctx.new_code(code_obj);
         let run_res = vm.run_code_obj(code_obj, scope);
-        let ret = run_res?;
+        let ret = if let Err(excep) = run_res {
+            let mut chain = String::new();
+            vm.write_exception(&mut chain, &excep)
+                .map_err(|_| InnerError::Other {
+                    reason: "Fail to write to string".into(),
+                })?;
+            return Err(chain.into());
+        } else if let Ok(ret) = run_res {
+            ret
+        } else {
+            unreachable!()
+        };
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
         let mut cols: Vec<ArrayRef> = into_columns(&ret, vm)?;
