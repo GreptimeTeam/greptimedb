@@ -21,17 +21,28 @@ use crate::write_batch::WriteBatch;
 
 pub type RegionWriterRef = Arc<RegionWriter>;
 
+// TODO(yingwen): Add benches for write and support group commit to improve write throughput.
+
+/// Region writer manages all write operations to the region.
 pub struct RegionWriter {
+    /// Inner writer guarded by write lock, the write lock is used to ensure
+    /// all write operations are serialized.
     inner: Mutex<WriterInner>,
+    /// Version lock, protects read-write-update to region `Version`.
+    ///
+    /// Increasing committed sequence should be guarded by this lock.
+    version_mutex: Mutex<()>,
 }
 
 impl RegionWriter {
     pub fn new(memtable_builder: MemtableBuilderRef) -> RegionWriter {
         RegionWriter {
             inner: Mutex::new(WriterInner::new(memtable_builder)),
+            version_mutex: Mutex::new(()),
         }
     }
 
+    /// Write to region in the write lock.
     pub async fn write<S: LogStore>(
         &self,
         ctx: &WriteContext,
@@ -39,17 +50,48 @@ impl RegionWriter {
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<WriteResponse> {
         let mut inner = self.inner.lock().await;
-        inner.write(ctx, request, writer_ctx).await
+        inner
+            .write(&self.version_mutex, ctx, request, writer_ctx)
+            .await
     }
 
+    /// Apply version edit.
     pub async fn apply_version_edit<S: LogStore>(
         &self,
         wal: &Wal<S>,
         edit: VersionEdit,
         shared: &SharedDataRef,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        inner.apply_version_edit(wal, edit, shared).await
+        // HACK: We won't acquire the write lock here because write stall would hold
+        // write lock thus we have no chance to get the lock and apply the version edit.
+        // So we add a version lock to ensure modification to `VersionControl` is
+        // serialized.
+        let version_control = &shared.version_control;
+
+        let _lock = self.version_mutex.lock().await;
+        let next_sequence = version_control.committed_sequence() + 1;
+
+        self.persist_manifest_version(wal, next_sequence, &edit)
+            .await?;
+
+        version_control.apply_edit(edit);
+
+        version_control.set_committed_sequence(next_sequence);
+
+        Ok(())
+    }
+
+    async fn persist_manifest_version<S: LogStore>(
+        &self,
+        wal: &Wal<S>,
+        seq: SequenceNumber,
+        edit: &VersionEdit,
+    ) -> Result<()> {
+        let header = WalHeader::with_last_manifest_version(edit.manifest_version);
+
+        wal.write_to_wal(seq, header, Payload::None).await?;
+
+        Ok(())
     }
 }
 
@@ -85,13 +127,13 @@ impl WriterInner {
         }
     }
 
-    // TODO(yingwen): Support group commit so we can avoid taking mutable reference.
     /// Write `WriteBatch` to region, now the schema of batch needs to be validated outside.
     ///
     /// Mutable reference of writer ensure no other reference of this writer can modify the
     /// version control (write is exclusive).
     async fn write<S: LogStore>(
         &mut self,
+        version_mutex: &Mutex<()>,
         _ctx: &WriteContext,
         request: WriteBatch,
         writer_ctx: WriterContext<'_, S>,
@@ -102,6 +144,7 @@ impl WriterInner {
         let version_control = writer_ctx.version_control();
         let version = version_control.current();
 
+        let _lock = version_mutex.lock().await;
         let committed_sequence = version_control.committed_sequence();
         // Sequence for current write batch.
         let next_sequence = committed_sequence + 1;
@@ -214,6 +257,10 @@ impl WriterInner {
             // However the last flush job may fail, in which case, we just return error
             // and abort current write request. The flush handle is left empty, so the next
             // time we still have chance to trigger a new flush.
+            logging::info!("Write stall, region: {}", shared.name);
+
+            // TODO(yingwen): We should release the write lock during waiting flush done, which
+            // needs something like async condvar.
             flush_handle.join().await.map_err(|e| {
                 logging::error!(
                     "Previous flush job failed, region: {}, err: {}",
@@ -246,39 +293,6 @@ impl WriterInner {
 
         let flush_handle = flush_scheduler.schedule_flush(Box::new(flush_req)).await?;
         self.flush_handle = Some(flush_handle);
-
-        Ok(())
-    }
-
-    async fn apply_version_edit<S: LogStore>(
-        &mut self,
-        wal: &Wal<S>,
-        edit: VersionEdit,
-        shared: &SharedDataRef,
-    ) -> Result<()> {
-        let version_control = &shared.version_control;
-
-        let next_sequence = version_control.committed_sequence() + 1;
-
-        self.persist_manifest_version(wal, next_sequence, &edit)
-            .await?;
-
-        version_control.apply_edit(edit);
-
-        version_control.set_committed_sequence(next_sequence);
-
-        Ok(())
-    }
-
-    async fn persist_manifest_version<S: LogStore>(
-        &self,
-        wal: &Wal<S>,
-        seq: SequenceNumber,
-        edit: &VersionEdit,
-    ) -> Result<()> {
-        let header = WalHeader::with_last_manifest_version(edit.manifest_version);
-
-        wal.write_to_wal(seq, header, Payload::None).await?;
 
         Ok(())
     }
