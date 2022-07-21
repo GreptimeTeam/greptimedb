@@ -194,6 +194,11 @@ impl Version {
 
         self.ssts = Arc::new(merged_ssts);
     }
+
+    #[inline]
+    pub fn manifest_version(&self) -> ManifestVersion {
+        self.manifest_version
+    }
 }
 
 #[cfg(test)]

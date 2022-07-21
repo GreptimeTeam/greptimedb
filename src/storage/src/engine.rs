@@ -21,11 +21,11 @@ use crate::sst::FsAccessLayer;
 use crate::wal::Wal;
 
 /// [StorageEngine] implementation.
-pub struct EngineImpl<S> {
+pub struct EngineImpl<S: LogStore> {
     inner: Arc<EngineInner<S>>,
 }
 
-impl<S> Clone for EngineImpl<S> {
+impl<S: LogStore> Clone for EngineImpl<S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -63,7 +63,7 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
     }
 }
 
-impl<S> EngineImpl<S> {
+impl<S: LogStore> EngineImpl<S> {
     pub async fn new(config: EngineConfig, log_store: Arc<S>) -> Result<Self> {
         Ok(Self {
             inner: Arc::new(EngineInner::new(config, log_store).await?),
@@ -113,13 +113,13 @@ impl SharedData {
 
 type RegionMap<S> = HashMap<String, RegionImpl<S>>;
 
-struct EngineInner<S> {
+struct EngineInner<S: LogStore> {
     log_store: Arc<S>,
     regions: RwLock<RegionMap<S>>,
     shared: SharedData,
 }
 
-impl<S> EngineInner<S> {
+impl<S: LogStore> EngineInner<S> {
     pub async fn new(config: EngineConfig, log_store: Arc<S>) -> Result<Self> {
         Ok(Self {
             log_store,
@@ -127,9 +127,7 @@ impl<S> EngineInner<S> {
             shared: SharedData::new(config).await?,
         })
     }
-}
 
-impl<S: LogStore> EngineInner<S> {
     async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl<S>> {
         {
             let regions = self.regions.read().unwrap();
@@ -146,7 +144,7 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let wal = Wal::new(region_name.clone(), self.log_store.clone());
+        let wal = Wal::new(region_id, region_name.clone(), self.log_store.clone());
         let sst_dir = &self.shared.region_sst_dir(&region_name);
         let sst_layer = Arc::new(FsAccessLayer::new(
             sst_dir,
