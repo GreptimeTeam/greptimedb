@@ -21,9 +21,14 @@ use datatypes::types::PrimitiveType;
 use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
+use query::catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use query::catalog::schema::SchemaProvider;
+use query::catalog::{CatalogList, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::error::Result;
 use query::query_engine::Output;
+use query::QueryEngineFactory;
 use snafu::ResultExt;
+use table::TableRef;
 
 use crate::testing_table::TestingTable;
 
@@ -220,7 +225,7 @@ where
         Arc::new(PrimitiveVector::<T>::from_vec(numbers.clone())),
     ));
 
-    let factory = testing_table::new_query_engine_factory(table_name.clone(), testing_table);
+    let factory = new_query_engine_factory(table_name.clone(), testing_table);
     let engine = factory.query_engine();
 
     engine.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
@@ -249,4 +254,16 @@ where
     let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
     assert_eq!(expected, pretty_print);
     Ok(())
+}
+
+pub fn new_query_engine_factory(table_name: String, table: TableRef) -> QueryEngineFactory {
+    let schema_provider = Arc::new(MemorySchemaProvider::new());
+    let catalog_provider = Arc::new(MemoryCatalogProvider::new());
+    let catalog_list = Arc::new(MemoryCatalogList::default());
+
+    schema_provider.register_table(table_name, table).unwrap();
+    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);
+    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
+
+    QueryEngineFactory::new(catalog_list)
 }

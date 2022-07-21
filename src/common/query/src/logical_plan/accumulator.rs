@@ -94,7 +94,7 @@ pub struct DfAccumulatorAdaptor(pub Box<dyn Accumulator>);
 impl DfAccumulator for DfAccumulatorAdaptor {
     fn state(&self) -> DfResult<Vec<ScalarValue>> {
         let state = self.0.state()?;
-        Ok(state.into_iter().map(|x| ScalarValue::from(x)).collect())
+        Ok(state.into_iter().map(ScalarValue::from).collect())
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> DfResult<()> {

@@ -9,12 +9,8 @@ use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures::task::{Context, Poll};
 use futures::Stream;
-use query::catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use query::catalog::schema::SchemaProvider;
-use query::catalog::{CatalogList, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use query::QueryEngineFactory;
 use table::error::Result;
-use table::{Table, TableRef};
+use table::Table;
 
 #[derive(Debug, Clone)]
 pub struct TestingTable {
@@ -74,16 +70,4 @@ impl Stream for TestingRecordsStream {
             None => Poll::Ready(None),
         }
     }
-}
-
-pub fn new_query_engine_factory(table_name: String, table: TableRef) -> QueryEngineFactory {
-    let schema_provider = Arc::new(MemorySchemaProvider::new());
-    let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogList::default());
-
-    schema_provider.register_table(table_name, table).unwrap();
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);
-    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
-
-    QueryEngineFactory::new(catalog_list)
 }

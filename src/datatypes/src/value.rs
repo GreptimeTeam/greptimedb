@@ -196,7 +196,7 @@ impl From<Value> for ScalarValue {
             Value::Null => ScalarValue::Boolean(None),
             Value::List(v) => ScalarValue::List(
                 v.items
-                    .map(|vs| Box::new(vs.into_iter().map(|v| ScalarValue::from(v)).collect())),
+                    .map(|vs| Box::new(vs.into_iter().map(ScalarValue::from).collect())),
                 Box::new(v.datatype.as_arrow_type()),
             ),
         }
@@ -205,6 +205,8 @@ impl From<Value> for ScalarValue {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListValue {
+    /// List of nested Values (boxed to reduce size_of(Value))
+    #[allow(clippy::box_collection)]
     items: Option<Box<Vec<Value>>>,
     /// Inner values datatype, to distinguish empty lists of different datatypes.
     /// Restricted by DataFusion, cannot use null datatype for empty list.

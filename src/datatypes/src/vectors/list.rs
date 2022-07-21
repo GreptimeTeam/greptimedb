@@ -74,10 +74,12 @@ impl Vector for ListVector {
 
     fn get(&self, index: usize) -> Value {
         let array = &self.array.value(index);
-        let vector = VectorHelper::try_into_vector(array).expect(&format!(
-            "arrow array with datatype {:?} cannot converted to our vector",
-            array.data_type()
-        ));
+        let vector = VectorHelper::try_into_vector(array).unwrap_or_else(|_| {
+            panic!(
+                "arrow array with datatype {:?} cannot converted to our vector",
+                array.data_type()
+            )
+        });
         let values = (0..vector.len())
             .map(|i| vector.get(i))
             .collect::<Vec<Value>>();
@@ -229,9 +231,7 @@ mod tests {
         arrow_array.try_extend(data).unwrap();
         let arrow_array: ArrowListArray = arrow_array.into();
 
-        let list_vector = ListVector {
-            array: arrow_array.clone(),
-        };
+        let list_vector = ListVector { array: arrow_array };
         let mut iter = list_vector.values_iter();
         assert_eq!(
             "Int64[1, 2, 3]",

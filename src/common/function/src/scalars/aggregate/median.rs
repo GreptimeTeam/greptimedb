@@ -121,7 +121,7 @@ where
         for state in states.values_iter() {
             let state = state.context(FromScalarValueSnafu)?;
             // merging state is simply accumulate stored numbers from others', so just call update
-            self.update_batch(&vec![state])?
+            self.update_batch(&[state])?
         }
         Ok(())
     }
