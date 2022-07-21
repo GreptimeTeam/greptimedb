@@ -431,7 +431,7 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             returns: ret_names,
             arg_types,
             return_types,
-            script: script.to_owned()
+            script: script.to_owned(),
         })
     } else {
         Err(InnerError::CoprParse {

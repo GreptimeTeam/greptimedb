@@ -16,7 +16,7 @@ type ExecResPredicateFn = Option<fn(Result<DfRecordBatch>)>;
 
 #[test]
 fn testsuite_parse() {
-    let correct_script =             r#"
+    let correct_script = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem

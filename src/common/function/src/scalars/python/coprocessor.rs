@@ -185,10 +185,7 @@ impl Coprocessor {
     }
 
     /// check real types and annotation types(if have) is the same, if not try cast columns to annotated type
-    fn check_cast_type(
-        &self,
-        cols: &mut [ArrayRef]
-    ) -> Result<()> {
+    fn check_cast_type(&self, cols: &mut [ArrayRef]) -> Result<()> {
         let return_types = &self.return_types;
         for (col, anno) in cols.iter_mut().zip(return_types) {
             if let Some(AnnotationInfo {
@@ -408,7 +405,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
                     })?;
                 return Err(PyExceptionSerde { output: chain }.into());
             }
-            Ok(ret) => ret
+            Ok(ret) => ret,
         };
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
