@@ -1,4 +1,5 @@
-use prost::{DecodeError, Message};
+pub use prost::DecodeError;
+use prost::Message;
 
 use crate::v1::InsertBatch;
 

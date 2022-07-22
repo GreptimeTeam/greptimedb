@@ -14,7 +14,7 @@ use table::requests::CreateTableRequest;
 use table_engine::engine::MitoEngine;
 
 use crate::error::{CreateTableSnafu, ExecuteSqlSnafu, InsertSnafu, Result, TableNotFoundSnafu};
-use crate::server::grpc::insert::insert_to_request;
+use crate::server::grpc::insert::insertion_expr_to_request;
 use crate::sql::SqlHandler;
 
 type DefaultEngine = MitoEngine<EngineImpl>;
@@ -52,13 +52,14 @@ impl Instance {
             .unwrap()
             .schema(DEFAULT_SCHEMA_NAME)
             .unwrap();
-        let insert = insert_to_request(schema_provider.clone(), insert_expr.clone())?;
-        let table_name = insert_expr.table_name.clone();
+
+        let table_name = &insert_expr.table_name.clone();
         let table = schema_provider
-            .table(&table_name)
-            .context(TableNotFoundSnafu {
-                table_name: table_name.clone(),
-            })?;
+            .table(table_name)
+            .context(TableNotFoundSnafu { table_name })?;
+
+        let insert = insertion_expr_to_request(schema_provider.clone(), insert_expr)?;
+
         let affected_rows = table
             .insert(insert)
             .await
