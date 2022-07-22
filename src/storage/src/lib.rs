@@ -7,14 +7,14 @@ pub mod config;
 mod engine;
 pub mod error;
 mod flush;
-pub mod manifest;
-pub mod memtable;
-pub mod metadata;
+mod manifest;
+mod memtable;
+mod metadata;
 mod proto;
 mod region;
 mod snapshot;
 mod sst;
-pub mod sync;
+mod sync;
 #[cfg(test)]
 mod test_util;
 mod version;

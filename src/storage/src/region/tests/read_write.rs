@@ -12,9 +12,17 @@ use store_api::storage::{
 };
 use tempdir::TempDir;
 
-use crate::region::RegionImpl;
+use crate::region::{RegionImpl, RegionMetadata};
 use crate::test_util::{self, config_util, descriptor_util::RegionDescBuilder, write_batch_util};
 use crate::write_batch::{PutData, WriteBatch};
+
+pub fn new_metadata(region_name: &str, enable_version_column: bool) -> RegionMetadata {
+    let desc = RegionDescBuilder::new(region_name)
+        .enable_version_column(enable_version_column)
+        .push_value_column(("v1", LogicalTypeId::Int64, true))
+        .build();
+    desc.try_into().unwrap()
+}
 
 /// Create a new region for read/write test
 async fn new_region_for_rw(
@@ -24,13 +32,9 @@ async fn new_region_for_rw(
     let region_id = 0;
     let region_name = "region-rw-0";
 
-    let desc = RegionDescBuilder::new(region_name)
-        .enable_version_column(enable_version_column)
-        .push_value_column(("v1", LogicalTypeId::Int64, true))
-        .build();
-    let metadata = desc.try_into().unwrap();
+    let metadata = new_metadata(region_name, enable_version_column);
 
-    let store_config = config_util::new_store_config(&store_dir, region_id, &region_name).await;
+    let store_config = config_util::new_store_config(store_dir, region_id, region_name).await;
 
     RegionImpl::new(region_id, region_name.to_string(), metadata, store_config)
 }
@@ -87,7 +91,7 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
 }
 
 /// Test region without considering version column.
-struct Tester {
+pub struct Tester {
     region: RegionImpl<NoopLogStore>,
     write_ctx: WriteContext,
     read_ctx: ReadContext,
@@ -97,6 +101,10 @@ impl Tester {
     async fn new(store_dir: &str) -> Tester {
         let region = new_region_for_rw(store_dir, false).await;
 
+        Tester::with_region(region)
+    }
+
+    pub fn with_region(region: RegionImpl<NoopLogStore>) -> Tester {
         Tester {
             region,
             write_ctx: WriteContext::default(),
@@ -107,7 +115,7 @@ impl Tester {
     /// Put without version specified.
     ///
     /// Format of data: (timestamp, v1), timestamp is key, v1 is value.
-    async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+    pub async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
         // Build a batch without version.
         let mut batch = new_write_batch_for_test(false);
         let put_data = new_put_data(data);

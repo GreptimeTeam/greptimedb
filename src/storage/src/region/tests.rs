@@ -27,7 +27,7 @@ async fn test_new_region() {
         .to_string_lossy()
         .to_string();
 
-    let store_config = config_util::new_store_config(&store_dir, region_id, &region_name).await;
+    let store_config = config_util::new_store_config(&store_dir, region_id, region_name).await;
 
     let region = RegionImpl::new(region_id, region_name.to_string(), metadata, store_config);
 
