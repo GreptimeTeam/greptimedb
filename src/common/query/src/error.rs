@@ -31,6 +31,9 @@ pub enum InnerError {
 
     #[snafu(display("Failed to create accumulator: {}", err_msg))]
     CreateAccumulator { err_msg: String },
+
+    #[snafu(display("Failed to downcast vector: {}", err_msg))]
+    DowncastVector { err_msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -38,9 +41,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for InnerError {
     fn status_code(&self) -> StatusCode {
         match self {
-            InnerError::ExecuteFunction { .. } | InnerError::CreateAccumulator { .. } => {
-                StatusCode::EngineExecuteQuery
-            }
+            InnerError::ExecuteFunction { .. }
+            | InnerError::CreateAccumulator { .. }
+            | InnerError::DowncastVector { .. } => StatusCode::EngineExecuteQuery,
             InnerError::IntoVector { source, .. } => source.status_code(),
             InnerError::FromScalarValue { source } => source.status_code(),
         }

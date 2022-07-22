@@ -52,23 +52,23 @@ pub trait AggregateFunctionCreator: Send + Sync + Debug {
     fn creator(&self) -> AccumulatorCreatorFunction;
 
     /// Get the input data type of the Accumulator.
-    fn input_types(&self) -> Vec<ConcreteDataType>;
+    fn input_types(&self) -> Result<Vec<ConcreteDataType>>;
 
     /// Store the input data type that is provided by DataFusion at runtime.
-    fn set_input_types(&self, input_types: Vec<ConcreteDataType>);
+    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> Result<()>;
 
     /// Get the Accumulator's output data type.
-    fn output_type(&self) -> ConcreteDataType;
+    fn output_type(&self) -> Result<ConcreteDataType>;
 
     /// Get the Accumulator's state data types.
-    fn state_types(&self) -> Vec<ConcreteDataType>;
+    fn state_types(&self) -> Result<Vec<ConcreteDataType>>;
 }
 
 pub fn make_accumulator_function(
     creator: Arc<dyn AggregateFunctionCreator>,
 ) -> AccumulatorFunctionImpl {
     Arc::new(move || {
-        let input_types = creator.input_types();
+        let input_types = creator.input_types()?;
         let creator = creator.creator();
         creator(&input_types)
     })
@@ -76,14 +76,15 @@ pub fn make_accumulator_function(
 
 pub fn make_return_function(creator: Arc<dyn AggregateFunctionCreator>) -> ReturnTypeFunction {
     Arc::new(move |input_types| {
-        creator.set_input_types(input_types.to_vec());
+        creator.set_input_types(input_types.to_vec())?;
 
-        Ok(Arc::new(creator.output_type()))
+        let output_type = creator.output_type()?;
+        Ok(Arc::new(output_type))
     })
 }
 
 pub fn make_state_function(creator: Arc<dyn AggregateFunctionCreator>) -> StateTypeFunction {
-    Arc::new(move |_| Ok(Arc::new(creator.state_types())))
+    Arc::new(move |_| Ok(Arc::new(creator.state_types()?)))
 }
 
 /// A wrapper newtype for our Accumulator to DataFusion's Accumulator,

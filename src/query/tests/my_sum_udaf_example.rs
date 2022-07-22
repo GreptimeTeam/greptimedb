@@ -82,16 +82,16 @@ impl AggregateFunctionCreator for MySumAccumulatorCreator {
         creator
     }
 
-    fn input_types(&self) -> Vec<ConcreteDataType> {
-        self.input_type
+    fn input_types(&self) -> QueryResult<Vec<ConcreteDataType>> {
+        Ok(self.input_type
             .load()
             .as_ref()
             .expect("input_type is not present, check if DataFusion has changed its UDAF execution logic")
             .as_ref()
-            .clone()
+            .clone())
     }
 
-    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) {
+    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> QueryResult<()> {
         let old = self.input_type.swap(Some(Arc::new(input_types.clone())));
         if let Some(old) = old {
             assert_eq!(old.len(), input_types.len());
@@ -99,14 +99,15 @@ impl AggregateFunctionCreator for MySumAccumulatorCreator {
                 assert_eq!(x, y, "input type {:?} != {:?}, check if DataFusion has changed its UDAF execution logic", x, y)
             );
         }
+        Ok(())
     }
 
-    fn output_type(&self) -> ConcreteDataType {
-        let input_type = &self.input_types()[0];
+    fn output_type(&self) -> QueryResult<ConcreteDataType> {
+        let input_type = &self.input_types()?[0];
         with_match_primitive_type_id!(
             input_type.logical_type_id(),
             |$S| {
-                PrimitiveType::<<$S as Primitive>::LargestType>::default().logical_type_id().data_type()
+                Ok(PrimitiveType::<<$S as Primitive>::LargestType>::default().logical_type_id().data_type())
             },
             {
                 unreachable!()
@@ -114,8 +115,8 @@ impl AggregateFunctionCreator for MySumAccumulatorCreator {
         )
     }
 
-    fn state_types(&self) -> Vec<ConcreteDataType> {
-        vec![self.output_type()]
+    fn state_types(&self) -> QueryResult<Vec<ConcreteDataType>> {
+        Ok(vec![self.output_type()?])
     }
 }
 

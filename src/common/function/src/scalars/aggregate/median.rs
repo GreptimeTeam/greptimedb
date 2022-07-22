@@ -3,15 +3,18 @@ use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use common_query::error::{CreateAccumulatorSnafu, FromScalarValueSnafu, Result};
+use common_query::error::{
+    CreateAccumulatorSnafu, DowncastVectorSnafu, ExecuteFunctionSnafu, FromScalarValueSnafu, Result,
+};
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
+use datafusion_common::DataFusionError;
 use datatypes::prelude::*;
 use datatypes::value::ListValue;
 use datatypes::vectors::{ConstantVector, ListVector};
 use datatypes::with_match_ordered_primitive_type_id;
 use num::NumCast;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 // This median calculation algorithm's details can be found at
 // https://leetcode.cn/problems/find-median-from-data-stream/
@@ -121,7 +124,15 @@ where
         // The states here are returned by the `state` method. Since we only returned a vector
         // with one value in that method, `states[0]` is fine.
         let states = &states[0];
-        let states = states.as_any().downcast_ref::<ListVector>().unwrap();
+        let states = states
+            .as_any()
+            .downcast_ref::<ListVector>()
+            .with_context(|| DowncastVectorSnafu {
+                err_msg: format!(
+                    "expect ListVector, got vector type {}",
+                    states.vector_type_name()
+                ),
+            })?;
         for state in states.values_iter() {
             let state = state.context(FromScalarValueSnafu)?;
             // merging state is simply accumulate stored numbers from others', so just call update
@@ -148,6 +159,7 @@ where
             // unwrap is safe because greater heap len >= not_greater heap len, which is > 0
             let greater = self.greater.peek().unwrap();
 
+            // the following three NumCast's `unwrap`s are safe because T is primitive
             let not_greater_v: f64 = NumCast::from(not_greater).unwrap();
             let greater_v: f64 = NumCast::from(greater.0).unwrap();
             let median: T = NumCast::from((not_greater_v + greater_v) / 2.0).unwrap();
@@ -159,7 +171,7 @@ where
 
 #[derive(Debug, Default)]
 pub struct MedianAccumulatorCreator {
-    input_type: ArcSwapOption<Vec<ConcreteDataType>>,
+    input_types: ArcSwapOption<Vec<ConcreteDataType>>,
 }
 
 impl AggregateFunctionCreator for MedianAccumulatorCreator {
@@ -183,32 +195,48 @@ impl AggregateFunctionCreator for MedianAccumulatorCreator {
         creator
     }
 
-    fn input_types(&self) -> Vec<ConcreteDataType> {
-        self.input_type
-            .load()
-            .as_ref()
-            .expect("input_type is not present, check if DataFusion has changed its UDAF execution logic")
-            .as_ref()
-            .clone()
-    }
-
-    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) {
-        let old = self.input_type.swap(Some(Arc::new(input_types.clone())));
-        if let Some(old) = old {
-            assert_eq!(old.len(), input_types.len());
-            old.iter().zip(input_types.iter()).for_each(|(x, y)|
-                assert_eq!(x, y, "input type {:?} != {:?}, check if DataFusion has changed its UDAF execution logic", x, y)
-            );
+    fn input_types(&self) -> Result<Vec<ConcreteDataType>> {
+        let input_types = self.input_types.load();
+        if input_types.is_none() {
+            return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
         }
+        Ok(input_types.as_ref().unwrap().as_ref().clone())
     }
 
-    fn output_type(&self) -> ConcreteDataType {
-        self.input_types().into_iter().next().unwrap()
+    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> Result<()> {
+        let old = self.input_types.swap(Some(Arc::new(input_types.clone())));
+        if let Some(old) = old {
+            if old.len() != input_types.len() {
+                return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
+            }
+            for (x, y) in old.iter().zip(input_types.iter()) {
+                if x != y {
+                    return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
+                }
+            }
+        }
+        Ok(())
     }
 
-    fn state_types(&self) -> Vec<ConcreteDataType> {
-        vec![ConcreteDataType::list_datatype(self.output_type())]
+    fn output_type(&self) -> Result<ConcreteDataType> {
+        let input_types = self.input_types()?;
+        if input_types.len() != 1 {
+            return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
+        }
+        // unwrap is safe because we have checked input_types len must equals 1
+        Ok(input_types.into_iter().next().unwrap())
     }
+
+    fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
+        Ok(vec![ConcreteDataType::list_datatype(self.output_type()?)])
+    }
+}
+
+fn datafusion_internal_error() -> DataFusionError {
+    DataFusionError::Internal(
+        "Illegal input_types status, check if DataFusion has changed its UDAF execution logic."
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
