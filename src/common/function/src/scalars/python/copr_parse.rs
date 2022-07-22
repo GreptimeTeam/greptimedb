@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use arrow::datatypes::DataType;
 use rustpython_parser::{
     ast,
@@ -244,39 +246,25 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                 loc: Some(func.location)
             }
         );
-        let mut arg_names = None;
-        let mut ret_names = None;
+        let avail_key = HashSet::from(["args", "returns"]);
+        let mut kw_map = HashMap::new();
         for kw in keywords {
             match &kw.node.arg {
                 Some(s) => {
                     let s = s.as_str();
-                    match s {
-                        "args" => {
-                            if arg_names.is_none() {
-                                arg_names = Some(pylist_to_vec(&kw.node.value))
-                            } else {
-                                return Err(InnerError::CoprParse {
-                                    reason: "`args` occur multiple times in decorator's arguements' list.".to_string(),
-                                    loc: Some(kw.location)
-                                });
-                            }
-                        }
-                        "returns" => {
-                            if ret_names.is_none() {
-                                ret_names = Some(pylist_to_vec(&kw.node.value))
-                            } else {
-                                return Err(InnerError::CoprParse {
-                                    reason: "`returns` occur multiple times in decorator's arguements' list.".to_string(),
-                                    loc: Some(kw.location)
-                                });
-                            }
-                        }
-                        _ => {
+                    if !kw_map.contains_key(s){
+                        if !avail_key.contains(s){
                             return Err(InnerError::CoprParse {
-                                reason: format!("Expect `args` or `returns`, found `{}`", s),
+                                reason: format!("Expect one of {:?}, found `{}`", &avail_key,  s),
                                 loc: Some(kw.location),
                             })
                         }
+                        kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
+                    } else {
+                        return Err(InnerError::CoprParse {
+                            reason: format!("`{s}` occur multiple times in decorator's arguements' list."),
+                            loc: Some(kw.location)
+                        });
                     }
                 }
                 None => {
@@ -290,19 +278,19 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                 }
             }
         }
-        let arg_names = if let Some(args) = arg_names {
-            args?
+        let arg_names = if let Some(args) = kw_map.remove("args") {
+            args
         } else {
             return Err(InnerError::CoprParse {
-                reason: "Expect `args` keyword".to_string(),
+                reason: "Expect `args` keyword".into(),
                 loc: Some(decorator.location),
             });
         };
-        let ret_names = if let Some(rets) = ret_names {
-            rets?
+        let ret_names = if let Some(rets) = kw_map.remove("returns") {
+            rets
         } else {
             return Err(InnerError::CoprParse {
-                reason: "Expect `rets` keyword".to_string(),
+                reason: "Expect `rets` keyword".into(),
                 loc: Some(decorator.location),
             });
         };
