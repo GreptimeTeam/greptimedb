@@ -252,18 +252,20 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
             match &kw.node.arg {
                 Some(s) => {
                     let s = s.as_str();
-                    if !kw_map.contains_key(s){
-                        if !avail_key.contains(s){
+                    if !kw_map.contains_key(s) {
+                        if !avail_key.contains(s) {
                             return Err(InnerError::CoprParse {
-                                reason: format!("Expect one of {:?}, found `{}`", &avail_key,  s),
+                                reason: format!("Expect one of {:?}, found `{}`", &avail_key, s),
                                 loc: Some(kw.location),
-                            })
+                            });
                         }
                         kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
                     } else {
                         return Err(InnerError::CoprParse {
-                            reason: format!("`{s}` occur multiple times in decorator's arguements' list."),
-                            loc: Some(kw.location)
+                            reason: format!(
+                                "`{s}` occur multiple times in decorator's arguements' list."
+                            ),
+                            loc: Some(kw.location),
                         });
                     }
                 }
