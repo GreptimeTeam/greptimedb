@@ -97,9 +97,7 @@ impl VersionControl {
 
     pub fn apply_edit(&self, edit: VersionEdit) {
         let mut version_to_update = self.version.lock();
-
         version_to_update.apply_edit(edit);
-
         version_to_update.commit();
     }
 }
