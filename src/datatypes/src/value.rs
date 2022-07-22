@@ -132,22 +132,6 @@ impl From<&[u8]> for Value {
     }
 }
 
-impl From<Vec<Value>> for Value {
-    fn from(vs: Vec<Value>) -> Self {
-        match vs.len() {
-            0 => Value::Null,
-            _ => {
-                assert!(
-                    vs.windows(2).all(|w| w[0].data_type() == w[1].data_type()),
-                    "All values' datatypes are not the same!"
-                );
-                let datatype = vs[0].data_type();
-                Value::List(ListValue::new(Some(Box::new(vs)), datatype))
-            }
-        }
-    }
-}
-
 impl Serialize for Value {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -296,23 +280,6 @@ mod tests {
 
         let bytes = Bytes::from(b"world".as_slice());
         assert_eq!(Value::Binary(bytes.clone()), Value::from(bytes));
-    }
-
-    #[test]
-    fn test_from_values_vec() {
-        let vs: Vec<Value> = vec![];
-        let v = Value::from(vs);
-        assert_eq!(Value::Null, v);
-
-        let vs = vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)];
-        let v = Value::from(vs.clone());
-        assert_eq!(
-            Value::List(ListValue::new(
-                Some(Box::new(vs)),
-                ConcreteDataType::int32_datatype()
-            )),
-            v
-        );
     }
 
     #[test]

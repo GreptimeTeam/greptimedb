@@ -3,13 +3,12 @@ use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use common_query::error::{ExecuteFunctionSnafu, FromScalarValueSnafu, Result};
+use common_query::error::{CreateAccumulatorSnafu, FromScalarValueSnafu, Result};
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
-use datafusion_common::DataFusionError;
 use datatypes::prelude::*;
 use datatypes::value::ListValue;
-use datatypes::vectors::ListVector;
+use datatypes::vectors::{ConstantVector, ListVector};
 use datatypes::with_match_ordered_primitive_type_id;
 use num::NumCast;
 use snafu::ResultExt;
@@ -100,7 +99,12 @@ where
 
         // This is a unary accumulator, so only one column is provided.
         let column = &values[0];
-        let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(column) };
+        let column: &<T as Scalar>::VectorType = if column.is_const() {
+            let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
+            unsafe { VectorHelper::static_cast(column.inner()) }
+        } else {
+            unsafe { VectorHelper::static_cast(column) }
+        };
         for v in column.iter_data().flatten() {
             self.push(v);
         }
@@ -128,11 +132,24 @@ where
 
     // DataFusion expects this function to return the final value of this aggregator.
     fn evaluate(&self) -> Result<Value> {
+        if self.not_greater.is_empty() {
+            assert!(
+                self.greater.is_empty(),
+                "not expected in two-heap median algorithm, there must be a bug when implementing it"
+            );
+            return Ok(Value::Null);
+        }
+
+        // unwrap is safe because we checked not_greater heap's len above
+        let not_greater = *self.not_greater.peek().unwrap();
         let median = if self.not_greater.len() > self.greater.len() {
-            (*self.not_greater.peek().unwrap()).into()
+            not_greater.into()
         } else {
-            let not_greater_v: f64 = NumCast::from(*self.not_greater.peek().unwrap()).unwrap();
-            let greater_v: f64 = NumCast::from(self.greater.peek().unwrap().0).unwrap();
+            // unwrap is safe because greater heap len >= not_greater heap len, which is > 0
+            let greater = self.greater.peek().unwrap();
+
+            let not_greater_v: f64 = NumCast::from(not_greater).unwrap();
+            let greater_v: f64 = NumCast::from(greater.0).unwrap();
             let median: T = NumCast::from((not_greater_v + greater_v) / 2.0).unwrap();
             median.into()
         };
@@ -156,11 +173,10 @@ impl AggregateFunctionCreator for MedianAccumulatorCreator {
                 },
                 {
                     let err_msg = format!(
-                        "\"MEDIAN\" aggregate function not support date type {:?}",
+                        "\"MEDIAN\" aggregate function not support data type {:?}",
                         input_type.logical_type_id(),
                     );
-                    let err: std::result::Result<(), DataFusionError> = Err(DataFusionError::Execution(err_msg));
-                    Err(err.context(ExecuteFunctionSnafu).err().unwrap().into())
+                    CreateAccumulatorSnafu { err_msg }.fail()?
                 }
             )
         });
@@ -192,5 +208,65 @@ impl AggregateFunctionCreator for MedianAccumulatorCreator {
 
     fn state_types(&self) -> Vec<ConcreteDataType> {
         vec![ConcreteDataType::list_datatype(self.output_type())]
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use datatypes::vectors::PrimitiveVector;
+
+    use super::*;
+    #[test]
+    fn test_update_batch() {
+        // test update empty batch, expect not updating anything
+        let mut median = Median::<i32>::default();
+        assert!(median.update_batch(&[]).is_ok());
+        assert!(median.not_greater.is_empty());
+        assert!(median.greater.is_empty());
+        assert_eq!(Value::Null, median.evaluate().unwrap());
+
+        // test update one not-null value
+        let mut median = Median::<i32>::default();
+        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
+        assert!(median.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(42), median.evaluate().unwrap());
+
+        // test update one null value
+        let mut median = Median::<i32>::default();
+        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+            Option::<i32>::None,
+        ]))];
+        assert!(median.update_batch(&v).is_ok());
+        assert_eq!(Value::Null, median.evaluate().unwrap());
+
+        // test update no null-value batch
+        let mut median = Median::<i32>::default();
+        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+            Some(-1i32),
+            Some(1),
+            Some(2),
+        ]))];
+        assert!(median.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(1), median.evaluate().unwrap());
+
+        // test update null-value batch
+        let mut median = Median::<i32>::default();
+        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+            Some(-2i32),
+            None,
+            Some(3),
+            Some(4),
+        ]))];
+        assert!(median.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(3), median.evaluate().unwrap());
+
+        // test update with constant vector
+        let mut median = Median::<i32>::default();
+        let v: Vec<VectorRef> = vec![Arc::new(ConstantVector::new(
+            Arc::new(PrimitiveVector::<i32>::from_vec(vec![4])),
+            10,
+        ))];
+        assert!(median.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(4), median.evaluate().unwrap());
     }
 }

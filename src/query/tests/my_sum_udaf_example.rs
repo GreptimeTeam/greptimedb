@@ -6,7 +6,7 @@ mod testing_table;
 
 use arc_swap::ArcSwapOption;
 use common_function::scalars::aggregate::AggregateFunctionMeta;
-use common_query::error::ExecuteFunctionSnafu;
+use common_query::error::CreateAccumulatorSnafu;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Accumulator;
 use common_query::logical_plan::AggregateFunctionCreator;
@@ -14,7 +14,6 @@ use common_query::prelude::*;
 use common_recordbatch::util;
 use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-use datafusion_common::DataFusionError;
 use datatypes::prelude::*;
 use datatypes::types::DataTypeBuilder;
 use datatypes::types::PrimitiveType;
@@ -27,7 +26,6 @@ use query::catalog::{CatalogList, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::error::Result;
 use query::query_engine::Output;
 use query::QueryEngineFactory;
-use snafu::ResultExt;
 use table::TableRef;
 
 use crate::testing_table::TestingTable;
@@ -74,11 +72,10 @@ impl AggregateFunctionCreator for MySumAccumulatorCreator {
                 },
                 {
                     let err_msg = format!(
-                        "\"MY_SUM\" aggregate function not support date type {:?}",
+                        "\"MY_SUM\" aggregate function not support data type {:?}",
                         input_type.logical_type_id(),
                     );
-                    let err: std::result::Result<(), DataFusionError> = Err(DataFusionError::Execution(err_msg));
-                    Err(err.context(ExecuteFunctionSnafu).err().unwrap().into())
+                    CreateAccumulatorSnafu { err_msg }.fail()?
                 }
             )
         });

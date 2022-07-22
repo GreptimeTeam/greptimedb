@@ -59,10 +59,6 @@ impl<T: Primitive> PrimitiveVector<T> {
             array: PrimitiveArray::from_values(iter),
         }
     }
-
-    pub fn get_primitive(&self, i: usize) -> T {
-        self.array.value(i)
-    }
 }
 
 impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
@@ -298,7 +294,6 @@ mod tests {
     use serde_json;
 
     use super::*;
-    use crate::for_all_primitive_types;
     use crate::serialize::Serializable;
 
     fn check_vec(v: PrimitiveVector<i32>) {
@@ -421,18 +416,5 @@ mod tests {
         assert_eq!(20, v.memory_size());
         let v = PrimitiveVector::<i64>::from(vec![Some(0i64), Some(1i64), Some(2i64), None, None]);
         assert_eq!(40, v.memory_size());
-    }
-
-    #[test]
-    fn test_get_primitive() {
-        macro_rules! test_get_primitive {
-            ([], $( { $T:ty } ),*) => {
-                $(
-                    let v = PrimitiveVector::<$T>::from_slice((0..5).map(|x| x as $T).collect::<Vec<$T>>());
-                    (0usize..5).for_each(|i| assert_eq!(i as $T, v.get_primitive(i)));
-                )*
-            }
-        }
-        for_all_primitive_types! { test_get_primitive }
     }
 }

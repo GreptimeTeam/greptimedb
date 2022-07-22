@@ -28,7 +28,7 @@ pub type ReturnTypeFunction =
 /// Accumulator creator that will be used by DataFusion
 pub type AccumulatorFunctionImpl = Arc<dyn Fn() -> Result<Box<dyn Accumulator>> + Send + Sync>;
 
-/// Create Accumulator with the data type of input column.
+/// Create Accumulator with the data type of input columns.
 pub type AccumulatorCreatorFunction =
     Arc<dyn Fn(&[ConcreteDataType]) -> Result<Box<dyn Accumulator>> + Sync + Send>;
 

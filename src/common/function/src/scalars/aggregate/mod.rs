@@ -7,20 +7,22 @@ pub use median::MedianAccumulatorCreator;
 
 use crate::scalars::FunctionRegistry;
 
+/// A function creates `AggregateFunctionCreator`.
+/// "Aggregator" *is* AggregatorFunction. Since the later one is long, we named an short alias for it.
+/// The two names might be used interchangeably.
+type AggregatorCreatorFunction = Arc<dyn Fn() -> AggregateFunctionCreatorRef + Send + Sync>;
+
 /// `AggregateFunctionMeta` dynamically creates AggregateFunctionCreator.
 #[derive(Clone)]
 pub struct AggregateFunctionMeta {
     name: String,
-    creator: Arc<dyn Fn() -> AggregateFunctionCreatorRef + Send + Sync>,
+    creator: AggregatorCreatorFunction,
 }
 
 pub type AggregateFunctionMetaRef = Arc<AggregateFunctionMeta>;
 
 impl AggregateFunctionMeta {
-    pub fn new(
-        name: &str,
-        creator: Arc<dyn Fn() -> AggregateFunctionCreatorRef + Send + Sync>,
-    ) -> Self {
+    pub fn new(name: &str, creator: AggregatorCreatorFunction) -> Self {
         Self {
             name: name.to_string(),
             creator,

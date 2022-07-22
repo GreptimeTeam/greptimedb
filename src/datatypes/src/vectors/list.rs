@@ -9,6 +9,7 @@ use snafu::prelude::*;
 use crate::error::Result;
 use crate::prelude::*;
 use crate::serialize::Serializable;
+use crate::types::ListType;
 use crate::value::ListValue;
 use crate::vectors::{impl_try_from_arrow_array_for_vector, impl_validity_for_vector};
 
@@ -18,24 +19,18 @@ type ArrowListArray = ListArray<i32>;
 #[derive(Debug, Clone)]
 pub struct ListVector {
     array: ArrowListArray,
+    inner_data_type: ConcreteDataType,
 }
 
 impl ListVector {
     pub fn values_iter(&self) -> Box<dyn Iterator<Item = Result<VectorRef>> + '_> {
         Box::new(self.array.values_iter().map(VectorHelper::try_into_vector))
     }
-
-    fn get_inner_datatype(&self) -> ConcreteDataType {
-        ConcreteDataType::from_arrow_type(match self.array.data_type() {
-            ArrowDataType::List(field) => &field.data_type,
-            _ => unreachable!(),
-        })
-    }
 }
 
 impl Vector for ListVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::from_arrow_type(self.array.data_type())
+        ConcreteDataType::List(ListType::new(self.inner_data_type.clone()))
     }
 
     fn vector_type_name(&self) -> String {
@@ -85,7 +80,7 @@ impl Vector for ListVector {
             .collect::<Vec<Value>>();
         Value::List(ListValue::new(
             Some(Box::new(values)),
-            self.get_inner_datatype(),
+            self.inner_data_type.clone(),
         ))
     }
 
@@ -99,13 +94,28 @@ impl Vector for ListVector {
 
 impl Serializable for ListVector {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
-        unimplemented!()
+        self.array
+            .iter()
+            .map(|v| match v {
+                None => Ok(JsonValue::Null),
+                Some(v) => VectorHelper::try_into_vector(v)
+                    .and_then(|v| v.serialize_to_json())
+                    .map(JsonValue::Array),
+            })
+            .collect()
     }
 }
 
 impl From<ArrowListArray> for ListVector {
     fn from(array: ArrowListArray) -> Self {
-        Self { array }
+        let inner_data_type = ConcreteDataType::from_arrow_type(match array.data_type() {
+            ArrowDataType::List(field) => &field.data_type,
+            _ => unreachable!(),
+        });
+        Self {
+            array,
+            inner_data_type,
+        }
     }
 }
 
@@ -132,6 +142,7 @@ mod tests {
 
         let list_vector = ListVector {
             array: arrow_array.clone(),
+            inner_data_type: ConcreteDataType::int32_datatype(),
         };
         assert_eq!(
             ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype())),
@@ -214,7 +225,7 @@ mod tests {
 
         let list_vector = ListVector::try_from_arrow_array(array_ref).unwrap();
         assert_eq!(
-            "ListVector { array: ListArray[[1, 2, 3], None, [4, None, 6]] }",
+            "ListVector { array: ListArray[[1, 2, 3], None, [4, None, 6]], inner_data_type: UInt32(UInt32) }",
             format!("{:?}", list_vector)
         );
     }
@@ -231,7 +242,10 @@ mod tests {
         arrow_array.try_extend(data).unwrap();
         let arrow_array: ArrowListArray = arrow_array.into();
 
-        let list_vector = ListVector { array: arrow_array };
+        let list_vector = ListVector {
+            array: arrow_array,
+            inner_data_type: ConcreteDataType::int32_datatype(),
+        };
         let mut iter = list_vector.values_iter();
         assert_eq!(
             "Int64[1, 2, 3]",
@@ -246,5 +260,27 @@ mod tests {
             format!("{:?}", iter.next().unwrap().unwrap().to_arrow_array())
         );
         assert!(iter.next().is_none())
+    }
+
+    #[test]
+    fn test_serialize_to_json() {
+        let data = vec![
+            Some(vec![Some(1i64), Some(2), Some(3)]),
+            None,
+            Some(vec![Some(4), None, Some(6)]),
+        ];
+
+        let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i64>>::new();
+        arrow_array.try_extend(data).unwrap();
+        let arrow_array: ArrowListArray = arrow_array.into();
+
+        let list_vector = ListVector {
+            array: arrow_array,
+            inner_data_type: ConcreteDataType::int32_datatype(),
+        };
+        assert_eq!(
+            "Ok([Array([Number(1), Number(2), Number(3)]), Null, Array([Number(4), Null, Number(6)])])",
+            format!("{:?}", list_vector.serialize_to_json())
+        );
     }
 }

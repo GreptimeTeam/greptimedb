@@ -1,5 +1,4 @@
 #![feature(generic_associated_types)]
-#![feature(iterator_try_collect)]
 
 pub mod arrow_array;
 pub mod data_type;

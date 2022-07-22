@@ -1,6 +1,7 @@
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 
 use crate::prelude::*;
+use crate::value::ListValue;
 
 /// Used to represent the List datatype.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,7 +34,7 @@ impl DataType for ListType {
     }
 
     fn default_value(&self) -> Value {
-        vec![self.inner.default_value()].into()
+        Value::List(ListValue::new(None, *self.inner.clone()))
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
@@ -53,12 +54,7 @@ mod tests {
         assert_eq!("List", t.name());
         assert_eq!(LogicalTypeId::List, t.logical_type_id());
         assert_eq!(
-            Value::List(ListValue::new(
-                Some(Box::new(vec![
-                    ConcreteDataType::boolean_datatype().default_value()
-                ])),
-                ConcreteDataType::boolean_datatype()
-            )),
+            Value::List(ListValue::new(None, ConcreteDataType::boolean_datatype())),
             t.default_value()
         );
         assert_eq!(

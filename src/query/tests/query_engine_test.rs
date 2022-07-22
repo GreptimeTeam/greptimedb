@@ -177,10 +177,11 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
     factory.query_engine().clone()
 }
 
-async fn get_numbers_from_table<T: Primitive + DataTypeBuilder>(
-    table_name: &str,
-    engine: Arc<dyn QueryEngine>,
-) -> Vec<T> {
+async fn get_numbers_from_table<T>(table_name: &str, engine: Arc<dyn QueryEngine>) -> Vec<T>
+where
+    T: Primitive + DataTypeBuilder,
+    for<'a> T: Scalar<RefType<'a> = T>,
+{
     let column_name = table_name;
     let sql = format!("SELECT {} FROM {}", column_name, table_name);
     let plan = engine.sql_to_plan(&sql).unwrap();
@@ -194,11 +195,8 @@ async fn get_numbers_from_table<T: Primitive + DataTypeBuilder>(
 
     let columns = numbers[0].df_recordbatch.columns();
     let column = VectorHelper::try_into_vector(&columns[0]).unwrap();
-    let v = column
-        .as_any()
-        .downcast_ref::<PrimitiveVector<T>>()
-        .unwrap();
-    (0..v.len()).map(|i| v.get_primitive(i)).collect::<Vec<T>>()
+    let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(&column) };
+    column.iter_data().flatten().collect::<Vec<T>>()
 }
 
 #[tokio::test]
@@ -228,6 +226,7 @@ async fn test_median_aggregator() -> Result<()> {
 async fn test_median_success<T>(table_name: &str, engine: Arc<dyn QueryEngine>) -> Result<()>
 where
     T: Primitive + Ord + DataTypeBuilder,
+    for<'a> T: Scalar<RefType<'a> = T>,
 {
     let result = execute_median(table_name, engine.clone()).await.unwrap();
     assert_eq!(1, result.len());
@@ -265,7 +264,7 @@ where
     assert!(result.is_err());
     let error = result.unwrap_err();
     assert!(error.to_string().contains(&format!(
-        "\"MEDIAN\" aggregate function not support date type {}",
+        "Failed to create accumulator: \"MEDIAN\" aggregate function not support data type {}",
         T::type_name()
     )));
     Ok(())

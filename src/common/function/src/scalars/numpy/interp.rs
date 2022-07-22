@@ -38,9 +38,9 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /* search the biggest number that smaller than x in xp */
-fn linear_search_ascending_vector(x: f64, xp: &PrimitiveVector<f64>) -> usize {
+fn linear_search_ascending_vector(x: Value, xp: &PrimitiveVector<f64>) -> usize {
     for i in 0..xp.len() {
-        if x < xp.get_primitive(i) {
+        if x < xp.get(i) {
             return i - 1;
         }
     }
@@ -48,7 +48,7 @@ fn linear_search_ascending_vector(x: f64, xp: &PrimitiveVector<f64>) -> usize {
 }
 
 /* search the biggest number that smaller than x in xp */
-fn binary_search_ascending_vector(key: f64, xp: &PrimitiveVector<f64>) -> usize {
+fn binary_search_ascending_vector(key: Value, xp: &PrimitiveVector<f64>) -> usize {
     let mut left = 0;
     let mut right = xp.len();
     /* If len <= 4 use linear search. */
@@ -58,7 +58,7 @@ fn binary_search_ascending_vector(key: f64, xp: &PrimitiveVector<f64>) -> usize 
     /* find index by bisection */
     while left < right {
         let mid = left + ((right - left) >> 1);
-        if key >= xp.get_primitive(mid) {
+        if key >= xp.get(mid) {
             left = mid + 1;
         } else {
             right = mid;
@@ -140,9 +140,9 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
         res = x
             .iter_data()
             .map(|x| {
-                if x.unwrap_or(f64::MIN) < xp.get_primitive(0) {
+                if Value::from(x) < xp.get(0) {
                     left
-                } else if x.unwrap_or(f64::MIN) > xp.get_primitive(xp.len() - 1) {
+                } else if Value::from(x) > xp.get(xp.len() - 1) {
                     right
                 } else {
                     fp.get_data(0)
@@ -179,12 +179,12 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
             .iter_data()
             .map(|x| match x {
                 Some(xi) => {
-                    if xi > xp.get_primitive(xp.len() - 1) {
+                    if Value::from(xi) > xp.get(xp.len() - 1) {
                         right
-                    } else if xi < xp.get_primitive(0) {
+                    } else if Value::from(xi) < xp.get(0) {
                         left
                     } else {
-                        j = binary_search_ascending_vector(xi, &xp);
+                        j = binary_search_ascending_vector(Value::from(xi), &xp);
                         if j == xp.len() - 1 || xp.get(j) == Value::from(xi) {
                             fp.get_data(j)
                         } else {

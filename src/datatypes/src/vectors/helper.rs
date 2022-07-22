@@ -178,7 +178,7 @@ impl Helper {
     }
 
     pub fn try_into_vectors(arrays: &[ArrayRef]) -> Result<Vec<VectorRef>> {
-        arrays.iter().map(Self::try_into_vector).try_collect::<_>()
+        arrays.iter().map(Self::try_into_vector).collect()
     }
 }
 

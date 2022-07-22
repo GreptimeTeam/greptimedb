@@ -28,6 +28,9 @@ pub enum InnerError {
         source: DataTypeError,
         data_type: ArrowDatatype,
     },
+
+    #[snafu(display("Failed to create accumulator: {}", err_msg))]
+    CreateAccumulator { err_msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -35,7 +38,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for InnerError {
     fn status_code(&self) -> StatusCode {
         match self {
-            InnerError::ExecuteFunction { .. } => StatusCode::EngineExecuteQuery,
+            InnerError::ExecuteFunction { .. } | InnerError::CreateAccumulator { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
             InnerError::IntoVector { source, .. } => source.status_code(),
             InnerError::FromScalarValue { source } => source.status_code(),
         }
