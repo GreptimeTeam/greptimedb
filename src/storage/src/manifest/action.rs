@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
 
 use serde::{Deserialize, Serialize};
 use serde_json as json;
+use serde_json::ser::to_writer;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::action::ProtocolAction;
 use store_api::manifest::action::ProtocolVersion;
@@ -13,7 +14,7 @@ use store_api::storage::SequenceNumber;
 
 use crate::error::{
     DecodeJsonSnafu, DecodeRegionMetaActionListSnafu, EncodeJsonSnafu,
-    ManifestProtocolForbideReadSnafu, Result, Utf8Snafu,
+    ManifestProtocolForbidReadSnafu, ReadlineSnafu, Result,
 };
 use crate::metadata::{RegionMetadataRef, VersionNumber};
 use crate::sst::FileMeta;
@@ -57,8 +58,12 @@ pub enum RegionMetaAction {
     Edit(RegionEdit),
 }
 
-const NEW_LINE: &str = "\r\n";
-const PREV_VERSION_KEY: &str = "prev_version";
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct VersionHeader {
+    prev_version: ManifestVersion,
+}
+
+const NEWLINE: &[u8] = "\n".as_bytes();
 
 impl RegionMetaActionList {
     pub fn with_action(action: RegionMetaAction) -> Self {
@@ -77,41 +82,32 @@ impl RegionMetaActionList {
 
     /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
-        let mut s = String::default();
+        let mut bytes = Vec::default();
 
         {
             // Encode prev_version
-            let mut m = HashMap::new();
-            m.insert(PREV_VERSION_KEY.to_string(), self.prev_version);
-            s.push_str(&json::to_string(&m).context(EncodeJsonSnafu)?);
-            s.push_str(NEW_LINE);
+            let v = VersionHeader {
+                prev_version: self.prev_version,
+            };
+
+            to_writer(&mut bytes, &v).context(EncodeJsonSnafu)?;
+            // unwrap is fine here, because we write into a buffer.
+            bytes.write_all(NEWLINE).unwrap();
         }
 
-        // Encode actions
-        let action_strings = self
-            .actions
-            .iter()
-            .map(|action| json::to_string(action).context(EncodeJsonSnafu))
-            .collect::<Result<Vec<_>>>();
-        s.push_str(&action_strings?.join(NEW_LINE));
+        for action in &self.actions {
+            to_writer(&mut bytes, action).context(EncodeJsonSnafu)?;
+            bytes.write_all(NEWLINE).unwrap();
+        }
 
-        Ok(s.into_bytes())
+        Ok(bytes)
     }
 
     pub(crate) fn decode(
         bs: &[u8],
         reader_version: ProtocolVersion,
     ) -> Result<(Self, Option<ProtocolAction>)> {
-        let s = std::str::from_utf8(bs).context(Utf8Snafu)?;
-
-        let lines: Vec<&str> = s.split(NEW_LINE).collect();
-
-        ensure!(
-            lines.len() > 1,
-            DecodeRegionMetaActionListSnafu {
-                msg: format!("invalid content: {}", s),
-            }
-        );
+        let mut lines = BufReader::new(bs).lines();
 
         let mut action_list = RegionMetaActionList {
             actions: Vec::default(),
@@ -119,26 +115,32 @@ impl RegionMetaActionList {
         };
 
         {
+            let first_line = lines
+                .next()
+                .with_context(|| DecodeRegionMetaActionListSnafu {
+                    msg: format!(
+                        "Invalid content in manifest: {}",
+                        std::str::from_utf8(bs).unwrap_or("**invalid bytes**")
+                    ),
+                })?
+                .context(ReadlineSnafu)?;
+
             // Decode prev_version
-            let m: HashMap<String, ManifestVersion> =
-                json::from_str(lines[0]).context(DecodeJsonSnafu)?;
-            action_list.prev_version =
-                *m.get(PREV_VERSION_KEY)
-                    .context(DecodeRegionMetaActionListSnafu {
-                        msg: "missing prev_version",
-                    })?;
+            let v: VersionHeader = json::from_str(&first_line).context(DecodeJsonSnafu)?;
+            action_list.prev_version = v.prev_version;
         }
 
         // Decode actions
         let mut protocol_action = None;
-        let mut actions = Vec::with_capacity(lines.len() - 1);
-        for line in lines.iter().skip(1) {
+        let mut actions = Vec::default();
+        for line in lines {
+            let line = &line.context(ReadlineSnafu)?;
             let action: RegionMetaAction = json::from_str(line).context(DecodeJsonSnafu)?;
 
             if let RegionMetaAction::Protocol(p) = &action {
                 ensure!(
                     p.is_readable(reader_version),
-                    ManifestProtocolForbideReadSnafu {
+                    ManifestProtocolForbidReadSnafu {
                         min_version: p.min_reader_version,
                         supported_version: reader_version,
                     }
@@ -210,7 +212,7 @@ mod tests {
         let e = RegionMetaActionList::decode(&bs, 0);
         assert!(e.is_err());
         assert_eq!(
-            "Manifest protocol forbide to read, min_version: 1, supported_version: 0",
+            "Manifest protocol forbid to read, min_version: 1, supported_version: 0",
             format!("{}", e.err().unwrap())
         );
 

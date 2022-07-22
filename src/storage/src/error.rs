@@ -139,22 +139,22 @@ pub enum Error {
     Cancelled { backtrace: Backtrace },
 
     #[snafu(display(
-        "Manifest protocol forbide to read, min_version: {}, supported_version: {}",
+        "Manifest protocol forbid to read, min_version: {}, supported_version: {}",
         min_version,
         supported_version
     ))]
-    ManifestProtocolForbideRead {
+    ManifestProtocolForbidRead {
         min_version: ProtocolVersion,
         supported_version: ProtocolVersion,
         backtrace: Backtrace,
     },
 
     #[snafu(display(
-        "Manifest protocol forbide to write, min_version: {}, supported_version: {}",
+        "Manifest protocol forbid to write, min_version: {}, supported_version: {}",
         min_version,
         supported_version
     ))]
-    ManifestProtocolForbideWrite {
+    ManifestProtocolForbidWrite {
         min_version: ProtocolVersion,
         supported_version: ProtocolVersion,
         backtrace: Backtrace,
@@ -162,6 +162,9 @@ pub enum Error {
 
     #[snafu(display("Failed to decode region action list, {}", msg))]
     DecodeRegionMetaActionList { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to read line, err: {}", source))]
+    Readline { source: IoError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -183,7 +186,8 @@ impl ErrorExt for Error {
             | DecodeJson { .. }
             | JoinTask { .. }
             | Cancelled { .. }
-            | DecodeRegionMetaActionList { .. } => StatusCode::Unexpected,
+            | DecodeRegionMetaActionList { .. }
+            | Readline { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | InitBackend { .. }
@@ -195,8 +199,8 @@ impl ErrorExt for Error {
             | WriteWal { .. }
             | DecodeWalHeader { .. }
             | EncodeWalHeader { .. }
-            | ManifestProtocolForbideRead { .. }
-            | ManifestProtocolForbideWrite { .. } => StatusCode::StorageUnavailable,
+            | ManifestProtocolForbidRead { .. }
+            | ManifestProtocolForbidWrite { .. } => StatusCode::StorageUnavailable,
         }
     }
 

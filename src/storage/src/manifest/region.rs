@@ -13,7 +13,7 @@ use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
 use store_api::storage::RegionId;
 
-use crate::error::{Error, ManifestProtocolForbideWriteSnafu, Result};
+use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result};
 use crate::manifest::action::*;
 use crate::manifest::storage::ManifestObjectStore;
 use crate::manifest::storage::ObjectStoreLogIterator;
@@ -52,20 +52,17 @@ impl Manifest for RegionManifest {
 
         let mut iter = self.inner.scan(start_bound, MAX_VERSION).await?;
 
-        loop {
-            match iter.next_action().await? {
-                Some((_v, action_list)) => {
-                    for action in action_list.actions {
-                        if let RegionMetaAction::Change(c) = action {
-                            return Ok(Some(RegionManifestData {
-                                region_meta: c.metadata,
-                            }));
-                        }
-                    }
+        while let Some((_v, action_list)) = iter.next_action().await? {
+            for action in action_list.actions {
+                if let RegionMetaAction::Change(c) = action {
+                    return Ok(Some(RegionManifestData {
+                        region_meta: c.metadata,
+                    }));
                 }
-                None => return Ok(None),
             }
         }
+
+        Ok(None)
     }
 
     async fn checkpoint(&self) -> Result<ManifestVersion> {
@@ -84,7 +81,8 @@ struct RegionManifestInner {
     /// Current using protocol
     protocol: ArcSwap<ProtocolAction>,
     /// Current node supported protocols (reader_version, writer_version)
-    supported_protocol: (ProtocolVersion, ProtocolVersion),
+    supported_reader_version: ProtocolVersion,
+    supported_writer_version: ProtocolVersion,
 }
 
 struct RegionMetaActionListIterator {
@@ -108,13 +106,16 @@ impl RegionMetaActionListIterator {
 
 impl RegionManifestInner {
     fn new(region_id: RegionId, manifest_dir: &str, object_store: ObjectStore) -> Self {
+        let (reader_version, writer_version) = action::supported_protocol_version();
+
         Self {
             region_id,
             store: Arc::new(ManifestObjectStore::new(manifest_dir, object_store)),
             // TODO(dennis): recover the last version from history
             version: AtomicU64::new(0),
             protocol: ArcSwap::new(Arc::new(ProtocolAction::new())),
-            supported_protocol: action::supported_protocol_version(),
+            supported_reader_version: reader_version,
+            supported_writer_version: writer_version,
         }
     }
 
@@ -128,20 +129,17 @@ impl RegionManifestInner {
         self.version.load(Ordering::Relaxed)
     }
 
-    async fn save(&self, mut action_list: RegionMetaActionList) -> Result<ManifestVersion> {
-        let curr_writer_version = self.supported_protocol.1;
+    async fn save(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         let protocol = self.protocol.load();
 
         ensure!(
-            protocol.is_writable(curr_writer_version),
-            ManifestProtocolForbideWriteSnafu {
+            protocol.is_writable(self.supported_writer_version),
+            ManifestProtocolForbidWriteSnafu {
                 min_version: protocol.min_writer_version,
-                supported_version: curr_writer_version,
+                supported_version: self.supported_writer_version,
             }
         );
 
-        // Save previous version to current action list
-        action_list.set_prev_version(self.last_version());
         let version = self.inc_version();
 
         logging::debug!(
@@ -162,7 +160,7 @@ impl RegionManifestInner {
     ) -> Result<RegionMetaActionListIterator> {
         Ok(RegionMetaActionListIterator {
             log_iter: self.store.scan(start, end).await?,
-            reader_version: self.supported_protocol.0,
+            reader_version: self.supported_reader_version,
         })
     }
 }
