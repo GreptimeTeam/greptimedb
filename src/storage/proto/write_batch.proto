@@ -10,6 +10,13 @@ message SchemaProto {
   repeated ColumnSchemaProto column_schemas = 1;
 }
 
+// 有些值是重复的
+message ColumnSchemaProto {
+  string name = 1;
+  ConcreteDataTypeProto  data_type = 2;
+  bool is_nullable = 3;
+}
+
 message MutationProto{
   MutationTypeProto mutation_type = 1;
   map<string,ValueProto> put_datas = 2;
@@ -18,12 +25,6 @@ message MutationProto{
 enum MutationTypeProto {
   PUT = 0;
   DELETE = 1;
-}
-
-message ColumnSchemaProto {
-  string name = 1;
-  ConcreteDataTypeProto  data_type = 2;
-  bool is_nullable = 3;
 }
 
 enum ConcreteDataTypeProto {
@@ -40,87 +41,26 @@ enum ConcreteDataTypeProto {
   Float32 = 10;
   Float64 = 11;
   String = 12;
+  Bytes = 13;
 }
 
 
 message ValueProto {
-  message I8Value{
-      int32 i8_value = 1;
-      bool is_null = 2;
-  }
-  repeated I8Value i8_values = 1;
+  repeated int32 i8_values = 1;
+  repeated int32 i16_values = 2;
+  repeated int32 i32_values = 3;
+  repeated int64 i64_values = 4;
+  repeated uint32 u8_values = 5;
+  repeated uint32 u16_values = 6;
+  repeated uint32 u32_values = 7;
+  repeated uint64 u64_values = 8;
+  repeated float f32_values = 9;
+  repeated double f64_values = 10;
+  repeated bool bool_values = 11;
+  repeated bytes bytes_values = 12;
+  repeated string string_values = 13;
 
-  message I16Value{
-      int32 i16_value = 1;
-      bool is_null = 2;
-  }
-  repeated I16Value i16_values = 2;
+  repeated bytes null_mask = 14;
 
-  message I32Value{
-      int32 i32_value = 1;
-      bool is_null = 2;
-  }
-  repeated I32Value i32_values = 3;
-
-  message I64Value{
-      int64 i64_value = 1;
-      bool is_null = 2;
-  }
-  repeated I64Value i64_values = 4;
-
-  message U8Value{
-      uint32 u8_value = 1;
-      bool is_null = 2;
-  }
-  repeated U8Value u8_values = 5;
-
-  message U16Value{
-      uint32 u16_value = 1;
-      bool is_null = 2;
-  }
-  repeated U16Value u16_values = 6;
-
-  message U32Value{
-      uint32 u32_value = 1;
-      bool is_null = 2;
-  }
-  repeated U32Value u32_values = 7;
-
-  message U64Value{
-    uint64 u64_value = 1;
-    bool is_null = 2;
-  }
-  repeated U64Value u64_values = 8;
-
-  message Float32Value{
-    float f32_value = 1;
-    bool is_null = 2;
-  }
-  repeated Float32Value f32_values = 9;
-
-  message Float64Value{
-    double f64_value = 1;
-    bool is_null = 2;
-  }
-  repeated Float64Value f64_values = 10;
-
-  message BoolValue{
-    bool bool_value = 1;
-    bool is_null = 2;
-  }
-  repeated BoolValue bool_values = 11;
-  // repeated bytes bytes_values = 12;
-
-  message StringValue {
-    string string_value = 1;
-    bool is_null = 2;
-  }
-  repeated StringValue string_values = 12;
-
-  message NullValue {
-    bool is_null = 1;
-  }
-  repeated NullValue null_mask = 13;
-
-  ConcreteDataTypeProto data_type = 13;
+  ConcreteDataTypeProto data_type = 15;
 }
