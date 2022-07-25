@@ -1,3 +1,4 @@
+use std::cmp::max;
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
 use std::pin::Pin;
@@ -76,7 +77,11 @@ impl FileWriter {
             let future = self.write(req.data.clone(), offset as u64);
             futures.push(future);
         }
-
+        debug!(
+            "Write batch, size: {}, max offset: {}",
+            batch.len(),
+            max_offset
+        );
         futures::future::join_all(futures)
             .await
             .into_iter()
@@ -181,7 +186,7 @@ impl LogFile {
     #[allow(unused)]
     #[inline]
     pub fn persisted_size(&self) -> usize {
-        self.state.flush_offset.load(Ordering::Relaxed)
+        self.state.flush_offset()
     }
 
     #[inline]
@@ -190,6 +195,7 @@ impl LogFile {
     }
 
     /// Increases next entry field by `delta` and return the previous value.
+    #[inline]
     fn inc_entry_id(&self) -> u64 {
         // Relaxed order is enough since no sync-with relationship
         // between `offset` and any other field.
@@ -205,7 +211,7 @@ impl LogFile {
         let (tx, mut rx) = tokio::sync::mpsc::channel(self.append_buffer_size);
 
         let handle = tokio::spawn(async move {
-            while !state.stopped.load(Ordering::Acquire) {
+            while !state.is_stopped() {
                 let batch = Self::recv_batch(&mut rx, &state, &notify, true).await;
                 debug!("Receive write request, size: {}", batch.len());
                 if !batch.is_empty() {
@@ -251,17 +257,13 @@ impl LogFile {
         writer: &Arc<FileWriter>,
     ) {
         // preserve previous write offset
-        let prev_write_offset = state.write_offset.load(Ordering::Acquire);
+        let prev_write_offset = state.write_offset();
 
         for mut req in &mut batch {
             req.offset = state
                 .write_offset
                 .fetch_add(req.data.len(), Ordering::AcqRel);
-            info!(
-                "Write offset, {}->{}",
-                req.offset,
-                state.write_offset.load(Ordering::Acquire)
-            );
+            debug!("Write offset, {}->{}", req.offset, state.write_offset());
         }
 
         match writer.write_batch(&batch).await {
@@ -310,7 +312,7 @@ impl LogFile {
                     TryRecvError::Empty => {
                         if batch.is_empty() && wait_on_empty {
                             notify.notified().await;
-                            if state.stopped.load(Ordering::Acquire) {
+                            if state.is_stopped() {
                                 break;
                             }
                         } else {
@@ -335,7 +337,7 @@ impl LogFile {
     /// Replays current file til last entry read
     pub async fn replay(&mut self) -> Result<(usize, Id)> {
         let log_name = self.name.to_string();
-        let previous_offset = self.state.flush_offset.load(Ordering::Relaxed);
+        let previous_offset = self.state.flush_offset();
         let ns = LocalNamespace::default();
         let mut stream = self.create_stream(
             // TODO(hl): LocalNamespace should be filled
@@ -421,7 +423,7 @@ impl LogFile {
     where
         T: Encode<Error = Error>,
     {
-        if self.state.stopped.load(Ordering::Acquire) {
+        if self.state.is_stopped() {
             return Err(Error::Eof);
         }
         e.set_id(0);
@@ -431,7 +433,7 @@ impl LogFile {
             .context(AppendSnafu)?;
         let size = serialized.len();
 
-        if size + self.state.write_offset.load(Ordering::Relaxed) > self.max_file_size {
+        if size + self.state.write_offset() > self.max_file_size {
             return Err(Error::Eof);
         }
 
@@ -536,6 +538,23 @@ struct State {
     next_entry_id: AtomicU64,
     sealed: AtomicBool,
     stopped: AtomicBool,
+}
+
+impl State {
+    #[inline]
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn write_offset(&self) -> usize {
+        self.write_offset.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn flush_offset(&self) -> usize {
+        self.flush_offset.load(Ordering::Acquire)
+    }
 }
 
 type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk<CHUNK_SIZE>>> + Send>>;

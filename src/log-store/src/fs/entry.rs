@@ -11,9 +11,9 @@ use store_api::logstore::entry_stream::{EntryStream, SendableEntryStream};
 use crate::error::{CorruptedSnafu, DecodeAgainSnafu, DecodeSnafu, EncodeSnafu, Error};
 use crate::fs::crc;
 
-// length+offset+epoch+crc
+// length + offset + epoch + crc
 const ENTRY_MIN_LEN: usize = 4 + 8 + 8 + 4;
-// length+offset+epoch
+// length + offset + epoch
 const HEADER_LENGTH: usize = 4 + 8 + 8;
 
 #[derive(Debug, PartialEq, Clone)]
