@@ -749,6 +749,27 @@ mod tests {
     }
 
     #[tokio::test]
+    pub async fn test_read_at_center() {
+        let dir = tempdir::TempDir::new("greptimedb-store-test").unwrap();
+        let file_path = dir.path().join("chunk-stream-file-test-center");
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&file_path)
+            .await
+            .unwrap();
+        file.write_all("1234567890ab".as_bytes()).await.unwrap();
+        file.flush().await.unwrap();
+
+        let file_len = file.metadata().await.unwrap().len();
+        let file = Arc::new(file.into_std().await);
+        let result = read_at(&file, 8, file_len as usize).unwrap();
+        assert_eq!(4, result.len());
+        assert_eq!("90ab".as_bytes(), &result.data[0..result.len()]);
+    }
+
+    #[tokio::test]
     pub async fn test_file_chunk_stream() {
         let dir = tempdir::TempDir::new("greptimedb-store-test").unwrap();
         let file_path = dir.path().join("chunk-stream-file-test");
