@@ -8,13 +8,15 @@ use std::sync::{
 
 use datatypes::prelude::*;
 use datatypes::value::Value;
-use datatypes::vectors::{UInt64VectorBuilder, UInt8VectorBuilder, VectorBuilder};
+use datatypes::vectors::{
+    UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder, VectorBuilder,
+};
 use store_api::storage::{SequenceNumber, ValueType};
 
 use crate::error::Result;
 use crate::memtable::{
-    Batch, BatchIterator, BatchIteratorPtr, IterContext, KeyValues, Memtable, MemtableSchema,
-    RowOrdering,
+    Batch, BatchIterator, BatchIteratorPtr, IterContext, KeyValues, Memtable, MemtableId,
+    MemtableSchema, RowOrdering,
 };
 
 type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
@@ -22,15 +24,18 @@ type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
 /// A simple memtable implementation based on std's [`BTreeMap`].
 ///
 /// Mainly for test purpose, don't use in production.
+#[derive(Debug)]
 pub struct BTreeMemtable {
+    id: MemtableId,
     schema: MemtableSchema,
     map: Arc<RwLockMap>,
     estimated_bytes: AtomicUsize,
 }
 
 impl BTreeMemtable {
-    pub fn new(schema: MemtableSchema) -> BTreeMemtable {
+    pub fn new(id: MemtableId, schema: MemtableSchema) -> BTreeMemtable {
         BTreeMemtable {
+            id,
             schema,
             map: Arc::new(RwLock::new(BTreeMap::new())),
             estimated_bytes: AtomicUsize::new(0),
@@ -39,6 +44,10 @@ impl BTreeMemtable {
 }
 
 impl Memtable for BTreeMemtable {
+    fn id(&self) -> MemtableId {
+        self.id
+    }
+
     fn schema(&self) -> &MemtableSchema {
         &self.schema
     }
@@ -84,9 +93,13 @@ impl BatchIterator for BTreeIterator {
     fn ordering(&self) -> RowOrdering {
         RowOrdering::Key
     }
+}
 
-    fn next(&mut self) -> Result<Option<Batch>> {
-        Ok(self.next_batch())
+impl Iterator for BTreeIterator {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Result<Batch>> {
+        self.next_batch().map(Ok)
     }
 }
 
@@ -107,18 +120,13 @@ impl BTreeIterator {
         } else {
             map.range(..)
         };
-        let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence);
 
-        let mut keys = Vec::with_capacity(self.ctx.batch_size);
-        let mut sequences = UInt64VectorBuilder::with_capacity(self.ctx.batch_size);
-        let mut value_types = UInt8VectorBuilder::with_capacity(self.ctx.batch_size);
-        let mut values = Vec::with_capacity(self.ctx.batch_size);
-        for (inner_key, row_value) in iter.take(self.ctx.batch_size) {
-            keys.push(inner_key);
-            sequences.push(Some(inner_key.sequence));
-            value_types.push(Some(inner_key.value_type.as_u8()));
-            values.push(row_value);
-        }
+        let (keys, sequences, value_types, values) = if self.ctx.for_flush {
+            collect_iter(iter, self.ctx.batch_size)
+        } else {
+            let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence);
+            collect_iter(iter, self.ctx.batch_size)
+        };
 
         if keys.is_empty() {
             return None;
@@ -140,14 +148,37 @@ impl BTreeIterator {
 
         Some(Batch {
             keys: rows_to_vectors(key_data_types, keys.as_slice()),
-            sequences: sequences.finish(),
-            value_types: value_types.finish(),
+            sequences,
+            value_types,
             values: rows_to_vectors(value_data_types, values.as_slice()),
         })
     }
 }
 
-/// `MapIterWrapper` removes same user key with elder sequence.
+fn collect_iter<'a, I: Iterator<Item = (&'a InnerKey, &'a RowValue)>>(
+    iter: I,
+    batch_size: usize,
+) -> (
+    Vec<&'a InnerKey>,
+    UInt64Vector,
+    UInt8Vector,
+    Vec<&'a RowValue>,
+) {
+    let mut keys = Vec::with_capacity(batch_size);
+    let mut sequences = UInt64VectorBuilder::with_capacity(batch_size);
+    let mut value_types = UInt8VectorBuilder::with_capacity(batch_size);
+    let mut values = Vec::with_capacity(batch_size);
+    for (inner_key, row_value) in iter.take(batch_size) {
+        keys.push(inner_key);
+        sequences.push(Some(inner_key.sequence));
+        value_types.push(Some(inner_key.value_type.as_u8()));
+        values.push(row_value);
+    }
+
+    (keys, sequences.finish(), value_types.finish(), values)
+}
+
+/// `MapIterWrapper` removes same user key with invisible sequence.
 struct MapIterWrapper<'a, InnerKey, RowValue> {
     iter: btree_map::Range<'a, InnerKey, RowValue>,
     prev_key: Option<InnerKey>,

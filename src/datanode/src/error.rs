@@ -3,6 +3,7 @@ use std::any::Any;
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
+use storage::error::Error as StorageError;
 use table::error::Error as TableError;
 use table_engine::error::Error as TableEngineError;
 
@@ -98,6 +99,9 @@ pub enum Error {
 
     #[snafu(display("Failed to open log store, source: {}", source))]
     OpenLogStore { source: log_store::error::Error },
+
+    #[snafu(display("Failed to storage engine, source: {}", source))]
+    OpenStorageEngine { source: StorageError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -121,6 +125,7 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::CreateDir { .. } => StatusCode::Internal,
             Error::OpenLogStore { source } => source.status_code(),
+            Error::OpenStorageEngine { source } => source.status_code(),
         }
     }
 

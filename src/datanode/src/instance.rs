@@ -8,7 +8,7 @@ use query::catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
-use storage::EngineImpl;
+use storage::{config::EngineConfig, EngineImpl};
 use table::engine::EngineContext;
 use table::engine::TableEngine;
 use table::requests::CreateTableRequest;
@@ -34,26 +34,14 @@ pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
     pub async fn new(opts: &DatanodeOptions, catalog_list: CatalogListRef) -> Result<Self> {
-        // create wal directory
-        fs::create_dir_all(path::Path::new(&opts.wal_dir)).context(error::CreateDirSnafu {
-            dir: &opts.wal_dir.clone(),
-        })?;
-
-        info!("The wal directory is: {}", &opts.wal_dir);
-
-        // TODO(jiachun): log store config
-        let log_config = LogConfig {
-            append_buffer_size: 128,
-            max_log_file_size: 128,
-            log_file_dir: opts.wal_dir.clone(),
-        };
-        let log_store = LocalFileLogStore::open(&log_config)
-            .await
-            .context(error::OpenLogStoreSnafu)?;
-
+        let log_store = create_local_file_log_store(opts).await?;
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine().clone();
-        let table_engine = DefaultEngine::new(EngineImpl::new(Arc::new(log_store)));
+        let table_engine = DefaultEngine::new(
+            EngineImpl::new(EngineConfig::default(), Arc::new(log_store))
+                .await
+                .context(error::OpenStorageEngineSnafu)?,
+        );
 
         Ok(Self {
             query_engine,
@@ -115,7 +103,10 @@ impl Instance {
                 CreateTableRequest {
                     name: table_name.to_string(),
                     desc: Some(" a test table".to_string()),
-                    schema: Arc::new(Schema::new(column_schemas)),
+                    schema: Arc::new(
+                        Schema::with_timestamp_index(column_schemas, 3)
+                            .expect("ts is expected to be timestamp column"),
+                    ),
                 },
             )
             .await
@@ -134,6 +125,25 @@ impl Instance {
 
         Ok(())
     }
+}
+
+async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFileLogStore> {
+    // create WAL directory
+    fs::create_dir_all(path::Path::new(&opts.wal_dir))
+        .context(error::CreateDirSnafu { dir: &opts.wal_dir })?;
+
+    info!("The WAL directory is: {}", &opts.wal_dir);
+
+    let log_config = LogConfig {
+        log_file_dir: opts.wal_dir.clone(),
+        ..Default::default()
+    };
+
+    let log_store = LocalFileLogStore::open(&log_config)
+        .await
+        .context(error::OpenLogStoreSnafu)?;
+
+    Ok(log_store)
 }
 
 #[cfg(test)]

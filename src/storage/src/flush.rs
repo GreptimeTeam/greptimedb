@@ -1,212 +1,264 @@
-use std::collections::HashMap;
+use std::sync::Arc;
 
-use datatypes::arrow::chunk::Chunk;
-use datatypes::arrow::datatypes::{DataType, Field, Schema};
-use datatypes::arrow::io::parquet::write::{
-    Compression, Encoding, FileSink, Version, WriteOptions,
-};
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::Vector;
-use datatypes::schema::ColumnSchema;
-use futures_util::sink::SinkExt;
-use object_store::{backend::fs, ObjectStore};
-use snafu::ResultExt;
-use store_api::storage::consts::{SEQUENCE_COLUMN_NAME, VALUE_TYPE_COLUMN_NAME};
+use async_trait::async_trait;
+use common_telemetry::logging;
+use common_time::RangeMillis;
+use store_api::logstore::LogStore;
+use store_api::manifest::Manifest;
+use store_api::manifest::ManifestVersion;
 use store_api::storage::SequenceNumber;
+use uuid::Uuid;
 
-use crate::error::{FlushIoSnafu, Result, WriteParquetSnafu};
-use crate::memtable::{IterContext, MemtableRef, MemtableSchema};
-use crate::metadata::ColumnMetadata;
+use crate::background::{Context, Job, JobHandle, JobPoolRef};
+use crate::error::{CancelledSnafu, Result};
+use crate::manifest::action::*;
+use crate::manifest::region::RegionManifest;
+use crate::memtable::{IterContext, MemtableId, MemtableRef};
+use crate::region::RegionWriterRef;
+use crate::region::SharedDataRef;
+use crate::sst::{AccessLayerRef, FileMeta, WriteOptions};
+use crate::version::VersionEdit;
+use crate::wal::Wal;
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub enum Backend {
-    Fs { dir: String },
-}
+/// Default write buffer size (32M).
+const DEFAULT_WRITE_BUFFER_SIZE: usize = 32 * 1024 * 1024;
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct FlushConfig {
-    pub backend: Backend,
-    pub row_group_size: usize,
-}
-
-impl Default for FlushConfig {
-    fn default() -> Self {
-        Self {
-            row_group_size: 128,
-            backend: Backend::Fs {
-                dir: "/tmp/greptimedb-sst".to_string(),
-            },
-        }
-    }
-}
-
-#[allow(dead_code)]
-pub struct FlushTask {
-    config: FlushConfig,
-    object_store: ObjectStore,
-}
-
-#[allow(dead_code)]
-impl FlushTask {
-    pub async fn try_new(config: FlushConfig) -> Result<Self> {
-        let operator = match config.backend {
-            Backend::Fs { ref dir } => {
-                let accessor = fs::Backend::build()
-                    .root(dir)
-                    .finish()
-                    .await
-                    .context(FlushIoSnafu)?;
-                ObjectStore::new(accessor)
-            }
-        };
-        Ok(Self {
-            config,
-            object_store: operator,
-        })
-    }
-
-    /// Iterates memtable and writes rows to Parquet file.
-    /// A chunk of records yielded from each iteration with a size given
-    /// in config will be written to a single row group.
-    pub async fn write_rows(
+pub trait FlushStrategy: Send + Sync {
+    fn should_flush(
         &self,
-        mt: &MemtableRef,
-        object_name: &str,
-        extra_meta: Option<HashMap<String, String>>,
-    ) -> Result<()> {
-        let schema = memtable_schema_to_arrow_schema(mt.schema());
-        let object = self.object_store.object(object_name);
+        shared: &SharedDataRef,
+        bytes_mutable: usize,
+        bytes_total: usize,
+    ) -> bool;
+}
 
-        // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
-        // but in s3/azblob backend the Content-Length field of HTTP request is set
-        // to this value.
-        let writer = object.writer(0).await.context(FlushIoSnafu)?;
+pub type FlushStrategyRef = Arc<dyn FlushStrategy>;
 
-        // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
-        let encodings = get_encoding_for_schema(&schema, |_| Encoding::Plain);
+#[derive(Debug)]
+pub struct SizeBasedStrategy {
+    /// Write buffer size of memtable.
+    max_write_buffer_size: usize,
+    /// Mutable memtable memory size limitation
+    mutable_limitation: usize,
+}
 
-        let mut sink = FileSink::try_new(
-            writer,
-            schema,
-            encodings,
-            WriteOptions {
-                write_statistics: true,
-                compression: Compression::Gzip,
-                version: Version::V2,
-            },
-        )
-        .context(WriteParquetSnafu)?;
+#[inline]
+fn get_mutable_limitation(max_write_buffer_size: usize) -> usize {
+    // Inspired by RocksDB
+    // https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L86
+    max_write_buffer_size * 7 / 8
+}
 
-        let iter_ctx = IterContext {
-            batch_size: 128,
-            visible_sequence: SequenceNumber::MAX,
-        };
-
-        let mut iter = mt.iter(iter_ctx)?;
-        while let Some(batch) = iter.next()? {
-            sink.send(Chunk::new(
-                batch
-                    .keys
-                    .iter()
-                    .map(|v| v.to_arrow_array())
-                    .chain(std::iter::once(batch.sequences.to_arrow_array()))
-                    .chain(std::iter::once(batch.value_types.to_arrow_array()))
-                    .chain(batch.values.iter().map(|v| v.to_arrow_array()))
-                    .collect(),
-            ))
-            .await
-            .context(WriteParquetSnafu)?;
+impl Default for SizeBasedStrategy {
+    fn default() -> Self {
+        let max_write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE;
+        Self {
+            max_write_buffer_size,
+            mutable_limitation: get_mutable_limitation(max_write_buffer_size),
         }
-
-        if let Some(meta) = extra_meta {
-            for (k, v) in meta {
-                sink.metadata.insert(k, Some(v));
-            }
-        }
-        sink.close().await.context(WriteParquetSnafu)
     }
 }
 
-/// Assembles arrow schema from memtable schema info.
-fn memtable_schema_to_arrow_schema(schema: &MemtableSchema) -> Schema {
-    let col_meta_to_field: fn(&ColumnMetadata) -> Field = |col_meta| {
-        Field::from(&ColumnSchema::new(
-            col_meta.desc.name.clone(),
-            col_meta.desc.data_type.clone(),
-            col_meta.desc.is_nullable,
-        ))
-    };
+impl FlushStrategy for SizeBasedStrategy {
+    fn should_flush(
+        &self,
+        shared: &SharedDataRef,
+        bytes_mutable: usize,
+        bytes_total: usize,
+    ) -> bool {
+        // Insipired by RocksDB flush strategy
+        // https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L94
 
-    let fields = schema
-        .row_key_columns()
-        .map(col_meta_to_field)
-        .chain(std::iter::once(Field::from(&ColumnSchema::new(
-            SEQUENCE_COLUMN_NAME,
-            ConcreteDataType::uint64_datatype(),
-            false,
-        ))))
-        .chain(std::iter::once(Field::from(&ColumnSchema::new(
-            VALUE_TYPE_COLUMN_NAME,
-            ConcreteDataType::uint8_datatype(),
-            false,
-        ))))
-        .chain(schema.value_columns().map(col_meta_to_field))
-        .collect::<Vec<_>>();
-    Schema::from(fields)
-}
+        if bytes_mutable > self.mutable_limitation {
+            logging::info!(
+                "Region should flush, region: {}, bytes_mutable: {}, mutable_limitation: {}, \
+                 bytes_total: {}, max_write_buffer_size: {} .",
+                shared.name,
+                bytes_mutable,
+                self.mutable_limitation,
+                bytes_total,
+                self.max_write_buffer_size
+            );
 
-fn get_encoding_for_schema<F: Fn(&DataType) -> Encoding + Clone>(
-    schema: &Schema,
-    map: F,
-) -> Vec<Encoding> {
-    schema
-        .fields
-        .iter()
-        .flat_map(|f| transverse(&f.data_type, map.clone()))
-        .collect()
-}
-
-// TODO(hl): backport from arrow2 v0.12 (https://github.com/jorgecarleitao/arrow2/blob/f57dbd5dbc61b940a71decd5f81d0fd4c93b158d/src/io/parquet/write/mod.rs#L454-L509)
-// remove it when upgrade to newer version
-pub fn transverse<T, F: Fn(&DataType) -> T + Clone>(data_type: &DataType, map: F) -> Vec<T> {
-    let mut encodings = vec![];
-    transverse_recursive(data_type, map, &mut encodings);
-    encodings
-}
-
-fn transverse_recursive<T, F: Fn(&DataType) -> T + Clone>(
-    data_type: &DataType,
-    map: F,
-    encodings: &mut Vec<T>,
-) {
-    use datatypes::arrow::datatypes::PhysicalType::*;
-    match data_type.to_physical_type() {
-        Null | Boolean | Primitive(_) | Binary | FixedSizeBinary | LargeBinary | Utf8
-        | Dictionary(_) | LargeUtf8 => encodings.push(map(data_type)),
-        List | FixedSizeList | LargeList => {
-            let a = data_type.to_logical_type();
-            if let DataType::List(inner) = a {
-                transverse_recursive(&inner.data_type, map, encodings)
-            } else if let DataType::LargeList(inner) = a {
-                transverse_recursive(&inner.data_type, map, encodings)
-            } else if let DataType::FixedSizeList(inner, _) = a {
-                transverse_recursive(&inner.data_type, map, encodings)
-            } else {
-                unreachable!()
-            }
+            return true;
         }
-        Struct => {
-            if let DataType::Struct(fields) = data_type.to_logical_type() {
-                for field in fields {
-                    transverse_recursive(&field.data_type, map.clone(), encodings)
-                }
-            } else {
-                unreachable!()
-            }
+
+        let buffer_size = self.max_write_buffer_size;
+
+        // If the memory exceeds the buffer size, we trigger more aggressive
+        // flush. But if already more than half memory is being flushed,
+        // triggering more flush may not help. We will hold it instead.
+        let should_flush = bytes_total >= buffer_size && bytes_mutable >= buffer_size / 2;
+
+        if should_flush {
+            logging::info!(
+                "Region should flush, region: {}, bytes_mutable: {}, mutable_limitation: {}, \
+                 bytes_total: {}, max_write_buffer_size: {} .",
+                shared.name,
+                bytes_mutable,
+                self.mutable_limitation,
+                bytes_total,
+                buffer_size
+            );
         }
-        Union => todo!(),
-        Map => todo!(),
+
+        should_flush
+    }
+}
+
+#[derive(Debug)]
+pub struct MemtableWithMeta {
+    pub memtable: MemtableRef,
+    pub bucket: RangeMillis,
+}
+
+#[async_trait]
+pub trait FlushScheduler: Send + Sync {
+    async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle>;
+}
+
+pub struct FlushSchedulerImpl {
+    job_pool: JobPoolRef,
+}
+
+impl FlushSchedulerImpl {
+    pub fn new(job_pool: JobPoolRef) -> FlushSchedulerImpl {
+        FlushSchedulerImpl { job_pool }
+    }
+}
+
+#[async_trait]
+impl FlushScheduler for FlushSchedulerImpl {
+    async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle> {
+        // TODO(yingwen): [flush] Implements flush schedule strategy, controls max background flushes.
+        self.job_pool.submit(flush_job).await
+    }
+}
+
+pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
+
+pub struct FlushJob<S: LogStore> {
+    /// Max memtable id in these memtables,
+    /// used to remove immutable memtables in current version.
+    pub max_memtable_id: MemtableId,
+    /// Memtables to be flushed.
+    pub memtables: Vec<MemtableWithMeta>,
+    /// Last sequence of data to be flushed.
+    pub flush_sequence: SequenceNumber,
+    /// Shared data of region to be flushed.
+    pub shared: SharedDataRef,
+    /// Sst access layer of the region.
+    pub sst_layer: AccessLayerRef,
+    /// Region writer, used to persist log entry that points to the latest manifest file.
+    pub writer: RegionWriterRef,
+    /// Region write-ahead logging, used to write data/meta to the log file.
+    pub wal: Wal<S>,
+    /// Region manifest service, used to persist metadata.
+    pub manifest: RegionManifest,
+}
+
+impl<S: LogStore> FlushJob<S> {
+    async fn write_memtables_to_layer(&self, ctx: &Context) -> Result<Vec<FileMeta>> {
+        if ctx.is_cancelled() {
+            return CancelledSnafu {}.fail();
+        }
+
+        let mut futures = Vec::with_capacity(self.memtables.len());
+        for m in &self.memtables {
+            let file_name = Self::generate_sst_file_name();
+            // TODO(hl): Check if random file name already exists in meta.
+
+            let iter_ctx = IterContext {
+                for_flush: true,
+                ..Default::default()
+            };
+
+            let iter = m.memtable.iter(iter_ctx)?;
+            futures.push(async move {
+                self.sst_layer
+                    .write_sst(&file_name, iter, WriteOptions::default())
+                    .await
+            });
+        }
+
+        let metas = futures_util::future::join_all(futures)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|f| FileMeta {
+                file_path: f,
+                level: 0,
+            })
+            .collect();
+
+        logging::info!("Successfully flush memtables to files: {:?}", metas);
+        Ok(metas)
+    }
+
+    async fn write_to_manifest(&self, file_metas: &[FileMeta]) -> Result<ManifestVersion> {
+        let edit = RegionEdit {
+            region_id: self.shared.id,
+            region_version: self.shared.version_control.metadata().version,
+            flush_sequence: self.flush_sequence,
+            files_to_add: file_metas.to_vec(),
+            files_to_remove: Vec::default(),
+        };
+        logging::debug!("Write region edit: {:?} to manifest.", edit);
+        self.manifest.update(RegionMetaAction::Edit(edit)).await
+    }
+
+    /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`
+    fn generate_sst_file_name() -> String {
+        format!("{}.parquet", Uuid::new_v4().hyphenated())
+    }
+}
+
+#[async_trait]
+impl<S: LogStore> Job for FlushJob<S> {
+    // TODO(yingwen): [flush] Support in-job parallelism (Flush memtables concurrently)
+    async fn run(&mut self, ctx: &Context) -> Result<()> {
+        let file_metas = self.write_memtables_to_layer(ctx).await?;
+
+        let manifest_version = self.write_to_manifest(&file_metas).await?;
+
+        let edit = VersionEdit {
+            files_to_add: file_metas,
+            flushed_sequence: Some(self.flush_sequence),
+            manifest_version,
+            max_memtable_id: Some(self.max_memtable_id),
+        };
+
+        self.writer
+            .apply_version_edit(&self.wal, edit, &self.shared)
+            .await?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use log_store::fs::noop::NoopLogStore;
+    use regex::Regex;
+
+    use super::*;
+
+    #[test]
+    fn test_get_mutable_limitation() {
+        assert_eq!(7, get_mutable_limitation(8));
+        assert_eq!(8, get_mutable_limitation(10));
+        assert_eq!(56, get_mutable_limitation(64));
+    }
+
+    #[test]
+    pub fn test_uuid_generate() {
+        let file_name = FlushJob::<NoopLogStore>::generate_sst_file_name();
+        let regex = Regex::new(r"^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$").unwrap();
+        assert!(
+            regex.is_match(&file_name),
+            "illegal sst file name: {}",
+            file_name
+        );
     }
 }

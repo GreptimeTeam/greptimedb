@@ -1,11 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use arrow::datatypes::{Field, Schema as ArrowSchema};
+use arrow::datatypes::{Field, Metadata, Schema as ArrowSchema};
 use serde::{Deserialize, Serialize};
+use snafu::{ensure, ResultExt};
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error::{Error, Result};
+use crate::error::{self, Error, Result};
+
+const TIMESTAMP_INDEX_KEY: &str = "greptime:timestamp_index";
 
 // TODO(yingwen): consider assign a version to schema so compare schema can be
 // done by compare version.
@@ -36,24 +39,42 @@ pub struct Schema {
     column_schemas: Vec<ColumnSchema>,
     name_to_index: HashMap<String, usize>,
     arrow_schema: Arc<ArrowSchema>,
+    /// Index of the timestamp key column.
+    ///
+    /// Timestamp key column is the column holds the timestamp and forms part of
+    /// the primary key. None means there is no timestamp key column.
+    timestamp_index: Option<usize>,
 }
 
 impl Schema {
     pub fn new(column_schemas: Vec<ColumnSchema>) -> Schema {
-        let mut fields = Vec::with_capacity(column_schemas.len());
-        let mut name_to_index = HashMap::with_capacity(column_schemas.len());
-        for (index, column_schema) in column_schemas.iter().enumerate() {
-            let field = Field::from(column_schema);
-            fields.push(field);
-            name_to_index.insert(column_schema.name.clone(), index);
-        }
-        let arrow_schema = Arc::new(ArrowSchema::from(fields));
+        let (arrow_schema, name_to_index) = collect_column_schemas(&column_schemas);
 
         Schema {
             column_schemas,
             name_to_index,
-            arrow_schema,
+            arrow_schema: Arc::new(arrow_schema),
+            timestamp_index: None,
         }
+    }
+
+    pub fn with_timestamp_index(
+        column_schemas: Vec<ColumnSchema>,
+        timestamp_index: usize,
+    ) -> Result<Schema> {
+        let (arrow_schema, name_to_index) = collect_column_schemas(&column_schemas);
+        let mut metadata = BTreeMap::new();
+        metadata.insert(TIMESTAMP_INDEX_KEY.to_string(), timestamp_index.to_string());
+        let arrow_schema = Arc::new(arrow_schema.with_metadata(metadata));
+
+        validate_timestamp_index(&column_schemas, timestamp_index)?;
+
+        Ok(Schema {
+            column_schemas,
+            name_to_index,
+            arrow_schema,
+            timestamp_index: Some(timestamp_index),
+        })
     }
 
     pub fn arrow_schema(&self) -> &Arc<ArrowSchema> {
@@ -69,6 +90,55 @@ impl Schema {
             .get(name)
             .map(|index| &self.column_schemas[*index])
     }
+
+    #[inline]
+    pub fn num_columns(&self) -> usize {
+        self.column_schemas.len()
+    }
+
+    /// Returns index of the timestamp key column.
+    #[inline]
+    pub fn timestamp_index(&self) -> Option<usize> {
+        self.timestamp_index
+    }
+
+    #[inline]
+    pub fn timestamp_column(&self) -> Option<&ColumnSchema> {
+        self.timestamp_index.map(|idx| &self.column_schemas[idx])
+    }
+}
+
+fn collect_column_schemas(
+    column_schemas: &[ColumnSchema],
+) -> (ArrowSchema, HashMap<String, usize>) {
+    let mut fields = Vec::with_capacity(column_schemas.len());
+    let mut name_to_index = HashMap::with_capacity(column_schemas.len());
+    for (index, column_schema) in column_schemas.iter().enumerate() {
+        let field = Field::from(column_schema);
+        fields.push(field);
+        name_to_index.insert(column_schema.name.clone(), index);
+    }
+
+    (ArrowSchema::from(fields), name_to_index)
+}
+
+fn validate_timestamp_index(column_schemas: &[ColumnSchema], timestamp_index: usize) -> Result<()> {
+    ensure!(
+        timestamp_index < column_schemas.len(),
+        error::InvalidTimestampIndexSnafu {
+            index: timestamp_index,
+        }
+    );
+
+    let column_schema = &column_schemas[timestamp_index];
+    ensure!(
+        column_schema.data_type.is_timestamp(),
+        error::InvalidTimestampIndexSnafu {
+            index: timestamp_index,
+        }
+    );
+
+    Ok(())
 }
 
 pub type SchemaRef = Arc<Schema>;
@@ -109,11 +179,29 @@ impl TryFrom<Arc<ArrowSchema>> for Schema {
             column_schemas.push(column_schema);
         }
 
+        let timestamp_index = try_parse_index(&arrow_schema.metadata, TIMESTAMP_INDEX_KEY)?;
+        if let Some(index) = timestamp_index {
+            validate_timestamp_index(&column_schemas, index)?;
+        }
+
         Ok(Self {
             column_schemas,
             name_to_index,
             arrow_schema,
+            timestamp_index,
         })
+    }
+}
+
+fn try_parse_index(metadata: &Metadata, key: &str) -> Result<Option<usize>> {
+    if let Some(value) = metadata.get(key) {
+        let index = value
+            .parse()
+            .context(error::ParseSchemaIndexSnafu { value })?;
+
+        Ok(Some(index))
+    } else {
+        Ok(None)
     }
 }
 
@@ -136,12 +224,16 @@ mod tests {
     }
 
     #[test]
-    fn test_schema() {
+    fn test_schema_no_timestamp() {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), false),
             ColumnSchema::new("col2", ConcreteDataType::float64_datatype(), true),
         ];
         let schema = Schema::new(column_schemas.clone());
+
+        assert_eq!(2, schema.num_columns());
+        assert!(schema.timestamp_index().is_none());
+        assert!(schema.timestamp_column().is_none());
 
         for column_schema in &column_schemas {
             let found = schema.column_schema_by_name(&column_schema.name).unwrap();
@@ -158,5 +250,32 @@ mod tests {
         assert_eq!(column_schemas, schema.column_schemas());
         assert_eq!(arrow_schema, *schema.arrow_schema());
         assert_eq!(arrow_schema, *new_schema.arrow_schema());
+    }
+
+    #[test]
+    fn test_schema_with_timestamp() {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false),
+        ];
+        let schema = Schema::with_timestamp_index(column_schemas.clone(), 1).unwrap();
+
+        assert_eq!(1, schema.timestamp_index().unwrap());
+        assert_eq!(&column_schemas[1], schema.timestamp_column().unwrap());
+
+        let new_schema = Schema::try_from(schema.arrow_schema().clone()).unwrap();
+        assert_eq!(1, schema.timestamp_index().unwrap());
+        assert_eq!(schema, new_schema);
+    }
+
+    #[test]
+    fn test_schema_wrong_timestamp() {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("col2", ConcreteDataType::float64_datatype(), false),
+        ];
+        assert!(Schema::with_timestamp_index(column_schemas.clone(), 0).is_err());
+        assert!(Schema::with_timestamp_index(column_schemas.clone(), 1).is_err());
+        assert!(Schema::with_timestamp_index(column_schemas, 2).is_err());
     }
 }

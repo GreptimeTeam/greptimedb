@@ -5,7 +5,7 @@ use std::str::Utf8Error;
 use common_error::prelude::*;
 use datatypes::arrow;
 use serde_json::error::Error as JsonError;
-use store_api::manifest::Version;
+use store_api::manifest::ManifestVersion;
 
 use crate::metadata::Error as MetadataError;
 
@@ -31,8 +31,18 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Missing timestamp in write batch"))]
+    BatchMissingTimestamp { backtrace: Backtrace },
+
     #[snafu(display("Failed to write columns, source: {}", source))]
     FlushIo {
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to init backend, source: {}", source))]
+    InitBackend {
+        dir: String,
         source: std::io::Error,
         backtrace: Backtrace,
     },
@@ -91,13 +101,47 @@ pub enum Error {
 
     #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
     InvalidScanIndex {
-        start: Version,
-        end: Version,
+        start: ManifestVersion,
+        end: ManifestVersion,
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to write wal, region: {}, source: {}", region, source))]
-    WriteWal { region: String, source: BoxedError },
+    #[snafu(display(
+        "Failed to write WAL, region id: {}, WAL name: {}, source: {}",
+        region_id,
+        name,
+        source
+    ))]
+    WriteWal {
+        region_id: u32,
+        name: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to encode WAL header, source {}", source))]
+    EncodeWalHeader {
+        backtrace: Backtrace,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("Failed to decode WAL header, source {}", source))]
+    DecodeWalHeader {
+        backtrace: Backtrace,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("Failed to join task, source: {}", source))]
+    JoinTask {
+        source: common_runtime::JoinError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid timestamp in write batch, source: {}", source))]
+    InvalidTimestamp { source: crate::write_batch::Error },
+
+    #[snafu(display("Task already cancelled"))]
+    Cancelled { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -110,15 +154,26 @@ impl ErrorExt for Error {
             InvalidScanIndex { .. }
             | InvalidRegionDesc { .. }
             | InvalidInputSchema { .. }
-            | BatchMissingColumn { .. } => StatusCode::InvalidArguments,
-            Utf8 { .. } | EncodeJson { .. } | DecodeJson { .. } => StatusCode::Unexpected,
+            | BatchMissingColumn { .. }
+            | BatchMissingTimestamp { .. }
+            | InvalidTimestamp { .. } => StatusCode::InvalidArguments,
+
+            Utf8 { .. }
+            | EncodeJson { .. }
+            | DecodeJson { .. }
+            | JoinTask { .. }
+            | Cancelled { .. } => StatusCode::Unexpected,
+
             FlushIo { .. }
+            | InitBackend { .. }
             | WriteParquet { .. }
             | ReadObject { .. }
             | WriteObject { .. }
             | ListObjects { .. }
             | DeleteObject { .. }
-            | WriteWal { .. } => StatusCode::StorageUnavailable,
+            | WriteWal { .. }
+            | DecodeWalHeader { .. }
+            | EncodeWalHeader { .. } => StatusCode::StorageUnavailable,
         }
     }
 

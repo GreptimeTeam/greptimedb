@@ -6,24 +6,28 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use snafu::ensure;
-use store_api::storage::{ReadContext, Region, RegionMeta, WriteContext, WriteResponse};
-use tokio::sync::Mutex;
+use store_api::logstore::LogStore;
+use store_api::storage::{ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse};
 
+use crate::background::JobPoolImpl;
 use crate::error::{self, Error, Result};
-use crate::memtable::{DefaultMemtableBuilder, MemtableBuilder, MemtableSchema, MemtableSet};
+use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
+use crate::manifest::region::RegionManifest;
+use crate::memtable::{DefaultMemtableBuilder, MemtableVersion};
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
-use crate::region::writer::RegionWriter;
+pub use crate::region::writer::{RegionWriter, RegionWriterRef, WriterContext};
 use crate::snapshot::SnapshotImpl;
+use crate::sst::AccessLayerRef;
 use crate::version::{VersionControl, VersionControlRef};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
-pub struct RegionImpl<S> {
+pub struct RegionImpl<S: LogStore> {
     inner: Arc<RegionInner<S>>,
 }
 
-impl<S> Clone for RegionImpl<S> {
+impl<S: LogStore> Clone for RegionImpl<S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -32,17 +36,14 @@ impl<S> Clone for RegionImpl<S> {
 }
 
 #[async_trait]
-impl<S> Region for RegionImpl<S>
-where
-    S: Send + Sync + 'static,
-{
+impl<S: LogStore> Region for RegionImpl<S> {
     type Error = Error;
     type Meta = RegionMetaImpl;
     type WriteRequest = WriteBatch;
     type Snapshot = SnapshotImpl;
 
     fn name(&self) -> &str {
-        &self.inner.name
+        &self.inner.shared.name
     }
 
     fn in_memory_metadata(&self) -> RegionMetaImpl {
@@ -58,43 +59,86 @@ where
     }
 }
 
-impl<S> RegionImpl<S> {
-    pub fn new(name: String, metadata: RegionMetadata, _wal: Wal<S>) -> RegionImpl<S> {
+impl<S: LogStore> RegionImpl<S> {
+    pub fn new(
+        id: RegionId,
+        name: String,
+        metadata: RegionMetadata,
+        wal: Wal<S>,
+        sst_layer: AccessLayerRef,
+        manifest: RegionManifest,
+    ) -> RegionImpl<S> {
         let memtable_builder = Arc::new(DefaultMemtableBuilder {});
-        let memtable_schema = MemtableSchema::new(metadata.columns_row_key.clone());
-        let mem = memtable_builder.build(memtable_schema);
-        let memtables = MemtableSet::new(mem);
+        let memtable_version = MemtableVersion::new();
+        // TODO(yingwen): Pass flush scheduler to `RegionImpl::new`.
+        let job_pool = Arc::new(JobPoolImpl {});
+        let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
 
-        let version = VersionControl::new(metadata, memtables);
+        let version_control = VersionControl::new(metadata, memtable_version);
         let inner = Arc::new(RegionInner {
-            name,
-            version: Arc::new(version),
-            writer: Mutex::new(RegionWriter::new(memtable_builder)),
-            _wal,
+            shared: Arc::new(SharedData {
+                id,
+                name,
+                version_control: Arc::new(version_control),
+            }),
+            writer: Arc::new(RegionWriter::new(memtable_builder)),
+            wal,
+            flush_strategy: Arc::new(SizeBasedStrategy::default()),
+            flush_scheduler,
+            sst_layer,
+            manifest,
         });
 
         RegionImpl { inner }
     }
+}
 
-    #[cfg(test)]
+// Private methods for tests.
+#[cfg(test)]
+impl<S: LogStore> RegionImpl<S> {
     #[inline]
     fn committed_sequence(&self) -> store_api::storage::SequenceNumber {
-        self.inner.version.committed_sequence()
+        self.inner.version_control().committed_sequence()
     }
 }
 
-struct RegionInner<S> {
-    name: String,
-    version: VersionControlRef,
-    writer: Mutex<RegionWriter>,
-    _wal: Wal<S>,
+/// Shared data of region.
+pub struct SharedData {
+    pub id: RegionId,
+    pub name: String,
+    // TODO(yingwen): Maybe no need to use Arc for version control.
+    pub version_control: VersionControlRef,
 }
 
-impl<S> RegionInner<S> {
+pub type SharedDataRef = Arc<SharedData>;
+
+struct RegionInner<S: LogStore> {
+    shared: SharedDataRef,
+    writer: RegionWriterRef,
+    wal: Wal<S>,
+    flush_strategy: FlushStrategyRef,
+    flush_scheduler: FlushSchedulerRef,
+    sst_layer: AccessLayerRef,
+    manifest: RegionManifest,
+}
+
+impl<S: LogStore> RegionInner<S> {
+    #[inline]
+    fn version_control(&self) -> &VersionControl {
+        &*self.shared.version_control
+    }
+
     fn in_memory_metadata(&self) -> RegionMetaImpl {
-        let metadata = self.version.metadata();
+        let metadata = self.version_control().metadata();
 
         RegionMetaImpl::new(metadata)
+    }
+
+    fn create_snapshot(&self) -> SnapshotImpl {
+        let version = self.version_control().current();
+        let sequence = self.version_control().committed_sequence();
+
+        SnapshotImpl::new(version, sequence)
     }
 
     async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
@@ -103,20 +147,21 @@ impl<S> RegionInner<S> {
         // Only compare column schemas.
         ensure!(
             schema.column_schemas() == request.schema().column_schemas(),
-            error::InvalidInputSchemaSnafu { region: &self.name }
+            error::InvalidInputSchemaSnafu {
+                region: &self.shared.name
+            }
         );
 
-        // TODO(jiachun) write data to wal
-
+        let writer_ctx = WriterContext {
+            shared: &self.shared,
+            flush_strategy: &self.flush_strategy,
+            flush_scheduler: &self.flush_scheduler,
+            sst_layer: &self.sst_layer,
+            wal: &self.wal,
+            writer: &self.writer,
+            manifest: &self.manifest,
+        };
         // Now altering schema is not allowed, so it is safe to validate schema outside of the lock.
-        let mut writer = self.writer.lock().await;
-        writer.write(ctx, &self.version, request).await
-    }
-
-    fn create_snapshot(&self) -> SnapshotImpl {
-        let version = self.version.current();
-        let sequence = self.version.committed_sequence();
-
-        SnapshotImpl::new(version, sequence)
+        self.writer.write(ctx, request, writer_ctx).await
     }
 }

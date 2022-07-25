@@ -22,6 +22,12 @@ pub enum Error {
 
     #[snafu(display("Column family id already exists, id: {}", id))]
     CfIdExists { id: ColumnId, backtrace: Backtrace },
+
+    #[snafu(display("Failed to build schema, source: {}", source))]
+    InvalidSchema {
+        source: datatypes::error::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -162,7 +168,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
             builder = builder.add_column_family(cf)?;
         }
 
-        Ok(builder.build())
+        builder.build()
     }
 }
 
@@ -245,8 +251,15 @@ impl RegionMetadataBuilder {
         Ok(self)
     }
 
-    fn build(self) -> RegionMetadata {
-        let schema = Arc::new(Schema::new(self.column_schemas));
+    fn build(self) -> Result<RegionMetadata> {
+        let schema = if self.column_schemas.is_empty() {
+            Arc::new(Schema::new(self.column_schemas))
+        } else {
+            Arc::new(
+                Schema::with_timestamp_index(self.column_schemas, self.row_key.timestamp_key_index)
+                    .context(InvalidSchemaSnafu)?,
+            )
+        };
         let columns = ColumnsMetadata {
             columns: self.columns,
             name_to_col_index: self.name_to_col_index,
@@ -256,7 +269,7 @@ impl RegionMetadataBuilder {
             row_key: self.row_key,
         });
 
-        RegionMetadata {
+        Ok(RegionMetadata {
             id: self.id,
             schema,
             columns_row_key,
@@ -264,7 +277,7 @@ impl RegionMetadataBuilder {
                 id_to_cfs: self.id_to_cfs,
             },
             version: 0,
-        }
+        })
     }
 
     // Helper methods:
@@ -320,17 +333,20 @@ mod tests {
     #[test]
     fn test_descriptor_to_region_metadata() {
         let desc = RegionDescBuilder::new("region-0")
-            .timestamp(("ts", LogicalTypeId::UInt64, false))
+            .timestamp(("ts", LogicalTypeId::Int64, false))
             .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_value_column(("v1", LogicalTypeId::Float32, true))
             .build();
 
-        let expect_schema = schema_util::new_schema_ref(&[
-            ("k1", LogicalTypeId::Int32, false),
-            ("ts", LogicalTypeId::UInt64, false),
-            ("v1", LogicalTypeId::Float32, true),
-        ]);
+        let expect_schema = schema_util::new_schema_ref(
+            &[
+                ("k1", LogicalTypeId::Int32, false),
+                ("ts", LogicalTypeId::Int64, false),
+                ("v1", LogicalTypeId::Float32, true),
+            ],
+            Some(1),
+        );
 
         let metadata = RegionMetadata::try_from(desc).unwrap();
         assert_eq!(expect_schema, metadata.schema);
@@ -340,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_build_empty_region_metadata() {
-        let metadata = RegionMetadataBuilder::default().build();
+        let metadata = RegionMetadataBuilder::default().build().unwrap();
         assert!(metadata.schema.column_schemas().is_empty());
 
         assert!(metadata.columns_row_key.columns.columns.is_empty());
@@ -385,17 +401,21 @@ mod tests {
             .add_column_family(cf)
             .unwrap()
             .build()
+            .unwrap()
     }
 
     #[test]
     fn test_build_metedata_disable_version() {
         let metadata = new_metadata(false);
 
-        let expect_schema = schema_util::new_schema_ref(&[
-            ("k1", LogicalTypeId::Int64, false),
-            ("ts", LogicalTypeId::Int64, false),
-            ("v1", LogicalTypeId::Int64, true),
-        ]);
+        let expect_schema = schema_util::new_schema_ref(
+            &[
+                ("k1", LogicalTypeId::Int64, false),
+                ("ts", LogicalTypeId::Int64, false),
+                ("v1", LogicalTypeId::Int64, true),
+            ],
+            Some(1),
+        );
 
         assert_eq!(expect_schema, metadata.schema);
 
@@ -434,12 +454,15 @@ mod tests {
     fn test_build_metedata_enable_version() {
         let metadata = new_metadata(true);
 
-        let expect_schema = schema_util::new_schema_ref(&[
-            ("k1", LogicalTypeId::Int64, false),
-            ("ts", LogicalTypeId::Int64, false),
-            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-            ("v1", LogicalTypeId::Int64, true),
-        ]);
+        let expect_schema = schema_util::new_schema_ref(
+            &[
+                ("k1", LogicalTypeId::Int64, false),
+                ("ts", LogicalTypeId::Int64, false),
+                (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
+                ("v1", LogicalTypeId::Int64, true),
+            ],
+            Some(1),
+        );
 
         assert_eq!(expect_schema, metadata.schema);
 

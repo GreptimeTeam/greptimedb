@@ -27,13 +27,13 @@ impl Manifest for RegionManifest {
     type MetadataId = RegionId;
     type Metadata = RegionManifestData;
 
-    fn new(id: Self::MetadataId, object_store: ObjectStore) -> Self {
+    fn new(id: Self::MetadataId, manifest_dir: &str, object_store: ObjectStore) -> Self {
         RegionManifest {
-            inner: Arc::new(RegionManifestInner::new(id, object_store)),
+            inner: Arc::new(RegionManifestInner::new(id, manifest_dir, object_store)),
         }
     }
 
-    async fn update(&self, action: RegionMetaAction) -> Result<()> {
+    async fn update(&self, action: RegionMetaAction) -> Result<ManifestVersion> {
         self.inner.save(&action).await
     }
 
@@ -58,7 +58,7 @@ impl Manifest for RegionManifest {
         }
     }
 
-    async fn checkpoint(&self) -> Result<()> {
+    async fn checkpoint(&self) -> Result<ManifestVersion> {
         unimplemented!();
     }
 
@@ -78,7 +78,7 @@ struct RegionMetaActionIterator {
 }
 
 impl RegionMetaActionIterator {
-    async fn next_action(&mut self) -> Result<Option<(Version, RegionMetaAction)>> {
+    async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaAction)>> {
         match self.log_iter.next_log().await? {
             Some((v, bytes)) => {
                 let action: RegionMetaAction = RegionMetaAction::decode(&bytes)?;
@@ -90,29 +90,26 @@ impl RegionMetaActionIterator {
 }
 
 impl RegionManifestInner {
-    fn new(region_id: RegionId, object_store: ObjectStore) -> Self {
-        // TODO(dennis): make manifest dir configurable.
-        let path = format!("{}/manifest/", region_id);
-
+    fn new(region_id: RegionId, manifest_dir: &str, object_store: ObjectStore) -> Self {
         Self {
             region_id,
-            store: Arc::new(ManifestObjectStore::new(&path, object_store)),
+            store: Arc::new(ManifestObjectStore::new(manifest_dir, object_store)),
             // TODO(dennis): recover the last version from history
             version: AtomicU64::new(0),
         }
     }
 
     #[inline]
-    fn inc_version(&self) -> Version {
+    fn inc_version(&self) -> ManifestVersion {
         self.version.fetch_add(1, Ordering::Relaxed)
     }
 
     #[inline]
-    fn last_version(&self) -> Version {
+    fn last_version(&self) -> ManifestVersion {
         self.version.load(Ordering::Relaxed)
     }
 
-    async fn save(&self, action: &RegionMetaAction) -> Result<()> {
+    async fn save(&self, action: &RegionMetaAction) -> Result<ManifestVersion> {
         let version = self.inc_version();
 
         logging::debug!(
@@ -121,10 +118,16 @@ impl RegionManifestInner {
             version
         );
 
-        self.store.save(version, &action.encode()?).await
+        self.store.save(version, &action.encode()?).await?;
+
+        Ok(version)
     }
 
-    async fn scan(&self, start: Version, end: Version) -> Result<RegionMetaActionIterator> {
+    async fn scan(
+        &self,
+        start: ManifestVersion,
+        end: ManifestVersion,
+    ) -> Result<RegionMetaActionIterator> {
         Ok(RegionMetaActionIterator {
             log_iter: self.store.scan(start, end).await?,
         })
@@ -154,7 +157,7 @@ mod tests {
         );
         let region_id = 0;
 
-        let manifest = RegionManifest::new(region_id, object_store);
+        let manifest = RegionManifest::new(region_id, "/manifest/", object_store);
         assert_eq!(region_id, manifest.metadata_id());
 
         let region_name = "region-0";

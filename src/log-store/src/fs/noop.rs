@@ -4,8 +4,7 @@ use crate::error::{Error, Result};
 use crate::fs::{entry::EntryImpl, namespace::LocalNamespace, AppendResponseImpl};
 
 /// A noop log store which only for test
-///
-/// TODO: Add a test feature
+// TODO: Add a test feature
 #[derive(Default)]
 pub struct NoopLogStore {}
 
