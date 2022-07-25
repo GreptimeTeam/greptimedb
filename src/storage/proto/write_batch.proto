@@ -41,7 +41,7 @@ enum ConcreteDataTypeProto {
   Float32 = 10;
   Float64 = 11;
   String = 12;
-  Bytes = 13;
+  Binary = 13;
 }
 
 
@@ -57,10 +57,10 @@ message ValueProto {
   repeated float f32_values = 9;
   repeated double f64_values = 10;
   repeated bool bool_values = 11;
-  repeated bytes bytes_values = 12;
+  repeated bytes binary_values = 12;
   repeated string string_values = 13;
 
-  repeated bytes null_mask = 14;
+  bytes null_mask = 14;
 
   ConcreteDataTypeProto data_type = 15;
 }
