@@ -34,6 +34,11 @@ pub enum StatusCode {
     TableNotFound,
     TableColumnNotFound,
     // ====== End of catalog related status code =======
+
+    // ====== Begin of storage related status code =====
+    /// Storage is temporarily unable to handle the request
+    StorageUnavailable,
+    // ====== End of storage related status code =======
 }
 
 impl fmt::Display for StatusCode {

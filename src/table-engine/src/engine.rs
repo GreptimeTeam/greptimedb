@@ -194,8 +194,8 @@ mod tests {
     use crate::table::test;
 
     #[tokio::test]
-    async fn test_creat_table_insert_scan() {
-        let (_engine, table, schema) = test::setup_test_engine_and_table().await;
+    async fn test_create_table_insert_scan() {
+        let (_engine, table, schema, _dir) = test::setup_test_engine_and_table().await;
 
         assert_eq!(TableType::Base, table.table_type());
         assert_eq!(schema, table.schema());

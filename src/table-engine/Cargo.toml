@@ -14,6 +14,7 @@ common-telemetry = {path = "../common/telemetry" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
 datatypes = { path = "../datatypes" }
 futures = "0.3"
+log-store = { path = "../log-store" }
 snafu = { version = "0.7", features = ["backtraces"] }
 storage ={ path = "../storage" }
 store-api ={ path = "../store-api" }
@@ -21,4 +22,5 @@ table = { path = "../table" }
 
 [dev-dependencies]
 datatypes = { path = "../datatypes" }
+tempdir = "0.3"
 tokio = { version = "1.18", features = ["full"] }

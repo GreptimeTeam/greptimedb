@@ -3,28 +3,46 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_telemetry::logging::info;
+use object_store::{backend::fs::Backend, util, ObjectStore};
 use snafu::ResultExt;
-use store_api::storage::{EngineContext, RegionDescriptor, StorageEngine};
+use store_api::{
+    logstore::LogStore,
+    manifest::Manifest,
+    storage::{EngineContext, RegionDescriptor, StorageEngine},
+};
 
+use crate::config::{EngineConfig, ObjectStoreConfig};
 use crate::error::{self, Error, Result};
+use crate::manifest::action::*;
+use crate::manifest::region::RegionManifest;
+use crate::metadata::RegionMetadata;
 use crate::region::RegionImpl;
+use crate::sst::FsAccessLayer;
+use crate::wal::Wal;
 
 /// [StorageEngine] implementation.
-#[derive(Clone)]
-pub struct EngineImpl {
-    inner: Arc<EngineInner>,
+pub struct EngineImpl<S: LogStore> {
+    inner: Arc<EngineInner<S>>,
+}
+
+impl<S: LogStore> Clone for EngineImpl<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 #[async_trait]
-impl StorageEngine for EngineImpl {
+impl<S: LogStore> StorageEngine for EngineImpl<S> {
     type Error = Error;
-    type Region = RegionImpl;
+    type Region = RegionImpl<S>;
 
-    async fn open_region(&self, _ctx: &EngineContext, _name: &str) -> Result<RegionImpl> {
+    async fn open_region(&self, _ctx: &EngineContext, _name: &str) -> Result<Self::Region> {
         unimplemented!()
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, _region: RegionImpl) -> Result<()> {
+    async fn close_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
         unimplemented!()
     }
 
@@ -32,42 +50,85 @@ impl StorageEngine for EngineImpl {
         &self,
         _ctx: &EngineContext,
         descriptor: RegionDescriptor,
-    ) -> Result<RegionImpl> {
+    ) -> Result<Self::Region> {
         self.inner.create_region(descriptor).await
     }
 
-    async fn drop_region(&self, _ctx: &EngineContext, _region: RegionImpl) -> Result<()> {
+    async fn drop_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
         unimplemented!()
     }
 
-    fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<RegionImpl>> {
+    fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<Self::Region>> {
         Ok(self.inner.get_region(name))
     }
 }
 
-impl EngineImpl {
-    pub fn new() -> EngineImpl {
-        EngineImpl {
-            inner: Arc::new(EngineInner::default()),
-        }
+impl<S: LogStore> EngineImpl<S> {
+    pub async fn new(config: EngineConfig, log_store: Arc<S>) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(EngineInner::new(config, log_store).await?),
+        })
     }
 }
 
-impl Default for EngineImpl {
-    fn default() -> Self {
-        Self::new()
+/// Engine share data
+/// TODO(dennis): merge to EngineInner?
+#[derive(Clone, Debug)]
+struct SharedData {
+    pub _config: EngineConfig,
+    pub object_store: ObjectStore,
+}
+
+impl SharedData {
+    async fn new(config: EngineConfig) -> Result<Self> {
+        // TODO(dennis): supports other backend
+        let store_dir = util::normalize_dir(match &config.store_config {
+            ObjectStoreConfig::File(file) => &file.store_dir,
+        });
+
+        let accessor = Backend::build()
+            .root(&store_dir)
+            .finish()
+            .await
+            .context(error::InitBackendSnafu { dir: &store_dir })?;
+
+        let object_store = ObjectStore::new(accessor);
+
+        Ok(Self {
+            _config: config,
+            object_store,
+        })
+    }
+
+    #[inline]
+    fn region_sst_dir(&self, region_name: &str) -> String {
+        format!("{}/", region_name)
+    }
+
+    #[inline]
+    fn region_manifest_dir(&self, region_name: &str) -> String {
+        format!("{}/manifest/", region_name)
     }
 }
 
-type RegionMap = HashMap<String, RegionImpl>;
+type RegionMap<S> = HashMap<String, RegionImpl<S>>;
 
-#[derive(Default)]
-struct EngineInner {
-    regions: RwLock<RegionMap>,
+struct EngineInner<S: LogStore> {
+    log_store: Arc<S>,
+    regions: RwLock<RegionMap<S>>,
+    shared: SharedData,
 }
 
-impl EngineInner {
-    async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl> {
+impl<S: LogStore> EngineInner<S> {
+    pub async fn new(config: EngineConfig, log_store: Arc<S>) -> Result<Self> {
+        Ok(Self {
+            log_store,
+            regions: RwLock::new(Default::default()),
+            shared: SharedData::new(config).await?,
+        })
+    }
+
+    async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl<S>> {
         {
             let regions = self.regions.read().unwrap();
             if let Some(region) = regions.get(&descriptor.name) {
@@ -75,13 +136,38 @@ impl EngineInner {
             }
         }
 
+        let region_id = descriptor.id;
         let region_name = descriptor.name.clone();
-        let metadata = descriptor
-            .try_into()
-            .context(error::InvalidRegionDescSnafu {
-                region: &region_name,
-            })?;
-        let region = RegionImpl::new(region_name.clone(), metadata);
+        let metadata: RegionMetadata =
+            descriptor
+                .try_into()
+                .context(error::InvalidRegionDescSnafu {
+                    region: &region_name,
+                })?;
+        let wal = Wal::new(region_id, region_name.clone(), self.log_store.clone());
+        let sst_dir = &self.shared.region_sst_dir(&region_name);
+        let sst_layer = Arc::new(FsAccessLayer::new(
+            sst_dir,
+            self.shared.object_store.clone(),
+        ));
+        let manifest_dir = self.shared.region_manifest_dir(&region_name);
+        let manifest =
+            RegionManifest::new(region_id, &manifest_dir, self.shared.object_store.clone());
+
+        let region = RegionImpl::new(
+            region_id,
+            region_name.clone(),
+            metadata.clone(),
+            wal,
+            sst_layer,
+            manifest.clone(),
+        );
+        // Persist region metadata
+        manifest
+            .update(RegionMetaAction::Change(RegionChange {
+                metadata: Arc::new(metadata),
+            }))
+            .await?;
 
         {
             let mut regions = self.regions.write().unwrap();
@@ -91,7 +177,6 @@ impl EngineInner {
 
             regions.insert(region_name.clone(), region.clone());
         }
-        // TODO(yingwen): Persist region metadata to log.
 
         // TODO(yingwen): Impl Debug format for region and print region info briefly in log.
         info!("Storage engine create region {}", region_name);
@@ -99,7 +184,7 @@ impl EngineInner {
         Ok(region)
     }
 
-    fn get_region(&self, name: &str) -> Option<RegionImpl> {
+    fn get_region(&self, name: &str) -> Option<RegionImpl<S>> {
         self.regions.read().unwrap().get(name).cloned()
     }
 }
@@ -107,14 +192,22 @@ impl EngineInner {
 #[cfg(test)]
 mod tests {
     use datatypes::type_id::LogicalTypeId;
+    use log_store::test_util::log_store_util;
     use store_api::storage::Region;
+    use tempdir::TempDir;
 
     use super::*;
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     #[tokio::test]
     async fn test_create_new_region() {
-        let engine = EngineImpl::new();
+        let (log_store, _tmp) =
+            log_store_util::create_tmp_local_file_log_store("test_engine_wal").await;
+        let dir = TempDir::new("test_create_new_region").unwrap();
+        let store_dir = dir.path().to_string_lossy();
+        let config = EngineConfig::with_store_dir(&store_dir);
+
+        let engine = EngineImpl::new(config, Arc::new(log_store)).await.unwrap();
 
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)

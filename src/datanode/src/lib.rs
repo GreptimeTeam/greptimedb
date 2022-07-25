@@ -6,5 +6,7 @@ mod metric;
 pub mod server;
 mod sql;
 
-pub use crate::datanode::Datanode;
-pub use crate::datanode::DatanodeOptions;
+#[cfg(test)]
+pub mod test_util;
+#[cfg(test)]
+mod tests;

@@ -1,6 +1,11 @@
 use std::any::Any;
+use std::io::Error as IoError;
+use std::str::Utf8Error;
 
 use common_error::prelude::*;
+use datatypes::arrow;
+use serde_json::error::Error as JsonError;
+use store_api::manifest::ManifestVersion;
 
 use crate::metadata::Error as MetadataError;
 
@@ -25,6 +30,118 @@ pub enum Error {
         column: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Missing timestamp in write batch"))]
+    BatchMissingTimestamp { backtrace: Backtrace },
+
+    #[snafu(display("Failed to write columns, source: {}", source))]
+    FlushIo {
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to init backend, source: {}", source))]
+    InitBackend {
+        dir: String,
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to write parquet file, source: {}", source))]
+    WriteParquet {
+        source: arrow::error::ArrowError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Fail to read object from path: {}, source: {}", path, source))]
+    ReadObject {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
+
+    #[snafu(display("Fail to write object into path: {}, source: {}", path, source))]
+    WriteObject {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
+
+    #[snafu(display("Fail to delete object from path: {}, source: {}", path, source))]
+    DeleteObject {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
+
+    #[snafu(display("Fail to list objects in path: {}, source: {}", path, source))]
+    ListObjects {
+        path: String,
+        backtrace: Backtrace,
+        source: IoError,
+    },
+
+    #[snafu(display("Fail to create str from bytes, source: {}", source))]
+    Utf8 {
+        backtrace: Backtrace,
+        source: Utf8Error,
+    },
+
+    #[snafu(display("Fail to encode object into json , source: {}", source))]
+    EncodeJson {
+        backtrace: Backtrace,
+        source: JsonError,
+    },
+
+    #[snafu(display("Fail to decode object from json , source: {}", source))]
+    DecodeJson {
+        backtrace: Backtrace,
+        source: JsonError,
+    },
+
+    #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
+    InvalidScanIndex {
+        start: ManifestVersion,
+        end: ManifestVersion,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to write WAL, region id: {}, WAL name: {}, source: {}",
+        region_id,
+        name,
+        source
+    ))]
+    WriteWal {
+        region_id: u32,
+        name: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to encode WAL header, source {}", source))]
+    EncodeWalHeader {
+        backtrace: Backtrace,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("Failed to decode WAL header, source {}", source))]
+    DecodeWalHeader {
+        backtrace: Backtrace,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("Failed to join task, source: {}", source))]
+    JoinTask {
+        source: common_runtime::JoinError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid timestamp in write batch, source: {}", source))]
+    InvalidTimestamp { source: crate::write_batch::Error },
+
+    #[snafu(display("Task already cancelled"))]
+    Cancelled { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -34,9 +151,29 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            InvalidRegionDesc { .. } | InvalidInputSchema { .. } | BatchMissingColumn { .. } => {
-                StatusCode::InvalidArguments
-            }
+            InvalidScanIndex { .. }
+            | InvalidRegionDesc { .. }
+            | InvalidInputSchema { .. }
+            | BatchMissingColumn { .. }
+            | BatchMissingTimestamp { .. }
+            | InvalidTimestamp { .. } => StatusCode::InvalidArguments,
+
+            Utf8 { .. }
+            | EncodeJson { .. }
+            | DecodeJson { .. }
+            | JoinTask { .. }
+            | Cancelled { .. } => StatusCode::Unexpected,
+
+            FlushIo { .. }
+            | InitBackend { .. }
+            | WriteParquet { .. }
+            | ReadObject { .. }
+            | WriteObject { .. }
+            | ListObjects { .. }
+            | DeleteObject { .. }
+            | WriteWal { .. }
+            | DecodeWalHeader { .. }
+            | EncodeWalHeader { .. } => StatusCode::StorageUnavailable,
         }
     }
 
@@ -51,6 +188,9 @@ impl ErrorExt for Error {
 
 #[cfg(test)]
 mod tests {
+
+    use common_error::prelude::StatusCode::*;
+    use datatypes::arrow::error::ArrowError;
     use snafu::GenerateImplicitData;
 
     use super::*;
@@ -71,5 +211,33 @@ mod tests {
 
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
         assert!(err.backtrace_opt().is_some());
+    }
+
+    #[test]
+    pub fn test_flush_error() {
+        fn throw_io_error() -> std::result::Result<(), std::io::Error> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "writer is closed",
+            ))
+        }
+
+        let error = throw_io_error().context(FlushIoSnafu).err().unwrap();
+        assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+        assert!(error.backtrace_opt().is_some());
+    }
+
+    #[test]
+    pub fn test_arrow_error() {
+        fn throw_arrow_error() -> std::result::Result<(), ArrowError> {
+            Err(ArrowError::ExternalFormat("Lorem ipsum".to_string()))
+        }
+
+        let error = throw_arrow_error()
+            .context(WriteParquetSnafu)
+            .err()
+            .unwrap();
+        assert_eq!(StorageUnavailable, error.status_code());
+        assert!(error.backtrace_opt().is_some());
     }
 }

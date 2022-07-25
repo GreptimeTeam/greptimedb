@@ -7,6 +7,7 @@ mod planner;
 
 use std::sync::Arc;
 
+use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
 use common_query::prelude::ScalarUdf;
@@ -85,6 +86,17 @@ impl QueryEngine for DatafusionQueryEngine {
 
     fn register_udf(&self, udf: ScalarUdf) {
         self.state.register_udf(udf);
+    }
+
+    /// Note in SQL queries, aggregate names are looked up using
+    /// lowercase unless the query uses quotes. For example,
+    ///
+    /// `SELECT MY_UDAF(x)...` will look for an aggregate named `"my_udaf"`
+    /// `SELECT "my_UDAF"(x)` will look for an aggregate named `"my_UDAF"`
+    ///
+    /// So it's better to make UDAF name lowercase when creating one.
+    fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {
+        self.state.register_aggregate_function(func);
     }
 
     fn register_function(&self, func: FunctionRef) {

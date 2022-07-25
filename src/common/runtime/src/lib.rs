@@ -9,4 +9,4 @@ pub use global::{
     spawn_read, spawn_write, write_runtime,
 };
 
-pub use crate::runtime::{Builder, JoinHandle, Runtime};
+pub use crate::runtime::{Builder, JoinError, JoinHandle, Runtime};

@@ -2,16 +2,17 @@ use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
 use paste::paste;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
-    NullType, StringType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    ListType, NullType, StringType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[enum_dispatch::enum_dispatch(DataType)]
 pub enum ConcreteDataType {
     Null(NullType),
@@ -32,6 +33,8 @@ pub enum ConcreteDataType {
     // String types
     Binary(BinaryType),
     String(StringType),
+
+    List(ListType),
 }
 
 impl ConcreteDataType {
@@ -68,6 +71,10 @@ impl ConcreteDataType {
                 | ConcreteDataType::UInt32(_)
                 | ConcreteDataType::UInt64(_)
         )
+    }
+
+    pub fn is_timestamp(&self) -> bool {
+        matches!(self, ConcreteDataType::Int64(_))
     }
 
     pub fn numerics() -> Vec<ConcreteDataType> {
@@ -113,6 +120,9 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Float64 => Self::float64_datatype(),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
+            ArrowDataType::List(field) => Self::List(ListType::new(
+                ConcreteDataType::from_arrow_type(&field.data_type),
+            )),
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
@@ -144,6 +154,12 @@ impl_new_concrete_type_functions!(
     Binary, String
 );
 
+impl ConcreteDataType {
+    pub fn list_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
+        ConcreteDataType::List(ListType::new(inner_type))
+    }
+}
+
 /// Data type abstraction.
 #[enum_dispatch::enum_dispatch]
 pub trait DataType: std::fmt::Debug + Send + Sync {
@@ -164,6 +180,8 @@ pub type DataTypeRef = Arc<dyn DataType>;
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::Field;
+
     use super::*;
 
     #[test]
@@ -242,5 +260,13 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::LargeUtf8),
             ConcreteDataType::String(_)
         ));
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::List(Box::new(Field::new(
+                "item",
+                ArrowDataType::Int32,
+                true
+            )))),
+            ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype()))
+        );
     }
 }

@@ -30,6 +30,20 @@ pub enum Error {
         arrow_type: arrow::datatypes::DataType,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Failed to parse index in schema meta, value: {}, source: {}",
+        value,
+        source
+    ))]
+    ParseSchemaIndex {
+        value: String,
+        source: std::num::ParseIntError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid timestamp index: {}", index))]
+    InvalidTimestampIndex { index: usize, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {

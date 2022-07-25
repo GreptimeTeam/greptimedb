@@ -1,5 +1,7 @@
 use datatypes::value::Value;
+use serde::{Deserialize, Serialize};
 
+use crate::manifest::MetadataId;
 use crate::storage::{consts, ColumnSchema, ConcreteDataType};
 
 /// Id of column, unique in each region.
@@ -7,6 +9,7 @@ pub type ColumnId = u32;
 /// Id of column family, unique in each region.
 pub type ColumnFamilyId = u32;
 pub type RegionId = u32;
+impl MetadataId for RegionId {}
 /// Default region name prefix
 pub const REGION_PREFIX: &str = "r_";
 
@@ -17,7 +20,7 @@ pub fn gen_region_name(id: RegionId) -> String {
 
 // TODO(yingwen): Validate default value has same type with column, and name is a valid column name.
 /// A [ColumnDescriptor] contains information to create a column.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColumnDescriptor {
     pub id: ColumnId,
     pub name: String,
@@ -131,7 +134,7 @@ impl RowKeyDescriptorBuilder {
         Self {
             columns: Vec::new(),
             timestamp,
-            enable_version_column: true,
+            enable_version_column: false,
         }
     }
 
@@ -254,7 +257,7 @@ mod tests {
 
         let desc = RowKeyDescriptorBuilder::new(timestamp.clone()).build();
         assert!(desc.columns.is_empty());
-        assert!(desc.enable_version_column);
+        assert!(!desc.enable_version_column);
 
         let desc = RowKeyDescriptorBuilder::new(timestamp.clone())
             .columns_capacity(1)
@@ -266,7 +269,7 @@ mod tests {
             )
             .build();
         assert_eq!(2, desc.columns.len());
-        assert!(desc.enable_version_column);
+        assert!(!desc.enable_version_column);
 
         let desc = RowKeyDescriptorBuilder::new(timestamp)
             .enable_version_column(false)

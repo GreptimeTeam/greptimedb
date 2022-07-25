@@ -63,14 +63,17 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::value::Value;
+    use log_store::fs::noop::NoopLogStore;
     use query::catalog::memory;
     use query::catalog::schema::SchemaProvider;
     use query::error::Result as QueryResult;
     use query::QueryEngineFactory;
+    use storage::config::EngineConfig;
     use storage::EngineImpl;
     use table::error::Result as TableResult;
     use table::{Table, TableRef};
     use table_engine::engine::MitoEngine;
+    use tempdir::TempDir;
 
     use super::*;
 
@@ -90,7 +93,7 @@ mod tests {
                 ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
             ];
 
-            Arc::new(Schema::new(column_schemas))
+            Arc::new(Schema::with_timestamp_index(column_schemas, 3).unwrap())
         }
         async fn scan(
             &self,
@@ -129,8 +132,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_statement_to_request() {
+    #[tokio::test]
+    async fn test_statement_to_request() {
+        let dir = TempDir::new("setup_test_engine_and_table").unwrap();
+        let store_dir = dir.path().to_string_lossy();
+
         let catalog_list = memory::new_memory_catalog_list().unwrap();
         let factory = QueryEngineFactory::new(catalog_list);
         let query_engine = factory.query_engine().clone();
@@ -140,7 +146,14 @@ mod tests {
                            ('host2', 88.8,  333.3, 1655276558000)
                            "#;
 
-        let table_engine = MitoEngine::<EngineImpl>::new(EngineImpl::new());
+        let table_engine = MitoEngine::<EngineImpl<NoopLogStore>>::new(
+            EngineImpl::new(
+                EngineConfig::with_store_dir(&store_dir),
+                Arc::new(NoopLogStore::default()),
+            )
+            .await
+            .unwrap(),
+        );
         let sql_handler = SqlHandler::new(table_engine);
 
         let stmt = query_engine.sql_to_statement(sql).unwrap();

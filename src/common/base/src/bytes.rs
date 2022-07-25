@@ -1,9 +1,9 @@
 use std::ops::Deref;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bytes buffer.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct Bytes(bytes::Bytes);
 
 impl From<bytes::Bytes> for Bytes {
@@ -53,15 +53,6 @@ impl PartialEq<[u8]> for Bytes {
 impl PartialEq<Bytes> for [u8] {
     fn eq(&self, other: &Bytes) -> bool {
         self == other.0
-    }
-}
-
-impl Serialize for Bytes {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.0.serialize(serializer)
     }
 }
 
@@ -125,6 +116,17 @@ impl Serialize for StringBytes {
         S: Serializer,
     {
         self.as_utf8().serialize(serializer)
+    }
+}
+
+// Custom Deserialize to ensure UTF-8 check is always done.
+impl<'de> Deserialize<'de> for StringBytes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(StringBytes::from(s))
     }
 }
 
