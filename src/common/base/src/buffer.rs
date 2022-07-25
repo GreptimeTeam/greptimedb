@@ -49,6 +49,13 @@ macro_rules! impl_read_le {
                 fn [<read_ $num_ty _le>](&mut self) -> Result<$num_ty> {
                     let mut buf = [0u8; std::mem::size_of::<$num_ty>()];
                     self.read_to_slice(&mut buf)?;
+                    self.advance_by(std::mem::size_of::<$num_ty>());
+                    Ok($num_ty::from_le_bytes(buf))
+                }
+
+                fn [<peek_ $num_ty _le>](&mut self) -> Result<$num_ty> {
+                    let mut buf = [0u8; std::mem::size_of::<$num_ty>()];
+                    self.read_to_slice(&mut buf)?;
                     Ok($num_ty::from_le_bytes(buf))
                 }
             }

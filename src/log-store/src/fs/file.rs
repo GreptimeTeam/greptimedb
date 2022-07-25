@@ -1,4 +1,3 @@
-use std::cmp::max;
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
 use std::pin::Pin;

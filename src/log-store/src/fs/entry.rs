@@ -75,11 +75,9 @@ impl Encode for EntryImpl {
         let mut header = &header[..];
         let id = header.read_u64_le().unwrap(); // unwrap here is safe because header bytes must be present
         digest.update(&id.to_le_bytes());
-        header.advance_by(8);
 
         let epoch = header.read_u64_le().unwrap();
         digest.update(&epoch.to_le_bytes());
-        header.advance_by(8);
 
         let data_len = header.read_u32_le().unwrap();
         digest.update(&data_len.to_le_bytes());
@@ -96,7 +94,7 @@ impl Encode for EntryImpl {
         digest.update(&data);
         buf.advance_by(data_len as usize);
 
-        let crc_read = map_err!(buf.read_u32_le(), buf)?;
+        let crc_read = map_err!(buf.peek_u32_le(), buf)?;
         let crc_calc = digest.finalize();
 
         ensure!(
