@@ -1,6 +1,7 @@
 use api::v1::*;
 use query::Output;
 
+use crate::server::grpc::server::PROTOCOL_VERSION;
 use crate::{error::Result, instance::InstanceRef};
 
 #[derive(Clone)]
@@ -30,7 +31,9 @@ impl BatchHandler {
                             self.instance.execute_grpc_insert(insert_expr).await
                         {
                             object_resp.header = Some(ResultHeader {
+                                version: PROTOCOL_VERSION,
                                 success: rows as u32,
+                                failure: 0,
                                 ..Default::default()
                             });
                         }

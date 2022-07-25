@@ -3,6 +3,8 @@ use tonic::{Request, Response, Status};
 
 use super::handler::BatchHandler;
 
+pub const PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Clone)]
 pub struct Server {
     handler: BatchHandler,

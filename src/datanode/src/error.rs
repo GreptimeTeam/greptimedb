@@ -74,7 +74,7 @@ pub enum Error {
         source: TableError,
     },
 
-    #[snafu(display("illegal insert data"))]
+    #[snafu(display("Illegal insert data"))]
     IllegalInsertData,
 
     #[snafu(display("Fail to convert bytes to insert batch, {}", source))]
