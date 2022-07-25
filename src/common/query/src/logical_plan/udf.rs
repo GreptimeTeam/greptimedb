@@ -5,15 +5,14 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use arrow::datatypes::DataType as ArrowDataType;
 use datafusion_expr::{
-    ColumnarValue as DfColumnarValue, ReturnTypeFunction as DfReturnTypeFunction,
+    ColumnarValue as DfColumnarValue,
     ScalarFunctionImplementation as DfScalarFunctionImplementation, ScalarUDF as DfScalarUDF,
 };
-use datatypes::prelude::{ConcreteDataType, DataType};
 
 use crate::error::Result;
 use crate::function::{ReturnTypeFunction, ScalarFunctionImplementation};
+use crate::prelude::to_df_return_type;
 use crate::signature::Signature;
 
 /// Logical representation of a UDF.
@@ -60,25 +59,10 @@ impl ScalarUdf {
         DfScalarUDF::new(
             &self.name,
             &self.signature.into(),
-            &to_df_returntype(self.return_type),
+            &to_df_return_type(self.return_type),
             &to_df_scalar_func(self.fun),
         )
     }
-}
-
-fn to_df_returntype(fun: ReturnTypeFunction) -> DfReturnTypeFunction {
-    Arc::new(move |data_types: &[ArrowDataType]| {
-        let concret_types = data_types
-            .iter()
-            .map(ConcreteDataType::from_arrow_type)
-            .collect::<Vec<ConcreteDataType>>();
-
-        let result = (fun)(&concret_types);
-
-        result
-            .map(|t| Arc::new(t.as_arrow_type()))
-            .map_err(|e| e.into())
-    })
 }
 
 fn to_df_scalar_func(fun: ScalarFunctionImplementation) -> DfScalarFunctionImplementation {

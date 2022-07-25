@@ -1,3 +1,4 @@
+pub mod aggregate;
 pub mod expression;
 pub mod function;
 pub mod function_registry;
@@ -7,5 +8,6 @@ pub mod numpy;
 pub(crate) mod test;
 pub mod udf;
 
+pub use aggregate::MedianAccumulatorCreator;
 pub use function::{Function, FunctionRef};
 pub use function_registry::{FunctionRegistry, FUNCTION_REGISTRY};

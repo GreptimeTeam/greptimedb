@@ -621,10 +621,12 @@ dependencies = [
 name = "common-function"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "arrow2",
  "chrono-tz",
  "common-error",
  "common-query",
+ "datafusion-common",
  "datatypes",
  "num",
  "num-traits",
@@ -644,6 +646,7 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "snafu",
+ "tokio",
 ]
 
 [[package]]
@@ -1064,6 +1067,8 @@ dependencies = [
  "common-error",
  "datafusion-common",
  "enum_dispatch",
+ "num",
+ "num-traits",
  "ordered-float 3.0.0",
  "paste",
  "serde",
@@ -2696,6 +2701,7 @@ dependencies = [
 name = "query"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "arrow2",
  "async-trait",
  "common-error",
@@ -2709,6 +2715,9 @@ dependencies = [
  "futures",
  "futures-util",
  "metrics",
+ "num",
+ "num-traits",
+ "rand 0.8.5",
  "snafu",
  "sql",
  "table",

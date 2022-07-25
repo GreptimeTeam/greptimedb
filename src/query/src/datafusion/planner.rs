@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::DataType;
+use common_query::logical_plan::create_aggregate_function;
 use datafusion::catalog::TableReference;
 use datafusion::datasource::TableProvider;
 use datafusion::physical_plan::udaf::AggregateUDF;
@@ -80,10 +81,8 @@ impl ContextProvider for DfContextProviderAdapter {
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
         self.state
-            .df_context()
-            .state
-            .lock()
-            .get_aggregate_meta(name)
+            .aggregate_function(name)
+            .map(|func| Arc::new(create_aggregate_function(func.name(), func.create()).into()))
     }
 
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {

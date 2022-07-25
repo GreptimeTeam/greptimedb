@@ -5,6 +5,7 @@ use std::sync::RwLock;
 
 use once_cell::sync::Lazy;
 
+use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::function::FunctionRef;
 use crate::scalars::math::MathFunction;
 use crate::scalars::numpy::NumpyFunction;
@@ -12,6 +13,7 @@ use crate::scalars::numpy::NumpyFunction;
 #[derive(Default)]
 pub struct FunctionRegistry {
     functions: RwLock<HashMap<String, FunctionRef>>,
+    aggregate_functions: RwLock<HashMap<String, AggregateFunctionMetaRef>>,
 }
 
 impl FunctionRegistry {
@@ -22,12 +24,28 @@ impl FunctionRegistry {
             .insert(func.name().to_string(), func);
     }
 
+    pub fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {
+        self.aggregate_functions
+            .write()
+            .unwrap()
+            .insert(func.name(), func);
+    }
+
     pub fn get_function(&self, name: &str) -> Option<FunctionRef> {
         self.functions.read().unwrap().get(name).cloned()
     }
 
     pub fn functions(&self) -> Vec<FunctionRef> {
         self.functions.read().unwrap().values().cloned().collect()
+    }
+
+    pub fn aggregate_functions(&self) -> Vec<AggregateFunctionMetaRef> {
+        self.aggregate_functions
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 }
 
@@ -36,6 +54,8 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     MathFunction::register(&function_registry);
     NumpyFunction::register(&function_registry);
+
+    AggregateFunctions::register(&function_registry);
 
     Arc::new(function_registry)
 });

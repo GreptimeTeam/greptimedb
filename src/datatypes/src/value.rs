@@ -1,8 +1,11 @@
+use std::cmp::Ordering;
+
 use common_base::bytes::{Bytes, StringBytes};
+use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Serialize, Serializer};
 
-use crate::data_type::ConcreteDataType;
+use crate::prelude::*;
 
 pub type OrderedF32 = OrderedFloat<f32>;
 pub type OrderedF64 = OrderedFloat<f64>;
@@ -36,6 +39,8 @@ pub enum Value {
     // Date & Time types:
     Date(i32),
     DateTime(i64),
+
+    List(ListValue),
 }
 
 impl Value {
@@ -59,7 +64,7 @@ impl Value {
             Value::Float64(_) => ConcreteDataType::float64_datatype(),
             Value::String(_) => ConcreteDataType::string_datatype(),
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
-            Value::Date(_) | Value::DateTime(_) => {
+            Value::Date(_) | Value::DateTime(_) | Value::List(_) => {
                 unimplemented!("Unsupported data type of value {:?}", self)
             }
         }
@@ -149,7 +154,70 @@ impl Serialize for Value {
             Value::Binary(bytes) => bytes.serialize(serializer),
             Value::Date(v) => v.serialize(serializer),
             Value::DateTime(v) => v.serialize(serializer),
+            Value::List(_) => unimplemented!(),
         }
+    }
+}
+
+impl From<Value> for ScalarValue {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Boolean(v) => ScalarValue::Boolean(Some(v)),
+            Value::UInt8(v) => ScalarValue::UInt8(Some(v)),
+            Value::UInt16(v) => ScalarValue::UInt16(Some(v)),
+            Value::UInt32(v) => ScalarValue::UInt32(Some(v)),
+            Value::UInt64(v) => ScalarValue::UInt64(Some(v)),
+            Value::Int8(v) => ScalarValue::Int8(Some(v)),
+            Value::Int16(v) => ScalarValue::Int16(Some(v)),
+            Value::Int32(v) => ScalarValue::Int32(Some(v)),
+            Value::Int64(v) => ScalarValue::Int64(Some(v)),
+            Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
+            Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
+            Value::String(v) => ScalarValue::LargeUtf8(Some(v.as_utf8().to_string())),
+            Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
+            Value::Date(v) => ScalarValue::Date32(Some(v)),
+            Value::DateTime(v) => ScalarValue::Date64(Some(v)),
+            Value::Null => ScalarValue::Boolean(None),
+            Value::List(v) => ScalarValue::List(
+                v.items
+                    .map(|vs| Box::new(vs.into_iter().map(ScalarValue::from).collect())),
+                Box::new(v.datatype.as_arrow_type()),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListValue {
+    /// List of nested Values (boxed to reduce size_of(Value))
+    #[allow(clippy::box_collection)]
+    items: Option<Box<Vec<Value>>>,
+    /// Inner values datatype, to distinguish empty lists of different datatypes.
+    /// Restricted by DataFusion, cannot use null datatype for empty list.
+    datatype: ConcreteDataType,
+}
+
+impl Eq for ListValue {}
+
+impl ListValue {
+    pub fn new(items: Option<Box<Vec<Value>>>, datatype: ConcreteDataType) -> Self {
+        Self { items, datatype }
+    }
+}
+
+impl PartialOrd for ListValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ListValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        assert_eq!(
+            self.datatype, other.datatype,
+            "Cannot compare different datatypes!"
+        );
+        self.items.cmp(&other.items)
     }
 }
 
@@ -296,5 +364,77 @@ mod tests {
 
         let world: &[u8] = b"world";
         assert_eq!(Value::Binary(Bytes::from(world)), Value::from(world));
+    }
+
+    #[test]
+    fn test_value_into_scalar_value() {
+        assert_eq!(
+            ScalarValue::Boolean(Some(true)),
+            Value::Boolean(true).into()
+        );
+        assert_eq!(
+            ScalarValue::Boolean(Some(true)),
+            Value::Boolean(true).into()
+        );
+
+        assert_eq!(
+            ScalarValue::UInt8(Some(u8::MIN + 1)),
+            Value::UInt8(u8::MIN + 1).into()
+        );
+        assert_eq!(
+            ScalarValue::UInt16(Some(u16::MIN + 2)),
+            Value::UInt16(u16::MIN + 2).into()
+        );
+        assert_eq!(
+            ScalarValue::UInt32(Some(u32::MIN + 3)),
+            Value::UInt32(u32::MIN + 3).into()
+        );
+        assert_eq!(
+            ScalarValue::UInt64(Some(u64::MIN + 4)),
+            Value::UInt64(u64::MIN + 4).into()
+        );
+
+        assert_eq!(
+            ScalarValue::Int8(Some(i8::MIN + 4)),
+            Value::Int8(i8::MIN + 4).into()
+        );
+        assert_eq!(
+            ScalarValue::Int16(Some(i16::MIN + 5)),
+            Value::Int16(i16::MIN + 5).into()
+        );
+        assert_eq!(
+            ScalarValue::Int32(Some(i32::MIN + 6)),
+            Value::Int32(i32::MIN + 6).into()
+        );
+        assert_eq!(
+            ScalarValue::Int64(Some(i64::MIN + 7)),
+            Value::Int64(i64::MIN + 7).into()
+        );
+
+        assert_eq!(
+            ScalarValue::Float32(Some(8.0f32)),
+            Value::Float32(OrderedFloat(8.0f32)).into()
+        );
+        assert_eq!(
+            ScalarValue::Float64(Some(9.0f64)),
+            Value::Float64(OrderedFloat(9.0f64)).into()
+        );
+
+        assert_eq!(
+            ScalarValue::LargeUtf8(Some("hello".to_string())),
+            Value::String(StringBytes::from("hello")).into()
+        );
+        assert_eq!(
+            ScalarValue::LargeBinary(Some("world".as_bytes().to_vec())),
+            Value::Binary(Bytes::from("world".as_bytes())).into()
+        );
+
+        assert_eq!(ScalarValue::Date32(Some(10i32)), Value::Date(10i32).into());
+        assert_eq!(
+            ScalarValue::Date64(Some(20i64)),
+            Value::DateTime(20i64).into()
+        );
+
+        assert_eq!(ScalarValue::Boolean(None), Value::Null.into());
     }
 }

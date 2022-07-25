@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
-use datatypes::prelude::ConcreteDataType;
+use arrow::datatypes::DataType as ArrowDataType;
+use datafusion_expr::ReturnTypeFunction as DfReturnTypeFunction;
+use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
 use crate::error::{ExecuteFunctionSnafu, Result};
+use crate::logical_plan::Accumulator;
 use crate::prelude::{ColumnarValue, ScalarValue};
 
 /// Scalar function
@@ -21,6 +24,13 @@ pub type ScalarFunctionImplementation =
 /// A function's return type
 pub type ReturnTypeFunction =
     Arc<dyn Fn(&[ConcreteDataType]) -> Result<Arc<ConcreteDataType>> + Send + Sync>;
+
+/// Accumulator creator that will be used by DataFusion
+pub type AccumulatorFunctionImpl = Arc<dyn Fn() -> Result<Box<dyn Accumulator>> + Send + Sync>;
+
+/// Create Accumulator with the data type of input columns.
+pub type AccumulatorCreatorFunction =
+    Arc<dyn Fn(&[ConcreteDataType]) -> Result<Box<dyn Accumulator>> + Sync + Send>;
 
 /// This signature corresponds to which types an aggregator serializes
 /// its state, given its return datatype.
@@ -67,6 +77,25 @@ where
                 .context(ExecuteFunctionSnafu)?)
         }
     })
+}
+
+pub fn to_df_return_type(func: ReturnTypeFunction) -> DfReturnTypeFunction {
+    let df_func = move |data_types: &[ArrowDataType]| {
+        // DataFusion DataType -> ConcreteDataType
+        let concrete_data_types = data_types
+            .iter()
+            .map(ConcreteDataType::from_arrow_type)
+            .collect::<Vec<_>>();
+
+        // evaluate ConcreteDataType
+        let eval_result = (func)(&concrete_data_types);
+
+        // ConcreteDataType -> DataFusion DataType
+        eval_result
+            .map(|t| Arc::new(t.as_arrow_type()))
+            .map_err(|e| e.into())
+    };
+    Arc::new(df_func)
 }
 
 #[cfg(test)]
