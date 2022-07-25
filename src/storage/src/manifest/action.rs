@@ -63,7 +63,7 @@ struct VersionHeader {
     prev_version: ManifestVersion,
 }
 
-const NEWLINE: &[u8] = "\n".as_bytes();
+const NEWLINE: &[u8] = b"\n";
 
 impl RegionMetaActionList {
     pub fn with_action(action: RegionMetaAction) -> Self {
