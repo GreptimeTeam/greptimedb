@@ -22,5 +22,5 @@ pub fn schema_for_test() -> MemtableSchema {
 }
 
 pub fn new_memtable() -> MemtableRef {
-    DefaultMemtableBuilder {}.build(schema_for_test())
+    DefaultMemtableBuilder {}.build(1, schema_for_test())
 }

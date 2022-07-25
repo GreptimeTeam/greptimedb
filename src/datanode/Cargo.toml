@@ -15,6 +15,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 datatypes = { path = "../datatypes"}
 hyper = { version = "0.14", features = ["full"] }
+log-store = { path = "../log-store" }
 metrics = "0.18"
 query = { path = "../query" }
 serde = "1.0"
@@ -34,6 +35,7 @@ tower-http = { version ="0.3", features = ["full"]}
 [dev-dependencies]
 axum-test-helper = "0.1"
 common-query = { path = "../common/query" }
+tempdir = "0.3"
 
 [dev-dependencies.arrow]
 package = "arrow2"

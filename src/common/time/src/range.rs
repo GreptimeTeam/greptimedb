@@ -11,7 +11,7 @@ pub struct TimeRange<T> {
 }
 
 impl<T> TimeRange<T> {
-    /// Create a new range that contains timestamp in `[start, end)`.
+    /// Creates a new range that contains timestamp in `[start, end)`.
     ///
     /// Returns `None` if `start` > `end`.
     pub fn new<U: PartialOrd + Into<T>>(start: U, end: U) -> Option<TimeRange<T>> {
@@ -20,6 +20,14 @@ impl<T> TimeRange<T> {
             Some(TimeRange { start, end })
         } else {
             None
+        }
+    }
+
+    /// Given a value, creates an empty time range that `start == end == value`.
+    pub fn empty_with_value<U: Clone + Into<T>>(value: U) -> TimeRange<T> {
+        TimeRange {
+            start: value.clone().into(),
+            end: value.into(),
         }
     }
 
@@ -71,6 +79,10 @@ mod tests {
         assert_eq!(range_eq.start(), range_eq.end());
 
         assert_eq!(None, RangeMillis::new(1, 0));
+
+        let range = RangeMillis::empty_with_value(1024);
+        assert_eq!(range.start(), range.end());
+        assert_eq!(1024, *range.start());
     }
 
     #[test]

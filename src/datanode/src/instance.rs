@@ -1,21 +1,24 @@
-use std::sync::Arc;
+use std::{fs, path, sync::Arc};
 
+use common_telemetry::logging::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
+use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use query::catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
-use storage::EngineImpl;
+use storage::{config::EngineConfig, EngineImpl};
 use table::engine::EngineContext;
 use table::engine::TableEngine;
 use table::requests::CreateTableRequest;
 use table_engine::engine::MitoEngine;
 
-use crate::error::{CreateTableSnafu, ExecuteSqlSnafu, Result};
+use crate::datanode::DatanodeOptions;
+use crate::error::{self, CreateTableSnafu, ExecuteSqlSnafu, Result};
 use crate::sql::SqlHandler;
 
-type DefaultEngine = MitoEngine<EngineImpl>;
+type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 
 // An abstraction to read/write services.
 pub struct Instance {
@@ -30,17 +33,22 @@ pub struct Instance {
 pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    pub fn new(catalog_list: CatalogListRef) -> Self {
+    pub async fn new(opts: &DatanodeOptions, catalog_list: CatalogListRef) -> Result<Self> {
+        let log_store = create_local_file_log_store(opts).await?;
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine().clone();
-        let table_engine = DefaultEngine::new(EngineImpl::new());
+        let table_engine = DefaultEngine::new(
+            EngineImpl::new(EngineConfig::default(), Arc::new(log_store))
+                .await
+                .context(error::OpenStorageEngineSnafu)?,
+        );
 
-        Self {
+        Ok(Self {
             query_engine,
             sql_handler: SqlHandler::new(table_engine.clone()),
             table_engine,
             catalog_list,
-        }
+        })
     }
 
     pub async fn execute_sql(&self, sql: &str) -> Result<Output> {
@@ -95,7 +103,10 @@ impl Instance {
                 CreateTableRequest {
                     name: table_name.to_string(),
                     desc: Some(" a test table".to_string()),
-                    schema: Arc::new(Schema::new(column_schemas)),
+                    schema: Arc::new(
+                        Schema::with_timestamp_index(column_schemas, 3)
+                            .expect("ts is expected to be timestamp column"),
+                    ),
                 },
             )
             .await
@@ -116,6 +127,25 @@ impl Instance {
     }
 }
 
+async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFileLogStore> {
+    // create WAL directory
+    fs::create_dir_all(path::Path::new(&opts.wal_dir))
+        .context(error::CreateDirSnafu { dir: &opts.wal_dir })?;
+
+    info!("The WAL directory is: {}", &opts.wal_dir);
+
+    let log_config = LogConfig {
+        log_file_dir: opts.wal_dir.clone(),
+        ..Default::default()
+    };
+
+    let log_store = LocalFileLogStore::open(&log_config)
+        .await
+        .context(error::OpenLogStoreSnafu)?;
+
+    Ok(log_store)
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::array::UInt64Array;
@@ -123,12 +153,13 @@ mod tests {
     use query::catalog::memory;
 
     use super::*;
+    use crate::test_util;
 
     #[tokio::test]
     async fn test_execute_insert() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
-
-        let instance = Instance::new(catalog_list);
+        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let instance = Instance::new(&opts, catalog_list).await.unwrap();
         instance.start().await.unwrap();
 
         let output = instance
@@ -147,8 +178,8 @@ mod tests {
     #[tokio::test]
     async fn test_execute_query() {
         let catalog_list = memory::new_memory_catalog_list().unwrap();
-
-        let instance = Instance::new(catalog_list);
+        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let instance = Instance::new(&opts, catalog_list).await.unwrap();
 
         let output = instance
             .execute_sql("select sum(number) from numbers limit 20")

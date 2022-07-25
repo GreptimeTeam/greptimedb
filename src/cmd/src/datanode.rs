@@ -1,5 +1,5 @@
 use clap::Parser;
-use datanode::{Datanode, DatanodeOptions};
+use datanode::datanode::{Datanode, DatanodeOptions};
 use snafu::ResultExt;
 
 use crate::error::{Result, StartDatanodeSnafu};
@@ -40,6 +40,7 @@ struct StartCommand {
 impl StartCommand {
     async fn run(self) -> Result<()> {
         Datanode::new(self.into())
+            .await
             .context(StartDatanodeSnafu)?
             .start()
             .await
@@ -52,6 +53,7 @@ impl From<StartCommand> for DatanodeOptions {
         DatanodeOptions {
             http_addr: cmd.http_addr,
             rpc_addr: cmd.rpc_addr,
+            ..Default::default()
         }
     }
 }

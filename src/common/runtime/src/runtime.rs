@@ -6,13 +6,13 @@ use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
 use tokio::runtime::{Builder as RuntimeBuilder, Handle};
 use tokio::sync::oneshot;
-pub use tokio::task::JoinHandle;
+pub use tokio::task::{JoinError, JoinHandle};
 
 use crate::error::*;
 use crate::metric::*;
 
 /// A runtime to run future tasks
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Runtime {
     handle: Handle,
     // Used to receive a drop signal when dropper is dropped, inspired by databend
@@ -20,6 +20,7 @@ pub struct Runtime {
 }
 
 /// Dropping the dropper will cause runtime to shutdown.
+#[derive(Debug)]
 pub struct Dropper {
     close: Option<oneshot::Sender<()>>,
 }

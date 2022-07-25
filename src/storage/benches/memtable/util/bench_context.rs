@@ -27,9 +27,11 @@ impl BenchContext {
         let iter_ctx = IterContext {
             batch_size,
             visible_sequence: SequenceNumber::MAX,
+            for_flush: false,
         };
-        let mut iter = self.memtable.iter(iter_ctx).unwrap();
-        while let Ok(Some(_)) = iter.next() {
+        let iter = self.memtable.iter(iter_ctx).unwrap();
+        for batch in iter {
+            batch.unwrap();
             read_count += batch_size;
         }
         read_count
