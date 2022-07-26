@@ -4,7 +4,7 @@ use datatypes::error::Error as DataTypeError;
 use rustpython_compiler_core::error::CompileError as CoreCompileError;
 use rustpython_parser::{ast::Location, error::ParseError};
 pub use snafu::ensure;
-use snafu::{prelude::Snafu, Backtrace};
+use snafu::{prelude::Snafu, Backtrace, ResultExt};
 
 common_error::define_opaque_error!(Error);
 pub type Result<T> = std::result::Result<T, InnerError>;
@@ -28,12 +28,21 @@ pub enum InnerError {
     },
     /// these Python Errors already have very clear error hint, so no backtraces needed for them
     #[snafu(display("Python Parsing error: {}", source))]
-    PyParse { source: ParseError },
+    PyParse {
+        backtrace: Backtrace,
+        source: ParseError,
+    },
     #[snafu(display("Python Compile error: {}", source))]
-    PyCompile { source: CoreCompileError },
+    PyCompile {
+        backtrace: Backtrace,
+        source: CoreCompileError,
+    },
     /// rustpython problem, using python virtual machines' backtrace instead
     #[snafu(display("Python Runtime error: {}", source.output))]
-    PyRuntime { source: PyExceptionSerde },
+    PyRuntime {
+        backtrace: Backtrace,
+        source: PyExceptionSerde,
+    },
     #[snafu(display("Arrow error: {}", source))]
     Arrow {
         backtrace: Backtrace,
@@ -42,13 +51,17 @@ pub enum InnerError {
     /// errors in coprocessors' parse check for types and etc.
     #[snafu(display("Coprocessor error: {} at {}.", reason, if let Some(loc)=loc{format!("{loc}")}else{"Unknown location".into()}))]
     CoprParse {
+        backtrace: Backtrace,
         reason: String,
         // location is option because maybe errors can't give a clear location?
         loc: Option<Location>,
     },
     /// Other types of error that isn't any of above
     #[snafu(display("Coprocessor's other types of error: {}", reason))]
-    Other { reason: String },
+    Other {
+        backtrace: Backtrace,
+        reason: String,
+    },
 }
 impl From<InnerError> for Error {
     fn from(err: InnerError) -> Self {
@@ -75,19 +88,8 @@ impl ErrorExt for InnerError {
     }
 }
 // impl from for those error so one can use question mark and implictly cast into `CoprError`
-impl From<PyExceptionSerde> for InnerError {
-    fn from(err: PyExceptionSerde) -> Self {
-        Self::PyRuntime { source: err }
-    }
-}
 impl From<DataTypeError> for InnerError {
     fn from(e: DataTypeError) -> Self {
         Self::TypeCast { source: e }
-    }
-}
-
-impl From<CoreCompileError> for InnerError {
-    fn from(err: rustpython_compiler_core::error::CompileError) -> Self {
-        Self::PyCompile { source: err }
     }
 }

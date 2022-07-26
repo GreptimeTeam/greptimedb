@@ -18,12 +18,16 @@ use snafu::ResultExt;
 use vm::builtins::PyTuple;
 use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
-use crate::scalars::python::copr_parse::parse_copr;
+use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
 use crate::scalars::python::error::{
-    ensure, ArrowSnafu, CoprParseSnafu, InnerError, OtherSnafu, PyExceptionSerde, PyParseSnafu,
-    Result,
+    ensure, ArrowSnafu, CoprParseSnafu, InnerError, OtherSnafu, PyCompileSnafu, PyExceptionSerde,
+    PyParseSnafu, Result,
 };
 use crate::scalars::python::type_::{is_instance, PyVector};
+
+fn ret_other_error_with(reason: String) -> OtherSnafu{
+    OtherSnafu{ reason }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnotationInfo {
@@ -92,10 +96,11 @@ impl Coprocessor {
                     arg.node.annotation = None;
                 }
             } else {
-                return Err(InnerError::CoprParse {
-                reason: format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
-                loc: Some(code[0].location)
-            });
+                return ret_parse_error(
+                    format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
+                    Some(code[0].location)
+                )
+                .fail();
             }
             let mut loc = code[0].location;
             // This manually construct ast has no corrsponding code in the script, so just give it a random location(which doesn't matter because Location usually only used in pretty print errors)
@@ -127,10 +132,11 @@ impl Coprocessor {
             };
             code.push(set_loc(stmt, loc));
         } else {
-            return Err(InnerError::CoprParse {
-                reason: format!("Expect statement in script, found: {:?}", top),
-                loc: None,
-            });
+            return ret_parse_error(
+                format!("Expect statement in script, found: {:?}", top),
+                None,
+            )
+            .fail();
         }
         // use `compile::Mode::BlockExpr` so it return the result of statement
         compile::compile_top(
@@ -139,7 +145,7 @@ impl Coprocessor {
             compile::Mode::BlockExpr,
             compile::CompileOpts { optimize: 0 },
         )
-        .map_err(|err| err.into())
+        .context(PyCompileSnafu)
     }
 
     /// generate [`Schema`] according to return names, types or
@@ -252,12 +258,10 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
                 v
             }
             _ => {
-                return Err(InnerError::Other {
-                    reason: format!(
-                        "Unsupport data type at column {idx}: {:?} for coprocessor",
-                        arg.data_type()
-                    ),
-                })
+                return ret_other_error_with(format!(
+                    "Unsupport data type at column {idx}: {:?} for coprocessor",
+                    arg.data_type()
+                )).fail()
             }
         };
         args.push(PyVector::from(v));

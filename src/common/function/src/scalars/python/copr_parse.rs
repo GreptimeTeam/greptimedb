@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{binary_heap::Iter, HashMap, HashSet};
 
 use arrow::datatypes::DataType;
 use rustpython_parser::{
@@ -6,16 +6,24 @@ use rustpython_parser::{
     ast::{Arguments, Location},
     parser,
 };
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::scalars::python::coprocessor::Coprocessor;
 use crate::scalars::python::error::{ensure, CoprParseSnafu, InnerError, PyParseSnafu, Result};
 use crate::scalars::python::AnnotationInfo;
 
+/// Return a CoprParseSnafu for you to chain fail() to return correct err Result type
+pub fn ret_parse_error(
+    reason: String,
+    loc: Option<Location>,
+) -> CoprParseSnafu<String, Option<Location>> {
+    return CoprParseSnafu { reason, loc };
+}
+
 /// turn a python list of string in ast form(a `ast::Expr`) of string into a `Vec<String>`
 fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
     if let ast::ExprKind::List { elts, ctx: _ } = &lst.node {
-        let mut ret = Vec::new();
+        let mut ret = Vec::with_capacity(elts.len());
         for s in elts {
             if let ast::ExprKind::Constant {
                 value: ast::Constant::Str(v),
@@ -24,21 +32,23 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
             {
                 ret.push(v.to_owned())
             } else {
-                return Err(InnerError::CoprParse {
-                    reason: format!(
+                return ret_parse_error(
+                    format!(
                         "Expect a list of String, found {:?} in list element",
                         &s.node
                     ),
-                    loc: Some(lst.location),
-                });
+                    Some(lst.location),
+                )
+                .fail();
             }
         }
         Ok(ret)
     } else {
-        Err(InnerError::CoprParse {
-            reason: format!("Expect a list, found {:?}", &lst.node),
-            loc: Some(lst.location),
-        })
+        return ret_parse_error(
+            format!("Expect a list, found {:?}", &lst.node),
+            Some(lst.location),
+        )
+        .fail();
     }
 }
 
@@ -58,10 +68,11 @@ fn into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
         "f64" => Ok(Some(DataType::Float64)),
         // for any datatype
         "_" => Ok(None),
-        _ => Err(InnerError::CoprParse {
-            reason: format!("Unknown datatype: {ty} at {}", loc),
-            loc: Some(loc.to_owned()),
-        }),
+        _ => ret_parse_error(
+            format!("Unknown datatype: {ty} at {}", loc),
+            Some(loc.to_owned()),
+        )
+        .fail(),
     }
 }
 
@@ -73,10 +84,11 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
             datatype: into_datatype(id, &sub.location)?,
             is_nullable: false,
         }),
-        _ => Err(InnerError::CoprParse {
-            reason: format!("Expect types' name, found {:?}", &sub.node),
-            loc: Some(sub.location),
-        }),
+        _ => ret_parse_error(
+            format!("Expect types' name, found {:?}", &sub.node),
+            Some(sub.location),
+        )
+        .fail(),
     }
 }
 
@@ -97,19 +109,20 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
         if let ast::ExprKind::Name { id, ctx: _ } = &value.node {
             ensure!(
                 id == "vector",
-                CoprParseSnafu {
-                    reason: format!(
+                ret_parse_error(
+                    format!(
                         "Wrong type annotation, expect `vector[...]`, found \"{}\"",
                         id
                     ),
-                    loc: Some(value.location)
-                }
+                    Some(value.location)
+                )
             )
         } else {
-            return Err(InnerError::CoprParse {
-                reason: format!("Expect \"vector\", found {:?}", &value.node),
-                loc: Some(value.location),
-            });
+            return ret_parse_error(
+                format!("Expect \"vector\", found {:?}", &value.node),
+                Some(value.location),
+            )
+            .fail();
         }
         // i.e: vector[f64]
         match &slice.node {
@@ -127,13 +140,10 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                         ast::ExprKind::Constant { value, kind: _ } => {
                             ensure!(
                                 matches!(value, ast::Constant::None),
-                                CoprParseSnafu {
-                                    reason: format!(
-                                        "Expect only typenames and `None`, found {:?}",
-                                        i.node
-                                    ),
-                                    loc: Some(i.location)
-                                }
+                                ret_parse_error(
+                                    format!("Expect only typenames and `None`, found {:?}", i.node),
+                                    Some(i.location)
+                                )
                             );
                         }
                         ast::ExprKind::Name { id: _, ctx: _ }
@@ -143,29 +153,31 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                             keywords: _,
                         } => {
                             if has_ty {
-                                return Err(InnerError::CoprParse {
-                                    reason:
-                                        "Expect one typenames and one `None`, not two type names"
-                                            .into(),
-                                    loc: Some(i.location),
-                                });
+                                return ret_parse_error(
+                                    "Expect one typenames and one `None`, not two type names"
+                                        .into(),
+                                    Some(i.location),
+                                )
+                                .fail();
                             } else {
                                 has_ty = true;
                             }
                         }
                         _ => {
-                            return Err(InnerError::CoprParse {
-                                reason: format!("Expect typename or `None`, found {:?}", &i.node),
-                                loc: Some(i.location),
-                            })
+                            return ret_parse_error(
+                                format!("Expect typename or `None`, found {:?}", &i.node),
+                                Some(i.location),
+                            )
+                            .fail()
                         }
                     }
                 }
                 if !has_ty {
-                    return Err(InnerError::CoprParse {
-                        reason: "Expect a type name, not two `None`".into(),
-                        loc: Some(slice.location),
-                    });
+                    return ret_parse_error(
+                        "Expect a type name, not two `None`".into(),
+                        Some(slice.location),
+                    )
+                    .fail();
                 }
 
                 // then get types from this BinOp
@@ -184,31 +196,36 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                             keywords: _,
                         } => tmp_anno = Some(parse_item(i)?),
                         _ => {
-                            return Err(InnerError::CoprParse {
-                                reason: format!("Expect typename or `None`, found {:?}", &i.node),
-                                loc: Some(i.location),
-                            })
+                            return ret_parse_error(
+                                format!("Expect typename or `None`, found {:?}", &i.node),
+                                Some(i.location),
+                            )
+                            .fail();
                         }
                     }
                 }
                 // deal with errors anyway in case code above changed but forget to modify
-                let mut tmp_anno = tmp_anno.ok_or(InnerError::CoprParse {
-                    reason: "Expect a type name, not two `None`".into(),
-                    loc: Some(slice.location),
-                })?;
+                let mut tmp_anno = tmp_anno.context(ret_parse_error(
+                    "Expect a type name, not two `None`".into(),
+                    Some(slice.location),
+                ))?;
                 tmp_anno.is_nullable = is_nullable;
                 Ok(tmp_anno)
             }
-            _ => Err(InnerError::CoprParse {
-                reason: format!("Expect type in `vector[...]`, found {:?}", &slice.node),
-                loc: Some(slice.location),
-            }),
+            _ => {
+                return ret_parse_error(
+                    format!("Expect type in `vector[...]`, found {:?}", &slice.node),
+                    Some(slice.location),
+                )
+                .fail()
+            }
         }
     } else {
-        Err(InnerError::CoprParse {
-            reason: format!("Expect type annotation, found {:?}", &sub),
-            loc: Some(sub.location),
-        })
+        ret_parse_error(
+            format!("Expect type annotation, found {:?}", &sub),
+            Some(sub.location),
+        )
+        .fail()
     }
 }
 
@@ -254,72 +271,70 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                     let s = s.as_str();
                     if !kw_map.contains_key(s) {
                         if !avail_key.contains(s) {
-                            return Err(InnerError::CoprParse {
-                                reason: format!("Expect one of {:?}, found `{}`", &avail_key, s),
-                                loc: Some(kw.location),
-                            });
+                            return ret_parse_error(
+                                format!("Expect one of {:?}, found `{}`", &avail_key, s),
+                                Some(kw.location),
+                            )
+                            .fail();
                         }
                         kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
                     } else {
-                        return Err(InnerError::CoprParse {
-                            reason: format!(
-                                "`{s}` occur multiple times in decorator's arguements' list."
-                            ),
-                            loc: Some(kw.location),
-                        });
+                        return ret_parse_error(
+                            format!("`{s}` occur multiple times in decorator's arguements' list."),
+                            Some(kw.location),
+                        )
+                        .fail();
                     }
                 }
                 None => {
-                    return Err(InnerError::CoprParse {
-                        reason: format!(
+                    return ret_parse_error(
+                        format!(
                             "Expect explictly set both `args` and `returns`, found {:?}",
                             &kw.node
                         ),
-                        loc: Some(kw.location),
-                    })
+                        Some(kw.location),
+                    )
+                    .fail()
                 }
             }
         }
-        let arg_names = if let Some(args) = kw_map.remove("args") {
-            args
-        } else {
-            return Err(InnerError::CoprParse {
-                reason: "Expect `args` keyword".into(),
-                loc: Some(decorator.location),
-            });
-        };
-        let ret_names = if let Some(rets) = kw_map.remove("returns") {
-            rets
-        } else {
-            return Err(InnerError::CoprParse {
-                reason: "Expect `rets` keyword".into(),
-                loc: Some(decorator.location),
-            });
-        };
+        let arg_names = kw_map.remove("args").context(ret_parse_error(
+            "Expect `args` keyword".into(),
+            Some(decorator.location),
+        ))?;
+        let ret_names = kw_map.remove("returns").context(ret_parse_error(
+            "Expect `rets` keyword".into(),
+            Some(decorator.location),
+        ))?;
         Ok((arg_names, ret_names))
     } else {
-        Err(InnerError::CoprParse {
-            reason: format!(
+        return ret_parse_error(
+            format!(
                 "Expect decorator to be a function call(like `@copr(...)`), found {:?}",
                 decorator.node
             ),
-            loc: Some(decorator.location),
-        })
+            Some(decorator.location),
+        )
+        .fail();
     }
 }
 
 // get type annotaion in arguments
 fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> {
     // get arg types from type annotation>
-    let mut arg_types = Vec::new();
-    for arg in &args.args {
-        if let Some(anno) = &arg.node.annotation {
-            arg_types.push(Some(parse_annotation(anno)?))
-        } else {
-            arg_types.push(None)
-        }
-    }
-    Ok(arg_types)
+
+    Ok(args
+        .args
+        .iter()
+        .map(|arg| {
+            if let Some(anno) = &arg.node.annotation {
+                // for there is erro handling for parse_annotation
+                parse_annotation(anno).map(|v| (Some(v)))
+            } else {
+                Ok(None)
+            }
+        })
+        .collect::<Result<Vec<Option<_>>>>()?)
 }
 
 fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationInfo>>> {
@@ -337,7 +352,16 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
             slice: _,
             ctx: _,
         } => return_types.push(Some(parse_annotation(rets)?)),
-        _ => todo!(),
+        _ => {
+            return ret_parse_error(
+                format!(
+                    "Expect one or many type annotation for the return type, found {:#?}",
+                    &rets.node
+                ),
+                Some(rets.location),
+            )
+            .fail()
+        }
     }
     Ok(return_types)
 }
@@ -389,9 +413,7 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             get_return_annotations(rets)?
         } else {
             // if no anntation at all, set it to all None
-            let mut tmp = Vec::new();
-            tmp.resize(ret_names.len(), None);
-            tmp
+            std::iter::repeat(None).take(ret_names.len()).collect()
         };
         ensure!(
             arg_names.len() == arg_types.len(),
@@ -424,12 +446,13 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             script: script.to_owned(),
         })
     } else {
-        Err(InnerError::CoprParse {
-            reason: format!(
+        return ret_parse_error(
+            format!(
                 "Expect a function definition, found a {:?}",
                 &python_ast[0].node
             ),
-            loc: Some(python_ast[0].location),
-        })
+            Some(python_ast[0].location),
+        )
+        .fail();
     }
 }
