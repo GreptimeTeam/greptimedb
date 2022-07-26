@@ -144,21 +144,27 @@ pub enum Error {
     #[snafu(display("Task already cancelled"))]
     Cancelled { backtrace: Backtrace },
 
-    #[snafu(display("Failed to read Parquet file {}, source: {}", file, source))]
-    ReadParquet { file: String, source: ArrowError },
+    #[snafu(display("Failed to read Parquet file: {}, source: {}", file, source))]
+    ReadParquet {
+        file: String,
+        source: ArrowError,
+        backtrace: Backtrace,
+    },
 
-    #[snafu(display("IO failed while reading Parquet file {}, source: {}", file, source))]
+    #[snafu(display("IO failed while reading Parquet file: {}, source: {}", file, source))]
     ReadParquetIo {
         file: String,
         source: std::io::Error,
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Parquet file schema is not valid: {}", msg))]
-    SequenceColumnNotFound { msg: String },
+    SequenceColumnNotFound { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Parquet file schema is not valid, msg: {}, source: {}", msg, source))]
     InvalidParquetSchema {
         msg: String,
+        #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
 }

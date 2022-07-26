@@ -212,19 +212,16 @@ impl<'a> ParquetReader<'a> {
         let reader_factory = || -> ReaderFactoryFuture<SeekableReader> {
             Box::pin(async { Ok(self.object_store.object(self.file_name).seekable_reader(..)) })
         };
-        let mut reader = reader_factory()
+        let mut reader = reader_factory().await.context(ReadParquetIoSnafu {
+            file: self.file_name,
+        })?;
+        let metadata = read_metadata_async(&mut reader)
             .await
-            .with_context(|_| ReadParquetIoSnafu {
-                file: self.file_name.to_string(),
+            .context(ReadParquetSnafu {
+                file: self.file_name,
             })?;
-        let metadata =
-            read_metadata_async(&mut reader)
-                .await
-                .with_context(|_| ReadParquetSnafu {
-                    file: self.file_name.to_string(),
-                })?;
-        let schema = infer_schema(&metadata).with_context(|_| ReadParquetSnafu {
-            file: self.file_name.to_string(),
+        let schema = infer_schema(&metadata).context(ReadParquetSnafu {
+            file: self.file_name,
         })?;
 
         let projected_fields = projection.map_or_else(|| schema.fields.clone(), |p| p(&schema));
@@ -242,13 +239,13 @@ impl<'a> ParquetReader<'a> {
                 )
                 .await
                 .context(ReadParquetSnafu {
-                    file: self.file_name.to_string(),
+                    file: self.file_name,
                 })?;
 
                 let chunks = RowGroupDeserializer::new(column_chunks, rg.num_rows() as usize, None);
                 for maybe_chunk in chunks {
-                    let columns_in_chunk = maybe_chunk.with_context(|_| ReadParquetSnafu {
-                        file: self.file_name.to_string(),
+                    let columns_in_chunk = maybe_chunk.context(ReadParquetSnafu {
+                        file: self.file_name,
                     })?;
                     yield columns_in_chunk;
                 }

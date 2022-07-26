@@ -68,6 +68,7 @@ impl BatchReader for ConcatReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::read::BatchReader;
     use crate::test_util::read_util;
 
     #[tokio::test]
