@@ -657,29 +657,14 @@ pub mod codec {
                 .schema()
                 .column_schemas()
                 .iter()
-                .map(|column_schema| ColumnSchemaProto {
+                .map(|column_schema| proto::ColumnSchema {
                     name: column_schema.name.clone(),
-                    data_type: match column_schema.data_type {
-                        ConcreteDataType::Boolean(_) => DataType::Boolean.into(),
-                        ConcreteDataType::Int8(_) => DataType::Int8.into(),
-                        ConcreteDataType::Int16(_) => DataType::Int16.into(),
-                        ConcreteDataType::Int32(_) => DataType::Int32.into(),
-                        ConcreteDataType::Int64(_) => DataType::Int64.into(),
-                        ConcreteDataType::UInt8(_) => DataType::Uint8.into(),
-                        ConcreteDataType::UInt16(_) => DataType::Uint16.into(),
-                        ConcreteDataType::UInt32(_) => DataType::Uint32.into(),
-                        ConcreteDataType::UInt64(_) => DataType::Uint64.into(),
-                        ConcreteDataType::Float32(_) => DataType::Float64.into(),
-                        ConcreteDataType::Float64(_) => DataType::Float64.into(),
-                        ConcreteDataType::String(_) => DataType::String.into(),
-                        ConcreteDataType::Null(_) => DataType::Null.into(),
-                        ConcreteDataType::Binary(_) => DataType::Binary.into(),
-                        _ => unreachable!(),
-                    },
+                    data_type: proto::DataType::from(&column_schema.data_type).into(),
                     is_nullable: column_schema.is_nullable,
                 })
                 .collect();
-            let schema = SchemaProto {
+
+            let schema = proto::Schema {
                 column_schemas,
                 timestamp_index: match item.schema().timestamp_index() {
                     Some(time_stamp) => Some(time_stamp as u64),
@@ -691,7 +676,7 @@ pub mod codec {
             let mutations = item
                 .mutations
                 .iter()
-                .map(|mutation| {
+                .map(|mutation| -> proto::Mutation {
                     match mutation {
                         Mutation::Put(put_data) => {
                             let mut null_mask =
@@ -700,37 +685,49 @@ pub mod codec {
 
                             item.schema().column_schemas().iter().enumerate().for_each(
                                 |(i, column_schema)| {
-                                    let vector = put_data.columns.get(&column_schema.name);
-                                    match vector {
-                                        Some(vector) => {
-                                            // 解码为对应的类型，这边只用i8做一下示例
-                                            match vector.data_type() {
-                                                ConcreteDataType::Int8(_) => {
-                                                    let mut column = Column::default();
-                                                    let mut values = Values::default();
-                                                    let vector_ref = vector
-                                                        .as_any()
-                                                        .downcast_ref::<Int64Vector>()
-                                                        .expect("downcast failed");
-                                                    let mut value_null_mask =
-                                                        bit_vec::BitVec::from_elem(
-                                                            vector_ref.len(),
-                                                            false,
-                                                        );
-                                                    vector_ref.iter_data().enumerate().for_each(
-                                                        |(i, value)| match value {
-                                                            Some(value) => {
-                                                                values.i8_values.push(value as i32)
-                                                            }
-                                                            None => value_null_mask.set(i, true),
-                                                        },
-                                                    );
-                                                    column.null_mask = value_null_mask.to_bytes();
-                                                    columns.push(column);
-                                                }
-                                                _ => unreachable!(),
+                                    match put_data.columns.get(&column_schema.name) {
+                                        Some(vector) => match vector.data_type() {
+                                            ConcreteDataType::Boolean(_) => {
+                                                proto::gen_columns_bool(vector, &mut columns);
                                             }
-                                        }
+                                            ConcreteDataType::Int8(_) => {
+                                                proto::gen_columns_i8(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::Int16(_) => {
+                                                proto::gen_columns_i16(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::Int32(_) => {
+                                                proto::gen_columns_i32(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::Int64(_) => {
+                                                proto::gen_columns_i64(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::UInt8(_) => {
+                                                proto::gen_columns_u8(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::UInt16(_) => {
+                                                proto::gen_columns_u16(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::UInt32(_) => {
+                                                proto::gen_columns_u32(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::UInt64(_) => {
+                                                proto::gen_columns_u64(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::Float32(_) => {
+                                                proto::gen_columns_f32(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::Float64(_) => {
+                                                proto::gen_columns_f64(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::Binary(_) => {
+                                                proto::gen_columns_bytes(vector, &mut columns);
+                                            }
+                                            ConcreteDataType::String(_) => {
+                                                proto::gen_columns_string(vector, &mut columns);
+                                            }
+                                            _ => unreachable!(),
+                                        },
                                         None => {
                                             null_mask.set(i, true);
                                         }
@@ -738,12 +735,12 @@ pub mod codec {
                                 },
                             );
 
-                            let put = Put {
-                                columns: columns,
-                                null_mask: null_mask.to_bytes(),
+                            let put = proto::Put {
+                                columns,
+                                column_null_mask: null_mask.to_bytes(),
                             };
-                            let mutation = mut_Mutation::Put(put);
-                            MutationProto {
+                            let mutation = proto::mutation::Mutation::Put(put);
+                            proto::Mutation {
                                 mutation: Some(mutation),
                             }
                         }
@@ -752,14 +749,14 @@ pub mod codec {
                 })
                 .collect();
 
-            let write_batch = WriteBatchProto {
+            let write_batch = proto::WriteBatch {
                 schema: Some(schema),
-                mutations: mutations,
+                mutations,
                 num_rows: item.num_rows as u64,
                 ..Default::default()
             };
 
-            write_batch.encode(dst);
+            // write_batch.encode(dst).context(EncodeArrowSnafu)?;
             Ok(())
         }
     }
@@ -771,7 +768,7 @@ pub mod codec {
         type Error = WriteBatchError;
 
         fn decode(&self, src: &[u8]) -> Result<Option<Self::Item>> {
-            let write_batch_proto = WriteBatchProto::decode(src).unwrap();
+            let write_batch_proto = proto::WriteBatch::decode(src).unwrap();
             let schema = match write_batch_proto.schema {
                 Some(schema) => schema,
                 _ => unreachable!(),
@@ -783,22 +780,9 @@ pub mod codec {
                 .map(|column_schema| {
                     ColumnSchema::new(
                         column_schema.name.clone(),
-                        match DataType::from_i32(column_schema.data_type) {
-                            Some(DataType::Boolean) => ConcreteDataType::boolean_datatype(),
-                            Some(DataType::Int8) => ConcreteDataType::int8_datatype(),
-                            Some(DataType::Int16) => ConcreteDataType::int16_datatype(),
-                            Some(DataType::Int32) => ConcreteDataType::int32_datatype(),
-                            Some(DataType::Int64) => ConcreteDataType::int64_datatype(),
-                            Some(DataType::Uint8) => ConcreteDataType::uint8_datatype(),
-                            Some(DataType::Uint16) => ConcreteDataType::uint16_datatype(),
-                            Some(DataType::Uint32) => ConcreteDataType::uint32_datatype(),
-                            Some(DataType::Uint64) => ConcreteDataType::uint64_datatype(),
-                            Some(DataType::Float32) => ConcreteDataType::float32_datatype(),
-                            Some(DataType::Float64) => ConcreteDataType::float64_datatype(),
-                            Some(DataType::String) => ConcreteDataType::string_datatype(),
-                            Some(DataType::Binary) => ConcreteDataType::binary_datatype(),
-                            Some(DataType::Null) => ConcreteDataType::null_datatype(),
-                            None => unreachable!(),
+                        match proto::DataType::from_i32(column_schema.data_type) {
+                            Some(data_type) => data_type.into(),
+                            _ => unreachable!(),
                         },
                         column_schema.is_nullable,
                     )
@@ -818,16 +802,16 @@ pub mod codec {
                 .mutations
                 .iter()
                 .for_each(|mutation| match &mutation.mutation {
-                    Some(mut_Mutation::Put(put)) => {
+                    Some(proto::mutation::Mutation::Put(put)) => {
                         let mut put_data = PutData::new();
-                        bit_vec::BitVec::from_bytes(&put.null_mask)
+                        bit_vec::BitVec::from_bytes(&put.column_null_mask)
                             .iter()
                             .take(schema.num_columns())
                             .zip(schema.column_schemas().iter())
                             .zip(put.columns.iter())
                             .for_each(|((mask, column_schema), column)| {
                                 let mut buidler =
-                                    Int8VectorBuilder::with_capacity(column.null_mask.len());
+                                    Int8VectorBuilder::with_capacity(column.value_null_mask.len());
                                 let values = match &column.values {
                                     Some(values) => values,
                                     _ => unreachable!(),
@@ -835,7 +819,7 @@ pub mod codec {
                                 let mut i8_iter = values.i8_values.iter();
                                 // if mask == true don't allow to insert in the putdata
                                 if mask != false {
-                                    bit_vec::BitVec::from_bytes(&column.null_mask)
+                                    bit_vec::BitVec::from_bytes(&column.value_null_mask)
                                         .iter()
                                         .take(write_batch_proto.num_rows as usize)
                                         .for_each(|mask| {
@@ -849,15 +833,16 @@ pub mod codec {
                                                 buidler.push(None);
                                             }
                                         });
-                                    put_data
-                                        .columns
-                                        .insert(column_schema.name.clone(), Arc::new(buidler.finish()));
+                                    put_data.columns.insert(
+                                        column_schema.name.clone(),
+                                        Arc::new(buidler.finish()),
+                                    );
                                 }
                             });
                         let mutation = Mutation::Put(put_data);
                         mutations.push(mutation);
                     }
-                    Some(mut_Mutation::Delete(_)) => todo!(),
+                    Some(proto::mutation::Mutation::Delete(_)) => todo!(),
                     _ => unreachable!(),
                 });
 

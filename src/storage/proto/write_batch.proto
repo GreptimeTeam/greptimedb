@@ -28,7 +28,11 @@ message Mutation {
 
 message Put {
   repeated Column columns = 1;
+<<<<<<< HEAD
   bytes null_mask = 2;
+=======
+  bytes column_null_mask = 2;
+>>>>>>> 3e9d60a (feat/wal/protobuf)
 }
 
 message Delete {
@@ -37,7 +41,11 @@ message Delete {
 
 message Column {
   Values values = 1;
+<<<<<<< HEAD
   bytes null_mask = 2;
+=======
+  bytes value_null_mask = 2;
+>>>>>>> 3e9d60a (feat/wal/protobuf)
 }
 
 enum DataType {
