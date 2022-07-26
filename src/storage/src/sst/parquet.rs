@@ -106,6 +106,7 @@ impl<'a> ParquetWriter<'a> {
             }
         }
         sink.close().await.context(WriteParquetSnafu)?;
+        // https://github.com/jorgecarleitao/parquet2/issues/162
         sink.flush().await.context(WriteParquetSnafu)
     }
 }
