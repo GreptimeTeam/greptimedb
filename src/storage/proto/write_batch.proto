@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package greptime.storage.wal.v1;
+
+message WriteBatch {
+  Schema schema = 1;
+  repeated Mutation mutations = 2;
+  uint64 num_rows = 3;
+}
+
+message Schema {
+  repeated ColumnSchema column_schemas = 1;
+  optional uint64 timestamp_index = 2;
+}
+
+message ColumnSchema {
+  string name = 1;
+  DataType data_type = 2;
+  bool is_nullable = 3;
+}
+
+message Mutation {
+  oneof mutation {
+    Put put = 1;
+    Delete delete = 2;
+  }
+}
+
+message Put {
+  repeated Column columns = 1;
+  bytes null_mask = 2;
+}
+
+message Delete {
+  // TODO(zxy)
+}
+
+message Column {
+  Values values = 1;
+  bytes null_mask = 2;
+}
+
+enum DataType {
+  NULL = 0;
+  BOOLEAN = 1;
+  INT8 = 2;
+  INT16 = 3;
+  INT32 = 4;
+  INT64 = 5;
+  UINT8 = 6;
+  UINT16 = 7;
+  UINT32 = 8;
+  UINT64 = 9;
+  FLOAT32 = 10;
+  FLOAT64 = 11;
+  STRING = 12;
+  BINARY = 13;
+}
+
+message Values {
+  repeated int32 i8_values = 1;
+  repeated int32 i16_values = 2;
+  repeated int32 i32_values = 3;
+  repeated int64 i64_values = 4;
+  repeated uint32 u8_values = 5;
+  repeated uint32 u16_values = 6;
+  repeated uint32 u32_values = 7;
+  repeated uint64 u64_values = 8;
+  repeated float f32_values = 9;
+  repeated double f64_values = 10;
+  repeated bool bool_values = 11;
+  repeated bytes binary_values = 12;
+  repeated string string_values = 13;
+}
