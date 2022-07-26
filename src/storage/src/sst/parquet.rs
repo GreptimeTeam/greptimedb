@@ -105,7 +105,8 @@ impl<'a> ParquetWriter<'a> {
                 sink.metadata.insert(k, Some(v));
             }
         }
-        sink.close().await.context(WriteParquetSnafu)
+        sink.close().await.context(WriteParquetSnafu)?;
+        sink.flush().await.context(WriteParquetSnafu)
     }
 }
 
