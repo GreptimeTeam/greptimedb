@@ -352,7 +352,21 @@ fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> 
 }
 
 fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationInfo>>> {
-    let mut return_types = Vec::new();
+    let mut return_types = Vec::with_capacity(
+        match &rets.node {
+            ast::ExprKind::Tuple { elts, ctx: _ } => elts.len(),
+            ast::ExprKind::Subscript { value:_, slice:_, ctx:_ } => 1,
+            _ => return ret_parse_error(
+                format!(
+                    "Expect one or many type annotation for the return type, found {:#?}",
+                    &rets.node
+                ),
+                Some(rets.location),
+            )
+            .fail()
+            .map_err(|err| err.into())
+        }
+    );
     match &rets.node {
         // python: ->(vector[...], vector[...], ...)
         ast::ExprKind::Tuple { elts, ctx: _ } => {
@@ -366,17 +380,8 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
             slice: _,
             ctx: _,
         } => return_types.push(Some(parse_annotation(rets)?)),
-        _ => {
-            return ret_parse_error(
-                format!(
-                    "Expect one or many type annotation for the return type, found {:#?}",
-                    &rets.node
-                ),
-                Some(rets.location),
-            )
-            .fail()
-            .map_err(|err| err.into())
-        }
+        // already deal with errors above
+        _ => unreachable!()
     }
     Ok(return_types)
 }

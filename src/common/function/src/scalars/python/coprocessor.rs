@@ -234,7 +234,7 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
     arg: Arc<dyn Array>,
 ) -> Result<Arc<dyn Vector>> {
     PrimitiveVector::<T>::try_from_arrow_array(arg)
-        .map(|op| Arc::new(op) as Arc<dyn Vector>)
+        .map(|op| Arc::new(op) as _)
         // to cast datatypes::Error to python::Error
         .context(TypeCastSnafu)
         .map_err(|err| err.into())
@@ -243,7 +243,7 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
 /// convert a `Vec<ArrayRef>` into a `Vec<PyVector>` only when they are of supported types
 /// PyVector now only support unsigned&int8/16/32/64, float32/64 and bool when doing meanful arithmetics operation
 fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
-    let mut args: Vec<PyVector> = Vec::new();
+    let mut args: Vec<PyVector> = Vec::with_capacity(fetch_args.len());
     for (idx, arg) in fetch_args.into_iter().enumerate() {
         let v: VectorRef = match arg.data_type() {
             DataType::Float32 => into_vector::<f32>(arg)?,
@@ -278,7 +278,6 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
 /// convert a tuple of `PyVector` or one `PyVector`(wrapped in a Python Object Ref[`PyObjectRef`])
 /// to a `Vec<ArrayRef>`
 fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>> {
-    let mut cols: Vec<ArrayRef> = Vec::new();
     if is_instance(obj, PyTuple::class(vm).into(), vm) {
         let tuple = obj
             .payload::<PyTuple>()
@@ -286,7 +285,7 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
                 "can't cast obj {:?} to PyTuple)",
                 obj
             )))?;
-        for obj in tuple {
+        let cols = tuple.iter().map(|obj| -> Result<Arc<dyn Array>> {
             if is_instance(obj, PyVector::class(vm).into(), vm) {
                 let pyv = obj
                     .payload::<PyVector>()
@@ -294,13 +293,14 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
                         "can't cast obj {:?} to PyVector",
                         obj
                     )))?;
-                cols.push(pyv.to_arrow_array())
+                Ok(pyv.to_arrow_array())
             } else {
-                return ret_other_error_with(
+                ret_other_error_with(
                     format!("Expect all element in returning tuple to be vector, found one of the element is {:?}", obj)
-                ).fail().map_err(|err|err.into());
+                ).fail().map_err(|err|err.into())
             }
-        }
+        }).collect::<Result<Vec<ArrayRef>>>()?;
+        Ok(cols)
     } else if is_instance(obj, PyVector::class(vm).into(), vm) {
         let pyv = obj
             .payload::<PyVector>()
@@ -308,9 +308,15 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
                 "can't cast obj {:?} to PyVector",
                 obj
             )))?;
-        cols.push(pyv.to_arrow_array())
+        Ok(vec![pyv.to_arrow_array()])
+    } else {
+        ret_other_error_with(format!(
+            "Expect a single vector or a tuple of vector, found {:#?}",
+            obj
+        ))
+        .fail()
+        .map_err(|err| err.into())
     }
-    Ok(cols)
 }
 
 /// The coprocessor function accept a python script and a Record Batch:
@@ -364,7 +370,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     // 2. also check for exist of `args` in `rb`, if not found, return error
     let copr = parse_copr(script)?;
     // 3. get args from `rb`, and cast them into PyVector
-    let mut fetch_idx = Vec::new();
+    let mut fetch_idx = Vec::with_capacity(rb.num_columns());
     for (idx, field) in rb.schema().fields.iter().enumerate() {
         for arg in &copr.args {
             if arg.as_str() == field.name.as_str() {
@@ -372,7 +378,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
             }
         }
     }
-    let mut fetch_args = Vec::new();
+    let mut fetch_args = Vec::with_capacity(rb.num_columns());
     for idx in fetch_idx {
         fetch_args.push(rb.column(idx).clone());
     }
