@@ -49,7 +49,12 @@ pub enum InnerError {
         source: ArrowError,
     },
     /// errors in coprocessors' parse check for types and etc.
-    #[snafu(display("Coprocessor error: {} at {}.", reason, if let Some(loc)=loc{format!("{loc}")}else{"Unknown location".into()}))]
+    #[snafu(display("Coprocessor error: {} at {}.", reason, 
+    if let Some(loc) = loc{
+        format!("{loc}")
+    }else{
+        "Unknown location".into()
+    }))]
     CoprParse {
         backtrace: Backtrace,
         reason: String,
@@ -57,7 +62,7 @@ pub enum InnerError {
         loc: Option<Location>,
     },
     /// Other types of error that isn't any of above
-    #[snafu(display("Coprocessor's Inner types of error: {}", reason))]
+    #[snafu(display("Coprocessor's Internal types of error: {}", reason))]
     Other {
         backtrace: Backtrace,
         reason: String,
