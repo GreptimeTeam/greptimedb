@@ -16,6 +16,8 @@ use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
 use type_::PyVector;
 
+pub use crate::error::Error;
+
 pub fn execute_script(script: &str) -> vm::PyResult {
     vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
         PyVector::make_class(&vm.ctx);

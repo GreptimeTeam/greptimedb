@@ -14,19 +14,19 @@ use rustpython_parser::{
 };
 use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
-use snafu::ResultExt;
-use vm::builtins::PyTuple;
+use snafu::{OptionExt, ResultExt};
+use vm::builtins::{PyBaseExceptionRef, PyTuple};
 use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
 use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
 use crate::scalars::python::error::{
-    ensure, ArrowSnafu, CoprParseSnafu, InnerError, OtherSnafu, PyCompileSnafu, PyExceptionSerde,
-    PyParseSnafu, Result,
+    ensure, ArrowSnafu, CoprParseSnafu, Error, OtherSnafu, PyCompileSnafu, PyExceptionSerde,
+    PyParseSnafu, PyRuntimeSnafu, Result, TypeCastSnafu,
 };
 use crate::scalars::python::type_::{is_instance, PyVector};
 
-fn ret_other_error_with(reason: String) -> OtherSnafu{
-    OtherSnafu{ reason }
+fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
+    OtherSnafu { reason }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +100,7 @@ impl Coprocessor {
                     format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
                     Some(code[0].location)
                 )
-                .fail();
+                .fail().map_err(|err|err.into());
             }
             let mut loc = code[0].location;
             // This manually construct ast has no corrsponding code in the script, so just give it a random location(which doesn't matter because Location usually only used in pretty print errors)
@@ -136,7 +136,8 @@ impl Coprocessor {
                 format!("Expect statement in script, found: {:?}", top),
                 None,
             )
-            .fail();
+            .fail()
+            .map_err(|err| err.into());
         }
         // use `compile::Mode::BlockExpr` so it return the result of statement
         compile::compile_top(
@@ -146,6 +147,7 @@ impl Coprocessor {
             compile::CompileOpts { optimize: 0 },
         )
         .context(PyCompileSnafu)
+        .map_err(|err| err.into())
     }
 
     /// generate [`Schema`] according to return names, types or
@@ -234,6 +236,7 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
     PrimitiveVector::<T>::try_from_arrow_array(arg)
         .map(|op| Arc::new(op) as Arc<dyn Vector>)
         // to cast datatypes::Error to python::Error
+        .context(TypeCastSnafu)
         .map_err(|err| err.into())
 }
 
@@ -254,14 +257,17 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
             DataType::Int32 => into_vector::<i32>(arg)?,
             DataType::Int64 => into_vector::<i64>(arg)?,
             DataType::Boolean => {
-                let v: VectorRef = Arc::new(BooleanVector::try_from_arrow_array(arg)?);
+                let v: VectorRef =
+                    Arc::new(BooleanVector::try_from_arrow_array(arg).context(TypeCastSnafu)?);
                 v
             }
             _ => {
                 return ret_other_error_with(format!(
                     "Unsupport data type at column {idx}: {:?} for coprocessor",
                     arg.data_type()
-                )).fail()
+                ))
+                .fail()
+                .map_err(|err| err.into())
             }
         };
         args.push(PyVector::from(v));
@@ -274,23 +280,34 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
 fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>> {
     let mut cols: Vec<ArrayRef> = Vec::new();
     if is_instance(obj, PyTuple::class(vm).into(), vm) {
-        let tuple = obj.payload::<PyTuple>().ok_or(InnerError::Other {
-            reason: format!("can't cast obj {:?} to PyTuple)", obj),
-        })?;
+        let tuple = obj
+            .payload::<PyTuple>()
+            .context(ret_other_error_with(format!(
+                "can't cast obj {:?} to PyTuple)",
+                obj
+            )))?;
         for obj in tuple {
             if is_instance(obj, PyVector::class(vm).into(), vm) {
-                let pyv = obj.payload::<PyVector>().ok_or(InnerError::Other {
-                    reason: format!("can't cast obj {:?} to PyVector", obj),
-                })?;
+                let pyv = obj
+                    .payload::<PyVector>()
+                    .context(ret_other_error_with(format!(
+                        "can't cast obj {:?} to PyVector",
+                        obj
+                    )))?;
                 cols.push(pyv.to_arrow_array())
             } else {
-                return Err(InnerError::Other { reason: format!("Expect all element in returning tuple to be vector, found one of the element is {:?}", obj) });
+                return ret_other_error_with(
+                    format!("Expect all element in returning tuple to be vector, found one of the element is {:?}", obj)
+                ).fail().map_err(|err|err.into());
             }
         }
     } else if is_instance(obj, PyVector::class(vm).into(), vm) {
-        let pyv = obj.payload::<PyVector>().ok_or(InnerError::Other {
-            reason: format!("can't cast obj {:?} to PyVector", obj),
-        })?;
+        let pyv = obj
+            .payload::<PyVector>()
+            .context(ret_other_error_with(format!(
+                "can't cast obj {:?} to PyVector",
+                obj
+            )))?;
         cols.push(pyv.to_arrow_array())
     }
     Ok(cols)
@@ -385,32 +402,24 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         PyVector::make_class(&vm.ctx);
         let scope = vm.new_scope_with_builtins();
         for (name, vector) in copr.args.iter().zip(args) {
-            scope
+            let res = scope
                 .locals
                 .as_object()
-                .set_item(name, vm.new_pyobj(vector), vm)
-                .map_err(|err| InnerError::Other {
-                    reason: format!(
-                        "fail to set item{} in python scope, PyExpection: {:?}",
-                        name, err
-                    ),
-                })?;
+                .set_item(name, vm.new_pyobj(vector), vm);
+            if let Err(res) = res {
+                let res = to_serde_excep(res, vm)?;
+                return Err(res).context(PyRuntimeSnafu)?;
+            }
         }
 
         let code_obj = copr.strip_append_and_compile()?;
         let code_obj = vm.ctx.new_code(code_obj);
         let run_res = vm.run_code_obj(code_obj, scope);
+        // FIXME: better error handling, perhaps with chain calls
         let ret = match run_res {
-            Err(excep) => {
-                let mut chain = String::new();
-                vm.write_exception(&mut chain, &excep)
-                    .map_err(|_| InnerError::Other {
-                        reason: "Fail to write to string".into(),
-                    })?;
-                return Err(PyExceptionSerde { output: chain }.into());
-            }
-            Ok(ret) => ret,
-        };
+            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
+            Ok(ret) => Ok::<_, Error>(ret),
+        }?;
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
         let mut cols: Vec<ArrayRef> = into_columns(&ret, vm)?;
@@ -432,4 +441,16 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
         Ok(res_rb)
     })
+}
+
+fn to_serde_excep(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> Result<PyExceptionSerde> {
+    let mut chain = String::new();
+    let r = vm.write_exception(&mut chain, &excep);
+    // FIXME: better error handling, perhaps with chain calls?
+    if let Err(r) = r {
+        return ret_other_error_with(format!("Fail to write to string, error: {:#?}", r))
+            .fail()
+            .map_err(|err| err.into());
+    }
+    Ok(PyExceptionSerde { output: chain })
 }

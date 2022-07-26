@@ -4,10 +4,10 @@ use datatypes::error::Error as DataTypeError;
 use rustpython_compiler_core::error::CompileError as CoreCompileError;
 use rustpython_parser::{ast::Location, error::ParseError};
 pub use snafu::ensure;
-use snafu::{prelude::Snafu, Backtrace, ResultExt};
+use snafu::{prelude::Snafu, Backtrace};
 
 common_error::define_opaque_error!(Error);
-pub type Result<T> = std::result::Result<T, InnerError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// for now it's just a String containing Exception info print by `write_exceptions`
 ///
@@ -57,7 +57,7 @@ pub enum InnerError {
         loc: Option<Location>,
     },
     /// Other types of error that isn't any of above
-    #[snafu(display("Coprocessor's other types of error: {}", reason))]
+    #[snafu(display("Coprocessor's Inner types of error: {}", reason))]
     Other {
         backtrace: Backtrace,
         reason: String,
