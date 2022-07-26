@@ -35,6 +35,6 @@ rustpython-vm = {git = "https://github.com/RustPython/RustPython", optional = tr
 snafu = {version = "0.7", features = ["backtraces"]}
 
 [dependencies.arrow]
-features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
 package = "arrow2"
 version = "0.10"
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
