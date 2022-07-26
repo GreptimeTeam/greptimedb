@@ -38,8 +38,7 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
                     ),
                     Some(lst.location),
                 )
-                .fail()
-                .map_err(|err| err.into());
+                .fail();
             }
         }
         Ok(ret)
@@ -49,7 +48,6 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
             Some(lst.location),
         )
         .fail()
-        .map_err(|err| err.into())
     }
 }
 
@@ -73,8 +71,7 @@ fn into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
             format!("Unknown datatype: {ty} at {}", loc),
             Some(loc.to_owned()),
         )
-        .fail()
-        .map_err(|err| err.into()),
+        .fail(),
     }
 }
 
@@ -90,8 +87,7 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
             format!("Expect types' name, found {:?}", &sub.node),
             Some(sub.location),
         )
-        .fail()
-        .map_err(|err| err.into()),
+        .fail(),
     }
 }
 
@@ -125,8 +121,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 format!("Expect \"vector\", found {:?}", &value.node),
                 Some(value.location),
             )
-            .fail()
-            .map_err(|err| err.into());
+            .fail();
         }
         // i.e: vector[f64]
         match &slice.node {
@@ -162,8 +157,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                                         .into(),
                                     Some(i.location),
                                 )
-                                .fail()
-                                .map_err(|err| err.into());
+                                .fail();
                             } else {
                                 has_ty = true;
                             }
@@ -174,7 +168,6 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                                 Some(i.location),
                             )
                             .fail()
-                            .map_err(|err| err.into())
                         }
                     }
                 }
@@ -183,8 +176,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                         "Expect a type name, not two `None`".into(),
                         Some(slice.location),
                     )
-                    .fail()
-                    .map_err(|err| err.into());
+                    .fail();
                 }
 
                 // then get types from this BinOp
@@ -208,7 +200,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                                 Some(i.location),
                             )
                             .fail()
-                            .map_err(|err| err.into());
+                            ;
                         }
                     }
                 }
@@ -225,7 +217,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 Some(slice.location),
             )
             .fail()
-            .map_err(|err| err.into()),
+            ,
         }
     } else {
         ret_parse_error(
@@ -233,7 +225,6 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
             Some(sub.location),
         )
         .fail()
-        .map_err(|err| err.into())
     }
 }
 
@@ -284,7 +275,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                                 Some(kw.location),
                             )
                             .fail()
-                            .map_err(|err| err.into());
+                            ;
                         }
                         kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
                     } else {
@@ -293,7 +284,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                             Some(kw.location),
                         )
                         .fail()
-                        .map_err(|err| err.into());
+                        ;
                     }
                 }
                 None => {
@@ -305,7 +296,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                         Some(kw.location),
                     )
                     .fail()
-                    .map_err(|err| err.into())
+                    
                 }
             }
         }
@@ -327,7 +318,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
             Some(decorator.location),
         )
         .fail()
-        .map_err(|err| err.into())
+        
     }
 }
 
@@ -365,7 +356,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
                 Some(rets.location),
             )
             .fail()
-            .map_err(|err| err.into())
+            
         }
     });
     match &rets.node {
@@ -475,6 +466,6 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             Some(python_ast[0].location),
         )
         .fail()
-        .map_err(|err| err.into())
+        
     }
 }

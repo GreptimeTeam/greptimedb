@@ -6,9 +6,7 @@ use rustpython_parser::{ast::Location, error::ParseError};
 pub use snafu::ensure;
 use snafu::{prelude::Snafu, Backtrace};
 
-common_error::define_opaque_error!(Error);
 pub type Result<T> = std::result::Result<T, Error>;
-
 /// for now it's just a String containing Exception info print by `write_exceptions`
 ///
 /// TODO: maybe use [`rustpython_vm::exceptions::SerializeException`] instead of print out exception chain
@@ -20,7 +18,7 @@ pub struct PyExceptionSerde {
 // TODO: rewrite Error
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
-pub enum InnerError {
+pub enum Error {
     #[snafu(display("Datatype error: {}", source))]
     TypeCast {
         #[snafu(backtrace)]
@@ -68,22 +66,13 @@ pub enum InnerError {
         reason: String,
     },
 }
-impl From<InnerError> for Error {
-    fn from(err: InnerError) -> Self {
-        Self::new(err)
-    }
-}
-impl ErrorExt for InnerError {
+
+impl ErrorExt for Error {
     fn status_code(&self) -> common_error::prelude::StatusCode {
         StatusCode::Unknown
     }
     fn backtrace_opt(&self) -> Option<&common_error::snafu::Backtrace> {
         match self {
-            Self::TypeCast { source } => source.backtrace_opt(),
-            Self::Arrow {
-                backtrace,
-                source: _,
-            } => Some(backtrace),
             _ => None,
         }
     }
@@ -93,7 +82,7 @@ impl ErrorExt for InnerError {
     }
 }
 // impl from for those error so one can use question mark and implictly cast into `CoprError`
-impl From<DataTypeError> for InnerError {
+impl From<DataTypeError> for Error {
     fn from(e: DataTypeError) -> Self {
         Self::TypeCast { source: e }
     }
