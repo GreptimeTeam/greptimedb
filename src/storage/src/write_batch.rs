@@ -14,6 +14,7 @@ use datatypes::{
     schema::SchemaRef,
     vectors::{Int64Vector, VectorRef},
 };
+use prost::{DecodeError, EncodeError};
 use snafu::ensure;
 use store_api::storage::{consts, PutOperation, WriteRequest};
 
@@ -82,6 +83,29 @@ pub enum Error {
         source: ArrowError,
     },
 
+    #[snafu(display("Failed to encode, source: {}", source))]
+    EncodeProtobuf {
+        backtrace: Backtrace,
+        source: EncodeError,
+    },
+
+    #[snafu(display("Failed to decode, source: {}", source))]
+    DecodeProtobuf {
+        backtrace: Backtrace,
+        source: DecodeError,
+    },
+
+    #[snafu(display("No corresponding ConcreteDataType found"))]
+    UnknownConcreteDataType { backtrace: Backtrace },
+
+    #[snafu(display("Null schema"))]
+    NullSchema,
+
+    #[snafu(display("No corresponding DataType found"))]
+    UnknownDataType,
+
+    // #[snafu(display("Unknown column {}", name))]
+    // UnknownColumn { name: String, backtrace: Backtrace },
     #[snafu(display("Failed to parse schema, source: {}", source))]
     ParseSchema {
         backtrace: Backtrace,
@@ -101,6 +125,13 @@ pub enum Error {
     DecodeVector {
         backtrace: Backtrace,
         source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Invalid timestamp index: {}", index))]
+    InvalidTimestampIndex {
+        index: usize,
+        source: datatypes::error::Error,
+        backtrace: Backtrace,
     },
 }
 
@@ -402,9 +433,9 @@ impl PutData {
 }
 
 pub mod codec {
+
     use std::{io::Cursor, sync::Arc};
 
-    use common_error::prelude::*;
     use datatypes::{
         arrow::{
             chunk::Chunk as ArrowChunk,
@@ -415,23 +446,23 @@ pub mod codec {
             },
         },
         error::Result as DataTypesResult,
-        schema::Schema,
+        schema::{ColumnSchema, Schema, SchemaRef},
         vectors::Helper,
     };
-    use snafu::ensure;
-    use store_api::storage::WriteRequest;
+    use prost::Message;
+    use snafu::{ensure, ResultExt};
+    use store_api::storage::{PutOperation, WriteRequest};
 
     use super::{
-        DataCorruptedSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
-        Error as WriteBatchError, Mutation, ParseSchemaSnafu, Result, WriteBatch,
+        DataCorruptionSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
+        Error as WriteBatchError, InvalidTimestampIndexSnafu, Mutation, ParseSchemaSnafu, Result,
+        WriteBatch,
     };
+    use crate::proto::{self, gen_columns, gen_put_data_vector, MutationExtra, MutationType};
+    use crate::write_batch::{DecodeProtobufSnafu, EncodeProtobufSnafu, PutData};
     use crate::{
         arrow_stream::ArrowStreamReader,
         codec::{Decoder, Encoder},
-    };
-    use crate::{
-        proto::{MutationExtra, MutationType},
-        write_batch::PutData,
     };
 
     // TODO(jiachun): The codec logic is too complex, maybe we should use protobuf to
@@ -639,16 +670,172 @@ pub mod codec {
             Ok(write_batch)
         }
     }
-}
 
+    pub struct WriteBatchProtobufEncoder {}
+
+    impl Encoder for WriteBatchProtobufEncoder {
+        type Item = WriteBatch;
+        type Error = WriteBatchError;
+
+        fn encode(&self, item: &WriteBatch, dst: &mut Vec<u8>) -> Result<()> {
+            let column_schemas = item
+                .schema()
+                .column_schemas()
+                .iter()
+                .map(|column_schema| proto::ColumnSchema {
+                    name: column_schema.name.clone(),
+                    data_type: proto::DataType::from(&column_schema.data_type).into(),
+                    is_nullable: column_schema.is_nullable,
+                })
+                .collect();
+
+            let schema = proto::Schema {
+                column_schemas,
+                timestamp_index: item
+                    .schema()
+                    .timestamp_index()
+                    .map(|time_stamp| time_stamp as u64),
+            };
+
+            let mutations = item
+                .mutations
+                .iter()
+                .map(|mutation| -> proto::Mutation {
+                    match mutation {
+                        Mutation::Put(put_data) => {
+                            let mut null_mask =
+                                bit_vec::BitVec::from_elem(item.schema().num_columns(), false);
+                            let mut columns = vec![];
+                            item.schema().column_schemas().iter().enumerate().for_each(
+                                |(i, column_schema)| {
+                                    match put_data.columns.get(&column_schema.name) {
+                                        Some(vector) => {
+                                            let column = gen_columns(vector.data_type(), vector);
+                                            columns.push(column);
+                                        }
+                                        None => {
+                                            null_mask.set(i, true);
+                                        }
+                                    };
+                                },
+                            );
+
+                            let put = proto::Put {
+                                columns,
+                                column_null_mask: null_mask.to_bytes(),
+                            };
+                            proto::Mutation {
+                                mutation: Some(proto::mutation::Mutation::Put(put)),
+                            }
+                        }
+                    }
+                })
+                .collect();
+
+            let write_batch = proto::WriteBatch {
+                schema: Some(schema),
+                mutations,
+                num_rows: item.num_rows as u64,
+            };
+
+            write_batch.encode(dst).context(EncodeProtobufSnafu)?;
+            Ok(())
+        }
+    }
+
+    pub struct WriteBatchProtobufDecoder {}
+
+    impl Decoder for WriteBatchProtobufDecoder {
+        type Item = WriteBatch;
+        type Error = WriteBatchError;
+
+        fn decode(&self, src: &[u8]) -> Result<Option<Self::Item>> {
+            let write_batch_proto = proto::WriteBatch::decode(src).context(DecodeProtobufSnafu)?;
+
+            let schema = match write_batch_proto.schema {
+                Some(schema) => schema,
+                _ => return Err(WriteBatchError::NullSchema),
+            };
+
+            let column_schemas = schema
+                .column_schemas
+                .iter()
+                .map(|column_schema| {
+                    ColumnSchema::new(
+                        column_schema.name.clone(),
+                        match proto::DataType::from_i32(column_schema.data_type) {
+                            Some(data_type) => data_type.into(),
+                            _ => unreachable!(),
+                        },
+                        column_schema.is_nullable,
+                    )
+                })
+                .collect();
+
+            let schema: SchemaRef = match schema.timestamp_index {
+                Some(index) => Arc::new(
+                    Schema::with_timestamp_index(column_schemas, index as usize).context(
+                        InvalidTimestampIndexSnafu {
+                            index: index as usize,
+                        },
+                    )?,
+                ),
+                None => Arc::new(Schema::new(column_schemas)),
+            };
+
+            let mut mutations = Vec::new();
+
+            write_batch_proto
+                .mutations
+                .iter()
+                .for_each(|mutation| match &mutation.mutation {
+                    Some(proto::mutation::Mutation::Put(put)) => {
+                        let mut put_data = PutData::new();
+                        bit_vec::BitVec::from_bytes(&put.column_null_mask)
+                            .iter()
+                            .take(schema.num_columns())
+                            .zip(schema.column_schemas().iter())
+                            .filter(|(mask, _)| !mask)
+                            .zip(put.columns.iter())
+                            .for_each(|((_, column_schema), column)| {
+                                let vector_ref = gen_put_data_vector(
+                                    column_schema.data_type.clone(),
+                                    write_batch_proto.num_rows as usize,
+                                    column,
+                                );
+                                put_data
+                                    .add_column_by_name(column_schema.name.as_str(), vector_ref)
+                                    .unwrap();
+                            });
+                        mutations.push(Mutation::Put(put_data));
+                    }
+                    Some(proto::mutation::Mutation::Delete(_)) => todo!(),
+                    _ => unreachable!(),
+                });
+
+            let write_bacth = WriteBatch {
+                schema,
+                mutations,
+                num_rows: write_batch_proto.num_rows as usize,
+            };
+
+            Ok(Some(write_bacth))
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use std::iter;
     use std::sync::Arc;
 
+    use datatypes::prelude::ScalarVectorBuilder;
+    use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::type_id::LogicalTypeId;
-    use datatypes::vectors::{BooleanVector, Int32Vector, Int64Vector, UInt64Vector};
+    use datatypes::vectors::{
+        BooleanVector, Int32Vector, Int64Vector, Int8Vector, Int8VectorBuilder, UInt64Vector,
+    };
 
+    use super::codec::{WriteBatchProtobufDecoder, WriteBatchProtobufEncoder};
     use super::*;
     use crate::codec::{Decoder, Encoder};
     use crate::proto;
@@ -929,5 +1116,62 @@ mod tests {
         assert_eq!(batch.num_rows, batch2.num_rows);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_codec_protobuf_single_column() {
+        let mut column_schemas = Vec::new();
+        let column = ColumnSchema::new("i8_column_test", ConcreteDataType::int8_datatype(), true);
+        column_schemas.push(column);
+
+        let schema = Schema::new(column_schemas);
+        let mut write_batch = WriteBatch::new(Arc::new(schema));
+
+        let mut i8_vec = Int8VectorBuilder::with_capacity(3);
+        i8_vec.push(Some(1_i8));
+        i8_vec.push(Some(2_i8));
+        i8_vec.push(Some(3_i8));
+
+        let mut put_data = PutData::new();
+        put_data
+            .columns
+            .insert("i8_column_test".to_string(), Arc::new(i8_vec.finish()));
+
+        write_batch.mutations.push(Mutation::Put(put_data));
+        write_batch.add_num_rows(3).unwrap();
+
+        let protobuf_encoder = WriteBatchProtobufEncoder {};
+
+        let mut dst: Vec<u8> = vec![];
+        protobuf_encoder.encode(&write_batch, &mut dst).unwrap();
+        let protobuf_decoder = WriteBatchProtobufDecoder {};
+        let out = protobuf_decoder.decode(&dst).unwrap();
+        match out {
+            Some(out) => {
+                let schema = out.schema;
+                let mutations = out.mutations;
+                let num_rows = out.num_rows;
+
+                assert_eq!(1, schema.num_columns());
+                assert_eq!(3, num_rows);
+
+                for mutation in mutations {
+                    match mutation {
+                        Mutation::Put(put_data) => {
+                            for (_, value) in put_data.columns.iter() {
+                                let v = value.as_any().downcast_ref::<Int8Vector>().unwrap();
+                                let vs = Int8Vector::from_vec(vec![1_i8, 2_i8, 3_i8]);
+                                v.iter_data().zip(vs.iter_data()).for_each(|(a, b)| {
+                                    assert_eq!(a, b);
+                                });
+                            }
+                        }
+                    };
+                }
+            }
+            _ => {
+                unreachable!();
+            }
+        };
     }
 }
