@@ -1,8 +1,8 @@
 #![allow(clippy::all)]
 
-tonic::include_proto!("greptime.storage.wal.v1");
-
 use crate::write_batch::{Mutation, WriteBatch};
+
+tonic::include_proto!("greptime.storage.wal.v1");
 
 pub fn gen_mutation_extras(write_batch: &WriteBatch) -> Vec<MutationExtra> {
     let column_schemas = write_batch.schema().column_schemas();

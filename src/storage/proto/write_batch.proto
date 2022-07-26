@@ -1,33 +1,37 @@
 syntax = "proto3";
 
-message WriteBatchProto {
-  SchemaProto schema = 1;
-  repeated MutationProto mutations = 2;
+package greptime.storage.wal.v2;
+
+message WriteBatch {
+  Schema schema = 1;
+  repeated Mutation mutations = 2;
   uint64 num_rows = 3;
 }
 
-message SchemaProto {
-  repeated ColumnSchemaProto column_schemas = 1;
+message Schema {
+  repeated ColumnSchema column_schemas = 1;
+  optional uint64 timestamp_index = 2;
 }
 
-// 有些值是重复的
-message ColumnSchemaProto {
+
+message ColumnSchema {
   string name = 1;
-  ConcreteDataTypeProto  data_type = 2;
+  ConcreteDataType  data_type = 2;
   bool is_nullable = 3;
 }
 
-message MutationProto{
-  MutationTypeProto mutation_type = 1;
-  map<string,ValueProto> put_datas = 2;
+message Mutation{
+  MutationType mutation_type = 1;
+  repeated Value values = 2;
+  repeated string names = 3;
 }
 
-enum MutationTypeProto {
+enum MutationType {
   PUT = 0;
   DELETE = 1;
 }
 
-enum ConcreteDataTypeProto {
+enum ConcreteDataType {
   Null = 0;
   Boolean = 1;
   Int8 = 2;
@@ -45,7 +49,7 @@ enum ConcreteDataTypeProto {
 }
 
 
-message ValueProto {
+message Value {
   repeated int32 i8_values = 1;
   repeated int32 i16_values = 2;
   repeated int32 i32_values = 3;
@@ -59,8 +63,5 @@ message ValueProto {
   repeated bool bool_values = 11;
   repeated bytes binary_values = 12;
   repeated string string_values = 13;
-
   bytes null_mask = 14;
-
-  ConcreteDataTypeProto data_type = 15;
 }
