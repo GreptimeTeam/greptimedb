@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef};
@@ -368,20 +369,32 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
 pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
+    // TODO: cache the result of parse_copr
     let copr = parse_copr(script)?;
     // 3. get args from `rb`, and cast them into PyVector
-    let mut fetch_idx = Vec::with_capacity(rb.num_columns());
-    for (idx, field) in rb.schema().fields.iter().enumerate() {
-        for arg in &copr.args {
-            if arg.as_str() == field.name.as_str() {
-                fetch_idx.push(idx)
-            }
-        }
-    }
-    let mut fetch_args = Vec::with_capacity(rb.num_columns());
-    for idx in fetch_idx {
-        fetch_args.push(rb.column(idx).clone());
-    }
+    let field_map: HashMap<&String, usize> = rb
+        .schema()
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| (&field.name, idx))
+        .collect();
+    let fetch_idx: Vec<usize> = copr
+        .args
+        .iter()
+        .map(|field| {
+            field_map
+                .get(field).copied()
+                .context(OtherSnafu {
+                    reason: format!("Can't found field name {field}"),
+                })
+                .map_err(|err| err.into())
+        })
+        .collect::<Result<Vec<usize>>>()?;
+    let fetch_args: Vec<Arc<dyn Array>> = fetch_idx
+        .into_iter()
+        .map(|idx| rb.column(idx).clone())
+        .collect();
     let args: Vec<PyVector> = into_py_vector(fetch_args)?;
 
     // match between arguments' real type and annotation types
@@ -433,7 +446,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
             cols.len() == copr.returns.len(),
             OtherSnafu {
                 reason: format!(
-                    "The number of return Vector is wrong, expect{}, found{}",
+                    "The number of return Vector is wrong, expect {}, found {}",
                     copr.returns.len(),
                     cols.len()
                 )
