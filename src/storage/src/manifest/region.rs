@@ -4,13 +4,16 @@ use std::sync::{
     Arc,
 };
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use common_telemetry::logging;
 use object_store::ObjectStore;
+use snafu::ensure;
+use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
 use store_api::storage::RegionId;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result};
 use crate::manifest::action::*;
 use crate::manifest::storage::ManifestObjectStore;
 use crate::manifest::storage::ObjectStoreLogIterator;
@@ -23,7 +26,7 @@ pub struct RegionManifest {
 #[async_trait]
 impl Manifest for RegionManifest {
     type Error = Error;
-    type MetaAction = RegionMetaAction;
+    type MetaAction = RegionMetaActionList;
     type MetadataId = RegionId;
     type Metadata = RegionManifestData;
 
@@ -33,8 +36,8 @@ impl Manifest for RegionManifest {
         }
     }
 
-    async fn update(&self, action: RegionMetaAction) -> Result<ManifestVersion> {
-        self.inner.save(&action).await
+    async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+        self.inner.save(action_list).await
     }
 
     async fn load(&self) -> Result<Option<RegionManifestData>> {
@@ -49,13 +52,17 @@ impl Manifest for RegionManifest {
 
         let mut iter = self.inner.scan(start_bound, MAX_VERSION).await?;
 
-        match iter.next_action().await? {
-            Some((_v, RegionMetaAction::Change(c))) => Ok(Some(RegionManifestData {
-                region_meta: c.metadata,
-            })),
-            Some(_) => todo!(),
-            None => Ok(None),
+        while let Some((_v, action_list)) = iter.next_action().await? {
+            for action in action_list.actions {
+                if let RegionMetaAction::Change(c) = action {
+                    return Ok(Some(RegionManifestData {
+                        region_meta: c.metadata,
+                    }));
+                }
+            }
         }
+
+        Ok(None)
     }
 
     async fn checkpoint(&self) -> Result<ManifestVersion> {
@@ -71,18 +78,26 @@ struct RegionManifestInner {
     region_id: RegionId,
     store: Arc<ManifestObjectStore>,
     version: AtomicU64,
+    /// Current using protocol
+    protocol: ArcSwap<ProtocolAction>,
+    /// Current node supported protocols (reader_version, writer_version)
+    supported_reader_version: ProtocolVersion,
+    supported_writer_version: ProtocolVersion,
 }
 
-struct RegionMetaActionIterator {
+struct RegionMetaActionListIterator {
     log_iter: ObjectStoreLogIterator,
+    reader_version: ProtocolVersion,
 }
 
-impl RegionMetaActionIterator {
-    async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaAction)>> {
+impl RegionMetaActionListIterator {
+    async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaActionList)>> {
         match self.log_iter.next_log().await? {
             Some((v, bytes)) => {
-                let action: RegionMetaAction = RegionMetaAction::decode(&bytes)?;
-                Ok(Some((v, action)))
+                //TODO(dennis): save protocol into inner's protocol when recovering
+                let (action_list, _protocol) =
+                    RegionMetaActionList::decode(&bytes, self.reader_version)?;
+                Ok(Some((v, action_list)))
             }
             None => Ok(None),
         }
@@ -91,11 +106,16 @@ impl RegionMetaActionIterator {
 
 impl RegionManifestInner {
     fn new(region_id: RegionId, manifest_dir: &str, object_store: ObjectStore) -> Self {
+        let (reader_version, writer_version) = action::supported_protocol_version();
+
         Self {
             region_id,
             store: Arc::new(ManifestObjectStore::new(manifest_dir, object_store)),
             // TODO(dennis): recover the last version from history
             version: AtomicU64::new(0),
+            protocol: ArcSwap::new(Arc::new(ProtocolAction::new())),
+            supported_reader_version: reader_version,
+            supported_writer_version: writer_version,
         }
     }
 
@@ -109,16 +129,26 @@ impl RegionManifestInner {
         self.version.load(Ordering::Relaxed)
     }
 
-    async fn save(&self, action: &RegionMetaAction) -> Result<ManifestVersion> {
+    async fn save(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+        let protocol = self.protocol.load();
+
+        ensure!(
+            protocol.is_writable(self.supported_writer_version),
+            ManifestProtocolForbidWriteSnafu {
+                min_version: protocol.min_writer_version,
+                supported_version: self.supported_writer_version,
+            }
+        );
+
         let version = self.inc_version();
 
         logging::debug!(
             "Save region metadata action: {:?}, version: {}",
-            action,
+            action_list,
             version
         );
 
-        self.store.save(version, &action.encode()?).await?;
+        self.store.save(version, &action_list.encode()?).await?;
 
         Ok(version)
     }
@@ -127,9 +157,10 @@ impl RegionManifestInner {
         &self,
         start: ManifestVersion,
         end: ManifestVersion,
-    ) -> Result<RegionMetaActionIterator> {
-        Ok(RegionMetaActionIterator {
+    ) -> Result<RegionMetaActionListIterator> {
+        Ok(RegionMetaActionListIterator {
             log_iter: self.store.scan(start, end).await?,
+            reader_version: self.supported_reader_version,
         })
     }
 }
@@ -172,9 +203,11 @@ mod tests {
         assert!(manifest.load().await.unwrap().is_none());
 
         manifest
-            .update(RegionMetaAction::Change(RegionChange {
-                metadata: region_meta.clone(),
-            }))
+            .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
+                RegionChange {
+                    metadata: region_meta.clone(),
+                },
+            )))
             .await
             .unwrap();
 
@@ -193,9 +226,11 @@ mod tests {
         let metadata: RegionMetadata = desc.try_into().unwrap();
         let region_meta = Arc::new(metadata);
         manifest
-            .update(RegionMetaAction::Change(RegionChange {
-                metadata: region_meta.clone(),
-            }))
+            .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
+                RegionChange {
+                    metadata: region_meta.clone(),
+                },
+            )))
             .await
             .unwrap();
 

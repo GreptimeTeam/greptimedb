@@ -1,18 +1,14 @@
 //! Region tests.
 
+mod flush;
 mod read_write;
 
 use datatypes::type_id::LogicalTypeId;
-use log_store::fs::noop::NoopLogStore;
-use object_store::{backend::fs::Backend, ObjectStore};
-use store_api::manifest::Manifest;
 use store_api::storage::consts;
 use tempdir::TempDir;
 
 use super::*;
-use crate::manifest::region::RegionManifest;
-use crate::sst::FsAccessLayer;
-use crate::test_util::{self, descriptor_util::RegionDescBuilder, schema_util};
+use crate::test_util::{self, config_util, descriptor_util::RegionDescBuilder, schema_util};
 
 #[tokio::test]
 async fn test_new_region() {
@@ -25,26 +21,15 @@ async fn test_new_region() {
         .build();
     let metadata = desc.try_into().unwrap();
 
-    let wal = Wal::new(region_id, region_name, Arc::new(NoopLogStore::default()));
     let store_dir = TempDir::new("test_new_region")
         .unwrap()
         .path()
         .to_string_lossy()
         .to_string();
 
-    let accessor = Backend::build().root(&store_dir).finish().await.unwrap();
-    let object_store = ObjectStore::new(accessor);
-    let sst_layer = Arc::new(FsAccessLayer::new("/", object_store.clone()));
-    let manifest = RegionManifest::new(region_id, "/manifest/", object_store);
+    let store_config = config_util::new_store_config(&store_dir, region_id, region_name).await;
 
-    let region = RegionImpl::new(
-        region_id,
-        region_name.to_string(),
-        metadata,
-        wal,
-        sst_layer,
-        manifest,
-    );
+    let region = RegionImpl::new(region_id, region_name.to_string(), metadata, store_config);
 
     let expect_schema = schema_util::new_schema_ref(
         &[

@@ -3526,6 +3526,7 @@ dependencies = [
  "futures",
  "object-store",
  "serde",
+ "serde_json",
  "snafu",
  "tokio",
 ]

@@ -129,6 +129,7 @@ impl<S: LogStore> Wal<S> {
 pub enum Payload<'a> {
     None, // only header
     WriteBatchArrow(&'a WriteBatch),
+    #[allow(dead_code)]
     WriteBatchProto(&'a WriteBatch),
 }
 

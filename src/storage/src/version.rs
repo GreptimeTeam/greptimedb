@@ -97,16 +97,7 @@ impl VersionControl {
 
     pub fn apply_edit(&self, edit: VersionEdit) {
         let mut version_to_update = self.version.lock();
-
-        if let Some(max_memtable_id) = edit.max_memtable_id {
-            // Remove flushed memtables
-            let memtable_version = version_to_update.memtables();
-            let removed = memtable_version.remove_immutables(max_memtable_id);
-            version_to_update.memtables = Arc::new(removed);
-        }
-
         version_to_update.apply_edit(edit);
-
         version_to_update.commit();
     }
 }
@@ -189,6 +180,14 @@ impl Version {
         if self.manifest_version < edit.manifest_version {
             self.manifest_version = edit.manifest_version;
         }
+
+        if let Some(max_memtable_id) = edit.max_memtable_id {
+            // Remove flushed memtables
+            let memtable_version = self.memtables();
+            let removed = memtable_version.remove_immutables(max_memtable_id);
+            self.memtables = Arc::new(removed);
+        }
+
         let handles_to_add = edit.files_to_add.into_iter().map(FileHandle::new);
         let merged_ssts = self.ssts.merge(handles_to_add);
 

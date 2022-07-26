@@ -5,20 +5,23 @@ use async_trait::async_trait;
 use common_telemetry::logging::info;
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use snafu::ResultExt;
+use store_api::manifest::action::ProtocolAction;
 use store_api::{
     logstore::LogStore,
     manifest::Manifest,
     storage::{EngineContext, RegionDescriptor, StorageEngine},
 };
 
+use crate::background::JobPoolImpl;
 use crate::config::{EngineConfig, ObjectStoreConfig};
 use crate::error::{self, Error, Result};
+use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
 use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
+use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
-use crate::region::RegionImpl;
+use crate::region::{RegionImpl, StoreConfig};
 use crate::sst::FsAccessLayer;
-use crate::wal::Wal;
 
 /// [StorageEngine] implementation.
 pub struct EngineImpl<S: LogStore> {
@@ -99,16 +102,16 @@ impl SharedData {
             object_store,
         })
     }
+}
 
-    #[inline]
-    fn region_sst_dir(&self, region_name: &str) -> String {
-        format!("{}/", region_name)
-    }
+#[inline]
+pub fn region_sst_dir(region_name: &str) -> String {
+    format!("{}/", region_name)
+}
 
-    #[inline]
-    fn region_manifest_dir(&self, region_name: &str) -> String {
-        format!("{}/manifest/", region_name)
-    }
+#[inline]
+pub fn region_manifest_dir(region_name: &str) -> String {
+    format!("{}/manifest/", region_name)
 }
 
 type RegionMap<S> = HashMap<String, RegionImpl<S>>;
@@ -117,14 +120,23 @@ struct EngineInner<S: LogStore> {
     log_store: Arc<S>,
     regions: RwLock<RegionMap<S>>,
     shared: SharedData,
+    memtable_builder: MemtableBuilderRef,
+    flush_scheduler: FlushSchedulerRef,
+    flush_strategy: FlushStrategyRef,
 }
 
 impl<S: LogStore> EngineInner<S> {
     pub async fn new(config: EngineConfig, log_store: Arc<S>) -> Result<Self> {
+        let job_pool = Arc::new(JobPoolImpl {});
+        let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
+
         Ok(Self {
             log_store,
             regions: RwLock::new(Default::default()),
             shared: SharedData::new(config).await?,
+            memtable_builder: Arc::new(DefaultMemtableBuilder {}),
+            flush_scheduler,
+            flush_strategy: Arc::new(SizeBasedStrategy::default()),
         })
     }
 
@@ -144,29 +156,38 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let wal = Wal::new(region_id, region_name.clone(), self.log_store.clone());
-        let sst_dir = &self.shared.region_sst_dir(&region_name);
+        let sst_dir = &region_sst_dir(&region_name);
         let sst_layer = Arc::new(FsAccessLayer::new(
             sst_dir,
             self.shared.object_store.clone(),
         ));
-        let manifest_dir = self.shared.region_manifest_dir(&region_name);
+        let manifest_dir = region_manifest_dir(&region_name);
         let manifest =
             RegionManifest::new(region_id, &manifest_dir, self.shared.object_store.clone());
+
+        let store_config = StoreConfig {
+            log_store: self.log_store.clone(),
+            sst_layer,
+            manifest: manifest.clone(),
+            memtable_builder: self.memtable_builder.clone(),
+            flush_scheduler: self.flush_scheduler.clone(),
+            flush_strategy: self.flush_strategy.clone(),
+        };
 
         let region = RegionImpl::new(
             region_id,
             region_name.clone(),
             metadata.clone(),
-            wal,
-            sst_layer,
-            manifest.clone(),
+            store_config,
         );
         // Persist region metadata
         manifest
-            .update(RegionMetaAction::Change(RegionChange {
-                metadata: Arc::new(metadata),
-            }))
+            .update(RegionMetaActionList::new(vec![
+                RegionMetaAction::Protocol(ProtocolAction::new()),
+                RegionMetaAction::Change(RegionChange {
+                    metadata: Arc::new(metadata),
+                }),
+            ]))
             .await?;
 
         {
