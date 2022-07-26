@@ -220,14 +220,12 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 tmp_anno.is_nullable = is_nullable;
                 Ok(tmp_anno)
             }
-            _ => {
-                ret_parse_error(
-                    format!("Expect type in `vector[...]`, found {:?}", &slice.node),
-                    Some(slice.location),
-                )
-                .fail()
-                .map_err(|err| err.into())
-            }
+            _ => ret_parse_error(
+                format!("Expect type in `vector[...]`, found {:?}", &slice.node),
+                Some(slice.location),
+            )
+            .fail()
+            .map_err(|err| err.into()),
         }
     } else {
         ret_parse_error(
@@ -337,8 +335,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
 fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> {
     // get arg types from type annotation>
 
-    args
-        .args
+    args.args
         .iter()
         .map(|arg| {
             if let Some(anno) = &arg.node.annotation {
@@ -352,11 +349,15 @@ fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> 
 }
 
 fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationInfo>>> {
-    let mut return_types = Vec::with_capacity(
-        match &rets.node {
-            ast::ExprKind::Tuple { elts, ctx: _ } => elts.len(),
-            ast::ExprKind::Subscript { value:_, slice:_, ctx:_ } => 1,
-            _ => return ret_parse_error(
+    let mut return_types = Vec::with_capacity(match &rets.node {
+        ast::ExprKind::Tuple { elts, ctx: _ } => elts.len(),
+        ast::ExprKind::Subscript {
+            value: _,
+            slice: _,
+            ctx: _,
+        } => 1,
+        _ => {
+            return ret_parse_error(
                 format!(
                     "Expect one or many type annotation for the return type, found {:#?}",
                     &rets.node
@@ -366,7 +367,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
             .fail()
             .map_err(|err| err.into())
         }
-    );
+    });
     match &rets.node {
         // python: ->(vector[...], vector[...], ...)
         ast::ExprKind::Tuple { elts, ctx: _ } => {
@@ -381,7 +382,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
             ctx: _,
         } => return_types.push(Some(parse_annotation(rets)?)),
         // already deal with errors above
-        _ => unreachable!()
+        _ => unreachable!(),
     }
     Ok(return_types)
 }

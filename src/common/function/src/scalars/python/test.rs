@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-
 use arrow::array::PrimitiveArray;
 use arrow::datatypes::{DataType, Field, Schema};
 use common_error::prelude::ErrorExt;
@@ -119,14 +118,14 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
             Some(|r| {
-                if r.is_err(){
-                    let err = if let Err(r) = r{r}else{unreachable!()};
-                    if !get_error_reason(&err).contains("Expect a list, found "){
+                if r.is_err() {
+                    let err = if let Err(r) = r { r } else { unreachable!() };
+                    if !get_error_reason(&err).contains("Expect a list, found ") {
                         dbg!(err);
                         // don't
                         panic!();
                     }
-                }else{
+                } else {
                     panic!("Expect error, found {r:#?}");
                 }
                 true
@@ -263,9 +262,9 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)]
             Some(|r| {
                 // assert in here seems to be more readable
                 assert!(
-                    r.is_err() && get_error_reason(&r.unwrap_err()).contains(
-                                "Expect decorator with name `copr` or `coprocessor`, found",
-                            )
+                    r.is_err()
+                        && get_error_reason(&r.unwrap_err())
+                            .contains("Expect decorator with name `copr` or `coprocessor`, found",)
                 );
                 true
             }),
@@ -280,7 +279,9 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
             Some(|r| {
                 // assert in here seems to be more readable
                 assert!(
-                    r.is_err() && get_error_reason(&r.unwrap_err()).contains("Expect two keyword argument of `args` and `returns`")
+                    r.is_err()
+                        && get_error_reason(&r.unwrap_err())
+                            .contains("Expect two keyword argument of `args` and `returns`")
                 );
                 true
             }),

@@ -384,7 +384,8 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         .iter()
         .map(|field| {
             field_map
-                .get(field).copied()
+                .get(field)
+                .copied()
                 .context(OtherSnafu {
                     reason: format!("Can't found field name {field}"),
                 })
