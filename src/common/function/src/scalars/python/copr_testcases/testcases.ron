@@ -1,5 +1,6 @@
 // This is the file for python coprocessor's testcases, 
 // including coprocessor parsing test and execute test
+// check src/scalars/python/test.rs for more information
 [
     (
         code: r#"
@@ -217,4 +218,14 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
             ]
         )
     ),
+    (
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why", "whatever", "nihilism"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vector[f64], vector[f64 | None], vector[bool], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem, cpu
+"#,
+        predicate: ExecIsErr(
+            reason: "The number of return Vector is wrong, expect"
+        )
+    )
 ]

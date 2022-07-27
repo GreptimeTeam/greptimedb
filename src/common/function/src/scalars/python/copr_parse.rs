@@ -91,6 +91,119 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
     }
 }
 
+/// parse a `DataType | None` or a single `DataType`
+fn parse_bin_op(slice: &ast::Expr<()>) -> Result<AnnotationInfo> {
+    if let ast::ExprKind::BinOp { left, op: _, right } = &slice.node{
+        // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
+        let mut has_ty = false;
+        for i in [left, right] {
+            match &i.node {
+                ast::ExprKind::Constant { value, kind: _ } => {
+                    ensure!(
+                        matches!(value, ast::Constant::None),
+                        ret_parse_error(
+                            format!("Expect only typenames and `None`, found {:?}", i.node),
+                            Some(i.location)
+                        )
+                    );
+                }
+                ast::ExprKind::Name { id: _, ctx: _ }
+                 => {
+                    if has_ty {
+                        return ret_parse_error(
+                            "Expect one typenames and one `None`, not two type names"
+                                .into(),
+                            Some(i.location),
+                        )
+                        .fail();
+                    } else {
+                        has_ty = true;
+                    }
+                }
+                _ => {
+                    return ret_parse_error(
+                        format!("Expect typename or `None`, found {:?}", &i.node),
+                        Some(i.location),
+                    )
+                    .fail()
+                }
+            }
+        }
+        if !has_ty {
+            return ret_parse_error(
+                "Expect a type name, not two `None`".into(),
+                Some(slice.location),
+            )
+            .fail();
+        }
+
+        // then get types from this BinOp
+        let mut is_nullable = false;
+        let mut tmp_anno = None;
+        for i in [left, right] {
+            match &i.node {
+                ast::ExprKind::Constant { value: _, kind: _ } => {
+                    // already check Constant to be `None`
+                    is_nullable = true;
+                }
+                ast::ExprKind::Name { id: _, ctx: _ }
+                | ast::ExprKind::Call {
+                    func: _,
+                    args: _,
+                    keywords: _,
+                } => tmp_anno = Some(parse_item(i)?),
+                _ => {
+                    return ret_parse_error(
+                        format!("Expect typename or `None`, found {:?}", &i.node),
+                        Some(i.location),
+                    )
+                    .fail()
+                    ;
+                }
+            }
+        }
+        // deal with errors anyway in case code above changed but forget to modify
+        let mut tmp_anno = tmp_anno.context(ret_parse_error(
+            "Expect a type name, not two `None`".into(),
+            Some(slice.location),
+        ))?;
+        tmp_anno.is_nullable = is_nullable;
+        return Ok(tmp_anno);
+    }
+    unreachable!()
+}
+
+/// check for the grammar correctness of annotation
+fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
+    if let ast::ExprKind::Subscript { value, slice:_, ctx:_ } = &sub.node{
+        if let ast::ExprKind::Name { id, ctx: _ } = &value.node {
+            ensure!(
+                id == "vector",
+                ret_parse_error(
+                    format!(
+                        "Wrong type annotation, expect `vector[...]`, found \"{}\"",
+                        id
+                    ),
+                    Some(value.location)
+                )
+            );
+        } else {
+            return ret_parse_error(
+                format!("Expect \"vector\", found {:?}", &value.node),
+                Some(value.location),
+            )
+            .fail();
+        }
+    }else{
+        return ret_parse_error(
+            format!("Expect type annotation, found {:?}", &sub),
+            Some(sub.location),
+        )
+        .fail()
+    };
+    Ok(())
+}
+
 /// where:
 ///
 /// Start => vector`[`TYPE`]`

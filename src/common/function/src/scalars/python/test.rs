@@ -36,8 +36,8 @@ enum Predicate {
         columns: Vec<ColumnInfo>,
     },
     ExecIsErr {
-
-    }
+        reason: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -48,6 +48,18 @@ struct ColumnInfo {
 
 type PredicateFn = Option<fn(Result<Coprocessor>) -> bool>;
 type ExecResPredicateFn = Option<fn(Result<DfRecordBatch>)>;
+
+fn create_sample_recordbatch() -> DfRecordBatch {
+    let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
+    let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
+    let schema = Arc::new(Schema::from(vec![
+        Field::new("cpu", DataType::Float32, false),
+        Field::new("mem", DataType::Float64, false),
+    ]));
+    let rb =
+        DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
+    rb
+}
 
 #[test]
 fn run_ron_testcases() {
@@ -76,15 +88,7 @@ fn run_ron_testcases() {
                 }
             }
             Predicate::ExecIsOk { fields, columns } => {
-                let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
-                let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
-                let schema = Arc::new(Schema::from(vec![
-                    Field::new("cpu", DataType::Float32, false),
-                    Field::new("mem", DataType::Float64, false),
-                ]));
-                let rb =
-                    DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)])
-                        .unwrap();
+                let rb = create_sample_recordbatch();
                 let res = exec_coprocessor(&testcase.code, &rb);
                 assert!(res.is_ok());
                 let res = res.unwrap();
@@ -115,7 +119,15 @@ fn run_ron_testcases() {
                     })
                     .count();
             }
-            _ => todo!(),
+            Predicate::ExecIsErr { reason } => {
+                let rb = create_sample_recordbatch();
+                let res = exec_coprocessor(&testcase.code, &rb);
+                let res = get_error_reason(&res.unwrap_err());
+                if !res.contains(&reason) {
+                    println!("{}", testcase.code);
+                    panic!("Expect \"{reason}\" in \"{res}\", but not found.")
+                }
+            }
         }
     }
 }
@@ -431,14 +443,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vecto
             }),
         ),
     ];
-    let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
-    let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
-    let schema = Arc::new(Schema::from(vec![
-        Field::new("cpu", DataType::Float32, false),
-        Field::new("mem", DataType::Float64, false),
-    ]));
-    let rb =
-        DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
+    let rb = create_sample_recordbatch();
 
     for (script, predicate) in test_cases {
         if let Some(predicate) = predicate {
