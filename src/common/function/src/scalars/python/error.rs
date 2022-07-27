@@ -72,9 +72,7 @@ impl ErrorExt for Error {
         StatusCode::Unknown
     }
     fn backtrace_opt(&self) -> Option<&common_error::snafu::Backtrace> {
-        match self {
-            _ => None,
-        }
+        None
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

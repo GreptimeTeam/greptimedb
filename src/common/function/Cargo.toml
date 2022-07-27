@@ -38,3 +38,7 @@ snafu = {version = "0.7", features = ["backtraces"]}
 package = "arrow2"
 version = "0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+
+[dev-dependencies]
+ron = "0.7.1"
+serde = { version = "1.0", features = ["derive"] }

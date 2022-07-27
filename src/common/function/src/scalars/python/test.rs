@@ -1,8 +1,10 @@
+use std::path::Path;
 use std::sync::Arc;
+use std::fs::File;
+use std::io::prelude::*;
 
 use arrow::array::PrimitiveArray;
 use arrow::datatypes::{DataType, Field, Schema};
-use common_error::prelude::ErrorExt;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use rustpython_parser::parser;
 
@@ -10,20 +12,72 @@ use super::*;
 use crate::scalars::python::{
     copr_parse::parse_copr,
     coprocessor::Coprocessor,
-    error::{Error, InnerError, Result},
+    error::{Error, Result},
 };
+
+use serde::{Serialize, Deserialize};
+use ron::value::Value as RonValue;
+use ron::to_string as to_ron_string;
+use ron::from_str as from_ron_string;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct TestCase{
+    code: String,
+    predicate: Predicate
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum Predicate {
+    ParseIsOk{
+        result: Coprocessor
+    },
+    ParseIsErr{
+        reason: String
+    }
+}
+
+
 type PredicateFn = Option<fn(Result<Coprocessor>) -> bool>;
 type ExecResPredicateFn = Option<fn(Result<DfRecordBatch>)>;
 
+#[test]
+fn run_ron_testcases() {
+    let loc  = Path::new("src/scalars/python/copr_testcases/testcases.ron");
+    let mut file = File::open(
+        loc.to_str().unwrap()
+    ).unwrap();
+    let mut buf= String::new();
+    file.read_to_string(&mut buf).unwrap();
+    let testcases: Vec<TestCase> = from_ron_string(&buf).unwrap();
+    dbg!(&testcases);
+    for testcase in testcases{
+        match testcase.predicate {
+            Predicate::ParseIsOk { result } => {
+                let copr = parse_copr(&testcase.code);
+                let mut copr = copr.unwrap();
+                copr.script = "".into();
+                assert_eq!(copr, result);
+            }
+            Predicate::ParseIsErr { reason } => {
+                let copr = parse_copr(&testcase.code);
+                assert!(copr.is_err());
+                let res = get_error_reason(&copr.unwrap_err());
+                assert!(res.contains(&reason));
+                dbg!(res);
+            }
+        }
+    }
+
+}
+
 fn get_error_reason(err: &Error) -> String {
-    let inner = err.as_any().downcast_ref::<InnerError>().unwrap();
-    match inner {
-        InnerError::CoprParse {
+    match err {
+        Error::CoprParse {
             backtrace: _,
             reason,
             loc: _,
         } => reason.clone(),
-        InnerError::Other {
+        Error::Other {
             backtrace: _,
             reason,
         } => reason.clone(),

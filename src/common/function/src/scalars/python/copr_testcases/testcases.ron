@@ -1,0 +1,54 @@
+[
+    (
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+        "#,
+        predicate: ParseIsOk(
+            result: (
+                name: "a",
+                args: ["cpu", "mem"],
+                returns: ["perf", "what", "how", "why"],
+                arg_types: [
+                    Some((
+                        datatype: Some(Float32),
+                        is_nullable: false
+                    )),
+                    Some((
+                        datatype: Some(Float64),
+                        is_nullable: false
+                    )),
+                ],
+                return_types: [
+                    Some((
+                        datatype: Some(Float64),
+                        is_nullable: false
+                    )),
+                    Some((
+                        datatype: Some(Float64),
+                        is_nullable: true
+                    )),
+                    Some((
+                        datatype: None,
+                        is_nullable: false
+                    )),
+                    Some((
+                        datatype: None,
+                        is_nullable: true
+                    )),
+                ]
+            )
+        )
+    ),
+    (
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[g32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Unknown datatype:"
+        )
+    )
+]
