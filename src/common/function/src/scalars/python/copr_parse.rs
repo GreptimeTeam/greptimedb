@@ -92,8 +92,8 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 }
 
 /// parse a `DataType | None` or a single `DataType`
-fn parse_bin_op(slice: &ast::Expr<()>) -> Result<AnnotationInfo> {
-    if let ast::ExprKind::BinOp { left, op: _, right } = &slice.node{
+fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
+    if let ast::ExprKind::BinOp { left, op: _, right } = &bin_op.node {
         // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
         let mut has_ty = false;
         for i in [left, right] {
@@ -107,12 +107,10 @@ fn parse_bin_op(slice: &ast::Expr<()>) -> Result<AnnotationInfo> {
                         )
                     );
                 }
-                ast::ExprKind::Name { id: _, ctx: _ }
-                 => {
+                ast::ExprKind::Name { id: _, ctx: _ } => {
                     if has_ty {
                         return ret_parse_error(
-                            "Expect one typenames and one `None`, not two type names"
-                                .into(),
+                            "Expect one typenames and one `None`, not two type names".into(),
                             Some(i.location),
                         )
                         .fail();
@@ -132,7 +130,7 @@ fn parse_bin_op(slice: &ast::Expr<()>) -> Result<AnnotationInfo> {
         if !has_ty {
             return ret_parse_error(
                 "Expect a type name, not two `None`".into(),
-                Some(slice.location),
+                Some(bin_op.location),
             )
             .fail();
         }
@@ -157,15 +155,14 @@ fn parse_bin_op(slice: &ast::Expr<()>) -> Result<AnnotationInfo> {
                         format!("Expect typename or `None`, found {:?}", &i.node),
                         Some(i.location),
                     )
-                    .fail()
-                    ;
+                    .fail();
                 }
             }
         }
         // deal with errors anyway in case code above changed but forget to modify
         let mut tmp_anno = tmp_anno.context(ret_parse_error(
             "Expect a type name, not two `None`".into(),
-            Some(slice.location),
+            Some(bin_op.location),
         ))?;
         tmp_anno.is_nullable = is_nullable;
         return Ok(tmp_anno);
@@ -175,7 +172,12 @@ fn parse_bin_op(slice: &ast::Expr<()>) -> Result<AnnotationInfo> {
 
 /// check for the grammar correctness of annotation
 fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
-    if let ast::ExprKind::Subscript { value, slice:_, ctx:_ } = &sub.node{
+    if let ast::ExprKind::Subscript {
+        value,
+        slice,
+        ctx: _,
+    } = &sub.node
+    {
         if let ast::ExprKind::Name { id, ctx: _ } = &value.node {
             ensure!(
                 id == "vector",
@@ -194,12 +196,33 @@ fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
             )
             .fail();
         }
-    }else{
+
+        match &slice.node {
+            ast::ExprKind::Name { id: _, ctx: _ }
+            | ast::ExprKind::Call {
+                func: _,
+                args: _,
+                keywords: _,
+            }
+            | ast::ExprKind::BinOp {
+                left: _,
+                op: _,
+                right: _,
+            } => (),
+            _ => {
+                return ret_parse_error(
+                    format!("Expect type in `vector[...]`, found {:?}", &slice.node),
+                    Some(slice.location),
+                )
+                .fail()
+            }
+        }
+    } else {
         return ret_parse_error(
             format!("Expect type annotation, found {:?}", &sub),
             Some(sub.location),
         )
-        .fail()
+        .fail();
     };
     Ok(())
 }
@@ -212,6 +235,7 @@ fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
 ///
 /// Item => NativeType
 fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
+    check_annotation(sub)?;
     if let ast::ExprKind::Subscript {
         value,
         slice,
@@ -244,93 +268,16 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 args: _,
                 keywords: _,
             } => parse_item(slice),
-            ast::ExprKind::BinOp { left, op: _, right } => {
-                // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
-                let mut has_ty = false;
-                for i in [left, right] {
-                    match &i.node {
-                        ast::ExprKind::Constant { value, kind: _ } => {
-                            ensure!(
-                                matches!(value, ast::Constant::None),
-                                ret_parse_error(
-                                    format!("Expect only typenames and `None`, found {:?}", i.node),
-                                    Some(i.location)
-                                )
-                            );
-                        }
-                        ast::ExprKind::Name { id: _, ctx: _ }
-                        | ast::ExprKind::Call {
-                            func: _,
-                            args: _,
-                            keywords: _,
-                        } => {
-                            if has_ty {
-                                return ret_parse_error(
-                                    "Expect one typenames and one `None`, not two type names"
-                                        .into(),
-                                    Some(i.location),
-                                )
-                                .fail();
-                            } else {
-                                has_ty = true;
-                            }
-                        }
-                        _ => {
-                            return ret_parse_error(
-                                format!("Expect typename or `None`, found {:?}", &i.node),
-                                Some(i.location),
-                            )
-                            .fail()
-                        }
-                    }
-                }
-                if !has_ty {
-                    return ret_parse_error(
-                        "Expect a type name, not two `None`".into(),
-                        Some(slice.location),
-                    )
-                    .fail();
-                }
-
-                // then get types from this BinOp
-                let mut is_nullable = false;
-                let mut tmp_anno = None;
-                for i in [left, right] {
-                    match &i.node {
-                        ast::ExprKind::Constant { value: _, kind: _ } => {
-                            // already check Constant to be `None`
-                            is_nullable = true;
-                        }
-                        ast::ExprKind::Name { id: _, ctx: _ }
-                        | ast::ExprKind::Call {
-                            func: _,
-                            args: _,
-                            keywords: _,
-                        } => tmp_anno = Some(parse_item(i)?),
-                        _ => {
-                            return ret_parse_error(
-                                format!("Expect typename or `None`, found {:?}", &i.node),
-                                Some(i.location),
-                            )
-                            .fail()
-                            ;
-                        }
-                    }
-                }
-                // deal with errors anyway in case code above changed but forget to modify
-                let mut tmp_anno = tmp_anno.context(ret_parse_error(
-                    "Expect a type name, not two `None`".into(),
-                    Some(slice.location),
-                ))?;
-                tmp_anno.is_nullable = is_nullable;
-                Ok(tmp_anno)
-            }
+            ast::ExprKind::BinOp {
+                left: _,
+                op: _,
+                right: _,
+            } => parse_bin_op(slice),
             _ => ret_parse_error(
                 format!("Expect type in `vector[...]`, found {:?}", &slice.node),
                 Some(slice.location),
             )
-            .fail()
-            ,
+            .fail(),
         }
     } else {
         ret_parse_error(
@@ -387,8 +334,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                                 format!("Expect one of {:?}, found `{}`", &avail_key, s),
                                 Some(kw.location),
                             )
-                            .fail()
-                            ;
+                            .fail();
                         }
                         kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
                     } else {
@@ -396,8 +342,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                             format!("`{s}` occur multiple times in decorator's arguements' list."),
                             Some(kw.location),
                         )
-                        .fail()
-                        ;
+                        .fail();
                     }
                 }
                 None => {
@@ -409,7 +354,6 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                         Some(kw.location),
                     )
                     .fail()
-                    
                 }
             }
         }
@@ -431,7 +375,6 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
             Some(decorator.location),
         )
         .fail()
-        
     }
 }
 
@@ -469,7 +412,6 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
                 Some(rets.location),
             )
             .fail()
-            
         }
     });
     match &rets.node {
@@ -579,6 +521,5 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             Some(python_ast[0].location),
         )
         .fail()
-        
     }
 }
