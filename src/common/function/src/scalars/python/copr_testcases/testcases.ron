@@ -103,7 +103,7 @@ def a(cpu: vector[None | None], mem: vector[f64])->(vector[f64], vector[None|Non
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: "Expect a type name, not two `None`"
+            reason: "Expect a type name and a `None`, found"
         )
     ),
     (

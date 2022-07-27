@@ -46,7 +46,6 @@ struct ColumnInfo {
     pub len: usize,
 }
 
-type PredicateFn = Option<fn(Result<Coprocessor>) -> bool>;
 type ExecResPredicateFn = Option<fn(Result<DfRecordBatch>)>;
 
 fn create_sample_recordbatch() -> DfRecordBatch {
@@ -83,7 +82,7 @@ fn run_ron_testcases() {
                 let res = get_error_reason(&copr.unwrap_err());
                 if !res.contains(&reason) {
                     println!("{}", testcase.code);
-                    panic!("Expect \"{reason}\" in \"{res}\", but not found.")
+                    panic!("Parse Error, expect \"{reason}\" in \"{res}\", but not found.")
                 }
             }
             Predicate::ExecIsOk { fields, columns } => {
@@ -124,7 +123,7 @@ fn run_ron_testcases() {
                 let res = get_error_reason(&res.unwrap_err());
                 if !res.contains(&reason) {
                     println!("{}", testcase.code);
-                    panic!("Expect \"{reason}\" in \"{res}\", but not found.")
+                    panic!("Execute error, expect \"{reason}\" in \"{res}\", but not found.")
                 }
             }
         }
@@ -144,272 +143,6 @@ fn get_error_reason(err: &Error) -> String {
         } => reason.clone(),
         _ => {
             unimplemented!()
-        }
-    }
-}
-
-#[test]
-fn testsuite_parse() {
-    let correct_script = r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#;
-    let testcases: Vec<(&'static str, PredicateFn)> = vec![
-        (
-            // for correct parse with all possible type annotation
-            correct_script,
-            Some(|r| {
-                r.is_ok()
-                    && r.unwrap()
-                        == Coprocessor {
-                            name: "a".into(),
-                            args: vec!["cpu".into(), "mem".into()],
-                            returns: vec!["perf".into(), "what".into(), "how".into(), "why".into()],
-                            arg_types: vec![
-                                Some(AnnotationInfo {
-                                    datatype: Some(DataType::Float32),
-                                    is_nullable: false,
-                                }),
-                                Some(AnnotationInfo {
-                                    datatype: Some(DataType::Float64),
-                                    is_nullable: false,
-                                }),
-                            ],
-                            return_types: vec![
-                                Some(AnnotationInfo {
-                                    datatype: Some(DataType::Float64),
-                                    is_nullable: false,
-                                }),
-                                Some(AnnotationInfo {
-                                    datatype: Some(DataType::Float64),
-                                    is_nullable: true,
-                                }),
-                                Some(AnnotationInfo {
-                                    datatype: None,
-                                    is_nullable: false,
-                                }),
-                                Some(AnnotationInfo {
-                                    datatype: None,
-                                    is_nullable: true,
-                                }),
-                            ],
-                            script: r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#.to_owned()
-                        }
-            }),
-        ),
-        (
-            // missing decrator
-            r#"
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                //dbg!(&r);
-                r.is_err() && get_error_reason(&r.unwrap_err()).contains("Expect one decorator")
-            }),
-        ),
-        (
-            // illegal list(not all is string)
-            r#"
-@copr(args=["cpu", 3], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                r.is_err()
-                    && get_error_reason(&r.unwrap_err()).contains("Expect a list of String, found ")
-            }),
-        ),
-        (
-            // not even a list
-            r#"
-@copr(args=42, returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                if r.is_err() {
-                    let err = if let Err(r) = r { r } else { unreachable!() };
-                    if !get_error_reason(&err).contains("Expect a list, found ") {
-                        dbg!(err);
-                        // don't
-                        panic!();
-                    }
-                } else {
-                    panic!("Expect error, found {r:#?}");
-                }
-                true
-            }),
-        ),
-        (
-            // unknown type names
-            r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[g32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                assert!(
-                    r.is_err() && get_error_reason(&r.unwrap_err()).contains("Unknown datatype:")
-                );
-                true
-            }),
-        ),
-        (
-            // two type name
-            r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f32 | f64], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                assert!(
-                    r.is_err() && get_error_reason(&r.unwrap_err()).contains("not two type names")
-                );
-                true
-            }),
-        ),
-        (
-            // two `None`
-            r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[None | None], mem: vector[f64])->(vector[f64], vector[None|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                assert!(
-                    r.is_err()
-                        && get_error_reason(&r.unwrap_err())
-                            .contains("Expect a type name, not two `None`")
-                );
-                true
-            }),
-        ),
-        (
-            // Expect a Types name
-            r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f64|None], mem: vector[f64])->(vector[g64], vector[f64|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                assert!(
-                    r.is_err() && get_error_reason(&r.unwrap_err()).contains("Unknown datatype:")
-                );
-                true
-            }),
-        ),
-        (
-            // no more `into`
-            r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[cast(f64)], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                assert!(
-                    r.is_err()
-                        && get_error_reason(&r.unwrap_err()).contains("Expect types' name, found")
-                );
-                true
-            }),
-        ),
-        (
-            // Expect `vector` not `vec`
-            r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vec[f64], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                assert!(
-                    r.is_err()
-                        && get_error_reason(&r.unwrap_err())
-                            .contains("Wrong type annotation, expect `vector[...]`, found")
-                );
-                true
-            }),
-        ),
-        (
-            // Expect `None`
-            r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f64|1], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                assert!(
-                    r.is_err()
-                        && get_error_reason(&r.unwrap_err())
-                            .contains("Expect only typenames and `None`, found")
-                );
-                true
-            }),
-        ),
-        (
-            // more than one statement
-            r#"
-print("hello world")
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                // assert in here seems to be more readable
-                assert!(
-                    r.is_err() && get_error_reason(&r.unwrap_err()).contains("Expect one and only one python function with `@coprocessor` or `@cpor` decorator")
-                );
-                true
-            }),
-        ),
-        (
-            // wrong decorator name
-            r#"
-@corp(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                // assert in here seems to be more readable
-                assert!(
-                    r.is_err()
-                        && get_error_reason(&r.unwrap_err())
-                            .contains("Expect decorator with name `copr` or `coprocessor`, found",)
-                );
-                true
-            }),
-        ),
-        (
-            // not enough keyword arguements
-            r#"
-@copr(args=["cpu", "mem"])
-def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)], vector[f64], vector[f64 | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
-"#,
-            Some(|r| {
-                // assert in here seems to be more readable
-                assert!(
-                    r.is_err()
-                        && get_error_reason(&r.unwrap_err())
-                            .contains("Expect two keyword argument of `args` and `returns`")
-                );
-                true
-            }),
-        ),
-        // ... More `Other` errors
-    ];
-
-    for (script, predicate) in testcases {
-        let copr = parse_copr(script);
-        if let Some(predicate) = predicate {
-            if !predicate(copr) {
-                panic!("Error on {script}");
-            }
         }
     }
 }
@@ -497,7 +230,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
     let ret = exec_coprocessor(python_source, &rb);
     // println!("{}", ret.unwrap_err());
-    dbg!(&ret);
+    // dbg!(&ret);
     assert!(ret.is_ok());
     assert_eq!(ret.unwrap().column(0).len(), 4);
 }

@@ -149,7 +149,6 @@ impl Coprocessor {
             // This manually construct ast has no corrsponding code
             // in the script, so just give it a random location
             // (which doesn't matter because Location usually only used in pretty print errors)
-
             code.push(self.gen_call(&loc));
         } else {
             return ret_parse_error(
@@ -497,7 +496,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
             }
         );
 
-        // if cols and schema's data types is not match, try coerced it to given type(if annotated)(if error occur, return relevant error with question mark)
+        // if cols and schema's data types is not match, try coerce it to given type(if annotated)(if error occur, return relevant error with question mark)
         copr.check_and_cast_type(&mut cols)?;
         // 6. return a assembled DfRecordBatch
         let schema = copr.gen_schema(&cols)?;

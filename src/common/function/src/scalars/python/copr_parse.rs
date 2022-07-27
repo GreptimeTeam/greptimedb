@@ -91,14 +91,16 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
     }
 }
 
-/// parse a `DataType | None` or a single `DataType`
-fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
+/// check if binary op expr is legal(with one typename and one `None`)
+fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
     if let ast::ExprKind::BinOp { left, op: _, right } = &bin_op.node {
         // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
         let mut has_ty = false;
+        let mut has_none = false;
         for i in [left, right] {
             match &i.node {
                 ast::ExprKind::Constant { value, kind: _ } => {
+                    has_none = matches!(value, ast::Constant::None);
                     ensure!(
                         matches!(value, ast::Constant::None),
                         ret_parse_error(
@@ -127,29 +129,23 @@ fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 }
             }
         }
-        if !has_ty {
+        if !(has_ty && has_none) {
             return ret_parse_error(
-                "Expect a type name, not two `None`".into(),
+                format!("Expect a type name and a `None`, found {:?}", &bin_op.node),
                 Some(bin_op.location),
             )
             .fail();
         }
 
-        // then get types from this BinOp
-        let mut is_nullable = false;
-        let mut tmp_anno = None;
         for i in [left, right] {
             match &i.node {
-                ast::ExprKind::Constant { value: _, kind: _ } => {
-                    // already check Constant to be `None`
-                    is_nullable = true;
-                }
-                ast::ExprKind::Name { id: _, ctx: _ }
+                ast::ExprKind::Constant { value: _, kind: _ }
+                | ast::ExprKind::Name { id: _, ctx: _ }
                 | ast::ExprKind::Call {
                     func: _,
                     args: _,
                     keywords: _,
-                } => tmp_anno = Some(parse_item(i)?),
+                } => (),
                 _ => {
                     return ret_parse_error(
                         format!("Expect typename or `None`, found {:?}", &i.node),
@@ -159,12 +155,44 @@ fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 }
             }
         }
+        Ok(())
+    } else {
+        ret_parse_error(
+            format!(
+                "Expect binary ops like `DataType | None`, found {:#?}",
+                bin_op
+            ),
+            Some(bin_op.location),
+        )
+        .fail()
+    }
+}
+
+/// parse a `DataType | None` or a single `DataType`
+fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
+    // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
+    check_bin_op(bin_op)?;
+    if let ast::ExprKind::BinOp { left, op: _, right } = &bin_op.node {
+        // then get types from this BinOp
+        let mut tmp_anno = None;
+        for i in [left, right] {
+            match &i.node {
+                ast::ExprKind::Constant { value: _, kind: _ } => (),
+                ast::ExprKind::Name { id: _, ctx: _ }
+                | ast::ExprKind::Call {
+                    func: _,
+                    args: _,
+                    keywords: _,
+                } => tmp_anno = Some(parse_item(i)?),
+                _ => unreachable!(),
+            }
+        }
         // deal with errors anyway in case code above changed but forget to modify
         let mut tmp_anno = tmp_anno.context(ret_parse_error(
             "Expect a type name, not two `None`".into(),
             Some(bin_op.location),
         ))?;
-        tmp_anno.is_nullable = is_nullable;
+        tmp_anno.is_nullable = true;
         return Ok(tmp_anno);
     }
     unreachable!()
