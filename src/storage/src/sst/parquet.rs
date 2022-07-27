@@ -106,7 +106,8 @@ impl<'a> ParquetWriter<'a> {
             }
         }
         sink.close().await.context(WriteParquetSnafu)?;
-        // FIXME(yingwen): Hack to workaround https://github.com/jorgecarleitao/parquet2/issues/162
+        // FIXME(yingwen): Hack to workaround an [arrow2 BUG](https://github.com/jorgecarleitao/parquet2/issues/162),
+        // upgrading to latest arrow2 can fixed this, but now datafusion is still using an old arrow2 version.
         sink.flush().await.context(WriteParquetSnafu)
     }
 }

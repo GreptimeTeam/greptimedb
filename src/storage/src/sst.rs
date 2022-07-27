@@ -127,8 +127,8 @@ impl FileHandle {
     }
 
     #[inline]
-    pub fn file_path(&self) -> &str {
-        &self.inner.meta.file_path
+    pub fn file_name(&self) -> &str {
+        &self.inner.meta.file_name
     }
 }
 
@@ -149,7 +149,7 @@ impl FileHandleInner {
 /// Immutable metadata of a sst file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileMeta {
-    pub file_path: String,
+    pub file_name: String,
     /// SST level of the file.
     pub level: u8,
 }
@@ -168,13 +168,13 @@ pub struct ReadOptions {
 /// SST access layer.
 #[async_trait]
 pub trait AccessLayer: Send + Sync + std::fmt::Debug {
-    /// Writes SST file with given `file_name` and returns the full path.
+    /// Writes SST file with given `file_name`.
     async fn write_sst(
         &self,
         file_name: &str,
         iter: BoxedBatchIterator,
         opts: &WriteOptions,
-    ) -> Result<String>;
+    ) -> Result<()>;
 
     /// Read SST file with given `file_name`.
     // TODO(yingwen): Read SST according to scan request and returns a chunk stream.
@@ -211,14 +211,14 @@ impl AccessLayer for FsAccessLayer {
         file_name: &str,
         iter: BoxedBatchIterator,
         opts: &WriteOptions,
-    ) -> Result<String> {
+    ) -> Result<()> {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(file_name);
         let writer = ParquetWriter::new(&file_path, iter, self.object_store.clone());
 
         writer.write_sst(opts).await?;
-        Ok(file_path)
+        Ok(())
     }
 
     async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader> {

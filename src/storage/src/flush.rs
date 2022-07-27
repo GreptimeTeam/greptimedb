@@ -178,7 +178,12 @@ impl<S: LogStore> FlushJob<S> {
             futures.push(async move {
                 self.sst_layer
                     .write_sst(&file_name, iter, &WriteOptions::default())
-                    .await
+                    .await?;
+
+                Ok(FileMeta {
+                    file_name,
+                    level: 0,
+                })
             });
         }
 
@@ -187,10 +192,6 @@ impl<S: LogStore> FlushJob<S> {
             .into_iter()
             .collect::<Result<Vec<_>>>()?
             .into_iter()
-            .map(|f| FileMeta {
-                file_path: f,
-                level: 0,
-            })
             .collect();
 
         logging::info!("Successfully flush memtables to files: {:?}", metas);
