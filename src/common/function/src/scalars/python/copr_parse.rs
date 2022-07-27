@@ -237,29 +237,11 @@ fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
 fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
     check_annotation(sub)?;
     if let ast::ExprKind::Subscript {
-        value,
+        value: _,
         slice,
         ctx: _,
     } = &sub.node
     {
-        if let ast::ExprKind::Name { id, ctx: _ } = &value.node {
-            ensure!(
-                id == "vector",
-                ret_parse_error(
-                    format!(
-                        "Wrong type annotation, expect `vector[...]`, found \"{}\"",
-                        id
-                    ),
-                    Some(value.location)
-                )
-            )
-        } else {
-            return ret_parse_error(
-                format!("Expect \"vector\", found {:?}", &value.node),
-                Some(value.location),
-            )
-            .fail();
-        }
         // i.e: vector[f64]
         match &slice.node {
             ast::ExprKind::Name { id: _, ctx: _ }
@@ -273,23 +255,63 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 op: _,
                 right: _,
             } => parse_bin_op(slice),
-            _ => ret_parse_error(
-                format!("Expect type in `vector[...]`, found {:?}", &slice.node),
-                Some(slice.location),
-            )
-            .fail(),
+            _ => unreachable!(),
         }
     } else {
-        ret_parse_error(
-            format!("Expect type annotation, found {:?}", &sub),
-            Some(sub.location),
-        )
-        .fail()
+        unreachable!()
     }
 }
 
-/// returns args and returns in Vec of String
-fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String>)> {
+/// parse a list of keyword and return args and returns list from keywords
+fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<String>)> {
+    let avail_key = HashSet::from(["args", "returns"]);
+    let mut kw_map = HashMap::new();
+    for kw in keywords {
+        match &kw.node.arg {
+            Some(s) => {
+                let s = s.as_str();
+                if !kw_map.contains_key(s) {
+                    if !avail_key.contains(s) {
+                        return ret_parse_error(
+                            format!("Expect one of {:?}, found `{}`", &avail_key, s),
+                            Some(kw.location),
+                        )
+                        .fail();
+                    }
+                    kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
+                } else {
+                    return ret_parse_error(
+                        format!("`{s}` occur multiple times in decorator's arguements' list."),
+                        Some(kw.location),
+                    )
+                    .fail();
+                }
+            }
+            None => {
+                return ret_parse_error(
+                    format!(
+                        "Expect explictly set both `args` and `returns`, found {:?}",
+                        &kw.node
+                    ),
+                    Some(kw.location),
+                )
+                .fail()
+            }
+        }
+    }
+    let loc = keywords[0].location;
+    let arg_names = kw_map
+        .remove("args")
+        .context(ret_parse_error("Expect `args` keyword".into(), Some(loc)))?;
+    let ret_names = kw_map
+        .remove("returns")
+        .context(ret_parse_error("Expect `rets` keyword".into(), Some(loc)))?;
+    Ok((arg_names, ret_names))
+}
+
+/// check if decorator is named with `copr` or `coprocessor`
+/// and if numbers of arguments is right(=2 for now `args` & `returns`)
+fn check_decorator(decorator: &ast::Expr<()>) -> Result<()> {
     if let ast::ExprKind::Call {
         func,
         args,
@@ -322,66 +344,37 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                 loc: Some(func.location)
             }
         );
-        let avail_key = HashSet::from(["args", "returns"]);
-        let mut kw_map = HashMap::new();
-        for kw in keywords {
-            match &kw.node.arg {
-                Some(s) => {
-                    let s = s.as_str();
-                    if !kw_map.contains_key(s) {
-                        if !avail_key.contains(s) {
-                            return ret_parse_error(
-                                format!("Expect one of {:?}, found `{}`", &avail_key, s),
-                                Some(kw.location),
-                            )
-                            .fail();
-                        }
-                        kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
-                    } else {
-                        return ret_parse_error(
-                            format!("`{s}` occur multiple times in decorator's arguements' list."),
-                            Some(kw.location),
-                        )
-                        .fail();
-                    }
-                }
-                None => {
-                    return ret_parse_error(
-                        format!(
-                            "Expect explictly set both `args` and `returns`, found {:?}",
-                            &kw.node
-                        ),
-                        Some(kw.location),
-                    )
-                    .fail()
-                }
-            }
-        }
-        let arg_names = kw_map.remove("args").context(ret_parse_error(
-            "Expect `args` keyword".into(),
-            Some(decorator.location),
-        ))?;
-        let ret_names = kw_map.remove("returns").context(ret_parse_error(
-            "Expect `rets` keyword".into(),
-            Some(decorator.location),
-        ))?;
-        Ok((arg_names, ret_names))
     } else {
-        ret_parse_error(
+        return ret_parse_error(
             format!(
                 "Expect decorator to be a function call(like `@copr(...)`), found {:?}",
                 decorator.node
             ),
             Some(decorator.location),
         )
-        .fail()
+        .fail();
+    }
+    Ok(())
+}
+
+/// returns args and returns in Vec of String
+fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String>)> {
+    check_decorator(decorator)?;
+    if let ast::ExprKind::Call {
+        func: _,
+        args: _,
+        keywords,
+    } = &decorator.node
+    {
+        parse_keywords(keywords)
+    } else {
+        unreachable!()
     }
 }
 
 // get type annotaion in arguments
 fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> {
     // get arg types from type annotation>
-
     args.args
         .iter()
         .map(|arg| {
@@ -395,7 +388,27 @@ fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> 
         .collect::<Result<Vec<Option<_>>>>()
 }
 
+fn check_return_annotations(rets: &ast::Expr<()>) -> Result<()> {
+    match &rets.node {
+        ast::ExprKind::Tuple { elts: _, ctx: _ }
+        | ast::ExprKind::Subscript {
+            value: _,
+            slice: _,
+            ctx: _,
+        } => Ok(()),
+        _ => ret_parse_error(
+            format!(
+                "Expect one or many type annotation for the return type, found {:#?}",
+                &rets.node
+            ),
+            Some(rets.location),
+        )
+        .fail(),
+    }
+}
+
 fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationInfo>>> {
+    check_return_annotations(rets)?;
     let mut return_types = Vec::with_capacity(match &rets.node {
         ast::ExprKind::Tuple { elts, ctx: _ } => elts.len(),
         ast::ExprKind::Subscript {
@@ -403,16 +416,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
             slice: _,
             ctx: _,
         } => 1,
-        _ => {
-            return ret_parse_error(
-                format!(
-                    "Expect one or many type annotation for the return type, found {:#?}",
-                    &rets.node
-                ),
-                Some(rets.location),
-            )
-            .fail()
-        }
+        _ => unreachable!(),
     });
     match &rets.node {
         // python: ->(vector[...], vector[...], ...)
@@ -433,30 +437,30 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
     Ok(return_types)
 }
 
-/// parse script and return `Coprocessor` struct with info extract from ast
-pub fn parse_copr(script: &str) -> Result<Coprocessor> {
-    let python_ast = parser::parse_program(script).context(PyParseSnafu)?;
+/// check if the list of statements contain only one statement and
+/// that statement is a function call with one decorator
+fn check_copr(stmts: &Vec<ast::Stmt<()>>) -> Result<()> {
     ensure!(
-        python_ast.len() == 1,
+        stmts.len() == 1,
         CoprParseSnafu {
             reason:
                 "Expect one and only one python function with `@coprocessor` or `@cpor` decorator"
                     .to_string(),
-            loc: if python_ast.is_empty() {
+            loc: if stmts.is_empty() {
                 None
             } else {
-                Some(python_ast[0].location)
+                Some(stmts[0].location)
             }
         }
     );
     if let ast::StmtKind::FunctionDef {
-        name,
-        args: fn_args,
+        name: _,
+        args: _,
         body: _,
         decorator_list,
-        returns,
+        returns: _,
         type_comment: _,
-    } = &python_ast[0].node
+    } = &stmts[0].node
     {
         ensure!(
             decorator_list.len() == 1,
@@ -469,6 +473,29 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
                 }
             }
         );
+    } else {
+        return ret_parse_error(
+            format!("Expect a function definition, found a {:?}", &stmts[0].node),
+            Some(stmts[0].location),
+        )
+        .fail();
+    }
+    Ok(())
+}
+
+/// parse script and return `Coprocessor` struct with info extract from ast
+pub fn parse_copr(script: &str) -> Result<Coprocessor> {
+    let python_ast = parser::parse_program(script).context(PyParseSnafu)?;
+    check_copr(&python_ast)?;
+    if let ast::StmtKind::FunctionDef {
+        name,
+        args: fn_args,
+        body: _,
+        decorator_list,
+        returns,
+        type_comment: _,
+    } = &python_ast[0].node
+    {
         let decorator = &decorator_list[0];
         let (arg_names, ret_names) = parse_decorator(decorator)?;
 
@@ -482,6 +509,9 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             // if no anntation at all, set it to all None
             std::iter::repeat(None).take(ret_names.len()).collect()
         };
+
+        // make sure both arguments&returns in fucntion
+        // and in decorator have same length
         ensure!(
             arg_names.len() == arg_types.len(),
             CoprParseSnafu {
@@ -513,13 +543,6 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             script: script.to_owned(),
         })
     } else {
-        ret_parse_error(
-            format!(
-                "Expect a function definition, found a {:?}",
-                &python_ast[0].node
-            ),
-            Some(python_ast[0].location),
-        )
-        .fail()
+        unreachable!()
     }
 }

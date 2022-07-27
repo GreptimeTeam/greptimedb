@@ -56,9 +56,8 @@ fn create_sample_recordbatch() -> DfRecordBatch {
         Field::new("cpu", DataType::Float32, false),
         Field::new("mem", DataType::Float64, false),
     ]));
-    let rb =
-        DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
-    rb
+
+    DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap()
 }
 
 #[test]
