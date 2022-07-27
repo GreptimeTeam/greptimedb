@@ -107,7 +107,7 @@ impl Coprocessor {
                     format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
                     Some(code[0].location)
                 )
-                .fail().map_err(|err|err.into());
+                .fail();
             }
             let mut loc = code[0].location;
             // This manually construct ast has no corrsponding code in the script, so just give it a random location(which doesn't matter because Location usually only used in pretty print errors)
@@ -143,8 +143,7 @@ impl Coprocessor {
                 format!("Expect statement in script, found: {:?}", top),
                 None,
             )
-            .fail()
-            .map_err(|err| err.into());
+            .fail();
         }
         // use `compile::Mode::BlockExpr` so it return the result of statement
         compile::compile_top(
@@ -154,7 +153,6 @@ impl Coprocessor {
             compile::CompileOpts { optimize: 0 },
         )
         .context(PyCompileSnafu)
-        .map_err(|err| err.into())
     }
 
     /// generate [`Schema`] according to return names, types or
@@ -244,7 +242,6 @@ fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilde
         .map(|op| Arc::new(op) as _)
         // to cast datatypes::Error to python::Error
         .context(TypeCastSnafu)
-        .map_err(|err| err.into())
 }
 
 /// convert a `Vec<ArrayRef>` into a `Vec<PyVector>` only when they are of supported types
@@ -274,7 +271,6 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
                     arg.data_type()
                 ))
                 .fail()
-                .map_err(|err| err.into())
             }
         };
         args.push(PyVector::from(v));
@@ -304,7 +300,7 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
             } else {
                 ret_other_error_with(
                     format!("Expect all element in returning tuple to be vector, found one of the element is {:?}", obj)
-                ).fail().map_err(|err|err.into())
+                ).fail()
             }
         }).collect::<Result<Vec<ArrayRef>>>()?;
         Ok(cols)
@@ -322,7 +318,6 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
             obj
         ))
         .fail()
-        .map_err(|err| err.into())
     }
 }
 
@@ -395,7 +390,6 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
                 .context(OtherSnafu {
                     reason: format!("Can't found field name {field}"),
                 })
-                .map_err(|err| err.into())
         })
         .collect::<Result<Vec<usize>>>()?;
     let fetch_args: Vec<Arc<dyn Array>> = fetch_idx
@@ -475,8 +469,7 @@ fn to_serde_excep(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> Result<PyEx
     // FIXME: better error handling, perhaps with chain calls?
     if let Err(r) = r {
         return ret_other_error_with(format!("Fail to write to string, error: {:#?}", r))
-            .fail()
-            .map_err(|err| err.into());
+            .fail();
     }
     Ok(PyExceptionSerde { output: chain })
 }

@@ -1,12 +1,14 @@
-use std::path::Path;
-use std::sync::Arc;
 use std::fs::File;
 use std::io::prelude::*;
+use std::path::Path;
+use std::sync::Arc;
 
 use arrow::array::PrimitiveArray;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
+use serde::{Deserialize, Serialize};
 
 use super::*;
 use crate::scalars::python::{
@@ -15,42 +17,48 @@ use crate::scalars::python::{
     error::{Error, Result},
 };
 
-use serde::{Serialize, Deserialize};
-use ron::value::Value as RonValue;
-use ron::to_string as to_ron_string;
-use ron::from_str as from_ron_string;
-
 #[derive(Serialize, Deserialize, Debug)]
-struct TestCase{
+struct TestCase {
     code: String,
-    predicate: Predicate
+    predicate: Predicate,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 enum Predicate {
-    ParseIsOk{
-        result: Coprocessor
+    ParseIsOk {
+        result: Coprocessor,
     },
-    ParseIsErr{
-        reason: String
+    ParseIsErr {
+        reason: String,
+    },
+    ExecIsOk {
+        fields: Vec<AnnotationInfo>,
+        columns: Vec<ColumnInfo>,
+    },
+    ExecIsErr {
+
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct ColumnInfo {
+    pub ty: DataType,
+    pub len: usize,
+}
 
 type PredicateFn = Option<fn(Result<Coprocessor>) -> bool>;
 type ExecResPredicateFn = Option<fn(Result<DfRecordBatch>)>;
 
 #[test]
 fn run_ron_testcases() {
-    let loc  = Path::new("src/scalars/python/copr_testcases/testcases.ron");
-    let mut file = File::open(
-        loc.to_str().unwrap()
-    ).unwrap();
-    let mut buf= String::new();
-    file.read_to_string(&mut buf).unwrap();
-    let testcases: Vec<TestCase> = from_ron_string(&buf).unwrap();
-    dbg!(&testcases);
-    for testcase in testcases{
+    let loc = Path::new("src/scalars/python/copr_testcases/testcases.ron");
+    let mut file =
+        File::open(loc.to_str().expect("Fail to parse path")).expect("Fail to open file");
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)
+        .expect("Fail to read to string");
+    let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
+    for testcase in testcases {
         match testcase.predicate {
             Predicate::ParseIsOk { result } => {
                 let copr = parse_copr(&testcase.code);
@@ -62,12 +70,54 @@ fn run_ron_testcases() {
                 let copr = parse_copr(&testcase.code);
                 assert!(copr.is_err());
                 let res = get_error_reason(&copr.unwrap_err());
-                assert!(res.contains(&reason));
-                dbg!(res);
+                if !res.contains(&reason) {
+                    println!("{}", testcase.code);
+                    panic!("Expect \"{reason}\" in \"{res}\", but not found.")
+                }
             }
+            Predicate::ExecIsOk { fields, columns } => {
+                let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
+                let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
+                let schema = Arc::new(Schema::from(vec![
+                    Field::new("cpu", DataType::Float32, false),
+                    Field::new("mem", DataType::Float64, false),
+                ]));
+                let rb =
+                    DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)])
+                        .unwrap();
+                let res = exec_coprocessor(&testcase.code, &rb);
+                assert!(res.is_ok());
+                let res = res.unwrap();
+                fields
+                    .iter()
+                    .zip(&res.schema().fields)
+                    .map(|(anno, real)| {
+                        if !(anno.datatype.clone().unwrap() == real.data_type
+                            && anno.is_nullable == real.is_nullable)
+                        {
+                            panic!("fields expect to be {anno:#?}, found to be {real:#?}.");
+                        }
+                    })
+                    .count();
+                columns
+                    .iter()
+                    .zip(res.columns())
+                    .map(|(anno, real)| {
+                        if !(&anno.ty == real.data_type() && anno.len == real.len()) {
+                            panic!(
+                                "Unmatch type or length!Expect [{:#?}; {}], found [{:#?}; {}]",
+                                anno.ty,
+                                anno.len,
+                                real.data_type(),
+                                real.len()
+                            )
+                        }
+                    })
+                    .count();
+            }
+            _ => todo!(),
         }
     }
-
 }
 
 fn get_error_reason(err: &Error) -> String {
@@ -443,6 +493,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
     let ret = exec_coprocessor(python_source, &rb);
     // println!("{}", ret.unwrap_err());
+    dbg!(&ret);
     assert!(ret.is_ok());
     assert_eq!(ret.unwrap().column(0).len(), 4);
 }
