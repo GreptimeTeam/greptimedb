@@ -42,7 +42,7 @@ impl Snapshot for SnapshotImpl {
 
         let mut builder =
             ChunkReaderBuilder::new(self.version.schema().clone(), self.sst_layer.clone())
-                .num_memtables(memtable_version.num_memtables())
+                .reserve_num_memtables(memtable_version.num_memtables())
                 .iter_ctx(IterContext {
                     batch_size: ctx.batch_size,
                     visible_sequence,

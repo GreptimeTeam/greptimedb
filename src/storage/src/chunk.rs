@@ -94,7 +94,7 @@ impl ChunkReaderBuilder {
     }
 
     /// Reserve space for iterating `num` memtables.
-    pub fn num_memtables(mut self, num: usize) -> Self {
+    pub fn reserve_num_memtables(mut self, num: usize) -> Self {
         self.iters.reserve(num);
         self
     }
@@ -124,7 +124,9 @@ impl ChunkReaderBuilder {
         // Now we just simply chain all iterators together, ignore duplications/ordering.
         let iter = Box::new(self.iters.into_iter().flatten());
 
-        let read_opts = ReadOptions::default();
+        let read_opts = ReadOptions {
+            batch_size: self.iter_ctx.batch_size,
+        };
         let mut sst_readers = Vec::with_capacity(self.files_to_read.len());
         for file in &self.files_to_read {
             let reader = self

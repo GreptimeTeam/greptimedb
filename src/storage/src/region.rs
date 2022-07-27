@@ -108,6 +108,10 @@ impl<S: LogStore> RegionImpl<S> {
     fn committed_sequence(&self) -> store_api::storage::SequenceNumber {
         self.inner.version_control().committed_sequence()
     }
+
+    async fn wait_flush_done(&self) -> Result<()> {
+        self.inner.writer.wait_flush_done().await
+    }
 }
 
 /// Shared data of region.

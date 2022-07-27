@@ -35,19 +35,19 @@ use crate::sst;
 
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
-    file_name: &'a str,
+    file_path: &'a str,
     iter: BoxedBatchIterator,
     object_store: ObjectStore,
 }
 
 impl<'a> ParquetWriter<'a> {
     pub fn new(
-        file_name: &'a str,
+        file_path: &'a str,
         iter: BoxedBatchIterator,
         object_store: ObjectStore,
     ) -> ParquetWriter {
         ParquetWriter {
-            file_name,
+            file_path,
             iter,
             object_store,
         }
@@ -62,7 +62,7 @@ impl<'a> ParquetWriter<'a> {
     /// in config will be written to a single row group.
     async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
         let schema = memtable_schema_to_arrow_schema(self.iter.schema());
-        let object = self.object_store.object(self.file_name);
+        let object = self.object_store.object(self.file_path);
 
         // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
         // but in s3/azblob backend the Content-Length field of HTTP request is set
@@ -106,7 +106,7 @@ impl<'a> ParquetWriter<'a> {
             }
         }
         sink.close().await.context(WriteParquetSnafu)?;
-        // https://github.com/jorgecarleitao/parquet2/issues/162
+        // FIXME(yingwen): Hack to workaround https://github.com/jorgecarleitao/parquet2/issues/162
         sink.flush().await.context(WriteParquetSnafu)
     }
 }
@@ -195,7 +195,7 @@ fn transverse_recursive<T, F: Fn(&DataType) -> T + Clone>(
 }
 
 pub struct ParquetReader<'a> {
-    file_name: &'a str,
+    file_path: &'a str,
     object_store: ObjectStore,
 }
 
@@ -205,6 +205,13 @@ type ReaderFactoryFuture<'a, R> =
 pub type FieldProjection = Box<dyn Fn(&Schema) -> Vec<Field> + Send + Sync>;
 
 impl<'a> ParquetReader<'a> {
+    pub fn new(file_path: &str, object_store: ObjectStore) -> ParquetReader {
+        ParquetReader {
+            file_path,
+            object_store,
+        }
+    }
+
     #[allow(dead_code)]
     pub async fn chunk_stream(
         &self,
@@ -212,18 +219,18 @@ impl<'a> ParquetReader<'a> {
         chunk_size: usize,
     ) -> Result<ChunkStream<'_>> {
         let reader_factory = || -> ReaderFactoryFuture<SeekableReader> {
-            Box::pin(async { Ok(self.object_store.object(self.file_name).seekable_reader(..)) })
+            Box::pin(async { Ok(self.object_store.object(self.file_path).seekable_reader(..)) })
         };
         let mut reader = reader_factory().await.context(ReadParquetIoSnafu {
-            file: self.file_name,
+            file: self.file_path,
         })?;
         let metadata = read_metadata_async(&mut reader)
             .await
             .context(ReadParquetSnafu {
-                file: self.file_name,
+                file: self.file_path,
             })?;
         let schema = infer_schema(&metadata).context(ReadParquetSnafu {
-            file: self.file_name,
+            file: self.file_path,
         })?;
 
         let projected_fields = projection.map_or_else(|| schema.fields.clone(), |p| p(&schema));
@@ -241,13 +248,13 @@ impl<'a> ParquetReader<'a> {
                 )
                 .await
                 .context(ReadParquetSnafu {
-                    file: self.file_name,
+                    file: self.file_path,
                 })?;
 
                 let chunks = RowGroupDeserializer::new(column_chunks, rg.num_rows() as usize, None);
                 for maybe_chunk in chunks {
                     let columns_in_chunk = maybe_chunk.context(ReadParquetSnafu {
-                        file: self.file_name,
+                        file: self.file_path,
                     })?;
                     yield columns_in_chunk;
                 }

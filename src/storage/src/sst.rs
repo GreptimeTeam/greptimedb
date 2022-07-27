@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
 use crate::read::BoxedBatchReader;
-use crate::sst::parquet::ParquetWriter;
+use crate::sst::parquet::{ParquetReader, ParquetWriter};
 
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: usize = 1;
@@ -159,8 +159,11 @@ pub struct WriteOptions {
     // TODO(yingwen): [flush] row group size.
 }
 
-#[derive(Debug, Default)]
-pub struct ReadOptions {}
+#[derive(Debug)]
+pub struct ReadOptions {
+    /// Suggested size of each batch.
+    pub batch_size: usize,
+}
 
 /// SST access layer.
 #[async_trait]
@@ -218,7 +221,11 @@ impl AccessLayer for FsAccessLayer {
         Ok(file_path)
     }
 
-    async fn read_sst(&self, _file_name: &str, _opts: &ReadOptions) -> Result<BoxedBatchReader> {
-        unimplemented!()
+    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader> {
+        let file_path = self.sst_file_path(file_name);
+        let reader = ParquetReader::new(&file_path, self.object_store.clone());
+
+        let stream = reader.chunk_stream(None, opts.batch_size).await?;
+        Ok(Box::new(stream))
     }
 }
