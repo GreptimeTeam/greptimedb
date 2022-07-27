@@ -171,6 +171,7 @@ fn is_null(null_mask: &BitSet, idx: usize) -> bool {
     matches!(null_mask.get_bit(idx), Some(true))
 }
 
+// TOOD(fys): move BitSet to better location
 struct BitSet {
     buffer: Vec<u8>,
     len: usize,
