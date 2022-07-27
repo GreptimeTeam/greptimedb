@@ -211,7 +211,7 @@ impl Coprocessor {
         )))
     }
 
-    /// check real types and annotation types(if have) is the same, if not try cast columns to annotated type
+    /// check if real types and annotation types(if have) is the same, if not try cast columns to annotated type
     fn check_and_cast_type(&self, cols: &mut [ArrayRef]) -> Result<()> {
         let return_types = &self.return_types;
         for (col, anno) in cols.iter_mut().zip(return_types) {
@@ -506,6 +506,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     })
 }
 
+/// transfer a Python Exception into a python call stack in `String` format
 fn to_serde_excep(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> Result<PyExceptionSerde> {
     let mut chain = String::new();
     let r = vm.write_exception(&mut chain, &excep);
