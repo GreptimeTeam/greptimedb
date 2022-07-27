@@ -5,6 +5,7 @@
 GreptimeDB: the next-generation hybrid timeseries/analytics processing database in the cloud.
 
 ## Getting Started
+
 ### Prerequisites
 To compile GreptimeDB from source, you'll need the following:
 - Rust
@@ -22,7 +23,7 @@ The [`prost-build`](https://github.com/tokio-rs/prost/tree/master/prost-build) d
 Follow the instructions for your operating system on the [`cmake`](https://cmake.org/install/) site.
 
 For macOS users, you can also use `homebrew` to install `cmake`.
-```bash
+```bash 
 brew install cmake
 ```
 
