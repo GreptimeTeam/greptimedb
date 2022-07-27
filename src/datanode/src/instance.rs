@@ -68,7 +68,7 @@ impl Instance {
             .table(table_name)
             .context(TableNotFoundSnafu { table_name })?;
 
-        let insert = insertion_expr_to_request(schema_provider.clone(), insert_expr)?;
+        let insert = insertion_expr_to_request(insert_expr, table.clone())?;
 
         let affected_rows = table
             .insert(insert)

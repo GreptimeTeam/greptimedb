@@ -27,15 +27,23 @@ impl BatchHandler {
 
                 match obj_expr.expr {
                     Some(object_expr::Expr::Insert(insert_expr)) => {
-                        if let Ok(Output::AffectedRows(rows)) =
-                            self.instance.execute_grpc_insert(insert_expr).await
-                        {
-                            object_resp.header = Some(ResultHeader {
-                                version: PROTOCOL_VERSION,
-                                success: rows as u32,
-                                failure: 0,
-                                ..Default::default()
-                            });
+                        match self.instance.execute_grpc_insert(insert_expr).await {
+                            Ok(Output::AffectedRows(rows)) => {
+                                object_resp.header = Some(ResultHeader {
+                                    version: PROTOCOL_VERSION,
+                                    success: rows as u32,
+                                    ..Default::default()
+                                });
+                            }
+                            Err(err) => {
+                                object_resp.header = Some(ResultHeader {
+                                    version: PROTOCOL_VERSION,
+                                    err_msg: err.to_string(),
+                                    // TODO(fys): failure count
+                                    ..Default::default()
+                                })
+                            }
+                            _ => unreachable!(),
                         }
                     }
                     _ => unimplemented!(),
