@@ -15,6 +15,7 @@ use crate::{
     write_batch::{codec::WriteBatchArrowEncoder, WriteBatch},
 };
 
+#[derive(Debug)]
 pub struct Wal<S: LogStore> {
     region_id: u32,
     namespace: S::Namespace,

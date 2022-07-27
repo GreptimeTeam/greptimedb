@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use store_api::logstore::namespace::Namespace;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LocalNamespace {
     inner: Arc<LocalNamespaceInner>,
 }
@@ -13,6 +13,7 @@ impl Default for LocalNamespace {
     }
 }
 
+#[derive(Debug)]
 struct LocalNamespaceInner {
     name: String,
     id: u64,

@@ -95,7 +95,7 @@ pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
 
 pub type BatchIteratorPtr = Box<dyn BatchIterator>;
 
-pub trait MemtableBuilder: Send + Sync {
+pub trait MemtableBuilder: Send + Sync + std::fmt::Debug {
     fn build(&self, id: MemtableId, schema: MemtableSchema) -> MemtableRef;
 }
 
@@ -136,7 +136,8 @@ impl KeyValues {
     }
 }
 
-pub struct DefaultMemtableBuilder {}
+#[derive(Debug)]
+pub struct DefaultMemtableBuilder;
 
 impl MemtableBuilder for DefaultMemtableBuilder {
     fn build(&self, id: MemtableId, schema: MemtableSchema) -> MemtableRef {

@@ -23,7 +23,7 @@ use crate::wal::Wal;
 /// Default write buffer size (32M).
 const DEFAULT_WRITE_BUFFER_SIZE: usize = 32 * 1024 * 1024;
 
-pub trait FlushStrategy: Send + Sync {
+pub trait FlushStrategy: Send + Sync + std::fmt::Debug {
     fn should_flush(
         &self,
         shared: &SharedDataRef,
@@ -113,10 +113,11 @@ pub struct MemtableWithMeta {
 }
 
 #[async_trait]
-pub trait FlushScheduler: Send + Sync {
+pub trait FlushScheduler: Send + Sync + std::fmt::Debug {
     async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle>;
 }
 
+#[derive(Debug)]
 pub struct FlushSchedulerImpl {
     job_pool: JobPoolRef,
 }

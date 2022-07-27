@@ -21,6 +21,7 @@ use crate::fs::AppendResponseImpl;
 
 type FileMap = BTreeMap<u64, LogFileRef>;
 
+#[derive(Debug)]
 pub struct LocalFileLogStore {
     files: RwLock<FileMap>,
     active: ArcSwap<LogFile>,

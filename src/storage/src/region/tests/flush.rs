@@ -47,7 +47,7 @@ impl FlushTester {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct FlushSwitch {
     should_flush: AtomicBool,
 }

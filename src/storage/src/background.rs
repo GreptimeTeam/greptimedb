@@ -10,7 +10,7 @@ use snafu::ResultExt;
 use crate::error::{self, Result};
 
 /// Background job context.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Context {
     inner: Arc<ContextInner>,
 }
@@ -34,12 +34,13 @@ impl Context {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ContextInner {
     cancelled: AtomicBool,
 }
 
 /// Handle to the background job.
+#[derive(Debug)]
 pub struct JobHandle {
     ctx: Context,
     handle: JoinHandle<Result<()>>,
@@ -71,7 +72,7 @@ type BoxedJob = Box<dyn Job>;
 
 /// Thread pool that runs all background jobs.
 #[async_trait]
-pub trait JobPool: Send + Sync {
+pub trait JobPool: Send + Sync + std::fmt::Debug {
     /// Submit a job to run in background.
     ///
     /// Returns the [JobHandle] to the job.
@@ -83,6 +84,7 @@ pub trait JobPool: Send + Sync {
 
 pub type JobPoolRef = Arc<dyn JobPool>;
 
+#[derive(Debug)]
 pub struct JobPoolImpl {}
 
 #[async_trait]

@@ -18,7 +18,7 @@ use crate::manifest::action::*;
 use crate::manifest::storage::ManifestObjectStore;
 use crate::manifest::storage::ObjectStoreLogIterator;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RegionManifest {
     inner: Arc<RegionManifestInner>,
 }
@@ -74,6 +74,7 @@ impl Manifest for RegionManifest {
     }
 }
 
+#[derive(Debug)]
 struct RegionManifestInner {
     region_id: RegionId,
     store: Arc<ManifestObjectStore>,

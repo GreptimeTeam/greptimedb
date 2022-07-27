@@ -24,6 +24,7 @@ pub type RegionWriterRef = Arc<RegionWriter>;
 // TODO(yingwen): Add benches for write and support group commit to improve write throughput.
 
 /// Region writer manages all write operations to the region.
+#[derive(Debug)]
 pub struct RegionWriter {
     /// Inner writer guarded by write lock, the write lock is used to ensure
     /// all write operations are serialized.
@@ -112,6 +113,7 @@ impl<'a, S: LogStore> WriterContext<'a, S> {
     }
 }
 
+#[derive(Debug)]
 struct WriterInner {
     memtable_builder: MemtableBuilderRef,
     last_memtable_id: MemtableId,

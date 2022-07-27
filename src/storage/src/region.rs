@@ -22,6 +22,7 @@ use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
+#[derive(Debug)]
 pub struct RegionImpl<S: LogStore> {
     inner: Arc<RegionInner<S>>,
 }
@@ -110,6 +111,7 @@ impl<S: LogStore> RegionImpl<S> {
 }
 
 /// Shared data of region.
+#[derive(Debug)]
 pub struct SharedData {
     pub id: RegionId,
     pub name: String,
@@ -119,6 +121,7 @@ pub struct SharedData {
 
 pub type SharedDataRef = Arc<SharedData>;
 
+#[derive(Debug)]
 struct RegionInner<S: LogStore> {
     shared: SharedDataRef,
     writer: RegionWriterRef,

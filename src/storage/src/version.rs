@@ -24,6 +24,7 @@ use crate::sync::CowCell;
 const DEFAULT_BUCKET_DURATION: Duration = Duration::from_secs(3600 * 2);
 
 /// Controls version of in memory state for a region.
+#[derive(Debug)]
 pub struct VersionControl {
     // TODO(yingwen): If all modification to version must acquire the region writer lock first,
     // then we may just use ArcSwap to hold version. But some operations may only require the
@@ -116,7 +117,7 @@ type MemtableVersionRef = Arc<MemtableVersion>;
 type LevelMetasRef = Arc<LevelMetas>;
 
 /// Version contains metadata and state of region.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Version {
     /// Metadata of the region.
     ///

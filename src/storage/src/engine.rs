@@ -199,8 +199,7 @@ impl<S: LogStore> EngineInner<S> {
             regions.insert(region_name.clone(), region.clone());
         }
 
-        // TODO(yingwen): Impl Debug format for region and print region info briefly in log.
-        info!("Storage engine create region {}", region_name);
+        info!("Storage engine create region {:?}", &region);
 
         Ok(region)
     }

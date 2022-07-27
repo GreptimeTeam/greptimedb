@@ -5,8 +5,8 @@ use crate::fs::{entry::EntryImpl, namespace::LocalNamespace, AppendResponseImpl}
 
 /// A noop log store which only for test
 // TODO: Add a test feature
-#[derive(Default)]
-pub struct NoopLogStore {}
+#[derive(Debug, Default)]
+pub struct NoopLogStore;
 
 #[async_trait::async_trait]
 impl LogStore for NoopLogStore {

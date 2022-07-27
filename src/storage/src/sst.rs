@@ -121,7 +121,7 @@ pub struct WriteOptions {
 
 /// Sst access layer.
 #[async_trait]
-pub trait AccessLayer: Send + Sync {
+pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     // Writes SST file with given name and returns the full path.
     async fn write_sst(
         &self,
@@ -134,6 +134,7 @@ pub trait AccessLayer: Send + Sync {
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
 
 /// Sst access layer based on local file system.
+#[derive(Debug)]
 pub struct FsAccessLayer {
     sst_dir: String,
     object_store: ObjectStore,
