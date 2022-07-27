@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::result::Result as StdResult;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef};
@@ -17,6 +18,7 @@ use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
 use snafu::{OptionExt, ResultExt};
 use vm::builtins::{PyBaseExceptionRef, PyTuple};
+use vm::scope::Scope;
 use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
 use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
@@ -31,7 +33,7 @@ fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 }
 
 #[cfg(test)]
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[cfg_attr(test, derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +58,40 @@ pub struct Coprocessor {
 }
 
 impl Coprocessor {
+    /// generate a call to the coprocessor function
+    /// with arguments given in decorator's `args` list
+    /// also set in location in source code to `loc`
+    fn gen_call(&self, loc: &Location) -> ast::Stmt<()> {
+        let mut loc = loc.to_owned();
+        loc.newline();
+        let args: Vec<Located<ast::ExprKind>> = self
+            .args
+            .iter()
+            .map(|v| {
+                let node = ast::ExprKind::Name {
+                    id: v.to_owned(),
+                    ctx: ast::ExprContext::Load,
+                };
+                set_loc(node, loc)
+            })
+            .collect();
+        let func = ast::ExprKind::Call {
+            func: Box::new(set_loc(
+                ast::ExprKind::Name {
+                    id: self.name.to_owned(),
+                    ctx: ast::ExprContext::Load,
+                },
+                loc,
+            )),
+            args,
+            keywords: Vec::new(),
+        };
+        let stmt = ast::StmtKind::Expr {
+            value: Box::new(set_loc(func, loc)),
+        };
+        set_loc(stmt, loc)
+    }
+
     /// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
     ///
     /// The conside is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
@@ -63,7 +99,6 @@ impl Coprocessor {
     /// And add a function call in the end and also
     /// strip type annotation
     fn strip_append_and_compile(&self) -> Result<CodeObject> {
-        let copr = &self;
         let script = &self.script;
         // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
         let mut top = parser::parse(script, parser::Mode::Interactive).context(PyParseSnafu)?;
@@ -109,35 +144,13 @@ impl Coprocessor {
                 )
                 .fail();
             }
-            let mut loc = code[0].location;
-            // This manually construct ast has no corrsponding code in the script, so just give it a random location(which doesn't matter because Location usually only used in pretty print errors)
-            loc.newline();
-            let args: Vec<Located<ast::ExprKind>> = copr
-                .args
-                .iter()
-                .map(|v| {
-                    let node = ast::ExprKind::Name {
-                        id: v.to_owned(),
-                        ctx: ast::ExprContext::Load,
-                    };
-                    set_loc(node, loc)
-                })
-                .collect();
-            let func = ast::ExprKind::Call {
-                func: Box::new(set_loc(
-                    ast::ExprKind::Name {
-                        id: copr.name.to_owned(),
-                        ctx: ast::ExprContext::Load,
-                    },
-                    loc,
-                )),
-                args,
-                keywords: Vec::new(),
-            };
-            let stmt = ast::StmtKind::Expr {
-                value: Box::new(set_loc(func, loc)),
-            };
-            code.push(set_loc(stmt, loc));
+            let loc = code[0].location;
+
+            // This manually construct ast has no corrsponding code
+            // in the script, so just give it a random location
+            // (which doesn't matter because Location usually only used in pretty print errors)
+
+            code.push(self.gen_call(&loc));
         } else {
             return ret_parse_error(
                 format!("Expect statement in script, found: {:?}", top),
@@ -155,8 +168,9 @@ impl Coprocessor {
         .context(PyCompileSnafu)
     }
 
-    /// generate [`Schema`] according to return names, types or
-    /// datatypes of the actual columns if no annotation
+    /// generate [`Schema`] according to return names, types,
+    /// if no annotation
+    /// the datatypes of the actual columns is used directly
     fn gen_schema(&self, cols: &[ArrayRef]) -> Result<Arc<Schema>> {
         let names = &self.returns;
         let anno = &self.return_types;
@@ -198,7 +212,7 @@ impl Coprocessor {
     }
 
     /// check real types and annotation types(if have) is the same, if not try cast columns to annotated type
-    fn check_cast_type(&self, cols: &mut [ArrayRef]) -> Result<()> {
+    fn check_and_cast_type(&self, cols: &mut [ArrayRef]) -> Result<()> {
         let return_types = &self.return_types;
         for (col, anno) in cols.iter_mut().zip(return_types) {
             if let Some(AnnotationInfo {
@@ -280,6 +294,8 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
 
 /// convert a tuple of `PyVector` or one `PyVector`(wrapped in a Python Object Ref[`PyObjectRef`])
 /// to a `Vec<ArrayRef>`
+///
+/// TODO: add support for constant columns
 fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>> {
     if is_instance(obj, PyTuple::class(vm).into(), vm) {
         let tuple = obj
@@ -318,6 +334,82 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
             obj
         ))
         .fail()
+    }
+}
+
+/// select columns according to `fetch_names` from `rb`
+/// and cast them into a Vec of PyVector
+fn select_from_rb(rb: &DfRecordBatch, fetch_names: &[String]) -> Result<Vec<PyVector>> {
+    let field_map: HashMap<&String, usize> = rb
+        .schema()
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| (&field.name, idx))
+        .collect();
+    let fetch_idx: Vec<usize> = fetch_names
+        .iter()
+        .map(|field| {
+            field_map.get(field).copied().context(OtherSnafu {
+                reason: format!("Can't found field name {field}"),
+            })
+        })
+        .collect::<Result<Vec<usize>>>()?;
+    let fetch_args: Vec<Arc<dyn Array>> = fetch_idx
+        .into_iter()
+        .map(|idx| rb.column(idx).clone())
+        .collect();
+    into_py_vector(fetch_args)
+}
+
+/// match between arguments' real type and annotation types
+/// so as to double check you extract correct columns(with correct type) from RecordBatch
+fn check_args_anno_real_type(
+    args: &[PyVector],
+    copr: &Coprocessor,
+    rb: &DfRecordBatch,
+) -> Result<()> {
+    for (idx, arg) in args.iter().enumerate() {
+        let anno_ty = copr.arg_types[idx].to_owned();
+        let real_ty = arg.to_arrow_array().data_type().to_owned();
+        let is_nullable: bool = rb.schema().fields[idx].is_nullable;
+        ensure!(
+            anno_ty
+                .to_owned()
+                .map(|v| v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
+                .unwrap_or(true),
+            OtherSnafu {
+                reason: format!(
+                    "column {}'s Type annotation is {:?}, but actual type is {:?}",
+                    copr.args[idx], anno_ty, real_ty
+                )
+            }
+        )
+    }
+    Ok(())
+}
+
+/// set arguments with given name and values in python scopes
+fn set_items_in_scope(
+    scope: &Scope,
+    vm: &VirtualMachine,
+    arg_names: &[String],
+    args: Vec<PyVector>,
+) -> Result<()> {
+    let res = arg_names
+        .iter()
+        .zip(args)
+        .map(|(name, vector)| {
+            scope
+                .locals
+                .as_object()
+                .set_item(name, vm.new_pyobj(vector), vm)
+        })
+        .collect::<StdResult<Vec<()>, PyBaseExceptionRef>>();
+    if let Err(res) = res {
+        Err(to_serde_excep(res, vm)?).context(PyRuntimeSnafu)
+    } else {
+        Ok(())
     }
 }
 
@@ -373,64 +465,15 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     // TODO: cache the result of parse_copr
     let copr = parse_copr(script)?;
     // 3. get args from `rb`, and cast them into PyVector
-    let field_map: HashMap<&String, usize> = rb
-        .schema()
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(idx, field)| (&field.name, idx))
-        .collect();
-    let fetch_idx: Vec<usize> = copr
-        .args
-        .iter()
-        .map(|field| {
-            field_map
-                .get(field)
-                .copied()
-                .context(OtherSnafu {
-                    reason: format!("Can't found field name {field}"),
-                })
-        })
-        .collect::<Result<Vec<usize>>>()?;
-    let fetch_args: Vec<Arc<dyn Array>> = fetch_idx
-        .into_iter()
-        .map(|idx| rb.column(idx).clone())
-        .collect();
-    let args: Vec<PyVector> = into_py_vector(fetch_args)?;
+    let args: Vec<PyVector> = select_from_rb(rb, &copr.args)?;
+    check_args_anno_real_type(&args, &copr, rb)?;
 
-    // match between arguments' real type and annotation types
-    // so as to double check you extract correct columns(with correct type) from RecordBatch
-    for (idx, arg) in args.iter().enumerate() {
-        let anno_ty = copr.arg_types[idx].to_owned();
-        let real_ty = arg.to_arrow_array().data_type().to_owned();
-        let is_nullable: bool = rb.schema().fields[idx].is_nullable;
-        ensure!(
-            anno_ty
-                .to_owned()
-                .map(|v| v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
-                .unwrap_or(true),
-            OtherSnafu {
-                reason: format!(
-                    "column {}'s Type annotation is {:?}, but actual type is {:?}",
-                    copr.args[idx], anno_ty, real_ty
-                )
-            }
-        )
-    }
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
     vm::Interpreter::without_stdlib(Default::default()).enter(|vm| -> Result<DfRecordBatch> {
         PyVector::make_class(&vm.ctx);
+        // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
-        for (name, vector) in copr.args.iter().zip(args) {
-            let res = scope
-                .locals
-                .as_object()
-                .set_item(name, vm.new_pyobj(vector), vm);
-            if let Err(res) = res {
-                let res = to_serde_excep(res, vm)?;
-                return Err(res).context(PyRuntimeSnafu)?;
-            }
-        }
+        set_items_in_scope(&scope, vm, &copr.args, args)?;
 
         let code_obj = copr.strip_append_and_compile()?;
         let code_obj = vm.ctx.new_code(code_obj);
@@ -455,7 +498,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         );
 
         // if cols and schema's data types is not match, try coerced it to given type(if annotated)(if error occur, return relevant error with question mark)
-        copr.check_cast_type(&mut cols)?;
+        copr.check_and_cast_type(&mut cols)?;
         // 6. return a assembled DfRecordBatch
         let schema = copr.gen_schema(&cols)?;
         let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
@@ -468,8 +511,7 @@ fn to_serde_excep(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> Result<PyEx
     let r = vm.write_exception(&mut chain, &excep);
     // FIXME: better error handling, perhaps with chain calls?
     if let Err(r) = r {
-        return ret_other_error_with(format!("Fail to write to string, error: {:#?}", r))
-            .fail();
+        return ret_other_error_with(format!("Fail to write to string, error: {:#?}", r)).fail();
     }
     Ok(PyExceptionSerde { output: chain })
 }
