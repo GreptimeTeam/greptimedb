@@ -501,6 +501,10 @@ fn set_items_in_scope(
 /// def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[_ | None]):
 ///     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 /// ```
+///
+/// # Return Constant columns
+/// You can return constant in python code like `return 1, 1.0, True`
+/// which create a constant array(with same value)(currently support int, float and bool) as column on return
 pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
