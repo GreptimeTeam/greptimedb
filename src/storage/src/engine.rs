@@ -74,34 +74,19 @@ impl<S: LogStore> EngineImpl<S> {
     }
 }
 
-/// Engine share data
-/// TODO(dennis): merge to EngineInner?
-#[derive(Clone, Debug)]
-struct SharedData {
-    pub _config: EngineConfig,
-    pub object_store: ObjectStore,
-}
+async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
+    // TODO(dennis): supports other backend
+    let store_dir = util::normalize_dir(match store_config {
+        ObjectStoreConfig::File(file) => &file.store_dir,
+    });
 
-impl SharedData {
-    async fn new(config: EngineConfig) -> Result<Self> {
-        // TODO(dennis): supports other backend
-        let store_dir = util::normalize_dir(match &config.store_config {
-            ObjectStoreConfig::File(file) => &file.store_dir,
-        });
+    let accessor = Backend::build()
+        .root(&store_dir)
+        .finish()
+        .await
+        .context(error::InitBackendSnafu { dir: &store_dir })?;
 
-        let accessor = Backend::build()
-            .root(&store_dir)
-            .finish()
-            .await
-            .context(error::InitBackendSnafu { dir: &store_dir })?;
-
-        let object_store = ObjectStore::new(accessor);
-
-        Ok(Self {
-            _config: config,
-            object_store,
-        })
-    }
+    Ok(ObjectStore::new(accessor))
 }
 
 #[inline]
@@ -117,9 +102,9 @@ pub fn region_manifest_dir(region_name: &str) -> String {
 type RegionMap<S> = HashMap<String, RegionImpl<S>>;
 
 struct EngineInner<S: LogStore> {
+    object_store: ObjectStore,
     log_store: Arc<S>,
     regions: RwLock<RegionMap<S>>,
-    shared: SharedData,
     memtable_builder: MemtableBuilderRef,
     flush_scheduler: FlushSchedulerRef,
     flush_strategy: FlushStrategyRef,
@@ -129,11 +114,12 @@ impl<S: LogStore> EngineInner<S> {
     pub async fn new(config: EngineConfig, log_store: Arc<S>) -> Result<Self> {
         let job_pool = Arc::new(JobPoolImpl {});
         let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
+        let object_store = new_object_store(&config.store_config).await?;
 
         Ok(Self {
+            object_store,
             log_store,
             regions: RwLock::new(Default::default()),
-            shared: SharedData::new(config).await?,
             memtable_builder: Arc::new(DefaultMemtableBuilder {}),
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
@@ -157,13 +143,9 @@ impl<S: LogStore> EngineInner<S> {
                     region: &region_name,
                 })?;
         let sst_dir = &region_sst_dir(&region_name);
-        let sst_layer = Arc::new(FsAccessLayer::new(
-            sst_dir,
-            self.shared.object_store.clone(),
-        ));
+        let sst_layer = Arc::new(FsAccessLayer::new(sst_dir, self.object_store.clone()));
         let manifest_dir = region_manifest_dir(&region_name);
-        let manifest =
-            RegionManifest::new(region_id, &manifest_dir, self.shared.object_store.clone());
+        let manifest = RegionManifest::new(region_id, &manifest_dir, self.object_store.clone());
 
         let store_config = StoreConfig {
             log_store: self.log_store.clone(),
