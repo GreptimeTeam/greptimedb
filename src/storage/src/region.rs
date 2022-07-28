@@ -82,7 +82,7 @@ impl<S: LogStore> RegionImpl<S> {
     ) -> RegionImpl<S> {
         let memtable_version = MemtableVersion::new();
         let version_control = VersionControl::new(metadata, memtable_version);
-        let wal = Wal::new(id, name.clone(), store_config.log_store);
+        let wal = Wal::new(name.clone(), store_config.log_store);
 
         let inner = Arc::new(RegionInner {
             shared: Arc::new(SharedData {

@@ -17,7 +17,6 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Wal<S: LogStore> {
-    region_id: u32,
     namespace: S::Namespace,
     store: Arc<S>,
 }
@@ -26,7 +25,6 @@ pub struct Wal<S: LogStore> {
 impl<S: LogStore> Clone for Wal<S> {
     fn clone(&self) -> Self {
         Self {
-            region_id: self.region_id,
             namespace: self.namespace.clone(),
             store: self.store.clone(),
         }
@@ -34,20 +32,11 @@ impl<S: LogStore> Clone for Wal<S> {
 }
 
 impl<S: LogStore> Wal<S> {
-    pub fn new(region_id: u32, region_name: impl Into<String>, store: Arc<S>) -> Self {
+    pub fn new(region_name: impl Into<String>, store: Arc<S>) -> Self {
         let region_name = region_name.into();
-        let namespace = S::Namespace::new(&region_name, region_id as u64);
+        let namespace = S::Namespace::new(&region_name);
 
-        Self {
-            region_id,
-            namespace,
-            store,
-        }
-    }
-
-    #[inline]
-    pub fn region_id(&self) -> u32 {
-        self.region_id
+        Self { namespace, store }
     }
 
     #[inline]
@@ -96,10 +85,7 @@ impl<S: LogStore> Wal<S> {
             encoder
                 .encode(batch, &mut buf)
                 .map_err(BoxedError::new)
-                .context(error::WriteWalSnafu {
-                    region_id: self.region_id(),
-                    name: self.name(),
-                })?;
+                .context(error::WriteWalSnafu { name: self.name() })?;
         }
 
         // TODO(jiachun): encode protobuf payload
@@ -118,10 +104,7 @@ impl<S: LogStore> Wal<S> {
             .append(ns, e)
             .await
             .map_err(BoxedError::new)
-            .context(error::WriteWalSnafu {
-                region_id: self.region_id(),
-                name: self.name(),
-            })?;
+            .context(error::WriteWalSnafu { name: self.name() })?;
 
         Ok((res.entry_id(), res.offset()))
     }
@@ -187,7 +170,7 @@ mod tests {
     pub async fn test_write_wal() {
         let (log_store, _tmp) =
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
-        let wal = Wal::new(0, "test_region", Arc::new(log_store));
+        let wal = Wal::new("test_region", Arc::new(log_store));
 
         let res = wal.write(0, b"test1").await.unwrap();
 
