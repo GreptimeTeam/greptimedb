@@ -1,5 +1,6 @@
 use std::any::Any;
 
+use api::convert::DecodeError;
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
@@ -74,6 +75,12 @@ pub enum Error {
         source: TableError,
     },
 
+    #[snafu(display("Illegal insert data"))]
+    IllegalInsertData,
+
+    #[snafu(display("Fail to convert bytes to insert batch, {}", source))]
+    DecodeInsert { source: DecodeError },
+
     // The error source of http error is clear even without backtrace now so
     // a backtrace is not carried in this varaint.
     #[snafu(display("Fail to start HTTP server, source: {}", source))]
@@ -117,7 +124,9 @@ impl ErrorExt for Error {
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
             Error::ColumnValuesNumberMismatch { .. }
             | Error::ParseSqlValue { .. }
-            | Error::ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
+            | Error::ColumnTypeMismatch { .. }
+            | Error::IllegalInsertData { .. }
+            | Error::DecodeInsert { .. } => StatusCode::InvalidArguments,
             // TODO(yingwen): Further categorize http error.
             Error::StartHttp { .. }
             | Error::ParseAddr { .. }

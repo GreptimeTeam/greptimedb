@@ -1,3 +1,7 @@
+syntax = "proto3";
+
+package greptime.v1;
+
 message InsertBatch {
   repeated Column columns = 1;
   uint32 row_count = 2;
@@ -28,7 +32,7 @@ message Column {
     repeated double f64_values = 10;
 
     repeated bool bool_values = 11;
-    repeated bytes bytes_values = 12;
+    repeated bytes binary_values = 12;
     repeated string string_values = 13;
   }
   // The array of non-null values in this column.

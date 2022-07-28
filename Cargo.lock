@@ -608,6 +608,7 @@ dependencies = [
  "api",
  "common-error",
  "snafu",
+ "tokio",
  "tonic",
 ]
 

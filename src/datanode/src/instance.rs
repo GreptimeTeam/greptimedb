@@ -1,12 +1,13 @@
 use std::{fs, path, sync::Arc};
 
+use api::v1::InsertExpr;
 use common_telemetry::logging::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use query::catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig, EngineImpl};
 use table::engine::EngineContext;
@@ -15,7 +16,10 @@ use table::requests::CreateTableRequest;
 use table_engine::engine::MitoEngine;
 
 use crate::datanode::DatanodeOptions;
-use crate::error::{self, CreateTableSnafu, ExecuteSqlSnafu, Result};
+use crate::error::{
+    self, CreateTableSnafu, ExecuteSqlSnafu, InsertSnafu, Result, TableNotFoundSnafu,
+};
+use crate::server::grpc::insert::insertion_expr_to_request;
 use crate::sql::SqlHandler;
 
 type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
@@ -49,6 +53,29 @@ impl Instance {
             table_engine,
             catalog_list,
         })
+    }
+
+    pub async fn execute_grpc_insert(&self, insert_expr: InsertExpr) -> Result<Output> {
+        let schema_provider = self
+            .catalog_list
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .schema(DEFAULT_SCHEMA_NAME)
+            .unwrap();
+
+        let table_name = &insert_expr.table_name.clone();
+        let table = schema_provider
+            .table(table_name)
+            .context(TableNotFoundSnafu { table_name })?;
+
+        let insert = insertion_expr_to_request(insert_expr, table.clone())?;
+
+        let affected_rows = table
+            .insert(insert)
+            .await
+            .context(InsertSnafu { table_name })?;
+
+        Ok(Output::AffectedRows(affected_rows))
     }
 
     pub async fn execute_sql(&self, sql: &str) -> Result<Output> {
