@@ -10,6 +10,7 @@ use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
 
+use super::error::pretty_print_loc_in_src;
 use super::*;
 use crate::scalars::python::{
     copr_parse::parse_copr,
@@ -146,7 +147,10 @@ fn get_error_reason(err: &Error) -> String {
             backtrace: _,
             source,
         } => source.output.clone(),
-        Error::PyParse { backtrace:_, source } => format!("{}", source.error),
+        Error::PyParse {
+            backtrace: _,
+            source,
+        } => format!("{}", source.error),
         _ => {
             unimplemented!()
         }
@@ -231,11 +235,11 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     } = ret
     {
         let res = pretty_print_loc_in_src(
-            python_source, 
-            &source.location, 
-            format!("{}", source.error).as_str(),
+            python_source,
+            &source.location,
+            source.error.to_string().as_str(),
             0,
-            "copr.py"
+            "copr.py",
         );
         println!("{res}");
     }

@@ -84,3 +84,31 @@ impl From<DataTypeError> for Error {
         Self::TypeCast { source: e }
     }
 }
+
+/// pretty print a location in script with desc.
+///
+/// `ln_offset` is line offset number that added to `loc`'s `row`, `filename` is the file's name display with it's row and columns info.
+pub fn pretty_print_loc_in_src(
+    script: &str,
+    loc: &Location,
+    desc: &str,
+    ln_offset: usize,
+    filename: &str,
+) -> String {
+    let lines: Vec<&str> = script.split('\n').collect();
+    let loc = Location::new(ln_offset + loc.row(), loc.column());
+    let (row, col) = (loc.row(), loc.column());
+    let indicate = format!(
+        "
+{right_arrow} {filename}:{row}:{col}
+{ln_pad} {line}
+{ln_pad} \u{001B}[1;31m{arrow:>pad$} {desc}\u{001B}[0m
+",
+        line = lines[loc.row() - 1],
+        pad = loc.column(),
+        arrow = "^",
+        right_arrow = "\u{001B}[1;34m-->\u{001B}[0m",
+        ln_pad = "\u{001B}[1;34m|\u{001B}[0m",
+    );
+    indicate
+}

@@ -23,8 +23,8 @@ use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
 use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
 use crate::scalars::python::error::{
-    ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde,
-    PyParseSnafu, PyRuntimeSnafu, Result, TypeCastSnafu,
+    ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
+    PyRuntimeSnafu, Result, TypeCastSnafu,
 };
 use crate::scalars::python::type_::{is_instance, PyVector};
 
@@ -58,9 +58,6 @@ pub struct Coprocessor {
 }
 
 impl Coprocessor {
-
-    
-
     /// generate a call to the coprocessor function
     /// with arguments given in decorator's `args` list
     /// also set in location in source code to `loc`
