@@ -1,3 +1,6 @@
+#![allow(clippy::print_stdout)]
+// for debug purpose, also this is already a 
+// test module so allow print_stdout shouldn't be a problem?
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
