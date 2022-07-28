@@ -196,6 +196,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Region is under {} state, cannot proceed operation", state))]
+    InvalidRegionState {
+        state: &'static str,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -235,7 +241,8 @@ impl ErrorExt for Error {
             | ManifestProtocolForbidRead { .. }
             | ManifestProtocolForbidWrite { .. }
             | ReadParquet { .. }
-            | ReadParquetIo { .. } => StatusCode::StorageUnavailable,
+            | ReadParquetIo { .. }
+            | InvalidRegionState { .. } => StatusCode::StorageUnavailable,
         }
     }
 
