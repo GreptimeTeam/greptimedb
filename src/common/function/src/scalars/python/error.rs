@@ -115,7 +115,7 @@ pub fn pretty_print_error_in_src(
         return visualize_loc(
             script,
             &loc,
-            format!("{}", err).as_str(),
+            &err.to_string(),
             &reason,
             ln_offset,
             filename,

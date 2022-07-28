@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef};
+use arrow::array::{Array, ArrayRef, PrimitiveArray, BooleanArray};
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
@@ -317,7 +317,7 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
 }
 
 /// convert a single PyVector or a number(a constant) into a Array(or a constant array)
-fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<ArrayRef> {
+fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<ArrayRef> {
     if is_instance(obj, PyVector::class(vm).into(), vm) {
         let pyv = obj
             .payload::<PyVector>()
@@ -332,11 +332,24 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<ArrayRe
             Ok(val) => val,
             Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
         };
-        todo!()
+        let ret = PrimitiveArray::from_vec(vec![val;col_len]);
+        Ok(Arc::new(ret) as _)
     } else if is_instance(obj, PyFloat::class(vm).into(), vm) {
-        todo!()
+        let val = obj.to_owned().try_into_value::<f64>(vm);
+        let val = match val {
+            Ok(val) => val,
+            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
+        };
+        let ret = PrimitiveArray::from_vec(vec![val;col_len]);
+        Ok(Arc::new(ret) as _)
     } else if is_instance(obj, PyBool::class(vm).into(), vm) {
-        todo!()
+        let val = obj.to_owned().try_into_value::<bool>(vm);
+        let val = match val {
+            Ok(val) => val,
+            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
+        };
+        let ret = BooleanArray::from_iter(std::iter::repeat(Some(val)).take(5));
+        Ok(Arc::new(ret) as _)
     } else {
         ret_other_error_with(format!("Expect a vector or a constant, found {:?}", obj)).fail()
     }
@@ -346,7 +359,7 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<ArrayRe
 /// to a `Vec<ArrayRef>`
 ///
 /// TODO: add support for constant columns
-fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>> {
+fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<Vec<ArrayRef>> {
     if is_instance(obj, PyTuple::class(vm).into(), vm) {
         let tuple = obj
             .payload::<PyTuple>()
@@ -356,17 +369,17 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
             )))?;
         let cols = tuple
             .iter()
-            .map(|obj| py_vec_to_array_ref(obj, vm))
+            .map(|obj| py_vec_to_array_ref(obj, vm, col_len))
             .collect::<Result<Vec<ArrayRef>>>()?;
         Ok(cols)
     } else {
-        let col = py_vec_to_array_ref(obj, vm)?;
+        let col = py_vec_to_array_ref(obj, vm, col_len)?;
         Ok(vec![col])
     }
 }
 
 /// select columns according to `fetch_names` from `rb`
-/// and cast them into a Vec of PyVector
+/// and cast them into a Vec of PyVector, also return their length
 fn select_from_rb(rb: &DfRecordBatch, fetch_names: &[String]) -> Result<Vec<PyVector>> {
     let field_map: HashMap<&String, usize> = rb
         .schema()
@@ -513,7 +526,8 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         };
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
-        let mut cols: Vec<ArrayRef> = into_columns(&ret, vm)?;
+        let col_len = rb.num_rows();
+        let mut cols: Vec<ArrayRef> = into_columns(&ret, vm, col_len)?;
         ensure!(
             cols.len() == copr.returns.len(),
             OtherSnafu {
