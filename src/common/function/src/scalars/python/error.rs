@@ -1,11 +1,11 @@
 use arrow::error::ArrowError;
 use common_error::prelude::{ErrorExt, StatusCode};
+use console::{style, Style};
 use datatypes::error::Error as DataTypeError;
 use rustpython_compiler_core::error::CompileError as CoreCompileError;
 use rustpython_parser::{ast::Location, error::ParseError};
 pub use snafu::ensure;
 use snafu::{prelude::Snafu, Backtrace};
-use console::{style, Style};
 pub type Result<T> = std::result::Result<T, Error>;
 /// for now it's just a String containing Exception info print by `write_exceptions`
 ///
@@ -112,17 +112,11 @@ pub fn pretty_print_error_in_src(
     };
     if let Some(loc) = loc {
         let reason = get_error_reason(err);
-        return visualize_loc(
-            script,
-            &loc,
-            &err.to_string(),
-            &reason,
-            ln_offset,
-            filename,
-        );
+        visualize_loc(script, &loc, &err.to_string(), &reason, ln_offset, filename)
+    } else {
+        // No location provide
+        format!("{}: {}", style("error").red().bold(), err)
     }
-
-    todo!()
 }
 
 /// pretty print a location in script with desc.
@@ -184,6 +178,6 @@ pub fn get_error_reason(err: &Error) -> String {
             backtrace: _,
             source,
         } => format!("{}", source.error),
-        _ => format!("Unknown error: {:?}", err)
+        _ => format!("Unknown error: {:?}", err),
     }
 }

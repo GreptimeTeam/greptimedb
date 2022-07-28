@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, PrimitiveArray, BooleanArray};
+use arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
@@ -334,7 +334,7 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
             Ok(val) => val,
             Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
         };
-        let ret = PrimitiveArray::from_vec(vec![val;col_len]);
+        let ret = PrimitiveArray::from_vec(vec![val; col_len]);
         Ok(Arc::new(ret) as _)
     } else if is_instance(obj, PyFloat::class(vm).into(), vm) {
         let val = obj.to_owned().try_into_value::<f64>(vm);
@@ -342,7 +342,7 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
             Ok(val) => val,
             Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
         };
-        let ret = PrimitiveArray::from_vec(vec![val;col_len]);
+        let ret = PrimitiveArray::from_vec(vec![val; col_len]);
         Ok(Arc::new(ret) as _)
     } else if is_instance(obj, PyBool::class(vm).into(), vm) {
         let val = obj.to_owned().try_into_value::<bool>(vm);
@@ -550,16 +550,19 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     })
 }
 
-/// execute script just like [`exec_coprocessor`] do, 
-/// but instead of return a internal [`Error`] type, 
+/// execute script just like [`exec_coprocessor`] do,
+/// but instead of return a internal [`Error`] type,
 /// return a friendly String format of error
-/// 
+///
 /// use `ln_offset` and `filename` to offset line number and mark file name in error prompt
-pub fn exec_copr_print(script: &str, rb: &DfRecordBatch, ln_offset: usize, filename: &str) -> StdResult<DfRecordBatch, String>{
+pub fn exec_copr_print(
+    script: &str,
+    rb: &DfRecordBatch,
+    ln_offset: usize,
+    filename: &str,
+) -> StdResult<DfRecordBatch, String> {
     let res = exec_coprocessor(script, rb);
-    res.map_err(|e|{
-        pretty_print_error_in_src(script, &e, ln_offset, filename)
-    })
+    res.map_err(|e| pretty_print_error_in_src(script, &e, ln_offset, filename))
 }
 
 /// transfer a Python Exception into a python call stack in `String` format

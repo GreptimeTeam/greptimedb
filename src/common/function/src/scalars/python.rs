@@ -7,5 +7,5 @@ mod error;
 mod test;
 mod type_;
 
-pub use coprocessor::{exec_coprocessor, exec_copr_print};
 use coprocessor::AnnotationInfo;
+pub use coprocessor::{exec_copr_print, exec_coprocessor};
