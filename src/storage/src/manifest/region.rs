@@ -11,7 +11,6 @@ use object_store::ObjectStore;
 use snafu::ensure;
 use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
-use store_api::storage::RegionId;
 
 use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result};
 use crate::manifest::action::*;
@@ -27,12 +26,11 @@ pub struct RegionManifest {
 impl Manifest for RegionManifest {
     type Error = Error;
     type MetaAction = RegionMetaActionList;
-    type MetadataId = RegionId;
     type Metadata = RegionManifestData;
 
-    fn new(id: Self::MetadataId, manifest_dir: &str, object_store: ObjectStore) -> Self {
+    fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
         RegionManifest {
-            inner: Arc::new(RegionManifestInner::new(id, manifest_dir, object_store)),
+            inner: Arc::new(RegionManifestInner::new(manifest_dir, object_store)),
         }
     }
 
@@ -68,15 +66,10 @@ impl Manifest for RegionManifest {
     async fn checkpoint(&self) -> Result<ManifestVersion> {
         unimplemented!();
     }
-
-    fn metadata_id(&self) -> RegionId {
-        self.inner.region_id
-    }
 }
 
 #[derive(Debug)]
 struct RegionManifestInner {
-    region_id: RegionId,
     store: Arc<ManifestObjectStore>,
     version: AtomicU64,
     /// Current using protocol
@@ -106,11 +99,10 @@ impl RegionMetaActionListIterator {
 }
 
 impl RegionManifestInner {
-    fn new(region_id: RegionId, manifest_dir: &str, object_store: ObjectStore) -> Self {
+    fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
         let (reader_version, writer_version) = action::supported_protocol_version();
 
         Self {
-            region_id,
             store: Arc::new(ManifestObjectStore::new(manifest_dir, object_store)),
             // TODO(dennis): recover the last version from history
             version: AtomicU64::new(0),
@@ -187,14 +179,12 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let region_id = 0;
 
-        let manifest = RegionManifest::new(region_id, "/manifest/", object_store);
-        assert_eq!(region_id, manifest.metadata_id());
+        let manifest = RegionManifest::new("/manifest/", object_store);
 
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)
-            .id(region_id)
+            .id(0)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_value_column(("v1", LogicalTypeId::Float32, true))
             .build();
@@ -218,7 +208,7 @@ mod tests {
         // save another metadata
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)
-            .id(region_id)
+            .id(0)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_key_column(("k2", LogicalTypeId::Int64, false))
             .push_value_column(("v1", LogicalTypeId::Float32, true))

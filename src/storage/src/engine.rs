@@ -9,7 +9,7 @@ use store_api::manifest::action::ProtocolAction;
 use store_api::{
     logstore::LogStore,
     manifest::Manifest,
-    storage::{EngineContext, RegionDescriptor, RegionId, StorageEngine},
+    storage::{EngineContext, RegionDescriptor, StorageEngine},
 };
 
 use crate::background::JobPoolImpl;
@@ -255,7 +255,7 @@ impl<S: LogStore> EngineInner<S> {
         let mut guard = SlotGuard::new(name, &self.regions);
 
         // FIXME(yingwen): Get region id or remove dependency of region id.
-        let store_config = self.region_store_config(1, name);
+        let store_config = self.region_store_config(name);
         let region = RegionImpl::open(name.to_string(), store_config).await?;
 
         guard.update(RegionSlot::Ready(region.clone()));
@@ -281,7 +281,7 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let store_config = self.region_store_config(region_id, &region_name);
+        let store_config = self.region_store_config(&region_name);
         let manifest = store_config.manifest.clone();
 
         let region = RegionImpl::new(
@@ -313,11 +313,11 @@ impl<S: LogStore> EngineInner<S> {
         slot.get_ready_region()
     }
 
-    fn region_store_config(&self, region_id: RegionId, region_name: &str) -> StoreConfig<S> {
+    fn region_store_config(&self, region_name: &str) -> StoreConfig<S> {
         let sst_dir = &region_sst_dir(&region_name);
         let sst_layer = Arc::new(FsAccessLayer::new(sst_dir, self.object_store.clone()));
         let manifest_dir = region_manifest_dir(&region_name);
-        let manifest = RegionManifest::new(region_id, &manifest_dir, self.object_store.clone());
+        let manifest = RegionManifest::new(&manifest_dir, self.object_store.clone());
 
         StoreConfig {
             log_store: self.log_store.clone(),

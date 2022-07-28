@@ -3,7 +3,6 @@ use std::sync::Arc;
 use log_store::fs::noop::NoopLogStore;
 use object_store::{backend::fs::Backend, ObjectStore};
 use store_api::manifest::Manifest;
-use store_api::storage::RegionId;
 
 use crate::background::JobPoolImpl;
 use crate::engine;
@@ -14,18 +13,14 @@ use crate::region::StoreConfig;
 use crate::sst::FsAccessLayer;
 
 /// Create a new StoreConfig for test.
-pub async fn new_store_config(
-    store_dir: &str,
-    region_id: RegionId,
-    region_name: &str,
-) -> StoreConfig<NoopLogStore> {
+pub async fn new_store_config(store_dir: &str, region_name: &str) -> StoreConfig<NoopLogStore> {
     let sst_dir = engine::region_sst_dir(region_name);
     let manifest_dir = engine::region_manifest_dir(region_name);
 
     let accessor = Backend::build().root(store_dir).finish().await.unwrap();
     let object_store = ObjectStore::new(accessor);
     let sst_layer = Arc::new(FsAccessLayer::new(&sst_dir, object_store.clone()));
-    let manifest = RegionManifest::new(region_id, &manifest_dir, object_store);
+    let manifest = RegionManifest::new(&manifest_dir, object_store);
     let job_pool = Arc::new(JobPoolImpl {});
     let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
 

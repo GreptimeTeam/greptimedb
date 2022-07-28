@@ -19,14 +19,12 @@ async fn new_region_for_flush(
     enable_version_column: bool,
     flush_strategy: FlushStrategyRef,
 ) -> RegionImpl<NoopLogStore> {
-    let region_id = 0;
-
     let metadata = read_write::new_metadata(REGION_NAME, enable_version_column);
 
-    let mut store_config = config_util::new_store_config(store_dir, region_id, REGION_NAME).await;
+    let mut store_config = config_util::new_store_config(store_dir, REGION_NAME).await;
     store_config.flush_strategy = flush_strategy;
 
-    RegionImpl::new(region_id, REGION_NAME.to_string(), metadata, store_config)
+    RegionImpl::new(0, REGION_NAME.to_string(), metadata, store_config)
 }
 
 struct FlushTester {
