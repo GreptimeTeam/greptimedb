@@ -7,17 +7,26 @@ use object_store::{util, ObjectStore};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::memtable::BatchIteratorPtr;
-use crate::sst::parquet::ParquetWriter;
+use crate::memtable::BoxedBatchIterator;
+use crate::read::BoxedBatchReader;
+use crate::sst::parquet::{ParquetReader, ParquetWriter};
 
-/// Maximum level of ssts.
+/// Maximum level of SSTs.
 pub const MAX_LEVEL: usize = 1;
 
 // We only has fixed number of level, so we array to hold elements. This implement
 // detail of LevelMetaVec should not be exposed to the user of [LevelMetas].
 type LevelMetaVec = [LevelMeta; MAX_LEVEL];
 
-/// Metadata of all ssts under a region.
+/// Visitor to access file in each level.
+pub trait Visitor {
+    /// Visit all `files` in `level`.
+    ///
+    /// Now the input `files` are unordered.
+    fn visit(&mut self, level: usize, files: &[FileHandle]) -> Result<()>;
+}
+
+/// Metadata of all SSTs under a region.
 ///
 /// Files are organized into multiple level, though there may be only one level.
 #[derive(Debug, Clone)]
@@ -29,7 +38,7 @@ impl LevelMetas {
     /// Create a new LevelMetas and initialized each level.
     pub fn new() -> LevelMetas {
         LevelMetas {
-            levels: [LevelMeta::default(); MAX_LEVEL],
+            levels: new_level_meta_vec(),
         }
     }
 
@@ -49,6 +58,18 @@ impl LevelMetas {
 
         merged
     }
+
+    /// Visit all SST files.
+    ///
+    /// Stop visiting remaining files if the visitor returns `Err`, and the `Err`
+    /// will be returned to caller.
+    pub fn visit_levels<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
+        for level in &self.levels {
+            level.visit_level(visitor)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for LevelMetas {
@@ -57,9 +78,10 @@ impl Default for LevelMetas {
     }
 }
 
-/// Metadata of files in same sst level.
+/// Metadata of files in same SST level.
 #[derive(Debug, Default, Clone)]
 pub struct LevelMeta {
+    level: u8,
     /// Handles to the files in this level.
     // TODO(yingwen): Now for simplicity, files are unordered, maybe sort the files by time range
     // or use another structure to hold them.
@@ -70,6 +92,19 @@ impl LevelMeta {
     fn add_file(&mut self, file: FileHandle) {
         self.files.push(file);
     }
+
+    fn visit_level<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
+        visitor.visit(self.level.into(), &self.files)
+    }
+}
+
+fn new_level_meta_vec() -> LevelMetaVec {
+    let mut levels = [LevelMeta::default(); MAX_LEVEL];
+    for (i, level) in levels.iter_mut().enumerate() {
+        level.level = i as u8;
+    }
+
+    levels
 }
 
 /// In-memory handle to a file.
@@ -90,6 +125,11 @@ impl FileHandle {
     pub fn level_index(&self) -> usize {
         self.inner.meta.level.into()
     }
+
+    #[inline]
+    pub fn file_name(&self) -> &str {
+        &self.inner.meta.file_name
+    }
 }
 
 /// Actually data of [FileHandle].
@@ -107,9 +147,9 @@ impl FileHandleInner {
 }
 
 /// Immutable metadata of a sst file.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileMeta {
-    pub file_path: String,
+    pub file_name: String,
     /// SST level of the file.
     pub level: u8,
 }
@@ -119,16 +159,26 @@ pub struct WriteOptions {
     // TODO(yingwen): [flush] row group size.
 }
 
-/// Sst access layer.
+#[derive(Debug)]
+pub struct ReadOptions {
+    /// Suggested size of each batch.
+    pub batch_size: usize,
+}
+
+/// SST access layer.
 #[async_trait]
 pub trait AccessLayer: Send + Sync + std::fmt::Debug {
-    // Writes SST file with given name and returns the full path.
+    /// Writes SST file with given `file_name`.
     async fn write_sst(
         &self,
         file_name: &str,
-        iter: BatchIteratorPtr,
-        opts: WriteOptions,
-    ) -> Result<String>;
+        iter: BoxedBatchIterator,
+        opts: &WriteOptions,
+    ) -> Result<()>;
+
+    /// Read SST file with given `file_name`.
+    // TODO(yingwen): Read SST according to scan request and returns a chunk stream.
+    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
@@ -159,15 +209,23 @@ impl AccessLayer for FsAccessLayer {
     async fn write_sst(
         &self,
         file_name: &str,
-        iter: BatchIteratorPtr,
-        opts: WriteOptions,
-    ) -> Result<String> {
-        // Now we only supports parquet format. We may allow caller to specific sst format in
+        iter: BoxedBatchIterator,
+        opts: &WriteOptions,
+    ) -> Result<()> {
+        // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(file_name);
         let writer = ParquetWriter::new(&file_path, iter, self.object_store.clone());
 
         writer.write_sst(opts).await?;
-        Ok(file_path)
+        Ok(())
+    }
+
+    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader> {
+        let file_path = self.sst_file_path(file_name);
+        let reader = ParquetReader::new(&file_path, self.object_store.clone());
+
+        let stream = reader.chunk_stream(None, opts.batch_size).await?;
+        Ok(Box::new(stream))
     }
 }

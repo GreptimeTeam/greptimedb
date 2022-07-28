@@ -6,9 +6,10 @@ use store_api::storage::{
     Snapshot,
 };
 
-use crate::chunk::ChunkReaderImpl;
+use crate::chunk::{ChunkReaderBuilder, ChunkReaderImpl};
 use crate::error::{Error, Result};
 use crate::memtable::IterContext;
+use crate::sst::AccessLayerRef;
 use crate::version::VersionRef;
 
 /// [Snapshot] implementation.
@@ -16,6 +17,7 @@ pub struct SnapshotImpl {
     version: VersionRef,
     /// Max sequence number (inclusive) visible to user.
     visible_sequence: SequenceNumber,
+    sst_layer: AccessLayerRef,
 }
 
 #[async_trait]
@@ -37,32 +39,22 @@ impl Snapshot for SnapshotImpl {
 
         let mutables = memtable_version.mutable_memtables();
         let immutables = memtable_version.immutable_memtables();
-        let mut batch_iters = Vec::with_capacity(memtable_version.num_memtables());
 
-        let iter_ctx = IterContext {
-            batch_size: ctx.batch_size,
-            visible_sequence,
-            ..Default::default()
-        };
-
-        for (_range, mem) in mutables.iter() {
-            let iter = mem.iter(iter_ctx.clone())?;
-
-            batch_iters.push(iter);
-        }
+        let mut builder =
+            ChunkReaderBuilder::new(self.version.schema().clone(), self.sst_layer.clone())
+                .reserve_num_memtables(memtable_version.num_memtables())
+                .iter_ctx(IterContext {
+                    batch_size: ctx.batch_size,
+                    visible_sequence,
+                    ..Default::default()
+                })
+                .pick_memtables(mutables)?;
 
         for mem_set in immutables {
-            for (_range, mem) in mem_set.iter() {
-                let iter = mem.iter(iter_ctx.clone())?;
-
-                batch_iters.push(iter);
-            }
+            builder = builder.pick_memtables(mem_set)?;
         }
 
-        // Now we just simply chain all iterators together, ignore duplications/ordering.
-        let iter = Box::new(batch_iters.into_iter().flatten());
-
-        let reader = ChunkReaderImpl::new(self.version.schema().clone(), iter);
+        let reader = builder.pick_ssts(&**self.version.ssts())?.build().await?;
 
         Ok(ScanResponse { reader })
     }
@@ -73,10 +65,15 @@ impl Snapshot for SnapshotImpl {
 }
 
 impl SnapshotImpl {
-    pub fn new(version: VersionRef, visible_sequence: SequenceNumber) -> SnapshotImpl {
+    pub fn new(
+        version: VersionRef,
+        visible_sequence: SequenceNumber,
+        sst_layer: AccessLayerRef,
+    ) -> SnapshotImpl {
         SnapshotImpl {
             version,
             visible_sequence,
+            sst_layer,
         }
     }
 

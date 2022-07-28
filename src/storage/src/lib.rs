@@ -11,6 +11,7 @@ mod manifest;
 pub mod memtable;
 pub mod metadata;
 mod proto;
+mod read;
 mod region;
 mod snapshot;
 mod sst;

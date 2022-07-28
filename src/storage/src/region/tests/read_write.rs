@@ -92,7 +92,7 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
 
 /// Test region without considering version column.
 pub struct Tester {
-    region: RegionImpl<NoopLogStore>,
+    pub region: RegionImpl<NoopLogStore>,
     write_ctx: WriteContext,
     read_ctx: ReadContext,
 }
@@ -124,7 +124,8 @@ impl Tester {
         self.region.write(&self.write_ctx, batch).await.unwrap()
     }
 
-    async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
+    /// Scan all data.
+    pub async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
         let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
 
         let resp = snapshot

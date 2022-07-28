@@ -16,11 +16,14 @@ impl Chunk {
     }
 }
 
+/// `ChunkReader` is similar to async iterator of [Chunk].
 #[async_trait]
 pub trait ChunkReader: Send {
     type Error: ErrorExt + Send + Sync;
 
+    /// Schema of the chunks returned by this reader.
     fn schema(&self) -> &SchemaRef;
 
+    /// Fetch next chunk from the reader.
     async fn next_chunk(&mut self) -> Result<Option<Chunk>, Self::Error>;
 }
