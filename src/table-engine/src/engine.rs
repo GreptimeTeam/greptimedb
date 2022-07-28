@@ -116,27 +116,33 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
         let host_column =
             ColumnDescriptorBuilder::new(0, "host", ConcreteDataType::string_datatype())
                 .is_nullable(false)
-                .build();
+                .build()
+                .unwrap();
         let cpu_column =
             ColumnDescriptorBuilder::new(1, "cpu", ConcreteDataType::float64_datatype())
                 .is_nullable(true)
-                .build();
+                .build()
+                .unwrap();
         let memory_column =
             ColumnDescriptorBuilder::new(2, "memory", ConcreteDataType::float64_datatype())
                 .is_nullable(true)
-                .build();
-        let ts_column =
-            ColumnDescriptorBuilder::new(0, "ts", ConcreteDataType::int64_datatype()).build();
+                .build()
+                .unwrap();
+        let ts_column = ColumnDescriptorBuilder::new(0, "ts", ConcreteDataType::int64_datatype())
+            .build()
+            .unwrap();
 
         let row_key = RowKeyDescriptorBuilder::new(ts_column)
             .push_column(host_column)
             .enable_version_column(false)
-            .build();
+            .build()
+            .unwrap();
 
         let default_cf = ColumnFamilyDescriptorBuilder::default()
             .push_column(cpu_column)
             .push_column(memory_column)
-            .build();
+            .build()
+            .unwrap();
 
         let region = self
             .storage_engine
@@ -155,17 +161,20 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
             .context(error::CreateRegionSnafu)?;
 
         // Use region meta schema instead of request schema
-        let table_meta = TableMetaBuilder::new(region.in_memory_metadata().schema().clone())
+        let table_meta = TableMetaBuilder::default()
+            .schema(region.in_memory_metadata().schema().clone())
             .engine(DEFAULT_ENGINE)
-            .build();
+            .build()
+            .unwrap();
 
         let table_name = request.name;
         let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
-            .table_id(self.next_table_id())
+            .ident(self.next_table_id())
             .table_version(0u64)
             .table_type(TableType::Base)
             .desc(request.desc)
-            .build();
+            .build()
+            .unwrap();
 
         let table = Arc::new(MitoTable::new(table_info, region));
 

@@ -15,3 +15,4 @@ datatypes = { path = "../datatypes" }
 futures = "0.3"
 serde = "1.0.136"
 snafu = { version = "0.7", features = ["backtraces"] }
+derive_builder = "0.11"
