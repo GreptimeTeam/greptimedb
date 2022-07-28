@@ -1,3 +1,4 @@
+use snafu::ensure;
 use snafu::ResultExt;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::{dialect::keywords::Keyword, tokenizer::Token};
@@ -5,7 +6,7 @@ use table_engine::engine;
 
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error;
-use crate::error::SyntaxSnafu;
+use crate::error::{InvalidTimeIndexKeysSnafu, SyntaxSnafu};
 use crate::parser::ParserContext;
 use crate::parser::Result;
 use crate::statements::create_table::CreateTable;
@@ -116,6 +117,12 @@ impl<'a> ParserContext<'a> {
                     .parser
                     .parse_parenthesized_column_list(Mandatory)
                     .context(error::SyntaxSnafu { sql: self.sql })?;
+
+                ensure!(
+                    columns.len() == 1,
+                    InvalidTimeIndexKeysSnafu { sql: self.sql }
+                );
+
                 // TODO(dennis): TableConstraint doesn't support dialect right now,
                 // so we use unique constraint with special key to represent TIME INDEX.
                 Ok(Some(TableConstraint::Unique {
@@ -170,12 +177,14 @@ mod tests {
 
     #[test]
     pub fn test_parse_create_table() {
-        let sql = r"create table demo(host string,
-                                ts int64,
-                               cpu float64 default 0,
-                               memory float64,
-                              TIME INDEX (ts),
-                              PRIMARY KEY(ts, host)) engine=mito with(regions=1);
+        let sql = r"create table demo(
+                             host string,
+                             ts int64,
+                             cpu float64 default 0,
+                             memory float64,
+                             TIME INDEX (ts),
+                             PRIMARY KEY(ts, host)) engine=mito
+                             with(regions=1);
          ";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
         assert_eq!(1, result.len());
@@ -212,5 +221,24 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_invalid_index_keys() {
+        let sql = r"create table demo(
+                             host string,
+                             ts int64,
+                             cpu float64 default 0,
+                             memory float64,
+                             TIME INDEX (ts, host),
+                             PRIMARY KEY(ts, host)) engine=mito
+                             with(regions=1);
+         ";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result.is_err());
+        assert_matches!(
+            result,
+            Err(crate::error::Error::InvalidTimeIndexKeys { .. })
+        );
     }
 }
