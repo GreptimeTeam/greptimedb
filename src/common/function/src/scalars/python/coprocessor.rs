@@ -139,7 +139,7 @@ impl Coprocessor {
 
     /// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
     ///
-    /// The conside is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
+    /// The rationale is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
     /// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
     /// And add a function call in the end and also
     /// strip type annotation
@@ -380,7 +380,7 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Resul
 }
 
 /// select columns according to `fetch_names` from `rb`
-/// and cast them into a Vec of PyVector, also return their length
+/// and cast them into a Vec of PyVector
 fn select_from_rb(rb: &DfRecordBatch, fetch_names: &[String]) -> Result<Vec<PyVector>> {
     let field_map: HashMap<&String, usize> = rb
         .schema()
