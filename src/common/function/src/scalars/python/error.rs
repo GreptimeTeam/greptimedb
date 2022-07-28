@@ -184,8 +184,6 @@ pub fn get_error_reason(err: &Error) -> String {
             backtrace: _,
             source,
         } => format!("{}", source.error),
-        _ => {
-            unimplemented!()
-        }
+        _ => format!("Unknown error: {:?}", err)
     }
 }

@@ -35,6 +35,8 @@ fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 #[cfg(test)]
 use serde::{Deserialize, Serialize};
 
+use super::error::pretty_print_error_in_src;
+
 #[cfg_attr(test, derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnotationInfo {
@@ -545,6 +547,18 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         let schema = copr.gen_schema(&cols)?;
         let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
         Ok(res_rb)
+    })
+}
+
+/// execute script just like [`exec_coprocessor`] do, 
+/// but instead of return a internal [`Error`] type, 
+/// return a friendly String format of error
+/// 
+/// use `ln_offset` and `filename` to offset line number and mark file name in error prompt
+pub fn exec_copr_print(script: &str, rb: &DfRecordBatch, ln_offset: usize, filename: &str) -> StdResult<DfRecordBatch, String>{
+    let res = exec_coprocessor(script, rb);
+    res.map_err(|e|{
+        pretty_print_error_in_src(script, &e, ln_offset, filename)
     })
 }
 
