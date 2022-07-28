@@ -35,10 +35,10 @@ pub enum Error {
     Tokenizer { sql: String, source: TokenizerError },
 
     #[snafu(display(
-        "Invalid time index keys, it should contains only one column, sql: {}.",
+        "Invalid time index, it should contains only one column, sql: {}.",
         sql
     ))]
-    InvalidTimeIndexKeys { sql: String, backtrace: Backtrace },
+    InvalidTimeIndex { sql: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -47,7 +47,7 @@ impl ErrorExt for Error {
 
         match self {
             Unsupported { .. } => StatusCode::Unsupported,
-            Unexpected { .. } | Syntax { .. } | InvalidTimeIndexKeys { .. } | Tokenizer { .. } => {
+            Unexpected { .. } | Syntax { .. } | InvalidTimeIndex { .. } | Tokenizer { .. } => {
                 StatusCode::InvalidSyntax
             }
         }

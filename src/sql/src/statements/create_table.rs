@@ -1,7 +1,7 @@
 use crate::ast::{ColumnDef, ObjectName, SqlOption, TableConstraint};
 
 /// Time index name, used in table constraints.
-pub const TS_INDEX: &str = "__ts_index";
+pub const TIME_INDEX: &str = "__time_index";
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct CreateTable {

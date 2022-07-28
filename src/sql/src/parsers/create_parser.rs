@@ -6,10 +6,10 @@ use table_engine::engine;
 
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error;
-use crate::error::{InvalidTimeIndexKeysSnafu, SyntaxSnafu};
+use crate::error::{InvalidTimeIndexSnafu, SyntaxSnafu};
 use crate::parser::ParserContext;
 use crate::parser::Result;
-use crate::statements::create_table::{CreateTable, TS_INDEX};
+use crate::statements::create_table::{CreateTable, TIME_INDEX};
 use crate::statements::statement::Statement;
 
 const ENGINE: &str = "ENGINE";
@@ -117,16 +117,13 @@ impl<'a> ParserContext<'a> {
                     .parse_parenthesized_column_list(Mandatory)
                     .context(error::SyntaxSnafu { sql: self.sql })?;
 
-                ensure!(
-                    columns.len() == 1,
-                    InvalidTimeIndexKeysSnafu { sql: self.sql }
-                );
+                ensure!(columns.len() == 1, InvalidTimeIndexSnafu { sql: self.sql });
 
                 // TODO(dennis): TableConstraint doesn't support dialect right now,
                 // so we use unique constraint with special key to represent TIME INDEX.
                 Ok(Some(TableConstraint::Unique {
                     name: Some(Ident {
-                        value: TS_INDEX.to_owned(),
+                        value: TIME_INDEX.to_owned(),
                         quote_style: None,
                     }),
                     columns,
@@ -235,9 +232,6 @@ mod tests {
          ";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
         assert!(result.is_err());
-        assert_matches!(
-            result,
-            Err(crate::error::Error::InvalidTimeIndexKeys { .. })
-        );
+        assert_matches!(result, Err(crate::error::Error::InvalidTimeIndex { .. }));
     }
 }
