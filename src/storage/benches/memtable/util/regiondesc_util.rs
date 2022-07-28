@@ -17,14 +17,15 @@ impl RegionDescBuilder {
         let key_builder = RowKeyDescriptorBuilder::new(
             ColumnDescriptorBuilder::new(2, TIMESTAMP_NAME, ConcreteDataType::int64_datatype())
                 .is_nullable(false)
-                .build(),
+                .build()
+                .unwrap(),
         );
 
         Self {
             name: name.into(),
             last_column_id: 2,
             key_builder,
-            default_cf_builder: ColumnFamilyDescriptorBuilder::new(),
+            default_cf_builder: ColumnFamilyDescriptorBuilder::default(),
         }
     }
 
@@ -38,8 +39,8 @@ impl RegionDescBuilder {
         RegionDescriptor {
             id: 0,
             name: self.name,
-            row_key: self.key_builder.build(),
-            default_cf: self.default_cf_builder.build(),
+            row_key: self.key_builder.build().unwrap(),
+            default_cf: self.default_cf_builder.build().unwrap(),
             extra_cfs: Vec::new(),
         }
     }
@@ -54,5 +55,6 @@ impl RegionDescBuilder {
         ColumnDescriptorBuilder::new(self.alloc_column_id(), column_def.0, datatype)
             .is_nullable(column_def.2)
             .build()
+            .unwrap()
     }
 }
