@@ -10,7 +10,7 @@ use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
 
-use super::error::{visualize_loc, get_error_reason};
+use super::error::{get_error_reason, visualize_loc};
 use super::*;
 use crate::scalars::python::{
     copr_parse::parse_copr,
@@ -62,9 +62,8 @@ fn create_sample_recordbatch() -> DfRecordBatch {
     DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap()
 }
 
-
-/// test cases which read from a .ron file, deser, 
-/// 
+/// test cases which read from a .ron file, deser,
+///
 /// and exec/parse (depending on the type of predicate) then decide if result is as expected
 #[test]
 fn run_ron_testcases() {
@@ -96,6 +95,9 @@ fn run_ron_testcases() {
             Predicate::ExecIsOk { fields, columns } => {
                 let rb = create_sample_recordbatch();
                 let res = exec_coprocessor(&testcase.code, &rb);
+                if res.is_err() {
+                    dbg!(&res);
+                }
                 assert!(res.is_ok());
                 let res = res.unwrap();
                 fields
@@ -137,8 +139,6 @@ fn run_ron_testcases() {
         }
     }
 }
-
-
 
 #[test]
 fn test_all_types_error() {
