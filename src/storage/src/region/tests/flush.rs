@@ -45,6 +45,14 @@ impl FlushTester {
     async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
         self.tester.put(data).await
     }
+
+    async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
+        self.tester.full_scan().await
+    }
+
+    async fn wait_flush_done(&self) {
+        self.tester.region.wait_flush_done().await.unwrap();
+    }
 }
 
 #[derive(Debug, Default)]
@@ -70,10 +78,10 @@ impl FlushStrategy for FlushSwitch {
 }
 
 #[tokio::test]
-async fn test_flush() {
+async fn test_flush_and_stall() {
     common_telemetry::init_default_ut_logging();
 
-    let dir = TempDir::new("flush").unwrap();
+    let dir = TempDir::new("flush-stall").unwrap();
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -105,4 +113,32 @@ async fn test_flush() {
         }
     }
     assert!(has_parquet_file);
+}
+
+#[tokio::test]
+async fn test_read_after_flush() {
+    common_telemetry::init_default_ut_logging();
+
+    let dir = TempDir::new("read-flush").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+
+    let flush_switch = Arc::new(FlushSwitch::default());
+    // Always trigger flush before write.
+    let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
+
+    // Put elements so we have content to flush.
+    tester.put(&[(1000, Some(100))]).await;
+    tester.put(&[(2000, Some(200))]).await;
+
+    // Now set should flush to true to trigger flush.
+    flush_switch.set_should_flush(true);
+
+    // Put element to trigger flush.
+    tester.put(&[(3000, Some(300))]).await;
+    tester.wait_flush_done().await;
+
+    let expect = vec![(3000, Some(300)), (1000, Some(100)), (2000, Some(200))];
+
+    let output = tester.full_scan().await;
+    assert_eq!(expect, output);
 }

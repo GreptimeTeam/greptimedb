@@ -79,6 +79,9 @@ impl RegionWriter {
 
         version_control.set_committed_sequence(next_sequence);
 
+        // TODO(yingwen): We should set the flush handle to `None`, but we can't acquire
+        // write lock here.
+
         Ok(())
     }
 
@@ -91,6 +94,19 @@ impl RegionWriter {
         let header = WalHeader::with_last_manifest_version(edit.manifest_version);
 
         wal.write_to_wal(seq, header, Payload::None).await?;
+
+        Ok(())
+    }
+}
+
+// Private methods for tests.
+#[cfg(test)]
+impl RegionWriter {
+    pub async fn wait_flush_done(&self) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        if let Some(handle) = inner.flush_handle.take() {
+            handle.join().await?;
+        }
 
         Ok(())
     }

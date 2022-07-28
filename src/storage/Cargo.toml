@@ -9,6 +9,7 @@ edition = "2021"
 arc-swap = "1.0"
 arrow-format = { version = "0.4", features = ["ipc"] }
 async-trait = "0.1"
+async-stream = "0.3"
 bit-vec = "0.6"
 bytes = "1.1"
 common-error = { path = "../common/error" }

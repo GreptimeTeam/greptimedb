@@ -4,6 +4,7 @@ use std::str::Utf8Error;
 
 use common_error::prelude::*;
 use datatypes::arrow;
+use datatypes::arrow::error::ArrowError;
 use serde_json::error::Error as JsonError;
 use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
@@ -171,6 +172,30 @@ pub enum Error {
 
     #[snafu(display("Failed to read line, err: {}", source))]
     Readline { source: IoError },
+
+    #[snafu(display("Failed to read Parquet file: {}, source: {}", file, source))]
+    ReadParquet {
+        file: String,
+        source: ArrowError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("IO failed while reading Parquet file: {}, source: {}", file, source))]
+    ReadParquetIo {
+        file: String,
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Parquet file schema is not valid: {}", msg))]
+    SequenceColumnNotFound { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Parquet file schema is not valid, msg: {}, source: {}", msg, source))]
+    InvalidParquetSchema {
+        msg: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -193,7 +218,9 @@ impl ErrorExt for Error {
             | JoinTask { .. }
             | Cancelled { .. }
             | DecodeRegionMetaActionList { .. }
-            | Readline { .. } => StatusCode::Unexpected,
+            | Readline { .. }
+            | InvalidParquetSchema { .. }
+            | SequenceColumnNotFound { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | InitBackend { .. }
@@ -206,7 +233,9 @@ impl ErrorExt for Error {
             | DecodeWalHeader { .. }
             | EncodeWalHeader { .. }
             | ManifestProtocolForbidRead { .. }
-            | ManifestProtocolForbidWrite { .. } => StatusCode::StorageUnavailable,
+            | ManifestProtocolForbidWrite { .. }
+            | ReadParquet { .. }
+            | ReadParquetIo { .. } => StatusCode::StorageUnavailable,
         }
     }
 

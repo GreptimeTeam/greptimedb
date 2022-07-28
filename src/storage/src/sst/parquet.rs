@@ -1,45 +1,59 @@
 //! Parquet sst format.
 
 use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::Arc;
 
+use async_stream::try_stream;
+use async_trait::async_trait;
+use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk;
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
+use datatypes::arrow::io::parquet::read::{
+    infer_schema, read_columns_many_async, read_metadata_async, RowGroupDeserializer,
+};
 use datatypes::arrow::io::parquet::write::{
     Compression, Encoding, FileSink, Version, WriteOptions,
 };
 use datatypes::prelude::{ConcreteDataType, Vector};
 use datatypes::schema::ColumnSchema;
+use datatypes::vectors::{Helper, UInt64Vector, UInt8Vector};
 use futures_util::sink::SinkExt;
-use object_store::ObjectStore;
-use snafu::ResultExt;
+use futures_util::{Stream, TryStreamExt};
+use object_store::{ObjectStore, SeekableReader};
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::consts;
 
-use crate::error::{FlushIoSnafu, Result, WriteParquetSnafu};
-use crate::memtable::{BatchIteratorPtr, MemtableSchema};
+use crate::error::{
+    FlushIoSnafu, InvalidParquetSchemaSnafu, ReadParquetIoSnafu, ReadParquetSnafu, Result,
+    SequenceColumnNotFoundSnafu, WriteParquetSnafu,
+};
+use crate::memtable::{BoxedBatchIterator, MemtableSchema};
 use crate::metadata::ColumnMetadata;
+use crate::read::{Batch, BatchReader};
 use crate::sst;
 
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
-    file_name: &'a str,
-    iter: BatchIteratorPtr,
+    file_path: &'a str,
+    iter: BoxedBatchIterator,
     object_store: ObjectStore,
 }
 
 impl<'a> ParquetWriter<'a> {
     pub fn new(
-        file_name: &'a str,
-        iter: BatchIteratorPtr,
+        file_path: &'a str,
+        iter: BoxedBatchIterator,
         object_store: ObjectStore,
     ) -> ParquetWriter {
         ParquetWriter {
-            file_name,
+            file_path,
             iter,
             object_store,
         }
     }
 
-    pub async fn write_sst(self, _opts: sst::WriteOptions) -> Result<()> {
+    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<()> {
         self.write_rows(None).await
     }
 
@@ -48,7 +62,7 @@ impl<'a> ParquetWriter<'a> {
     /// in config will be written to a single row group.
     async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
         let schema = memtable_schema_to_arrow_schema(self.iter.schema());
-        let object = self.object_store.object(self.file_name);
+        let object = self.object_store.object(self.file_path);
 
         // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
         // but in s3/azblob backend the Content-Length field of HTTP request is set
@@ -91,11 +105,15 @@ impl<'a> ParquetWriter<'a> {
                 sink.metadata.insert(k, Some(v));
             }
         }
-        sink.close().await.context(WriteParquetSnafu)
+        sink.close().await.context(WriteParquetSnafu)?;
+        // FIXME(yingwen): Hack to workaround an [arrow2 BUG](https://github.com/jorgecarleitao/parquet2/issues/162),
+        // upgrading to latest arrow2 can fixed this, but now datafusion is still using an old arrow2 version.
+        sink.flush().await.context(WriteParquetSnafu)
     }
 }
 
 /// Assembles arrow schema from memtable schema info.
+/// TODO(hl): implement `From<Schema>` for `MemtableSchema`/`Physical schema`
 fn memtable_schema_to_arrow_schema(schema: &MemtableSchema) -> Schema {
     let col_meta_to_field: fn(&ColumnMetadata) -> Field = |col_meta| {
         Field::from(&ColumnSchema::new(
@@ -177,6 +195,157 @@ fn transverse_recursive<T, F: Fn(&DataType) -> T + Clone>(
     }
 }
 
+pub struct ParquetReader<'a> {
+    file_path: &'a str,
+    object_store: ObjectStore,
+}
+
+type ReaderFactoryFuture<'a, R> =
+    Pin<Box<dyn futures_util::Future<Output = std::io::Result<R>> + Send + 'a>>;
+
+pub type FieldProjection = Box<dyn Fn(&Schema) -> Vec<Field> + Send + Sync>;
+
+impl<'a> ParquetReader<'a> {
+    pub fn new(file_path: &str, object_store: ObjectStore) -> ParquetReader {
+        ParquetReader {
+            file_path,
+            object_store,
+        }
+    }
+
+    pub async fn chunk_stream(
+        &self,
+        projection: Option<FieldProjection>,
+        chunk_size: usize,
+    ) -> Result<ChunkStream> {
+        let file_path = self.file_path.to_string();
+        let operator = self.object_store.clone();
+        let reader_factory = move || -> ReaderFactoryFuture<SeekableReader> {
+            let file_path = file_path.clone();
+            let operator = operator.clone();
+            Box::pin(async move { Ok(operator.object(&file_path).seekable_reader(..)) })
+        };
+
+        let file_path = self.file_path.to_string();
+        let mut reader = reader_factory()
+            .await
+            .context(ReadParquetIoSnafu { file: &file_path })?;
+        let metadata = read_metadata_async(&mut reader)
+            .await
+            .context(ReadParquetSnafu { file: &file_path })?;
+        let schema = infer_schema(&metadata).context(ReadParquetSnafu { file: &file_path })?;
+
+        let projected_fields = projection.map_or_else(|| schema.fields.clone(), |p| p(&schema));
+        let projected_schema = Schema {
+            fields: projected_fields.clone(),
+            metadata: schema.metadata,
+        };
+
+        let chunk_stream = try_stream!({
+            for rg in metadata.row_groups {
+                let column_chunks = read_columns_many_async(
+                    &reader_factory,
+                    &rg,
+                    projected_fields.clone(),
+                    Some(chunk_size),
+                )
+                .await
+                .context(ReadParquetSnafu { file: &file_path })?;
+
+                let chunks = RowGroupDeserializer::new(column_chunks, rg.num_rows() as usize, None);
+                for maybe_chunk in chunks {
+                    let columns_in_chunk =
+                        maybe_chunk.context(ReadParquetSnafu { file: &file_path })?;
+                    yield columns_in_chunk;
+                }
+            }
+        });
+
+        ChunkStream::new(projected_schema, Box::pin(chunk_stream))
+    }
+}
+
+type ChunkConverter = Box<dyn Fn(Chunk<Arc<dyn Array>>) -> Result<Batch> + Send + Sync>;
+
+pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk<Arc<dyn Array>>>> + Send>>;
+
+pub struct ChunkStream {
+    stream: SendableChunkStream,
+    converter: ChunkConverter,
+}
+
+impl ChunkStream {
+    pub fn new(schema: Schema, stream: SendableChunkStream) -> Result<Self> {
+        Ok(Self {
+            converter: batch_converter_factory(schema)?,
+            stream,
+        })
+    }
+}
+
+#[async_trait]
+impl BatchReader for ChunkStream {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        self.stream
+            .try_next()
+            .await?
+            .map(&self.converter)
+            .transpose()
+    }
+}
+
+// TODO(hl): Currently rowkey/values/reserved columns are identified by their position in field:
+// all fields before `__sequence` column are rowkeys and fields after `__value_type` are values.
+// But it would be better to persist rowkey/value columns' positions to Parquet metadata and
+// parse `MemtableSchema` from metadata while building BatchReader.
+fn batch_converter_factory(schema: Schema) -> Result<ChunkConverter> {
+    let ts_idx = schema
+        .fields
+        .iter()
+        .position(|f| f.name == consts::SEQUENCE_COLUMN_NAME)
+        .with_context(|| SequenceColumnNotFoundSnafu {
+            msg: format!("Schema: {:?}", schema),
+        })?;
+
+    let field_len = schema.fields.len();
+
+    macro_rules! handle_err {
+        ($stmt: expr, $schema: ident) => {
+            $stmt.with_context(|_| InvalidParquetSchemaSnafu {
+                msg: format!("Schema type error: {:?}", $schema),
+            })?
+        };
+    }
+
+    let converter = move |c: Chunk<Arc<dyn Array>>| {
+        Ok(Batch {
+            sequences: handle_err!(
+                UInt64Vector::try_from_arrow_array(&c.arrays()[ts_idx].clone()),
+                schema
+            ),
+            value_types: handle_err!(
+                UInt8Vector::try_from_arrow_array(&c.arrays()[ts_idx + 1].clone()),
+                schema
+            ),
+            keys: handle_err!(
+                (0..ts_idx)
+                    .into_iter()
+                    .map(|i| Helper::try_into_vector(&c.arrays()[i].clone()))
+                    .collect::<std::result::Result<_, _>>(),
+                schema
+            ),
+            values: handle_err!(
+                (ts_idx + 2..field_len)
+                    .into_iter()
+                    .map(|i| Helper::try_into_vector(&c.arrays()[i].clone()))
+                    .collect::<std::result::Result<_, _>>(),
+                schema
+            ),
+        })
+    };
+    Ok(Box::new(converter))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -220,7 +389,7 @@ mod tests {
         let writer = ParquetWriter::new(sst_file_name, iter, object_store);
 
         writer
-            .write_sst(sst::WriteOptions::default())
+            .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
 

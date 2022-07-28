@@ -183,16 +183,16 @@ mod tests {
                 flush_sequence: 99,
                 files_to_add: vec![
                     FileMeta {
-                        file_path: "test1".to_string(),
+                        file_name: "test1".to_string(),
                         level: 1,
                     },
                     FileMeta {
-                        file_path: "test2".to_string(),
+                        file_name: "test2".to_string(),
                         level: 2,
                     },
                 ],
                 files_to_remove: vec![FileMeta {
-                    file_path: "test0".to_string(),
+                    file_name: "test0".to_string(),
                     level: 0,
                 }],
             }),
@@ -202,7 +202,7 @@ mod tests {
         let bs = action_list.encode().unwrap();
         // {"prev_version":3}
         // {"Protocol":{"min_reader_version":1,"min_writer_version":0}}
-        // {"Edit":{"region_id":1,"region_version":10,"flush_sequence":99,"files_to_add":[{"file_path":"test1","level":1},{"file_path":"test2","level":2}],"files_to_remove":[{"file_path":"test0","level":0}]}}
+        // {"Edit":{"region_id":1,"region_version":10,"flush_sequence":99,"files_to_add":[{"file_name":"test1","level":1},{"file_name":"test2","level":2}],"files_to_remove":[{"file_name":"test0","level":0}]}}
 
         logging::debug!(
             "Encoded action list: \r\n{}",
