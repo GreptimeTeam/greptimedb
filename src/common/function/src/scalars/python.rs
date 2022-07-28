@@ -12,11 +12,26 @@ use std::sync::Arc;
 pub use coprocessor::exec_coprocessor;
 use coprocessor::AnnotationInfo;
 use datatypes::vectors::{Float32Vector, Int32Vector, VectorRef};
+use rustpython_parser::ast::Location;
 use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
 use type_::PyVector;
 
 pub use crate::error::Error;
+
+pub fn pretty_print_loc_in_src(script: &str, loc: &Location, desc: &str) -> String {
+    let lines: Vec<&str> = script.split('\n').collect();
+    let indicate = format!(
+        "
+\u{001B}[1;34m-->\u{001B}[0m python coprocessor function:{loc}
+{line}
+\u{001B}[1;31m{arrow:>pad$} {desc}\u{001B}[0m",
+        line = lines[loc.row() - 1],
+        pad = loc.column(),
+        arrow = "^"
+    );
+    indicate
+}
 
 pub fn execute_script(script: &str) -> vm::PyResult {
     vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {

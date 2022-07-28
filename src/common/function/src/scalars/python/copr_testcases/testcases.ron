@@ -227,5 +227,16 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vecto
         predicate: ExecIsErr(
             reason: "The number of return Vector is wrong, expect"
         )
+    ),
+    (
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+    vector[f32]):
+    return cpu + mem, cpu - mem*(1/0)
+"#,
+        predicate: ExecIsErr(
+            reason: "ZeroDivisionError: division by zero"
+        )
     )
 ]

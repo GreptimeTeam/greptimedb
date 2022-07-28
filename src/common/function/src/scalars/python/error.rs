@@ -24,7 +24,6 @@ pub enum Error {
         #[snafu(backtrace)]
         source: DataTypeError,
     },
-    /// these Python Errors already have very clear error hint, so no backtraces needed for them
     #[snafu(display("Python Parsing error: {}", source))]
     PyParse {
         backtrace: Backtrace,

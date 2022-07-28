@@ -62,12 +62,13 @@ fn create_sample_recordbatch() -> DfRecordBatch {
 #[test]
 fn run_ron_testcases() {
     let loc = Path::new("src/scalars/python/copr_testcases/testcases.ron");
-    let mut file =
-        File::open(loc.to_str().expect("Fail to parse path")).expect("Fail to open file");
+    let loc = loc.to_str().expect("Fail to parse path");
+    let mut file = File::open(loc).expect("Fail to open file");
     let mut buf = String::new();
     file.read_to_string(&mut buf)
         .expect("Fail to read to string");
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
+    println!("Read {} testcases from {}", testcases.len(), loc);
     for testcase in testcases {
         match testcase.predicate {
             Predicate::ParseIsOk { result } => {
@@ -141,6 +142,10 @@ fn get_error_reason(err: &Error) -> String {
             backtrace: _,
             reason,
         } => reason.clone(),
+        Error::PyRuntime {
+            backtrace: _,
+            source,
+        } => source.output.clone(),
         _ => {
             unimplemented!()
         }
@@ -149,32 +154,18 @@ fn get_error_reason(err: &Error) -> String {
 
 #[test]
 fn test_all_types_error() {
-    let test_cases: Vec<(&'static str, ExecResPredicateFn)> = vec![
-        (
-            // cast errors
-            r#"
+    let test_cases: Vec<(&'static str, ExecResPredicateFn)> = vec![(
+        // cast to bool
+        r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why", "whatever", "nihilism"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vector[f64], vector[f64 | None], vector[bool], vector[_ | None]):
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem, cpu, mem
 "#,
-            Some(|r| {
-                // assert in here seems to be more readable
-                assert!(r.is_ok());
-            }),
-        ),
-        (
-            // cast to bool
-            r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why", "whatever", "nihilism"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vector[f64], vector[f64 | None], vector[bool], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem, cpu, mem
-"#,
-            Some(|r| {
-                // assert in here seems to be more readable
-                assert!(r.is_ok() && *r.unwrap().column(4).data_type() == DataType::Boolean);
-            }),
-        ),
-    ];
+        Some(|r| {
+            // assert in here seems to be more readable
+            assert!(r.is_ok() && *r.unwrap().column(4).data_type() == DataType::Boolean);
+        }),
+    )];
     let rb = create_sample_recordbatch();
 
     for (script, predicate) in test_cases {
@@ -217,7 +208,7 @@ fn test_coprocessor() {
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
     vector[f32]):
-    return cpu + mem, cpu - mem
+    return cpu + mem, cpu - mem***
 "#;
     //println!("{}, {:?}", python_source, python_ast);
     let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
@@ -230,7 +221,18 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
     let ret = exec_coprocessor(python_source, &rb);
     // println!("{}", ret.unwrap_err());
-    // dbg!(&ret);
-    assert!(ret.is_ok());
-    assert_eq!(ret.unwrap().column(0).len(), 4);
+    dbg!(&ret);
+    if let Error::PyParse {
+        backtrace: _,
+        source,
+    } = ret.unwrap_err()
+    {
+        let res = pretty_print_loc_in_src(
+            python_source, 
+            &source.location, 
+            format!("{}", source.error).as_str());
+        println!("{res}");
+    }
+    // assert!(ret.is_ok());
+    // assert_eq!(ret.unwrap().column(0).len(), 4);
 }

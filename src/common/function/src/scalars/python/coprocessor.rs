@@ -23,7 +23,7 @@ use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
 use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
 use crate::scalars::python::error::{
-    ensure, ArrowSnafu, CoprParseSnafu, Error, OtherSnafu, PyCompileSnafu, PyExceptionSerde,
+    ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde,
     PyParseSnafu, PyRuntimeSnafu, Result, TypeCastSnafu,
 };
 use crate::scalars::python::type_::{is_instance, PyVector};
@@ -58,6 +58,9 @@ pub struct Coprocessor {
 }
 
 impl Coprocessor {
+
+    
+
     /// generate a call to the coprocessor function
     /// with arguments given in decorator's `args` list
     /// also set in location in source code to `loc`
@@ -92,19 +95,9 @@ impl Coprocessor {
         set_loc(stmt, loc)
     }
 
-    /// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
-    ///
-    /// The conside is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
-    /// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
-    /// And add a function call in the end and also
-    /// strip type annotation
-    fn strip_append_and_compile(&self) -> Result<CodeObject> {
-        let script = &self.script;
-        // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
-        let mut top = parser::parse(script, parser::Mode::Interactive).context(PyParseSnafu)?;
-        // erase decorator
-        if let ast::Mod::Interactive { body } = &mut top {
-            let code = body;
+    /// check if `Mod` is of one line of statement
+    fn check_before_compile(top: &ast::Mod) -> Result<()> {
+        if let ast::Mod::Interactive { body: code } = top {
             ensure!(
                 code.len() == 1,
                 CoprParseSnafu {
@@ -119,6 +112,47 @@ impl Coprocessor {
                     }
                 }
             );
+
+            if let ast::StmtKind::FunctionDef {
+                name: _,
+                args: _,
+                body: _,
+                decorator_list: _,
+                returns: _,
+                type_comment: __main__,
+            } = &code[0].node
+            {
+            } else {
+                return ret_parse_error(
+                    format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
+                    Some(code[0].location)
+                )
+                .fail();
+            }
+        } else {
+            return ret_parse_error(
+                format!("Expect statement in script, found: {:?}", top),
+                None,
+            )
+            .fail();
+        }
+        Ok(())
+    }
+
+    /// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
+    ///
+    /// The conside is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
+    /// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
+    /// And add a function call in the end and also
+    /// strip type annotation
+    fn strip_append_and_compile(&self) -> Result<CodeObject> {
+        let script = &self.script;
+        // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
+        let mut top = parser::parse(script, parser::Mode::Interactive).context(PyParseSnafu)?;
+        Self::check_before_compile(&top)?;
+        // erase decorator
+        if let ast::Mod::Interactive { body } = &mut top {
+            let code = body;
             if let ast::StmtKind::FunctionDef {
                 name: _,
                 args,
@@ -138,11 +172,8 @@ impl Coprocessor {
                     arg.node.annotation = None;
                 }
             } else {
-                return ret_parse_error(
-                    format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
-                    Some(code[0].location)
-                )
-                .fail();
+                // already done in check function
+                unreachable!()
             }
             let loc = code[0].location;
 
@@ -151,11 +182,8 @@ impl Coprocessor {
             // (which doesn't matter because Location usually only used in pretty print errors)
             code.push(self.gen_call(&loc));
         } else {
-            return ret_parse_error(
-                format!("Expect statement in script, found: {:?}", top),
-                None,
-            )
-            .fail();
+            // already done in check function
+            unreachable!()
         }
         // use `compile::Mode::BlockExpr` so it return the result of statement
         compile::compile_top(
