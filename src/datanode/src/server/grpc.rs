@@ -1,3 +1,7 @@
+mod handler;
+pub mod insert;
+mod server;
+
 use common_telemetry::logging::info;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
@@ -8,9 +12,6 @@ use crate::{
     instance::InstanceRef,
     server::grpc::{handler::BatchHandler, server::Server},
 };
-
-mod handler;
-mod server;
 
 pub struct GrpcServer {
     handler: BatchHandler,
