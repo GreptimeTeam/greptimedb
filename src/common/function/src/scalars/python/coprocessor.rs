@@ -17,7 +17,7 @@ use rustpython_parser::{
 use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
 use snafu::{OptionExt, ResultExt};
-use vm::builtins::{PyBaseExceptionRef, PyTuple};
+use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
 use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
@@ -316,6 +316,32 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
     Ok(args)
 }
 
+/// convert a single PyVector or a number(a constant) into a Array(or a constant array)
+fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<ArrayRef> {
+    if is_instance(obj, PyVector::class(vm).into(), vm) {
+        let pyv = obj
+            .payload::<PyVector>()
+            .context(ret_other_error_with(format!(
+                "can't cast obj {:?} to PyVector",
+                obj
+            )))?;
+        Ok(pyv.to_arrow_array())
+    } else if is_instance(obj, PyInt::class(vm).into(), vm) {
+        let val = obj.to_owned().try_into_value::<i64>(vm);
+        let val = match val {
+            Ok(val) => val,
+            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
+        };
+        todo!()
+    } else if is_instance(obj, PyFloat::class(vm).into(), vm) {
+        todo!()
+    } else if is_instance(obj, PyBool::class(vm).into(), vm) {
+        todo!()
+    } else {
+        ret_other_error_with(format!("Expect a vector or a constant, found {:?}", obj)).fail()
+    }
+}
+
 /// convert a tuple of `PyVector` or one `PyVector`(wrapped in a Python Object Ref[`PyObjectRef`])
 /// to a `Vec<ArrayRef>`
 ///
@@ -328,36 +354,14 @@ fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Vec<ArrayRef>>
                 "can't cast obj {:?} to PyTuple)",
                 obj
             )))?;
-        let cols = tuple.iter().map(|obj| -> Result<Arc<dyn Array>> {
-            if is_instance(obj, PyVector::class(vm).into(), vm) {
-                let pyv = obj
-                    .payload::<PyVector>()
-                    .context(ret_other_error_with(format!(
-                        "can't cast obj {:?} to PyVector",
-                        obj
-                    )))?;
-                Ok(pyv.to_arrow_array())
-            } else {
-                ret_other_error_with(
-                    format!("Expect all element in returning tuple to be vector, found one of the element is {:?}", obj)
-                ).fail()
-            }
-        }).collect::<Result<Vec<ArrayRef>>>()?;
+        let cols = tuple
+            .iter()
+            .map(|obj| py_vec_to_array_ref(obj, vm))
+            .collect::<Result<Vec<ArrayRef>>>()?;
         Ok(cols)
-    } else if is_instance(obj, PyVector::class(vm).into(), vm) {
-        let pyv = obj
-            .payload::<PyVector>()
-            .context(ret_other_error_with(format!(
-                "can't cast obj {:?} to PyVector",
-                obj
-            )))?;
-        Ok(vec![pyv.to_arrow_array()])
     } else {
-        ret_other_error_with(format!(
-            "Expect a single vector or a tuple of vector, found {:#?}",
-            obj
-        ))
-        .fail()
+        let col = py_vec_to_array_ref(obj, vm)?;
+        Ok(vec![col])
     }
 }
 

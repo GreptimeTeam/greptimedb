@@ -1,5 +1,5 @@
 //! python udf supports
-//! use the function `coprocessor` to parse and run a python function with arguments from recordBatch, and return a newly assembled RecordBatch
+//! use the function [`exec_coprocessor`](exec_coprocessor) to parse and run a python function with arguments from recordBatch, and return a newly assembled RecordBatch
 mod copr_parse;
 mod coprocessor;
 mod error;

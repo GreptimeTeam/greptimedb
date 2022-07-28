@@ -33,6 +33,7 @@ rustpython-compiler-core = {git = "https://github.com/RustPython/RustPython", op
 rustpython-parser = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 rustpython-vm = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 snafu = {version = "0.7", features = ["backtraces"]}
+console = "0.15.1"
 
 [dependencies.arrow]
 package = "arrow2"

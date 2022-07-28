@@ -10,7 +10,7 @@ use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
 
-use super::error::pretty_print_loc_in_src;
+use super::error::{visualize_loc, get_error_reason};
 use super::*;
 use crate::scalars::python::{
     copr_parse::parse_copr,
@@ -30,6 +30,7 @@ enum Predicate {
         result: Coprocessor,
     },
     ParseIsErr {
+        /// used to check if after serialize [`Error`] into a String, that string contains `reason`
         reason: String,
     },
     ExecIsOk {
@@ -37,6 +38,7 @@ enum Predicate {
         columns: Vec<ColumnInfo>,
     },
     ExecIsErr {
+        /// used to check if after serialize [`Error`] into a String, that string contains `reason`
         reason: String,
     },
 }
@@ -60,6 +62,10 @@ fn create_sample_recordbatch() -> DfRecordBatch {
     DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap()
 }
 
+
+/// test cases which read from a .ron file, deser, 
+/// 
+/// and exec/parse (depending on the type of predicate) then decide if result is as expected
 #[test]
 fn run_ron_testcases() {
     let loc = Path::new("src/scalars/python/copr_testcases/testcases.ron");
@@ -132,30 +138,7 @@ fn run_ron_testcases() {
     }
 }
 
-fn get_error_reason(err: &Error) -> String {
-    match err {
-        Error::CoprParse {
-            backtrace: _,
-            reason,
-            loc: _,
-        } => reason.clone(),
-        Error::Other {
-            backtrace: _,
-            reason,
-        } => reason.clone(),
-        Error::PyRuntime {
-            backtrace: _,
-            source,
-        } => source.output.clone(),
-        Error::PyParse {
-            backtrace: _,
-            source,
-        } => format!("{}", source.error),
-        _ => {
-            unimplemented!()
-        }
-    }
-}
+
 
 #[test]
 fn test_all_types_error() {
@@ -216,17 +199,18 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
     let ret = exec_coprocessor(python_source, &rb);
     // println!("{}", ret.unwrap_err());
-    dbg!(&ret);
+    // dbg!(&ret);
     let ret = ret.unwrap_err();
-    dbg!(get_error_reason(&ret));
+    // dbg!(get_error_reason(&ret));
     if let Error::PyParse {
         backtrace: _,
         source,
     } = ret
     {
-        let res = pretty_print_loc_in_src(
+        let res = visualize_loc(
             python_source,
             &source.location,
+            "unknown tokens",
             source.error.to_string().as_str(),
             0,
             "copr.py",

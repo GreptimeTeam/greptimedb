@@ -219,6 +219,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         )
     ),
     (
+        // expect 4 vector ,found 5
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why", "whatever", "nihilism"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vector[f64], vector[f64 | None], vector[bool], vector[_ | None]):
