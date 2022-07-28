@@ -70,12 +70,11 @@ pub struct TableInfo {
 
 impl TableInfoBuilder {
     pub fn new<S: Into<String>>(name: S, meta: TableMeta) -> Self {
-        let mut this = Self::default();
-
-        this.name = Some(name.into());
-        this.meta = Some(meta);
-
-        this
+        Self {
+            name: Some(name.into()),
+            meta: Some(meta),
+            ..Default::default()
+        }
     }
 
     pub fn table_id(mut self, id: impl Into<TableId>) -> Self {

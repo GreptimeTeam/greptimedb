@@ -40,11 +40,12 @@ pub struct ColumnDescriptor {
 
 impl ColumnDescriptorBuilder {
     pub fn new<S: Into<String>>(id: ColumnId, name: S, data_type: ConcreteDataType) -> Self {
-        let mut this = Self::default();
-        this.id = Some(id);
-        this.name = Some(name.into());
-        this.data_type = Some(data_type);
-        this
+        Self {
+            id: Some(id),
+            name: Some(name.into()),
+            data_type: Some(data_type),
+            ..Default::default()
+        }
     }
 }
 
@@ -99,10 +100,10 @@ pub struct RegionDescriptor {
 
 impl RowKeyDescriptorBuilder {
     pub fn new(timestamp: ColumnDescriptor) -> Self {
-        let mut this = Self::default();
-        this.timestamp = Some(timestamp);
-
-        this
+        Self {
+            timestamp: Some(timestamp),
+            ..Default::default()
+        }
     }
 
     pub fn columns_capacity(mut self, capacity: usize) -> Self {
