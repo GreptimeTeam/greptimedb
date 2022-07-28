@@ -73,6 +73,7 @@ pub struct StoreConfig<S> {
 }
 
 impl<S: LogStore> RegionImpl<S> {
+    /// Create a new region without any data.
     pub fn new(
         id: RegionId,
         name: String,
@@ -98,6 +99,11 @@ impl<S: LogStore> RegionImpl<S> {
         });
 
         RegionImpl { inner }
+    }
+
+    /// Open an exsiting region and recover its data.
+    pub async fn open(_name: String, _store_config: StoreConfig<S>) -> Result<RegionImpl<S>> {
+        unimplemented!()
     }
 }
 

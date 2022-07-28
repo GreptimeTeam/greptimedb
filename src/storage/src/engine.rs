@@ -9,7 +9,7 @@ use store_api::manifest::action::ProtocolAction;
 use store_api::{
     logstore::LogStore,
     manifest::Manifest,
-    storage::{EngineContext, RegionDescriptor, StorageEngine},
+    storage::{EngineContext, RegionDescriptor, RegionId, StorageEngine},
 };
 
 use crate::background::JobPoolImpl;
@@ -252,9 +252,17 @@ impl<S: LogStore> EngineInner<S> {
             return slot.try_get_ready_region();
         }
 
-        let _guard = SlotGuard::new(name, &self.regions);
+        let mut guard = SlotGuard::new(name, &self.regions);
 
-        unimplemented!()
+        // FIXME(yingwen): Get region id or remove dependency of region id.
+        let store_config = self.region_store_config(1, name);
+        let region = RegionImpl::open(name.to_string(), store_config).await?;
+
+        guard.update(RegionSlot::Ready(region.clone()));
+
+        info!("Storage engine open region {:?}", &region);
+
+        Ok(region)
     }
 
     async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl<S>> {
@@ -273,19 +281,8 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let sst_dir = &region_sst_dir(&region_name);
-        let sst_layer = Arc::new(FsAccessLayer::new(sst_dir, self.object_store.clone()));
-        let manifest_dir = region_manifest_dir(&region_name);
-        let manifest = RegionManifest::new(region_id, &manifest_dir, self.object_store.clone());
-
-        let store_config = StoreConfig {
-            log_store: self.log_store.clone(),
-            sst_layer,
-            manifest: manifest.clone(),
-            memtable_builder: self.memtable_builder.clone(),
-            flush_scheduler: self.flush_scheduler.clone(),
-            flush_strategy: self.flush_strategy.clone(),
-        };
+        let store_config = self.region_store_config(region_id, &region_name);
+        let manifest = store_config.manifest.clone();
 
         let region = RegionImpl::new(
             region_id,
@@ -293,6 +290,7 @@ impl<S: LogStore> EngineInner<S> {
             metadata.clone(),
             store_config,
         );
+
         // Persist region metadata
         manifest
             .update(RegionMetaActionList::new(vec![
@@ -313,6 +311,22 @@ impl<S: LogStore> EngineInner<S> {
     fn get_region(&self, name: &str) -> Option<RegionImpl<S>> {
         let slot = self.regions.read().unwrap().get(name).cloned()?;
         slot.get_ready_region()
+    }
+
+    fn region_store_config(&self, region_id: RegionId, region_name: &str) -> StoreConfig<S> {
+        let sst_dir = &region_sst_dir(&region_name);
+        let sst_layer = Arc::new(FsAccessLayer::new(sst_dir, self.object_store.clone()));
+        let manifest_dir = region_manifest_dir(&region_name);
+        let manifest = RegionManifest::new(region_id, &manifest_dir, self.object_store.clone());
+
+        StoreConfig {
+            log_store: self.log_store.clone(),
+            sst_layer,
+            manifest,
+            memtable_builder: self.memtable_builder.clone(),
+            flush_scheduler: self.flush_scheduler.clone(),
+            flush_strategy: self.flush_strategy.clone(),
+        }
     }
 }
 
