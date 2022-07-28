@@ -18,13 +18,6 @@ pub struct ParserContext<'a> {
     pub(crate) sql: &'a str,
 }
 
-// Use `Parser::expected` instead, if possible
-macro_rules! parser_err {
-    ($MSG:expr) => {
-        Err(ParserError::ParserError($MSG.to_string()))
-    };
-}
-
 impl<'a> ParserContext<'a> {
     /// Parses SQL with given dialect
     pub fn create_with_dialect(sql: &'a str, dialect: &dyn Dialect) -> Result<Vec<Statement>> {
@@ -118,8 +111,11 @@ impl<'a> ParserContext<'a> {
 
     // Report unexpected token
     pub(crate) fn expected<T>(&self, expected: &str, found: Token) -> Result<T> {
-        parser_err!(format!("Expected {}, found: {}", expected, found))
-            .context(SyntaxSnafu { sql: self.sql })
+        Err(ParserError::ParserError(format!(
+            "Expected {}, found: {}",
+            expected, found
+        )))
+        .context(SyntaxSnafu { sql: self.sql })
     }
 
     pub fn consume_token(&mut self, expected: &str) -> bool {
