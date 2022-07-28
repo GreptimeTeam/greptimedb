@@ -9,11 +9,10 @@ use crate::error;
 use crate::error::{InvalidTimeIndexKeysSnafu, SyntaxSnafu};
 use crate::parser::ParserContext;
 use crate::parser::Result;
-use crate::statements::create_table::CreateTable;
+use crate::statements::create_table::{CreateTable, TS_INDEX};
 use crate::statements::statement::Statement;
 
 const ENGINE: &str = "ENGINE";
-const TS_INDEX: &str = "ts_index";
 
 /// Pasre create [table] statement
 impl<'a> ParserContext<'a> {
