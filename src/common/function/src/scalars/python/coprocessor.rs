@@ -480,8 +480,8 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         // FIXME: better error handling, perhaps with chain calls
         let ret = match run_res {
             Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
-            Ok(ret) => Ok::<_, Error>(ret),
-        }?;
+            Ok(ret) => ret,
+        };
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
         let mut cols: Vec<ArrayRef> = into_columns(&ret, vm)?;
