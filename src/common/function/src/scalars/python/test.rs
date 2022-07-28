@@ -146,6 +146,7 @@ fn get_error_reason(err: &Error) -> String {
             backtrace: _,
             source,
         } => source.output.clone(),
+        Error::PyParse { backtrace:_, source } => format!("{}", source.error),
         _ => {
             unimplemented!()
         }
@@ -222,15 +223,20 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     let ret = exec_coprocessor(python_source, &rb);
     // println!("{}", ret.unwrap_err());
     dbg!(&ret);
+    let ret = ret.unwrap_err();
+    dbg!(get_error_reason(&ret));
     if let Error::PyParse {
         backtrace: _,
         source,
-    } = ret.unwrap_err()
+    } = ret
     {
         let res = pretty_print_loc_in_src(
             python_source, 
             &source.location, 
-            format!("{}", source.error).as_str());
+            format!("{}", source.error).as_str(),
+            0,
+            "copr.py"
+        );
         println!("{res}");
     }
     // assert!(ret.is_ok());

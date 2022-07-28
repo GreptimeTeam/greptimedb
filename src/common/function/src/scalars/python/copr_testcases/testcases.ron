@@ -238,5 +238,16 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         predicate: ExecIsErr(
             reason: "ZeroDivisionError: division by zero"
         )
-    )
+    ),
+    (
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+    vector[f32]):
+    return cpu + mem, cpu - mem***
+"#,
+        predicate: ParseIsErr(
+            reason: "invalid syntax. Got unexpected token "
+        )
+    ),
 ]
