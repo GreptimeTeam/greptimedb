@@ -194,16 +194,6 @@ def a(cpu: vector[_], mem: vector[f64])->(vector[f64|None], vector[f64], vector[
     // dbg!(&copr);
     //assert!(copr.is_ok());
 }
-#[test]
-fn test_execute_script() {
-    let python_source = "
-def a(a: int,b: int)->int:
-    return 1
-a(2,3)
-";
-    let result = execute_script(python_source);
-    assert!(result.is_ok());
-}
 
 #[test]
 #[allow(clippy::print_stdout)]
