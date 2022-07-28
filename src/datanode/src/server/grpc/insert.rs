@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    sync::Arc,
+};
 
 use api::v1::{column::Values, Column, InsertBatch, InsertExpr};
 use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
@@ -29,18 +32,23 @@ pub fn insertion_expr_to_request(
                 None => continue,
             };
 
-            let column_schema =
-                schema
-                    .column_schema_by_name(&column_name)
-                    .context(ColumnNotFoundSnafu {
-                        column_name: &column_name,
-                        table_name,
-                    })?;
-            let data_type = &column_schema.data_type;
-
-            let vector_builder = columns_builders.entry(column_name).or_insert_with(|| {
-                VectorBuilder::with_capacity(data_type.clone(), row_count as usize)
-            });
+            let column = column_name.clone();
+            let vector_builder = match columns_builders.entry(column) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let column_schema = schema.column_schema_by_name(&column_name).context(
+                        ColumnNotFoundSnafu {
+                            column_name: &column_name,
+                            table_name,
+                        },
+                    )?;
+                    let data_type = &column_schema.data_type;
+                    entry.insert(VectorBuilder::with_capacity(
+                        data_type.clone(),
+                        row_count as usize,
+                    ))
+                }
+            };
 
             add_values_to_builder(vector_builder, values, row_count as usize, null_mask)?;
         }

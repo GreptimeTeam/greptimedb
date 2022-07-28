@@ -31,6 +31,9 @@ impl BatchHandler {
                             Ok(Output::AffectedRows(rows)) => {
                                 object_resp.header = Some(ResultHeader {
                                     version: PROTOCOL_VERSION,
+                                    // TODO(fys): Only one success code (200) was provided
+                                    // in the early stage and we will refine it later
+                                    code: 200,
                                     success: rows as u32,
                                     ..Default::default()
                                 });
@@ -38,6 +41,9 @@ impl BatchHandler {
                             Err(err) => {
                                 object_resp.header = Some(ResultHeader {
                                     version: PROTOCOL_VERSION,
+                                    // TODO(fys): Only one error code (500) was provided
+                                    // in the early stage and we will refine it later
+                                    code: 500,
                                     err_msg: err.to_string(),
                                     // TODO(fys): failure count
                                     ..Default::default()
