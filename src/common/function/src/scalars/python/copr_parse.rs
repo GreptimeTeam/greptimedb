@@ -19,6 +19,14 @@ pub(crate) fn ret_parse_error(
     CoprParseSnafu { reason, loc }
 }
 
+/// append a `.fail()` after `ret_parse_error`, so compiler can return a Err(this error)
+#[macro_export]
+macro_rules! fail_parse_error {
+    ($reason:expr, $loc:expr $(,)*) => {
+        ret_parse_error($reason, $loc).fail()
+    };
+}
+
 /// turn a python list of string in ast form(a `ast::Expr`) of string into a `Vec<String>`
 fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
     if let ast::ExprKind::List { elts, ctx: _ } = &lst.node {
@@ -31,23 +39,21 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
             {
                 ret.push(v.to_owned())
             } else {
-                return ret_parse_error(
+                return fail_parse_error!(
                     format!(
                         "Expect a list of String, found {:?} in list element",
                         &s.node
                     ),
-                    Some(lst.location),
-                )
-                .fail();
+                    Some(lst.location)
+                );
             }
         }
         Ok(ret)
     } else {
-        ret_parse_error(
+        fail_parse_error!(
             format!("Expect a list, found {:?}", &lst.node),
-            Some(lst.location),
+            Some(lst.location)
         )
-        .fail()
     }
 }
 
@@ -67,11 +73,10 @@ fn into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
         "f64" => Ok(Some(DataType::Float64)),
         // for any datatype
         "_" => Ok(None),
-        _ => ret_parse_error(
+        _ => fail_parse_error!(
             format!("Unknown datatype: {ty} at {}", loc),
-            Some(loc.to_owned()),
-        )
-        .fail(),
+            Some(loc.to_owned())
+        ),
     }
 }
 
@@ -83,11 +88,10 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
             datatype: into_datatype(id, &sub.location)?,
             is_nullable: false,
         }),
-        _ => ret_parse_error(
+        _ => fail_parse_error!(
             format!("Expect types' name, found {:?}", &sub.node),
-            Some(sub.location),
-        )
-        .fail(),
+            Some(sub.location)
+        ),
     }
 }
 
@@ -111,30 +115,27 @@ fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
                 }
                 ast::ExprKind::Name { id: _, ctx: _ } => {
                     if has_ty {
-                        return ret_parse_error(
+                        return fail_parse_error!(
                             "Expect one typenames and one `None`, not two type names".into(),
-                            Some(i.location),
-                        )
-                        .fail();
+                            Some(i.location)
+                        );
                     } else {
                         has_ty = true;
                     }
                 }
                 _ => {
-                    return ret_parse_error(
+                    return fail_parse_error!(
                         format!("Expect typename or `None`, found {:?}", &i.node),
                         Some(i.location),
                     )
-                    .fail()
                 }
             }
         }
         if !(has_ty && has_none) {
-            return ret_parse_error(
+            return fail_parse_error!(
                 format!("Expect a type name and a `None`, found {:?}", &bin_op.node),
-                Some(bin_op.location),
-            )
-            .fail();
+                Some(bin_op.location)
+            );
         }
 
         for i in [left, right] {
@@ -147,24 +148,22 @@ fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
                     keywords: _,
                 } => (),
                 _ => {
-                    return ret_parse_error(
+                    return fail_parse_error!(
                         format!("Expect typename or `None`, found {:?}", &i.node),
                         Some(i.location),
-                    )
-                    .fail();
+                    );
                 }
             }
         }
         Ok(())
     } else {
-        ret_parse_error(
+        fail_parse_error!(
             format!(
                 "Expect binary ops like `DataType | None`, found {:#?}",
                 bin_op
             ),
-            Some(bin_op.location),
+            Some(bin_op.location)
         )
-        .fail()
     }
 }
 
@@ -218,11 +217,10 @@ fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
                 )
             );
         } else {
-            return ret_parse_error(
+            return fail_parse_error!(
                 format!("Expect \"vector\", found {:?}", &value.node),
-                Some(value.location),
-            )
-            .fail();
+                Some(value.location)
+            );
         }
 
         match &slice.node {
@@ -238,19 +236,17 @@ fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
                 right: _,
             } => (),
             _ => {
-                return ret_parse_error(
+                return fail_parse_error!(
                     format!("Expect type in `vector[...]`, found {:?}", &slice.node),
                     Some(slice.location),
                 )
-                .fail()
             }
         }
     } else {
-        return ret_parse_error(
+        return fail_parse_error!(
             format!("Expect type annotation, found {:?}", &sub),
-            Some(sub.location),
-        )
-        .fail();
+            Some(sub.location)
+        );
     };
     Ok(())
 }
@@ -300,30 +296,27 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<
                 let s = s.as_str();
                 if !kw_map.contains_key(s) {
                     if !avail_key.contains(s) {
-                        return ret_parse_error(
+                        return fail_parse_error!(
                             format!("Expect one of {:?}, found `{}`", &avail_key, s),
                             Some(kw.location),
-                        )
-                        .fail();
+                        );
                     }
                     kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
                 } else {
-                    return ret_parse_error(
+                    return fail_parse_error!(
                         format!("`{s}` occur multiple times in decorator's arguements' list."),
                         Some(kw.location),
-                    )
-                    .fail();
+                    );
                 }
             }
             None => {
-                return ret_parse_error(
+                return fail_parse_error!(
                     format!(
                         "Expect explictly set both `args` and `returns`, found {:?}",
                         &kw.node
                     ),
                     Some(kw.location),
                 )
-                .fail()
             }
         }
     }
@@ -373,14 +366,13 @@ fn check_decorator(decorator: &ast::Expr<()>) -> Result<()> {
             }
         );
     } else {
-        return ret_parse_error(
+        return fail_parse_error!(
             format!(
                 "Expect decorator to be a function call(like `@copr(...)`), found {:?}",
                 decorator.node
             ),
             Some(decorator.location),
-        )
-        .fail();
+        );
     }
     Ok(())
 }
@@ -424,14 +416,13 @@ fn check_return_annotations(rets: &ast::Expr<()>) -> Result<()> {
             slice: _,
             ctx: _,
         } => Ok(()),
-        _ => ret_parse_error(
+        _ => fail_parse_error!(
             format!(
                 "Expect one or many type annotation for the return type, found {:#?}",
                 &rets.node
             ),
             Some(rets.location),
-        )
-        .fail(),
+        ),
     }
 }
 
@@ -502,11 +493,10 @@ fn check_copr(stmts: &Vec<ast::Stmt<()>>) -> Result<()> {
             }
         );
     } else {
-        return ret_parse_error(
+        return fail_parse_error!(
             format!("Expect a function definition, found a {:?}", &stmts[0].node),
             Some(stmts[0].location),
-        )
-        .fail();
+        );
     }
     Ok(())
 }

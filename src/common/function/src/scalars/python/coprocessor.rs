@@ -21,6 +21,7 @@ use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
 use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
+use crate::fail_parse_error;
 use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
 use crate::scalars::python::error::{
     ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
@@ -122,18 +123,16 @@ impl Coprocessor {
             } = &code[0].node
             {
             } else {
-                return ret_parse_error(
+                return fail_parse_error!(
                     format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
                     Some(code[0].location)
-                )
-                .fail();
+                );
             }
         } else {
-            return ret_parse_error(
+            return fail_parse_error!(
                 format!("Expect statement in script, found: {:?}", top),
                 None,
-            )
-            .fail();
+            );
         }
         Ok(())
     }
