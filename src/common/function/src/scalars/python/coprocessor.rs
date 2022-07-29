@@ -293,7 +293,7 @@ fn try_into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBu
 
 /// convert a `Vec<ArrayRef>` into a `Vec<PyVector>` only when they are of supported types
 /// PyVector now only support unsigned&int8/16/32/64, float32/64 and bool when doing meanful arithmetics operation
-fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
+fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
     let mut args: Vec<PyVector> = Vec::with_capacity(fetch_args.len());
     for (idx, arg) in fetch_args.into_iter().enumerate() {
         let v: VectorRef = match arg.data_type() {
@@ -368,7 +368,7 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
 /// to a `Vec<ArrayRef>`
 ///
 /// TODO: add support for constant columns
-fn into_columns(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<Vec<ArrayRef>> {
+fn try_into_columns(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<Vec<ArrayRef>> {
     if is_instance(obj, PyTuple::class(vm).into(), vm) {
         let tuple = obj
             .payload::<PyTuple>()
@@ -409,7 +409,7 @@ fn select_from_rb(rb: &DfRecordBatch, fetch_names: &[String]) -> Result<Vec<PyVe
         .into_iter()
         .map(|idx| rb.column(idx).clone())
         .collect();
-    into_py_vector(fetch_args)
+    try_into_py_vector(fetch_args)
 }
 
 /// match between arguments' real type and annotation types
@@ -540,7 +540,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
         let col_len = rb.num_rows();
-        let mut cols: Vec<ArrayRef> = into_columns(&ret, vm, col_len)?;
+        let mut cols: Vec<ArrayRef> = try_into_columns(&ret, vm, col_len)?;
         ensure!(
             cols.len() == copr.returns.len(),
             OtherSnafu {
