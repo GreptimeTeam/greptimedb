@@ -7,6 +7,16 @@ use crate::TableRef;
 /// Table engine abstraction.
 #[async_trait::async_trait]
 pub trait TableEngine: Send + Sync {
+    /// Return engine name
+    fn name(&self) -> &str;
+
+    /// Open a table.
+    async fn open_table(
+        &self,
+        ctx: &EngineContext,
+        request: OpenTableRequest,
+    ) -> Result<Option<TableRef>>;
+
     /// Create a table by given request.
     ///
     /// Return the created table.

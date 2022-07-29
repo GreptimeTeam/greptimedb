@@ -1,3 +1,11 @@
+mod consts;
+mod error;
+mod manager;
+pub mod memory;
+pub mod schema;
+mod system;
+mod tables;
+
 use std::any::Any;
 use std::sync::Arc;
 
@@ -16,6 +24,14 @@ pub trait CatalogList: Sync + Send {
         name: String,
         catalog: Arc<dyn CatalogProvider>,
     ) -> Option<Arc<dyn CatalogProvider>>;
+
+    /// Registers a catalog and return `None` if no catalog with the same name was already
+    /// registered, or `Some` with the previously registered catalog.
+    fn register_catalog_if_absent(
+        &self,
+        name: String,
+        catalog: Arc<dyn CatalogProvider>,
+    ) -> Option<CatalogProviderRef>;
 
     /// Retrieves the list of available catalog names
     fn catalog_names(&self) -> Vec<String>;

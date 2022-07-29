@@ -49,6 +49,10 @@ impl<S: StorageEngine> MitoEngine<S> {
 
 #[async_trait]
 impl<S: StorageEngine> TableEngine for MitoEngine<S> {
+    fn name(&self) -> &str {
+        DEFAULT_ENGINE
+    }
+
     async fn create_table(
         &self,
         ctx: &EngineContext,
@@ -227,6 +231,15 @@ fn build_column_family_from_request(
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
+    async fn open_table(
+        &self,
+        _ctx: &EngineContext,
+        _request: OpenTableRequest,
+    ) -> Result<Option<TableRef>> {
+        // as StorageEngine::open_region is not implemented yet.
+        unimplemented!()
+    }
+
     async fn create_table(
         &self,
         _ctx: &EngineContext,

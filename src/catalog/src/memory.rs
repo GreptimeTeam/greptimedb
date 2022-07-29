@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -62,6 +63,21 @@ impl CatalogList for MemoryCatalogList {
     ) -> Option<CatalogProviderRef> {
         let mut catalogs = self.catalogs.write().unwrap();
         catalogs.insert(name, catalog)
+    }
+
+    fn register_catalog_if_absent(
+        &self,
+        name: String,
+        catalog: Arc<dyn CatalogProvider>,
+    ) -> Option<CatalogProviderRef> {
+        let mut catalogs = self.catalogs.write().unwrap();
+        match catalogs.entry(name) {
+            Entry::Occupied(v) => Some(v.get().clone()),
+            Entry::Vacant(v) => {
+                v.insert(catalog);
+                None
+            }
+        }
     }
 
     fn catalog_names(&self) -> Vec<String> {
