@@ -84,10 +84,12 @@ pub struct ColumnFamilyDescriptor {
 }
 
 /// A [RegionDescriptor] contains information to create a region.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Builder)]
+#[builder(pattern = "owned")]
 pub struct RegionDescriptor {
     pub id: RegionId,
     /// Region name.
+    #[builder(setter(into))]
     pub name: String,
     /// Row key descriptor of this region.
     pub row_key: RowKeyDescriptor,
