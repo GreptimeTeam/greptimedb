@@ -2,15 +2,14 @@ use datatypes::value::Value;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::MetadataId;
 use crate::storage::{consts, ColumnSchema, ConcreteDataType};
 
 /// Id of column, unique in each region.
 pub type ColumnId = u32;
 /// Id of column family, unique in each region.
 pub type ColumnFamilyId = u32;
+/// Id of the region.
 pub type RegionId = u32;
-impl MetadataId for RegionId {}
 /// Default region name prefix
 pub const REGION_PREFIX: &str = "r_";
 

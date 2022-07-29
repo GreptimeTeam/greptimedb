@@ -37,9 +37,17 @@ pub struct VersionControl {
 
 impl VersionControl {
     /// Construct a new version control from `metadata`.
-    pub fn new(metadata: RegionMetadata, memtables: MemtableVersion) -> VersionControl {
+    pub fn new(metadata: RegionMetadata) -> VersionControl {
         VersionControl {
-            version: CowCell::new(Version::new(metadata, memtables)),
+            version: CowCell::new(Version::new(metadata)),
+            committed_sequence: AtomicU64::new(0),
+        }
+    }
+
+    /// Construct a new version control from existing `version`.
+    pub fn with_version(version: Version) -> VersionControl {
+        VersionControl {
+            version: CowCell::new(version),
             committed_sequence: AtomicU64::new(0),
         }
     }
@@ -139,14 +147,19 @@ pub struct Version {
 }
 
 impl Version {
-    pub fn new(metadata: RegionMetadata, memtables: MemtableVersion) -> Version {
+    pub fn new(metadata: RegionMetadata) -> Version {
         Version {
             metadata: Arc::new(metadata),
-            memtables: Arc::new(memtables),
+            memtables: Arc::new(MemtableVersion::new()),
             ssts: Arc::new(LevelMetas::new()),
             flushed_sequence: 0,
             manifest_version: 0,
         }
+    }
+
+    #[inline]
+    pub fn metadata(&self) -> &RegionMetadataRef {
+        &self.metadata
     }
 
     #[inline]
@@ -167,6 +180,11 @@ impl Version {
     #[inline]
     pub fn ssts(&self) -> &LevelMetasRef {
         &self.ssts
+    }
+
+    #[inline]
+    pub fn flushed_sequence(&self) -> SequenceNumber {
+        self.flushed_sequence
     }
 
     /// Returns duration used to partition the memtables and ssts by time.
@@ -218,7 +236,7 @@ mod tests {
             .build();
         let metadata: RegionMetadata = desc.try_into().unwrap();
 
-        VersionControl::new(metadata, MemtableVersion::new())
+        VersionControl::new(metadata)
     }
 
     #[test]

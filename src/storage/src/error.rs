@@ -108,14 +108,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display(
-        "Failed to write WAL, region id: {}, WAL name: {}, source: {}",
-        region_id,
-        name,
-        source
-    ))]
+    #[snafu(display("Failed to write WAL, WAL name: {}, source: {}", name, source))]
     WriteWal {
-        region_id: u32,
         name: String,
         #[snafu(backtrace)]
         source: BoxedError,
@@ -196,6 +190,19 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Region is under {} state, cannot proceed operation", state))]
+    InvalidRegionState {
+        state: &'static str,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to read WAL, name: {}, source: {}", name, source))]
+    ReadWal {
+        name: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -235,7 +242,9 @@ impl ErrorExt for Error {
             | ManifestProtocolForbidRead { .. }
             | ManifestProtocolForbidWrite { .. }
             | ReadParquet { .. }
-            | ReadParquetIo { .. } => StatusCode::StorageUnavailable,
+            | ReadParquetIo { .. }
+            | InvalidRegionState { .. }
+            | ReadWal { .. } => StatusCode::StorageUnavailable,
         }
     }
 

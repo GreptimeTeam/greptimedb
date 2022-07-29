@@ -29,14 +29,13 @@ async fn new_region_for_rw(
     store_dir: &str,
     enable_version_column: bool,
 ) -> RegionImpl<NoopLogStore> {
-    let region_id = 0;
     let region_name = "region-rw-0";
 
     let metadata = new_metadata(region_name, enable_version_column);
 
-    let store_config = config_util::new_store_config(store_dir, region_id, region_name).await;
+    let store_config = config_util::new_store_config(store_dir, region_name).await;
 
-    RegionImpl::new(region_id, region_name.to_string(), metadata, store_config)
+    RegionImpl::new(0, region_name.to_string(), metadata, store_config)
 }
 
 fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {

@@ -12,7 +12,6 @@ use crate::test_util::{self, config_util, descriptor_util::RegionDescBuilder, sc
 
 #[tokio::test]
 async fn test_new_region() {
-    let region_id = 0;
     let region_name = "region-0";
     let desc = RegionDescBuilder::new(region_name)
         .enable_version_column(true)
@@ -27,9 +26,9 @@ async fn test_new_region() {
         .to_string_lossy()
         .to_string();
 
-    let store_config = config_util::new_store_config(&store_dir, region_id, region_name).await;
+    let store_config = config_util::new_store_config(&store_dir, region_name).await;
 
-    let region = RegionImpl::new(region_id, region_name.to_string(), metadata, store_config);
+    let region = RegionImpl::new(0, region_name.to_string(), metadata, store_config);
 
     let expect_schema = schema_util::new_schema_ref(
         &[

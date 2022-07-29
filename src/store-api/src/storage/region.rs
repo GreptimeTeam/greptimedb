@@ -21,6 +21,7 @@
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
+use crate::storage::engine::OpenOptions;
 use crate::storage::metadata::RegionMeta;
 use crate::storage::requests::WriteRequest;
 use crate::storage::responses::WriteResponse;
@@ -28,7 +29,7 @@ use crate::storage::snapshot::{ReadContext, Snapshot};
 
 /// Chunks of rows in storage engine.
 #[async_trait]
-pub trait Region: Send + Sync + Clone + 'static {
+pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
     type Error: ErrorExt + Send + Sync;
     type Meta: RegionMeta;
     type WriteRequest: WriteRequest;
@@ -54,3 +55,9 @@ pub trait Region: Send + Sync + Clone + 'static {
 /// Context for write operations.
 #[derive(Debug, Clone, Default)]
 pub struct WriteContext {}
+
+impl From<&OpenOptions> for WriteContext {
+    fn from(_opts: &OpenOptions) -> WriteContext {
+        WriteContext::default()
+    }
+}
