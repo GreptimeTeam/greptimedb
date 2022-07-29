@@ -368,7 +368,11 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
 /// to a `Vec<ArrayRef>`
 ///
 /// TODO: add support for constant columns
-fn try_into_columns(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<Vec<ArrayRef>> {
+fn try_into_columns(
+    obj: &PyObjectRef,
+    vm: &VirtualMachine,
+    col_len: usize,
+) -> Result<Vec<ArrayRef>> {
     if is_instance(obj, PyTuple::class(vm).into(), vm) {
         let tuple = obj
             .payload::<PyTuple>()
