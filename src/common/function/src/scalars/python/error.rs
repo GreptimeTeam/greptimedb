@@ -118,13 +118,13 @@ pub fn visualize_loc(
     let red_bold = Style::new().red().bold();
     let blue_bold = Style::new().blue().bold();
     let col_space = (ln_offset + row).to_string().len().max(1);
-    let space: String = " ".repeat(col_space);
+    let space: String = " ".repeat(col_space-1);
     let indicate = format!(
         "
 {error}: {err_ty}
-{space}{r_arrow} {filename}:{row}:{col}
-{prow} {ln_pad} {line}
-{space} {ln_pad} {arrow:>pad$} {desc}
+{space}{r_arrow}{filename}:{row}:{col}
+{prow:col_space$}{ln_pad} {line}
+{space} {ln_pad}{arrow:>pad$} {desc}
 ",
         error = red_bold.apply_to("error"),
         err_ty = style(err_ty).bold(),
