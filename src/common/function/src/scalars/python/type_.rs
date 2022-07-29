@@ -104,7 +104,7 @@ fn arrow2_rfloordiv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
 }
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
-fn is_instance(obj: &PyObjectRef, ty: &PyObject, vm: &VirtualMachine) -> bool {
+pub fn is_instance(obj: &PyObjectRef, ty: &PyObject, vm: &VirtualMachine) -> bool {
     obj.is_instance(ty, vm).unwrap_or(false)
 }
 
@@ -153,6 +153,10 @@ impl AsRef<PyVector> for PyVector {
 
 #[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
 impl PyVector {
+    #[inline]
+    pub fn to_arrow_array(&self) -> ArrayRef {
+        self.vector.to_arrow_array()
+    }
     #[inline]
     fn scalar_arith_op<F>(
         &self,
@@ -463,12 +467,12 @@ fn is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
         || is_instance(obj, PyBool::class(vm).into(), vm)
 }
 
-/// convert a `PyObjectRef` into a `datatypess::Value`(is that ok?)
+/// convert a `PyObjectRef` into a `datatypes::Value`(is that ok?)
 /// if `obj` can be convert to given ConcreteDataType then return inner `Value` else return None
 /// if dtype is None, return types with highest precision
 /// Not used for now but may be use in future
 #[allow(unused)]
-fn pyobj_try_to_typed_val(
+pub fn pyobj_try_to_typed_val(
     obj: PyObjectRef,
     vm: &VirtualMachine,
     dtype: Option<ConcreteDataType>,
@@ -613,7 +617,7 @@ fn pyobj_try_to_typed_val(
 }
 
 /// convert a DataType `Value` into a `PyObjectRef`
-fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
+pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
     match val {
         // This comes from:https://github.com/RustPython/RustPython/blob/8ab4e770351d451cfdff5dc2bf8cce8df76a60ab/vm/src/builtins/singletons.rs#L37
         // None in Python is universally singleton so
@@ -869,7 +873,7 @@ pub mod tests {
                         if v {
                             "\u{001B}[32m...[ok]\u{001B}[0m".to_string()
                         } else {
-                            "\u{001B}[12m...[failed]\u{001B}[0m".to_string()
+                            "\u{001B}[31m...[failed]\u{001B}[0m".to_string()
                         }
                     } else {
                         "\u{001B}[36m...[unapplicable]\u{001B}[0m".to_string()
