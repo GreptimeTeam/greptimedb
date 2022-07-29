@@ -316,6 +316,7 @@ fn version_column_desc() -> ColumnDescriptor {
     )
     .is_nullable(false)
     .build()
+    .unwrap()
 }
 
 // TODO(yingwen): Add tests for using invalid row_key/cf to build metadata.
@@ -381,20 +382,26 @@ mod tests {
     fn new_metadata(enable_version_column: bool) -> RegionMetadata {
         let timestamp = ColumnDescriptorBuilder::new(2, "ts", ConcreteDataType::int64_datatype())
             .is_nullable(false)
-            .build();
+            .build()
+            .unwrap();
         let row_key = RowKeyDescriptorBuilder::new(timestamp)
             .push_column(
                 ColumnDescriptorBuilder::new(3, "k1", ConcreteDataType::int64_datatype())
                     .is_nullable(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .enable_version_column(enable_version_column)
-            .build();
-        let cf = ColumnFamilyDescriptorBuilder::new()
+            .build()
+            .unwrap();
+        let cf = ColumnFamilyDescriptorBuilder::default()
             .push_column(
-                ColumnDescriptorBuilder::new(4, "v1", ConcreteDataType::int64_datatype()).build(),
+                ColumnDescriptorBuilder::new(4, "v1", ConcreteDataType::int64_datatype())
+                    .build()
+                    .unwrap(),
             )
-            .build();
+            .build()
+            .unwrap();
         RegionMetadataBuilder::new()
             .row_key(row_key)
             .unwrap()
