@@ -79,13 +79,13 @@ impl TableInfoBuilder {
     }
 
     pub fn table_id(mut self, id: impl Into<TableId>) -> Self {
-        let ident = self.ident.get_or_insert_with(|| TableIdent::default());
+        let ident = self.ident.get_or_insert_with(TableIdent::default);
         ident.table_id = id.into();
         self
     }
 
     pub fn table_version(mut self, version: impl Into<TableVersion>) -> Self {
-        let ident = self.ident.get_or_insert_with(|| TableIdent::default());
+        let ident = self.ident.get_or_insert_with(TableIdent::default);
         ident.version = version.into();
         self
     }

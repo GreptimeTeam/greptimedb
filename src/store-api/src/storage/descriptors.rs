@@ -113,7 +113,7 @@ impl RowKeyDescriptorBuilder {
     }
 
     pub fn push_column(mut self, column: ColumnDescriptor) -> Self {
-        let columns = self.columns.get_or_insert_with(|| Vec::new());
+        let columns = self.columns.get_or_insert_with(Vec::new);
         columns.push(column);
         self
     }
@@ -126,7 +126,7 @@ impl ColumnFamilyDescriptorBuilder {
     }
 
     pub fn push_column(mut self, column: ColumnDescriptor) -> Self {
-        let columns = self.columns.get_or_insert_with(|| Vec::new());
+        let columns = self.columns.get_or_insert_with(Vec::new);
         columns.push(column);
         self
     }
