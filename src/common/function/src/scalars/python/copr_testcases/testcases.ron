@@ -63,7 +63,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: "Expect a list of String, found "
+            reason: "Expect a list of String, found"
         )
     ),
     (
@@ -74,7 +74,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: "Expect a list, found Constant"
+            reason: "Expect a list, found"
         )
     ),
     (
@@ -385,6 +385,15 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64]):
 "#,
         predicate: ExecIsErr(
             reason: "'break' outside loop"
+        )
+    ),
+    (
+        name: "not_even_wrong",
+        code: r#"
+42
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect a function definition, found a"
         )
     )
 ]

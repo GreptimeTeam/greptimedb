@@ -41,7 +41,7 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
             } else {
                 return fail_parse_error!(
                     format!(
-                        "Expect a list of String, found {:?} in list element",
+                        "Expect a list of String, found one element to be: \n{:#?}",
                         &s.node
                     ),
                     Some(s.location)
@@ -51,7 +51,7 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
         Ok(ret)
     } else {
         fail_parse_error!(
-            format!("Expect a list, found {:?}", &lst.node),
+            format!("Expect a list, found \n{:#?}", &lst.node),
             Some(lst.location)
         )
     }
@@ -90,7 +90,7 @@ fn parse_native_type(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
             is_nullable: false,
         }),
         _ => fail_parse_error!(
-            format!("Expect types' name, found {:?}", &sub.node),
+            format!("Expect types' name, found \n{:#?}", &sub.node),
             Some(sub.location)
         ),
     }
@@ -128,7 +128,7 @@ fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
         } else if !(left_is_none && right_is_ty || left_is_ty && right_is_none) {
             fail_parse_error!(
                 format!(
-                    "Expect a type name and a `None`, found left: {:?} and right: {:?}",
+                    "Expect a type name and a `None`, found left: \n{:#?} \nand right: \n{:#?}",
                     &left.node, &right.node
                 ),
                 Some(bin_op.location)
@@ -138,7 +138,7 @@ fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
     } else {
         fail_parse_error!(
             format!(
-                "Expect binary ops like `DataType | None`, found {:#?}",
+                "Expect binary ops like `DataType | None`, found \n{:#?}",
                 bin_op.node
             ),
             Some(bin_op.location)
@@ -193,14 +193,14 @@ fn check_annotation_ret_slice(sub: &ast::Expr<()>) -> Result<&ast::Expr<()>> {
             );
         } else {
             return fail_parse_error!(
-                format!("Expect \"vector\", found {:?}", &value.node),
+                format!("Expect \"vector\", found \n{:#?}", &value.node),
                 Some(value.location)
             );
         }
         Ok(slice)
     } else {
         fail_parse_error!(
-            format!("Expect type annotation, found {:?}", &sub),
+            format!("Expect type annotation, found \n{:#?}", &sub),
             Some(sub.location)
         )
     }
@@ -227,7 +227,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
             } => parse_bin_op(slice),
             _ => {
                 fail_parse_error!(
-                    format!("Expect type in `vector[...]`, found {:?}", &slice.node),
+                    format!("Expect type in `vector[...]`, found \n{:#?}", &slice.node),
                     Some(slice.location),
                 )
             }
@@ -273,7 +273,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<
             None => {
                 return fail_parse_error!(
                     format!(
-                        "Expect explictly set both `args` and `returns`, found {:?}",
+                        "Expect explictly set both `args` and `returns`, found \n{:#?}",
                         &kw.node
                     ),
                     Some(kw.location),
@@ -313,7 +313,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
                     },
             CoprParseSnafu {
                 reason: format!(
-                    "Expect decorator with name `copr` or `coprocessor`, found {:?}",
+                    "Expect decorator with name `copr` or `coprocessor`, found \n{:#?}",
                     &func.node
                 ),
                 loc: Some(func.location)
@@ -323,7 +323,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String
     } else {
         fail_parse_error!(
             format!(
-                "Expect decorator to be a function call(like `@copr(...)`), found {:?}",
+                "Expect decorator to be a function call(like `@copr(...)`), found \n{:#?}",
                 decorator.node
             ),
             Some(decorator.location),
@@ -358,7 +358,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
         _ => {
             return fail_parse_error!(
                 format!(
-                    "Expect `(vector[...], vector[...], ...)` or `vector[...]`, found {:#?}",
+                    "Expect `(vector[...], vector[...], ...)` or `vector[...]`, found \n{:#?}",
                     &rets.node
                 ),
                 Some(rets.location),
@@ -381,7 +381,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
         _ => {
             return fail_parse_error!(
                 format!(
-                    "Expect one or many type annotation for the return type, found {:#?}",
+                    "Expect one or many type annotation for the return type, found \n{:#?}",
                     &rets.node
                 ),
                 Some(rets.location),
@@ -421,7 +421,7 @@ fn check_copr(stmts: &Vec<ast::Stmt<()>>) -> Result<()> {
         );
     } else {
         return fail_parse_error!(
-            format!("Expect a function definition, found a {:?}", &stmts[0].node),
+            format!("Expect a function definition, found a \n{:#?}", &stmts[0].node),
             Some(stmts[0].location),
         );
     }
