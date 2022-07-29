@@ -98,6 +98,12 @@ pub enum Error {
     #[snafu(display("No corresponding ConcreteDataType found"))]
     UnknownConcreteDataType { backtrace: Backtrace },
 
+    #[snafu(display("Null schema"))]
+    NullSchema,
+
+    #[snafu(display("No corresponding DataType found"))]
+    UnknownDataType,
+
     // #[snafu(display("Unknown column {}", name))]
     // UnknownColumn { name: String, backtrace: Backtrace },
     #[snafu(display("Failed to parse schema, source: {}", source))]
@@ -440,19 +446,13 @@ pub mod codec {
         Error as WriteBatchError, InvalidTimestampIndexSnafu, Mutation, ParseSchemaSnafu, Result,
         WriteBatch,
     };
-    use crate::proto;
-    use crate::proto::gen_columns;
-    use crate::proto::gen_put_data_vector;
-    use crate::write_batch::DecodeProtobufSnafu;
-    use crate::write_batch::EncodeProtobufSnafu;
+    use crate::proto::{self, gen_columns, gen_put_data_vector, MutationExtra, MutationType};
+    use crate::write_batch::{DecodeProtobufSnafu, EncodeProtobufSnafu, PutData};
     use crate::{
         arrow_stream::ArrowStreamReader,
         codec::{Decoder, Encoder},
     };
-    use crate::{
-        proto::{MutationExtra, MutationType},
-        write_batch::PutData,
-    };
+
     // TODO(jiachun): The codec logic is too complex, maybe we should use protobuf to
     // serialize/deserialize all our data.
     // And we can make a comparison with protobuf, including performance, storage cost,
@@ -690,7 +690,6 @@ pub mod codec {
                             let mut null_mask =
                                 bit_vec::BitVec::from_elem(item.schema().num_columns(), false);
                             let mut columns = vec![];
-
                             item.schema().column_schemas().iter().enumerate().for_each(
                                 |(i, column_schema)| {
                                     match put_data.columns.get(&column_schema.name) {
@@ -709,9 +708,8 @@ pub mod codec {
                                 columns,
                                 column_null_mask: null_mask.to_bytes(),
                             };
-                            let mutation = proto::mutation::Mutation::Put(put);
                             proto::Mutation {
-                                mutation: Some(mutation),
+                                mutation: Some(proto::mutation::Mutation::Put(put)),
                             }
                         }
                     }
@@ -740,7 +738,7 @@ pub mod codec {
 
             let schema = match write_batch_proto.schema {
                 Some(schema) => schema,
-                _ => unreachable!(),
+                _ => return Err(WriteBatchError::NullSchema),
             };
 
             let column_schemas = schema
@@ -777,17 +775,13 @@ pub mod codec {
                 .for_each(|mutation| match &mutation.mutation {
                     Some(proto::mutation::Mutation::Put(put)) => {
                         let mut put_data = PutData::new();
-                        let mut put_column_iter = put.columns.iter();
                         bit_vec::BitVec::from_bytes(&put.column_null_mask)
                             .iter()
                             .take(schema.num_columns())
                             .zip(schema.column_schemas().iter())
                             .filter(|(mask, _)| !mask)
-                            .for_each(|(_, column_schema)| {
-                                let column = match put_column_iter.next() {
-                                    Some(column) => column,
-                                    None => unreachable!(),
-                                };
+                            .zip(put.columns.iter())
+                            .for_each(|((_, column_schema), column)| {
                                 let vector_ref = gen_put_data_vector(
                                     column_schema.data_type.clone(),
                                     write_batch_proto.num_rows as usize,
@@ -797,8 +791,7 @@ pub mod codec {
                                     .add_column_by_name(column_schema.name.as_str(), vector_ref)
                                     .unwrap();
                             });
-                        let mutation = Mutation::Put(put_data);
-                        mutations.push(mutation);
+                        mutations.push(Mutation::Put(put_data));
                     }
                     Some(proto::mutation::Mutation::Delete(_)) => todo!(),
                     _ => unreachable!(),
@@ -1110,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn test_i8_vector_single_column() {
+    fn test_codec_protobuf_single_column() {
         let mut column_schemas = Vec::new();
         let column = ColumnSchema::new("i8_column_test", ConcreteDataType::int8_datatype(), true);
         column_schemas.push(column);
@@ -1120,7 +1113,7 @@ mod tests {
 
         let mut i8_vec = Int8VectorBuilder::with_capacity(3);
         i8_vec.push(Some(1_i8));
-        i8_vec.push(None);
+        i8_vec.push(Some(2_i8));
         i8_vec.push(Some(3_i8));
 
         let mut put_data = PutData::new();
@@ -1146,21 +1139,15 @@ mod tests {
                 assert_eq!(1, schema.num_columns());
                 assert_eq!(3, num_rows);
 
-                for mutation in mutations.iter() {
+                for mutation in mutations {
                     match mutation {
                         Mutation::Put(put_data) => {
-                            for (key, value) in put_data.columns.iter() {
-                                println!("key: {}", key);
-                                println!("value_len: {}", value.len());
+                            for (_, value) in put_data.columns.iter() {
 
                                 let v = value.as_any().downcast_ref::<Int8Vector>().unwrap();
-                                v.iter_data().for_each(|v_data| match v_data {
-                                    Some(v_i8) => {
-                                        println!("{:?}", v_i8);
-                                    }
-                                    None => {
-                                        println!("None \n");
-                                    }
+                                let vs = Int8Vector::from_vec(vec![1_i8, 2_i8, 3_i8]);
+                                v.iter_data().zip(vs.iter_data()).for_each(|(a, b)| {
+                                    assert_eq!(a, b);
                                 });
                             }
                         }
