@@ -9,3 +9,4 @@ edition = "2021"
 common-error = { path = "../common/error" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.15.0"
+table-engine = { path = "../table-engine" }

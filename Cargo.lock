@@ -3460,6 +3460,7 @@ dependencies = [
  "common-error",
  "snafu",
  "sqlparser",
+ "table-engine",
 ]
 
 [[package]]
