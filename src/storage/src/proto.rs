@@ -1,25 +1,28 @@
 #![allow(clippy::all)]
 
-<<<<<<< HEAD
-=======
+use std::sync::Arc;
+
 use datatypes::{
     arrow::array::{Int32Vec, Int64Vec, UInt64Vec, UInt8Vec},
     data_type::ConcreteDataType,
-    prelude::ScalarVector,
+    prelude::{ScalarVector, ScalarVectorBuilder},
+    schema::SchemaRef,
     vectors::{
-        BinaryVector, BooleanVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector,
-        Int64Vector, Int8Vector, StringVector, UInt16Vector, UInt32Vector, UInt8Vector, Vector,
-        VectorRef,
+        BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, Float32Vector,
+        Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder,
+        Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector,
+        Int8VectorBuilder, StringVector, StringVectorBuilder, UInt16Vector, UInt16VectorBuilder,
+        UInt32Vector, UInt32VectorBuilder, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+        Vector, VectorRef,
     },
 };
+use snafu::Error;
+use store_api::storage::PutOperation;
 
->>>>>>> 3e9d60a (feat/wal/protobuf)
-use crate::write_batch as wb;
+use crate::write_batch::{self as wb, PutData};
 
 tonic::include_proto!("greptime.storage.wal.v1");
 
-<<<<<<< HEAD
-=======
 impl From<&ConcreteDataType> for DataType {
     fn from(data_type: &ConcreteDataType) -> Self {
         match data_type {
@@ -66,7 +69,7 @@ impl Into<ConcreteDataType> for DataType {
 #[macro_export]
 macro_rules! gen_columns {
     ($name:tt, $vec_ty: ty, $vari:ident, $cast: expr, $field: tt) => {
-        pub fn $name(vector: &VectorRef, columns: &mut Vec<Column>) {
+        pub fn $name(vector: &VectorRef) -> Column {
             let mut column = Column::default();
             let mut values = Values::default();
 
@@ -84,9 +87,9 @@ macro_rules! gen_columns {
                     Some($vari) => values.$field.push($cast),
                     None => value_null_mask.set(i, true),
                 });
-
             column.value_null_mask = value_null_mask.to_bytes();
-            columns.push(column);
+            column.values = Some(values);
+            column
         }
     };
 }
@@ -153,7 +156,119 @@ gen_columns!(
     binary_values
 );
 
->>>>>>> 3e9d60a (feat/wal/protobuf)
+#[macro_export]
+macro_rules! gen_put_data {
+    ($name:tt,$builder_type:ty,$field:tt,$v:ident,$cast:expr) => {
+        pub fn $name(num_rows: usize, column: &Column) -> VectorRef {
+            let values = match &column.values {
+                Some(values) => values,
+                None => unreachable!(),
+            };
+            let mut vector_iter = values.$field.iter();
+            let mut builder = <$builder_type>::with_capacity(num_rows);
+            bit_vec::BitVec::from_bytes(&column.value_null_mask)
+                .iter()
+                .take(num_rows)
+                .for_each(|mask| {
+                    if mask == false {
+                        let v = match vector_iter.next() {
+                            Some($v) => Some($cast),
+                            None => None,
+                        };
+                        builder.push(v);
+                    } else {
+                        builder.push(None);
+                    }
+                });
+            Arc::new(builder.finish())
+        }
+    };
+}
+
+gen_put_data!(gen_put_data_i8, Int8VectorBuilder, i8_values, v, *v as i8);
+gen_put_data!(
+    gen_put_data_i16,
+    Int16VectorBuilder,
+    i16_values,
+    v,
+    *v as i16
+);
+gen_put_data!(gen_put_data_i32, Int32VectorBuilder, i32_values, v, *v);
+gen_put_data!(gen_put_data_i64, Int64VectorBuilder, i64_values, v, *v);
+gen_put_data!(gen_put_data_u8, UInt8VectorBuilder, u8_values, v, *v as u8);
+gen_put_data!(
+    gen_put_data_u16,
+    UInt16VectorBuilder,
+    u16_values,
+    v,
+    *v as u16
+);
+gen_put_data!(
+    gen_put_data_u32,
+    UInt32VectorBuilder,
+    u32_values,
+    v,
+    *v as u32
+);
+gen_put_data!(
+    gen_put_data_u64,
+    UInt64VectorBuilder,
+    u64_values,
+    v,
+    *v as u64
+);
+gen_put_data!(
+    gen_put_data_f32,
+    Float32VectorBuilder,
+    f32_values,
+    v,
+    *v as f32
+);
+gen_put_data!(
+    gen_put_data_f64,
+    Float64VectorBuilder,
+    f64_values,
+    v,
+    *v as f64
+);
+gen_put_data!(
+    gen_put_data_string,
+    StringVectorBuilder,
+    string_values,
+    v,
+    v.as_str()
+);
+gen_put_data!(gen_put_data_bool, BooleanVectorBuilder, bool_values, v, *v);
+gen_put_data!(
+    gen_put_data_bytes,
+    BinaryVectorBuilder,
+    binary_values,
+    v,
+    v.as_slice()
+);
+
+pub fn gen_columns(data_type: ConcreteDataType, vector: &VectorRef) -> Column {
+    let column = match data_type {
+        ConcreteDataType::Boolean(_) => gen_columns_bool(vector),
+        ConcreteDataType::Int8(_) => gen_columns_i8(vector),
+        ConcreteDataType::Int16(_) => gen_columns_i16(vector),
+        ConcreteDataType::Int32(_) => gen_columns_i32(vector),
+        ConcreteDataType::Int64(_) => gen_columns_i64(vector),
+        ConcreteDataType::UInt8(_) => gen_columns_u8(vector),
+        ConcreteDataType::UInt16(_) => gen_columns_u16(vector),
+        ConcreteDataType::UInt32(_) => gen_columns_u32(vector),
+        ConcreteDataType::UInt64(_) => gen_columns_u64(vector),
+        ConcreteDataType::Float32(_) => gen_columns_f32(vector),
+        ConcreteDataType::Float64(_) => gen_columns_f64(vector),
+        ConcreteDataType::Binary(_) => gen_columns_bytes(vector),
+        ConcreteDataType::String(_) => gen_columns_string(vector),
+        _ => {
+            unreachable!()
+        }
+    };
+    column
+}
+
 pub fn gen_mutation_extras(write_batch: &wb::WriteBatch) -> Vec<MutationExtra> {
     let column_schemas = write_batch.schema().column_schemas();
     write_batch

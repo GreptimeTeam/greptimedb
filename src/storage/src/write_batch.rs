@@ -14,6 +14,7 @@ use datatypes::{
     schema::SchemaRef,
     vectors::{Int64Vector, VectorRef},
 };
+use prost::{EncodeError, DecodeError};
 use snafu::ensure;
 use store_api::storage::{consts, PutOperation, WriteRequest};
 
@@ -82,11 +83,20 @@ pub enum Error {
         source: ArrowError,
     },
 
-    #[snafu(display("Protobuf failed to encode"))]
-    EncodeProtobuf { backtrace: Backtrace },
+    #[snafu(display("Failed to encode, source: {}", source))]
+    EncodeProtobuf {
+        backtrace: Backtrace,
+        source: EncodeError,
+    },
 
-    #[snafu(display("Protobuf failed to decode"))]
-    DecodeProtobuf { backtrace: Backtrace },
+    #[snafu(display("Failed to decode, source: {}", source))]
+    DecodeProtobuf {
+        backtrace: Backtrace,
+        source: DecodeError,
+    },
+
+    #[snafu(display("No corresponding ConcreteDataType found"))]
+    UnknownConcreteDataType { backtrace: Backtrace },
 
     #[snafu(display("Failed to parse schema, source: {}", source))]
     ParseSchema {
@@ -397,6 +407,7 @@ impl PutData {
 
 pub mod codec {
 
+    use core::num;
     use std::{io::Cursor, sync::Arc};
 
     use datatypes::{
@@ -413,15 +424,11 @@ pub mod codec {
         prelude::{ScalarVector, ScalarVectorBuilder},
         schema::{ColumnSchema, Schema, SchemaRef},
         vectors::{
-            null, BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder,
-            ConstantVector, Float32Vector, Float32VectorBuilder, Float64Vector,
-            Float64VectorBuilder, Helper, Int16Vector, Int16VectorBuilder, Int32Vector,
-            Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector, Int8VectorBuilder,
-            NullVector, PrimitiveVectorBuilder, StringVector, StringVectorBuilder, UInt16Vector,
-            UInt16VectorBuilder, UInt32Vector, UInt32VectorBuilder, UInt64Vector,
-            UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder, Vector, VectorRef,
+            BinaryVectorBuilder, BooleanVectorBuilder, Float32VectorBuilder, Float64VectorBuilder,
+            Helper, Int16VectorBuilder, Int32VectorBuilder, Int64Vector, Int64VectorBuilder,
+            Int8Vector, Int8VectorBuilder, StringVectorBuilder, UInt16VectorBuilder,
+            UInt32VectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, Vector,
         },
-        with_match_primitive_type_id,
     };
     use prost::Message;
     use snafu::{ensure, ResultExt};
@@ -431,11 +438,15 @@ pub mod codec {
         DataCorruptionSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
         Error as WriteBatchError, Mutation, ParseSchemaSnafu, Result, WriteBatch,
     };
-    use crate::proto::mutation::Mutation as mut_Mutation;
+    use crate::write_batch::DecodeProtobufSnafu;
+    use crate::proto::gen_columns;
     use crate::proto::{
-        Column, ColumnSchema as ColumnSchemaProto, DataType, Delete, Mutation as MutationProto,
-        Put, Schema as SchemaProto, Values, WriteBatch as WriteBatchProto,
+        self, gen_put_data_bool, gen_put_data_bytes, gen_put_data_f32, gen_put_data_f64,
+        gen_put_data_i16, gen_put_data_i32, gen_put_data_i64, gen_put_data_i8, gen_put_data_string,
+        gen_put_data_u16, gen_put_data_u32, gen_put_data_u64, gen_put_data_u8,
     };
+    use crate::write_batch::EncodeProtobufSnafu;
+    use crate::write_batch::UnknownConcreteDataTypeSnafu;
     use crate::{
         arrow_stream::ArrowStreamReader,
         codec::{Decoder, Encoder},
@@ -686,48 +697,10 @@ pub mod codec {
                             item.schema().column_schemas().iter().enumerate().for_each(
                                 |(i, column_schema)| {
                                     match put_data.columns.get(&column_schema.name) {
-                                        Some(vector) => match vector.data_type() {
-                                            ConcreteDataType::Boolean(_) => {
-                                                proto::gen_columns_bool(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::Int8(_) => {
-                                                proto::gen_columns_i8(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::Int16(_) => {
-                                                proto::gen_columns_i16(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::Int32(_) => {
-                                                proto::gen_columns_i32(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::Int64(_) => {
-                                                proto::gen_columns_i64(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::UInt8(_) => {
-                                                proto::gen_columns_u8(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::UInt16(_) => {
-                                                proto::gen_columns_u16(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::UInt32(_) => {
-                                                proto::gen_columns_u32(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::UInt64(_) => {
-                                                proto::gen_columns_u64(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::Float32(_) => {
-                                                proto::gen_columns_f32(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::Float64(_) => {
-                                                proto::gen_columns_f64(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::Binary(_) => {
-                                                proto::gen_columns_bytes(vector, &mut columns);
-                                            }
-                                            ConcreteDataType::String(_) => {
-                                                proto::gen_columns_string(vector, &mut columns);
-                                            }
-                                            _ => unreachable!(),
-                                        },
+                                        Some(vector) => {
+                                            let column = gen_columns(vector.data_type(), vector);
+                                            columns.push(column);
+                                        }
                                         None => {
                                             null_mask.set(i, true);
                                         }
@@ -756,7 +729,7 @@ pub mod codec {
                 ..Default::default()
             };
 
-            // write_batch.encode(dst).context(EncodeArrowSnafu)?;
+            write_batch.encode(dst).context(EncodeProtobufSnafu)?;
             Ok(())
         }
     }
@@ -768,7 +741,7 @@ pub mod codec {
         type Error = WriteBatchError;
 
         fn decode(&self, src: &[u8]) -> Result<Option<Self::Item>> {
-            let write_batch_proto = proto::WriteBatch::decode(src).unwrap();
+            let write_batch_proto = proto::WriteBatch::decode(src).context(DecodeProtobufSnafu)?;
             let schema = match write_batch_proto.schema {
                 Some(schema) => schema,
                 _ => unreachable!(),
@@ -804,39 +777,66 @@ pub mod codec {
                 .for_each(|mutation| match &mutation.mutation {
                     Some(proto::mutation::Mutation::Put(put)) => {
                         let mut put_data = PutData::new();
+                        // 不是一一对应这里面的代码逻辑有问题
+                        let mut put_column_iter = put.columns.iter();
                         bit_vec::BitVec::from_bytes(&put.column_null_mask)
                             .iter()
                             .take(schema.num_columns())
                             .zip(schema.column_schemas().iter())
-                            .zip(put.columns.iter())
-                            .for_each(|((mask, column_schema), column)| {
-                                let mut buidler =
-                                    Int8VectorBuilder::with_capacity(column.value_null_mask.len());
-                                let values = match &column.values {
-                                    Some(values) => values,
-                                    _ => unreachable!(),
-                                };
-                                let mut i8_iter = values.i8_values.iter();
-                                // if mask == true don't allow to insert in the putdata
-                                if mask != false {
-                                    bit_vec::BitVec::from_bytes(&column.value_null_mask)
-                                        .iter()
-                                        .take(write_batch_proto.num_rows as usize)
-                                        .for_each(|mask| {
-                                            if mask == true {
-                                                let v = match i8_iter.next() {
-                                                    Some(v) => Some(*v as i8),
-                                                    None => None,
-                                                };
-                                                buidler.push(v);
-                                            } else {
-                                                buidler.push(None);
-                                            }
-                                        });
-                                    put_data.columns.insert(
-                                        column_schema.name.clone(),
-                                        Arc::new(buidler.finish()),
-                                    );
+                            .for_each(|(mask, column_schema)| {
+                                // match column_schema.data_type() {}
+                                if mask == false {
+                                    let column = match put_column_iter.next() {
+                                        Some(column) => column,
+                                        _ => unreachable!(),
+                                    };
+                                    let num_rows = write_batch_proto.num_rows as usize;
+                                    let column_name = column_schema.name.clone();
+                                    let vector_ref = match column_schema.data_type {
+                                        ConcreteDataType::Boolean(_) => {
+                                            gen_put_data_bool(num_rows, column)
+                                        }
+                                        ConcreteDataType::Int8(_) => {
+                                            gen_put_data_i8(num_rows, column)
+                                        }
+                                        ConcreteDataType::Int16(_) => {
+                                            gen_put_data_i16(num_rows, column)
+                                        }
+                                        ConcreteDataType::Int32(_) => {
+                                            gen_put_data_i32(num_rows, column)
+                                        }
+                                        ConcreteDataType::Int64(_) => {
+                                            gen_put_data_i64(num_rows, column)
+                                        }
+                                        ConcreteDataType::UInt8(_) => {
+                                            gen_put_data_u8(num_rows, column)
+                                        }
+                                        ConcreteDataType::UInt16(_) => {
+                                            gen_put_data_u16(num_rows, column)
+                                        }
+                                        ConcreteDataType::UInt32(_) => {
+                                            gen_put_data_u32(num_rows, column)
+                                        }
+                                        ConcreteDataType::UInt64(_) => {
+                                            gen_put_data_u64(num_rows, column)
+                                        }
+                                        ConcreteDataType::Float32(_) => {
+                                            gen_put_data_f32(num_rows, column)
+                                        }
+                                        ConcreteDataType::Float64(_) => {
+                                            gen_put_data_f64(num_rows, column)
+                                        }
+                                        ConcreteDataType::Binary(_) => {
+                                            gen_put_data_bytes(num_rows, column)
+                                        }
+                                        ConcreteDataType::String(_) => {
+                                            gen_put_data_string(num_rows, column)
+                                        }
+                                        _ => unreachable!(),
+                                    };
+                                    put_data
+                                        .add_column_by_name(column_name.as_str(), vector_ref)
+                                        .unwrap();
                                 }
                             });
                         let mutation = Mutation::Put(put_data);
@@ -858,14 +858,12 @@ pub mod codec {
 }
 #[cfg(test)]
 mod tests {
-    use core::num;
     use std::iter;
     use std::sync::Arc;
 
     use datatypes::prelude::ScalarVectorBuilder;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::type_id::LogicalTypeId;
-    use datatypes::types::Int8Type;
     use datatypes::vectors::{
         BooleanVector, Int32Vector, Int64Vector, Int8Vector, Int8VectorBuilder, UInt64Vector,
     };
@@ -1153,72 +1151,72 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
-    // fn test_i8_vector() {
-    //     let mut column_schemas = Vec::new();
-    //     let column = ColumnSchema::new("i8_column_test", ConcreteDataType::int8_datatype(), true);
-    //     column_schemas.push(column);
+    #[test]
+    fn test_i8_vector_single_column() {
+        let mut column_schemas = Vec::new();
+        let column = ColumnSchema::new("i8_column_test", ConcreteDataType::int8_datatype(), true);
+        column_schemas.push(column);
 
-    //     let schema = Schema::new(column_schemas);
-    //     let mut write_batch = WriteBatch::new(Arc::new(schema));
+        let schema = Schema::new(column_schemas);
+        let mut write_batch = WriteBatch::new(Arc::new(schema));
 
-    //     let mut i8_vec = Int8VectorBuilder::with_capacity(3);
-    //     i8_vec.push(Some(1 as i8));
-    //     i8_vec.push(None);
-    //     i8_vec.push(Some(3 as i8));
+        let mut i8_vec = Int8VectorBuilder::with_capacity(3);
+        i8_vec.push(Some(1 as i8));
+        i8_vec.push(None);
+        i8_vec.push(Some(3 as i8));
 
-    //     let mut put_data = PutData::new();
-    //     put_data
-    //         .columns
-    //         .insert("i8_test".to_string(), Arc::new(i8_vec.finish()));
-    //     write_batch.mutations.push(Mutation::Put(put_data));
-    //     write_batch.add_num_rows(3).unwrap();
+        let mut put_data = PutData::new();
+        put_data
+            .columns
+            .insert("i8_column_test".to_string(), Arc::new(i8_vec.finish()));
 
-    //     let protobuf_encoder = WriteBatchProtobufEncoder {};
+        write_batch.mutations.push(Mutation::Put(put_data));
+        write_batch.add_num_rows(3).unwrap();
 
-    //     let mut dst: Vec<u8> = vec![];
-    //     protobuf_encoder.encode(&write_batch, &mut dst).unwrap();
-    //     println!("dst: {:?}", dst);
+        let protobuf_encoder = WriteBatchProtobufEncoder {};
 
-    //     let protobuf_decoder = WriteBatchProtobufDecoder {};
-    //     let out = protobuf_decoder.decode(&dst).unwrap();
-    //     match out {
-    //         Some(out) => {
-    //             let schema = out.schema;
-    //             let mutations = out.mutations;
-    //             let num_rows = out.num_rows;
+        let mut dst: Vec<u8> = vec![];
+        protobuf_encoder.encode(&write_batch, &mut dst).unwrap();
+        let protobuf_decoder = WriteBatchProtobufDecoder {};
+        let out = protobuf_decoder.decode(&dst).unwrap();
+        match out {
+            Some(out) => {
+                let schema = out.schema;
+                let mutations = out.mutations;
+                let num_rows = out.num_rows;
 
-    //             println!("schema.num_columns {:?}", schema.num_columns());
-    //             println!("num_rows: {:?}", num_rows);
+                assert_eq!(1, schema.num_columns());
+                assert_eq!(3, num_rows);
 
-    //             for mutation in mutations.iter() {
-    //                 match mutation {
-    //                     Mutation::Put(put_data) => {
-    //                         println!("put data \n");
-    //                         for (key, value) in put_data.columns.iter() {
-    //                             println!("key: {}", key);
-    //                             println!("value_len: {}", value.len());
+                for mutation in mutations.iter() {
+                    match mutation {
+                        Mutation::Put(put_data) => {
+                            let put_data_iter = put_data.columns.iter();
 
-    //                             let v = value.as_any().downcast_ref::<Int8Vector>().unwrap();
-    //                             v.iter_data().for_each(|v_data| match v_data {
-    //                                 Some(v_i8) => {
-    //                                     println!("{:?}", v_i8);
-    //                                 }
-    //                                 None => {
-    //                                     println!("None \n");
-    //                                 }
-    //                             });
-    //                         }
-    //                     }
-    //                     _ => {
-    //                         println!("None\n");
-    //                     }
-    //                 };
-    //             }
-    //         }
-    //         _ => {
-    //             unreachable!();
-    //         }
-    //     };
-    // }
+                            for (key, value) in put_data.columns.iter() {
+                                println!("key: {}", key);
+                                println!("value_len: {}", value.len());
+
+                                let v = value.as_any().downcast_ref::<Int8Vector>().unwrap();
+                                v.iter_data().for_each(|v_data| match v_data {
+                                    Some(v_i8) => {
+                                        println!("{:?}", v_i8);
+                                    }
+                                    None => {
+                                        println!("None \n");
+                                    }
+                                });
+                            }
+                        }
+                        _ => {
+                            println!("None\n");
+                        }
+                    };
+                }
+            }
+            _ => {
+                unreachable!();
+            }
+        };
+    }
 }
