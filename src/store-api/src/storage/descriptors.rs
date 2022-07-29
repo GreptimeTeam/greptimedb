@@ -66,9 +66,7 @@ pub struct RowKeyDescriptor {
     pub timestamp: ColumnDescriptor,
     /// Enable version column in row key if this field is true.
     ///
-    /// The default value is true.
-    // FIXME(yingwen): Change default value to true (Disable version column by
-    // default).
+    /// The default value is false.
     #[builder(default = "false")]
     pub enable_version_column: bool,
 }
