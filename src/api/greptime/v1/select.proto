@@ -4,8 +4,7 @@ package greptime.v1;
 
 import "greptime/v1/column.proto";
 
-message InsertBatch {
+message SelectResult {
   repeated Column columns = 1;
   uint32 row_count = 2;
 }
-

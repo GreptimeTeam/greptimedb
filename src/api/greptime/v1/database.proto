@@ -37,8 +37,7 @@ message DeleteExpr {}
 
 message ObjectResult {
   ResultHeader header = 1;
-  string schema = 2;
-  repeated bytes results = 3;
+  bytes results = 2;
 }
 
 message Header {
