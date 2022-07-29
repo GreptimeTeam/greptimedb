@@ -248,8 +248,16 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 
 /// parse a list of keyword and return args and returns list from keywords
 fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<String>)> {
+    
     // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
     let avail_key = HashSet::from(["args", "returns"]);
+    ensure!(
+        keywords.len() == avail_key.len(),
+        CoprParseSnafu {
+            reason: format!("Expect {} keyword argument, found {}.", avail_key.len(), keywords.len()),
+            loc: keywords.get(0).map(|s|s.location)
+        }
+    );
     let mut kw_map = HashMap::new();
     for kw in keywords {
         match &kw.node.arg {
@@ -291,12 +299,12 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<
     Ok((arg_names, ret_names))
 }
 
-/// check if decorator is named with `copr` or `coprocessor`
-/// and if numbers of arguments is right(=2 for now `args` & `returns`)
-fn check_decorator(decorator: &ast::Expr<()>) -> Result<()> {
+/// returns args and returns in Vec of String
+fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String>)> {
+    //check_decorator(decorator)?;
     if let ast::ExprKind::Call {
         func,
-        args,
+        args: _,
         keywords,
     } = &decorator.node
     {
@@ -319,32 +327,15 @@ fn check_decorator(decorator: &ast::Expr<()>) -> Result<()> {
                 loc: Some(func.location)
             }
         );
-        ensure!(
-            args.is_empty() && keywords.len() == 2,
-            CoprParseSnafu {
-                reason: "Expect two keyword argument of `args` and `returns`",
-                loc: Some(func.location)
-            }
-        );
+        parse_keywords(keywords)
     } else {
-        return fail_parse_error!(
+        fail_parse_error!(
             format!(
                 "Expect decorator to be a function call(like `@copr(...)`), found {:?}",
                 decorator.node
             ),
             Some(decorator.location),
-        );
-    }
-    Ok(())
-}
-
-/// returns args and returns in Vec of String
-fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String>)> {
-    check_decorator(decorator)?;
-    if let ast::ExprKind::Call { keywords, .. } = &decorator.node {
-        parse_keywords(keywords)
-    } else {
-        unreachable!()
+        )
     }
 }
 

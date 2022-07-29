@@ -184,7 +184,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
 "#,
         predicate: ParseIsErr(
             reason: 
-            "Expect two keyword argument of `args` and `returns`"
+            " keyword argument, found "
         )
     ),
     (
