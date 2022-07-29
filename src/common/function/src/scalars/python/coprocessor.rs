@@ -105,11 +105,7 @@ impl Coprocessor {
                         "Expect only one statement in script, found {} statement",
                         code.len()
                     ),
-                    loc: if code.is_empty() {
-                        None
-                    } else {
-                        Some(code[0].location)
-                    }
+                    loc: code.first().map(|s| s.location)
                 }
             );
 

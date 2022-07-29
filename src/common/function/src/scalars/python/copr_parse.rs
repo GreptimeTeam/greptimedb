@@ -85,7 +85,7 @@ fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
 /// default to be not nullable
 fn parse_native_type(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
     match &sub.node {
-        ast::ExprKind::Name { id, ctx: _ } => Ok(AnnotationInfo {
+        ast::ExprKind::Name { id, .. } => Ok(AnnotationInfo {
             datatype: try_into_datatype(id, &sub.location)?,
             is_nullable: false,
         }),
@@ -101,10 +101,13 @@ fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
     if let ast::ExprKind::BinOp { left, op: _, right } = &bin_op.node {
         // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
         let is_none = |node: &ast::Expr<()>| -> bool {
-            matches!(&node.node, ast::ExprKind::Constant {
-                value: ast::Constant::None,
-                kind: _,
-            })
+            matches!(
+                &node.node,
+                ast::ExprKind::Constant {
+                    value: ast::Constant::None,
+                    kind: _,
+                }
+            )
         };
         let is_type = |node: &ast::Expr<()>| {
             if let ast::ExprKind::Name { id, ctx: _ } = &node.node {
@@ -149,26 +152,22 @@ fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
     check_bin_op(bin_op)?;
     if let ast::ExprKind::BinOp { left, op: _, right } = &bin_op.node {
         // then get types from this BinOp
-        let mut tmp_anno = None;
-        for i in [left, right] {
-            match &i.node {
-                ast::ExprKind::Constant { value: _, kind: _ } => (),
-                ast::ExprKind::Name { id: _, ctx: _ }
-                | ast::ExprKind::Call {
-                    func: _,
-                    args: _,
-                    keywords: _,
-                } => tmp_anno = Some(parse_native_type(i)?),
-                _ => unreachable!(),
-            }
-        }
-        // deal with errors anyway in case code above changed but forget to modify
-        let mut tmp_anno = tmp_anno.context(ret_parse_error(
-            "Expect a type name, not two `None`".into(),
-            Some(bin_op.location),
-        ))?;
-        tmp_anno.is_nullable = true;
-        return Ok(tmp_anno);
+        let left_ty = parse_native_type(left).ok();
+        let right_ty = parse_native_type(right).ok();
+        let mut ty_anno = if let Some(left_ty) = left_ty {
+            left_ty
+        } else if let Some(right_ty) = right_ty {
+            right_ty
+        } else {
+            // deal with errors anyway in case code above changed but forget to modify
+            return fail_parse_error!(
+                "Expect a type name, not two `None`".into(),
+                Some(bin_op.location),
+            );
+        };
+        // because check_bin_op assure a `None` exist
+        ty_anno.is_nullable = true;
+        return Ok(ty_anno);
     }
     unreachable!()
 }
@@ -200,17 +199,7 @@ fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
         }
 
         match &slice.node {
-            ast::ExprKind::Name { id: _, ctx: _ }
-            | ast::ExprKind::Call {
-                func: _,
-                args: _,
-                keywords: _,
-            }
-            | ast::ExprKind::BinOp {
-                left: _,
-                op: _,
-                right: _,
-            } => (),
+            ast::ExprKind::Name { .. } | ast::ExprKind::BinOp { .. } => (),
             _ => {
                 return fail_parse_error!(
                     format!("Expect type in `vector[...]`, found {:?}", &slice.node),
@@ -244,12 +233,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
     {
         // i.e: vector[f64]
         match &slice.node {
-            ast::ExprKind::Name { id: _, ctx: _ }
-            | ast::ExprKind::Call {
-                func: _,
-                args: _,
-                keywords: _,
-            } => parse_native_type(slice),
+            ast::ExprKind::Name { .. } => parse_native_type(slice),
             ast::ExprKind::BinOp {
                 left: _,
                 op: _,
@@ -264,6 +248,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 
 /// parse a list of keyword and return args and returns list from keywords
 fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<String>)> {
+    // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
     let avail_key = HashSet::from(["args", "returns"]);
     let mut kw_map = HashMap::new();
     for kw in keywords {
@@ -356,12 +341,7 @@ fn check_decorator(decorator: &ast::Expr<()>) -> Result<()> {
 /// returns args and returns in Vec of String
 fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String>)> {
     check_decorator(decorator)?;
-    if let ast::ExprKind::Call {
-        func: _,
-        args: _,
-        keywords,
-    } = &decorator.node
-    {
+    if let ast::ExprKind::Call { keywords, .. } = &decorator.node {
         parse_keywords(keywords)
     } else {
         unreachable!()
@@ -384,26 +364,7 @@ fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> 
         .collect::<Result<Vec<Option<_>>>>()
 }
 
-fn check_return_annotations(rets: &ast::Expr<()>) -> Result<()> {
-    match &rets.node {
-        ast::ExprKind::Tuple { elts: _, ctx: _ }
-        | ast::ExprKind::Subscript {
-            value: _,
-            slice: _,
-            ctx: _,
-        } => Ok(()),
-        _ => fail_parse_error!(
-            format!(
-                "Expect one or many type annotation for the return type, found {:#?}",
-                &rets.node
-            ),
-            Some(rets.location),
-        ),
-    }
-}
-
 fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationInfo>>> {
-    check_return_annotations(rets)?;
     let mut return_types = Vec::with_capacity(match &rets.node {
         ast::ExprKind::Tuple { elts, ctx: _ } => elts.len(),
         ast::ExprKind::Subscript {
@@ -415,7 +376,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
     });
     match &rets.node {
         // python: ->(vector[...], vector[...], ...)
-        ast::ExprKind::Tuple { elts, ctx: _ } => {
+        ast::ExprKind::Tuple { elts, .. } => {
             for elem in elts {
                 return_types.push(Some(parse_annotation(elem)?))
             }
@@ -426,8 +387,15 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
             slice: _,
             ctx: _,
         } => return_types.push(Some(parse_annotation(rets)?)),
-        // already deal with errors above
-        _ => unreachable!(),
+        _ => {
+            return fail_parse_error!(
+                format!(
+                    "Expect one or many type annotation for the return type, found {:#?}",
+                    &rets.node
+                ),
+                Some(rets.location),
+            )
+        }
     }
     Ok(return_types)
 }
@@ -441,11 +409,7 @@ fn check_copr(stmts: &Vec<ast::Stmt<()>>) -> Result<()> {
             reason:
                 "Expect one and only one python function with `@coprocessor` or `@cpor` decorator"
                     .to_string(),
-            loc: if stmts.is_empty() {
-                None
-            } else {
-                Some(stmts[0].location)
-            }
+            loc: stmts.first().map(|s| s.location)
         }
     );
     if let ast::StmtKind::FunctionDef {
@@ -461,11 +425,7 @@ fn check_copr(stmts: &Vec<ast::Stmt<()>>) -> Result<()> {
             decorator_list.len() == 1,
             CoprParseSnafu {
                 reason: "Expect one decorator",
-                loc: if decorator_list.is_empty() {
-                    None
-                } else {
-                    Some(decorator_list[0].location)
-                }
+                loc: decorator_list.first().map(|s| s.location)
             }
         );
     } else {

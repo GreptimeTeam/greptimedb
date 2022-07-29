@@ -15,11 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{get_error_reason, visualize_loc};
 use super::*;
-use crate::scalars::python::{
-    copr_parse::parse_copr,
-    coprocessor::Coprocessor,
-    error::{Error, Result},
-};
+use crate::scalars::python::{copr_parse::parse_copr, coprocessor::Coprocessor, error::Error};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TestCase {
@@ -86,7 +82,7 @@ fn run_ron_testcases() {
             }
             Predicate::ParseIsErr { reason } => {
                 let copr = parse_copr(&testcase.code);
-                if copr.is_ok(){
+                if copr.is_ok() {
                     panic!("Expect to be err, found{copr:#?}")
                 }
                 let res = get_error_reason(&copr.unwrap_err());
@@ -195,6 +191,4 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         );
         println!("{res}");
     }
-    // assert!(ret.is_ok());
-    // assert_eq!(ret.unwrap().column(0).len(), 4);
 }

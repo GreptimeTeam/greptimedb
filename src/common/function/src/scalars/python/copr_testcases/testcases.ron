@@ -125,7 +125,7 @@ def a(cpu: vector[cast(f64)], mem: vector[f64])->(vector[f64], vector[f64|None],
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: "Expect types' name, found"
+            reason: "Expect type in `vector[...]`, found "
         )
     ),
     (
