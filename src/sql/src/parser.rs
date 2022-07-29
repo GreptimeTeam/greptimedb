@@ -2,9 +2,10 @@ use snafu::ResultExt;
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
+use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
-use crate::error::{self, Error, TokenizerSnafu};
+use crate::error::{self, Error, SyntaxSnafu, TokenizerSnafu};
 use crate::statements::show_database::SqlShowDatabase;
 use crate::statements::show_kind::ShowKind;
 use crate::statements::statement::Statement;
@@ -108,8 +109,13 @@ impl<'a> ParserContext<'a> {
         todo!()
     }
 
-    fn parse_create(&mut self) -> Result<Statement> {
-        todo!()
+    // Report unexpected token
+    pub(crate) fn expected<T>(&self, expected: &str, found: Token) -> Result<T> {
+        Err(ParserError::ParserError(format!(
+            "Expected {}, found: {}",
+            expected, found
+        )))
+        .context(SyntaxSnafu { sql: self.sql })
     }
 
     pub fn consume_token(&mut self, expected: &str) -> bool {

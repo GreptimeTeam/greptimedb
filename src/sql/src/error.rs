@@ -33,6 +33,12 @@ pub enum Error {
 
     #[snafu(display("Tokenizer error, sql: {}, source: {}", sql, source))]
     Tokenizer { sql: String, source: TokenizerError },
+
+    #[snafu(display(
+        "Invalid time index, it should contains only one column, sql: {}.",
+        sql
+    ))]
+    InvalidTimeIndex { sql: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -41,7 +47,9 @@ impl ErrorExt for Error {
 
         match self {
             Unsupported { .. } => StatusCode::Unsupported,
-            Unexpected { .. } | Syntax { .. } | Tokenizer { .. } => StatusCode::InvalidSyntax,
+            Unexpected { .. } | Syntax { .. } | InvalidTimeIndex { .. } | Tokenizer { .. } => {
+                StatusCode::InvalidSyntax
+            }
         }
     }
 
