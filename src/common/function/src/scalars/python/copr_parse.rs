@@ -197,7 +197,7 @@ fn check_annotation_ret_slice(sub: &ast::Expr<()>) -> Result<&ast::Expr<()>> {
                 Some(value.location)
             );
         }
-        Ok(&slice)
+        Ok(slice)
     } else {
         fail_parse_error!(
             format!("Expect type annotation, found {:?}", &sub),
@@ -215,7 +215,7 @@ fn check_annotation_ret_slice(sub: &ast::Expr<()>) -> Result<&ast::Expr<()>> {
 /// Item => NativeType
 fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
     let slice = check_annotation_ret_slice(sub)?;
-    
+
     {
         // i.e: vector[f64]
         match &slice.node {
@@ -230,7 +230,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                     format!("Expect type in `vector[...]`, found {:?}", &slice.node),
                     Some(slice.location),
                 )
-            },
+            }
         }
     }
 }

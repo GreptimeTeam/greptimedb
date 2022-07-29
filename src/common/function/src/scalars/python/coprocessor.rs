@@ -6,7 +6,8 @@ use arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-use datatypes::vectors::{BooleanVector, PrimitiveVector, Vector, VectorRef};
+use datatypes::vectors::Helper;
+use datatypes::vectors::{BooleanVector, Vector, VectorRef};
 use rustpython_bytecode::CodeObject;
 use rustpython_compiler_core::compile;
 use rustpython_parser::{
@@ -21,7 +22,6 @@ use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
 use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
-use datatypes::vectors::Helper;
 use crate::fail_parse_error;
 use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
 use crate::scalars::python::error::{
@@ -259,7 +259,7 @@ impl Coprocessor {
                 let anno_ty = datatype;
                 if real_ty != anno_ty {
                     {
-                        // This`CastOption` allow for overflowly cast and int to float loosely cast etc.., 
+                        // This`CastOption` allow for overflowly cast and int to float loosely cast etc..,
                         // check its doc for more information
                         *col = arrow::compute::cast::cast(
                             col.as_ref(),
