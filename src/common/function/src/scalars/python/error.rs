@@ -124,7 +124,7 @@ pub fn visualize_loc(
 {error}: {err_ty}
 {space}{r_arrow}{filename}:{row}:{col}
 {prow:col_space$}{ln_pad} {line}
-{space} {ln_pad}{arrow:>pad$} {desc}
+{space} {ln_pad} {arrow:>pad$} {desc}
 ",
         error = red_bold.apply_to("error"),
         err_ty = style(err_ty).bold(),
