@@ -421,7 +421,10 @@ fn check_copr(stmts: &Vec<ast::Stmt<()>>) -> Result<()> {
         );
     } else {
         return fail_parse_error!(
-            format!("Expect a function definition, found a \n{:#?}", &stmts[0].node),
+            format!(
+                "Expect a function definition, found a \n{:#?}",
+                &stmts[0].node
+            ),
             Some(stmts[0].location),
         );
     }
