@@ -3,10 +3,8 @@
 use std::sync::Arc;
 
 use datatypes::{
-    arrow::array::{Int32Vec, Int64Vec, UInt64Vec, UInt8Vec},
     data_type::ConcreteDataType,
     prelude::{ScalarVector, ScalarVectorBuilder},
-    schema::SchemaRef,
     vectors::{
         BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, Float32Vector,
         Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder,
@@ -16,10 +14,8 @@ use datatypes::{
         Vector, VectorRef,
     },
 };
-use snafu::Error;
-use store_api::storage::PutOperation;
 
-use crate::write_batch::{self as wb, PutData};
+use crate::write_batch as wb;
 
 tonic::include_proto!("greptime.storage.wal.v1");
 
@@ -269,6 +265,28 @@ pub fn gen_columns(data_type: ConcreteDataType, vector: &VectorRef) -> Column {
     column
 }
 
+pub fn gen_put_data_vector(
+    data_type: ConcreteDataType,
+    num_rows: usize,
+    column: &Column,
+) -> VectorRef {
+    match data_type {
+        ConcreteDataType::Boolean(_) => gen_put_data_bool(num_rows, column),
+        ConcreteDataType::Int8(_) => gen_put_data_i8(num_rows, column),
+        ConcreteDataType::Int16(_) => gen_put_data_i16(num_rows, column),
+        ConcreteDataType::Int32(_) => gen_put_data_i32(num_rows, column),
+        ConcreteDataType::Int64(_) => gen_put_data_i64(num_rows, column),
+        ConcreteDataType::UInt8(_) => gen_put_data_u8(num_rows, column),
+        ConcreteDataType::UInt16(_) => gen_put_data_u16(num_rows, column),
+        ConcreteDataType::UInt32(_) => gen_put_data_u32(num_rows, column),
+        ConcreteDataType::UInt64(_) => gen_put_data_u64(num_rows, column),
+        ConcreteDataType::Float32(_) => gen_put_data_f32(num_rows, column),
+        ConcreteDataType::Float64(_) => gen_put_data_f64(num_rows, column),
+        ConcreteDataType::Binary(_) => gen_put_data_bytes(num_rows, column),
+        ConcreteDataType::String(_) => gen_put_data_string(num_rows, column),
+        _ => unreachable!(),
+    }
+}
 pub fn gen_mutation_extras(write_batch: &wb::WriteBatch) -> Vec<MutationExtra> {
     let column_schemas = write_batch.schema().column_schemas();
     write_batch
