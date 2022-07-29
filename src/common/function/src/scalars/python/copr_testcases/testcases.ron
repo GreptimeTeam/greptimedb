@@ -92,7 +92,7 @@ def a(cpu: vector[f32 | f64], mem: vector[f64])->(vector[f64], vector[f64|None],
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: "not two type names"
+            reason: "Expect one typenames and one `None`"
         )
     ),
     (
@@ -103,7 +103,7 @@ def a(cpu: vector[None | None], mem: vector[f64])->(vector[f64], vector[None|Non
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: "Expect a type name and a `None`, found"
+            reason: "Expect one typenames and one `None`"
         )
     ),
     (
@@ -147,7 +147,7 @@ def a(cpu: vector[f64|1], mem: vector[f64])->(vector[f64|None], vector[f64], vec
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: "Expect only typenames and `None`, found"
+            reason: "Expect a type name and a `None`, found left: "
         )
     ),
     (

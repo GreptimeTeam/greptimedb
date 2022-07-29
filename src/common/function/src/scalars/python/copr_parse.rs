@@ -57,7 +57,7 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
     }
 }
 
-fn into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
+fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
     match ty {
         "bool" => Ok(Some(DataType::Boolean)),
         "u8" => Ok(Some(DataType::UInt8)),
@@ -73,6 +73,7 @@ fn into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
         "f64" => Ok(Some(DataType::Float64)),
         // for any datatype
         "_" => Ok(None),
+        // note the different between "_" and _
         _ => fail_parse_error!(
             format!("Unknown datatype: {ty} at {}", loc),
             Some(loc.to_owned())
@@ -82,10 +83,10 @@ fn into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
 
 /// Item => NativeType
 /// default to be not nullable
-fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
+fn parse_native_type(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
     match &sub.node {
         ast::ExprKind::Name { id, ctx: _ } => Ok(AnnotationInfo {
-            datatype: into_datatype(id, &sub.location)?,
+            datatype: try_into_datatype(id, &sub.location)?,
             is_nullable: false,
         }),
         _ => fail_parse_error!(
@@ -99,68 +100,43 @@ fn parse_item(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
     if let ast::ExprKind::BinOp { left, op: _, right } = &bin_op.node {
         // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
-        let mut has_ty = false;
-        let mut has_none = false;
-        for i in [left, right] {
-            match &i.node {
-                ast::ExprKind::Constant { value, kind: _ } => {
-                    has_none = matches!(value, ast::Constant::None);
-                    ensure!(
-                        matches!(value, ast::Constant::None),
-                        ret_parse_error(
-                            format!("Expect only typenames and `None`, found {:?}", i.node),
-                            Some(i.location)
-                        )
-                    );
-                }
-                ast::ExprKind::Name { id: _, ctx: _ } => {
-                    if has_ty {
-                        return fail_parse_error!(
-                            "Expect one typenames and one `None`, not two type names".into(),
-                            Some(i.location)
-                        );
-                    } else {
-                        has_ty = true;
-                    }
-                }
-                _ => {
-                    return fail_parse_error!(
-                        format!("Expect typename or `None`, found {:?}", &i.node),
-                        Some(i.location),
-                    )
-                }
+        let is_none = |node: &ast::Expr<()>| -> bool {
+            matches!(&node.node, ast::ExprKind::Constant {
+                value: ast::Constant::None,
+                kind: _,
+            })
+        };
+        let is_type = |node: &ast::Expr<()>| {
+            if let ast::ExprKind::Name { id, ctx: _ } = &node.node {
+                try_into_datatype(id, &node.location).is_ok()
+            } else {
+                false
             }
-        }
-        if !(has_ty && has_none) {
-            return fail_parse_error!(
-                format!("Expect a type name and a `None`, found {:?}", &bin_op.node),
+        };
+        let left_is_ty = is_type(left);
+        let left_is_none = is_none(left);
+        let right_is_ty = is_type(right);
+        let right_is_none = is_none(right);
+        if left_is_ty && right_is_ty || left_is_none && right_is_none {
+            fail_parse_error!(
+                "Expect one typenames and one `None`".to_string(),
                 Some(bin_op.location)
-            );
-        }
-
-        for i in [left, right] {
-            match &i.node {
-                ast::ExprKind::Constant { value: _, kind: _ }
-                | ast::ExprKind::Name { id: _, ctx: _ }
-                | ast::ExprKind::Call {
-                    func: _,
-                    args: _,
-                    keywords: _,
-                } => (),
-                _ => {
-                    return fail_parse_error!(
-                        format!("Expect typename or `None`, found {:?}", &i.node),
-                        Some(i.location),
-                    );
-                }
-            }
+            )?;
+        } else if !(left_is_none && right_is_ty || left_is_ty && right_is_none) {
+            fail_parse_error!(
+                format!(
+                    "Expect a type name and a `None`, found left: {:?} and right: {:?}",
+                    &left.node, &right.node
+                ),
+                Some(bin_op.location)
+            )?;
         }
         Ok(())
     } else {
         fail_parse_error!(
             format!(
                 "Expect binary ops like `DataType | None`, found {:#?}",
-                bin_op
+                bin_op.node
             ),
             Some(bin_op.location)
         )
@@ -182,7 +158,7 @@ fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
                     func: _,
                     args: _,
                     keywords: _,
-                } => tmp_anno = Some(parse_item(i)?),
+                } => tmp_anno = Some(parse_native_type(i)?),
                 _ => unreachable!(),
             }
         }
@@ -273,7 +249,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 func: _,
                 args: _,
                 keywords: _,
-            } => parse_item(slice),
+            } => parse_native_type(slice),
             ast::ExprKind::BinOp {
                 left: _,
                 op: _,
