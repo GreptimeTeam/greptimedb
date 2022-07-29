@@ -248,14 +248,17 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 
 /// parse a list of keyword and return args and returns list from keywords
 fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<String>)> {
-    
     // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
     let avail_key = HashSet::from(["args", "returns"]);
     ensure!(
         keywords.len() == avail_key.len(),
         CoprParseSnafu {
-            reason: format!("Expect {} keyword argument, found {}.", avail_key.len(), keywords.len()),
-            loc: keywords.get(0).map(|s|s.location)
+            reason: format!(
+                "Expect {} keyword argument, found {}.",
+                avail_key.len(),
+                keywords.len()
+            ),
+            loc: keywords.get(0).map(|s| s.location)
         }
     );
     let mut kw_map = HashMap::new();

@@ -66,6 +66,9 @@ impl Coprocessor {
     /// also set in location in source code to `loc`
     fn gen_call(&self, loc: &Location) -> ast::Stmt<()> {
         let mut loc = loc.to_owned();
+        // adding a line to avoid confusing if any error occurs when calling the function
+        // then the pretty print will point to the last line in code 
+        // instead of point to any of existing code written by user.
         loc.newline();
         let args: Vec<Located<ast::ExprKind>> = self
             .args
