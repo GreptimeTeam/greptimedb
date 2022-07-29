@@ -44,7 +44,7 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
                         "Expect a list of String, found {:?} in list element",
                         &s.node
                     ),
-                    Some(lst.location)
+                    Some(s.location)
                 );
             }
         }
@@ -185,7 +185,7 @@ fn check_annotation_ret_slice(sub: &ast::Expr<()>) -> Result<&ast::Expr<()>> {
                 id == "vector",
                 ret_parse_error(
                     format!(
-                        "Wrong type annotation, expect `vector[...]`, found \"{}\"",
+                        "Wrong type annotation, expect `vector[...]`, found `{}`",
                         id
                     ),
                     Some(value.location)

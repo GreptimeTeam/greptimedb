@@ -46,11 +46,11 @@ pub enum Error {
         source: ArrowError,
     },
     /// errors in coprocessors' parse check for types and etc.
-    #[snafu(display("Coprocessor error: {} at {}.", reason, 
+    #[snafu(display("Coprocessor error: {} {}.", reason, 
     if let Some(loc) = loc{
-        format!("{loc}")
+        format!("at {loc}")
     }else{
-        "Unknown location".into()
+        "".into()
     }))]
     CoprParse {
         backtrace: Backtrace,
@@ -59,7 +59,7 @@ pub enum Error {
         loc: Option<Location>,
     },
     /// Other types of error that isn't any of above
-    #[snafu(display("Coprocessor's Internal types of error: {}", reason))]
+    #[snafu(display("Coprocessor's Internal error: {}", reason))]
     Other {
         backtrace: Backtrace,
         reason: String,
@@ -93,29 +93,12 @@ pub fn pretty_print_error_in_src(
     ln_offset: usize,
     filename: &str,
 ) -> String {
-    // get a location if possible
-    let loc: Option<Location> = match err {
-        Error::PyParse {
-            backtrace: _,
-            source,
-        } => Some(source.location),
-        Error::PyCompile {
-            backtrace: _,
-            source,
-        } => Some(source.location),
-        Error::CoprParse {
-            backtrace: _,
-            reason: _,
-            loc,
-        } => loc.to_owned(),
-        _ => None,
-    };
+    let (reason, loc) = get_error_reason_loc(err);
     if let Some(loc) = loc {
-        let reason = get_error_reason(err);
         visualize_loc(script, &loc, &err.to_string(), &reason, ln_offset, filename)
     } else {
         // No location provide
-        format!("{}: {}", style("error").red().bold(), err)
+        format!("\n{}: {}", style("error").red().bold(), err)
     }
 }
 
@@ -131,53 +114,59 @@ pub fn visualize_loc(
     filename: &str,
 ) -> String {
     let lines: Vec<&str> = script.split('\n').collect();
-    let loc = Location::new(ln_offset + loc.row(), loc.column());
     let (row, col) = (loc.row(), loc.column());
     let red_bold = Style::new().red().bold();
     let blue_bold = Style::new().blue().bold();
+    let col_space = (ln_offset + row).to_string().len().max(1);
+    let space: String = " ".repeat(col_space);
     let indicate = format!(
         "
 {error}: {err_ty}
-{r_arrow} {filename}:{row}:{col}
-{prow:2}{ln_pad} {line}
-{prow:2}{ln_pad} {arrow:>pad$} {desc}
+{space}{r_arrow} {filename}:{row}:{col}
+{prow} {ln_pad} {line}
+{space} {ln_pad} {arrow:>pad$} {desc}
 ",
         error = red_bold.apply_to("error"),
         err_ty = style(err_ty).bold(),
-        r_arrow = blue_bold.apply_to(" -->"),
+        r_arrow = blue_bold.apply_to("-->"),
         filename = filename,
-        row = row,
+        row = ln_offset + row,
         col = col,
         line = lines[loc.row() - 1],
         pad = loc.column(),
         arrow = red_bold.apply_to("^"),
         desc = red_bold.apply_to(desc),
         ln_pad = blue_bold.apply_to("|"),
-        prow = blue_bold.apply_to(row),
+        prow = blue_bold.apply_to(ln_offset + row),
+        space = space
     );
     indicate
 }
 
-/// extract a reason for [`Error`]
-pub fn get_error_reason(err: &Error) -> String {
+/// extract a reason for [`Error`] in string format, also return a location if possible
+pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
     match err {
         Error::CoprParse {
             backtrace: _,
             reason,
-            loc: _,
-        } => reason.clone(),
+            loc,
+        } => (reason.clone(), loc.to_owned()),
         Error::Other {
             backtrace: _,
             reason,
-        } => reason.clone(),
+        } => (reason.clone(), None),
         Error::PyRuntime {
             backtrace: _,
             source,
-        } => source.output.clone(),
+        } => (source.output.clone(), None),
         Error::PyParse {
             backtrace: _,
             source,
-        } => format!("{}", source.error),
-        _ => format!("Unknown error: {:?}", err),
+        } => (source.error.to_string(), Some(source.location)),
+        Error::PyCompile {
+            backtrace: _,
+            source,
+        } => (source.error.to_string(), Some(source.location)),
+        _ => (format!("Unknown error: {:?}", err), None),
     }
 }

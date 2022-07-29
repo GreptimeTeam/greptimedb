@@ -14,8 +14,9 @@ use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
 
-use super::error::{get_error_reason, visualize_loc};
+use super::error::{get_error_reason_loc, visualize_loc};
 use super::*;
+use crate::scalars::python::error::pretty_print_error_in_src;
 use crate::scalars::python::{copr_parse::parse_copr, coprocessor::Coprocessor, error::Error};
 
 #[derive(Deserialize, Debug)]
@@ -86,12 +87,19 @@ fn run_ron_testcases() {
             Predicate::ParseIsErr { reason } => {
                 let copr = parse_copr(&testcase.code);
                 if copr.is_ok() {
-                    panic!("Expect to be err, found{copr:#?}")
+                    eprintln!("Expect to be err, found{copr:#?}");
+                    panic!()
                 }
-                let res = get_error_reason(&copr.unwrap_err());
+                let res = &copr.unwrap_err();
+                println!(
+                    "{}",
+                    pretty_print_error_in_src(&testcase.code, res, 0, "<embedded>")
+                );
+                let (res, _) = get_error_reason_loc(res);
                 if !res.contains(&reason) {
-                    println!("{}", testcase.code);
-                    panic!("Parse Error, expect \"{reason}\" in \"{res}\", but not found.")
+                    eprintln!("{}", testcase.code);
+                    eprintln!("Parse Error, expect \"{reason}\" in \"{res}\", but not found.");
+                    panic!()
                 }
             }
             Predicate::ExecIsOk { fields, columns } => {
@@ -109,7 +117,8 @@ fn run_ron_testcases() {
                         if !(anno.datatype.clone().unwrap() == real.data_type
                             && anno.is_nullable == real.is_nullable)
                         {
-                            panic!("fields expect to be {anno:#?}, found to be {real:#?}.");
+                            eprintln!("fields expect to be {anno:#?}, found to be {real:#?}.");
+                            panic!()
                         }
                     })
                     .count();
@@ -118,24 +127,41 @@ fn run_ron_testcases() {
                     .zip(res.columns())
                     .map(|(anno, real)| {
                         if !(&anno.ty == real.data_type() && anno.len == real.len()) {
-                            panic!(
+                            eprintln!(
                                 "Unmatch type or length!Expect [{:#?}; {}], found [{:#?}; {}]",
                                 anno.ty,
                                 anno.len,
                                 real.data_type(),
                                 real.len()
-                            )
+                            );
+                            panic!()
                         }
                     })
                     .count();
             }
-            Predicate::ExecIsErr { reason } => {
+            Predicate::ExecIsErr {
+                reason: part_reason,
+            } => {
                 let rb = create_sample_recordbatch();
                 let res = exec_coprocessor(&testcase.code, &rb);
-                let res = get_error_reason(&res.unwrap_err());
-                if !res.contains(&reason) {
-                    println!("{}", testcase.code);
-                    panic!("Execute error, expect \"{reason}\" in \"{res}\", but not found.")
+                if let Err(res) = res {
+                    println!(
+                        "{}",
+                        pretty_print_error_in_src(&testcase.code, &res, 1120, "<embedded>")
+                    );
+                    let (reason, _) = get_error_reason_loc(&res);
+                    if !reason.contains(&part_reason) {
+                        eprintln!(
+                            "{}\nExecute error, expect \"{reason}\" in \"{res}\", but not found.",
+                            testcase.code,
+                            reason = style(reason).green(),
+                            res = style(res).red()
+                        );
+                        panic!()
+                    }
+                } else {
+                    eprintln!("{:#?}\nExpect Err(...), found Ok(...)", res);
+                    panic!();
                 }
             }
         }

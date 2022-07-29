@@ -374,5 +374,17 @@ def a(cpu: vector[f32], mem: vector[f64])->f32:
         predicate: ParseIsErr(
             reason: "Expect `(vector[...], vector[...], ...)` or `vector[...]`, found "
         )
+    ),
+    (
+        name: "break_outside_loop",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64]):
+    break
+    return cpu + mem, cpu - mem
+"#,
+        predicate: ExecIsErr(
+            reason: "'break' outside loop"
+        )
     )
 ]
