@@ -1,4 +1,4 @@
-#![allow(clippy::print_stdout)]
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 // for debug purpose, also this is already a
 // test module so allow print_stdout shouldn't be a problem?
 use std::fs::File;
