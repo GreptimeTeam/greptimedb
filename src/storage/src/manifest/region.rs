@@ -50,6 +50,8 @@ impl Manifest for RegionManifest {
 
         let mut iter = self.inner.scan(start_bound, MAX_VERSION).await?;
 
+        // TODO(yingwen): [open_region] 1. Create Version from metadata 2. Load VersionEdits
+        // and apply to the Version by `Version::apply_edit`.
         while let Some((_v, action_list)) = iter.next_action().await? {
             for action in action_list.actions {
                 if let RegionMetaAction::Change(c) = action {

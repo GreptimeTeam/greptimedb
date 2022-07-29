@@ -9,7 +9,7 @@ use store_api::manifest::action::ProtocolAction;
 use store_api::{
     logstore::LogStore,
     manifest::Manifest,
-    storage::{EngineContext, RegionDescriptor, StorageEngine},
+    storage::{EngineContext, OpenOptions, RegionDescriptor, StorageEngine},
 };
 
 use crate::background::JobPoolImpl;
@@ -41,8 +41,13 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
     type Error = Error;
     type Region = RegionImpl<S>;
 
-    async fn open_region(&self, _ctx: &EngineContext, name: &str) -> Result<Self::Region> {
-        self.inner.open_region(name).await
+    async fn open_region(
+        &self,
+        _ctx: &EngineContext,
+        name: &str,
+        opts: &OpenOptions,
+    ) -> Result<Self::Region> {
+        self.inner.open_region(name, opts).await
     }
 
     async fn close_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
@@ -245,7 +250,7 @@ impl<S: LogStore> EngineInner<S> {
         None
     }
 
-    async fn open_region(&self, name: &str) -> Result<RegionImpl<S>> {
+    async fn open_region(&self, name: &str, opts: &OpenOptions) -> Result<RegionImpl<S>> {
         // We can wait until the state of the slot has been changed to ready, but this will
         // make the code more complicate, so we just return the error here.
         if let Some(slot) = self.get_or_occupy_slot(name, RegionSlot::Opening) {
@@ -256,7 +261,7 @@ impl<S: LogStore> EngineInner<S> {
 
         // FIXME(yingwen): Get region id or remove dependency of region id.
         let store_config = self.region_store_config(name);
-        let region = RegionImpl::open(name.to_string(), store_config).await?;
+        let region = RegionImpl::open(name.to_string(), store_config, opts).await?;
 
         guard.update(RegionSlot::Ready(region.clone()));
 
@@ -314,9 +319,9 @@ impl<S: LogStore> EngineInner<S> {
     }
 
     fn region_store_config(&self, region_name: &str) -> StoreConfig<S> {
-        let sst_dir = &region_sst_dir(&region_name);
+        let sst_dir = &region_sst_dir(region_name);
         let sst_layer = Arc::new(FsAccessLayer::new(sst_dir, self.object_store.clone()));
-        let manifest_dir = region_manifest_dir(&region_name);
+        let manifest_dir = region_manifest_dir(region_name);
         let manifest = RegionManifest::new(&manifest_dir, self.object_store.clone());
 
         StoreConfig {

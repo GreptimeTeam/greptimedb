@@ -1,6 +1,8 @@
+use std::pin::Pin;
 use std::sync::Arc;
 
 use common_error::prelude::BoxedError;
+use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
 use snafu::ResultExt;
 use store_api::{
@@ -20,6 +22,9 @@ pub struct Wal<S: LogStore> {
     namespace: S::Namespace,
     store: Arc<S>,
 }
+
+pub type WriteBatchStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<(WalHeader, WriteBatch)>> + Send + 'a>>;
 
 // wal should be cheap to clone
 impl<S: LogStore> Clone for Wal<S> {
@@ -94,6 +99,27 @@ impl<S: LogStore> Wal<S> {
         self.write(seq, &buf).await
     }
 
+    pub async fn read_from_wal(&self, start_seq: SequenceNumber) -> Result<WriteBatchStream<'_>> {
+        let stream = self
+            .store
+            .read(self.namespace.clone(), start_seq)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ReadWalSnafu { name: self.name() })?
+            .map_err(|e| Error::ReadWal {
+                name: self.name().to_string(),
+                source: BoxedError::new(e),
+            })
+            .and_then(|entries| async {
+                let iter = entries.into_iter().map(decode_entry);
+
+                Ok(stream::iter(iter))
+            })
+            .try_flatten();
+
+        Ok(Box::pin(stream))
+    }
+
     async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
         let ns = self.namespace.clone();
         let mut e = S::Entry::new(bytes);
@@ -108,6 +134,11 @@ impl<S: LogStore> Wal<S> {
 
         Ok((res.entry_id(), res.offset()))
     }
+}
+
+fn decode_entry<E: Entry>(_entry: E) -> Result<(WalHeader, WriteBatch)> {
+    // TODO(yingwen): [open_region] Decode entry into write batch.
+    unimplemented!()
 }
 
 pub enum Payload<'a> {

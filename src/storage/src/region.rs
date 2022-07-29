@@ -7,17 +7,20 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use snafu::ensure;
 use store_api::logstore::LogStore;
-use store_api::storage::{ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse};
+use store_api::manifest::Manifest;
+use store_api::storage::{
+    OpenOptions, ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse,
+};
 
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::region::RegionManifest;
-use crate::memtable::{MemtableBuilderRef, MemtableVersion};
+use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{RegionWriter, RegionWriterRef, WriterContext};
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
-use crate::version::{VersionControl, VersionControlRef};
+use crate::version::{Version, VersionControl, VersionControlRef};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
@@ -80,8 +83,7 @@ impl<S: LogStore> RegionImpl<S> {
         metadata: RegionMetadata,
         store_config: StoreConfig<S>,
     ) -> RegionImpl<S> {
-        let memtable_version = MemtableVersion::new();
-        let version_control = VersionControl::new(metadata, memtable_version);
+        let version_control = VersionControl::new(metadata);
         let wal = Wal::new(name.clone(), store_config.log_store);
 
         let inner = Arc::new(RegionInner {
@@ -102,7 +104,41 @@ impl<S: LogStore> RegionImpl<S> {
     }
 
     /// Open an exsiting region and recover its data.
-    pub async fn open(_name: String, _store_config: StoreConfig<S>) -> Result<RegionImpl<S>> {
+    pub async fn open(
+        name: String,
+        store_config: StoreConfig<S>,
+        opts: &OpenOptions,
+    ) -> Result<RegionImpl<S>> {
+        // Load version meta data from manifest.
+        let version = Self::recover_from_manifest(&store_config.manifest).await?;
+        let metadata = version.metadata().clone();
+        let version_control = Arc::new(VersionControl::with_version(version));
+        let wal = Wal::new(name.clone(), store_config.log_store);
+        let shared = Arc::new(SharedData {
+            id: metadata.id,
+            name,
+            version_control,
+        });
+
+        let writer = Arc::new(RegionWriter::new(store_config.memtable_builder));
+        let writer_ctx = WriterContext {
+            shared: &shared,
+            flush_strategy: &store_config.flush_strategy,
+            flush_scheduler: &store_config.flush_scheduler,
+            sst_layer: &store_config.sst_layer,
+            wal: &wal,
+            writer: &writer,
+            manifest: &store_config.manifest,
+        };
+        writer.replay(writer_ctx, opts).await?;
+
+        unimplemented!()
+    }
+
+    async fn recover_from_manifest(manifest: &RegionManifest) -> Result<Version> {
+        let _metadata = manifest.load().await?;
+
+        // TODO(yingwen): [open_region] Get version from metadata.
         unimplemented!()
     }
 }

@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use common_telemetry::logging;
 use common_time::RangeMillis;
+use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::storage::{SequenceNumber, WriteContext, WriteRequest, WriteResponse};
+use store_api::storage::{OpenOptions, SequenceNumber, WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
@@ -83,6 +84,16 @@ impl RegionWriter {
         // write lock here.
 
         Ok(())
+    }
+
+    /// Replay data to memtables.
+    pub async fn replay<S: LogStore>(
+        &self,
+        writer_ctx: WriterContext<'_, S>,
+        opts: &OpenOptions,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        inner.replay(&self.version_mutex, writer_ctx, opts).await
     }
 
     async fn persist_manifest_version<S: LogStore>(
@@ -186,6 +197,31 @@ impl WriterInner {
         version_control.set_committed_sequence(next_sequence);
 
         Ok(WriteResponse {})
+    }
+
+    async fn replay<S: LogStore>(
+        &mut self,
+        _version_mutex: &Mutex<()>,
+        writer_ctx: WriterContext<'_, S>,
+        opts: &OpenOptions,
+    ) -> Result<()> {
+        // TODO(yingwen): [open_region] Read `WriteBatch` from wal and invoke `WriterInner::write` to
+        // insert into memtables.
+        let version_control = writer_ctx.version_control();
+        let version = version_control.current();
+
+        // Data after flushed sequence need to be recovered.
+        let start_sequence = version.flushed_sequence() + 1;
+        let _write_ctx = WriteContext::from(opts);
+
+        let mut stream = writer_ctx.wal.read_from_wal(start_sequence).await?;
+
+        while let Some((_header, _write_batch)) = stream.try_next().await? {
+            // TODO(yingwen): [open_region] 1. Split write batch and insert into memtables. 2. Need to update
+            // (recover) committed_sequence.
+        }
+
+        unimplemented!()
     }
 
     /// Preprocess before write.

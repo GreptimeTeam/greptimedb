@@ -41,7 +41,8 @@ pub struct RegionEdit {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RegionManifestData {
     pub region_meta: RegionMetadataRef,
-    // TODO(dennis): version metadata
+    // TODO(dennis): [open_region] 1. load version metadata 2. The `region_meta` field could be removed if we
+    // have a `version` field.
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

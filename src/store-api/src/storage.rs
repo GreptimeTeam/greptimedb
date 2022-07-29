@@ -20,7 +20,7 @@ pub use self::descriptors::{
     ColumnFamilyDescriptorBuilder, ColumnFamilyId, ColumnId, RegionDescriptor, RegionId,
     RowKeyDescriptor, RowKeyDescriptorBuilder,
 };
-pub use self::engine::{EngineContext, StorageEngine};
+pub use self::engine::{EngineContext, OpenOptions, StorageEngine};
 pub use self::metadata::RegionMeta;
 pub use self::region::{Region, WriteContext};
 pub use self::requests::{GetRequest, PutOperation, ScanRequest, WriteRequest};
