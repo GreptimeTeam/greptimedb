@@ -1,4 +1,5 @@
 use datatypes::value::Value;
+use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::MetadataId;
@@ -112,11 +113,8 @@ impl RowKeyDescriptorBuilder {
     }
 
     pub fn push_column(mut self, column: ColumnDescriptor) -> Self {
-        if self.columns.is_none() {
-            self.columns = Some(Vec::new());
-        }
-
-        self.columns.as_mut().unwrap().push(column);
+        let columns = self.columns.get_or_insert_with(|| Vec::new());
+        columns.push(column);
         self
     }
 }
@@ -128,11 +126,8 @@ impl ColumnFamilyDescriptorBuilder {
     }
 
     pub fn push_column(mut self, column: ColumnDescriptor) -> Self {
-        if self.columns.is_none() {
-            self.columns = Some(Vec::new());
-        }
-
-        self.columns.as_mut().unwrap().push(column);
+        let columns = self.columns.get_or_insert_with(|| Vec::new());
+        columns.push(column);
         self
     }
 }

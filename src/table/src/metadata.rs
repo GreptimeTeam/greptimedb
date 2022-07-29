@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use datatypes::schema::SchemaRef;
+use derive_builder::Builder;
 
 pub type TableId = u64;
 pub type TableVersion = u64;
@@ -78,20 +79,14 @@ impl TableInfoBuilder {
     }
 
     pub fn table_id(mut self, id: impl Into<TableId>) -> Self {
-        if self.ident.is_none() {
-            self.ident = Some(TableIdent::default());
-        }
-
-        self.ident.as_mut().unwrap().table_id = id.into();
+        let ident = self.ident.get_or_insert_with(|| TableIdent::default());
+        ident.table_id = id.into();
         self
     }
 
     pub fn table_version(mut self, version: impl Into<TableVersion>) -> Self {
-        if self.ident.is_none() {
-            self.ident = Some(TableIdent::default());
-        }
-
-        self.ident.as_mut().unwrap().version = version.into();
+        let ident = self.ident.get_or_insert_with(|| TableIdent::default());
+        ident.version = version.into();
         self
     }
 }
