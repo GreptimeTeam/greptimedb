@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest};
 use crate::TableRef;
 
@@ -34,6 +36,8 @@ pub trait TableEngine: Send + Sync {
     async fn drop_table(&self, ctx: &EngineContext, request: DropTableRequest)
         -> Result<(), Error>;
 }
+
+pub type TableEngineRef = Arc<dyn TableEngine>;
 
 /// Storage engine context.
 #[derive(Debug, Clone, Default)]
