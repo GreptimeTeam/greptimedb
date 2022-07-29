@@ -152,10 +152,7 @@ def a(cpu: vector[_], mem: vector[f64])->(vector[f64|None], vector[f64], vector[
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#;
     let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
-    //dbg!(pyast);
     let copr = parse_copr(python_source);
-    // dbg!(&copr);
-    //assert!(copr.is_ok());
 }
 
 #[test]
@@ -170,7 +167,6 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     abc *= 2
     return abc, cpu - mem
 "#;
-    //println!("{}, {:?}", python_source, python_ast);
     let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
     let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
     let schema = Arc::new(Schema::from(vec![

@@ -176,7 +176,7 @@ impl Coprocessor {
             let loc = code[0].location;
 
             // This manually construct ast has no corrsponding code
-            // in the script, so just give it a random location
+            // in the script, so just give it a location that don't exist in orginal script
             // (which doesn't matter because Location usually only used in pretty print errors)
             code.push(self.gen_call(&loc));
         } else {
