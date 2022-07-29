@@ -355,13 +355,15 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
             slice: _,
             ctx: _,
         } => 1,
-        _ => return fail_parse_error!(
-            format!(
-                "Expect `(vector[...], vector[...], ...)` or `vector[...]`, found {:#?}",
-                &rets.node
-            ),
-            Some(rets.location),
-        ),
+        _ => {
+            return fail_parse_error!(
+                format!(
+                    "Expect `(vector[...], vector[...], ...)` or `vector[...]`, found {:#?}",
+                    &rets.node
+                ),
+                Some(rets.location),
+            )
+        }
     });
     match &rets.node {
         // python: ->(vector[...], vector[...], ...)
