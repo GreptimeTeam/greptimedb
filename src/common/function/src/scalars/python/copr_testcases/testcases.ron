@@ -344,4 +344,14 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
             reason: "invalid syntax. Got unexpected token "
         )
     ),
+    (
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->f32:
+    return cpu + mem, cpu - mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect `(vector[...], vector[...], ...)` or `vector[...]`, found "
+        )
+    )
 ]
