@@ -463,7 +463,7 @@ fn set_items_in_scope(
 ///
 /// # Example
 ///
-/// ```rust
+/// ```ignore
 /// use std::sync::Arc;
 /// use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 /// use arrow::array::PrimitiveArray;
