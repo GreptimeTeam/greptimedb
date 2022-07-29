@@ -21,6 +21,7 @@ use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
 use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
+use datatypes::vectors::Helper;
 use crate::fail_parse_error;
 use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
 use crate::scalars::python::error::{
@@ -78,11 +79,11 @@ impl Coprocessor {
                     id: v.to_owned(),
                     ctx: ast::ExprContext::Load,
                 };
-                set_loc(node, loc)
+                create_located(node, loc)
             })
             .collect();
         let func = ast::ExprKind::Call {
-            func: Box::new(set_loc(
+            func: Box::new(create_located(
                 ast::ExprKind::Name {
                     id: self.name.to_owned(),
                     ctx: ast::ExprContext::Load,
@@ -93,9 +94,9 @@ impl Coprocessor {
             keywords: Vec::new(),
         };
         let stmt = ast::StmtKind::Expr {
-            value: Box::new(set_loc(func, loc)),
+            value: Box::new(create_located(func, loc)),
         };
-        set_loc(stmt, loc)
+        create_located(stmt, loc)
     }
 
     /// check if `Mod` is of one line of statement
@@ -227,7 +228,7 @@ impl Coprocessor {
                     Field::new(
                         name,
                         // if type is like `_` or `_ | None`
-                        if let Some(ty) = ty { ty } else { real_ty },
+                        ty.unwrap_or(real_ty),
                         is_nullable,
                     )
                 })
@@ -238,6 +239,16 @@ impl Coprocessor {
     /// check if real types and annotation types(if have) is the same, if not try cast columns to annotated type
     fn check_and_cast_type(&self, cols: &mut [ArrayRef]) -> Result<()> {
         let return_types = &self.return_types;
+        ensure!(
+            cols.len() == return_types.len(),
+            OtherSnafu {
+                reason: format!(
+                    "The number of return Vector is wrong, expect {}, found {}",
+                    return_types.len(),
+                    cols.len()
+                )
+            }
+        );
         for (col, anno) in cols.iter_mut().zip(return_types) {
             if let Some(AnnotationInfo {
                 datatype: Some(datatype),
@@ -248,6 +259,8 @@ impl Coprocessor {
                 let anno_ty = datatype;
                 if real_ty != anno_ty {
                     {
+                        // This`CastOption` allow for overflowly cast and int to float loosely cast etc.., 
+                        // check its doc for more information
                         *col = arrow::compute::cast::cast(
                             col.as_ref(),
                             anno_ty,
@@ -259,8 +272,6 @@ impl Coprocessor {
                         .context(ArrowSnafu)?
                         .into();
                     }
-                } else {
-                    continue;
                 }
             }
         }
@@ -268,18 +279,16 @@ impl Coprocessor {
     }
 }
 
-fn set_loc<T>(node: T, loc: Location) -> Located<T> {
+fn create_located<T>(node: T, loc: Location) -> Located<T> {
     Located::new(loc, node)
 }
 
 /// cast a `dyn Array` of type unsigned/int/float into a `dyn Vector`
-fn into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilder>(
+fn try_into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilder>(
     arg: Arc<dyn Array>,
 ) -> Result<Arc<dyn Vector>> {
-    PrimitiveVector::<T>::try_from_arrow_array(arg)
-        .map(|op| Arc::new(op) as _)
-        // to cast datatypes::Error to python::Error
-        .context(TypeCastSnafu)
+    // wrap try_into_vector in here to convert `datatypes::error::Error` to `python::error::Error`
+    Helper::try_into_vector(arg).context(TypeCastSnafu)
 }
 
 /// convert a `Vec<ArrayRef>` into a `Vec<PyVector>` only when they are of supported types
@@ -288,16 +297,16 @@ fn into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
     let mut args: Vec<PyVector> = Vec::with_capacity(fetch_args.len());
     for (idx, arg) in fetch_args.into_iter().enumerate() {
         let v: VectorRef = match arg.data_type() {
-            DataType::Float32 => into_vector::<f32>(arg)?,
-            DataType::Float64 => into_vector::<f64>(arg)?,
-            DataType::UInt8 => into_vector::<u8>(arg)?,
-            DataType::UInt16 => into_vector::<u16>(arg)?,
-            DataType::UInt32 => into_vector::<u32>(arg)?,
-            DataType::UInt64 => into_vector::<u64>(arg)?,
-            DataType::Int8 => into_vector::<i8>(arg)?,
-            DataType::Int16 => into_vector::<i16>(arg)?,
-            DataType::Int32 => into_vector::<i32>(arg)?,
-            DataType::Int64 => into_vector::<i64>(arg)?,
+            DataType::Float32 => try_into_vector::<f32>(arg)?,
+            DataType::Float64 => try_into_vector::<f64>(arg)?,
+            DataType::UInt8 => try_into_vector::<u8>(arg)?,
+            DataType::UInt16 => try_into_vector::<u16>(arg)?,
+            DataType::UInt32 => try_into_vector::<u32>(arg)?,
+            DataType::UInt64 => try_into_vector::<u64>(arg)?,
+            DataType::Int8 => try_into_vector::<i8>(arg)?,
+            DataType::Int16 => try_into_vector::<i16>(arg)?,
+            DataType::Int32 => try_into_vector::<i32>(arg)?,
+            DataType::Int64 => try_into_vector::<i64>(arg)?,
             DataType::Boolean => {
                 let v: VectorRef =
                     Arc::new(BooleanVector::try_from_arrow_array(arg).context(TypeCastSnafu)?);

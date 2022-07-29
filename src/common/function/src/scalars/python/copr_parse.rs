@@ -172,8 +172,8 @@ fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
     unreachable!()
 }
 
-/// check for the grammar correctness of annotation
-fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
+/// check for the grammar correctness of annotation, also return the slice of subscript for further parsing
+fn check_annotation_ret_slice(sub: &ast::Expr<()>) -> Result<&ast::Expr<()>> {
     if let ast::ExprKind::Subscript {
         value,
         slice,
@@ -197,23 +197,13 @@ fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
                 Some(value.location)
             );
         }
-
-        match &slice.node {
-            ast::ExprKind::Name { .. } | ast::ExprKind::BinOp { .. } => (),
-            _ => {
-                return fail_parse_error!(
-                    format!("Expect type in `vector[...]`, found {:?}", &slice.node),
-                    Some(slice.location),
-                )
-            }
-        }
+        Ok(&slice)
     } else {
-        return fail_parse_error!(
+        fail_parse_error!(
             format!("Expect type annotation, found {:?}", &sub),
             Some(sub.location)
-        );
-    };
-    Ok(())
+        )
+    }
 }
 
 /// where:
@@ -224,12 +214,8 @@ fn check_annotation(sub: &ast::Expr<()>) -> Result<()> {
 ///
 /// Item => NativeType
 fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
-    check_annotation(sub)?;
-    if let ast::ExprKind::Subscript {
-        value: _,
-        slice,
-        ctx: _,
-    } = &sub.node
+    let slice = check_annotation_ret_slice(sub)?;
+    
     {
         // i.e: vector[f64]
         match &slice.node {
@@ -239,10 +225,13 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 op: _,
                 right: _,
             } => parse_bin_op(slice),
-            _ => unreachable!(),
+            _ => {
+                fail_parse_error!(
+                    format!("Expect type in `vector[...]`, found {:?}", &slice.node),
+                    Some(slice.location),
+                )
+            },
         }
-    } else {
-        unreachable!()
     }
 }
 
