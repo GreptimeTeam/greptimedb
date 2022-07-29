@@ -585,6 +585,7 @@ pub fn pyobj_try_to_typed_val(
                     None
                 }
             }
+            ConcreteDataType::List(_) => unreachable!(),
         }
     } else if is_instance(&obj, PyNone::class(vm).into(), vm) {
         // if Untyped then by default return types with highest precision
@@ -639,6 +640,7 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         // is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt
         value::Value::Date(v) => PyInt::from(v).into_pyobject(vm),
         value::Value::DateTime(v) => PyInt::from(v).into_pyobject(vm),
+        value::Value::List(_) => unreachable!(),
     }
 }
 
