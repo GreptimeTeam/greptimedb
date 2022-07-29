@@ -75,7 +75,7 @@ fn run_ron_testcases() {
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
     println!("Read {} testcases from {}", testcases.len(), loc);
     for testcase in testcases {
-        print!("Testing {}", testcase.name);
+        print!(".ron test {}", testcase.name);
         match testcase.predicate {
             Predicate::ParseIsOk { result } => {
                 let copr = parse_copr(&testcase.code);
@@ -139,7 +139,7 @@ fn run_ron_testcases() {
                 }
             }
         }
-        println!(" ... {}", style("ok").green());
+        println!(" ... {}", style("ok✅").green());
     }
 }
 
