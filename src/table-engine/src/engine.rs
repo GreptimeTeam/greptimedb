@@ -19,7 +19,7 @@ use table::{
     table::TableRef,
 };
 
-use crate::error::{self, Error, Result};
+use crate::error::{self, Result};
 use crate::table::MitoTable;
 
 pub const DEFAULT_ENGINE: &str = "mito";
@@ -43,33 +43,42 @@ impl<Store: StorageEngine> MitoEngine<Store> {
 
 #[async_trait]
 impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
-    type Error = Error;
-
     async fn create_table(
         &self,
         ctx: &EngineContext,
         request: CreateTableRequest,
-    ) -> Result<TableRef> {
-        self.inner.create_table(ctx, request).await
+    ) -> std::result::Result<TableRef, table::engine::Error> {
+        self.inner
+            .create_table(ctx, request)
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn alter_table(
         &self,
         _ctx: &EngineContext,
         _request: AlterTableRequest,
-    ) -> Result<TableRef> {
+    ) -> std::result::Result<TableRef, table::engine::Error> {
         unimplemented!();
     }
 
-    fn get_table(&self, ctx: &EngineContext, name: &str) -> Result<Option<TableRef>> {
-        self.inner.get_table(ctx, name)
+    fn get_table(
+        &self,
+        ctx: &EngineContext,
+        name: &str,
+    ) -> std::result::Result<Option<TableRef>, table::engine::Error> {
+        self.inner.get_table(ctx, name).map_err(|e| e.into())
     }
 
     fn table_exists(&self, _ctx: &EngineContext, _name: &str) -> bool {
         unimplemented!();
     }
 
-    async fn drop_table(&self, _ctx: &EngineContext, _request: DropTableRequest) -> Result<()> {
+    async fn drop_table(
+        &self,
+        _ctx: &EngineContext,
+        _request: DropTableRequest,
+    ) -> std::result::Result<(), table::engine::Error> {
         unimplemented!();
     }
 }

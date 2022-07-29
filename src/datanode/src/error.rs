@@ -5,8 +5,8 @@ use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
+use table::engine::Error as TableEngineError;
 use table::error::Error as TableError;
-use table_engine::error::Error as TableEngineError;
 
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
