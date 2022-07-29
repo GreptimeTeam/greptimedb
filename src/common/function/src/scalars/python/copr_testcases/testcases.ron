@@ -1,0 +1,399 @@
+// This is the file for python coprocessor's testcases, 
+// including coprocessor parsing test and execute test
+// check src/scalars/python/test.rs for more information
+[
+    (
+        name: "correct_parse",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+        "#,
+        predicate: ParseIsOk(
+            result: (
+                name: "a",
+                args: ["cpu", "mem"],
+                returns: ["perf", "what", "how", "why"],
+                arg_types: [
+                    Some((
+                        datatype: Some(Float32),
+                        is_nullable: false
+                    )),
+                    Some((
+                        datatype: Some(Float64),
+                        is_nullable: false
+                    )),
+                ],
+                return_types: [
+                    Some((
+                        datatype: Some(Float64),
+                        is_nullable: false
+                    )),
+                    Some((
+                        datatype: Some(Float64),
+                        is_nullable: true
+                    )),
+                    Some((
+                        datatype: None,
+                        is_nullable: false
+                    )),
+                    Some((
+                        datatype: None,
+                        is_nullable: true
+                    )),
+                ]
+            )
+        )
+    ),
+    (
+        name: "missing_decorator",
+        code: r#"
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect one decorator"
+        )
+    ),
+    (
+        name: "not_a_list_of_string",
+        code: r#"
+@copr(args=["cpu", 3], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect a list of String, found"
+        )
+    ),
+    (
+        name: "not_even_a_list",
+        code: r#"
+@copr(args=42, returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect a list, found"
+        )
+    ),
+    (
+        // unknown type names
+        name: "unknown_type_names",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[g32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Unknown datatype:"
+        )
+    ),
+    (
+        // two type name
+        name: "two_type_names",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32 | f64], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect one typenames and one `None`"
+        )
+    ),
+    (
+        name: "two_none",
+        // two `None`
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[None | None], mem: vector[f64])->(vector[f64], vector[None|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect one typenames and one `None`"
+        )
+    ),
+    (
+        // Expect a Types name
+        name: "unknown_type_names_in_ret",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f64|None], mem: vector[f64])->(vector[g64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Unknown datatype:"
+        )
+    ),
+    (
+        // no more `into`
+        name: "call_deprecated_for_cast_into",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[cast(f64)], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect type in `vector[...]`, found "
+        )
+    ),
+    (
+        // Expect `vector` not `vec`
+        name: "vector_not_vec",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vec[f64], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Wrong type annotation, expect `vector[...]`, found"
+        )
+    ),
+    (
+        // Expect `None`
+        name: "expect_none",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f64|1], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect a type name and a `None`, found left: "
+        )
+    ),
+    (
+        // more than one statement
+        name: "two_stmt",
+        code: r#"
+print("hello world")
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: 
+            "Expect one and only one python function with `@coprocessor` or `@cpor` decorator"
+        )
+    ),
+    (
+        // wrong decorator name
+        name: "typo_copr",
+        code: r#"
+@corp(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: 
+            "Expect decorator with name `copr` or `coprocessor`, found"
+        )
+    ),
+    (
+        name: "missing_keywords",
+        code: r#"
+@copr(args=["cpu", "mem"])
+def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: 
+            " keyword argument, found "
+        )
+    ),
+    (
+        // exec_coprocessor
+        name: "correct_exec",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+    vector[f32]):
+    return cpu + mem, cpu - mem
+"#,
+        predicate: ExecIsOk(
+            fields: [
+                (
+                    datatype: Some(Float64),
+                    is_nullable: true
+                ),
+                (
+                    datatype: Some(Float32),
+                    is_nullable: false
+                ),
+            ],
+            columns: [
+                (
+                    ty: Float64,
+                    len: 4
+                ),
+                (
+                    ty: Float32,
+                    len: 4
+                )
+            ]
+        )
+    ),
+    (
+        // constant column(float)
+        name: "constant_float_col",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+    vector[f32]):
+    return cpu + mem, 1.0
+"#,
+        predicate: ExecIsOk(
+            fields: [
+                (
+                    datatype: Some(Float64),
+                    is_nullable: true
+                ),
+                (
+                    datatype: Some(Float32),
+                    is_nullable: false
+                ),
+            ],
+            columns: [
+                (
+                    ty: Float64,
+                    len: 4
+                ),
+                (
+                    ty: Float32,
+                    len: 4
+                )
+            ]
+        )
+    ),
+    (
+        // constant column(int)
+        name: "constant_int_col",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+    vector[f32]):
+    return cpu + mem, 1
+"#,
+        predicate: ExecIsOk(
+            fields: [
+                (
+                    datatype: Some(Float64),
+                    is_nullable: true
+                ),
+                (
+                    datatype: Some(Float32),
+                    is_nullable: false
+                ),
+            ],
+            columns: [
+                (
+                    ty: Float64,
+                    len: 4
+                ),
+                (
+                    ty: Float32,
+                    len: 4
+                )
+            ]
+        )
+    ),
+    (
+        // constant column(bool)
+        name: "constant_bool_col",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+    vector[f32]):
+    return cpu + mem, True
+"#,
+        predicate: ExecIsOk(
+            fields: [
+                (
+                    datatype: Some(Float64),
+                    is_nullable: true
+                ),
+                (
+                    datatype: Some(Float32),
+                    is_nullable: false
+                ),
+            ],
+            columns: [
+                (
+                    ty: Float64,
+                    len: 4
+                ),
+                (
+                    ty: Float32,
+                    len: 4
+                )
+            ]
+        )
+    ),
+    (
+        // expect 4 vector ,found 5
+        name: "ret_nums_wrong",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why", "whatever", "nihilism"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vector[f64], vector[f64 | None], vector[bool], vector[_ | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem, cpu
+"#,
+        predicate: ExecIsErr(
+            reason: "The number of return Vector is wrong, expect"
+        )
+    ),
+    (
+        name: "div_by_zero",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+    vector[f32]):
+    return cpu + mem, cpu - mem*(1/0)
+"#,
+        predicate: ExecIsErr(
+            reason: "ZeroDivisionError: division by zero"
+        )
+    ),
+    (
+        name: "unexpected_token",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+    vector[f32]):
+    return cpu + mem, cpu - mem***
+"#,
+        predicate: ParseIsErr(
+            reason: "invalid syntax. Got unexpected token "
+        )
+    ),
+    (
+        name: "wrong_return_anno",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->f32:
+    return cpu + mem, cpu - mem
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect `(vector[...], vector[...], ...)` or `vector[...]`, found "
+        )
+    ),
+    (
+        name: "break_outside_loop",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64]):
+    break
+    return cpu + mem, cpu - mem
+"#,
+        predicate: ExecIsErr(
+            reason: "'break' outside loop"
+        )
+    ),
+    (
+        name: "not_even_wrong",
+        code: r#"
+42
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect a function definition, found a"
+        )
+    )
+]
