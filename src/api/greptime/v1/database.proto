@@ -21,8 +21,12 @@ message ObjectExpr {
   }
 }
 
+// TODO(fys): Only support sql now, and 
+// will support promql etc in the future
 message SelectExpr {
-  string select = 1; // sql, promql, etc.
+  oneof expr {
+    string sql = 1;
+  }
 }
 
 message InsertExpr {
