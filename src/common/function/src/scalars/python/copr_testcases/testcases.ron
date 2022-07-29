@@ -3,6 +3,7 @@
 // check src/scalars/python/test.rs for more information
 [
     (
+        name: "correct_parse",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
@@ -45,6 +46,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
         )
     ),
     (
+        name: "missing_decorator",
         code: r#"
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
@@ -54,6 +56,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
         )
     ),
     (
+        name: "not_a_list_of_string",
         code: r#"
 @copr(args=["cpu", 3], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
@@ -64,6 +67,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
         )
     ),
     (
+        name: "not_even_a_list",
         code: r#"
 @copr(args=42, returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
@@ -75,6 +79,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
     ),
     (
         // unknown type names
+        name: "unknown_type_names",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[g32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
@@ -86,6 +91,7 @@ def a(cpu: vector[g32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
     ),
     (
         // two type name
+        name: "two_type_names",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f32 | f64], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
@@ -96,6 +102,7 @@ def a(cpu: vector[f32 | f64], mem: vector[f64])->(vector[f64], vector[f64|None],
         )
     ),
     (
+        name: "two_none",
         // two `None`
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
@@ -108,6 +115,7 @@ def a(cpu: vector[None | None], mem: vector[f64])->(vector[f64], vector[None|Non
     ),
     (
         // Expect a Types name
+        name: "unknown_type_names_in_ret",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f64|None], mem: vector[f64])->(vector[g64], vector[f64|None], vector[_], vector[_ | None]):
@@ -119,6 +127,7 @@ def a(cpu: vector[f64|None], mem: vector[f64])->(vector[g64], vector[f64|None], 
     ),
     (
         // no more `into`
+        name: "call_deprecated_for_cast_into",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[cast(f64)], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
@@ -130,6 +139,7 @@ def a(cpu: vector[cast(f64)], mem: vector[f64])->(vector[f64], vector[f64|None],
     ),
     (
         // Expect `vector` not `vec`
+        name: "vector_not_vec",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vec[f64], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[_ | None]):
@@ -141,6 +151,7 @@ def a(cpu: vec[f64], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_
     ),
     (
         // Expect `None`
+        name: "expect_none",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f64|1], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[_ | None]):
@@ -152,6 +163,7 @@ def a(cpu: vector[f64|1], mem: vector[f64])->(vector[f64|None], vector[f64], vec
     ),
     (
         // more than one statement
+        name: "two_stmt",
         code: r#"
 print("hello world")
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
@@ -165,6 +177,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)]
     ),
     (
         // wrong decorator name
+        name: "typo_copr",
         code: r#"
 @corp(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)], vector[f64], vector[f64 | None]):
@@ -176,7 +189,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)]
         )
     ),
     (
-        // wrong decorator name
+        name: "missing_keywords",
         code: r#"
 @copr(args=["cpu", "mem"])
 def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)], vector[f64], vector[f64 | None]):
@@ -189,6 +202,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
     ),
     (
         // exec_coprocessor
+        name: "correct_exec",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
@@ -220,6 +234,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     ),
     (
         // constant column(float)
+        name: "constant_float_col",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
@@ -251,6 +266,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     ),
     (
         // constant column(int)
+        name: "constant_int_col",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
@@ -282,6 +298,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     ),
     (
         // constant column(bool)
+        name: "constant_bool_col",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
@@ -313,6 +330,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     ),
     (
         // expect 4 vector ,found 5
+        name: "ret_nums_wrong",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why", "whatever", "nihilism"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vector[f64], vector[f64 | None], vector[bool], vector[_ | None]):
@@ -323,6 +341,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vecto
         )
     ),
     (
+        name: "div_by_zero",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
@@ -334,6 +353,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         )
     ),
     (
+        name: "unexpected_token",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
@@ -345,6 +365,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         )
     ),
     (
+        name: "wrong_return_anno",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->f32:

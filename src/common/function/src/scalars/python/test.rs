@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use arrow::array::PrimitiveArray;
 use arrow::datatypes::{DataType, Field, Schema};
+use console::style;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
@@ -19,6 +20,7 @@ use crate::scalars::python::{copr_parse::parse_copr, coprocessor::Coprocessor, e
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TestCase {
+    name: String,
     code: String,
     predicate: Predicate,
 }
@@ -73,6 +75,7 @@ fn run_ron_testcases() {
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
     println!("Read {} testcases from {}", testcases.len(), loc);
     for testcase in testcases {
+        print!("Testing {}", testcase.name);
         match testcase.predicate {
             Predicate::ParseIsOk { result } => {
                 let copr = parse_copr(&testcase.code);
@@ -136,6 +139,7 @@ fn run_ron_testcases() {
                 }
             }
         }
+        println!(" ... {}", style("ok").green());
     }
 }
 
