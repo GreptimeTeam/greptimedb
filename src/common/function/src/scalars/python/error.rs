@@ -118,7 +118,7 @@ pub fn visualize_loc(
     let red_bold = Style::new().red().bold();
     let blue_bold = Style::new().blue().bold();
     let col_space = (ln_offset + row).to_string().len().max(1);
-    let space: String = " ".repeat(col_space-1);
+    let space: String = " ".repeat(col_space - 1);
     let indicate = format!(
         "
 {error}: {err_ty}
