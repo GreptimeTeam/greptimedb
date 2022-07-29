@@ -18,14 +18,14 @@ use super::error::{get_error_reason, visualize_loc};
 use super::*;
 use crate::scalars::python::{copr_parse::parse_copr, coprocessor::Coprocessor, error::Error};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 struct TestCase {
     name: String,
     code: String,
     predicate: Predicate,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 enum Predicate {
     ParseIsOk {
         result: Coprocessor,

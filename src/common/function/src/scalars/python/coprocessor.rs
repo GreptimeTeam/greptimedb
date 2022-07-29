@@ -35,11 +35,11 @@ fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 }
 
 #[cfg(test)]
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::error::pretty_print_error_in_src;
 
-#[cfg_attr(test, derive(Serialize, Deserialize))]
+#[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnotationInfo {
     /// if None, use types infered by PyVector
@@ -47,7 +47,7 @@ pub struct AnnotationInfo {
     pub is_nullable: bool,
 }
 
-#[cfg_attr(test, derive(Serialize, Deserialize))]
+#[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Coprocessor {
     pub name: String,
@@ -57,6 +57,7 @@ pub struct Coprocessor {
     // get from python function args& returns' annotation, first is type, second is is_nullable
     pub arg_types: Vec<Option<AnnotationInfo>>,
     pub return_types: Vec<Option<AnnotationInfo>>,
+    /// store its corresponding script, also skip serde when in `cfg(test)` to reduce work in compare
     #[cfg_attr(test, serde(skip))]
     pub script: String,
 }
