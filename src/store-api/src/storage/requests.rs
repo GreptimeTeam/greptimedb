@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use common_error::ext::ErrorExt;
 use common_time::RangeMillis;
-use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 
 use crate::storage::SequenceNumber;
@@ -11,8 +10,6 @@ use crate::storage::SequenceNumber;
 pub trait WriteRequest: Send {
     type Error: ErrorExt + Send + Sync;
     type PutOp: PutOperation;
-
-    fn new(schema: SchemaRef) -> Self;
 
     fn put(&mut self, put: Self::PutOp) -> Result<(), Self::Error>;
 
@@ -25,8 +22,6 @@ pub trait WriteRequest: Send {
 /// Put multiple rows.
 pub trait PutOperation: Send {
     type Error: ErrorExt + Send + Sync;
-
-    fn new() -> Self;
 
     fn with_num_columns(num_columns: usize) -> Self;
 

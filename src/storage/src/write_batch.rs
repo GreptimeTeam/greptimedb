@@ -130,17 +130,19 @@ pub struct WriteBatch {
     num_rows: usize,
 }
 
-impl WriteRequest for WriteBatch {
-    type Error = Error;
-    type PutOp = PutData;
-
-    fn new(schema: SchemaRef) -> Self {
+impl WriteBatch {
+    pub fn new(schema: SchemaRef) -> Self {
         Self {
             schema,
             mutations: Vec::new(),
             num_rows: 0,
         }
     }
+}
+
+impl WriteRequest for WriteBatch {
+    type Error = Error;
+    type PutOp = PutData;
 
     fn put(&mut self, data: PutData) -> Result<()> {
         if data.is_empty() {
@@ -231,12 +233,14 @@ pub struct PutData {
     columns: HashMap<String, VectorRef>,
 }
 
-impl PutOperation for PutData {
-    type Error = Error;
-
-    fn new() -> PutData {
+impl PutData {
+    pub fn new() -> PutData {
         PutData::default()
     }
+}
+
+impl PutOperation for PutData {
+    type Error = Error;
 
     fn with_num_columns(num_columns: usize) -> PutData {
         PutData {

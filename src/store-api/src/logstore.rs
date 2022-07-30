@@ -47,6 +47,8 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     // List all existing namespaces.
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
+
+    fn new_entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry;
 }
 
 pub trait AppendResponse: Send + Sync {

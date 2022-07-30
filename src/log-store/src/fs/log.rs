@@ -244,6 +244,10 @@ impl LogStore for LocalFileLogStore {
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
         todo!()
     }
+
+    fn new_entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry {
+        EntryImpl::new(data)
+    }
 }
 
 #[cfg(test)]
