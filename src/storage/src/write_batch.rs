@@ -195,6 +195,10 @@ impl WriteRequest for WriteBatch {
 
         Ok(ranges)
     }
+
+    fn put_op(&self) -> Self::PutOp {
+        PutData::new()
+    }
 }
 
 /// Aligns timestamp to nearest time interval.

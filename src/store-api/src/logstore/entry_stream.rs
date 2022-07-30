@@ -71,14 +71,6 @@ mod tests {
     impl Entry for SimpleEntry {
         type Error = Error;
 
-        fn new(data: impl AsRef<[u8]>) -> Self {
-            Self {
-                data: data.as_ref().to_vec(),
-                offset: 0,
-                epoch: 0,
-            }
-        }
-
         fn data(&self) -> &[u8] {
             &self.data
         }

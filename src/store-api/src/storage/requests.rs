@@ -17,6 +17,8 @@ pub trait WriteRequest: Send {
     ///
     /// Each time range is aligned to given `duration`.
     fn time_ranges(&self, duration: Duration) -> Result<Vec<RangeMillis>, Self::Error>;
+
+    fn put_op(&self) -> Self::PutOp;
 }
 
 /// Put multiple rows.
