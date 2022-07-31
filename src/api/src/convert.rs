@@ -5,7 +5,7 @@ use crate::v1::{InsertBatch, SelectResult};
 
 impl From<InsertBatch> for Vec<u8> {
     fn from(insert: InsertBatch) -> Self {
-        insert.encode_length_delimited_to_vec()
+        insert.encode_to_vec()
     }
 }
 
@@ -13,13 +13,13 @@ impl TryFrom<Vec<u8>> for InsertBatch {
     type Error = DecodeError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        InsertBatch::decode_length_delimited(value.as_ref())
+        InsertBatch::decode(value.as_ref())
     }
 }
 
 impl From<SelectResult> for Vec<u8> {
     fn from(result: SelectResult) -> Self {
-        result.encode_length_delimited_to_vec()
+        result.encode_to_vec()
     }
 }
 
@@ -27,7 +27,7 @@ impl TryFrom<Vec<u8>> for SelectResult {
     type Error = DecodeError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        SelectResult::decode_length_delimited(value.as_ref())
+        SelectResult::decode(value.as_ref())
     }
 }
 
