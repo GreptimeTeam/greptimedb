@@ -6,6 +6,8 @@ pub mod math;
 pub mod numpy;
 #[cfg(feature = "python-udf")]
 pub mod python;
+#[cfg(feature = "python-udf")]
+pub mod py_udf_module;
 #[cfg(test)]
 pub(crate) mod test;
 pub mod udf;

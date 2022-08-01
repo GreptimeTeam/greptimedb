@@ -153,6 +153,11 @@ impl AsRef<PyVector> for PyVector {
 
 #[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
 impl PyVector {
+    /// create a ref to inner vector
+    #[inline]
+    pub fn as_vector_ref(&self) -> VectorRef {
+        self.vector.clone()
+    }
     #[inline]
     pub fn to_arrow_array(&self) -> ArrayRef {
         self.vector.to_arrow_array()
