@@ -242,11 +242,11 @@ pub struct PutData {
 }
 
 impl PutData {
-    pub fn new() -> PutData {
+    pub(crate) fn new() -> PutData {
         PutData::default()
     }
 
-    pub fn with_num_columns(num_columns: usize) -> PutData {
+    pub(crate) fn with_num_columns(num_columns: usize) -> PutData {
         PutData {
             columns: HashMap::with_capacity(num_columns),
         }
