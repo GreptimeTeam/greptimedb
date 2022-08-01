@@ -9,3 +9,4 @@ mod type_;
 
 use coprocessor::AnnotationInfo;
 pub use coprocessor::{exec_copr_print, exec_coprocessor};
+pub use type_::PyVector;
