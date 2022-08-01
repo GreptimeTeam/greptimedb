@@ -12,7 +12,7 @@ use crate::region::StoreConfig;
 use crate::sst::FsAccessLayer;
 
 /// Create a new StoreConfig for test.
-pub async fn new_store_config(store_dir: &str, region_name: &str) -> StoreConfig<NoopLogStore> {
+pub async fn new_store_config(region_name: &str, store_dir: &str) -> StoreConfig<NoopLogStore> {
     let sst_dir = engine::region_sst_dir(region_name);
     let manifest_dir = engine::region_manifest_dir(region_name);
 

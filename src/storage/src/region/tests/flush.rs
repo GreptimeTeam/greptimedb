@@ -1,3 +1,5 @@
+//! Region flush tests.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -7,7 +9,7 @@ use tempdir::TempDir;
 
 use crate::engine;
 use crate::flush::{FlushStrategy, FlushStrategyRef};
-use crate::region::tests::read_write::{self, Tester};
+use crate::region::tests::{self, TesterBase};
 use crate::region::{RegionImpl, SharedDataRef};
 use crate::test_util::config_util;
 
@@ -19,16 +21,17 @@ async fn new_region_for_flush(
     enable_version_column: bool,
     flush_strategy: FlushStrategyRef,
 ) -> RegionImpl<NoopLogStore> {
-    let metadata = read_write::new_metadata(REGION_NAME, enable_version_column);
+    let metadata = tests::new_metadata(REGION_NAME, enable_version_column);
 
-    let mut store_config = config_util::new_store_config(store_dir, REGION_NAME).await;
+    let mut store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
     store_config.flush_strategy = flush_strategy;
 
     RegionImpl::new(0, REGION_NAME.to_string(), metadata, store_config)
 }
 
+/// Tester for region flush.
 struct FlushTester {
-    tester: Tester,
+    base: TesterBase,
 }
 
 impl FlushTester {
@@ -36,20 +39,20 @@ impl FlushTester {
         let region = new_region_for_flush(store_dir, false, flush_strategy).await;
 
         FlushTester {
-            tester: Tester::with_region(region),
+            base: TesterBase::with_region(region),
         }
     }
 
     async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
-        self.tester.put(data).await
+        self.base.put(data).await
     }
 
     async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
-        self.tester.full_scan().await
+        self.base.full_scan().await
     }
 
     async fn wait_flush_done(&self) {
-        self.tester.region.wait_flush_done().await.unwrap();
+        self.base.region.wait_flush_done().await.unwrap();
     }
 }
 
