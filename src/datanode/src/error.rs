@@ -6,7 +6,6 @@ use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
-use table_engine::error::Error as TableEngineError;
 
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
@@ -28,7 +27,7 @@ pub enum Error {
     CreateTable {
         table_name: String,
         #[snafu(backtrace)]
-        source: TableEngineError,
+        source: TableError,
     },
 
     #[snafu(display("Fail to get table: {}, {}", table_name, source))]

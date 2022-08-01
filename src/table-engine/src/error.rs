@@ -13,6 +13,12 @@ pub enum Error {
     },
 }
 
+impl From<Error> for table::error::Error {
+    fn from(e: Error) -> Self {
+        table::error::Error::new(e)
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
@@ -50,5 +56,13 @@ mod tests {
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
         assert!(err.backtrace_opt().is_some());
+    }
+
+    #[test]
+    pub fn test_opaque_error() {
+        let error = throw_create_table(StatusCode::InvalidSyntax).err().unwrap();
+        let table_engine_error: table::error::Error = error.into();
+        assert!(table_engine_error.backtrace_opt().is_some());
+        assert_eq!(StatusCode::InvalidSyntax, table_engine_error.status_code());
     }
 }
