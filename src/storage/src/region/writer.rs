@@ -201,27 +201,40 @@ impl WriterInner {
 
     async fn replay<S: LogStore>(
         &mut self,
-        _version_mutex: &Mutex<()>,
+        version_mutex: &Mutex<()>,
         writer_ctx: WriterContext<'_, S>,
         opts: &OpenOptions,
     ) -> Result<()> {
-        // TODO(yingwen): [open_region] Read `WriteBatch` from wal and invoke `WriterInner::write` to
-        // insert into memtables.
         let version_control = writer_ctx.version_control();
-        let version = version_control.current();
+
+        let _lock = version_mutex.lock().await;
 
         // Data after flushed sequence need to be recovered.
-        let start_sequence = version.flushed_sequence() + 1;
+        let flushed_sequence = version_control.current().flushed_sequence();
         let _write_ctx = WriteContext::from(opts);
 
-        let mut stream = writer_ctx.wal.read_from_wal(start_sequence).await?;
+        // TODO(yingwen): [open_region] Returns sequence number in the stream and use that as commited
+        // sequence.
+        let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence + 1).await?;
+        let mut next_sequence = flushed_sequence;
+        while let Some((_seq_num, _header, request)) = stream.try_next().await? {
+            if let Some(request) = request {
+                let time_ranges = self.prepare_memtables(&request, version_control)?;
+                // Note that memtables of `Version` may be updated during replay.
+                let version = version_control.current();
 
-        while let Some((_seq_num, _header, _write_batch)) = stream.try_next().await? {
-            // TODO(yingwen): [open_region] 1. Split write batch and insert into memtables. 2. Need to update
-            // (recover) committed_sequence.
+                next_sequence += 1;
+                // TODO(yingwen): Trigger flush if the size of memtables reach the flush threshold to avoid
+                // out of memory during replay, but we need to do it carefully to avoid dead lock.
+                let mut inserter =
+                    Inserter::new(next_sequence, time_ranges, version.bucket_duration());
+                inserter.insert_memtables(&request, version.mutable_memtables())?;
+            }
         }
 
-        unimplemented!()
+        version_control.set_committed_sequence(next_sequence);
+
+        Ok(())
     }
 
     /// Preprocess before write.
@@ -252,10 +265,19 @@ impl WriterInner {
             .await?;
         }
 
+        self.prepare_memtables(request, version_control)
+    }
+
+    /// Create all needed mutable memtables, returns time ranges that overlapped with `request`.
+    fn prepare_memtables(
+        &mut self,
+        request: &WriteBatch,
+        version_control: &VersionControlRef,
+    ) -> Result<Vec<RangeMillis>> {
         let current_version = version_control.current();
-        let duration = current_version.bucket_duration();
+        let bucket_duration = current_version.bucket_duration();
         let time_ranges = request
-            .time_ranges(duration)
+            .time_ranges(bucket_duration)
             .context(InvalidTimestampSnafu)?;
         let mutable = current_version.mutable_memtables();
         let mut memtables_to_add = MemtableSet::default();
