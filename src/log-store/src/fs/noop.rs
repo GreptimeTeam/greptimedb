@@ -17,7 +17,7 @@ impl LogStore for NoopLogStore {
 
     async fn append(
         &self,
-        _ns: Self::Namespace,
+        _ns: &Self::Namespace,
         mut _e: Self::Entry,
     ) -> Result<Self::AppendResponse> {
         Ok(AppendResponseImpl {

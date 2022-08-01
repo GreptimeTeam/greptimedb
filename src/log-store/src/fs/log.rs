@@ -3,9 +3,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use async_stream::stream;
 use common_telemetry::{error, info, warn};
+use futures::pin_mut;
+use futures::StreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{Encode, Id};
+use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::LogStore;
 use tokio::sync::RwLock;
 
@@ -167,7 +171,7 @@ impl LogStore for LocalFileLogStore {
 
     async fn append(
         &self,
-        _ns: Self::Namespace,
+        _ns: &Self::Namespace,
         mut entry: Self::Entry,
     ) -> Result<Self::AppendResponse> {
         // TODO(hl): configurable retry times
@@ -208,11 +212,23 @@ impl LogStore for LocalFileLogStore {
 
     async fn read(
         &self,
-        _ns: Self::Namespace,
-        _id: Id,
-    ) -> Result<store_api::logstore::entry_stream::SendableEntryStream<'_, Self::Entry, Self::Error>>
-    {
-        todo!()
+        ns: Self::Namespace,
+        id: Id,
+    ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>> {
+        let files = self.files.read().await;
+
+        let s = stream! {
+            for (start_id, file) in files.iter() {
+            if *start_id > id {
+            let s = file.create_stream(&ns, *start_id);
+                pin_mut!(s);
+                while let Some(entries) = s.next().await{
+                    yield entries;
+                }
+            }}
+        };
+
+        Ok(Box::pin(s))
     }
 
     async fn create_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
@@ -248,13 +264,11 @@ mod tests {
         };
 
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
+        let ns = LocalNamespace::default();
         assert_eq!(
             0,
             logstore
-                .append(
-                    LocalNamespace::default(),
-                    EntryImpl::new(generate_data(100)),
-                )
+                .append(&ns, EntryImpl::new(generate_data(100)),)
                 .await
                 .unwrap()
                 .entry_id
@@ -263,10 +277,7 @@ mod tests {
         assert_eq!(
             1,
             logstore
-                .append(
-                    LocalNamespace::default(),
-                    EntryImpl::new(generate_data(100)),
-                )
+                .append(&ns, EntryImpl::new(generate_data(100)),)
                 .await
                 .unwrap()
                 .entry_id
@@ -296,18 +307,16 @@ mod tests {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
+        let ns = LocalNamespace::default();
         let id = logstore
-            .append(
-                LocalNamespace::default(),
-                EntryImpl::new(generate_data(100)),
-            )
+            .append(&ns, EntryImpl::new(generate_data(100)))
             .await
             .unwrap()
             .entry_id;
         assert_eq!(0, id);
 
         let active_file = logstore.active_file();
-        let stream = active_file.create_stream(LocalNamespace::default(), 0);
+        let stream = active_file.create_stream(&ns, 0);
         tokio::pin!(stream);
 
         let entries = stream.next().await.unwrap().unwrap();
