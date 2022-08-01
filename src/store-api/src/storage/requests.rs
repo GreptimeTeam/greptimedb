@@ -19,13 +19,13 @@ pub trait WriteRequest: Send {
     fn time_ranges(&self, duration: Duration) -> Result<Vec<RangeMillis>, Self::Error>;
 
     fn put_op(&self) -> Self::PutOp;
+
+    fn put_op_with_columns(num_columns: usize) -> Self::PutOp;
 }
 
 /// Put multiple rows.
 pub trait PutOperation: Send {
     type Error: ErrorExt + Send + Sync;
-
-    fn with_num_columns(num_columns: usize) -> Self;
 
     fn add_key_column(&mut self, name: &str, vector: VectorRef) -> Result<(), Self::Error>;
 

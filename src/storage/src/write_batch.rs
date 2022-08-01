@@ -199,6 +199,10 @@ impl WriteRequest for WriteBatch {
     fn put_op(&self) -> Self::PutOp {
         PutData::new()
     }
+
+    fn put_op_with_columns(num_columns: usize) -> Self::PutOp {
+        PutData::with_num_columns(num_columns)
+    }
 }
 
 /// Aligns timestamp to nearest time interval.
@@ -241,16 +245,16 @@ impl PutData {
     pub fn new() -> PutData {
         PutData::default()
     }
-}
 
-impl PutOperation for PutData {
-    type Error = Error;
-
-    fn with_num_columns(num_columns: usize) -> PutData {
+    pub fn with_num_columns(num_columns: usize) -> PutData {
         PutData {
             columns: HashMap::with_capacity(num_columns),
         }
     }
+}
+
+impl PutOperation for PutData {
+    type Error = Error;
 
     fn add_key_column(&mut self, name: &str, vector: VectorRef) -> Result<()> {
         self.add_column_by_name(name, vector)
@@ -415,7 +419,7 @@ pub mod codec {
         vectors::Helper,
     };
     use snafu::ensure;
-    use store_api::storage::{PutOperation, WriteRequest};
+    use store_api::storage::WriteRequest;
 
     use super::{
         DataCorruptionSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
