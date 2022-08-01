@@ -216,7 +216,7 @@ impl WriterInner {
 
         let mut stream = writer_ctx.wal.read_from_wal(start_sequence).await?;
 
-        while let Some((_header, _write_batch)) = stream.try_next().await? {
+        while let Some((_seq_num, _header, _write_batch)) = stream.try_next().await? {
             // TODO(yingwen): [open_region] 1. Split write batch and insert into memtables. 2. Need to update
             // (recover) committed_sequence.
         }

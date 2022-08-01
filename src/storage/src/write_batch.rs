@@ -91,8 +91,8 @@ pub enum Error {
     #[snafu(display("Failed to decode, in stream waiting state"))]
     StreamWaiting,
 
-    #[snafu(display("Failed to decode, data corruption {}", message))]
-    DataCorruption {
+    #[snafu(display("Failed to decode, corrupted data {}", message))]
+    DataCorrupted {
         message: String,
         backtrace: Backtrace,
     },
@@ -422,7 +422,7 @@ pub mod codec {
     use store_api::storage::WriteRequest;
 
     use super::{
-        DataCorruptionSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
+        DataCorruptedSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
         Error as WriteBatchError, Mutation, ParseSchemaSnafu, Result, WriteBatch,
     };
     use crate::{
@@ -510,7 +510,6 @@ pub mod codec {
     }
 
     impl WriteBatchArrowDecoder {
-        #[allow(dead_code)]
         pub fn new(mutation_extras: Vec<MutationExtra>) -> Self {
             Self { mutation_extras }
         }
@@ -520,7 +519,7 @@ pub mod codec {
         type Item = WriteBatch;
         type Error = WriteBatchError;
 
-        fn decode(&self, src: &[u8]) -> Result<Option<WriteBatch>> {
+        fn decode(&self, src: &[u8]) -> Result<WriteBatch> {
             let mut reader = Cursor::new(src);
             let metadata = read::read_stream_metadata(&mut reader).context(DecodeArrowSnafu)?;
             let mut reader = ArrowStreamReader::new(reader, metadata);
@@ -539,7 +538,7 @@ pub mod codec {
             // check if exactly finished
             ensure!(
                 reader.check_exactly_finished().context(DecodeArrowSnafu)?,
-                DataCorruptionSnafu {
+                DataCorruptedSnafu {
                     message: "Impossible, the num of data chunks is different than expected."
                 }
             );
@@ -571,8 +570,8 @@ pub mod codec {
 
             ensure!(
                 chunks.len() == self.mutation_extras.len(),
-                DataCorruptionSnafu {
-                    message: &format!(
+                DataCorruptedSnafu {
+                    message: format!(
                         "expected {} mutations, but got {}",
                         self.mutation_extras.len(),
                         chunks.len()
@@ -592,36 +591,41 @@ pub mod codec {
                 .mutation_extras
                 .iter()
                 .zip(chunks.iter())
-                .map(|(ext, mtn)| match ext.mutation_type {
-                    x if x == MutationType::Put as i32 => {
-                        let valid_column_names = if ext.column_null_mask.is_empty() {
-                            column_names.clone()
-                        } else {
-                            bit_vec::BitVec::from_bytes(&ext.column_null_mask)
+                .map(
+                    |(ext, mtn)| match MutationType::from_i32(ext.mutation_type) {
+                        Some(MutationType::Put) => {
+                            let valid_column_names = if ext.column_null_mask.is_empty() {
+                                column_names.clone()
+                            } else {
+                                bit_vec::BitVec::from_bytes(&ext.column_null_mask)
+                                    .iter()
+                                    .zip(column_names.iter())
+                                    .filter(|(mask, _)| !*mask)
+                                    .map(|(_, column_name)| column_name.clone())
+                                    .collect::<Vec<_>>()
+                            };
+
+                            let mut put_data = PutData::with_num_columns(valid_column_names.len());
+
+                            let res = valid_column_names
                                 .iter()
-                                .zip(column_names.iter())
-                                .filter(|(mask, _)| !*mask)
-                                .map(|(_, column_name)| column_name.clone())
-                                .collect::<Vec<_>>()
-                        };
+                                .zip(mtn)
+                                .map(|(name, vector)| {
+                                    put_data.add_column_by_name(name, vector.clone())
+                                })
+                                .collect::<Result<Vec<_>>>();
 
-                        let mut put_data = PutData::with_num_columns(valid_column_names.len());
-
-                        let res = valid_column_names
-                            .iter()
-                            .zip(mtn)
-                            .map(|(name, vector)| put_data.add_column_by_name(name, vector.clone()))
-                            .collect::<Result<Vec<_>>>();
-
-                        res.map(|_| Mutation::Put(put_data))
-                    }
-                    x if x == MutationType::Delete as i32 => {
-                        todo!()
-                    }
-                    _ => {
-                        unreachable!()
-                    }
-                })
+                            res.map(|_| Mutation::Put(put_data))
+                        }
+                        Some(MutationType::Delete) => {
+                            todo!()
+                        }
+                        _ => DataCorruptedSnafu {
+                            message: format!("Unexpceted mutation type: {}", ext.mutation_type),
+                        }
+                        .fail(),
+                    },
+                )
                 .collect::<Result<Vec<_>>>()?;
 
             let mut write_batch = WriteBatch::new(Arc::new(schema));
@@ -632,7 +636,7 @@ pub mod codec {
                     Mutation::Put(put_data) => write_batch.put(put_data),
                 })?;
 
-            Ok(Some(write_batch))
+            Ok(write_batch)
         }
     }
 }
@@ -893,7 +897,7 @@ mod tests {
 
         let decoder = codec::WriteBatchArrowDecoder::new(proto::gen_mutation_extras(&batch));
         let result = decoder.decode(&dst);
-        let batch2 = result?.unwrap();
+        let batch2 = result?;
         assert_eq!(batch.num_rows, batch2.num_rows);
 
         Ok(())
@@ -921,7 +925,7 @@ mod tests {
 
         let decoder = codec::WriteBatchArrowDecoder::new(proto::gen_mutation_extras(&batch));
         let result = decoder.decode(&dst);
-        let batch2 = result?.unwrap();
+        let batch2 = result?;
         assert_eq!(batch.num_rows, batch2.num_rows);
 
         Ok(())

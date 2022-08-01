@@ -15,5 +15,5 @@ pub trait Decoder {
     type Error: ErrorExt;
 
     /// Decodes a message from the bytes buffer.
-    fn decode(&self, src: &[u8]) -> Result<Option<Self::Item>, Self::Error>;
+    fn decode(&self, src: &[u8]) -> Result<Self::Item, Self::Error>;
 }
