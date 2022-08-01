@@ -13,9 +13,9 @@ pub enum Error {
     },
 }
 
-impl From<Error> for table::engine::Error {
+impl From<Error> for table::error::Error {
     fn from(e: Error) -> Self {
-        table::engine::Error::new(e)
+        table::error::Error::new(e)
     }
 }
 
@@ -61,7 +61,7 @@ mod tests {
     #[test]
     pub fn test_opaque_error() {
         let error = throw_create_table(StatusCode::InvalidSyntax).err().unwrap();
-        let table_engine_error: table::engine::Error = error.into();
+        let table_engine_error: table::error::Error = error.into();
         assert!(table_engine_error.backtrace_opt().is_some());
         assert_eq!(StatusCode::InvalidSyntax, table_engine_error.status_code());
     }

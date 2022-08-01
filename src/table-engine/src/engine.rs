@@ -14,8 +14,8 @@ use store_api::storage::{
 };
 use table::engine::{EngineContext, TableEngine};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest};
+use table::Result as TableResult;
 use table::{
-    engine,
     metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType},
     table::TableRef,
 };
@@ -48,7 +48,7 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
         &self,
         ctx: &EngineContext,
         request: CreateTableRequest,
-    ) -> std::result::Result<TableRef, engine::Error> {
+    ) -> TableResult<TableRef> {
         Ok(self.inner.create_table(ctx, request).await?)
     }
 
@@ -56,15 +56,11 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
         &self,
         _ctx: &EngineContext,
         _request: AlterTableRequest,
-    ) -> std::result::Result<TableRef, engine::Error> {
+    ) -> TableResult<TableRef> {
         unimplemented!();
     }
 
-    fn get_table(
-        &self,
-        ctx: &EngineContext,
-        name: &str,
-    ) -> std::result::Result<Option<TableRef>, engine::Error> {
+    fn get_table(&self, ctx: &EngineContext, name: &str) -> TableResult<Option<TableRef>> {
         Ok(self.inner.get_table(ctx, name)?)
     }
 
@@ -76,7 +72,7 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
         &self,
         _ctx: &EngineContext,
         _request: DropTableRequest,
-    ) -> std::result::Result<(), engine::Error> {
+    ) -> TableResult<()> {
         unimplemented!();
     }
 }
