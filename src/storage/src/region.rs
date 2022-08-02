@@ -150,7 +150,10 @@ impl<S: LogStore> RegionImpl<S> {
 
         let mut version = None;
         let mut actions = Vec::new();
+        let mut last_manifest_version = manifest::MIN_VERSION;
         while let Some((manifest_version, action_list)) = iter.next_action().await? {
+            last_manifest_version = manifest_version;
+
             for action in action_list.actions {
                 match (action, version) {
                     (RegionMetaAction::Change(c), None) => {
@@ -174,6 +177,12 @@ impl<S: LogStore> RegionImpl<S> {
         }
 
         assert!(actions.is_empty() || version.is_none());
+
+        if version.is_some() {
+            // update manifest state after recovering
+            let protocol = iter.last_protocol();
+            manifest.update_state(last_manifest_version + 1, protocol.clone());
+        }
 
         version.context(error::VersionNotFoundSnafu { region_name })
     }

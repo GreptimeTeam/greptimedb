@@ -12,8 +12,6 @@ pub type ManifestVersion = u64;
 pub const MIN_VERSION: u64 = 0;
 pub const MAX_VERSION: u64 = u64::MAX;
 
-pub trait Metadata: Clone {}
-
 pub trait MetaAction: Serialize + DeserializeOwned {
     fn set_prev_version(&mut self, version: ManifestVersion);
 }
@@ -33,7 +31,6 @@ pub trait MetaActionIterator {
 pub trait Manifest: Send + Sync + Clone + 'static {
     type Error: ErrorExt + Send + Sync;
     type MetaAction: MetaAction;
-    type Metadata: Metadata;
     type MetaActionIterator: MetaActionIterator<Error = Self::Error, MetaAction = Self::MetaAction>;
 
     /// Update metadata by the action

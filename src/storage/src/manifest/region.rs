@@ -28,13 +28,17 @@ impl RegionManifest {
             inner: Arc::new(RegionManifestInner::new(manifest_dir, object_store)),
         }
     }
+
+    /// Update inner state.
+    pub fn update_state(&self, version: ManifestVersion, protocol: Option<ProtocolAction>) {
+        self.inner.update_state(version, protocol);
+    }
 }
 
 #[async_trait]
 impl Manifest for RegionManifest {
     type Error = Error;
     type MetaAction = RegionMetaActionList;
-    type Metadata = RegionManifestData;
     type MetaActionIterator = RegionMetaActionListIterator;
 
     async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
@@ -72,6 +76,13 @@ struct RegionManifestInner {
 pub struct RegionMetaActionListIterator {
     log_iter: ObjectStoreLogIterator,
     reader_version: ProtocolVersion,
+    last_protocol: Option<ProtocolAction>,
+}
+
+impl RegionMetaActionListIterator {
+    pub fn last_protocol(&self) -> &Option<ProtocolAction> {
+        &self.last_protocol
+    }
 }
 
 #[async_trait]
@@ -82,9 +93,13 @@ impl MetaActionIterator for RegionMetaActionListIterator {
     async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaActionList)>> {
         match self.log_iter.next_log().await? {
             Some((v, bytes)) => {
-                //TODO(dennis): save protocol into inner's protocol when recovering
-                let (action_list, _protocol) =
+                let (action_list, protocol) =
                     RegionMetaActionList::decode(&bytes, self.reader_version)?;
+
+                if protocol.is_some() {
+                    self.last_protocol = protocol;
+                }
+
                 Ok(Some((v, action_list)))
             }
             None => Ok(None),
@@ -98,7 +113,6 @@ impl RegionManifestInner {
 
         Self {
             store: Arc::new(ManifestObjectStore::new(manifest_dir, object_store)),
-            // TODO(dennis): recover the last version from history
             version: AtomicU64::new(0),
             protocol: ArcSwap::new(Arc::new(ProtocolAction::new())),
             supported_reader_version: reader_version,
@@ -109,6 +123,13 @@ impl RegionManifestInner {
     #[inline]
     fn inc_version(&self) -> ManifestVersion {
         self.version.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn update_state(&self, version: ManifestVersion, protocol: Option<ProtocolAction>) {
+        self.version.store(version, Ordering::Relaxed);
+        if let Some(p) = protocol {
+            self.protocol.store(Arc::new(p));
+        }
     }
 
     #[inline]
@@ -148,6 +169,7 @@ impl RegionManifestInner {
         Ok(RegionMetaActionListIterator {
             log_iter: self.store.scan(start, end).await?,
             reader_version: self.supported_reader_version,
+            last_protocol: None,
         })
     }
 }

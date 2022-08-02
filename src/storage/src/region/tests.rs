@@ -96,7 +96,6 @@ async fn test_recover_region_manifets() {
     let version = RegionImpl::<NoopLogStore>::recover_from_manifest(region_name, &manifest)
         .await
         .unwrap();
-
     assert_eq!(*version.metadata(), region_meta);
     assert_eq!(version.flushed_sequence(), 2);
     assert_eq!(version.manifest_version(), 1);
@@ -107,4 +106,7 @@ async fn test_recover_region_manifets() {
         assert_eq!(format!("f{}", i + 1), file.file_name());
     }
     assert!(version.mutable_memtables().is_empty());
+
+    // check manifest state
+    assert_eq!(2, manifest.last_version());
 }

@@ -8,7 +8,6 @@ use store_api::manifest::action::ProtocolAction;
 use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
 use store_api::manifest::MetaAction;
-use store_api::manifest::Metadata;
 use store_api::storage::RegionId;
 use store_api::storage::SequenceNumber;
 
@@ -35,13 +34,6 @@ pub struct RegionEdit {
     pub flushed_sequence: SequenceNumber,
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct RegionManifestData {
-    pub region_meta: RegionMetadataRef,
-    // TODO(dennis): [open_region] 1. load version metadata 2. The `region_meta` field could be removed if we
-    // have a `version` field.
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -155,8 +147,6 @@ impl RegionMetaActionList {
         Ok((action_list, protocol_action))
     }
 }
-
-impl Metadata for RegionManifestData {}
 
 impl MetaAction for RegionMetaActionList {
     fn set_prev_version(&mut self, version: ManifestVersion) {
