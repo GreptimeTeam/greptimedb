@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use datatypes::schema::SchemaRef;
 use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
-use store_api::manifest::{Manifest, ManifestVersion, MetaActionIterator, MAX_VERSION};
+use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
     OpenOptions, ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse,
 };
@@ -141,7 +141,7 @@ impl<S: LogStore> RegionImpl<S> {
         unimplemented!()
     }
 
-    pub(crate) async fn recover_from_manifest(
+    async fn recover_from_manifest(
         region_name: &str,
         manifest: &RegionManifest,
     ) -> Result<Version> {
@@ -152,22 +152,27 @@ impl<S: LogStore> RegionImpl<S> {
         let mut actions = Vec::new();
         while let Some((manifest_version, action_list)) = iter.next_action().await? {
             for action in action_list.actions {
-                if let RegionMetaAction::Change(c) = action {
-                    if version.is_none() {
+                match (action, version) {
+                    (RegionMetaAction::Change(c), None) => {
                         version = Some(Version::new(c.metadata));
                         for (manifest_version, action) in actions.drain(..) {
                             version = Self::replay_edit(manifest_version, action, version);
                         }
-                    } else {
-                        todo!("alter schema is not implemented");
                     }
-                } else if version.is_some() {
-                    version = Self::replay_edit(manifest_version, action, version);
-                } else {
-                    actions.push((manifest_version, action));
+                    (RegionMetaAction::Change(_), Some(_)) => {
+                        unimplemented!("alter schema is not implemented")
+                    }
+                    (action, None) => {
+                        actions.push((manifest_version, action));
+                        version = None;
+                    }
+                    (action, Some(v)) => {
+                        version = Self::replay_edit(manifest_version, action, Some(v));
+                    }
                 }
             }
         }
+
         assert!(actions.is_empty() || version.is_none());
 
         version.context(error::VersionNotFoundSnafu { region_name })
@@ -175,7 +180,7 @@ impl<S: LogStore> RegionImpl<S> {
 
     fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
         // TODO(dennis): use manifest version in WAL
-        (0, MAX_VERSION)
+        (manifest::MIN_VERSION, manifest::MAX_VERSION)
     }
 
     fn replay_edit(
