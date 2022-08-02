@@ -217,16 +217,17 @@ impl LogStore for LocalFileLogStore {
     ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>> {
         let files = self.files.read().await;
 
-        let s = stream! {
+        let s = stream!({
             for (start_id, file) in files.iter() {
-            if *start_id > id {
-            let s = file.create_stream(&ns, *start_id);
-                pin_mut!(s);
-                while let Some(entries) = s.next().await{
-                    yield entries;
+                if *start_id >= id {
+                    let s = file.create_stream(&ns, *start_id);
+                    pin_mut!(s);
+                    while let Some(entries) = s.next().await {
+                        yield entries;
+                    }
                 }
-            }}
-        };
+            }
+        });
 
         Ok(Box::pin(s))
     }
@@ -315,8 +316,7 @@ mod tests {
             .entry_id;
         assert_eq!(0, id);
 
-        let active_file = logstore.active_file();
-        let stream = active_file.create_stream(&ns, 0);
+        let stream = logstore.read(ns, 0).await.unwrap();
         tokio::pin!(stream);
 
         let entries = stream.next().await.unwrap().unwrap();

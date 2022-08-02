@@ -32,7 +32,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         e: Vec<Self::Entry>,
     ) -> Result<Id, Self::Error>;
 
-    // Create a new `EntryStream` to asynchronously generates `Entry`.
+    // Create a new `EntryStream` to asynchronously generates `Entry` with ids starting from `id`.
     async fn read(
         &self,
         ns: Self::Namespace,
