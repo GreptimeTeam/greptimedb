@@ -127,7 +127,7 @@ impl<S: LogStore> Wal<S> {
 
         let res = self
             .store
-            .append(ns, e)
+            .append(&ns, e)
             .await
             .map_err(BoxedError::new)
             .context(error::WriteWalSnafu { name: self.name() })?;

@@ -21,7 +21,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// Append an `Entry` to WAL with given namespace
     async fn append(
         &self,
-        ns: Self::Namespace,
+        ns: &Self::Namespace,
         mut e: Self::Entry,
     ) -> Result<Self::AppendResponse, Self::Error>;
 
@@ -32,7 +32,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         e: Vec<Self::Entry>,
     ) -> Result<Id, Self::Error>;
 
-    // Create a new `EntryStream` to asynchronously generates `Entry`.
+    // Create a new `EntryStream` to asynchronously generates `Entry` with ids starting from `id`.
     async fn read(
         &self,
         ns: Self::Namespace,
