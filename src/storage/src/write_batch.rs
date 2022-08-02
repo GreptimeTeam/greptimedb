@@ -130,17 +130,19 @@ pub struct WriteBatch {
     num_rows: usize,
 }
 
-impl WriteRequest for WriteBatch {
-    type Error = Error;
-    type PutOp = PutData;
-
-    fn new(schema: SchemaRef) -> Self {
+impl WriteBatch {
+    pub fn new(schema: SchemaRef) -> Self {
         Self {
             schema,
             mutations: Vec::new(),
             num_rows: 0,
         }
     }
+}
+
+impl WriteRequest for WriteBatch {
+    type Error = Error;
+    type PutOp = PutData;
 
     fn put(&mut self, data: PutData) -> Result<()> {
         if data.is_empty() {
@@ -193,6 +195,14 @@ impl WriteRequest for WriteBatch {
 
         Ok(ranges)
     }
+
+    fn put_op(&self) -> Self::PutOp {
+        PutData::new()
+    }
+
+    fn put_op_with_columns(num_columns: usize) -> Self::PutOp {
+        PutData::with_num_columns(num_columns)
+    }
 }
 
 /// Aligns timestamp to nearest time interval.
@@ -231,18 +241,20 @@ pub struct PutData {
     columns: HashMap<String, VectorRef>,
 }
 
-impl PutOperation for PutData {
-    type Error = Error;
-
-    fn new() -> PutData {
+impl PutData {
+    pub(crate) fn new() -> PutData {
         PutData::default()
     }
 
-    fn with_num_columns(num_columns: usize) -> PutData {
+    pub(crate) fn with_num_columns(num_columns: usize) -> PutData {
         PutData {
             columns: HashMap::with_capacity(num_columns),
         }
     }
+}
+
+impl PutOperation for PutData {
+    type Error = Error;
 
     fn add_key_column(&mut self, name: &str, vector: VectorRef) -> Result<()> {
         self.add_column_by_name(name, vector)
@@ -407,7 +419,7 @@ pub mod codec {
         vectors::Helper,
     };
     use snafu::ensure;
-    use store_api::storage::{PutOperation, WriteRequest};
+    use store_api::storage::WriteRequest;
 
     use super::{
         DataCorruptionSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,

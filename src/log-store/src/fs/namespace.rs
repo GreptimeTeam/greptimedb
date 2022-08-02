@@ -18,14 +18,16 @@ struct LocalNamespaceInner {
     name: String,
 }
 
-impl Namespace for LocalNamespace {
-    fn new(name: &str) -> Self {
+impl LocalNamespace {
+    pub(crate) fn new(name: &str) -> Self {
         let inner = Arc::new(LocalNamespaceInner {
             name: name.to_string(),
         });
         Self { inner }
     }
+}
 
+impl Namespace for LocalNamespace {
     fn name(&self) -> &str {
         self.inner.name.as_str()
     }

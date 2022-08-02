@@ -4,7 +4,6 @@ mod storage;
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
-use object_store::ObjectStore;
 use serde::{de::DeserializeOwned, Serialize};
 
 pub use crate::manifest::storage::*;
@@ -25,8 +24,6 @@ pub trait Manifest: Send + Sync + Clone + 'static {
     type Error: ErrorExt + Send + Sync;
     type MetaAction: MetaAction;
     type Metadata: Metadata;
-
-    fn new(manifest_dir: &str, object_store: ObjectStore) -> Self;
 
     /// Update metadata by the action
     async fn update(&self, action: Self::MetaAction) -> Result<ManifestVersion, Self::Error>;

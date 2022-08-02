@@ -39,7 +39,7 @@ impl<S: LogStore> Clone for Wal<S> {
 impl<S: LogStore> Wal<S> {
     pub fn new(region_name: impl Into<String>, store: Arc<S>) -> Self {
         let region_name = region_name.into();
-        let namespace = S::Namespace::new(&region_name);
+        let namespace = store.namespace(&region_name);
 
         Self { namespace, store }
     }
@@ -122,7 +122,7 @@ impl<S: LogStore> Wal<S> {
 
     async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
         let ns = self.namespace.clone();
-        let mut e = S::Entry::new(bytes);
+        let mut e = self.store.entry(bytes);
         e.set_id(seq);
 
         let res = self

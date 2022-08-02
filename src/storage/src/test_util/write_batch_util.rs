@@ -1,5 +1,3 @@
-use store_api::storage::WriteRequest;
-
 use crate::test_util::schema_util::{self, ColumnDef};
 use crate::write_batch::WriteBatch;
 

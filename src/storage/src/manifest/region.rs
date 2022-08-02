@@ -22,17 +22,19 @@ pub struct RegionManifest {
     inner: Arc<RegionManifestInner>,
 }
 
+impl RegionManifest {
+    pub fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
+        RegionManifest {
+            inner: Arc::new(RegionManifestInner::new(manifest_dir, object_store)),
+        }
+    }
+}
+
 #[async_trait]
 impl Manifest for RegionManifest {
     type Error = Error;
     type MetaAction = RegionMetaActionList;
     type Metadata = RegionManifestData;
-
-    fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
-        RegionManifest {
-            inner: Arc::new(RegionManifestInner::new(manifest_dir, object_store)),
-        }
-    }
 
     async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         self.inner.save(action_list).await

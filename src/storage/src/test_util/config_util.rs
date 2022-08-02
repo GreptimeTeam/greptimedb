@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use log_store::fs::noop::NoopLogStore;
 use object_store::{backend::fs::Backend, ObjectStore};
-use store_api::manifest::Manifest;
 
 use crate::background::JobPoolImpl;
 use crate::engine;

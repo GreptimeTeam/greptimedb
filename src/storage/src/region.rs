@@ -5,6 +5,7 @@ mod writer;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use datatypes::schema::SchemaRef;
 use snafu::ensure;
 use store_api::logstore::LogStore;
 use store_api::manifest::Manifest;
@@ -59,6 +60,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
 
     fn snapshot(&self, _ctx: &ReadContext) -> Result<SnapshotImpl> {
         Ok(self.inner.create_snapshot())
+    }
+
+    fn write_request(&self, schema: SchemaRef) -> Self::WriteRequest {
+        WriteBatch::new(schema)
     }
 }
 

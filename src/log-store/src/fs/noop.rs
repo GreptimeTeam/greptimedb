@@ -50,4 +50,12 @@ impl LogStore for NoopLogStore {
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
         todo!()
     }
+
+    fn entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry {
+        EntryImpl::new(data)
+    }
+
+    fn namespace(&self, name: &str) -> Self::Namespace {
+        LocalNamespace::new(name)
+    }
 }
