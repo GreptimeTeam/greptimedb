@@ -4,7 +4,7 @@ pub mod function;
 pub mod function_registry;
 pub mod math;
 pub mod numpy;
-#[cfg(feature = "py-udf-modules")]
+#[cfg(feature = "py-udf-builtins")]
 pub mod py_udf_module;
 #[cfg(feature = "python-udf")]
 pub mod python;

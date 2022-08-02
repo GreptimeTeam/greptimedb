@@ -104,6 +104,7 @@ fn arrow2_rfloordiv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
 }
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
+/// TODO: refactor it to use generic instead of `ty`
 pub fn is_instance(obj: &PyObjectRef, ty: &PyObject, vm: &VirtualMachine) -> bool {
     obj.is_instance(ty, vm).unwrap_or(false)
 }

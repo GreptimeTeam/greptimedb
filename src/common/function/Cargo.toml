@@ -10,7 +10,7 @@ version="0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
 
 [features]
-default = ["python-udf", "py-udf-modules"]
+default = ["python-udf", "py-udf-builtins"]
 python-udf = [
   "dep:rustpython-vm",
   "dep:rustpython-parser",
@@ -19,7 +19,7 @@ python-udf = [
   "dep:rustpython-bytecode",
   "dep:rustpython-ast",
 ]
-py-udf-modules = [
+py-udf-builtins = [
   "python-udf",
   "dep:datafusion-physical-expr",
   "dep:datafusion-expr"

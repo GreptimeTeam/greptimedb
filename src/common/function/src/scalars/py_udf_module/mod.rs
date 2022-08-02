@@ -7,28 +7,78 @@ use rustpython_vm::pymodule;
 ///  
 /// design to allow Python Coprocessor Function to use already implmented udf functions
 #[pymodule]
-mod udf_mod {
-    use rustpython_vm::{PyRef, VirtualMachine, PyObjectRef, PyResult, AsObject};
+mod udf_builtins {
+    use datafusion_common::ScalarValue;
+    use datafusion_expr::ColumnarValue;
+    use rustpython_vm::{
+        builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt},
+        AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    };
 
+    use crate::scalars::math::PowFunction;
     use crate::scalars::{function::FunctionContext, python::PyVector, Function};
     type PyVectorRef = PyRef<PyVector>;
-    use crate::scalars::math::PowFunction;
+    /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
+    /// if `PyResult` is Err, then this function return `false`
+    pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
+        obj.is_instance(T::class(vm).into(), vm).unwrap_or(false)
+    }
 
-    fn try_into_columnar_value(obj: PyObjectRef) -> PyResult<()> {
-        todo!()
+    fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseExceptionRef {
+        vm.new_type_error(format!("Can't cast operand of type `{name}` into `{ty}`."))
+    }
+
+    /// try to turn a Python Object into a PyVector or a scalar that can be use for calculate
+    ///
+    /// supported scalar are(leftside is python data type, right side is rust type):
+    ///
+    /// | Python | Rust |
+    /// | ------ | ---- |
+    /// | integer| i64  |
+    /// | float  | f64  |
+    /// | bool   | bool |
+    fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<ColumnarValue> {
+        if is_instance::<PyVector>(&obj, vm) {
+            let ret = obj
+                .payload::<PyVector>()
+                .ok_or_else(|| type_cast_error(&obj.class().name(), "vector", vm))?;
+            Ok(ColumnarValue::Array(ret.to_arrow_array()))
+        } else if is_instance::<PyInt>(&obj, vm) {
+            let ret = obj.try_into_value::<i64>(vm)?;
+            Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(ret))))
+        } else if is_instance::<PyFloat>(&obj, vm) {
+            let ret = obj.try_into_value::<f64>(vm)?;
+            Ok(ColumnarValue::Scalar(ScalarValue::Float64(Some(ret))))
+        } else if is_instance::<PyBool>(&obj, vm) {
+            let ret = obj.try_into_value::<bool>(vm)?;
+            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(ret))))
+        } else {
+            Err(vm.new_type_error(format!(
+                "Can't cast object of type {} into vector or scalar",
+                obj.class().name()
+            )))
+        }
     }
 
     /// Pow function,
     /// TODO: use PyObjectRef to adopt more type
     #[pyfunction]
-    fn pow(base: PyObjectRef, pow: PyVectorRef, vm:&VirtualMachine) -> PyResult<PyVector> {
-        let base = base.downcast_ref::<PyVector>().ok_or_else(|| {
-            vm.new_type_error(format!(
-                "Can't cast operand of type `{}` into `vector`.",
-                base.class().name()
-            ))
-        })?;
-        // pyfunction can return PyResult<...>, args can be like PyObjectRef or anything 
+    fn pow(base: PyObjectRef, pow: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let res = try_into_columnar_value(base.clone(), vm);
+        if let Ok(res) = res {
+            match res {
+                ColumnarValue::Array(arr) => {
+                    dbg!(&arr);
+                }
+                ColumnarValue::Scalar(val) => {
+                    dbg!(&val);
+                }
+            };
+        }
+        let base = base
+            .payload::<PyVector>()
+            .ok_or_else(|| type_cast_error(&base.class().name(), "vector", vm))?;
+        // pyfunction can return PyResult<...>, args can be like PyObjectRef or anything
         // impl IntoPyNativeFunc, see rustpython-vm function for more details
         let args = vec![base.as_vector_ref(), pow.as_vector_ref()];
         let res = PowFunction::default()
@@ -72,7 +122,7 @@ mod udf_mod {
         #[test]
         fn test_vm() {
             rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
-                vm.add_native_module("udf_mod", Box::new(super::make_module));
+                vm.add_native_module("udf_builtins", Box::new(super::make_module));
                 // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
                 PyVector::make_class(&vm.ctx);
             })
@@ -92,7 +142,7 @@ mod udf_mod {
                     .compile(
                         "
 from udf_mod import pow
-pow(1, pows)",
+pow(values, pows)",
                         rustpython_vm::compile::Mode::BlockExpr,
                         "<embedded>".to_owned(),
                     )
