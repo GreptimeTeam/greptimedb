@@ -59,7 +59,7 @@ impl From<&ColumnDescriptor> for ColumnSchema {
 #[derive(Debug, Clone, PartialEq, Builder)]
 #[builder(pattern = "owned")]
 pub struct RowKeyDescriptor {
-    #[builder(default)]
+    #[builder(default, setter(each(name = "push_column")))]
     pub columns: Vec<ColumnDescriptor>,
     /// Timestamp key column.
     pub timestamp: ColumnDescriptor,
@@ -78,7 +78,7 @@ pub struct ColumnFamilyDescriptor {
     #[builder(default = "consts::DEFAULT_CF_NAME.to_string()", setter(into))]
     pub name: String,
     /// Descriptors of columns in this column family.
-    #[builder(default)]
+    #[builder(default, setter(each(name = "push_column")))]
     pub columns: Vec<ColumnDescriptor>,
 }
 
@@ -95,6 +95,7 @@ pub struct RegionDescriptor {
     /// Default column family.
     pub default_cf: ColumnFamilyDescriptor,
     /// Extra column families defined by user.
+    #[builder(default, setter(each(name = "push_extra_column_family")))]
     pub extra_cfs: Vec<ColumnFamilyDescriptor>,
 }
 
@@ -110,23 +111,11 @@ impl RowKeyDescriptorBuilder {
         self.columns = Some(Vec::with_capacity(capacity));
         self
     }
-
-    pub fn push_column(mut self, column: ColumnDescriptor) -> Self {
-        let columns = self.columns.get_or_insert_with(Vec::new);
-        columns.push(column);
-        self
-    }
 }
 
 impl ColumnFamilyDescriptorBuilder {
     pub fn columns_capacity(mut self, capacity: usize) -> Self {
         self.columns = Some(Vec::with_capacity(capacity));
-        self
-    }
-
-    pub fn push_column(mut self, column: ColumnDescriptor) -> Self {
-        let columns = self.columns.get_or_insert_with(Vec::new);
-        columns.push(column);
         self
     }
 }
