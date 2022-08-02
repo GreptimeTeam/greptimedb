@@ -24,6 +24,7 @@ mod udf_mod {
     }
 
     #[cfg(test)]
+    #[allow(clippy::print_stdout)]
     mod test {
         use std::sync::Arc;
 
