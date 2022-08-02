@@ -12,7 +12,7 @@ use crate::background::JobHandle;
 use crate::error::{InvalidTimestampSnafu, Result};
 use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
-use crate::proto::WalHeader;
+use crate::proto::wal::WalHeader;
 use crate::region::RegionManifest;
 use crate::region::SharedDataRef;
 use crate::sst::AccessLayerRef;

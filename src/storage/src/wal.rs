@@ -13,7 +13,7 @@ use store_api::{
 use crate::{
     codec::{Decoder, Encoder},
     error::{self, Error, Result},
-    proto::{self, PayloadType, WalHeader},
+    proto::wal::{self, PayloadType, WalHeader},
     write_batch::{
         codec::{WriteBatchArrowDecoder, WriteBatchArrowEncoder},
         WriteBatch,
@@ -78,7 +78,7 @@ impl<S: LogStore> Wal<S> {
         header.payload_type = payload.payload_type();
 
         if let Payload::WriteBatchArrow(batch) = payload {
-            header.mutation_extras = proto::gen_mutation_extras(batch);
+            header.mutation_extras = wal::gen_mutation_extras(batch);
         }
 
         let mut buf = vec![];

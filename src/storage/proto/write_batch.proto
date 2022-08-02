@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package greptime.storage.wal.v1;
+package greptime.storage.write_batch.v1;
 
 message WriteBatch {
   Schema schema = 1;
@@ -10,7 +10,11 @@ message WriteBatch {
 
 message Schema {
   repeated ColumnSchema column_schemas = 1;
-  optional uint64 timestamp_index = 2;
+  TimestampIndex timestamp_index = 2;
+}
+
+message TimestampIndex {
+  uint64 value = 1;
 }
 
 message ColumnSchema {
@@ -28,7 +32,6 @@ message Mutation {
 
 message Put {
   repeated Column columns = 1;
-  bytes column_null_mask = 2;
 }
 
 message Delete {
@@ -62,12 +65,15 @@ message Values {
   repeated int32 i16_values = 2;
   repeated int32 i32_values = 3;
   repeated int64 i64_values = 4;
+
   repeated uint32 u8_values = 5;
   repeated uint32 u16_values = 6;
   repeated uint32 u32_values = 7;
   repeated uint64 u64_values = 8;
+
   repeated float f32_values = 9;
   repeated double f64_values = 10;
+
   repeated bool bool_values = 11;
   repeated bytes binary_values = 12;
   repeated string string_values = 13;
