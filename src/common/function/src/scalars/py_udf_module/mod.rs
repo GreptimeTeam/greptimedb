@@ -8,21 +8,30 @@ use rustpython_vm::pymodule;
 /// design to allow Python Coprocessor Function to use already implmented udf functions
 #[pymodule]
 mod udf_mod {
-    use rustpython_vm::PyRef;
+    use rustpython_vm::{PyRef, VirtualMachine, PyObjectRef, PyResult, AsObject};
 
     use crate::scalars::{function::FunctionContext, python::PyVector, Function};
     type PyVectorRef = PyRef<PyVector>;
     use crate::scalars::math::PowFunction;
 
+    /// Pow function,
+    /// TODO: use PyObjectRef to adopt more type
     #[pyfunction]
-    fn pow(base: PyVectorRef, pow: PyVectorRef) -> PyVector {
+    fn pow(base: PyObjectRef, pow: PyVectorRef, vm:&VirtualMachine) -> PyResult<PyVector> {
+        let base = base.downcast_ref::<PyVector>().ok_or_else(|| {
+            vm.new_type_error(format!(
+                "Can't cast operand into PyVector, actual is: {}",
+                base.class().name()
+            ))
+        })?;
+        // pyfunction can return PyResult<...>, args can be like PyObjectRef or anything 
+        // impl IntoPyNativeFunc, see rustpython-vm function for more details
         let args = vec![base.as_vector_ref(), pow.as_vector_ref()];
         let res = PowFunction::default()
             .eval(FunctionContext::default(), &args)
             .unwrap();
-        res.into()
+        Ok(res.into())
     }
-
     #[cfg(test)]
     #[allow(clippy::print_stdout)]
     mod test {

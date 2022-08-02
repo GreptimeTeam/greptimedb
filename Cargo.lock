@@ -113,6 +113,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8da52d66c7071e2e3fa2a1e5c6d088fec47b593032b254f5e980de8ea54454d6"
 
 [[package]]
+name = "arrow"
+version = "18.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5f89d2bc04fa746ee395d20c4cbfa508e4cce5c00bae816f0fae434fcfb9853"
+dependencies = [
+ "ahash",
+ "bitflags",
+ "chrono",
+ "comfy-table 6.0.0",
+ "csv",
+ "flatbuffers",
+ "half 2.1.0",
+ "hashbrown 0.12.1",
+ "hex",
+ "indexmap",
+ "lazy_static",
+ "lexical-core",
+ "multiversion",
+ "num",
+ "rand 0.8.5",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+]
+
+[[package]]
 name = "arrow-format"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -695,6 +722,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "comfy-table"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "121d8a5b0346092c18a4b2fd6f620d7a06f0eb7ac0a45860939a0884bc579c56"
+dependencies = [
+ "strum 0.24.1",
+ "strum_macros 0.24.2",
+ "unicode-width",
+]
+
+[[package]]
 name = "common-base"
 version = "0.1.0"
 dependencies = [
@@ -723,7 +761,8 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "console",
- "datafusion-common",
+ "datafusion-common 7.0.0",
+ "datafusion-physical-expr 10.0.0",
  "datatypes",
  "libc",
  "num",
@@ -748,8 +787,8 @@ dependencies = [
  "arrow2",
  "common-error",
  "datafusion",
- "datafusion-common",
- "datafusion-expr",
+ "datafusion-common 7.0.0",
+ "datafusion-expr 7.0.0",
  "datatypes",
  "snafu",
  "tokio",
@@ -761,7 +800,7 @@ version = "0.1.0"
 dependencies = [
  "common-error",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datatypes",
  "futures",
  "paste",
@@ -1118,10 +1157,10 @@ dependencies = [
  "arrow2",
  "async-trait",
  "chrono",
- "comfy-table",
- "datafusion-common",
- "datafusion-expr",
- "datafusion-physical-expr",
+ "comfy-table 5.0.1",
+ "datafusion-common 7.0.0",
+ "datafusion-expr 7.0.0",
+ "datafusion-physical-expr 7.0.0",
  "futures",
  "hashbrown 0.12.1",
  "lazy_static",
@@ -1134,7 +1173,7 @@ dependencies = [
  "pin-project-lite",
  "rand 0.8.5",
  "smallvec",
- "sqlparser",
+ "sqlparser 0.15.0",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -1148,7 +1187,18 @@ dependencies = [
  "arrow2",
  "ordered-float 2.10.0",
  "parquet2",
- "sqlparser",
+ "sqlparser 0.15.0",
+]
+
+[[package]]
+name = "datafusion-common"
+version = "10.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "794ca54d3b144038c36b7a31d64c9545abb2edbdda6da055e481fb8a13e4e33b"
+dependencies = [
+ "arrow",
+ "ordered-float 3.0.0",
+ "sqlparser 0.18.0",
 ]
 
 [[package]]
@@ -1158,8 +1208,20 @@ source = "git+https://github.com/apache/arrow-datafusion.git?branch=arrow2#744b2
 dependencies = [
  "ahash",
  "arrow2",
- "datafusion-common",
- "sqlparser",
+ "datafusion-common 7.0.0",
+ "sqlparser 0.15.0",
+]
+
+[[package]]
+name = "datafusion-expr"
+version = "10.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0087a4e55a861c7040314f217672259304fd26b5f174a065867df6b4ac659896"
+dependencies = [
+ "ahash",
+ "arrow",
+ "datafusion-common 10.0.0",
+ "sqlparser 0.18.0",
 ]
 
 [[package]]
@@ -1172,8 +1234,8 @@ dependencies = [
  "blake2",
  "blake3",
  "chrono",
- "datafusion-common",
- "datafusion-expr",
+ "datafusion-common 7.0.0",
+ "datafusion-expr 7.0.0",
  "hashbrown 0.12.1",
  "lazy_static",
  "md-5",
@@ -1183,6 +1245,43 @@ dependencies = [
  "regex",
  "sha2",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "datafusion-physical-expr"
+version = "10.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2328a0e901a89c46391be9445e6e55b6dd8002d4d177e578b0c4a2486ef07cda"
+dependencies = [
+ "ahash",
+ "arrow",
+ "blake2",
+ "blake3",
+ "chrono",
+ "datafusion-common 10.0.0",
+ "datafusion-expr 10.0.0",
+ "datafusion-row",
+ "hashbrown 0.12.1",
+ "lazy_static",
+ "md-5",
+ "ordered-float 3.0.0",
+ "paste",
+ "rand 0.8.5",
+ "regex",
+ "sha2",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "datafusion-row"
+version = "10.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef6b51e6398ed6dcc5e072c16722b9838f472b0c0ffe25b5df536927cda6044f"
+dependencies = [
+ "arrow",
+ "datafusion-common 10.0.0",
+ "paste",
+ "rand 0.8.5",
 ]
 
 [[package]]
@@ -1227,7 +1326,7 @@ dependencies = [
  "arrow2",
  "common-base",
  "common-error",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "enum_dispatch",
  "num",
  "num-traits",
@@ -1415,6 +1514,17 @@ name = "fixedbitset"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "279fb028e20b3c4c320317955b77c5e0c9701f05a1d309905d6fc702cdc5053e"
+
+[[package]]
+name = "flatbuffers"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86b428b715fdbdd1c364b84573b5fdc0f84f8e423661b9f398735278bc7f2b6a"
+dependencies = [
+ "bitflags",
+ "smallvec",
+ "thiserror",
+]
 
 [[package]]
 name = "flate2"
@@ -1634,6 +1744,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eabb4a44450da02c90444cf74558da904edde8fb4e9035a9a6a4e15445af0bd7"
 
 [[package]]
+name = "half"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad6a9459c9c30b177b925162351f97e7d967c7ea8bab3b8352805327daf45554"
+dependencies = [
+ "crunchy",
+]
+
+[[package]]
 name = "hash_hasher"
 version = "2.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1824,12 +1943,12 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "1.8.1"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f647032dfaa1f8b6dc29bd3edb7bbef4861b8b8007ebb118d6db284fd59f6ee"
+checksum = "10a35a97730320ffe8e2d410b5d3b69279b98d2c14bdb8b70ea89ecf7888d41e"
 dependencies = [
  "autocfg",
- "hashbrown 0.11.2",
+ "hashbrown 0.12.1",
 ]
 
 [[package]]
@@ -3178,7 +3297,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datatypes",
  "futures",
  "futures-util",
@@ -3359,9 +3478,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.5.5"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a11647b6b25ff05a515cb92c365cec08801e83423a235b51e231e1808747286"
+checksum = "4c4eb3267174b8c6c2f654116623910a0fef09c4753f8dd83db29c48a0df988b"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -3379,9 +3498,9 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.6.25"
+version = "0.6.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f497285884f3fcff424ffc933e56d7cbca511def0c9831a7f9b5f6153e3cc89b"
+checksum = "a3f87b73ce11b1619a3c6332f45341e0047173771e8b8b73f87bfeefb7b56244"
 
 [[package]]
 name = "remove_dir_all"
@@ -3694,7 +3813,7 @@ dependencies = [
  "exitcode",
  "flate2",
  "getrandom",
- "half",
+ "half 1.8.2",
  "hex",
  "hexf-parse",
  "indexmap",
@@ -3855,7 +3974,7 @@ version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bef2ebfde456fb76bbcf9f59315333decc4fda0b2b44b420243c11e0f5ec1f5"
 dependencies = [
- "half",
+ "half 1.8.2",
  "serde",
 ]
 
@@ -4027,7 +4146,7 @@ version = "0.1.0"
 dependencies = [
  "common-error",
  "snafu",
- "sqlparser",
+ "sqlparser 0.15.0",
 ]
 
 [[package]]
@@ -4035,6 +4154,15 @@ name = "sqlparser"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adbbea2526ad0d02ad9414a07c396078a5b944bbf9ca4fbab8f01bb4cb579081"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "sqlparser"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f531637a13132fa3d38c54d4cd8f115905e5dc3e72f6e77bd6160481f482e25d"
 dependencies = [
  "log",
 ]
@@ -4224,7 +4352,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datatypes",
  "futures",
  "serde",
@@ -4242,7 +4370,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datatypes",
  "futures",
  "log-store",
