@@ -26,24 +26,24 @@ impl LogStore for NoopLogStore {
         })
     }
 
-    async fn append_batch(&self, _ns: Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
+    async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
         todo!()
     }
 
     async fn read(
         &self,
-        _ns: Self::Namespace,
+        _ns: &Self::Namespace,
         _id: Id,
     ) -> Result<store_api::logstore::entry_stream::SendableEntryStream<'_, Self::Entry, Self::Error>>
     {
         todo!()
     }
 
-    async fn create_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
+    async fn create_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
         todo!()
     }
 
-    async fn delete_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
+    async fn delete_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
         todo!()
     }
 
