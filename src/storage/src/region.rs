@@ -152,7 +152,6 @@ impl<S: LogStore> RegionImpl<S> {
         let mut actions = Vec::new();
         while let Some((manifest_version, action_list)) = iter.next_action().await? {
             for action in action_list.actions {
-                println!("{:?}", action);
                 if let RegionMetaAction::Change(c) = action {
                     if version.is_none() {
                         version = Some(Version::new(c.metadata));
