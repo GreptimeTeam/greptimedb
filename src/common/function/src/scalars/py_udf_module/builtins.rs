@@ -9,8 +9,7 @@ use rustpython_vm::{
     AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
-use crate::scalars::{python::PyVector, Function};
-type PyVectorRef = PyRef<PyVector>;
+use crate::scalars::{python::PyVector};
 
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
@@ -118,7 +117,9 @@ fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
 }
 
 /// use to bind to Data Fusion's UDF function
-macro_rules! bind_math_function {
+/// P.S: seems due to fanky proc macro issues, can't just use #[pyfunction] in here
+/// TODO: remove Repetitions
+macro_rules! bind_call_unary_math_function {
     ($DF_FUNC: ident, $vm: ident $(,$ARG: ident)*) => {
         fn inner_fn($($ARG: PyObjectRef,)* vm: &VirtualMachine) -> PyResult<PyObjectRef> {
             let args = &[$(all_to_f64(try_into_columnar_value($ARG, vm)?, vm)?,)*];
@@ -155,20 +156,81 @@ mod udf_builtins {
         vm.new_runtime_error(format!("Data Fusion Error: {err:#?}"))
     }
 
+    // the main binding code, due to proc macro things, can't directly use a simpler macro
+    // because pyfunction is not a attr?
+
     /// return a general PyObjectRef
     /// so it can return both PyVector or a scalar PyInt/Float/Bool
     #[pyfunction]
-    fn abs(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        let args = &[all_to_f64(try_into_columnar_value(val, vm)?, vm)?];
-        let res = math_expressions::abs(args).map_err(|err| runtime_err(err, vm))?;
-        let ret = try_into_py_obj(res, vm)?;
-        Ok(ret)
+    fn sqrt(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(sqrt, vm, val);
     }
-    
     #[pyfunction]
-    fn mabs(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        bind_math_function!(abs, vm, val);
+    fn sin(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(sin, vm, val);
     }
+    #[pyfunction]
+    fn cos(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(cos, vm, val);
+    }
+    #[pyfunction]
+    fn tan(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(tan, vm, val);
+    }
+    #[pyfunction]
+    fn asin(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(asin, vm, val);
+    }
+    #[pyfunction]
+    fn acos(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(acos, vm, val);
+    }
+    #[pyfunction]
+    fn atan(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(atan, vm, val);
+    }
+    #[pyfunction]
+    fn floor(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(floor, vm, val);
+    }
+    #[pyfunction]
+    fn ceil(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(ceil, vm, val);
+    }
+    #[pyfunction]
+    fn round(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(round, vm, val);
+    }
+    #[pyfunction]
+    fn trunc(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(trunc, vm, val);
+    }
+    #[pyfunction]
+    fn abs(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(abs, vm, val);
+    }
+    #[pyfunction]
+    fn signum(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(signum, vm, val);
+    }
+    #[pyfunction]
+    fn exp(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(exp, vm, val);
+    }
+    #[pyfunction]
+    fn ln(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(ln, vm, val);
+    }
+    #[pyfunction]
+    fn log2(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(log2, vm, val);
+    }
+    #[pyfunction]
+    fn log10(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_call_unary_math_function!(log10, vm, val);
+    }
+
+    // TODO: random
     
 
     /// Pow function,
