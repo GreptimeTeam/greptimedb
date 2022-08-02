@@ -1,8 +1,7 @@
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
-use datafusion_common::{DataFusionError, ScalarValue};
+use datafusion_common::{ScalarValue};
 use datafusion_expr::ColumnarValue as DFColValue;
-use datafusion_physical_expr::math_expressions;
 use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::pymodule;
 use rustpython_vm::{
@@ -10,7 +9,7 @@ use rustpython_vm::{
     AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
-use crate::scalars::{function::FunctionContext, python::PyVector, Function};
+use crate::scalars::{python::PyVector, Function};
 type PyVectorRef = PyRef<PyVector>;
 
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
@@ -71,9 +70,12 @@ fn try_into_py_obj(col: DFColValue, vm: &VirtualMachine) -> PyResult<PyObjectRef
             .into_pyobject(vm);
             Ok(ret)
         }
-        DFColValue::Scalar(val) => {
-            todo!()
-        }
+        DFColValue::Scalar(val) => match val {
+            ScalarValue::Float64(Some(v)) => Ok(PyFloat::from(v).into_pyobject(vm)),
+            _ => {
+                Err(vm.new_type_error(format!("Can't cast type {:#?} to f64", val.get_datatype())))
+            }
+        },
     }
 }
 
@@ -98,8 +100,34 @@ fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
             })?;
             Ok(DFColValue::Array(res.into()))
         }
-        DFColValue::Scalar(val) => todo!(),
+        DFColValue::Scalar(val) => {
+            let val_in_f64 = match val {
+                ScalarValue::Int64(Some(v)) => v as f64,
+                ScalarValue::Boolean(Some(v)) => v as i64 as f64,
+                _ => {
+                    return Err(vm.new_type_error(format!(
+                        "Can't cast type {:#?} to {:#?}",
+                        val.get_datatype(),
+                        DataType::Float64
+                    )))
+                }
+            };
+            Ok(DFColValue::Scalar(ScalarValue::Float64(Some(val_in_f64))))
+        }
     }
+}
+
+/// use to bind to Data Fusion's UDF function
+macro_rules! bind_math_function {
+    ($DF_FUNC: ident, $vm: ident $(,$ARG: ident)*) => {
+        fn inner_fn($($ARG: PyObjectRef,)* vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+            let args = &[$(all_to_f64(try_into_columnar_value($ARG, vm)?, vm)?,)*];
+            let res = math_expressions::$DF_FUNC(args).map_err(|err| runtime_err(err, vm))?;
+            let ret = try_into_py_obj(res, vm)?;
+            Ok(ret)
+        }
+        return inner_fn($($ARG,)* $vm);
+    };
 }
 
 /// GrepTime User Define Function module
@@ -114,13 +142,12 @@ mod udf_builtins {
         builtins::PyBaseExceptionRef, AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine,
     };
 
+    use super::all_to_f64;
     use crate::scalars::math::PowFunction;
     use crate::scalars::py_udf_module::builtins::{
         try_into_columnar_value, try_into_py_obj, type_cast_error,
     };
     use crate::scalars::{function::FunctionContext, python::PyVector, Function};
-
-    use super::all_to_f64;
     type PyVectorRef = PyRef<PyVector>;
 
     #[inline]
@@ -137,6 +164,12 @@ mod udf_builtins {
         let ret = try_into_py_obj(res, vm)?;
         Ok(ret)
     }
+    
+    #[pyfunction]
+    fn mabs(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_math_function!(abs, vm, val);
+    }
+    
 
     /// Pow function,
     /// TODO: use PyObjectRef to adopt more type
@@ -175,7 +208,6 @@ mod test {
     use rustpython_vm::class::PyClassImpl;
     use rustpython_vm::{scope::Scope, AsObject, VirtualMachine};
 
-    use super::udf_builtins::*;
     use super::*;
     fn set_items_in_scope(
         scope: &Scope,
@@ -223,7 +255,7 @@ mod test {
                 .compile(
                     "
 from udf_builtins import *
-abs(pows)",
+mabs(-3)",
                     rustpython_vm::compile::Mode::BlockExpr,
                     "<embedded>".to_owned(),
                 )
