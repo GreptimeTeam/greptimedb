@@ -618,7 +618,7 @@ pub mod codec {
                             res.map(|_| Mutation::Put(put_data))
                         }
                         Some(MutationType::Delete) => {
-                            todo!()
+                            todo!("delete mutation")
                         }
                         _ => DataCorruptedSnafu {
                             message: format!("Unexpceted mutation type: {}", ext.mutation_type),

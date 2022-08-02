@@ -173,7 +173,7 @@ impl<S: LogStore> Wal<S> {
                 Ok((seq_num, header, Some(write_batch)))
             }
             Some(PayloadType::WriteBatchProto) => {
-                todo!() // TODO(jiachun): proto codec
+                todo!("protobuf decoder")
             }
             _ => error::WalDataCorruptedSnafu {
                 name: self.name(),
