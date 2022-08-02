@@ -29,12 +29,12 @@ pub const DEFAULT_ENGINE: &str = "mito";
 /// About mito <https://en.wikipedia.org/wiki/Alfa_Romeo_MiTo>.
 /// "you can't be a true petrolhead until you've owned an Alfa Romeo" -- by Jeremy Clarkson
 #[derive(Clone)]
-pub struct MitoEngine<Store: StorageEngine> {
-    inner: Arc<MitoEngineInner<Store>>,
+pub struct MitoEngine<S: StorageEngine> {
+    inner: Arc<MitoEngineInner<S>>,
 }
 
-impl<Store: StorageEngine> MitoEngine<Store> {
-    pub fn new(storage_engine: Store) -> Self {
+impl<S: StorageEngine> MitoEngine<S> {
+    pub fn new(storage_engine: S) -> Self {
         Self {
             inner: Arc::new(MitoEngineInner::new(storage_engine)),
         }
@@ -42,7 +42,7 @@ impl<Store: StorageEngine> MitoEngine<Store> {
 }
 
 #[async_trait]
-impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
+impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     async fn create_table(
         &self,
         ctx: &EngineContext,
@@ -85,12 +85,12 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
 }
 
 /// FIXME(dennis) impl system catalog to keep table metadata.
-struct MitoEngineInner<Store: StorageEngine> {
+struct MitoEngineInner<S: StorageEngine> {
     /// All tables opened by the engine.
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
     tables: RwLock<HashMap<String, TableRef>>,
-    storage_engine: Store,
+    storage_engine: S,
     // FIXME(yingwen): Remove `next_table_id`. Table id should be assigned by other module (maybe catalog).
     next_table_id: AtomicU64,
     /// Table mutex is used to protect the operations such as creating/opening/closing
@@ -98,8 +98,8 @@ struct MitoEngineInner<Store: StorageEngine> {
     table_mutex: Mutex<()>,
 }
 
-impl<Store: StorageEngine> MitoEngineInner<Store> {
-    fn new(storage_engine: Store) -> Self {
+impl<S: StorageEngine> MitoEngineInner<S> {
+    fn new(storage_engine: S) -> Self {
         Self {
             tables: RwLock::new(HashMap::default()),
             storage_engine,
@@ -113,7 +113,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
     }
 }
 
-impl<Store: StorageEngine> MitoEngineInner<Store> {
+impl<S: StorageEngine> MitoEngineInner<S> {
     async fn create_table(
         &self,
         _ctx: &EngineContext,
