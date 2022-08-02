@@ -49,6 +49,9 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
 
     fn entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry;
+
+    // TODO(sunng87): confusion with `create_namespace`
+    fn namespace(&self, name: &str) -> Self::Namespace;
 }
 
 pub trait AppendResponse: Send + Sync {

@@ -39,7 +39,7 @@ impl<S: LogStore> Clone for Wal<S> {
 impl<S: LogStore> Wal<S> {
     pub fn new(region_name: impl Into<String>, store: Arc<S>) -> Self {
         let region_name = region_name.into();
-        let namespace = S::Namespace::new(&region_name);
+        let namespace = store.namespace(&region_name);
 
         Self { namespace, store }
     }
