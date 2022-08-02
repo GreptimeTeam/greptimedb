@@ -203,6 +203,13 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("WAL data corrupted, name: {}, message: {}", name, message))]
+    WalDataCorrupted {
+        name: String,
+        message: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -227,7 +234,8 @@ impl ErrorExt for Error {
             | DecodeRegionMetaActionList { .. }
             | Readline { .. }
             | InvalidParquetSchema { .. }
-            | SequenceColumnNotFound { .. } => StatusCode::Unexpected,
+            | SequenceColumnNotFound { .. }
+            | WalDataCorrupted { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | InitBackend { .. }
