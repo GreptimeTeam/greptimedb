@@ -8,4 +8,3 @@ message InsertBatch {
   repeated Column columns = 1;
   uint32 row_count = 2;
 }
-
