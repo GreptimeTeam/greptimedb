@@ -65,6 +65,13 @@ async fn test_recover_region_manifets() {
     let region_name = "region-0";
     let region_meta = Arc::new(build_region_meta());
 
+    // Recover from empty
+    assert!(
+        RegionImpl::<NoopLogStore>::recover_from_manifest(region_name, &manifest)
+            .await
+            .is_err()
+    );
+
     {
         // save some actions into region_meta
         manifest

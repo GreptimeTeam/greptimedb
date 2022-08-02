@@ -157,19 +157,19 @@ impl<S: LogStore> RegionImpl<S> {
                     if version.is_none() {
                         version = Some(Version::new(c.metadata));
                         for (manifest_version, action) in actions.drain(..) {
-                            version = Self::try_apply_edit(manifest_version, action, version);
+                            version = Self::replay_edit(manifest_version, action, version);
                         }
                     } else {
                         todo!("alter schema is not implemented");
                     }
                 } else if version.is_some() {
-                    version = Self::try_apply_edit(manifest_version, action, version);
+                    version = Self::replay_edit(manifest_version, action, version);
                 } else {
                     actions.push((manifest_version, action));
                 }
             }
         }
-        assert!(actions.is_empty());
+        assert!(actions.is_empty() || version.is_none());
 
         version.context(error::VersionNotFoundSnafu { region_name })
     }
@@ -179,7 +179,7 @@ impl<S: LogStore> RegionImpl<S> {
         (0, MAX_VERSION)
     }
 
-    fn try_apply_edit(
+    fn replay_edit(
         manifest_version: ManifestVersion,
         action: RegionMetaAction,
         version: Option<Version>,
