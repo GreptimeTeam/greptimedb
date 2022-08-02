@@ -245,7 +245,7 @@ impl LogStore for LocalFileLogStore {
         todo!()
     }
 
-    fn new_entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry {
+    fn entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry {
         EntryImpl::new(data)
     }
 }

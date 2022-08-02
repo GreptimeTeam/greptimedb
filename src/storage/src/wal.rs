@@ -122,7 +122,7 @@ impl<S: LogStore> Wal<S> {
 
     async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
         let ns = self.namespace.clone();
-        let mut e = self.store.new_entry(bytes);
+        let mut e = self.store.entry(bytes);
         e.set_id(seq);
 
         let res = self
