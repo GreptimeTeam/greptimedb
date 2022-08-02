@@ -2,14 +2,34 @@ use std::any::Any;
 
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
+use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Fail to create region, source: {}", source))]
+    #[snafu(display("Failed to create region, source: {}", source))]
     CreateRegion {
         #[snafu(backtrace)]
         source: BoxedError,
+    },
+
+    #[snafu(display("Failed to open region, region: {}, source: {}", region_name, source))]
+    OpenRegion {
+        region_name: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to build table meta, source: {}", source))]
+    BuildTableMeta {
+        source: TableMetaBuilderError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to build table info, source: {}", source))]
+    BuildTableInfo {
+        source: TableInfoBuilderError,
+        backtrace: Backtrace,
     },
 }
 
@@ -23,8 +43,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
+        use Error::*;
+
         match self {
-            Error::CreateRegion { source, .. } => source.status_code(),
+            CreateRegion { source, .. } | OpenRegion { source, .. } => source.status_code(),
+            BuildTableMeta { .. } | BuildTableInfo { .. } => StatusCode::Unexpected,
         }
     }
 

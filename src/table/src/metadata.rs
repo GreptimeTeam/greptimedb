@@ -62,6 +62,7 @@ pub struct TableInfo {
     pub ident: TableIdent,
     #[builder(setter(into))]
     pub name: String,
+    // TODO(yingwen): Just use empty string and get rid of `Option`?
     #[builder(default, setter(into))]
     pub desc: Option<String>,
     pub meta: TableMeta,

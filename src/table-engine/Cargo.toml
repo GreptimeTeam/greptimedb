@@ -19,6 +19,7 @@ snafu = { version = "0.7", features = ["backtraces"] }
 storage ={ path = "../storage" }
 store-api ={ path = "../store-api" }
 table = { path = "../table" }
+tokio = { version = "1.0", features = ["full"] }
 
 [dev-dependencies]
 datatypes = { path = "../datatypes" }

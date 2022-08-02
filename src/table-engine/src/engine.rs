@@ -6,11 +6,9 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use snafu::ResultExt;
-use store_api::storage::ConcreteDataType;
 use store_api::storage::{
-    self as store, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder,
-    EngineContext as StorageContext, Region, RegionDescriptor, RegionId, RegionMeta,
-    RowKeyDescriptorBuilder, StorageEngine,
+    self, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder, ConcreteDataType, OpenOptions,
+    Region, RegionDescriptor, RegionId, RegionMeta, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
@@ -19,6 +17,7 @@ use table::{
     metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType},
     table::TableRef,
 };
+use tokio::sync::Mutex;
 
 use crate::error::{self, Result};
 use crate::table::MitoTable;
@@ -87,9 +86,16 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
 
 /// FIXME(dennis) impl system catalog to keep table metadata.
 struct MitoEngineInner<Store: StorageEngine> {
+    /// All tables opened by the engine.
+    ///
+    /// Writing to `tables` should also hold the `table_mutex`.
     tables: RwLock<HashMap<String, TableRef>>,
     storage_engine: Store,
+    // FIXME(yingwen): Remove `next_table_id`. Table id should be assigned by other module (maybe catalog).
     next_table_id: AtomicU64,
+    /// Table mutex is used to protect the operations such as creating/opening/closing
+    /// a table, to avoid things like opening the same table simultaneously.
+    table_mutex: Mutex<()>,
 }
 
 impl<Store: StorageEngine> MitoEngineInner<Store> {
@@ -98,6 +104,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
             tables: RwLock::new(HashMap::default()),
             storage_engine,
             next_table_id: AtomicU64::new(0),
+            table_mutex: Mutex::new(()),
         }
     }
 
@@ -122,7 +129,8 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
 
         //TODO(dennis): supports multi regions
         let region_id: RegionId = 0;
-        let name = store::gen_region_name(region_id);
+        // TODO(yingwen): Maybe we should use table name as part of region name.
+        let name = storage::gen_region_name(region_id);
 
         let host_column =
             ColumnDescriptorBuilder::new(0, "host", ConcreteDataType::string_datatype())
@@ -158,7 +166,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
         let region = self
             .storage_engine
             .create_region(
-                &StorageContext::default(),
+                &storage::EngineContext::default(),
                 RegionDescriptor {
                     id: region_id,
                     name,
@@ -203,11 +211,50 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
         _ctx: &EngineContext,
         request: OpenTableRequest,
     ) -> TableResult<TableRef> {
-        if let Some(table) = self.get_table(&request.table_name) {
+        let table_name = &request.table_name;
+        if let Some(table) = self.get_table(table_name) {
+            // Table has already been opened.
             return Ok(table);
         }
 
-        unimplemented!()
+        // Acquires the mutex before opening a new table.
+        let _lock = self.table_mutex.lock().await;
+        // Checks again, read lock should be enough since we are guarded by the mutex.
+        if let Some(table) = self.get_table(table_name) {
+            return Ok(table);
+        }
+
+        let engine_ctx = storage::EngineContext::default();
+        let opts = OpenOptions::default();
+        let region_name = table_name;
+        // Now we just use table name as region name. TODO(yingwen): Naming pattern of region.
+        let region = self
+            .storage_engine
+            .open_region(&engine_ctx, region_name, &opts)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::OpenRegionSnafu { region_name })?;
+
+        let table_meta = TableMetaBuilder::default()
+            .schema(region.in_memory_metadata().schema().clone())
+            .engine(DEFAULT_ENGINE)
+            .build()
+            .context(error::BuildTableMetaSnafu)?;
+        let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
+            .ident(request.table_id)
+            .table_version(0u64)
+            .table_type(TableType::Base)
+            .build()
+            .context(error::BuildTableInfoSnafu)?;
+
+        let table = Arc::new(MitoTable::new(table_info, region));
+
+        self.tables
+            .write()
+            .unwrap()
+            .insert(table_name.to_string(), table.clone());
+
+        Ok(table)
     }
 
     fn get_table(&self, name: &str) -> Option<TableRef> {
