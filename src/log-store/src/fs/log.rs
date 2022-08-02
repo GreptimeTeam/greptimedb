@@ -206,17 +206,18 @@ impl LogStore for LocalFileLogStore {
         .fail();
     }
 
-    async fn append_batch(&self, _ns: Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
+    async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
         todo!()
     }
 
     async fn read(
         &self,
-        ns: Self::Namespace,
+        ns: &Self::Namespace,
         id: Id,
     ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>> {
         let files = self.files.read().await;
 
+        let ns = ns.clone();
         let s = stream!({
             for (start_id, file) in files.iter() {
                 if *start_id >= id {
@@ -232,11 +233,11 @@ impl LogStore for LocalFileLogStore {
         Ok(Box::pin(s))
     }
 
-    async fn create_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
+    async fn create_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
         todo!()
     }
 
-    async fn delete_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
+    async fn delete_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
         todo!()
     }
 
@@ -316,7 +317,7 @@ mod tests {
             .entry_id;
         assert_eq!(0, id);
 
-        let stream = logstore.read(ns, 0).await.unwrap();
+        let stream = logstore.read(&ns, 0).await.unwrap();
         tokio::pin!(stream);
 
         let entries = stream.next().await.unwrap().unwrap();

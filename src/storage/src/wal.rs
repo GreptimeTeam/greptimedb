@@ -102,7 +102,7 @@ impl<S: LogStore> Wal<S> {
     pub async fn read_from_wal(&self, start_seq: SequenceNumber) -> Result<WriteBatchStream<'_>> {
         let stream = self
             .store
-            .read(self.namespace.clone(), start_seq)
+            .read(&self.namespace, start_seq)
             .await
             .map_err(BoxedError::new)
             .context(error::ReadWalSnafu { name: self.name() })?
