@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest};
+use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::TableRef;
 
 /// Table engine abstraction.
@@ -15,6 +15,9 @@ pub trait TableEngine: Send + Sync {
         ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> Result<TableRef>;
+
+    /// Open an existing table by given `request`, returns the opened table.
+    async fn open_table(&self, ctx: &EngineContext, request: OpenTableRequest) -> Result<TableRef>;
 
     /// Alter table schema, options etc. by given request,
     ///

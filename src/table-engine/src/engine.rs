@@ -13,7 +13,7 @@ use store_api::storage::{
     RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine};
-use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest};
+use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::Result as TableResult;
 use table::{
     metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType},
@@ -52,6 +52,14 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
         Ok(self.inner.create_table(ctx, request).await?)
     }
 
+    async fn open_table(
+        &self,
+        ctx: &EngineContext,
+        request: OpenTableRequest,
+    ) -> TableResult<TableRef> {
+        Ok(self.inner.open_table(ctx, request).await?)
+    }
+
     async fn alter_table(
         &self,
         _ctx: &EngineContext,
@@ -60,8 +68,8 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
         unimplemented!();
     }
 
-    fn get_table(&self, ctx: &EngineContext, name: &str) -> TableResult<Option<TableRef>> {
-        Ok(self.inner.get_table(ctx, name)?)
+    fn get_table(&self, _ctx: &EngineContext, name: &str) -> TableResult<Option<TableRef>> {
+        Ok(self.inner.get_table(name))
     }
 
     fn table_exists(&self, _ctx: &EngineContext, _name: &str) -> bool {
@@ -189,8 +197,21 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
         Ok(table)
     }
 
-    fn get_table(&self, _ctx: &EngineContext, name: &str) -> Result<Option<TableRef>> {
-        Ok(self.tables.read().unwrap().get(name).cloned())
+    // TODO(yingwen): Support catalog and schema name.
+    async fn open_table(
+        &self,
+        _ctx: &EngineContext,
+        request: OpenTableRequest,
+    ) -> TableResult<TableRef> {
+        if let Some(table) = self.get_table(&request.table_name) {
+            return Ok(table);
+        }
+
+        unimplemented!()
+    }
+
+    fn get_table(&self, name: &str) -> Option<TableRef> {
+        self.tables.read().unwrap().get(name).cloned()
     }
 }
 
