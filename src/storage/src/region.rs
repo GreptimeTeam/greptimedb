@@ -6,21 +6,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datatypes::schema::SchemaRef;
-use snafu::ensure;
+use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
-use store_api::manifest::Manifest;
+use store_api::manifest::{Manifest, ManifestVersion, MetaActionIterator, MAX_VERSION};
 use store_api::storage::{
     OpenOptions, ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse,
 };
 
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
-use crate::manifest::region::RegionManifest;
+use crate::manifest::{action::RegionMetaAction, region::RegionManifest};
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{RegionWriter, RegionWriterRef, WriterContext};
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
+use crate::version::VersionEdit;
 use crate::version::{Version, VersionControl, VersionControlRef};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
@@ -115,7 +116,7 @@ impl<S: LogStore> RegionImpl<S> {
         opts: &OpenOptions,
     ) -> Result<RegionImpl<S>> {
         // Load version meta data from manifest.
-        let version = Self::recover_from_manifest(&store_config.manifest).await?;
+        let version = Self::recover_from_manifest(&name, &store_config.manifest).await?;
         let metadata = version.metadata().clone();
         let version_control = Arc::new(VersionControl::with_version(version));
         let wal = Wal::new(name.clone(), store_config.log_store);
@@ -140,11 +141,63 @@ impl<S: LogStore> RegionImpl<S> {
         unimplemented!()
     }
 
-    async fn recover_from_manifest(manifest: &RegionManifest) -> Result<Version> {
-        let _metadata = manifest.load().await?;
+    pub(crate) async fn recover_from_manifest(
+        region_name: &str,
+        manifest: &RegionManifest,
+    ) -> Result<Version> {
+        let (start, end) = Self::manifest_scan_range();
+        let mut iter = manifest.scan(start, end).await?;
 
-        // TODO(yingwen): [open_region] Get version from metadata.
-        unimplemented!()
+        let mut version = None;
+        let mut actions = Vec::new();
+        while let Some((manifest_version, action_list)) = iter.next_action().await? {
+            for action in action_list.actions {
+                println!("{:?}", action);
+                if let RegionMetaAction::Change(c) = action {
+                    if version.is_none() {
+                        version = Some(Version::new(c.metadata));
+                        for (manifest_version, action) in actions.drain(..) {
+                            version = Self::try_apply_edit(manifest_version, action, version);
+                        }
+                    } else {
+                        todo!("alter schema is not implemented");
+                    }
+                } else if version.is_some() {
+                    version = Self::try_apply_edit(manifest_version, action, version);
+                } else {
+                    actions.push((manifest_version, action));
+                }
+            }
+        }
+        assert!(actions.is_empty());
+
+        version.context(error::VersionNotFoundSnafu { region_name })
+    }
+
+    fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
+        // TODO(dennis): use manifest version in WAL
+        (0, MAX_VERSION)
+    }
+
+    fn try_apply_edit(
+        manifest_version: ManifestVersion,
+        action: RegionMetaAction,
+        version: Option<Version>,
+    ) -> Option<Version> {
+        if let RegionMetaAction::Edit(e) = action {
+            let edit = VersionEdit {
+                files_to_add: e.files_to_add,
+                flushed_sequence: Some(e.flushed_sequence),
+                manifest_version,
+                max_memtable_id: None,
+            };
+            version.map(|mut v| {
+                v.apply_edit(edit);
+                v
+            })
+        } else {
+            version
+        }
     }
 }
 

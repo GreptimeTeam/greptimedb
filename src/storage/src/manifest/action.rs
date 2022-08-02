@@ -31,9 +31,8 @@ pub struct RegionRemove {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RegionEdit {
-    pub region_id: RegionId,
     pub region_version: VersionNumber,
-    pub flush_sequence: SequenceNumber,
+    pub flushed_sequence: SequenceNumber,
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
 }
@@ -170,6 +169,7 @@ mod tests {
     use common_telemetry::logging;
 
     use super::*;
+    use crate::manifest::test_utils;
 
     #[test]
     fn test_encode_decode_action_list() {
@@ -178,32 +178,18 @@ mod tests {
         protocol.min_reader_version = 1;
         let mut action_list = RegionMetaActionList::new(vec![
             RegionMetaAction::Protocol(protocol.clone()),
-            RegionMetaAction::Edit(RegionEdit {
-                region_id: 1,
-                region_version: 10,
-                flush_sequence: 99,
-                files_to_add: vec![
-                    FileMeta {
-                        file_name: "test1".to_string(),
-                        level: 1,
-                    },
-                    FileMeta {
-                        file_name: "test2".to_string(),
-                        level: 2,
-                    },
-                ],
-                files_to_remove: vec![FileMeta {
-                    file_name: "test0".to_string(),
-                    level: 0,
-                }],
-            }),
+            RegionMetaAction::Edit(test_utils::build_region_edit(
+                99,
+                &["test1", "test2"],
+                &["test3"],
+            )),
         ]);
         action_list.set_prev_version(3);
 
         let bs = action_list.encode().unwrap();
         // {"prev_version":3}
         // {"Protocol":{"min_reader_version":1,"min_writer_version":0}}
-        // {"Edit":{"region_id":1,"region_version":10,"flush_sequence":99,"files_to_add":[{"file_name":"test1","level":1},{"file_name":"test2","level":2}],"files_to_remove":[{"file_name":"test0","level":0}]}}
+        // {"Edit":{"region_version":0,"flush_sequence":99,"files_to_add":[{"file_name":"test1","level":1},{"file_name":"test2","level":2}],"files_to_remove":[{"file_name":"test0","level":0}]}}
 
         logging::debug!(
             "Encoded action list: \r\n{}",
