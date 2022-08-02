@@ -14,13 +14,17 @@ mod udf_mod {
     type PyVectorRef = PyRef<PyVector>;
     use crate::scalars::math::PowFunction;
 
+    fn try_into_columnar_value(obj: PyObjectRef) -> PyResult<()> {
+        todo!()
+    }
+
     /// Pow function,
     /// TODO: use PyObjectRef to adopt more type
     #[pyfunction]
     fn pow(base: PyObjectRef, pow: PyVectorRef, vm:&VirtualMachine) -> PyResult<PyVector> {
         let base = base.downcast_ref::<PyVector>().ok_or_else(|| {
             vm.new_type_error(format!(
-                "Can't cast operand into PyVector, actual is: {}",
+                "Can't cast operand of type `{}` into `vector`.",
                 base.class().name()
             ))
         })?;
@@ -88,7 +92,7 @@ mod udf_mod {
                     .compile(
                         "
 from udf_mod import pow
-pow(values, pows)",
+pow(1, pows)",
                         rustpython_vm::compile::Mode::BlockExpr,
                         "<embedded>".to_owned(),
                     )
