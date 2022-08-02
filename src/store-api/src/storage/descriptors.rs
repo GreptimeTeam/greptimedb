@@ -72,6 +72,7 @@ pub struct RowKeyDescriptor {
 
 /// A [ColumnFamilyDescriptor] contains information to create a column family.
 #[derive(Debug, Clone, PartialEq, Builder)]
+#[builder(pattern = "owned")]
 pub struct ColumnFamilyDescriptor {
     #[builder(default = "consts::DEFAULT_CF_ID")]
     pub cf_id: ColumnFamilyId,
