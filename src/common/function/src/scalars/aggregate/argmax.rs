@@ -10,7 +10,6 @@ use datafusion_common::DataFusionError;
 use datatypes::prelude::*;
 use datatypes::vectors::{ConstantVector, ListVector};
 use datatypes::with_match_ordered_primitive_type_id;
-use num_traits::AsPrimitive;
 use snafu::{OptionExt, ResultExt};
 
 // https://numpy.org/doc/stable/reference/generated/numpy.diff.html
@@ -19,7 +18,7 @@ pub struct Argmax<T>
 where
     T: Primitive + Ord,
 {
-    max: T,
+    max: Option<T>,
 }
 
 impl<T> Argmax<T>
@@ -27,16 +26,23 @@ where
     T: Primitive + Ord,
 {
     fn push(&mut self, value: T) {
-        if self.max < value {
-            self.max = value;
-        }
+        self.max = match self.max {
+            Some(max) => {
+                if max < value {
+                    Some(value)
+                } else {
+                    Some(max)
+                }
+            }
+            None => Some(value),
+        };
     }
 }
 
 impl<T> Accumulator for Argmax<T>
 where
     T: Primitive + Ord,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    for<'a> T: Scalar<RefType<'a> = T>, datatypes::prelude::Value: From<Option<T>>,
 {
     fn state(&self) -> Result<Vec<Value>> {
         Ok(vec![self.max.into()])
@@ -141,14 +147,12 @@ impl AggregateFunctionCreator for ArgmaxAccumulatorCreator {
         if input_types.len() != 1 {
             return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
         }
-        Ok(ConcreteDataType::float64_datatype())
+        // unwrap is safe because we have checked input_types len must equals 1
+        Ok(input_types.into_iter().next().unwrap())
     }
 
     fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
-        Ok(vec![
-            self.input_types()?[0].clone(),
-            ConcreteDataType::uint32_datatype(),
-        ])
+        Ok(vec![self.output_type()?])
     }
 }
 
@@ -167,52 +171,51 @@ mod test {
     #[test]
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
-        let mut mean = Mean::<i32>::default();
-        assert!(mean.update_batch(&[]).is_ok());
-        assert!(mean.n == 0);
-        assert_eq!(Value::Null, mean.evaluate().unwrap());
+        let mut argmax = Argmax::<i32>::default();
+        assert!(argmax.update_batch(&[]).is_ok());
+        assert_eq!(Value::Null, argmax.evaluate().unwrap());
 
         // test update one not-null value
-        let mut mean = Mean::<i32>::default();
+        let mut argmax = Argmax::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
-        assert!(mean.update_batch(&v).is_ok());
-        assert_eq!(Value::from(42.0_f64), mean.evaluate().unwrap());
+        assert!(argmax.update_batch(&v).is_ok());
+        assert_eq!(Value::from(42_i32), argmax.evaluate().unwrap());
 
         // test update one null value
-        let mut mean = Mean::<i32>::default();
+        let mut argmax = Argmax::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Option::<i32>::None,
         ]))];
-        assert!(mean.update_batch(&v).is_ok());
-        assert_eq!(Value::Null, mean.evaluate().unwrap());
+        assert!(argmax.update_batch(&v).is_ok());
+        assert_eq!(Value::Null, argmax.evaluate().unwrap());
 
         // test update no null-value batch
-        let mut mean = Mean::<i32>::default();
+        let mut argmax = Argmax::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Some(-1i32),
             Some(1),
             Some(3),
         ]))];
-        assert!(mean.update_batch(&v).is_ok());
-        assert_eq!(Value::from(1.00_f64), mean.evaluate().unwrap());
+        assert!(argmax.update_batch(&v).is_ok());
+        assert_eq!(Value::from(3_i32), argmax.evaluate().unwrap());
 
         // test update null-value batch
-        let mut mean = Mean::<i32>::default();
+        let mut argmax = Argmax::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Some(-2i32),
             None,
             Some(4),
         ]))];
-        assert!(mean.update_batch(&v).is_ok());
-        assert_eq!(Value::from(1.0_f64), mean.evaluate().unwrap());
+        assert!(argmax.update_batch(&v).is_ok());
+        assert_eq!(Value::from(4_i32), argmax.evaluate().unwrap());
 
         // test update with constant vector
-        let mut mean = Mean::<i32>::default();
+        let mut argmax = Argmax::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(ConstantVector::new(
             Arc::new(PrimitiveVector::<i32>::from_vec(vec![4])),
             10,
         ))];
-        assert!(mean.update_batch(&v).is_ok());
-        assert_eq!(Value::from(4_f64), mean.evaluate().unwrap());
+        assert!(argmax.update_batch(&v).is_ok());
+        assert_eq!(Value::from(4_i32), argmax.evaluate().unwrap());
     }
 }
