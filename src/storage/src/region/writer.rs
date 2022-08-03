@@ -5,7 +5,7 @@ use common_time::RangeMillis;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::storage::{OpenOptions, SequenceNumber, WriteContext, WriteRequest, WriteResponse};
+use store_api::storage::{SequenceNumber, WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
@@ -87,13 +87,9 @@ impl RegionWriter {
     }
 
     /// Replay data to memtables.
-    pub async fn replay<S: LogStore>(
-        &self,
-        writer_ctx: WriterContext<'_, S>,
-        opts: &OpenOptions,
-    ) -> Result<()> {
+    pub async fn replay<S: LogStore>(&self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        inner.replay(&self.version_mutex, writer_ctx, opts).await
+        inner.replay(&self.version_mutex, writer_ctx).await
     }
 
     async fn persist_manifest_version<S: LogStore>(
@@ -203,7 +199,6 @@ impl WriterInner {
         &mut self,
         version_mutex: &Mutex<()>,
         writer_ctx: WriterContext<'_, S>,
-        opts: &OpenOptions,
     ) -> Result<()> {
         let version_control = writer_ctx.version_control();
 

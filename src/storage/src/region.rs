@@ -113,7 +113,7 @@ impl<S: LogStore> RegionImpl<S> {
     pub async fn open(
         name: String,
         store_config: StoreConfig<S>,
-        opts: &OpenOptions,
+        _opts: &OpenOptions,
     ) -> Result<RegionImpl<S>> {
         // Load version meta data from manifest.
         let version = Self::recover_from_manifest(&name, &store_config.manifest).await?;
@@ -136,7 +136,7 @@ impl<S: LogStore> RegionImpl<S> {
             writer: &writer,
             manifest: &store_config.manifest,
         };
-        writer.replay(writer_ctx, opts).await?;
+        writer.replay(writer_ctx).await?;
 
         unimplemented!()
     }
