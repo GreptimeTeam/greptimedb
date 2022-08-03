@@ -6,7 +6,7 @@ mod flush;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::Int64Vector;
-use log_store::fs::noop::NoopLogStore;
+use log_store::fs::{log::LocalFileLogStore, noop::NoopLogStore};
 use object_store::{backend::fs, ObjectStore};
 use store_api::storage::{
     consts, Chunk, ChunkReader, PutOperation, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
@@ -31,14 +31,14 @@ pub fn new_metadata(region_name: &str, enable_version_column: bool) -> RegionMet
 }
 
 /// Test region with schema (timestamp, v1).
-pub struct TesterBase {
-    pub region: RegionImpl<NoopLogStore>,
+pub struct TesterBase<S: LogStore> {
+    pub region: RegionImpl<S>,
     write_ctx: WriteContext,
     read_ctx: ReadContext,
 }
 
-impl TesterBase {
-    pub fn with_region(region: RegionImpl<NoopLogStore>) -> TesterBase {
+impl<S: LogStore> TesterBase<S> {
+    pub fn with_region(region: RegionImpl<S>) -> TesterBase<S> {
         TesterBase {
             region,
             write_ctx: WriteContext::default(),
@@ -83,6 +83,8 @@ impl TesterBase {
         self.region.committed_sequence()
     }
 }
+
+pub type FileTesterBase = TesterBase<LocalFileLogStore>;
 
 fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     if enable_version_column {

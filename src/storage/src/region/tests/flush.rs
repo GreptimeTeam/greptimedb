@@ -3,13 +3,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use log_store::fs::noop::NoopLogStore;
+use log_store::fs::log::LocalFileLogStore;
 use store_api::storage::WriteResponse;
 use tempdir::TempDir;
 
 use crate::engine;
 use crate::flush::{FlushStrategy, FlushStrategyRef};
-use crate::region::tests::{self, TesterBase};
+use crate::region::tests::{self, FileTesterBase};
 use crate::region::{RegionImpl, SharedDataRef};
 use crate::test_util::config_util;
 
@@ -20,7 +20,7 @@ async fn create_region_for_flush(
     store_dir: &str,
     enable_version_column: bool,
     flush_strategy: FlushStrategyRef,
-) -> RegionImpl<NoopLogStore> {
+) -> RegionImpl<LocalFileLogStore> {
     let metadata = tests::new_metadata(REGION_NAME, enable_version_column);
 
     let mut store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
@@ -33,7 +33,7 @@ async fn create_region_for_flush(
 
 /// Tester for region flush.
 struct FlushTester {
-    base: TesterBase,
+    base: FileTesterBase,
 }
 
 impl FlushTester {
@@ -41,7 +41,7 @@ impl FlushTester {
         let region = create_region_for_flush(store_dir, false, flush_strategy).await;
 
         FlushTester {
-            base: TesterBase::with_region(region),
+            base: FileTesterBase::with_region(region),
         }
     }
 

@@ -14,7 +14,8 @@ use store_api::logstore::LogStore;
 use tokio::sync::RwLock;
 
 use crate::error::{
-    DuplicateFileSnafu, Error, FileNameIllegalSnafu, InternalSnafu, IoSnafu, Result,
+    CreateDirSnafu, DuplicateFileSnafu, Error, FileNameIllegalSnafu, InternalSnafu, IoSnafu,
+    ReadPathSnafu, Result,
 };
 use crate::fs::config::LogConfig;
 use crate::fs::entry::EntryImpl;
@@ -34,8 +35,14 @@ pub struct LocalFileLogStore {
 
 impl LocalFileLogStore {
     /// Opens a directory as log store directory, initialize directory if it is empty.
-    #[allow(unused)]
     pub async fn open(config: &LogConfig) -> Result<Self> {
+        // Create the log directory if missing.
+        tokio::fs::create_dir_all(&config.log_file_dir)
+            .await
+            .context(CreateDirSnafu {
+                path: &config.log_file_dir,
+            })?;
+
         let mut files = Self::load_dir(&config.log_file_dir, config).await?;
 
         if files.is_empty() {
@@ -100,7 +107,9 @@ impl LocalFileLogStore {
         let mut map = FileMap::new();
         let mut dir = tokio::fs::read_dir(Path::new(path.as_ref()))
             .await
-            .context(IoSnafu)?;
+            .context(ReadPathSnafu {
+                path: path.as_ref(),
+            })?;
 
         while let Some(f) = dir.next_entry().await.context(IoSnafu)? {
             let path_buf = f.path();

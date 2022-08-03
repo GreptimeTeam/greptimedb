@@ -5,6 +5,7 @@ mod writer;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_telemetry::logging;
 use datatypes::schema::SchemaRef;
 use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
@@ -152,6 +153,12 @@ impl<S: LogStore> RegionImpl<S> {
     ) -> Result<RegionImpl<S>> {
         // Load version meta data from manifest.
         let version = Self::recover_from_manifest(&name, &store_config.manifest).await?;
+
+        logging::debug!(
+            "Region recovered version from manifest, version: {:?}",
+            version
+        );
+
         let metadata = version.metadata().clone();
         let version_control = Arc::new(VersionControl::with_version(version));
         let wal = Wal::new(name.clone(), store_config.log_store);

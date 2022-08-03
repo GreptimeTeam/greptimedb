@@ -28,6 +28,20 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Failed to create path {}, source: {}", path, source))]
+    CreateDir {
+        path: String,
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to read path {}, source: {}", path, source))]
+    ReadPath {
+        path: String,
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to open log file {}, source: {}", file_name, source))]
     OpenLog {
         file_name: String,
