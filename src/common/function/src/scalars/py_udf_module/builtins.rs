@@ -182,7 +182,7 @@ fn eval_aggr_fn<T: AggregateExpr>(
 /// GrepTime User Define Function module
 ///  
 /// design to allow Python Coprocessor Function to use already implmented udf functions
-/// 
+///
 #[pymodule]
 mod udf_builtins {
     // P.S.: not extract to file because not inline proc macro attribute is *unstable*
