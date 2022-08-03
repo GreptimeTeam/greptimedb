@@ -97,7 +97,7 @@ impl Buffer for ChunkList {
         self.chunks.iter().map(|c| c.len()).sum()
     }
 
-    fn read_to_slice(&mut self, mut dst: &mut [u8]) -> common_base::buffer::Result<()> {
+    fn peek_to_slice(&self, mut dst: &mut [u8]) -> common_base::buffer::Result<()> {
         ensure!(self.remaining_size() >= dst.len(), UnderflowSnafu);
 
         for c in &self.chunks {
@@ -109,6 +109,12 @@ impl Buffer for ChunkList {
         }
 
         ensure!(dst.is_empty(), UnderflowSnafu);
+        Ok(())
+    }
+
+    fn read_to_slice(&mut self, dst: &mut [u8]) -> common_base::buffer::Result<()> {
+        self.peek_to_slice(dst)?;
+        self.advance_by(dst.len());
         Ok(())
     }
 
@@ -184,20 +190,20 @@ mod tests {
         assert_eq!(9, chunks.remaining_size());
 
         let mut dst = [0u8; 2];
-        chunks.read_to_slice(&mut dst).unwrap();
+        chunks.peek_to_slice(&mut dst).unwrap();
         chunks.advance_by(2);
         assert_eq!([b'a', b'b'], dst);
         assert_eq!(2, chunks.chunks.len());
 
         let mut dst = [0u8; 3];
-        chunks.read_to_slice(&mut dst).unwrap();
+        chunks.peek_to_slice(&mut dst).unwrap();
         chunks.advance_by(3);
         assert_eq!([b'c', b'd', b'1'], dst);
         assert_eq!(4, chunks.remaining_size());
         assert_eq!(1, chunks.chunks.len());
 
         let mut dst = [0u8; 4];
-        chunks.read_to_slice(&mut dst).unwrap();
+        chunks.peek_to_slice(&mut dst).unwrap();
         chunks.advance_by(4);
         assert_eq!([b'2', b'3', b'4', b'5'], dst);
         assert_eq!(0, chunks.remaining_size());

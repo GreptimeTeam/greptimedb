@@ -19,13 +19,19 @@ mod tests {
 
         buf.write_from_slice("hello, world".as_bytes()).unwrap();
         let mut content = vec![0u8; 5];
-        buf.read_to_slice(&mut content).unwrap();
+        buf.peek_to_slice(&mut content).unwrap();
         let read = String::from_utf8_lossy(&content);
         assert_eq!("hello", read);
         buf.advance_by(5);
-
         // after read, buffer should still have 7 bytes to read.
         assert_eq!(7, buf.remaining());
+
+        let mut content = vec![0u8; 6];
+        buf.read_to_slice(&mut content).unwrap();
+        let read = String::from_utf8_lossy(&content);
+        assert_eq!(", worl", read);
+        // after read, buffer should still have 1 byte to read.
+        assert_eq!(1, buf.remaining());
     }
 
     #[test]

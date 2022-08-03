@@ -1,10 +1,10 @@
 use std::any::Any;
-use std::io::Write;
+use std::io::{Read, Write};
 
 use bytes::{Buf, BufMut, BytesMut};
 use common_error::prelude::ErrorExt;
 use paste::paste;
-use snafu::{ensure, Backtrace, ErrorCompat, Snafu};
+use snafu::{ensure, Backtrace, ErrorCompat, ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -49,13 +49,12 @@ macro_rules! impl_read_le {
                 fn [<read_ $num_ty _le>](&mut self) -> Result<$num_ty> {
                     let mut buf = [0u8; std::mem::size_of::<$num_ty>()];
                     self.read_to_slice(&mut buf)?;
-                    self.advance_by(std::mem::size_of::<$num_ty>());
                     Ok($num_ty::from_le_bytes(buf))
                 }
 
                 fn [<peek_ $num_ty _le>](&mut self) -> Result<$num_ty> {
                     let mut buf = [0u8; std::mem::size_of::<$num_ty>()];
-                    self.read_to_slice(&mut buf)?;
+                    self.peek_to_slice(&mut buf)?;
                     Ok($num_ty::from_le_bytes(buf))
                 }
             }
@@ -89,7 +88,13 @@ pub trait Buffer {
     /// invoke `advance_by` if needed.
     /// # Panics
     /// This method **may** panic if buffer does not have enough data to be copied to dst.
-    fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()>;
+    fn peek_to_slice(&self, dst: &mut [u8]) -> Result<()>;
+
+    fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {
+        self.peek_to_slice(dst)?;
+        self.advance_by(dst.len());
+        Ok(())
+    }
 
     /// Advances internal cursor for next read.
     /// # Panics
@@ -107,7 +112,7 @@ macro_rules! impl_buffer_for_bytes {
                 self.len()
             }
 
-            fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {
+            fn peek_to_slice(&self, dst: &mut [u8]) -> Result<()> {
                 let dst_len = dst.len();
                 ensure!(self.remaining() >= dst.len(), OverflowSnafu {
                         src_len: self.remaining_size(),
@@ -134,7 +139,7 @@ impl Buffer for &[u8] {
         self.len()
     }
 
-    fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {
+    fn peek_to_slice(&self, dst: &mut [u8]) -> Result<()> {
         let dst_len = dst.len();
         ensure!(
             self.len() >= dst.len(),
@@ -145,6 +150,17 @@ impl Buffer for &[u8] {
         );
         dst.copy_from_slice(&self[0..dst_len]);
         Ok(())
+    }
+
+    fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {
+        ensure!(
+            self.len() >= dst.len(),
+            OverflowSnafu {
+                src_len: self.remaining_size(),
+                dst_len: dst.len(),
+            }
+        );
+        self.read_exact(dst).context(EofSnafu)
     }
 
     fn advance_by(&mut self, by: usize) {

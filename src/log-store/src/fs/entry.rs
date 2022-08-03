@@ -70,7 +70,7 @@ impl Encode for EntryImpl {
 
         let mut digest = crc::CRC_ALGO.digest();
         let mut header = [0u8; HEADER_LENGTH];
-        buf.read_to_slice(&mut header).unwrap();
+        buf.peek_to_slice(&mut header).unwrap();
 
         let mut header = &header[..];
         let id = header.read_u64_le().unwrap(); // unwrap here is safe because header bytes must be present
@@ -90,7 +90,7 @@ impl Encode for EntryImpl {
         buf.advance_by(HEADER_LENGTH);
 
         let mut data = vec![0u8; data_len as usize];
-        map_err!(buf.read_to_slice(&mut data), buf)?;
+        map_err!(buf.peek_to_slice(&mut data), buf)?;
         digest.update(&data);
         buf.advance_by(data_len as usize);
 
