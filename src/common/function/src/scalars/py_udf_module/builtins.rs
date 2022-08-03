@@ -1,7 +1,9 @@
+use arrow::array::ArrayRef;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
-use datafusion_common::ScalarValue;
+use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::ColumnarValue as DFColValue;
+use datafusion_physical_expr::AggregateExpr;
 use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::pymodule;
 use rustpython_vm::{
@@ -133,6 +135,44 @@ macro_rules! bind_call_unary_math_function {
     };
 }
 
+/// The macro for binding function in `datafusion_physical_expr::expressions`
+/// first arguements is the name of datafusion expression function, second is the python virtual machine ident
+/// following is the actual args passing in, lastly is the name given to expr of those function
+macro_rules! bind_aggr_fn {
+    ($AGGR_FUNC: ident, $VM: ident, $ARGS:expr $(, $EXPR_ARGS: ident)*) => {
+        // just a place holder, we just want the inner `XXXAccumulator`'s function
+        // so its expr is irrelevant
+        return eval_aggr_fn(
+            expressions::$AGGR_FUNC::new(
+                $(
+                    Arc::new(expressions::Column::new(stringify!($EXPR_ARGS), 0)) as _,
+                )*
+                stringify!($AGGR_FUNC), DataType::Float64), 
+            $ARGS, $VM)
+    };
+}
+
+#[inline]
+fn from_df_err(err: DataFusionError, vm: &VirtualMachine) -> PyBaseExceptionRef {
+    vm.new_runtime_error(format!("Data Fusion Error: {err:#?}"))
+}
+
+/// evalute Aggregate Expr using its backing accumulator
+fn eval_aggr_fn<T: AggregateExpr>(
+    aggr: T,
+    values: &[ArrayRef],
+    vm: &VirtualMachine,
+) -> PyResult<PyObjectRef> {
+    // acquire the accumulator, where the actual implement of aggregate expr layers
+    let mut acc = aggr
+        .create_accumulator()
+        .map_err(|err| from_df_err(err, vm))?;
+    acc.update_batch(values)
+        .map_err(|err| from_df_err(err, vm))?;
+    let res = acc.evaluate().map_err(|err| from_df_err(err, vm))?;
+    scalar_val_try_into_py_obj(res, vm)
+}
+
 /// GrepTime User Define Function module
 ///  
 /// design to allow Python Coprocessor Function to use already implmented udf functions
@@ -140,31 +180,20 @@ macro_rules! bind_call_unary_math_function {
 mod udf_builtins {
     use std::sync::Arc;
 
-    use arrow::array::ArrayRef;
     use arrow::array::NullArray;
     use arrow::datatypes::DataType;
-    use datafusion_common::{DataFusionError, ScalarValue};
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::expressions;
     use datafusion_physical_expr::math_expressions;
-    use datafusion_physical_expr::AggregateExpr;
-    use rustpython_vm::{
-        builtins::PyBaseExceptionRef, AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine,
-    };
+    use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
 
-    use super::all_to_f64;
-    use super::scalar_val_try_into_py_obj;
     use crate::scalars::math::PowFunction;
     use crate::scalars::py_udf_module::builtins::{
-        try_into_columnar_value, try_into_py_obj, type_cast_error,
+        all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
+        type_cast_error,
     };
     use crate::scalars::{function::FunctionContext, python::PyVector, Function};
     type PyVectorRef = PyRef<PyVector>;
-
-    #[inline]
-    fn from_df_err(err: DataFusionError, vm: &VirtualMachine) -> PyBaseExceptionRef {
-        vm.new_runtime_error(format!("Data Fusion Error: {err:#?}"))
-    }
 
     // the main binding code, due to proc macro things, can't directly use a simpler macro
     // because pyfunction is not a attr?
@@ -271,29 +300,19 @@ mod udf_builtins {
     }
     // UDAF(User Defined Aggregate Function) in datafusion
 
+    #[pyfunction]
+    fn approx_distinct(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(ApproxDistinct, vm, &[values.to_arrow_array()], expr0)
+    }
+
     /// directly port from datafusion's `avg` function
     #[pyfunction]
     fn avg(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         // just a place holder, we just want the inner `XXXAccumulator`'s function
         // so its expr is irrelevant
         let inner_expr = expressions::Column::new("placeholder", 0);
-        let op = expressions::Avg::new(Arc::new(inner_expr) as _, "avg(...)", DataType::Float64);
+        let op = expressions::Avg::new(Arc::new(inner_expr) as _, "avg", DataType::Float64);
         eval_aggr_fn(op, &[values.to_arrow_array()], vm)
-    }
-
-    fn eval_aggr_fn<T: AggregateExpr>(
-        aggr: T,
-        values: &[ArrayRef],
-        vm: &VirtualMachine,
-    ) -> PyResult<PyObjectRef> {
-        // acquire the accumulator, where the actual implement of aggregate expr layers
-        let mut acc = aggr
-            .create_accumulator()
-            .map_err(|err| from_df_err(err, vm))?;
-        acc.update_batch(values)
-            .map_err(|err| from_df_err(err, vm))?;
-        let res = acc.evaluate().map_err(|err| from_df_err(err, vm))?;
-        scalar_val_try_into_py_obj(res, vm)
     }
 
     /// Pow function,
