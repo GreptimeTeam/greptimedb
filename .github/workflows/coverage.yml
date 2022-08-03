@@ -2,8 +2,8 @@ on:
   pull_request:
   push:
     branches:
-      - 'main'
-      - 'develop'
+      - "main"
+      - "develop"
 
 name: Code coverage
 
@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - uses: arduino/setup-protoc@v1
       - name: Install toolchain
         uses: actions-rs/toolchain@v1
         with:
