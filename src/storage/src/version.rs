@@ -39,7 +39,7 @@ impl VersionControl {
     /// Construct a new version control from `metadata`.
     pub fn new(metadata: RegionMetadata) -> VersionControl {
         VersionControl {
-            version: CowCell::new(Version::new(metadata)),
+            version: CowCell::new(Version::new(Arc::new(metadata))),
             committed_sequence: AtomicU64::new(0),
         }
     }
@@ -56,6 +56,11 @@ impl VersionControl {
     #[inline]
     pub fn current(&self) -> VersionRef {
         self.version.get()
+    }
+
+    #[inline]
+    pub fn current_manifest_version(&self) -> ManifestVersion {
+        self.current().manifest_version
     }
 
     /// Metadata of current version.
@@ -147,9 +152,9 @@ pub struct Version {
 }
 
 impl Version {
-    pub fn new(metadata: RegionMetadata) -> Version {
+    pub fn new(metadata: RegionMetadataRef) -> Version {
         Version {
-            metadata: Arc::new(metadata),
+            metadata,
             memtables: Arc::new(MemtableVersion::new()),
             ssts: Arc::new(LevelMetas::new()),
             flushed_sequence: 0,

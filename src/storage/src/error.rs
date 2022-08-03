@@ -210,6 +210,12 @@ pub enum Error {
         message: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Region version not found in manifest, the region: {}", region_name))]
+    VersionNotFound {
+        region_name: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -235,7 +241,8 @@ impl ErrorExt for Error {
             | Readline { .. }
             | InvalidParquetSchema { .. }
             | SequenceColumnNotFound { .. }
-            | WalDataCorrupted { .. } => StatusCode::Unexpected,
+            | WalDataCorrupted { .. }
+            | VersionNotFound { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | InitBackend { .. }

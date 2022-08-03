@@ -12,10 +12,18 @@ pub type ManifestVersion = u64;
 pub const MIN_VERSION: u64 = 0;
 pub const MAX_VERSION: u64 = u64::MAX;
 
-pub trait Metadata: Clone {}
-
 pub trait MetaAction: Serialize + DeserializeOwned {
     fn set_prev_version(&mut self, version: ManifestVersion);
+}
+
+#[async_trait]
+pub trait MetaActionIterator {
+    type MetaAction: MetaAction;
+    type Error: ErrorExt + Send + Sync;
+
+    async fn next_action(
+        &mut self,
+    ) -> Result<Option<(ManifestVersion, Self::MetaAction)>, Self::Error>;
 }
 
 /// Manifest service
@@ -23,13 +31,19 @@ pub trait MetaAction: Serialize + DeserializeOwned {
 pub trait Manifest: Send + Sync + Clone + 'static {
     type Error: ErrorExt + Send + Sync;
     type MetaAction: MetaAction;
-    type Metadata: Metadata;
+    type MetaActionIterator: MetaActionIterator<Error = Self::Error, MetaAction = Self::MetaAction>;
 
     /// Update metadata by the action
     async fn update(&self, action: Self::MetaAction) -> Result<ManifestVersion, Self::Error>;
 
-    /// Retrieve the latest metadata
-    async fn load(&self) -> Result<Option<Self::Metadata>, Self::Error>;
+    /// Scan actions which version in range [start, end)
+    async fn scan(
+        &self,
+        start: ManifestVersion,
+        end: ManifestVersion,
+    ) -> Result<Self::MetaActionIterator, Self::Error>;
 
     async fn checkpoint(&self) -> Result<ManifestVersion, Self::Error>;
+
+    fn last_version(&self) -> ManifestVersion;
 }

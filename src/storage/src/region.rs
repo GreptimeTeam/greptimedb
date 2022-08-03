@@ -6,21 +6,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datatypes::schema::SchemaRef;
-use snafu::ensure;
+use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
-use store_api::manifest::Manifest;
+use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
     OpenOptions, ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse,
 };
 
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
-use crate::manifest::region::RegionManifest;
+use crate::manifest::{action::RegionMetaAction, region::RegionManifest};
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{RegionWriter, RegionWriterRef, WriterContext};
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
+use crate::version::VersionEdit;
 use crate::version::{Version, VersionControl, VersionControlRef};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
@@ -115,7 +116,7 @@ impl<S: LogStore> RegionImpl<S> {
         opts: &OpenOptions,
     ) -> Result<RegionImpl<S>> {
         // Load version meta data from manifest.
-        let version = Self::recover_from_manifest(&store_config.manifest).await?;
+        let version = Self::recover_from_manifest(&name, &store_config.manifest).await?;
         let metadata = version.metadata().clone();
         let version_control = Arc::new(VersionControl::with_version(version));
         let wal = Wal::new(name.clone(), store_config.log_store);
@@ -140,11 +141,76 @@ impl<S: LogStore> RegionImpl<S> {
         unimplemented!()
     }
 
-    async fn recover_from_manifest(manifest: &RegionManifest) -> Result<Version> {
-        let _metadata = manifest.load().await?;
+    async fn recover_from_manifest(
+        region_name: &str,
+        manifest: &RegionManifest,
+    ) -> Result<Version> {
+        let (start, end) = Self::manifest_scan_range();
+        let mut iter = manifest.scan(start, end).await?;
 
-        // TODO(yingwen): [open_region] Get version from metadata.
-        unimplemented!()
+        let mut version = None;
+        let mut actions = Vec::new();
+        let mut last_manifest_version = manifest::MIN_VERSION;
+        while let Some((manifest_version, action_list)) = iter.next_action().await? {
+            last_manifest_version = manifest_version;
+
+            for action in action_list.actions {
+                match (action, version) {
+                    (RegionMetaAction::Change(c), None) => {
+                        version = Some(Version::new(c.metadata));
+                        for (manifest_version, action) in actions.drain(..) {
+                            version = Self::replay_edit(manifest_version, action, version);
+                        }
+                    }
+                    (RegionMetaAction::Change(_), Some(_)) => {
+                        unimplemented!("alter schema is not implemented")
+                    }
+                    (action, None) => {
+                        actions.push((manifest_version, action));
+                        version = None;
+                    }
+                    (action, Some(v)) => {
+                        version = Self::replay_edit(manifest_version, action, Some(v));
+                    }
+                }
+            }
+        }
+
+        assert!(actions.is_empty() || version.is_none());
+
+        if version.is_some() {
+            // update manifest state after recovering
+            let protocol = iter.last_protocol();
+            manifest.update_state(last_manifest_version + 1, protocol.clone());
+        }
+
+        version.context(error::VersionNotFoundSnafu { region_name })
+    }
+
+    fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
+        // TODO(dennis): use manifest version in WAL
+        (manifest::MIN_VERSION, manifest::MAX_VERSION)
+    }
+
+    fn replay_edit(
+        manifest_version: ManifestVersion,
+        action: RegionMetaAction,
+        version: Option<Version>,
+    ) -> Option<Version> {
+        if let RegionMetaAction::Edit(e) = action {
+            let edit = VersionEdit {
+                files_to_add: e.files_to_add,
+                flushed_sequence: Some(e.flushed_sequence),
+                manifest_version,
+                max_memtable_id: None,
+            };
+            version.map(|mut v| {
+                v.apply_edit(edit);
+                v
+            })
+        } else {
+            version
+        }
     }
 }
 
