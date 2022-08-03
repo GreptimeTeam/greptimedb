@@ -9,7 +9,7 @@ use store_api::storage::{OpenOptions, SequenceNumber, WriteContext, WriteRequest
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
-use crate::error::{InvalidTimestampSnafu, Result};
+use crate::error::{self, Result};
 use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
 use crate::proto::WalHeader;
@@ -211,28 +211,41 @@ impl WriterInner {
 
         // Data after flushed sequence need to be recovered.
         let flushed_sequence = version_control.current().flushed_sequence();
-        let _write_ctx = WriteContext::from(opts);
 
-        // TODO(yingwen): [open_region] Returns sequence number in the stream and use that as commited
-        // sequence.
         let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence + 1).await?;
-        let mut next_sequence = flushed_sequence;
-        while let Some((_seq_num, _header, request)) = stream.try_next().await? {
+        let mut last_sequence = flushed_sequence;
+        while let Some((req_sequence, _header, request)) = stream.try_next().await? {
             if let Some(request) = request {
                 let time_ranges = self.prepare_memtables(&request, version_control)?;
                 // Note that memtables of `Version` may be updated during replay.
                 let version = version_control.current();
 
-                next_sequence += 1;
+                if req_sequence > last_sequence {
+                    last_sequence = req_sequence;
+                } else {
+                    logging::error!(
+                        "Sequence should not decrease during replay, found {} < {}, region_id: {}, region_name: {}",
+                        req_sequence,
+                        last_sequence,
+                        writer_ctx.shared.id,
+                        writer_ctx.shared.name,
+                    );
+
+                    error::SequenceDecreaseSnafu {
+                        prev: last_sequence,
+                        given: req_sequence,
+                    }
+                    .fail()?;
+                }
                 // TODO(yingwen): Trigger flush if the size of memtables reach the flush threshold to avoid
                 // out of memory during replay, but we need to do it carefully to avoid dead lock.
                 let mut inserter =
-                    Inserter::new(next_sequence, time_ranges, version.bucket_duration());
+                    Inserter::new(last_sequence, time_ranges, version.bucket_duration());
                 inserter.insert_memtables(&request, version.mutable_memtables())?;
             }
         }
 
-        version_control.set_committed_sequence(next_sequence);
+        version_control.set_committed_sequence(last_sequence);
 
         Ok(())
     }
@@ -278,7 +291,7 @@ impl WriterInner {
         let bucket_duration = current_version.bucket_duration();
         let time_ranges = request
             .time_ranges(bucket_duration)
-            .context(InvalidTimestampSnafu)?;
+            .context(error::InvalidTimestampSnafu)?;
         let mutable = current_version.mutable_memtables();
         let mut memtables_to_add = MemtableSet::default();
 

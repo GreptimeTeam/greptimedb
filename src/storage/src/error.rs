@@ -8,6 +8,7 @@ use datatypes::arrow::error::ArrowError;
 use serde_json::error::Error as JsonError;
 use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
+use store_api::storage::SequenceNumber;
 
 use crate::metadata::Error as MetadataError;
 
@@ -216,6 +217,17 @@ pub enum Error {
         region_name: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Sequence of region should increase monotonically ({} > {})",
+        prev,
+        given
+    ))]
+    SequenceDecrease {
+        prev: SequenceNumber,
+        given: SequenceNumber,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -242,7 +254,8 @@ impl ErrorExt for Error {
             | InvalidParquetSchema { .. }
             | SequenceColumnNotFound { .. }
             | WalDataCorrupted { .. }
-            | VersionNotFound { .. } => StatusCode::Unexpected,
+            | VersionNotFound { .. }
+            | SequenceDecrease { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | InitBackend { .. }
