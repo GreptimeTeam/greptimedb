@@ -12,6 +12,7 @@ use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result};
 use crate::server::grpc::{
+    bitset::BitSet,
     handler::{ERROR, SUCCESS},
     server::PROTOCOL_VERSION,
 };
@@ -64,6 +65,54 @@ pub(crate) fn convert_record_batches_to_select_result(
     todo!()
 }
 
+#[allow(dead_code)]
+fn aggregate_results(_results: Vec<SelectResult>) -> GrpcSelectResult {
+    todo!()
+}
+
+#[allow(dead_code)]
+fn convert_record_batch(record_batch: &RecordBatch) -> Result<SelectResult> {
+    let df_record = &record_batch.df_recordbatch;
+    let row_count = df_record.num_rows();
+    let column_schemas = record_batch.schema.column_schemas();
+    let mut column_map = HashMap::with_capacity(df_record.num_columns());
+
+    for (idx, column_array) in df_record.columns().iter().enumerate() {
+        let null_count = column_array.null_count();
+
+        let null_mask = if null_count == 0 {
+            Vec::default()
+        } else {
+            column_array
+                .validity()
+                .map(|vailidity| {
+                    let mut bit_set = BitSet::with_size(row_count);
+                    vailidity.iter().enumerate().for_each(|(_, vailidity)| {
+                        bit_set.append(!vailidity);
+                    });
+                    bit_set.buffer()
+                })
+                .unwrap_or_default()
+        };
+
+        let values = convert_arrow_array(column_array, column_array.data_type())?;
+        let column_name = &column_schemas[idx].name;
+
+        let column = Column {
+            column_name: column_name.to_string(),
+            values: Some(values),
+            null_mask,
+            ..Default::default()
+        };
+        column_map.insert(column_name.to_string(), (column, null_count as u32));
+    }
+
+    Ok(SelectResult {
+        columns: column_map,
+        row_count: row_count as u32,
+    })   
+}
+
 pub type ColumnName = String;
 pub type NullCount = u32;
 
@@ -95,7 +144,6 @@ macro_rules! convert_arrow_array_to_grpc_vals {
     };
 }
 
-#[allow(dead_code)]
 fn convert_arrow_array(array: &Arc<dyn Array>, data_type: &DataType) -> Result<Values> {
     convert_arrow_array_to_grpc_vals!(
         data_type, array,
@@ -127,10 +175,52 @@ fn convert_arrow_array(array: &Arc<dyn Array>, data_type: &DataType) -> Result<V
 mod tests {
     use std::sync::Arc;
 
-    use arrow::{array::{PrimitiveArray, Array, BooleanArray}, datatypes::DataType};
-    use datatypes::arrow_array::StringArray;
+    use arrow::{array::{PrimitiveArray, Array, BooleanArray}, datatypes::{DataType, Field}};
+    use common_recordbatch::RecordBatch;
+    use datafusion::field_util::SchemaExt;
+    use datatypes::{arrow_array::StringArray, vectors::{VectorRef, UInt32Vector}, schema::Schema};
 
-    use crate::server::grpc::select::convert_arrow_array;
+    use crate::server::grpc::select::{convert_arrow_array, convert_record_batch};
+
+    use datatypes::arrow::datatypes::Schema as ArrowSchema;
+
+    #[test]
+    fn test_convert_batch() {
+        let record_batch = mock_record_batch();
+
+        let result = convert_record_batch(&record_batch).unwrap();
+
+        assert_eq!(result.row_count, 3);
+
+        assert!(result.columns.contains_key("c1"));
+        assert!(result.columns.contains_key("c2"));
+
+        let (c1, c1_null_count) = result.columns.get("c1").unwrap();
+        let (c2, c2_null_count) = result.columns.get("c2").unwrap();
+
+        assert_eq!(1, *c1_null_count);
+        assert_eq!(2, *c2_null_count);
+
+        assert_eq!(vec![1, 2], c1.values.as_ref().unwrap().u32_values);
+        assert_eq!(vec![1], c2.values.as_ref().unwrap().u32_values);
+
+        assert_eq!(vec![4_u8], c1.null_mask);
+        assert_eq!(vec![6_u8], c2.null_mask);
+    }
+
+    fn mock_record_batch() -> RecordBatch {
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("c1", DataType::UInt32, false),
+            Field::new("c2", DataType::UInt32, false),
+        ]));
+        let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
+
+        let v1 = Arc::new(UInt32Vector::from(vec![Some(1), Some(2), None]));
+        let v2 = Arc::new(UInt32Vector::from(vec![Some(1), None, None]));
+        let columns: Vec<VectorRef> = vec![v1, v2];
+
+        RecordBatch::new(schema, columns).unwrap()
+    }
 
     #[test]
     fn test_convert_arrow_array_i32() {

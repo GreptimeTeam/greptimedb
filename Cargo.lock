@@ -1124,6 +1124,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "datafusion",
  "datatypes",
  "hyper",
  "log-store",
