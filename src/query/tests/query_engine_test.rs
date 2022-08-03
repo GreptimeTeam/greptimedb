@@ -8,7 +8,6 @@ use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
-use common_testutil::DfMemTable;
 use datafusion::field_util::FieldExt;
 use datafusion::field_util::SchemaExt;
 use datafusion::logical_plan::LogicalPlanBuilder;
@@ -25,6 +24,7 @@ use query::QueryEngine;
 use rand::Rng;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
+use testutil::DfMemTable;
 
 use crate::pow::pow;
 

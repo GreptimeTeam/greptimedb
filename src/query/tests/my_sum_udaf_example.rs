@@ -12,7 +12,6 @@ use common_query::logical_plan::Accumulator;
 use common_query::logical_plan::AggregateFunctionCreator;
 use common_query::prelude::*;
 use common_recordbatch::{util, RecordBatch};
-use common_testutil::DfMemTable;
 use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::prelude::*;
@@ -26,6 +25,7 @@ use query::error::Result;
 use query::query_engine::Output;
 use query::QueryEngineFactory;
 use table::TableRef;
+use testutil::DfMemTable;
 
 #[derive(Debug, Default)]
 struct MySumAccumulator<T, SumT>

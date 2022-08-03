@@ -29,6 +29,7 @@ table = { path = "../table" }
 tokio = "1.0"
 
 [dev-dependencies]
+testutil = { path = "../../testutil" }
 num = "0.4"
 num-traits = "0.2"
 rand = "0.8"

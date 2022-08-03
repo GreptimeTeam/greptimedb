@@ -1,5 +1,5 @@
 [package]
-name = "common-testutil"
+name = "testutil"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,11 +10,11 @@ features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc
 
 [dependencies]
 async-trait = "0.1"
-common-query = { path = "../query" }
-common-recordbatch = {path = "../recordbatch" }
+common-query = { path = "../src/common/query" }
+common-recordbatch = {path = "../src/common/recordbatch" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
-datatypes = {path = "../../datatypes" }
+datatypes = {path = "../src/datatypes" }
 futures = "0.3"
 snafu = { version = "0.7", features = ["backtraces"] }
-table = { path = "../../table" }
+table = { path = "../src/table" }
 tokio = { version = "1.20", features = ["full"] }

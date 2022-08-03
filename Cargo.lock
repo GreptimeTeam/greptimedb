@@ -759,22 +759,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "common-testutil"
-version = "0.1.0"
-dependencies = [
- "arrow2",
- "async-trait",
- "common-query",
- "common-recordbatch",
- "datafusion",
- "datatypes",
- "futures",
- "snafu",
- "table",
- "tokio",
-]
-
-[[package]]
 name = "common-time"
 version = "0.1.0"
 
@@ -2997,7 +2981,6 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
- "common-testutil",
  "datafusion",
  "datafusion-common",
  "datatypes",
@@ -3010,6 +2993,7 @@ dependencies = [
  "snafu",
  "sql",
  "table",
+ "testutil",
  "tokio",
  "tokio-stream",
 ]
@@ -3779,6 +3763,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bab24d30b911b2376f3a13cc2cd443142f0c81dda04c118693e35b3835757755"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "testutil"
+version = "0.1.0"
+dependencies = [
+ "arrow2",
+ "async-trait",
+ "common-query",
+ "common-recordbatch",
+ "datafusion",
+ "datatypes",
+ "futures",
+ "snafu",
+ "table",
+ "tokio",
 ]
 
 [[package]]

@@ -10,7 +10,6 @@ members = [
     "src/common/recordbatch",
     "src/common/runtime",
     "src/common/telemetry",
-    "src/common/testutil",
     "src/common/time",
     "src/cmd",
     "src/datanode",
@@ -24,4 +23,5 @@ members = [
     "src/store-api",
     "src/table",
     "src/table-engine",
+    "testutil",
 ]
