@@ -5,14 +5,13 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
-use query::catalog::memory;
 
 use crate::instance::Instance;
 use crate::server::http::HttpServer;
 use crate::test_util;
 
 async fn make_test_app() -> Router {
-    let catalog_list = memory::new_memory_catalog_list().unwrap();
+    let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
     let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
     let instance = Arc::new(Instance::new(&opts, catalog_list).await.unwrap());
     let http_server = HttpServer::new(instance);

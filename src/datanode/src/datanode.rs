@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use query::catalog::memory;
-use query::catalog::CatalogListRef;
+use catalog::CatalogListRef;
 use snafu::ResultExt;
 
 use crate::error::{NewCatalogSnafu, Result};
@@ -35,7 +34,7 @@ pub struct Datanode {
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
-        let catalog_list = memory::new_memory_catalog_list().context(NewCatalogSnafu)?;
+        let catalog_list = catalog::memory::new_memory_catalog_list().context(NewCatalogSnafu)?;
         let instance = Arc::new(Instance::new(&opts, catalog_list.clone()).await?);
 
         Ok(Self {

@@ -501,6 +501,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2698f953def977c68f935bb0dfa959375ad4638570e969e2f1e9f433cbf1af6"
 
 [[package]]
+name = "catalog"
+version = "0.1.0"
+dependencies = [
+ "common-error",
+ "common-telemetry",
+ "datafusion",
+ "snafu",
+ "table",
+ "tokio",
+]
+
+[[package]]
 name = "cc"
 version = "1.0.73"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1155,6 +1167,7 @@ dependencies = [
  "axum",
  "axum-macros",
  "axum-test-helper",
+ "catalog",
  "common-error",
  "common-query",
  "common-recordbatch",
@@ -2962,6 +2975,7 @@ dependencies = [
  "arc-swap",
  "arrow2",
  "async-trait",
+ "catalog",
  "common-error",
  "common-function",
  "common-query",

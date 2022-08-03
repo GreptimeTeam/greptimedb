@@ -1,11 +1,11 @@
 use std::{fs, path, sync::Arc};
 
 use api::v1::InsertExpr;
+use catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::logging::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
-use query::catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::{OptionExt, ResultExt};
 use sql::statements::statement::Statement;
@@ -177,14 +177,13 @@ async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFile
 mod tests {
     use arrow::array::UInt64Array;
     use common_recordbatch::util;
-    use query::catalog::memory;
 
     use super::*;
     use crate::test_util;
 
     #[tokio::test]
     async fn test_execute_insert() {
-        let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
         let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts, catalog_list).await.unwrap();
         instance.start().await.unwrap();
@@ -204,7 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_query() {
-        let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
         let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts, catalog_list).await.unwrap();
 
