@@ -106,7 +106,7 @@ impl AggregateFunctionCreator for MeanAccumulatorCreator {
                 },
                 {
                     let err_msg = format!(
-                        "\"Diff\" aggregate function not support data type {:?}",
+                        "\"MEAN\" aggregate function not support data type {:?}",
                         input_type.logical_type_id(),
                     );
                     CreateAccumulatorSnafu { err_msg }.fail()?
