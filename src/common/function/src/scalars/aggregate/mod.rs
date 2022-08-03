@@ -1,10 +1,12 @@
 mod diff;
+mod mean;
 mod median;
 
 use std::sync::Arc;
 
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use diff::DiffAccumulatorCreator;
+use mean::MeanAccumulatorCreator;
 pub use median::MedianAccumulatorCreator;
 
 use crate::scalars::FunctionRegistry;
@@ -51,6 +53,10 @@ impl AggregateFunctions {
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "diff",
             Arc::new(|| Arc::new(DiffAccumulatorCreator::default())),
+        )));
+        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
+            "mean",
+            Arc::new(|| Arc::new(MeanAccumulatorCreator::default())),
         )));
     }
 }
