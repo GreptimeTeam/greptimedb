@@ -1,8 +1,7 @@
 use api::v1::*;
-use common_recordbatch::{util, RecordBatch};
 use query::Output;
 
-use crate::server::grpc::server::PROTOCOL_VERSION;
+use crate::server::grpc::{select::select_result, server::PROTOCOL_VERSION};
 use crate::{error::Result, instance::InstanceRef};
 
 // TODO(fys): Only one success code (200) was provided
@@ -82,47 +81,8 @@ impl BatchHandler {
         match expr {
             select_expr::Expr::Sql(sql) => {
                 let result = self.instance.execute_sql(&sql).await;
-                Self::select_result(result).await
+                select_result(result).await
             }
         }
     }
-
-    async fn select_result(select_result: Result<Output>) -> ObjectResult {
-        let mut object_resp = ObjectResult::default();
-
-        let mut header = ResultHeader {
-            version: PROTOCOL_VERSION,
-            ..Default::default()
-        };
-
-        match select_result {
-            Ok(output) => match output {
-                Output::AffectedRows(rows) => {
-                    header.code = SUCCESS;
-                    header.success = rows as u32;
-                }
-                Output::RecordBatch(stream) => match util::collect(stream).await {
-                    Ok(record_batches) => {
-                        let select_result = convert_record_batches_to_select_result(record_batches);
-                        header.code = SUCCESS;
-                        object_resp.results = select_result.into();
-                    }
-                    Err(err) => {
-                        header.code = ERROR;
-                        header.err_msg = err.to_string();
-                    }
-                },
-            },
-            Err(err) => {
-                header.code = ERROR;
-                header.err_msg = err.to_string();
-            }
-        }
-        object_resp.header = Some(header);
-        object_resp
-    }
-}
-
-fn convert_record_batches_to_select_result(_record_batches: Vec<RecordBatch>) -> SelectResult {
-    unimplemented!()
 }
