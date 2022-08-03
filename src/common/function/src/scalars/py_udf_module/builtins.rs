@@ -69,12 +69,14 @@ fn try_into_py_obj(col: DFColValue, vm: &VirtualMachine) -> PyResult<PyObjectRef
             .into_pyobject(vm);
             Ok(ret)
         }
-        DFColValue::Scalar(val) => match val {
-            ScalarValue::Float64(Some(v)) => Ok(PyFloat::from(v).into_pyobject(vm)),
-            _ => {
-                Err(vm.new_type_error(format!("Can't cast type {:#?} to f64", val.get_datatype())))
-            }
-        },
+        DFColValue::Scalar(val) => scalar_val_try_into_py_obj(val, vm),
+    }
+}
+
+fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+    match val {
+        ScalarValue::Float64(Some(v)) => Ok(PyFloat::from(v).into_pyobject(vm)),
+        _ => Err(vm.new_type_error(format!("Can't cast type {:#?} to f64", val.get_datatype()))),
     }
 }
 
@@ -138,6 +140,7 @@ macro_rules! bind_call_unary_math_function {
 mod udf_builtins {
     use std::sync::Arc;
 
+    use arrow::array::ArrayRef;
     use arrow::array::NullArray;
     use arrow::datatypes::DataType;
     use datafusion_common::{DataFusionError, ScalarValue};
@@ -150,6 +153,7 @@ mod udf_builtins {
     };
 
     use super::all_to_f64;
+    use super::scalar_val_try_into_py_obj;
     use crate::scalars::math::PowFunction;
     use crate::scalars::py_udf_module::builtins::{
         try_into_columnar_value, try_into_py_obj, type_cast_error,
@@ -269,22 +273,27 @@ mod udf_builtins {
 
     /// directly port from datafusion's `avg` function
     #[pyfunction]
-    fn avg(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<f64> {
+    fn avg(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         // just a place holder, we just want the inner `XXXAccumulator`'s function
         // so its expr is irrelevant
         let inner_expr = expressions::Column::new("placeholder", 0);
         let op = expressions::Avg::new(Arc::new(inner_expr) as _, "avg(...)", DataType::Float64);
+        eval_aggr_fn(op, &[values.to_arrow_array()], vm)
+    }
+
+    fn eval_aggr_fn<T: AggregateExpr>(
+        aggr: T,
+        values: &[ArrayRef],
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
         // acquire the accumulator, where the actual implement of aggregate expr layers
-        let mut acc = op
+        let mut acc = aggr
             .create_accumulator()
             .map_err(|err| from_df_err(err, vm))?;
-        acc.update_batch(&[values.to_arrow_array()])
+        acc.update_batch(values)
             .map_err(|err| from_df_err(err, vm))?;
         let res = acc.evaluate().map_err(|err| from_df_err(err, vm))?;
-        match res{
-            ScalarValue::Float64(Some(v))=>Ok(v),
-            _ => Err(vm.new_type_error(format!("Expect Float64 only, found {:?}", res.get_datatype())))
-        }
+        scalar_val_try_into_py_obj(res, vm)
     }
 
     /// Pow function,
@@ -371,7 +380,7 @@ mod test {
                 .compile(
                     r#"
 from udf_builtins import *
-avg(values)"#,
+avg(pows)"#,
                     rustpython_vm::compile::Mode::BlockExpr,
                     "<embedded>".to_owned(),
                 )
