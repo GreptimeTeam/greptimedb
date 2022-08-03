@@ -109,6 +109,9 @@ pub enum Error {
 
     #[snafu(display("Failed to storage engine, source: {}", source))]
     OpenStorageEngine { source: StorageError },
+
+    #[snafu(display("Failed to convert datafusion type: {}", from))]
+    Conversion { from: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -132,7 +135,8 @@ impl ErrorExt for Error {
             | Error::ParseAddr { .. }
             | Error::TcpBind { .. }
             | Error::StartGrpc { .. }
-            | Error::CreateDir { .. } => StatusCode::Internal,
+            | Error::CreateDir { .. }
+            | Error::Conversion { .. } => StatusCode::Internal,
             Error::OpenLogStore { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
         }
