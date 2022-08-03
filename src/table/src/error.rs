@@ -36,14 +36,20 @@ pub enum InnerError {
         source: ArrowError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to convert Arrow schema, source: {}", source))]
+    SchemaConversion {
+        source: datatypes::error::Error,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for InnerError {
     fn status_code(&self) -> StatusCode {
         match self {
-            InnerError::Datafusion { .. } | InnerError::PollStream { .. } => {
-                StatusCode::EngineExecuteQuery
-            }
+            InnerError::Datafusion { .. }
+            | InnerError::PollStream { .. }
+            | InnerError::SchemaConversion { .. } => StatusCode::EngineExecuteQuery,
             InnerError::MissingColumn { .. } => StatusCode::InvalidArguments,
             InnerError::ExecuteRepeatedly { .. } => StatusCode::Unexpected,
         }

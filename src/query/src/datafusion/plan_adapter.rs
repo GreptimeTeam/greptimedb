@@ -17,7 +17,7 @@ use snafu::ResultExt;
 use table::table::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
 
 use crate::datafusion::error;
-use crate::error::Result;
+use crate::error::{Result, TableExecutionSnafu};
 use crate::executor::Runtime;
 use crate::plan::{Partitioning, PhysicalPlan};
 
@@ -97,10 +97,9 @@ impl PhysicalPlan for PhysicalPlanAdapter {
                     msg: "Fail to execute physical plan",
                 })?;
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.schema.clone(),
-            df_stream,
-        )))
+        Ok(Box::pin(
+            RecordBatchStreamAdapter::try_new(df_stream).context(TableExecutionSnafu)?,
+        ))
     }
 
     fn as_any(&self) -> &dyn Any {

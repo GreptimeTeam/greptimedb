@@ -759,6 +759,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-testutil"
+version = "0.1.0"
+dependencies = [
+ "arrow2",
+ "async-trait",
+ "common-query",
+ "common-recordbatch",
+ "datafusion",
+ "datatypes",
+ "futures",
+ "snafu",
+ "table",
+ "tokio",
+]
+
+[[package]]
 name = "common-time"
 version = "0.1.0"
 
@@ -2981,6 +2997,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "common-testutil",
  "datafusion",
  "datafusion-common",
  "datatypes",
@@ -3897,10 +3914,11 @@ checksum = "cda74da7e1a664f795bb1f8a87ec406fb89a02522cf6e50620d016add6dbbf5c"
 
 [[package]]
 name = "tokio"
-version = "1.18.2"
+version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4903bf0427cf68dddd5aa6a93220756f8be0c34fcfa9f5e6191e103e15a31395"
+checksum = "7a8325f63a7d4774dd041e363b2409ed1c5cbbd0f867795e661df066b2b0a581"
 dependencies = [
+ "autocfg",
  "bytes",
  "libc",
  "memchr",
