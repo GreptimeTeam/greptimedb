@@ -1,10 +1,55 @@
-use std::sync::Arc;
+use std::{collections::HashMap, fs::File, io::Read, path::Path, sync::Arc};
 
 use datatypes::vectors::VectorRef;
-use rustpython_vm::class::PyClassImpl;
-use rustpython_vm::{scope::Scope, AsObject, VirtualMachine};
+use ron::from_str as from_ron_string;
+use ron::to_string as to_ron_string;
+use rustpython_vm::{class::PyClassImpl, scope::Scope, AsObject, VirtualMachine};
+use serde::{Deserialize, Serialize};
 
 use super::*;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TestCase {
+    input: HashMap<String, Var>,
+    script: String,
+    expect: Var
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Var {
+    value: PyVar,
+    ty: DataType,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum PyVar {
+    FloatVec(Vec<f64>),
+    IntVec(Vec<i64>),
+    Int(i64),
+    Float(f64),
+}
+
+impl PyVar{
+    fn from_py_obj(obj: &PyObjectRef, vm:&VirtualMachine)->Self{
+        if is_instance::<PyVector>(&obj, vm){
+            let res = obj.payload::<PyVector>().unwrap();
+        }
+        todo!()
+    }
+}
+
+#[test]
+fn run_testcases() {
+    let loc = Path::new("src/scalars/py_udf_module/builtins/testcases.ron");
+    let loc = loc.to_str().expect("Fail to parse path");
+    let mut file = File::open(loc).expect("Fail to open file");
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)
+        .expect("Fail to read to string");
+    let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
+    dbg!(testcases);
+}
+
 fn set_items_in_scope(
     scope: &Scope,
     vm: &VirtualMachine,

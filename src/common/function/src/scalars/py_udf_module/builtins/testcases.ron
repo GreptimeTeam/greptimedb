@@ -1,0 +1,17 @@
+[
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+avg(values)"#,
+        expect: Var(
+            value: Float(2.0),
+            ty: Float64
+        )
+    )
+]
