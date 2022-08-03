@@ -26,8 +26,8 @@ use tokio::task::JoinHandle;
 use tokio::time;
 
 use crate::error::Error::Eof;
-use crate::error::{AppendSnafu, Error, InternalSnafu, IoSnafu, OpenLogSnafu, Result};
-use crate::fs::chunk::{Chunk, CompositeChunk};
+use crate::error::{AppendSnafu, Error, InternalSnafu, IoSnafu, OpenLogSnafu, Result, WriteSnafu};
+use crate::fs::chunk::{Chunk, ChunkList};
 use crate::fs::config::LogConfig;
 use crate::fs::crc::CRC_ALGO;
 use crate::fs::entry::{EntryImpl, StreamImpl};
@@ -48,20 +48,12 @@ impl FileWriter {
         Self { inner: file }
     }
 
-    pub async fn write(&self, data: Arc<Bytes>, offset: u64) -> Result<()> {
+    pub async fn write(&self, data: Bytes, offset: u64) -> Result<()> {
         let file = self.inner.clone();
         let handle = common_runtime::spawn_blocking_write(move || {
             crate::fs::io::pwrite_all(&file, &data, offset)
         });
-        handle
-            .await
-            .map_err(|e| {
-                InternalSnafu {
-                    msg: format!("Error while waiting for write finish, error:{}", e),
-                }
-                .build()
-            })
-            .and_then(|e| e) // Result::flatten is unstable now
+        handle.await.context(WriteSnafu).and_then(|e| e) // Result::flatten is unstable now
     }
 
     /// Writes a batch of `AppendRequest` to file.
@@ -385,9 +377,9 @@ impl LogFile {
 
         let mut chunk_stream = file_chunk_stream(self.writer.inner.clone(), 0, length, 0);
         let entry_stream = stream!({
-            let mut chunks = CompositeChunk::new();
+            let mut chunks = ChunkList::new();
             while let Some(chunk) = chunk_stream.next().await {
-                chunks.add(chunk.unwrap());
+                chunks.push(chunk.unwrap());
                 let mut batch = vec![];
                 loop {
                     match EntryImpl::decode(&mut chunks) {
@@ -447,7 +439,7 @@ impl LogFile {
             .as_ref()
             .expect("Call start before write to LogFile!")
             .send(AppendRequest {
-                data: Arc::new(serialized.freeze()),
+                data: serialized.freeze(),
                 tx,
                 offset: 0,
                 id: entry_id,
@@ -512,7 +504,7 @@ pub(crate) struct AppendRequest {
     tx: OneshotSender<std::result::Result<AppendResponseImpl, ()>>,
     offset: Offset,
     id: Id,
-    data: Arc<Bytes>,
+    data: Bytes,
 }
 
 impl AppendRequest {
@@ -794,13 +786,13 @@ mod tests {
         }
         assert_eq!(
             vec![4096, 1024],
-            chunks.iter().map(|c| c.write).collect::<Vec<_>>()
+            chunks.iter().map(|c| c.write_offset).collect::<Vec<_>>()
         );
         assert_eq!(
             vec![vec![42].repeat(4096), vec![42].repeat(1024)],
             chunks
                 .iter()
-                .map(|c| &c.data[0..c.write])
+                .map(|c| &c.data[0..c.write_offset])
                 .collect::<Vec<_>>()
         );
     }
@@ -830,13 +822,13 @@ mod tests {
         }
         assert_eq!(
             vec![4096, 1024],
-            chunks.iter().map(|c| c.write).collect::<Vec<_>>()
+            chunks.iter().map(|c| c.write_offset).collect::<Vec<_>>()
         );
         assert_eq!(
             vec![vec![42].repeat(4096), vec![42].repeat(1024)],
             chunks
                 .iter()
-                .map(|c| &c.data[0..c.write])
+                .map(|c| &c.data[0..c.write_offset])
                 .collect::<Vec<_>>()
         );
     }

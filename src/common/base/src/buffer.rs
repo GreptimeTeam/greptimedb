@@ -21,7 +21,7 @@ pub enum Error {
     },
 
     #[snafu(display("Buffer underflow"))]
-    Underflow {},
+    Underflow { backtrace: Backtrace },
 
     #[snafu(display("IO operation reach EOF, source: {}", source))]
     Eof {
@@ -85,7 +85,7 @@ pub trait Buffer {
         self.remaining_size() == 0
     }
 
-    /// Reads data into dst. This method should  not change internal cursor,
+    /// Reads data into dst. This method should not change internal cursor,
     /// invoke `advance_by` if needed.
     /// # Panics
     /// This method **may** panic if buffer does not have enough data to be copied to dst.

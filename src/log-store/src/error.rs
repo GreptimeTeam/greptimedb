@@ -14,13 +14,16 @@ pub enum Error {
     Decode { size: usize, backtrace: Backtrace },
 
     #[snafu(display("No enough data to decode, try again"))]
-    DecodeAgain {},
+    DecodeAgain,
 
     #[snafu(display("Failed to append entry, source: {}", source))]
     Append {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Failed to wait for log file write complete, source: {}", source))]
+    Write { source: tokio::task::JoinError },
 
     #[snafu(display("Entry corrupted, msg: {}", msg))]
     Corrupted { msg: String, backtrace: Backtrace },

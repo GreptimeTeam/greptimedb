@@ -214,7 +214,7 @@ mod tests {
     use tokio::time::Duration;
 
     use super::*;
-    use crate::fs::chunk::{Chunk, CompositeChunk};
+    use crate::fs::chunk::{Chunk, ChunkList};
     use crate::fs::crc::CRC_ALGO;
 
     #[test]
@@ -274,9 +274,9 @@ mod tests {
         EntryImpl::decode(&mut bytes.clone()).unwrap();
         let c2 = Chunk::copy_from_slice(&bytes);
 
-        let mut chunks = CompositeChunk::new();
-        chunks.add(c1);
-        chunks.add(c2);
+        let mut chunks = ChunkList::new();
+        chunks.push(c1);
+        chunks.push(c2);
 
         assert_eq!(
             ENTRY_MIN_LEN * 2 + data_2.len() + data_1.len(),
@@ -310,9 +310,9 @@ mod tests {
         let split_point = bytes.len() / 2;
         let (left, right) = bytes.split_at(split_point);
 
-        let mut chunks = CompositeChunk::new();
-        chunks.add(Chunk::copy_from_slice(left));
-        chunks.add(Chunk::copy_from_slice(right));
+        let mut chunks = ChunkList::new();
+        chunks.push(Chunk::copy_from_slice(left));
+        chunks.push(Chunk::copy_from_slice(right));
 
         assert_eq!(bytes.len(), chunks.remaining_size());
         let decoded = EntryImpl::decode(&mut chunks).unwrap();
@@ -344,10 +344,10 @@ mod tests {
 
         pin_mut!(chunk_stream);
 
-        let mut chunks = CompositeChunk::new();
+        let mut chunks = ChunkList::new();
         let mut decoded = vec![];
         while let Some(c) = chunk_stream.next().await {
-            chunks.add(c);
+            chunks.push(c);
             match EntryImpl::decode(&mut chunks) {
                 Ok(e) => {
                     decoded.push(e);

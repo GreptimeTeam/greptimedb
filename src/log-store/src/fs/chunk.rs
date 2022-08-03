@@ -9,17 +9,17 @@ pub(crate) struct Chunk<const N: usize> {
     // internal data
     pub data: [u8; N],
     // read offset
-    pub read: usize,
+    pub read_offset: usize,
     // write offset
-    pub write: usize,
+    pub write_offset: usize,
 }
 
 impl<const N: usize> Default for Chunk<N> {
     fn default() -> Self {
         let data = [0u8; N];
         Self {
-            write: 0,
-            read: 0,
+            write_offset: 0,
+            read_offset: 0,
             data,
         }
     }
@@ -32,22 +32,22 @@ impl<const N: usize> Chunk<N> {
         let mut data = [0u8; N];
         data[0..src_len].copy_from_slice(s);
         Self {
-            read: 0,
-            write: src_len,
+            read_offset: 0,
+            write_offset: src_len,
             data,
         }
     }
 
     pub fn new(data: [u8; N], write: usize) -> Self {
         Self {
-            write,
-            read: 0,
+            write_offset: write,
+            read_offset: 0,
             data,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.write - self.read
+        self.write_offset - self.read_offset
     }
 
     pub fn is_empty(&self) -> bool {
@@ -58,37 +58,41 @@ impl<const N: usize> Chunk<N> {
     /// Calling read **will not** advance read cursor, must call `advance` manually.
     pub fn read(&self, dst: &mut [u8]) -> usize {
         let size = self.len().min(dst.len());
-        let range = self.read..(self.read + size);
+        let range = self.read_offset..(self.read_offset + size);
         (&mut dst[0..size]).copy_from_slice(&self.data[range]);
         size
     }
 
     pub fn advance(&mut self, by: usize) -> usize {
         assert!(
-            self.write >= self.read,
+            self.write_offset >= self.read_offset,
             "Illegal chunk state, read: {}, write: {}",
-            self.read,
-            self.write
+            self.read_offset,
+            self.write_offset
         );
-        let step = by.min(self.write - self.read);
-        self.read += step;
+        let step = by.min(self.write_offset - self.read_offset);
+        self.read_offset += step;
         step
     }
 }
 
-pub struct CompositeChunk {
+pub struct ChunkList {
     chunks: LinkedList<Chunk<4096>>,
 }
 
-impl CompositeChunk {
+impl ChunkList {
     pub fn new() -> Self {
         Self {
             chunks: LinkedList::new(),
         }
     }
+
+    pub(crate) fn push(&mut self, chunk: Chunk<4096>) {
+        self.chunks.push_back(chunk);
+    }
 }
 
-impl Buffer for CompositeChunk {
+impl Buffer for ChunkList {
     fn remaining_size(&self) -> usize {
         self.chunks.iter().map(|c| c.len()).sum()
     }
@@ -124,12 +128,6 @@ impl Buffer for CompositeChunk {
     }
 }
 
-impl CompositeChunk {
-    pub(crate) fn add(&mut self, chunk: Chunk<4096>) {
-        self.chunks.push_back(chunk);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,14 +135,14 @@ mod tests {
     #[test]
     pub fn test_chunk() {
         let chunk: Chunk<4096> = Chunk::copy_from_slice("hello".as_bytes());
-        assert_eq!(5, chunk.write);
-        assert_eq!(0, chunk.read);
+        assert_eq!(5, chunk.write_offset);
+        assert_eq!(0, chunk.read_offset);
         assert_eq!(5, chunk.len());
 
         let mut dst = [0u8; 3];
         assert_eq!(3, chunk.read(&mut dst));
-        assert_eq!(5, chunk.write);
-        assert_eq!(0, chunk.read);
+        assert_eq!(5, chunk.write_offset);
+        assert_eq!(0, chunk.read_offset);
         assert_eq!(5, chunk.len());
     }
 
@@ -163,26 +161,26 @@ mod tests {
         let mut chunk: Chunk<4096> = Chunk::copy_from_slice("hello".as_bytes());
         let mut dst = vec![0u8; 8];
         assert_eq!(5, chunk.read(&mut dst));
-        assert_eq!(0, chunk.read);
-        assert_eq!(5, chunk.write);
+        assert_eq!(0, chunk.read_offset);
+        assert_eq!(5, chunk.write_offset);
 
         assert_eq!(1, chunk.advance(1));
-        assert_eq!(1, chunk.read);
-        assert_eq!(5, chunk.write);
+        assert_eq!(1, chunk.read_offset);
+        assert_eq!(5, chunk.write_offset);
 
         assert_eq!(4, chunk.advance(5));
-        assert_eq!(5, chunk.read);
-        assert_eq!(5, chunk.write);
+        assert_eq!(5, chunk.read_offset);
+        assert_eq!(5, chunk.write_offset);
     }
 
     #[test]
     pub fn test_composite_chunk_read() {
-        let mut chunks = CompositeChunk {
+        let mut chunks = ChunkList {
             chunks: LinkedList::new(),
         };
 
-        chunks.add(Chunk::copy_from_slice("abcd".as_bytes()));
-        chunks.add(Chunk::copy_from_slice("12345".as_bytes()));
+        chunks.push(Chunk::copy_from_slice("abcd".as_bytes()));
+        chunks.push(Chunk::copy_from_slice("12345".as_bytes()));
         assert_eq!(9, chunks.remaining_size());
 
         let mut dst = [0u8; 2];
@@ -205,7 +203,7 @@ mod tests {
         assert_eq!(0, chunks.remaining_size());
         assert_eq!(0, chunks.chunks.len());
 
-        chunks.add(Chunk::copy_from_slice("uvwxyz".as_bytes()));
+        chunks.push(Chunk::copy_from_slice("uvwxyz".as_bytes()));
         assert_eq!(6, chunks.remaining_size());
         assert_eq!(1, chunks.chunks.len());
     }
