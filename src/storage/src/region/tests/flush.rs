@@ -16,7 +16,7 @@ use crate::test_util::config_util;
 const REGION_NAME: &str = "region-flush-0";
 
 /// Create a new region for flush test
-async fn new_region_for_flush(
+async fn create_region_for_flush(
     store_dir: &str,
     enable_version_column: bool,
     flush_strategy: FlushStrategyRef,
@@ -26,7 +26,9 @@ async fn new_region_for_flush(
     let mut store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
     store_config.flush_strategy = flush_strategy;
 
-    RegionImpl::new(0, REGION_NAME.to_string(), metadata, store_config)
+    RegionImpl::create(0, REGION_NAME.to_string(), metadata, store_config)
+        .await
+        .unwrap()
 }
 
 /// Tester for region flush.
@@ -36,7 +38,7 @@ struct FlushTester {
 
 impl FlushTester {
     async fn new(store_dir: &str, flush_strategy: FlushStrategyRef) -> FlushTester {
-        let region = new_region_for_flush(store_dir, false, flush_strategy).await;
+        let region = create_region_for_flush(store_dir, false, flush_strategy).await;
 
         FlushTester {
             base: TesterBase::with_region(region),

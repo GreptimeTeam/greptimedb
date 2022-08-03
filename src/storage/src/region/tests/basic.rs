@@ -12,7 +12,7 @@ use crate::test_util::config_util;
 const REGION_NAME: &str = "region-basic-0";
 
 /// Create a new region for basic tests.
-async fn new_region_for_basic(
+async fn create_region_for_basic(
     region_name: &str,
     store_dir: &str,
     enable_version_column: bool,
@@ -21,7 +21,9 @@ async fn new_region_for_basic(
 
     let store_config = config_util::new_store_config(region_name, store_dir).await;
 
-    RegionImpl::new(0, region_name.to_string(), metadata, store_config)
+    RegionImpl::create(0, region_name.to_string(), metadata, store_config)
+        .await
+        .unwrap()
 }
 
 /// Tester for basic tests.
@@ -33,7 +35,7 @@ struct Tester {
 
 impl Tester {
     async fn new(region_name: &str, store_dir: &str) -> Tester {
-        let region = new_region_for_basic(region_name, store_dir, false).await;
+        let region = create_region_for_basic(region_name, store_dir, false).await;
 
         Tester {
             region_name: region_name.to_string(),

@@ -153,7 +153,12 @@ async fn test_new_region() {
 
     let store_config = config_util::new_store_config(region_name, &store_dir).await;
 
-    let region = RegionImpl::new(0, region_name.to_string(), metadata, store_config);
+    let region = RegionImpl::new(
+        0,
+        region_name.to_string(),
+        Version::new(Arc::new(metadata)),
+        store_config,
+    );
 
     let expect_schema = schema_util::new_schema_ref(
         &[

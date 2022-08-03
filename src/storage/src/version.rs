@@ -153,12 +153,19 @@ pub struct Version {
 
 impl Version {
     pub fn new(metadata: RegionMetadataRef) -> Version {
+        Version::with_manifest_version(metadata, 0)
+    }
+
+    pub fn with_manifest_version(
+        metadata: RegionMetadataRef,
+        manifest_version: ManifestVersion,
+    ) -> Version {
         Version {
             metadata,
             memtables: Arc::new(MemtableVersion::new()),
             ssts: Arc::new(LevelMetas::new()),
             flushed_sequence: 0,
-            manifest_version: 0,
+            manifest_version,
         }
     }
 

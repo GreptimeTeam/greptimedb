@@ -5,10 +5,8 @@ use async_trait::async_trait;
 use common_telemetry::logging::info;
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use snafu::ResultExt;
-use store_api::manifest::action::ProtocolAction;
 use store_api::{
     logstore::LogStore,
-    manifest::Manifest,
     storage::{EngineContext, OpenOptions, RegionDescriptor, StorageEngine},
 };
 
@@ -16,7 +14,6 @@ use crate::background::JobPoolImpl;
 use crate::config::{EngineConfig, ObjectStoreConfig};
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
-use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
@@ -287,24 +284,14 @@ impl<S: LogStore> EngineInner<S> {
                     region: &region_name,
                 })?;
         let store_config = self.region_store_config(&region_name);
-        let manifest = store_config.manifest.clone();
 
-        let region = RegionImpl::new(
+        let region = RegionImpl::create(
             region_id,
             region_name.clone(),
             metadata.clone(),
             store_config,
-        );
-
-        // Persist region metadata
-        manifest
-            .update(RegionMetaActionList::new(vec![
-                RegionMetaAction::Protocol(ProtocolAction::new()),
-                RegionMetaAction::Change(RegionChange {
-                    metadata: Arc::new(metadata),
-                }),
-            ]))
-            .await?;
+        )
+        .await?;
 
         guard.update(RegionSlot::Ready(region.clone()));
 
