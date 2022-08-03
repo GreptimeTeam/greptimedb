@@ -15,31 +15,31 @@ use snafu::{OptionExt, ResultExt};
 
 // https://numpy.org/doc/stable/reference/generated/numpy.diff.html
 #[derive(Debug, Default)]
-pub struct Mean<T>
+pub struct Argmax<T>
 where
-    T: Primitive + AsPrimitive<f64> + std::ops::AddAssign,
+    T: Primitive + Ord,
 {
-    sum: T,
-    n: u32,
+    max: T,
 }
 
-impl<T> Mean<T>
+impl<T> Argmax<T>
 where
-    T: Primitive + AsPrimitive<f64> + std::ops::AddAssign,
+    T: Primitive + Ord,
 {
-    fn add(&mut self, value: T) {
-        self.sum += value;
-        self.n += 1;
+    fn push(&mut self, value: T) {
+        if self.max < value {
+            self.max = value;
+        }
     }
 }
 
-impl<T> Accumulator for Mean<T>
+impl<T> Accumulator for Argmax<T>
 where
-    T: Primitive + AsPrimitive<f64> + std::ops::AddAssign,
+    T: Primitive + Ord,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     fn state(&self) -> Result<Vec<Value>> {
-        Ok(vec![self.sum.into(), self.n.into()])
+        Ok(vec![self.max.into()])
     }
 
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<()> {
@@ -55,7 +55,7 @@ where
             unsafe { VectorHelper::static_cast(column) }
         };
         for v in column.iter_data().flatten() {
-            self.add(v);
+            self.push(v);
         }
         Ok(())
     }
@@ -83,30 +83,27 @@ where
     }
 
     fn evaluate(&self) -> Result<Value> {
-        if self.n == 0 {
-            return Ok(Value::Null);
-        }
-        Ok(Value::from(self.sum.as_() / self.n as f64))
+        Ok(self.max.into())
     }
 }
 
 #[derive(Debug, Default)]
-pub struct MeanAccumulatorCreator {
+pub struct ArgmaxAccumulatorCreator {
     input_types: ArcSwapOption<Vec<ConcreteDataType>>,
 }
 
-impl AggregateFunctionCreator for MeanAccumulatorCreator {
+impl AggregateFunctionCreator for ArgmaxAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
         let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
             let input_type = &types[0];
             with_match_ordered_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Mean::<$S>::default()))
+                    Ok(Box::new(Argmax::<$S>::default()))
                 },
                 {
                     let err_msg = format!(
-                        "\"Diff\" aggregate function not support data type {:?}",
+                        "\"ARGMAX\" aggregate function not support data type {:?}",
                         input_type.logical_type_id(),
                     );
                     CreateAccumulatorSnafu { err_msg }.fail()?

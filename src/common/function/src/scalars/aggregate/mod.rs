@@ -1,13 +1,17 @@
+mod argmax;
 mod diff;
 mod mean;
 mod median;
+mod polyval;
 
 use std::sync::Arc;
 
+pub use argmax::ArgmaxAccumulatorCreator;
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use diff::DiffAccumulatorCreator;
-use mean::MeanAccumulatorCreator;
+pub use mean::MeanAccumulatorCreator;
 pub use median::MedianAccumulatorCreator;
+pub use polyval::PolyvalAccumulatorCreator;
 
 use crate::scalars::FunctionRegistry;
 
@@ -57,6 +61,14 @@ impl AggregateFunctions {
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "mean",
             Arc::new(|| Arc::new(MeanAccumulatorCreator::default())),
+        )));
+        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
+            "polyval",
+            Arc::new(|| Arc::new(PolyvalAccumulatorCreator::default())),
+        )));
+        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
+            "argmin",
+            Arc::new(|| Arc::new(ArgmaxAccumulatorCreator::default())),
         )));
     }
 }
