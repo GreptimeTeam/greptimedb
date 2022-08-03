@@ -130,18 +130,22 @@ async fn test_reopen() {
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = Tester::new(REGION_NAME, store_dir).await;
 
-    let data = vec![(1000, Some(100)), (1002, None), (1004, Some(104))];
+    let mut all_data = Vec::new();
+    // Reopen region multiple times.
+    for i in 0..5 {
+        let data = (i, Some(i));
+        tester.put(&[data]).await;
+        all_data.push(data);
 
-    tester.put(&data).await;
+        let output = tester.full_scan().await;
+        assert_eq!(all_data, output);
 
-    let output = tester.full_scan().await;
-    assert_eq!(data, output);
+        tester.reopen().await;
 
-    tester.reopen().await;
-
-    // Scan after reopen.
-    let output = tester.full_scan().await;
-    assert_eq!(data, output);
+        // Scan after reopen.
+        let output = tester.full_scan().await;
+        assert_eq!(all_data, output);
+    }
 }
 
 #[tokio::test]
