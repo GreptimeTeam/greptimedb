@@ -4,19 +4,21 @@ use common_base::buffer::Buffer;
 use common_base::buffer::UnderflowSnafu;
 use snafu::ensure;
 
+pub const DEFAULT_CHUNK_SIZE: usize = 4096;
+
 #[derive(Debug)]
-pub(crate) struct Chunk<const N: usize> {
+pub(crate) struct Chunk {
     // internal data
-    pub data: [u8; N],
+    pub data: Box<[u8]>,
     // read offset
     pub read_offset: usize,
     // write offset
     pub write_offset: usize,
 }
 
-impl<const N: usize> Default for Chunk<N> {
+impl Default for Chunk {
     fn default() -> Self {
-        let data = [0u8; N];
+        let data = vec![0u8; DEFAULT_CHUNK_SIZE].into_boxed_slice();
         Self {
             write_offset: 0,
             read_offset: 0,
@@ -25,11 +27,13 @@ impl<const N: usize> Default for Chunk<N> {
     }
 }
 
-impl<const N: usize> Chunk<N> {
+impl Chunk {
     #[cfg(test)]
     pub fn copy_from_slice(s: &[u8]) -> Self {
         let src_len = s.len();
-        let mut data = [0u8; N];
+        // before [box syntax](https://github.com/rust-lang/rust/issues/49733) becomes stable,
+        // we can only initialize an array on heap like this.
+        let mut data = vec![0u8; src_len].into_boxed_slice();
         data[0..src_len].copy_from_slice(s);
         Self {
             read_offset: 0,
@@ -38,7 +42,7 @@ impl<const N: usize> Chunk<N> {
         }
     }
 
-    pub fn new(data: [u8; N], write: usize) -> Self {
+    pub fn new(data: Box<[u8]>, write: usize) -> Self {
         Self {
             write_offset: write,
             read_offset: 0,
@@ -77,7 +81,7 @@ impl<const N: usize> Chunk<N> {
 }
 
 pub struct ChunkList {
-    chunks: LinkedList<Chunk<4096>>,
+    chunks: LinkedList<Chunk>,
 }
 
 impl ChunkList {
@@ -87,7 +91,7 @@ impl ChunkList {
         }
     }
 
-    pub(crate) fn push(&mut self, chunk: Chunk<4096>) {
+    pub(crate) fn push(&mut self, chunk: Chunk) {
         self.chunks.push_back(chunk);
     }
 }
@@ -140,7 +144,7 @@ mod tests {
 
     #[test]
     pub fn test_chunk() {
-        let chunk: Chunk<4096> = Chunk::copy_from_slice("hello".as_bytes());
+        let chunk: Chunk = Chunk::copy_from_slice("hello".as_bytes());
         assert_eq!(5, chunk.write_offset);
         assert_eq!(0, chunk.read_offset);
         assert_eq!(5, chunk.len());
@@ -154,7 +158,7 @@ mod tests {
 
     #[test]
     pub fn test_chunk_short_read() {
-        let chunk: Chunk<4096> = Chunk::copy_from_slice("hello".as_bytes());
+        let chunk: Chunk = Chunk::copy_from_slice("hello".as_bytes());
 
         let mut dst = vec![0u8; 8];
         let read = chunk.read(&mut dst);
@@ -164,7 +168,7 @@ mod tests {
 
     #[test]
     pub fn test_chunk_advance() {
-        let mut chunk: Chunk<4096> = Chunk::copy_from_slice("hello".as_bytes());
+        let mut chunk: Chunk = Chunk::copy_from_slice("hello".as_bytes());
         let mut dst = vec![0u8; 8];
         assert_eq!(5, chunk.read(&mut dst));
         assert_eq!(0, chunk.read_offset);

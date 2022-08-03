@@ -46,6 +46,9 @@ macro_rules! impl_read_le {
     ( $($num_ty: ty), *) => {
         $(
             paste!{
+                // TODO(hl): default implementation reaquires allocating a
+                // temp buffer. maybe use more efficient impls in concrete buffers.
+                // see https://github.com/GrepTimeTeam/greptimedb/pull/97#discussion_r930798941
                 fn [<read_ $num_ty _le>](&mut self) -> Result<$num_ty> {
                     let mut buf = [0u8; std::mem::size_of::<$num_ty>()];
                     self.read_to_slice(&mut buf)?;

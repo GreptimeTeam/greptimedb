@@ -548,7 +548,7 @@ impl State {
     }
 }
 
-type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk<CHUNK_SIZE>>> + Send>>;
+type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk>> + Send>>;
 
 /// Creates a stream of chunks of data from file. If `buffer_size` is not 0, the returned stream
 /// will have a bounded buffer and a background thread will do prefetching. When consumer cannot
@@ -628,12 +628,12 @@ fn file_chunk_stream_sync(
 /// Reads a chunk of data from file in a blocking manner.
 /// The file may not contain enough data to fulfill the whole chunk so only data available
 /// is read into chunk. The `write` field of `Chunk` indicates the end of valid data.  
-fn read_at(file: &Arc<File>, offset: usize, file_length: usize) -> Result<Chunk<CHUNK_SIZE>> {
+fn read_at(file: &Arc<File>, offset: usize, file_length: usize) -> Result<Chunk> {
     if offset > file_length {
         return Err(Eof);
     }
     let size = CHUNK_SIZE.min((file_length - offset) as usize);
-    let mut data = [0u8; CHUNK_SIZE];
+    let mut data = Box::new([0u8; CHUNK_SIZE]);
     crate::fs::io::pread_exact(file.as_ref(), &mut data[0..size], offset as u64)?;
     Ok(Chunk::new(data, size))
 }
