@@ -6,7 +6,7 @@ use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::pymodule;
 use rustpython_vm::{
     builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt},
-    AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
 
 use crate::scalars::python::PyVector;
@@ -123,7 +123,7 @@ macro_rules! bind_call_unary_math_function {
     ($DF_FUNC: ident, $vm: ident $(,$ARG: ident)*) => {
         fn inner_fn($($ARG: PyObjectRef,)* vm: &VirtualMachine) -> PyResult<PyObjectRef> {
             let args = &[$(all_to_f64(try_into_columnar_value($ARG, vm)?, vm)?,)*];
-            let res = math_expressions::$DF_FUNC(args).map_err(|err| runtime_err(err, vm))?;
+            let res = math_expressions::$DF_FUNC(args).map_err(|err| from_df_err(err, vm))?;
             let ret = try_into_py_obj(res, vm)?;
             Ok(ret)
         }
@@ -136,10 +136,15 @@ macro_rules! bind_call_unary_math_function {
 /// design to allow Python Coprocessor Function to use already implmented udf functions
 #[pymodule]
 mod udf_builtins {
+    use std::sync::Arc;
+
     use arrow::array::NullArray;
-    use datafusion_common::DataFusionError;
+    use arrow::datatypes::DataType;
+    use datafusion_common::{DataFusionError, ScalarValue};
     use datafusion_expr::ColumnarValue as DFColValue;
+    use datafusion_physical_expr::expressions;
     use datafusion_physical_expr::math_expressions;
+    use datafusion_physical_expr::AggregateExpr;
     use rustpython_vm::{
         builtins::PyBaseExceptionRef, AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine,
     };
@@ -153,79 +158,97 @@ mod udf_builtins {
     type PyVectorRef = PyRef<PyVector>;
 
     #[inline]
-    fn runtime_err(err: DataFusionError, vm: &VirtualMachine) -> PyBaseExceptionRef {
+    fn from_df_err(err: DataFusionError, vm: &VirtualMachine) -> PyBaseExceptionRef {
         vm.new_runtime_error(format!("Data Fusion Error: {err:#?}"))
     }
 
     // the main binding code, due to proc macro things, can't directly use a simpler macro
     // because pyfunction is not a attr?
 
-    /// return a general PyObjectRef
-    /// so it can return both PyVector or a scalar PyInt/Float/Bool
+    // The math function return a general PyObjectRef
+    // so it can return both PyVector or a scalar PyInt/Float/Bool
+
+    /// simple math function, the backing implement is datafusion's `sqrt` math function
     #[pyfunction]
     fn sqrt(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(sqrt, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `sin` math function
     #[pyfunction]
     fn sin(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(sin, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `cos` math function
     #[pyfunction]
     fn cos(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(cos, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `tan` math function
     #[pyfunction]
     fn tan(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(tan, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `asin` math function
     #[pyfunction]
     fn asin(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(asin, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `acos` math function
     #[pyfunction]
     fn acos(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(acos, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `atan` math function
     #[pyfunction]
     fn atan(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(atan, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `floor` math function
     #[pyfunction]
     fn floor(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(floor, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `ceil` math function
     #[pyfunction]
     fn ceil(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(ceil, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `round` math function
     #[pyfunction]
     fn round(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(round, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `trunc` math function
     #[pyfunction]
     fn trunc(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(trunc, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `abs` math function
     #[pyfunction]
     fn abs(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(abs, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `signum` math function
     #[pyfunction]
     fn signum(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(signum, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `exp` math function
     #[pyfunction]
     fn exp(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(exp, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `ln` math function
     #[pyfunction]
     fn ln(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(ln, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `log2` math function
     #[pyfunction]
     fn log2(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(log2, vm, val);
     }
+    /// simple math function, the backing implement is datafusion's `log10` math function
     #[pyfunction]
     fn log10(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(log10, vm, val);
@@ -237,14 +260,32 @@ mod udf_builtins {
         // This is in a proc macro so using full path to avoid strange things
         // more info at: https://doc.rust-lang.org/reference/procedural-macros.html#procedural-macro-hygiene
         let arg = NullArray::new(arrow::datatypes::DataType::Null, len);
-        let args = &[DFColValue::Array(
-            std::sync::Arc::new(arg) as _
-        )];
-        let res = math_expressions::random(args).map_err(|err|runtime_err(err, vm))?;
+        let args = &[DFColValue::Array(std::sync::Arc::new(arg) as _)];
+        let res = math_expressions::random(args).map_err(|err| from_df_err(err, vm))?;
         let ret = try_into_py_obj(res, vm)?;
         Ok(ret)
     }
-    // TODO: add `random()`
+    // UDAF(User Defined Aggregate Function) in datafusion
+
+    /// directly port from datafusion's `avg` function
+    #[pyfunction]
+    fn avg(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<f64> {
+        // just a place holder, we just want the inner `XXXAccumulator`'s function
+        // so its expr is irrelevant
+        let inner_expr = expressions::Column::new("placeholder", 0);
+        let op = expressions::Avg::new(Arc::new(inner_expr) as _, "avg(...)", DataType::Float64);
+        // acquire the accumulator, where the actual implement of aggregate expr layers
+        let mut acc = op
+            .create_accumulator()
+            .map_err(|err| from_df_err(err, vm))?;
+        acc.update_batch(&[values.to_arrow_array()])
+            .map_err(|err| from_df_err(err, vm))?;
+        let res = acc.evaluate().map_err(|err| from_df_err(err, vm))?;
+        match res{
+            ScalarValue::Float64(Some(v))=>Ok(v),
+            _ => Err(vm.new_type_error(format!("Expect Float64 only, found {:?}", res.get_datatype())))
+        }
+    }
 
     /// Pow function,
     /// TODO: use PyObjectRef to adopt more type
@@ -330,7 +371,7 @@ mod test {
                 .compile(
                     r#"
 from udf_builtins import *
-random(42)"#,
+avg(values)"#,
                     rustpython_vm::compile::Mode::BlockExpr,
                     "<embedded>".to_owned(),
                 )
