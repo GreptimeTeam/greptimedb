@@ -136,9 +136,20 @@ impl<S: LogStore> RegionImpl<S> {
             writer: &writer,
             manifest: &store_config.manifest,
         };
+        // Replay all unflushed data.
         writer.replay(writer_ctx).await?;
 
-        unimplemented!()
+        let inner = Arc::new(RegionInner {
+            shared,
+            writer,
+            wal,
+            flush_strategy: store_config.flush_strategy,
+            flush_scheduler: store_config.flush_scheduler,
+            sst_layer: store_config.sst_layer,
+            manifest: store_config.manifest,
+        });
+
+        Ok(RegionImpl { inner })
     }
 
     async fn recover_from_manifest(
