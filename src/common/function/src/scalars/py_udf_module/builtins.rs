@@ -78,6 +78,8 @@ fn try_into_py_obj(col: DFColValue, vm: &VirtualMachine) -> PyResult<PyObjectRef
 fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
     match val {
         ScalarValue::Float64(Some(v)) => Ok(PyFloat::from(v).into_pyobject(vm)),
+        ScalarValue::Int64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
+        ScalarValue::UInt64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
         _ => Err(vm.new_type_error(format!("Can't cast type {:#?} to f64", val.get_datatype()))),
     }
 }
@@ -136,13 +138,14 @@ macro_rules! bind_call_unary_math_function {
 }
 
 /// The macro for binding function in `datafusion_physical_expr::expressions`(most of them are aggregate function)
-/// 
+///
 /// - first arguements is the name of datafusion expression function like `Avg`
 /// - second is the python virtual machine ident `vm`
 /// - following is the actual args passing in(as a slice).i.e.`&[values.to_arrow_array()]`
+/// - the data type of passing in args, i.e: `Datatype::Float64`
 /// - lastly is the name given to expr of those function, i.e. `expr0, expr1,`....
 macro_rules! bind_aggr_fn {
-    ($AGGR_FUNC: ident, $VM: ident, $ARGS:expr $(, $EXPR_ARGS: ident)*) => {
+    ($AGGR_FUNC: ident, $VM: ident, $ARGS:expr, $DATA_TYPE: expr $(, $EXPR_ARGS: ident)*) => {
         // just a place holder, we just want the inner `XXXAccumulator`'s function
         // so its expr is irrelevant
         return eval_aggr_fn(
@@ -150,7 +153,7 @@ macro_rules! bind_aggr_fn {
                 $(
                     Arc::new(expressions::Column::new(stringify!($EXPR_ARGS), 0)) as _,
                 )*
-                stringify!($AGGR_FUNC), DataType::Float64), 
+                stringify!($AGGR_FUNC), $DATA_TYPE.to_owned()),
             $ARGS, $VM)
     };
 }
@@ -184,7 +187,6 @@ mod udf_builtins {
     use std::sync::Arc;
 
     use arrow::array::NullArray;
-    use arrow::datatypes::DataType;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::expressions;
     use datafusion_physical_expr::math_expressions;
@@ -305,17 +307,206 @@ mod udf_builtins {
 
     #[pyfunction]
     fn approx_distinct(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        bind_aggr_fn!(ApproxDistinct, vm, &[values.to_arrow_array()], expr0)
+        bind_aggr_fn!(
+            ApproxDistinct,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn approx_median(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            ApproxMedian,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn approx_percentile_cont(
+        values: PyVectorRef,
+        percent: f64,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
+        let percent =
+            expressions::Literal::new(datafusion_common::ScalarValue::Float64(Some(percent)));
+        return eval_aggr_fn(
+            expressions::ApproxPercentileCont::new(
+                vec![
+                    Arc::new(expressions::Column::new("expr0", 0)) as _,
+                    Arc::new(percent) as _,
+                ],
+                "ApproxPercentileCont",
+                (values.to_arrow_array().data_type()).to_owned(),
+            )
+            .map_err(|err| from_df_err(err, vm))?,
+            &[values.to_arrow_array()],
+            vm,
+        );
+    }
+
+    #[pyfunction]
+    fn array_agg(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            ArrayAgg,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
     }
 
     /// directly port from datafusion's `avg` function
     #[pyfunction]
     fn avg(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        // just a place holder, we just want the inner `XXXAccumulator`'s function
-        // so its expr is irrelevant
-        let inner_expr = expressions::Column::new("placeholder", 0);
-        let op = expressions::Avg::new(Arc::new(inner_expr) as _, "avg", DataType::Float64);
-        eval_aggr_fn(op, &[values.to_arrow_array()], vm)
+        bind_aggr_fn!(
+            Avg,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn correlation(
+        arg0: PyVectorRef,
+        arg1: PyVectorRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            Correlation,
+            vm,
+            &[arg0.to_arrow_array(), arg1.to_arrow_array()],
+            arg0.to_arrow_array().data_type(),
+            expr0,
+            expr1
+        );
+    }
+
+    #[pyfunction]
+    fn count(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            Count,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn covariance(
+        arg0: PyVectorRef,
+        arg1: PyVectorRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            Covariance,
+            vm,
+            &[arg0.to_arrow_array(), arg1.to_arrow_array()],
+            arg0.to_arrow_array().data_type(),
+            expr0,
+            expr1
+        );
+    }
+
+    #[pyfunction]
+    fn covariance_pop(
+        arg0: PyVectorRef,
+        arg1: PyVectorRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            CovariancePop,
+            vm,
+            &[arg0.to_arrow_array(), arg1.to_arrow_array()],
+            arg0.to_arrow_array().data_type(),
+            expr0,
+            expr1
+        );
+    }
+
+    #[pyfunction]
+    fn max(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            Max,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn min(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            Min,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn stddev(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            Stddev,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn stddev_pop(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            StddevPop,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn sum(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            Sum,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn variance(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            Variance,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn variance_pop(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            VariancePop,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
     }
 
     /// Pow function,
@@ -402,7 +593,7 @@ mod test {
                 .compile(
                     r#"
 from udf_builtins import *
-avg(pows)"#,
+approx_distinct(pows)"#,
                     rustpython_vm::compile::Mode::BlockExpr,
                     "<embedded>".to_owned(),
                 )
