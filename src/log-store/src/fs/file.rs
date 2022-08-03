@@ -699,8 +699,8 @@ mod tests {
             metadata.len()
         );
 
-        let mut stream = file.create_stream(LocalNamespace::default(), 0);
-
+        let ns = LocalNamespace::default();
+        let mut stream = file.create_stream(&ns, 0);
         let mut data = vec![];
 
         while let Some(v) = stream.next().await {
