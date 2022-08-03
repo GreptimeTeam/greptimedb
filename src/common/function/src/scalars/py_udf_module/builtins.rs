@@ -135,9 +135,12 @@ macro_rules! bind_call_unary_math_function {
     };
 }
 
-/// The macro for binding function in `datafusion_physical_expr::expressions`
-/// first arguements is the name of datafusion expression function, second is the python virtual machine ident
-/// following is the actual args passing in, lastly is the name given to expr of those function
+/// The macro for binding function in `datafusion_physical_expr::expressions`(most of them are aggregate function)
+/// 
+/// - first arguements is the name of datafusion expression function like `Avg`
+/// - second is the python virtual machine ident `vm`
+/// - following is the actual args passing in(as a slice).i.e.`&[values.to_arrow_array()]`
+/// - lastly is the name given to expr of those function, i.e. `expr0, expr1,`....
 macro_rules! bind_aggr_fn {
     ($AGGR_FUNC: ident, $VM: ident, $ARGS:expr $(, $EXPR_ARGS: ident)*) => {
         // just a place holder, we just want the inner `XXXAccumulator`'s function
