@@ -1,6 +1,6 @@
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
-use datafusion_common::{ScalarValue};
+use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue as DFColValue;
 use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::pymodule;
@@ -9,7 +9,7 @@ use rustpython_vm::{
     AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
-use crate::scalars::{python::PyVector};
+use crate::scalars::python::PyVector;
 
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
@@ -136,6 +136,7 @@ macro_rules! bind_call_unary_math_function {
 /// design to allow Python Coprocessor Function to use already implmented udf functions
 #[pymodule]
 mod udf_builtins {
+    use arrow::array::NullArray;
     use datafusion_common::DataFusionError;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
@@ -230,8 +231,20 @@ mod udf_builtins {
         bind_call_unary_math_function!(log10, vm, val);
     }
 
-    // TODO: random
-    
+    /// return a random vector range from 0 to 1 and length of len
+    #[pyfunction]
+    fn random(len: usize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        // This is in a proc macro so using full path to avoid strange things
+        // more info at: https://doc.rust-lang.org/reference/procedural-macros.html#procedural-macro-hygiene
+        let arg = NullArray::new(arrow::datatypes::DataType::Null, len);
+        let args = &[DFColValue::Array(
+            std::sync::Arc::new(arg) as _
+        )];
+        let res = math_expressions::random(args).map_err(|err|runtime_err(err, vm))?;
+        let ret = try_into_py_obj(res, vm)?;
+        Ok(ret)
+    }
+    // TODO: add `random()`
 
     /// Pow function,
     /// TODO: use PyObjectRef to adopt more type
@@ -315,9 +328,9 @@ mod test {
             set_items_in_scope(&scope, vm, &["values", "pows"], args).unwrap();
             let code_obj = vm
                 .compile(
-                    "
+                    r#"
 from udf_builtins import *
-mabs(-3)",
+random(42)"#,
                     rustpython_vm::compile::Mode::BlockExpr,
                     "<embedded>".to_owned(),
                 )
