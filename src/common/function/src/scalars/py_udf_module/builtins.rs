@@ -14,9 +14,7 @@ use rustpython_vm::{
 
 use crate::scalars::python::PyVector;
 
-#[cfg(test)]
-#[allow(clippy::print_stdout)]
-mod test;
+
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
 pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
@@ -204,7 +202,7 @@ fn eval_aggr_fn<T: AggregateExpr>(
 /// design to allow Python Coprocessor Function to use already implmented udf functions
 ///
 #[pymodule]
-mod udf_builtins {
+pub(in crate::scalars::py_udf_module) mod udf_builtins {
     // P.S.: not extract to file because not inline proc macro attribute is *unstable*
     use std::sync::Arc;
 

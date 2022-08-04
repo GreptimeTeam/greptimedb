@@ -1,14 +1,16 @@
 use std::{collections::HashMap, fs::File, io::Read, path::Path, sync::Arc};
 
-use arrow::array::{Float64Array, Int64Array};
+use arrow::{array::{Float64Array, Int64Array}, datatypes::DataType, compute::cast::CastOptions};
 use datatypes::vectors::VectorRef;
 use ron::from_str as from_ron_string;
 use rustpython_vm::{
-    class::PyClassImpl, convert::ToPyObject, scope::Scope, AsObject, VirtualMachine,
+    class::PyClassImpl, convert::ToPyObject, scope::Scope, AsObject, VirtualMachine, PyObjectRef, builtins::{PyInt, PyFloat, PyList},
 };
 use serde::{Deserialize, Serialize};
 
-use super::*;
+use crate::scalars::python::PyVector;
+
+use super::builtins::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TestCase {
@@ -192,7 +194,7 @@ impl PyVar {
 
 #[test]
 fn run_testcases() {
-    let loc = Path::new("src/scalars/py_udf_module/builtins/testcases.ron");
+    let loc = Path::new("src/scalars/py_udf_module/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
     let mut buf = String::new();

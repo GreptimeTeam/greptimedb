@@ -2,3 +2,7 @@
 //! python script(in Python Coprocessor more precisely)
 
 mod builtins;
+
+#[cfg(test)]
+#[allow(clippy::print_stdout)]
+mod test;
