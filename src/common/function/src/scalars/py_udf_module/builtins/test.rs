@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::File, io::Read, path::Path, sync::Arc, thread::panicking};
+use std::{collections::HashMap, fs::File, io::Read, path::Path, sync::Arc};
 
 use arrow::array::{Float64Array, Int64Array};
 use datatypes::vectors::VectorRef;
@@ -158,7 +158,7 @@ impl PyVar {
                     match res {
                         Self::Float(v) => Ok(v),
                         Self::Int(v) => Ok(v as f64),
-                        _ => Err(format!("Expect only int/float in list")),
+                        _ => Err(format!("Expect only int/float in list, found {res:#?}")),
                     }
                 })
                 .collect::<Result<_, _>>()?;

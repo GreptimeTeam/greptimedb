@@ -385,7 +385,7 @@ random(42)"#,
 from udf_builtins import *
 array_agg(values)"#,
         expect: Ok((
-            value: Float(2.0),
+            value: FloatVec([1.0, 2.0, 3.0]),
             ty: Float64
         ))
     ),

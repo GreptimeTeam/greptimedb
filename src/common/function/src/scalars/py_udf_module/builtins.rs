@@ -79,14 +79,17 @@ fn try_into_py_obj(col: DFColValue, vm: &VirtualMachine) -> PyResult<PyObjectRef
     }
 }
 
+/// turn a ScalarValue into a Python Object, currently support
+/// - Float64 -> PyFloat
+/// - Int64 -> PyInt
+/// - UInt64 -> PyInt
+/// - List -> PyList(of inner ScalarValue)
 fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
     match val {
         ScalarValue::Float64(Some(v)) => Ok(PyFloat::from(v).into_pyobject(vm)),
         ScalarValue::Int64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
         ScalarValue::UInt64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
         ScalarValue::List(Some(col), _) => {
-            // TODO: check if this is ok
-            dbg!(&col);
             let list: Vec<PyObjectRef> = col
                 .into_iter()
                 .map(|v| scalar_val_try_into_py_obj(v, vm))
