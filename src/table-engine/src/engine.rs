@@ -5,6 +5,7 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use common_telemetry::logging;
 use snafu::ResultExt;
 use store_api::storage::{
     self, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder, ConcreteDataType, OpenOptions,
@@ -218,41 +219,47 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         }
 
         // Acquires the mutex before opening a new table.
-        let _lock = self.table_mutex.lock().await;
-        // Checks again, read lock should be enough since we are guarded by the mutex.
-        if let Some(table) = self.get_table(table_name) {
-            return Ok(table);
-        }
+        let table = {
+            let _lock = self.table_mutex.lock().await;
+            // Checks again, read lock should be enough since we are guarded by the mutex.
+            if let Some(table) = self.get_table(table_name) {
+                return Ok(table);
+            }
 
-        let engine_ctx = storage::EngineContext::default();
-        let opts = OpenOptions::default();
-        let region_name = table_name;
-        // Now we just use table name as region name. TODO(yingwen): Naming pattern of region.
-        let region = self
-            .storage_engine
-            .open_region(&engine_ctx, region_name, &opts)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::OpenRegionSnafu { region_name })?;
+            let engine_ctx = storage::EngineContext::default();
+            let opts = OpenOptions::default();
+            let region_name = table_name;
+            // Now we just use table name as region name. TODO(yingwen): Naming pattern of region.
+            let region = self
+                .storage_engine
+                .open_region(&engine_ctx, region_name, &opts)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::OpenRegionSnafu { region_name })?;
 
-        let table_meta = TableMetaBuilder::default()
-            .schema(region.in_memory_metadata().schema().clone())
-            .engine(DEFAULT_ENGINE)
-            .build()
-            .context(error::BuildTableMetaSnafu)?;
-        let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
-            .ident(request.table_id)
-            .table_version(0u64)
-            .table_type(TableType::Base)
-            .build()
-            .context(error::BuildTableInfoSnafu)?;
+            let table_meta = TableMetaBuilder::default()
+                .schema(region.in_memory_metadata().schema().clone())
+                .engine(DEFAULT_ENGINE)
+                .build()
+                .context(error::BuildTableMetaSnafu)?;
+            let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
+                .ident(request.table_id)
+                .table_version(0u64)
+                .table_type(TableType::Base)
+                .build()
+                .context(error::BuildTableInfoSnafu)?;
 
-        let table = Arc::new(MitoTable::new(table_info, region));
+            let table = Arc::new(MitoTable::new(table_info, region));
 
-        self.tables
-            .write()
-            .unwrap()
-            .insert(table_name.to_string(), table.clone());
+            self.tables
+                .write()
+                .unwrap()
+                .insert(table_name.to_string(), table.clone());
+
+            table
+        };
+
+        logging::info!("Mito engine opened table {}", table_name);
 
         Ok(table)
     }
