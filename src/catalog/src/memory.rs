@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use common_error::prelude::*;
 use table::table::numbers::NumbersTable;
 use table::TableRef;
 
@@ -12,37 +11,8 @@ use crate::catalog::{
     CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef, DEFAULT_CATALOG_NAME,
     DEFAULT_SCHEMA_NAME,
 };
-use crate::error::{Error, Result};
+use crate::error::{Result, TableExistsSnafu};
 use crate::schema::SchemaProvider;
-
-/// Error implementation of memory catalog.
-#[derive(Debug, Snafu)]
-pub enum InnerError {
-    #[snafu(display("Table {} already exists", table))]
-    TableExists { table: String, backtrace: Backtrace },
-}
-
-impl ErrorExt for InnerError {
-    fn status_code(&self) -> StatusCode {
-        match self {
-            InnerError::TableExists { .. } => StatusCode::TableAlreadyExists,
-        }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl From<InnerError> for Error {
-    fn from(err: InnerError) -> Self {
-        Self::new(err)
-    }
-}
 
 /// Simple in-memory list of catalogs
 #[derive(Default)]
@@ -207,6 +177,8 @@ pub fn new_memory_catalog_list() -> Result<CatalogListRef> {
 
 #[cfg(test)]
 mod tests {
+    use common_error::ext::ErrorExt;
+    use common_error::prelude::StatusCode;
 
     use super::*;
 

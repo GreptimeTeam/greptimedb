@@ -1,5 +1,10 @@
-use common_error::prelude::Snafu;
-use snafu::Backtrace;
+use std::any::Any;
+
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::prelude::{Snafu, StatusCode};
+use datafusion::error::DataFusionError;
+use datatypes::arrow;
+use snafu::{Backtrace, ErrorCompat};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -44,6 +49,46 @@ pub enum Error {
 
     #[snafu(display("Cannot find catalog by name: {}", name))]
     CatalogNotFound { name: String },
+
+    #[snafu(display("Table {} already exists", table))]
+    TableExists { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to register table"))]
+    RegisterTable {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Error::TableExists { .. } => StatusCode::TableAlreadyExists,
+            Error::InvalidKey { .. } => StatusCode::StorageUnavailable,
+            Error::OpenSystemCatalog { .. } => StatusCode::Unexpected,
+            Error::CreateSystemCatalog { .. } => StatusCode::Unexpected,
+            Error::SystemCatalog { .. } => StatusCode::StorageUnavailable,
+            Error::SystemCatalogTypeMismatch { .. } => StatusCode::StorageUnavailable,
+            Error::EmptyValue => StatusCode::StorageUnavailable,
+            Error::ValueDeserialize { .. } => StatusCode::StorageUnavailable,
+            Error::CatalogNotFound { .. } => StatusCode::StorageUnavailable,
+            Error::RegisterTable { .. } => StatusCode::Internal,
+        }
+    }
+
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl From<Error> for DataFusionError {
+    fn from(e: Error) -> Self {
+        DataFusionError::Internal(e.to_string())
+    }
+}

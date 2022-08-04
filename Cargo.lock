@@ -504,9 +504,17 @@ checksum = "a2698f953def977c68f935bb0dfa959375ad4638570e969e2f1e9f433cbf1af6"
 name = "catalog"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "common-error",
+ "common-query",
+ "common-recordbatch",
  "common-telemetry",
  "datafusion",
+ "datatypes",
+ "futures",
+ "futures-util",
+ "serde",
+ "serde_json",
  "snafu",
  "table",
  "tokio",

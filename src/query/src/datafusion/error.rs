@@ -73,7 +73,9 @@ impl ErrorExt for InnerError {
 
 impl From<InnerError> for catalog::error::Error {
     fn from(e: InnerError) -> Self {
-        catalog::error::Error::new(e)
+        catalog::error::Error::RegisterTable {
+            source: BoxedError::new(e),
+        }
     }
 }
 

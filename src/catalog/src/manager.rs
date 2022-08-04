@@ -10,13 +10,11 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::TableEngine;
 
 use super::error::Result;
-use crate::catalog::consts::SYSTEM_CATALOG_NAME;
-use crate::catalog::error::{
-    CatalogNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu,
-};
-use crate::catalog::memory::MemoryCatalogProvider;
-use crate::catalog::system::{decode_system_catalog, Entry, SystemCatalogTable};
 use crate::catalog::{CatalogList, CatalogProvider, CatalogProviderRef};
+use crate::consts::SYSTEM_CATALOG_NAME;
+use crate::error::{CatalogNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu};
+use crate::memory::MemoryCatalogProvider;
+use crate::system::{decode_system_catalog, Entry, SystemCatalogTable};
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
 // TODO(hl): Replace current `memory::new_memory_catalog_list()` with CatalogManager

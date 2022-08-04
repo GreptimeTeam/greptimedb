@@ -9,14 +9,13 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::TableRef;
 
-use crate::catalog::consts::{
+use crate::consts::{
     INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID,
     SYSTEM_CATALOG_TABLE_NAME,
 };
-use crate::catalog::error::Result;
-use crate::catalog::error::{
+use crate::error::{
     CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidKeySnafu, OpenSystemCatalogSnafu,
-    ValueDeserializeSnafu,
+    Result, ValueDeserializeSnafu,
 };
 
 #[allow(dead_code)]
