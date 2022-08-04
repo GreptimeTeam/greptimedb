@@ -31,9 +31,9 @@ enum PyVar {
     Int(i64),
     Float(f64),
     /// just for test if the length of FloatVec is of the same as `VagueFloat.0`
-    VagueFloat(usize),
+    LenFloatVec(usize),
     /// just for test if the length of IntVec is of the same as `VagueInt.0`
-    VagueInt(usize),
+    LenIntVec(usize),
 }
 
 impl PartialEq for PyVar {
@@ -43,10 +43,10 @@ impl PartialEq for PyVar {
             (PyVar::IntVec(a), PyVar::IntVec(b)) => a == b,
             (PyVar::Float(a), PyVar::Float(b)) => a == b,
             (PyVar::Int(a), PyVar::Int(b)) => a == b,
-            (PyVar::VagueFloat(len), PyVar::FloatVec(v)) => *len == v.len(),
-            (PyVar::VagueInt(len), PyVar::IntVec(v)) => *len == v.len(),
-            (PyVar::FloatVec(v), PyVar::VagueFloat(len)) => *len == v.len(),
-            (PyVar::IntVec(v), PyVar::VagueInt(len)) => *len == v.len(),
+            (PyVar::LenFloatVec(len), PyVar::FloatVec(v)) => *len == v.len(),
+            (PyVar::LenIntVec(len), PyVar::IntVec(v)) => *len == v.len(),
+            (PyVar::FloatVec(v), PyVar::LenFloatVec(len)) => *len == v.len(),
+            (PyVar::IntVec(v), PyVar::LenIntVec(len)) => *len == v.len(),
             (_, _) => false,
         }
     }

@@ -367,7 +367,7 @@ log10(values)"#,
 from udf_builtins import *
 random(42)"#,
         expect: Ok((
-            value: VagueFloat(42),
+            value: LenFloatVec(42),
             ty: Float64
         ))
     ),
