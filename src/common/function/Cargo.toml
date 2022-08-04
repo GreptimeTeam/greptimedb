@@ -22,7 +22,8 @@ python-udf = [
 py-udf-builtins = [
   "python-udf",
   "dep:datafusion-physical-expr",
-  "dep:datafusion-expr"
+  "dep:datafusion-expr",
+  "dep:datafusion"
 ]
 
 [dependencies]
@@ -47,6 +48,7 @@ rustpython-parser = {git = "https://github.com/RustPython/RustPython", optional 
 rustpython-vm = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 snafu = {version = "0.7", features = ["backtraces"]}
 
 

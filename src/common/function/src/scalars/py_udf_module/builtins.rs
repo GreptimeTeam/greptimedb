@@ -5,6 +5,7 @@ use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::ColumnarValue as DFColValue;
 use datafusion_physical_expr::AggregateExpr;
 use datatypes::vectors::Helper as HelperVec;
+use rustpython_vm::builtins::PyList;
 use rustpython_vm::pymodule;
 use rustpython_vm::{
     builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt},
@@ -83,7 +84,20 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
         ScalarValue::Float64(Some(v)) => Ok(PyFloat::from(v).into_pyobject(vm)),
         ScalarValue::Int64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
         ScalarValue::UInt64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
-        _ => Err(vm.new_type_error(format!("Can't cast type {:#?} to f64", val.get_datatype()))),
+        ScalarValue::List(Some(col), _) => {
+            // TODO: check if this is ok
+            dbg!(&col);
+            let list: Vec<PyObjectRef> = col
+                .into_iter()
+                .map(|v| scalar_val_try_into_py_obj(v, vm))
+                .collect::<Result<_, _>>()?;
+            let list = PyList::from(list).into_pyobject(vm);
+            Ok(list)
+        }
+        _ => Err(vm.new_type_error(format!(
+            "Can't cast type {:#?} to a Python Object",
+            val.get_datatype()
+        ))),
     }
 }
 
@@ -192,8 +206,8 @@ mod udf_builtins {
     use std::sync::Arc;
 
     use arrow::array::NullArray;
+    use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
-    use datafusion_physical_expr::expressions;
     use datafusion_physical_expr::math_expressions;
     use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
 
@@ -355,6 +369,7 @@ mod udf_builtins {
         );
     }
 
+    /// effectively equals to `list(vector)`
     #[pyfunction]
     fn array_agg(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_aggr_fn!(

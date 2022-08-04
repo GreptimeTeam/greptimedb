@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::File, io::Read, path::Path, sync::Arc};
+use std::{collections::HashMap, fs::File, io::Read, path::Path, sync::Arc, thread::panicking};
 
 use arrow::array::{Float64Array, Int64Array};
 use datatypes::vectors::VectorRef;
@@ -24,12 +24,32 @@ struct Var {
 }
 
 /// Null element just not supported for now for simplicity with writing test cases
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 enum PyVar {
     FloatVec(Vec<f64>),
     IntVec(Vec<i64>),
     Int(i64),
     Float(f64),
+    /// just for test if the length of FloatVec is of the same as `VagueFloat.0`
+    VagueFloat(usize),
+    /// just for test if the length of IntVec is of the same as `VagueInt.0`
+    VagueInt(usize),
+}
+
+impl PartialEq for PyVar {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PyVar::FloatVec(a), PyVar::FloatVec(b)) => a == b,
+            (PyVar::IntVec(a), PyVar::IntVec(b)) => a == b,
+            (PyVar::Float(a), PyVar::Float(b)) => a == b,
+            (PyVar::Int(a), PyVar::Int(b)) => a == b,
+            (PyVar::VagueFloat(len), PyVar::FloatVec(v)) => *len == v.len(),
+            (PyVar::VagueInt(len), PyVar::IntVec(v)) => *len == v.len(),
+            (PyVar::FloatVec(v), PyVar::VagueFloat(len)) => *len == v.len(),
+            (PyVar::IntVec(v), PyVar::VagueInt(len)) => *len == v.len(),
+            (_, _) => false,
+        }
+    }
 }
 
 fn is_float(ty: &DataType) -> bool {
@@ -116,19 +136,33 @@ impl PyVar {
                 Err(format!("unspupported DataType:{ty:#?}"))
             }
         } else if is_instance::<PyInt>(obj, vm) {
-            let res = obj.to_owned().try_into_value::<i64>(vm).map_err(|err| {
-                let mut call_stack = String::new();
-                vm.write_exception(&mut call_stack, &err).unwrap();
-                call_stack
-            })?;
+            let res = obj
+                .to_owned()
+                .try_into_value::<i64>(vm)
+                .map_err(|err| to_serde_excep(err, vm).unwrap())?;
             Ok(Self::Int(res))
         } else if is_instance::<PyFloat>(obj, vm) {
-            let res = obj.to_owned().try_into_value::<f64>(vm).map_err(|err| {
-                let mut call_stack = String::new();
-                vm.write_exception(&mut call_stack, &err).unwrap();
-                call_stack
-            })?;
+            let res = obj
+                .to_owned()
+                .try_into_value::<f64>(vm)
+                .map_err(|err| to_serde_excep(err, vm).unwrap())?;
             Ok(Self::Float(res))
+        } else if is_instance::<PyList>(obj, vm) {
+            let res = obj.payload::<PyList>().unwrap();
+            let res: Vec<f64> = res
+                .borrow_vec()
+                .iter()
+                .map(|obj| {
+                    let res = Self::from_py_obj(obj, vm).unwrap();
+                    assert!(matches!(res, Self::Float(_) | Self::Int(_)));
+                    match res {
+                        Self::Float(v) => Ok(v),
+                        Self::Int(v) => Ok(v as f64),
+                        _ => Err(format!("Expect only int/float in list")),
+                    }
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(Self::FloatVec(res))
         } else {
             todo!()
         }
@@ -170,6 +204,7 @@ fn run_testcases() {
                         }
                         PyVar::Int(v) => set_item_into_scope(&scope, vm, k, *v),
                         PyVar::Float(v) => set_item_into_scope(&scope, vm, k, *v),
+                        _ => panic!("Vague not allowed in input!")
                     }
                 })
                 .unwrap();
@@ -186,6 +221,12 @@ fn run_testcases() {
                 Err(e) => {
                     let err_res = to_serde_excep(e, vm).unwrap();
                     println!("Error:\n{err_res}");
+                    if case.expect.is_ok(){
+                        panic!("Expect Ok, found Error")
+                    }
+                    if !err_res.contains(&case.expect.unwrap_err()){
+                        panic!("Error message not containing")
+                    }
                 }
                 Ok(obj) => {
                     let ser = PyVar::from_py_obj(&obj, vm);
