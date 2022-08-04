@@ -22,6 +22,7 @@ futures-util = "0.3"
 lazy_static = "1.4"
 log-store = { path = "../log-store" }
 object-store = { path = "../object-store" }
+paste = "1.0"
 planus = "0.2"
 prost = "0.10"
 serde = { version = "1.0", features = ["derive"] }

@@ -17,6 +17,7 @@ use datatypes::{
         UInt8VectorBuilder, Vector, VectorRef,
     },
 };
+use paste::paste;
 use snafu::OptionExt;
 
 #[derive(Debug, Snafu)]
@@ -91,152 +92,90 @@ impl From<DataType> for ConcreteDataType {
 
 #[macro_export]
 macro_rules! gen_columns {
-    ($name: tt, $vec_ty: ty, $vari: ident, $cast: expr, $field: tt) => {
-        pub fn $name(vector: &VectorRef) -> Result<Column> {
-            let mut column = Column::default();
-            let mut values = Values::default();
+    ($key: tt, $vec_ty: ty, $vari: ident, $cast: expr) => {
+        paste! {
+            pub fn [<gen_columns_ $key>](vector: &VectorRef) -> Result<Column> {
+                let mut column = Column::default();
+                let mut values = Values::default();
 
-            let vector_ref =
-                vector
-                    .as_any()
-                    .downcast_ref::<$vec_ty>()
-                    .with_context(|| ConversionSnafu {
-                        from: std::format!("{:?}", vector.as_ref().data_type()),
-                    })?;
+                let vector_ref =
+                    vector
+                        .as_any()
+                        .downcast_ref::<$vec_ty>()
+                        .with_context(|| ConversionSnafu {
+                            from: std::format!("{:?}", vector.as_ref().data_type()),
+                        })?;
 
-            let mut value_null_mask = bit_vec::BitVec::from_elem(vector_ref.len(), false);
+                let mut value_null_mask = bit_vec::BitVec::from_elem(vector_ref.len(), false);
 
-            vector_ref
-                .iter_data()
-                .enumerate()
-                .for_each(|(i, value)| match value {
-                    Some($vari) => values.$field.push($cast),
-                    None => value_null_mask.set(i, true),
-                });
-            column.value_null_mask = value_null_mask.to_bytes();
-            column.values = Some(values);
+                vector_ref
+                    .iter_data()
+                    .enumerate()
+                    .for_each(|(i, value)| match value {
+                        Some($vari) => values.[<$key _values>].push($cast),
+                        None => value_null_mask.set(i, true),
+                    });
+                column.value_null_mask = value_null_mask.to_bytes();
+                column.values = Some(values);
 
-            Ok(column)
+                Ok(column)
+            }
         }
     };
 }
 
-gen_columns!(gen_columns_i8, Int8Vector, v, v as i32, i8_values);
-gen_columns!(gen_columns_i16, Int16Vector, v, v as i32, i16_values);
-gen_columns!(gen_columns_i32, Int32Vector, v, v as i32, i32_values);
-gen_columns!(gen_columns_i64, Int64Vector, v, v as i64, i64_values);
-
-gen_columns!(gen_columns_u8, UInt8Vector, v, v as u32, u8_values);
-gen_columns!(gen_columns_u16, UInt16Vector, v, v as u32, u16_values);
-gen_columns!(gen_columns_u32, UInt32Vector, v, v as u32, u32_values);
-gen_columns!(gen_columns_u64, UInt64Vector, v, v as u64, u64_values);
-
-gen_columns!(gen_columns_f32, Float32Vector, v, v, f32_values);
-gen_columns!(gen_columns_f64, Float64Vector, v, v, f64_values);
-
-gen_columns!(gen_columns_bool, BooleanVector, v, v, bool_values);
-gen_columns!(
-    gen_columns_binary,
-    BinaryVector,
-    v,
-    v.to_vec(),
-    binary_values
-);
-gen_columns!(
-    gen_columns_string,
-    StringVector,
-    v,
-    v.to_string(),
-    string_values
-);
+gen_columns!(i8, Int8Vector, v, v as i32);
+gen_columns!(i16, Int16Vector, v, v as i32);
+gen_columns!(i32, Int32Vector, v, v as i32);
+gen_columns!(i64, Int64Vector, v, v as i64);
+gen_columns!(u8, UInt8Vector, v, v as u32);
+gen_columns!(u16, UInt16Vector, v, v as u32);
+gen_columns!(u32, UInt32Vector, v, v as u32);
+gen_columns!(u64, UInt64Vector, v, v as u64);
+gen_columns!(f32, Float32Vector, v, v);
+gen_columns!(f64, Float64Vector, v, v);
+gen_columns!(bool, BooleanVector, v, v);
+gen_columns!(binary, BinaryVector, v, v.to_vec());
+gen_columns!(string, StringVector, v, v.to_string());
 
 #[macro_export]
 macro_rules! gen_put_data {
-    ($name: tt, $builder_type: ty, $vari: ident, $cast: expr, $field: tt) => {
-        pub fn $name(num_rows: usize, column: Column) -> Result<VectorRef> {
-            let values = column.values.context(EmptyColumnValuesSnafu {})?;
-            let mut vector_iter = values.$field.iter();
-            let mut builder = <$builder_type>::with_capacity(num_rows);
-            bit_vec::BitVec::from_bytes(&column.value_null_mask)
-                .iter()
-                .take(num_rows)
-                .for_each(|mask| {
-                    if mask == false {
-                        builder.push(vector_iter.next().map(|$vari| $cast));
-                    } else {
-                        builder.push(None);
-                    }
-                });
+    ($key: tt, $builder_type: ty, $vari: ident, $cast: expr) => {
+        paste! {
+            pub fn [<gen_put_data_ $key>](num_rows: usize, column: Column) -> Result<VectorRef> {
+                let values = column.values.context(EmptyColumnValuesSnafu {})?;
+                let mut vector_iter = values.[<$key _values>].iter();
+                let mut builder = <$builder_type>::with_capacity(num_rows);
+                bit_vec::BitVec::from_bytes(&column.value_null_mask)
+                    .iter()
+                    .take(num_rows)
+                    .for_each(|mask| {
+                        if mask == false {
+                            builder.push(vector_iter.next().map(|$vari| $cast));
+                        } else {
+                            builder.push(None);
+                        }
+                    });
 
-            Ok(Arc::new(builder.finish()))
+                Ok(Arc::new(builder.finish()))
+            }
         }
     };
 }
 
-gen_put_data!(gen_put_data_i8, Int8VectorBuilder, v, *v as i8, i8_values);
-gen_put_data!(
-    gen_put_data_i16,
-    Int16VectorBuilder,
-    v,
-    *v as i16,
-    i16_values
-);
-gen_put_data!(gen_put_data_i32, Int32VectorBuilder, v, *v, i32_values);
-gen_put_data!(gen_put_data_i64, Int64VectorBuilder, v, *v, i64_values);
-
-gen_put_data!(gen_put_data_u8, UInt8VectorBuilder, v, *v as u8, u8_values);
-gen_put_data!(
-    gen_put_data_u16,
-    UInt16VectorBuilder,
-    v,
-    *v as u16,
-    u16_values
-);
-gen_put_data!(
-    gen_put_data_u32,
-    UInt32VectorBuilder,
-    v,
-    *v as u32,
-    u32_values
-);
-gen_put_data!(
-    gen_put_data_u64,
-    UInt64VectorBuilder,
-    v,
-    *v as u64,
-    u64_values
-);
-
-gen_put_data!(
-    gen_put_data_f32,
-    Float32VectorBuilder,
-    v,
-    *v as f32,
-    f32_values
-);
-gen_put_data!(
-    gen_put_data_f64,
-    Float64VectorBuilder,
-    v,
-    *v as f64,
-    f64_values
-);
-
-gen_put_data!(gen_put_data_bool, BooleanVectorBuilder, v, *v, bool_values);
-gen_put_data!(
-    gen_put_data_binary,
-    BinaryVectorBuilder,
-    v,
-    v.as_slice(),
-    binary_values
-);
-gen_put_data!(
-    gen_put_data_string,
-    StringVectorBuilder,
-    v,
-    v.as_str(),
-    string_values
-);
+gen_put_data!(i8, Int8VectorBuilder, v, *v as i8);
+gen_put_data!(i16, Int16VectorBuilder, v, *v as i16);
+gen_put_data!(i32, Int32VectorBuilder, v, *v);
+gen_put_data!(i64, Int64VectorBuilder, v, *v);
+gen_put_data!(u8, UInt8VectorBuilder, v, *v as u8);
+gen_put_data!(u16, UInt16VectorBuilder, v, *v as u16);
+gen_put_data!(u32, UInt32VectorBuilder, v, *v as u32);
+gen_put_data!(u64, UInt64VectorBuilder, v, *v as u64);
+gen_put_data!(f32, Float32VectorBuilder, v, *v as f32);
+gen_put_data!(f64, Float64VectorBuilder, v, *v as f64);
+gen_put_data!(bool, BooleanVectorBuilder, v, *v);
+gen_put_data!(binary, BinaryVectorBuilder, v, v.as_slice());
+gen_put_data!(string, StringVectorBuilder, v, v.as_str());
 
 pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
     match vector.data_type() {

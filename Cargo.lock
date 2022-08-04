@@ -3572,6 +3572,7 @@ dependencies = [
  "lazy_static",
  "log-store",
  "object-store",
+ "paste",
  "planus",
  "prost",
  "rand 0.8.5",
