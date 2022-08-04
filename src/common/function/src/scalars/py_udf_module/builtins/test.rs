@@ -30,10 +30,12 @@ enum PyVar {
     IntVec(Vec<i64>),
     Int(i64),
     Float(f64),
-    /// just for test if the length of FloatVec is of the same as `VagueFloat.0`
+    /// for test if the length of FloatVec is of the same as `VagueFloat.0`
     LenFloatVec(usize),
-    /// just for test if the length of IntVec is of the same as `VagueInt.0`
+    /// for test if the length of IntVec is of the same as `VagueInt.0`
     LenIntVec(usize),
+    /// for test if result is within the bound of err using formula:
+    /// `(res - value).abs() < (value.abs()* error_percent)`
     FloatWithError {
         value: f64,
         error_percent: f64,
@@ -58,8 +60,8 @@ impl PartialEq for PyVar {
                     value,
                     error_percent,
                 },
-            ) => (v - value).abs() < (value.abs() * error_percent),
-            (
+            )
+            | (
                 Self::FloatWithError {
                     value,
                     error_percent,
