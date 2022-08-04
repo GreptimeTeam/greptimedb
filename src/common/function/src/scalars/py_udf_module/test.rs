@@ -1,16 +1,23 @@
 use std::{collections::HashMap, fs::File, io::Read, path::Path, sync::Arc};
 
-use arrow::{array::{Float64Array, Int64Array}, datatypes::DataType, compute::cast::CastOptions};
+use arrow::{
+    array::{Float64Array, Int64Array},
+    compute::cast::CastOptions,
+    datatypes::DataType,
+};
 use datatypes::vectors::VectorRef;
 use ron::from_str as from_ron_string;
 use rustpython_vm::{
-    class::PyClassImpl, convert::ToPyObject, scope::Scope, AsObject, VirtualMachine, PyObjectRef, builtins::{PyInt, PyFloat, PyList},
+    builtins::{PyFloat, PyInt, PyList},
+    class::PyClassImpl,
+    convert::ToPyObject,
+    scope::Scope,
+    AsObject, PyObjectRef, VirtualMachine,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::scalars::python::PyVector;
-
 use super::builtins::*;
+use crate::scalars::python::PyVector;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TestCase {

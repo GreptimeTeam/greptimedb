@@ -14,7 +14,6 @@ use rustpython_vm::{
 
 use crate::scalars::python::PyVector;
 
-
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
 pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
