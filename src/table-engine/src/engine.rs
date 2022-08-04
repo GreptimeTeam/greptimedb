@@ -5,20 +5,20 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use common_telemetry::logging;
 use snafu::ResultExt;
-use store_api::storage::ConcreteDataType;
 use store_api::storage::{
-    self as store, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder,
-    EngineContext as StorageContext, Region, RegionDescriptor, RegionId, RegionMeta,
-    RowKeyDescriptorBuilder, StorageEngine,
+    self, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder, ConcreteDataType, OpenOptions,
+    Region, RegionDescriptor, RegionId, RegionMeta, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine};
-use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest};
+use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::Result as TableResult;
 use table::{
     metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType},
     table::TableRef,
 };
+use tokio::sync::Mutex;
 
 use crate::error::{self, Result};
 use crate::table::MitoTable;
@@ -30,12 +30,12 @@ pub const DEFAULT_ENGINE: &str = "mito";
 /// About mito <https://en.wikipedia.org/wiki/Alfa_Romeo_MiTo>.
 /// "you can't be a true petrolhead until you've owned an Alfa Romeo" -- by Jeremy Clarkson
 #[derive(Clone)]
-pub struct MitoEngine<Store: StorageEngine> {
-    inner: Arc<MitoEngineInner<Store>>,
+pub struct MitoEngine<S: StorageEngine> {
+    inner: Arc<MitoEngineInner<S>>,
 }
 
-impl<Store: StorageEngine> MitoEngine<Store> {
-    pub fn new(storage_engine: Store) -> Self {
+impl<S: StorageEngine> MitoEngine<S> {
+    pub fn new(storage_engine: S) -> Self {
         Self {
             inner: Arc::new(MitoEngineInner::new(storage_engine)),
         }
@@ -43,13 +43,21 @@ impl<Store: StorageEngine> MitoEngine<Store> {
 }
 
 #[async_trait]
-impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
+impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     async fn create_table(
         &self,
         ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> TableResult<TableRef> {
         Ok(self.inner.create_table(ctx, request).await?)
+    }
+
+    async fn open_table(
+        &self,
+        ctx: &EngineContext,
+        request: OpenTableRequest,
+    ) -> TableResult<TableRef> {
+        Ok(self.inner.open_table(ctx, request).await?)
     }
 
     async fn alter_table(
@@ -60,8 +68,8 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
         unimplemented!();
     }
 
-    fn get_table(&self, ctx: &EngineContext, name: &str) -> TableResult<Option<TableRef>> {
-        Ok(self.inner.get_table(ctx, name)?)
+    fn get_table(&self, _ctx: &EngineContext, name: &str) -> TableResult<Option<TableRef>> {
+        Ok(self.inner.get_table(name))
     }
 
     fn table_exists(&self, _ctx: &EngineContext, _name: &str) -> bool {
@@ -78,18 +86,26 @@ impl<Store: StorageEngine> TableEngine for MitoEngine<Store> {
 }
 
 /// FIXME(dennis) impl system catalog to keep table metadata.
-struct MitoEngineInner<Store: StorageEngine> {
+struct MitoEngineInner<S: StorageEngine> {
+    /// All tables opened by the engine.
+    ///
+    /// Writing to `tables` should also hold the `table_mutex`.
     tables: RwLock<HashMap<String, TableRef>>,
-    storage_engine: Store,
+    storage_engine: S,
+    // FIXME(yingwen): Remove `next_table_id`. Table id should be assigned by other module (maybe catalog).
     next_table_id: AtomicU64,
+    /// Table mutex is used to protect the operations such as creating/opening/closing
+    /// a table, to avoid things like opening the same table simultaneously.
+    table_mutex: Mutex<()>,
 }
 
-impl<Store: StorageEngine> MitoEngineInner<Store> {
-    fn new(storage_engine: Store) -> Self {
+impl<S: StorageEngine> MitoEngineInner<S> {
+    fn new(storage_engine: S) -> Self {
         Self {
             tables: RwLock::new(HashMap::default()),
             storage_engine,
             next_table_id: AtomicU64::new(0),
+            table_mutex: Mutex::new(()),
         }
     }
 
@@ -98,7 +114,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
     }
 }
 
-impl<Store: StorageEngine> MitoEngineInner<Store> {
+impl<S: StorageEngine> MitoEngineInner<S> {
     async fn create_table(
         &self,
         _ctx: &EngineContext,
@@ -114,7 +130,8 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
 
         //TODO(dennis): supports multi regions
         let region_id: RegionId = 0;
-        let name = store::gen_region_name(region_id);
+        // TODO(yingwen): Maybe we should use table name as part of region name.
+        let name = request.name.clone();
 
         let host_column =
             ColumnDescriptorBuilder::new(0, "host", ConcreteDataType::string_datatype())
@@ -150,7 +167,7 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
         let region = self
             .storage_engine
             .create_region(
-                &StorageContext::default(),
+                &storage::EngineContext::default(),
                 RegionDescriptor {
                     id: region_id,
                     name,
@@ -189,8 +206,66 @@ impl<Store: StorageEngine> MitoEngineInner<Store> {
         Ok(table)
     }
 
-    fn get_table(&self, _ctx: &EngineContext, name: &str) -> Result<Option<TableRef>> {
-        Ok(self.tables.read().unwrap().get(name).cloned())
+    // TODO(yingwen): Support catalog and schema name.
+    async fn open_table(
+        &self,
+        _ctx: &EngineContext,
+        request: OpenTableRequest,
+    ) -> TableResult<TableRef> {
+        let table_name = &request.table_name;
+        if let Some(table) = self.get_table(table_name) {
+            // Table has already been opened.
+            return Ok(table);
+        }
+
+        // Acquires the mutex before opening a new table.
+        let table = {
+            let _lock = self.table_mutex.lock().await;
+            // Checks again, read lock should be enough since we are guarded by the mutex.
+            if let Some(table) = self.get_table(table_name) {
+                return Ok(table);
+            }
+
+            let engine_ctx = storage::EngineContext::default();
+            let opts = OpenOptions::default();
+            let region_name = table_name;
+            // Now we just use table name as region name. TODO(yingwen): Naming pattern of region.
+            let region = self
+                .storage_engine
+                .open_region(&engine_ctx, region_name, &opts)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::OpenRegionSnafu { region_name })?;
+
+            let table_meta = TableMetaBuilder::default()
+                .schema(region.in_memory_metadata().schema().clone())
+                .engine(DEFAULT_ENGINE)
+                .build()
+                .context(error::BuildTableMetaSnafu)?;
+            let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
+                .ident(request.table_id)
+                .table_version(0u64)
+                .table_type(TableType::Base)
+                .build()
+                .context(error::BuildTableInfoSnafu)?;
+
+            let table = Arc::new(MitoTable::new(table_info, region));
+
+            self.tables
+                .write()
+                .unwrap()
+                .insert(table_name.to_string(), table.clone());
+
+            table
+        };
+
+        logging::info!("Mito engine opened table {}", table_name);
+
+        Ok(table)
+    }
+
+    fn get_table(&self, name: &str) -> Option<TableRef> {
+        self.tables.read().unwrap().get(name).cloned()
     }
 }
 
@@ -203,11 +278,11 @@ mod tests {
     use table::requests::InsertRequest;
 
     use super::*;
-    use crate::table::test;
+    use crate::table::test_util;
 
     #[tokio::test]
     async fn test_create_table_insert_scan() {
-        let (_engine, table, schema, _dir) = test::setup_test_engine_and_table().await;
+        let (_engine, table, schema, _dir) = test_util::setup_test_engine_and_table().await;
 
         assert_eq!(TableType::Base, table.table_type());
         assert_eq!(schema, table.schema());
@@ -253,5 +328,39 @@ mod tests {
         assert_eq!(tss.to_arrow_array(), columns[1]);
         assert_eq!(cpus.to_arrow_array(), columns[2]);
         assert_eq!(memories.to_arrow_array(), columns[3]);
+    }
+
+    #[tokio::test]
+    async fn test_open_table() {
+        common_telemetry::init_default_ut_logging();
+
+        let ctx = EngineContext::default();
+        let open_req = OpenTableRequest {
+            catalog_name: String::new(),
+            schema_name: String::new(),
+            table_name: test_util::TABLE_NAME.to_string(),
+            // Currently the first table has id 0.
+            table_id: 0,
+        };
+
+        let (engine, table) = {
+            let (engine, table_engine, table) = test_util::setup_mock_engine_and_table().await;
+            // Now try to open the table again.
+            let reopened = table_engine
+                .open_table(&ctx, open_req.clone())
+                .await
+                .unwrap();
+            assert_eq!(table.schema(), reopened.schema());
+
+            (engine, table)
+        };
+
+        // Construct a new table engine, and try to open the table.
+        let table_engine = MitoEngine::new(engine);
+        let reopened = table_engine
+            .open_table(&ctx, open_req.clone())
+            .await
+            .unwrap();
+        assert_eq!(table.schema(), reopened.schema());
     }
 }

@@ -20,6 +20,6 @@ mod sync;
 mod test_util;
 mod version;
 mod wal;
-mod write_batch;
+pub mod write_batch;
 
 pub use engine::EngineImpl;

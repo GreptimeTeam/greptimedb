@@ -1,3 +1,5 @@
+mod mock_engine;
+
 use std::sync::Arc;
 
 use datatypes::prelude::ConcreteDataType;
@@ -13,13 +15,11 @@ use table::TableRef;
 use tempdir::TempDir;
 
 use crate::engine::MitoEngine;
+use crate::table::test_util::mock_engine::MockEngine;
 
-pub async fn setup_test_engine_and_table() -> (
-    MitoEngine<EngineImpl<NoopLogStore>>,
-    TableRef,
-    SchemaRef,
-    TempDir,
-) {
+pub const TABLE_NAME: &str = "demo";
+
+fn schema_for_test() -> Schema {
     let column_schemas = vec![
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
@@ -27,10 +27,21 @@ pub async fn setup_test_engine_and_table() -> (
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
     ];
 
+    Schema::with_timestamp_index(column_schemas, 1).expect("ts must be timestamp column")
+}
+
+pub type MockMitoEngine = MitoEngine<MockEngine>;
+
+pub async fn setup_test_engine_and_table() -> (
+    MitoEngine<EngineImpl<NoopLogStore>>,
+    TableRef,
+    SchemaRef,
+    TempDir,
+) {
     let dir = TempDir::new("setup_test_engine_and_table").unwrap();
     let store_dir = dir.path().to_string_lossy();
 
-    let table_engine = MitoEngine::<EngineImpl<NoopLogStore>>::new(
+    let table_engine = MitoEngine::new(
         EngineImpl::new(
             EngineConfig::with_store_dir(&store_dir),
             Arc::new(NoopLogStore::default()),
@@ -39,16 +50,13 @@ pub async fn setup_test_engine_and_table() -> (
         .unwrap(),
     );
 
-    let table_name = "demo";
-    let schema = Arc::new(
-        Schema::with_timestamp_index(column_schemas, 1).expect("ts must be timestamp column"),
-    );
+    let schema = Arc::new(schema_for_test());
     let table = table_engine
         .create_table(
             &EngineContext::default(),
             CreateTableRequest {
-                name: table_name.to_string(),
-                desc: Some(" a test table".to_string()),
+                name: TABLE_NAME.to_string(),
+                desc: Some("a test table".to_string()),
                 schema: schema.clone(),
             },
         )
@@ -56,4 +64,24 @@ pub async fn setup_test_engine_and_table() -> (
         .unwrap();
 
     (table_engine, table, schema, dir)
+}
+
+pub async fn setup_mock_engine_and_table() -> (MockEngine, MockMitoEngine, TableRef) {
+    let mock_engine = MockEngine::default();
+    let table_engine = MitoEngine::new(mock_engine.clone());
+
+    let schema = Arc::new(schema_for_test());
+    let table = table_engine
+        .create_table(
+            &EngineContext::default(),
+            CreateTableRequest {
+                name: TABLE_NAME.to_string(),
+                desc: None,
+                schema: schema.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+    (mock_engine, table_engine, table)
 }

@@ -16,7 +16,7 @@ pub use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 
 pub use self::chunk::{Chunk, ChunkReader};
 pub use self::descriptors::{
-    gen_region_name, ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor,
+    ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor,
     ColumnFamilyDescriptorBuilder, ColumnFamilyId, ColumnId, RegionDescriptor, RegionId,
     RowKeyDescriptor, RowKeyDescriptorBuilder,
 };
