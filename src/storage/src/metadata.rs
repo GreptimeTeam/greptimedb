@@ -59,7 +59,11 @@ pub type VersionNumber = u32;
 /// In memory metadata of region.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RegionMetadata {
+    // The following fields are immutable.
     pub id: RegionId,
+    pub name: String,
+
+    // The following fields are mutable.
     /// Schema of the region.
     ///
     /// Holding a [SchemaRef] to allow converting into `SchemaRef`/`arrow::SchemaRef`
@@ -161,6 +165,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
         // Doesn't set version explicitly here, because this is a new region meta
         // created from descriptor, using initial version is reasonable.
         let mut builder = RegionMetadataBuilder::new()
+            .name(desc.name)
             .id(desc.id)
             .row_key(desc.row_key)?
             .add_column_family(desc.default_cf)?;
@@ -175,6 +180,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
 #[derive(Default)]
 struct RegionMetadataBuilder {
     id: RegionId,
+    name: String,
     columns: Vec<ColumnMetadata>,
     column_schemas: Vec<ColumnSchema>,
     name_to_col_index: HashMap<String, usize>,
@@ -188,6 +194,11 @@ struct RegionMetadataBuilder {
 impl RegionMetadataBuilder {
     fn new() -> RegionMetadataBuilder {
         RegionMetadataBuilder::default()
+    }
+
+    fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     fn id(mut self, id: RegionId) -> Self {
@@ -271,6 +282,7 @@ impl RegionMetadataBuilder {
 
         Ok(RegionMetadata {
             id: self.id,
+            name: self.name,
             schema,
             columns_row_key,
             column_families: ColumnFamiliesMetadata {
@@ -331,9 +343,12 @@ mod tests {
     use crate::test_util::descriptor_util::RegionDescBuilder;
     use crate::test_util::schema_util;
 
+    const TEST_REGION: &str = "test-region";
+
     #[test]
     fn test_descriptor_to_region_metadata() {
-        let desc = RegionDescBuilder::new("region-0")
+        let region_name = "region-0";
+        let desc = RegionDescBuilder::new(region_name)
             .timestamp(("ts", LogicalTypeId::Int64, false))
             .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
@@ -350,6 +365,7 @@ mod tests {
         );
 
         let metadata = RegionMetadata::try_from(desc).unwrap();
+        assert_eq!(region_name, metadata.name);
         assert_eq!(expect_schema, metadata.schema);
         assert_eq!(2, metadata.columns_row_key.num_row_key_columns());
         assert_eq!(1, metadata.columns_row_key.num_value_columns());
@@ -403,6 +419,7 @@ mod tests {
             .build()
             .unwrap();
         RegionMetadataBuilder::new()
+            .name(TEST_REGION)
             .row_key(row_key)
             .unwrap()
             .add_column_family(cf)
@@ -414,6 +431,7 @@ mod tests {
     #[test]
     fn test_build_metedata_disable_version() {
         let metadata = new_metadata(false);
+        assert_eq!(TEST_REGION, metadata.name);
 
         let expect_schema = schema_util::new_schema_ref(
             &[
@@ -460,6 +478,7 @@ mod tests {
     #[test]
     fn test_build_metedata_enable_version() {
         let metadata = new_metadata(true);
+        assert_eq!(TEST_REGION, metadata.name);
 
         let expect_schema = schema_util::new_schema_ref(
             &[

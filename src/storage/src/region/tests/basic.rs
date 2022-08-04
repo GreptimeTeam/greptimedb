@@ -21,9 +21,7 @@ async fn create_region_for_basic(
 
     let store_config = config_util::new_store_config(region_name, store_dir).await;
 
-    RegionImpl::create(0, region_name.to_string(), metadata, store_config)
-        .await
-        .unwrap()
+    RegionImpl::create(metadata, store_config).await.unwrap()
 }
 
 /// Tester for basic tests.

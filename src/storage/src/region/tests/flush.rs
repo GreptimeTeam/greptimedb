@@ -26,9 +26,7 @@ async fn create_region_for_flush(
     let mut store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
     store_config.flush_strategy = flush_strategy;
 
-    RegionImpl::create(0, REGION_NAME.to_string(), metadata, store_config)
-        .await
-        .unwrap()
+    RegionImpl::create(metadata, store_config).await.unwrap()
 }
 
 /// Tester for region flush.
