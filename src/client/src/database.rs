@@ -1,9 +1,9 @@
 use api::v1::object_expr;
 use api::v1::*;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 
 use crate::error;
-use crate::{Client, Result};
+use crate::{Client, Result, error::DecodeSelectSnafu};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -45,7 +45,24 @@ impl Database {
         Ok(())
     }
 
-    // TODO(jiachun) select/update/delete
+    pub async fn select(&self, select_expr: SelectExpr) -> Result<(Option<ResultHeader>, SelectResult)> {
+        let header = Header {
+            version: PROTOCOL_VERSION,
+        };
+
+        let expr = ObjectExpr {
+            header: Some(header),
+            expr: Some(object_expr::Expr::Select(select_expr)),
+        };
+
+        let obj_result = self.object(expr).await?;
+        let header = obj_result.header;
+        let result: SelectResult = obj_result.results.try_into().context(DecodeSelectSnafu)?;
+
+        Ok((header, result))
+    }
+
+    // TODO(jiachun) update/delete
 
     async fn object(&self, expr: ObjectExpr) -> Result<ObjectResult> {
         let res = self.objects(vec![expr]).await?.pop().unwrap();

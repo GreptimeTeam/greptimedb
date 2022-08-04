@@ -1,3 +1,4 @@
+use api::convert::DecodeError;
 use common_error::prelude::*;
 
 #[derive(Debug, Snafu)]
@@ -22,6 +23,11 @@ pub enum Error {
         source: tonic::Status,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Fail to decode select result, source: {}", source))]
+    DecodeSelect {
+        source: DecodeError
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
