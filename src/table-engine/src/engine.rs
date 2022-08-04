@@ -271,11 +271,11 @@ mod tests {
     use table::requests::InsertRequest;
 
     use super::*;
-    use crate::table::test;
+    use crate::table::test_util;
 
     #[tokio::test]
     async fn test_create_table_insert_scan() {
-        let (_engine, table, schema, _dir) = test::setup_test_engine_and_table().await;
+        let (_engine, table, schema, _dir) = test_util::setup_test_engine_and_table().await;
 
         assert_eq!(TableType::Base, table.table_type());
         assert_eq!(schema, table.schema());

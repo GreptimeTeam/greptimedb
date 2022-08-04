@@ -91,6 +91,8 @@ impl<S: LogStore> RegionImpl<S> {
     /// Create a new region and also persist the region metadata to manifest.
     ///
     /// The caller should avoid calling this method simultaneously.
+    // FIXME(yingwen): Region id is already specific in metadata, but name is not specific in metadata. We should
+    // add name to RegionMetadata.
     pub async fn create(
         id: RegionId,
         name: String,
