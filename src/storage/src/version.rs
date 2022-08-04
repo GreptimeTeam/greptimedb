@@ -15,7 +15,7 @@ use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
 use crate::memtable::{MemtableId, MemtableSchema, MemtableSet, MemtableVersion};
-use crate::metadata::{RegionMetadata, RegionMetadataRef};
+use crate::metadata::RegionMetadataRef;
 use crate::sst::LevelMetas;
 use crate::sst::{FileHandle, FileMeta};
 use crate::sync::CowCell;
@@ -36,14 +36,6 @@ pub struct VersionControl {
 }
 
 impl VersionControl {
-    /// Construct a new version control from `metadata`.
-    pub fn new(metadata: RegionMetadata) -> VersionControl {
-        VersionControl {
-            version: CowCell::new(Version::new(Arc::new(metadata))),
-            committed_sequence: AtomicU64::new(0),
-        }
-    }
-
     /// Construct a new version control from existing `version`.
     pub fn with_version(version: Version) -> VersionControl {
         VersionControl {
@@ -152,13 +144,23 @@ pub struct Version {
 }
 
 impl Version {
+    /// Create a new `Version` with given `metadata`.
+    #[cfg(test)]
     pub fn new(metadata: RegionMetadataRef) -> Version {
+        Version::with_manifest_version(metadata, 0)
+    }
+
+    /// Create a new `Version` with given `metadata` and initial `manifest_version`.
+    pub fn with_manifest_version(
+        metadata: RegionMetadataRef,
+        manifest_version: ManifestVersion,
+    ) -> Version {
         Version {
             metadata,
             memtables: Arc::new(MemtableVersion::new()),
             ssts: Arc::new(LevelMetas::new()),
             flushed_sequence: 0,
-            manifest_version: 0,
+            manifest_version,
         }
     }
 
@@ -233,6 +235,7 @@ impl Version {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::RegionMetadata;
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     fn new_version_control() -> VersionControl {
@@ -241,7 +244,8 @@ mod tests {
             .build();
         let metadata: RegionMetadata = desc.try_into().unwrap();
 
-        VersionControl::new(metadata)
+        let version = Version::new(Arc::new(metadata));
+        VersionControl::with_version(version)
     }
 
     #[test]

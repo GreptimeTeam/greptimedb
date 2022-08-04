@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use log_store::fs::noop::NoopLogStore;
+use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, ObjectStore};
 
 use crate::background::JobPoolImpl;
@@ -11,8 +11,15 @@ use crate::memtable::DefaultMemtableBuilder;
 use crate::region::StoreConfig;
 use crate::sst::FsAccessLayer;
 
+fn log_store_dir(store_dir: &str) -> String {
+    format!("{}/logstore", store_dir)
+}
+
 /// Create a new StoreConfig for test.
-pub async fn new_store_config(store_dir: &str, region_name: &str) -> StoreConfig<NoopLogStore> {
+pub async fn new_store_config(
+    region_name: &str,
+    store_dir: &str,
+) -> StoreConfig<LocalFileLogStore> {
     let sst_dir = engine::region_sst_dir(region_name);
     let manifest_dir = engine::region_manifest_dir(region_name);
 
@@ -22,9 +29,14 @@ pub async fn new_store_config(store_dir: &str, region_name: &str) -> StoreConfig
     let manifest = RegionManifest::new(&manifest_dir, object_store);
     let job_pool = Arc::new(JobPoolImpl {});
     let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
+    let log_config = LogConfig {
+        log_file_dir: log_store_dir(store_dir),
+        ..Default::default()
+    };
+    let log_store = Arc::new(LocalFileLogStore::open(&log_config).await.unwrap());
 
     StoreConfig {
-        log_store: Arc::new(NoopLogStore::default()),
+        log_store,
         sst_layer,
         manifest,
         memtable_builder: Arc::new(DefaultMemtableBuilder {}),

@@ -5,17 +5,23 @@ mod writer;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_telemetry::logging;
 use datatypes::schema::SchemaRef;
 use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
-use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
+use store_api::manifest::{
+    self, action::ProtocolAction, Manifest, ManifestVersion, MetaActionIterator,
+};
 use store_api::storage::{
     OpenOptions, ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse,
 };
 
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
-use crate::manifest::{action::RegionMetaAction, region::RegionManifest};
+use crate::manifest::{
+    action::{RegionChange, RegionMetaAction, RegionMetaActionList},
+    region::RegionManifest,
+};
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{RegionWriter, RegionWriterRef, WriterContext};
@@ -82,14 +88,42 @@ pub struct StoreConfig<S> {
 }
 
 impl<S: LogStore> RegionImpl<S> {
-    /// Create a new region without any data.
-    pub fn new(
+    /// Create a new region and also persist the region metadata to manifest.
+    ///
+    /// The caller should avoid calling this method simultaneously.
+    pub async fn create(
         id: RegionId,
         name: String,
         metadata: RegionMetadata,
         store_config: StoreConfig<S>,
+    ) -> Result<RegionImpl<S>> {
+        let metadata = Arc::new(metadata);
+        // Try to persist region data to manifest, ensure the new region could be recovered from
+        // the manifest.
+        let manifest_version = store_config
+            .manifest
+            .update(RegionMetaActionList::new(vec![
+                RegionMetaAction::Protocol(ProtocolAction::new()),
+                RegionMetaAction::Change(RegionChange {
+                    metadata: metadata.clone(),
+                }),
+            ]))
+            .await?;
+
+        let version = Version::with_manifest_version(metadata, manifest_version);
+        let region = RegionImpl::new(id, name, version, store_config);
+
+        Ok(region)
+    }
+
+    /// Create a new region without persisting manifest.
+    fn new(
+        id: RegionId,
+        name: String,
+        version: Version,
+        store_config: StoreConfig<S>,
     ) -> RegionImpl<S> {
-        let version_control = VersionControl::new(metadata);
+        let version_control = VersionControl::with_version(version);
         let wal = Wal::new(name.clone(), store_config.log_store);
 
         let inner = Arc::new(RegionInner {
@@ -110,13 +144,21 @@ impl<S: LogStore> RegionImpl<S> {
     }
 
     /// Open an exsiting region and recover its data.
+    ///
+    /// The caller should avoid calling this method simultaneously.
     pub async fn open(
         name: String,
         store_config: StoreConfig<S>,
-        opts: &OpenOptions,
+        _opts: &OpenOptions,
     ) -> Result<RegionImpl<S>> {
         // Load version meta data from manifest.
         let version = Self::recover_from_manifest(&name, &store_config.manifest).await?;
+
+        logging::debug!(
+            "Region recovered version from manifest, version: {:?}",
+            version
+        );
+
         let metadata = version.metadata().clone();
         let version_control = Arc::new(VersionControl::with_version(version));
         let wal = Wal::new(name.clone(), store_config.log_store);
@@ -136,9 +178,20 @@ impl<S: LogStore> RegionImpl<S> {
             writer: &writer,
             manifest: &store_config.manifest,
         };
-        writer.replay(writer_ctx, opts).await?;
+        // Replay all unflushed data.
+        writer.replay(writer_ctx).await?;
 
-        unimplemented!()
+        let inner = Arc::new(RegionInner {
+            shared,
+            writer,
+            wal,
+            flush_strategy: store_config.flush_strategy,
+            flush_scheduler: store_config.flush_scheduler,
+            sst_layer: store_config.sst_layer,
+            manifest: store_config.manifest,
+        });
+
+        Ok(RegionImpl { inner })
     }
 
     async fn recover_from_manifest(
@@ -157,7 +210,10 @@ impl<S: LogStore> RegionImpl<S> {
             for action in action_list.actions {
                 match (action, version) {
                     (RegionMetaAction::Change(c), None) => {
-                        version = Some(Version::new(c.metadata));
+                        version = Some(Version::with_manifest_version(
+                            c.metadata,
+                            last_manifest_version,
+                        ));
                         for (manifest_version, action) in actions.drain(..) {
                             version = Self::replay_edit(manifest_version, action, version);
                         }

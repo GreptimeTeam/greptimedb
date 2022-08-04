@@ -5,11 +5,11 @@ use common_time::RangeMillis;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::storage::{OpenOptions, SequenceNumber, WriteContext, WriteRequest, WriteResponse};
+use store_api::storage::{SequenceNumber, WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
-use crate::error::{InvalidTimestampSnafu, Result};
+use crate::error::{self, Result};
 use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
 use crate::proto::WalHeader;
@@ -87,13 +87,9 @@ impl RegionWriter {
     }
 
     /// Replay data to memtables.
-    pub async fn replay<S: LogStore>(
-        &self,
-        writer_ctx: WriterContext<'_, S>,
-        opts: &OpenOptions,
-    ) -> Result<()> {
+    pub async fn replay<S: LogStore>(&self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        inner.replay(&self.version_mutex, writer_ctx, opts).await
+        inner.replay(&self.version_mutex, writer_ctx).await
     }
 
     async fn persist_manifest_version<S: LogStore>(
@@ -201,27 +197,72 @@ impl WriterInner {
 
     async fn replay<S: LogStore>(
         &mut self,
-        _version_mutex: &Mutex<()>,
+        version_mutex: &Mutex<()>,
         writer_ctx: WriterContext<'_, S>,
-        opts: &OpenOptions,
     ) -> Result<()> {
-        // TODO(yingwen): [open_region] Read `WriteBatch` from wal and invoke `WriterInner::write` to
-        // insert into memtables.
         let version_control = writer_ctx.version_control();
-        let version = version_control.current();
 
-        // Data after flushed sequence need to be recovered.
-        let start_sequence = version.flushed_sequence() + 1;
-        let _write_ctx = WriteContext::from(opts);
+        let (flushed_sequence, mut last_sequence);
+        let mut num_requests = 0;
+        {
+            let _lock = version_mutex.lock().await;
 
-        let mut stream = writer_ctx.wal.read_from_wal(start_sequence).await?;
+            // Data after flushed sequence need to be recovered.
+            flushed_sequence = version_control.current().flushed_sequence();
+            last_sequence = flushed_sequence;
+            // FIXME(yingwen): Now log store will overwrite the entry id by its internal entry id,
+            // which starts from 0. This is a hack to just make the test passes since we knows the
+            // entry id of log store is always equals to `sequence - 1`. Change this to
+            // `flushed_sequence + ` once the log store fixes this issue.
+            let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence).await?;
+            while let Some((req_sequence, _header, request)) = stream.try_next().await? {
+                if let Some(request) = request {
+                    num_requests += 1;
+                    let time_ranges = self.prepare_memtables(&request, version_control)?;
+                    // Note that memtables of `Version` may be updated during replay.
+                    let version = version_control.current();
 
-        while let Some((_seq_num, _header, _write_batch)) = stream.try_next().await? {
-            // TODO(yingwen): [open_region] 1. Split write batch and insert into memtables. 2. Need to update
-            // (recover) committed_sequence.
+                    // FIXME(yingwen): Use req_sequence instead of `req_sequence + 1` once logstore
+                    // won't overwrite the entry id.
+                    let req_sequence = req_sequence + 1;
+                    if req_sequence > last_sequence {
+                        last_sequence = req_sequence;
+                    } else {
+                        logging::error!(
+                            "Sequence should not decrease during replay, found {} < {}, region_id: {}, region_name: {}",
+                            req_sequence,
+                            last_sequence,
+                            writer_ctx.shared.id,
+                            writer_ctx.shared.name,
+                        );
+
+                        error::SequenceNotMonotonicSnafu {
+                            prev: last_sequence,
+                            given: req_sequence,
+                        }
+                        .fail()?;
+                    }
+                    // TODO(yingwen): Trigger flush if the size of memtables reach the flush threshold to avoid
+                    // out of memory during replay, but we need to do it carefully to avoid dead lock.
+                    let mut inserter =
+                        Inserter::new(last_sequence, time_ranges, version.bucket_duration());
+                    inserter.insert_memtables(&request, version.mutable_memtables())?;
+                }
+            }
+
+            version_control.set_committed_sequence(last_sequence);
         }
 
-        unimplemented!()
+        logging::info!(
+            "Region replay finished, region_id: {}, region_name: {}, flushed_sequence: {}, last_sequence: {}, num_requests: {}",
+            writer_ctx.shared.id,
+            writer_ctx.shared.name,
+            flushed_sequence,
+            last_sequence,
+            num_requests,
+        );
+
+        Ok(())
     }
 
     /// Preprocess before write.
@@ -252,11 +293,20 @@ impl WriterInner {
             .await?;
         }
 
+        self.prepare_memtables(request, version_control)
+    }
+
+    /// Create all needed mutable memtables, returns time ranges that overlapped with `request`.
+    fn prepare_memtables(
+        &mut self,
+        request: &WriteBatch,
+        version_control: &VersionControlRef,
+    ) -> Result<Vec<RangeMillis>> {
         let current_version = version_control.current();
-        let duration = current_version.bucket_duration();
+        let bucket_duration = current_version.bucket_duration();
         let time_ranges = request
-            .time_ranges(duration)
-            .context(InvalidTimestampSnafu)?;
+            .time_ranges(bucket_duration)
+            .context(error::InvalidTimestampSnafu)?;
         let mutable = current_version.mutable_memtables();
         let mut memtables_to_add = MemtableSet::default();
 
