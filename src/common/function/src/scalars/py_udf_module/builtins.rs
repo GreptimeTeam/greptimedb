@@ -13,6 +13,9 @@ use rustpython_vm::{
 
 use crate::scalars::python::PyVector;
 
+#[cfg(test)]
+#[allow(clippy::print_stdout)]
+mod test;
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
 pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
@@ -511,21 +514,10 @@ mod udf_builtins {
         );
     }
 
-    /// Pow function,
-    /// TODO: use PyObjectRef to adopt more type
+    /// Pow function, bind from gp's [`PowFunction`]
     #[pyfunction]
     fn pow(base: PyObjectRef, pow: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let res = try_into_columnar_value(base.clone(), vm);
-        if let Ok(res) = res {
-            match res {
-                DFColValue::Array(arr) => {
-                    dbg!(&arr);
-                }
-                DFColValue::Scalar(val) => {
-                    dbg!(&val);
-                }
-            };
-        }
+        // let res = try_into_columnar_value(base.clone(), vm);
         let base = base
             .payload::<PyVector>()
             .ok_or_else(|| type_cast_error(&base.class().name(), "vector", vm))?;
@@ -538,7 +530,3 @@ mod udf_builtins {
         Ok(res.into())
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::print_stdout)]
-mod test;

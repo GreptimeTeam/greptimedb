@@ -1,4 +1,116 @@
 [
+    // math expressions
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "pows": Var(
+                ty: Int8,
+                value: IntVec([0, -1, 3])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+sqrt(values)"#,
+        expect: Ok((
+            value: FloatVec(
+                [
+                    1.0,
+                    1.4142135623730951,
+                    1.7320508075688772,
+                ],
+            ),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+sin(values)"#,
+        expect: Ok((
+            value: FloatVec(
+                [
+                    0.8414709848078965,
+                    0.9092974268256817,
+                    0.1411200080598672,
+                ],
+            ),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+cos(values)"#,
+        expect: Ok((
+            value: FloatVec(
+                [
+                    0.5403023058681398,
+                    -0.4161468365471424,
+                    -0.9899924966004454,
+                ],
+            ),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+tan(values)"#,
+        expect: Ok((
+            value: FloatVec(
+                [
+                    1.557407724654902,
+                    -2.185039863261519,
+                    -0.1425465430742778,
+                ],
+            ),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+asin(values)"#,
+        expect: Ok((
+            value: FloatVec(
+                [
+                    0.5403023058681398,
+                    -0.4161468365471424,
+                    -0.9899924966004454,
+                ],
+            ),
+            ty: Float64
+        ))
+    ),
+
+
     TestCase(
         input: {
             "values": Var(
@@ -9,9 +121,28 @@
         script: r#"
 from udf_builtins import *
 avg(values)"#,
-        expect: Var(
+        expect: Ok((
             value: Float(2.0),
             ty: Float64
-        )
-    )
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "pows": Var(
+                ty: Int8,
+                value: IntVec([0, -1, 3])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+pow(values, pows)"#,
+        expect: Ok((
+            value: FloatVec([ 1.0, 0.5, 27.0]),
+            ty: Float64
+        ))
+    ),
 ]

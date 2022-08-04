@@ -1,9 +1,11 @@
 use std::{collections::HashMap, fs::File, io::Read, path::Path, sync::Arc};
 
+use arrow::array::{Float64Array, Int64Array};
 use datatypes::vectors::VectorRef;
 use ron::from_str as from_ron_string;
-use ron::to_string as to_ron_string;
-use rustpython_vm::{class::PyClassImpl, scope::Scope, AsObject, VirtualMachine};
+use rustpython_vm::{
+    class::PyClassImpl, convert::ToPyObject, scope::Scope, AsObject, VirtualMachine,
+};
 use serde::{Deserialize, Serialize};
 
 use super::*;
@@ -12,7 +14,7 @@ use super::*;
 struct TestCase {
     input: HashMap<String, Var>,
     script: String,
-    expect: Var
+    expect: Result<Var, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -21,7 +23,8 @@ struct Var {
     ty: DataType,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Null element just not supported for now for simplicity with writing test cases
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 enum PyVar {
     FloatVec(Vec<f64>),
     IntVec(Vec<i64>),
@@ -29,12 +32,106 @@ enum PyVar {
     Float(f64),
 }
 
-impl PyVar{
-    fn from_py_obj(obj: &PyObjectRef, vm:&VirtualMachine)->Self{
-        if is_instance::<PyVector>(&obj, vm){
+fn is_float(ty: &DataType) -> bool {
+    matches!(
+        ty,
+        DataType::Float16 | DataType::Float32 | DataType::Float64
+    )
+}
+
+/// unsigned included
+fn is_int(ty: &DataType) -> bool {
+    matches!(
+        ty,
+        DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+    )
+}
+
+impl PyVar {
+    fn from_py_obj(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Self, String> {
+        if is_instance::<PyVector>(obj, vm) {
             let res = obj.payload::<PyVector>().unwrap();
+            let res = res.to_arrow_array();
+            let ty = res.data_type();
+            if is_float(ty) {
+                let vec_f64 = arrow::compute::cast::cast(
+                    res.as_ref(),
+                    &DataType::Float64,
+                    CastOptions {
+                        wrapped: true,
+                        partial: true,
+                    },
+                )
+                .map_err(|err| format!("{err:#?}"))?;
+                assert_eq!(vec_f64.data_type(), &DataType::Float64);
+                let vec_f64 = vec_f64
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or(format!("Can't cast {vec_f64:#?} to Float64Array!"))?;
+                let ret: Vec<f64> = vec_f64
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, v)| {
+                        v.ok_or(format!(
+                            "No null element expected, found one in {idx} position"
+                        ))
+                        .map(|v| v.to_owned())
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Self::FloatVec(ret))
+            } else if is_int(ty) {
+                let vec_int = arrow::compute::cast::cast(
+                    res.as_ref(),
+                    &DataType::Int64,
+                    CastOptions {
+                        wrapped: true,
+                        partial: true,
+                    },
+                )
+                .map_err(|err| format!("{err:#?}"))?;
+                assert_eq!(vec_int.data_type(), &DataType::Int64);
+                let vec_i64 = vec_int
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or(format!("Can't cast {vec_int:#?} to Int64Array!"))?;
+                let ret: Vec<i64> = vec_i64
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, v)| {
+                        v.ok_or(format!(
+                            "No null element expected, found one in {idx} position"
+                        ))
+                        .map(|v| v.to_owned())
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Self::IntVec(ret))
+            } else {
+                Err(format!("unspupported DataType:{ty:#?}"))
+            }
+        } else if is_instance::<PyInt>(obj, vm) {
+            let res = obj.to_owned().try_into_value::<i64>(vm).map_err(|err| {
+                let mut call_stack = String::new();
+                vm.write_exception(&mut call_stack, &err).unwrap();
+                call_stack
+            })?;
+            Ok(Self::Int(res))
+        } else if is_instance::<PyFloat>(obj, vm) {
+            let res = obj.to_owned().try_into_value::<f64>(vm).map_err(|err| {
+                let mut call_stack = String::new();
+                vm.write_exception(&mut call_stack, &err).unwrap();
+                call_stack
+            })?;
+            Ok(Self::Float(res))
+        } else {
+            todo!()
         }
-        todo!()
     }
 }
 
@@ -47,7 +144,90 @@ fn run_testcases() {
     file.read_to_string(&mut buf)
         .expect("Fail to read to string");
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
-    dbg!(testcases);
+    for (idx, case) in testcases.into_iter().enumerate() {
+        rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
+            vm.add_native_module("udf_builtins", Box::new(udf_builtins::make_module));
+            // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
+            PyVector::make_class(&vm.ctx);
+        })
+        .enter(|vm| {
+            let scope = vm.new_scope_with_builtins();
+            case.input
+                .iter()
+                .try_for_each(|(k, v)| -> Result<(), String> {
+                    match &v.value {
+                        PyVar::FloatVec(v) => {
+                            let v: VectorRef =
+                                Arc::new(datatypes::vectors::Float64Vector::from_vec(v.clone()));
+                            let v = PyVector::from(v);
+                            set_item_into_scope(&scope, vm, k, v)
+                        }
+                        PyVar::IntVec(v) => {
+                            let v: VectorRef =
+                                Arc::new(datatypes::vectors::Int64Vector::from_vec(v.clone()));
+                            let v = PyVector::from(v);
+                            set_item_into_scope(&scope, vm, k, v)
+                        }
+                        PyVar::Int(v) => set_item_into_scope(&scope, vm, k, *v),
+                        PyVar::Float(v) => set_item_into_scope(&scope, vm, k, *v),
+                    }
+                })
+                .unwrap();
+            let code_obj = vm
+                .compile(
+                    &case.script,
+                    rustpython_vm::compile::Mode::BlockExpr,
+                    "<embedded>".to_owned(),
+                )
+                .map_err(|err| vm.new_syntax_error(&err))
+                .unwrap();
+            let res = vm.run_code_obj(code_obj, scope);
+            match res {
+                Err(e) => {
+                    let err_res = to_serde_excep(e, vm).unwrap();
+                    println!("Error:\n{err_res}");
+                }
+                Ok(obj) => {
+                    let ser = PyVar::from_py_obj(&obj, vm);
+                    match (ser, case.expect){
+                        (Ok(real), Ok(expect)) => {
+                            if !(real == expect.value){
+                                panic!("Not as Expected for code:\n{}\n Real Value is {real:#?}, but expect {expect:#?}", case.script)
+                            }
+                        },
+                        (Err(real), Err(expect)) => {
+                            if !expect.contains(&real){
+                                panic!("Expect Err(\"{expect}\"), found {real}")
+                            }
+                        },
+                        (Ok(real), Err(expect)) => panic!("Expect Err({expect}), found Ok({real:?})"),
+                        (Err(real), Ok(expect)) => panic!("Expect Ok({expect:?}), found Err({real})"),
+                    };
+                }
+            };
+            println!("Testcase {idx} ... passed!");
+        });
+    }
+}
+
+fn set_item_into_scope(
+    scope: &Scope,
+    vm: &VirtualMachine,
+    name: &str,
+    value: impl ToPyObject,
+) -> Result<(), String> {
+    scope
+        .locals
+        .as_object()
+        .set_item(&name.to_owned(), vm.new_pyobj(value), vm)
+        .map_err(|err| {
+            format!(
+                "Error in setting var {name} in scope: \n{}",
+                to_serde_excep(err, vm).unwrap_or_else(|double_err| format!(
+                    "Another exception occur during serialize exception to string:\n{double_err}"
+                ))
+            )
+        })
 }
 
 fn set_items_in_scope(
@@ -73,6 +253,7 @@ fn set_items_in_scope(
     res
 }
 
+#[allow(unused_must_use)]
 #[test]
 fn test_vm() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
@@ -96,7 +277,7 @@ fn test_vm() {
             .compile(
                 r#"
 from udf_builtins import *
-approx_distinct(pows)"#,
+sin(values)"#,
                 rustpython_vm::compile::Mode::BlockExpr,
                 "<embedded>".to_owned(),
             )
@@ -104,9 +285,15 @@ approx_distinct(pows)"#,
             .unwrap();
         let res = vm.run_code_obj(code_obj, scope);
         println!("{:#?}", res);
-        if let Err(e) = res {
-            let err_res = to_serde_excep(e, vm).unwrap();
-            println!("Error:\n{err_res}");
+        match res {
+            Err(e) => {
+                let err_res = to_serde_excep(e, vm).unwrap();
+                println!("Error:\n{err_res}");
+            }
+            Ok(obj) => {
+                let _ser = PyVar::from_py_obj(&obj, vm);
+                dbg!(_ser);
+            }
         }
     });
 }
