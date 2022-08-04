@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -8,45 +10,69 @@ use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datafusion_common::DataFusionError;
 use datatypes::prelude::*;
+use datatypes::value::ListValue;
 use datatypes::vectors::{ConstantVector, ListVector};
 use datatypes::with_match_ordered_primitive_type_id;
+use num::NumCast;
 use snafu::{OptionExt, ResultExt};
 
-// https://numpy.org/doc/stable/reference/generated/numpy.diff.html
+// https://numpy.org/doc/stable/reference/generated/numpy.percentile.html?highlight=percentile#numpy.percentile
 #[derive(Debug, Default)]
-pub struct Argmin<T>
+pub struct Percentile<T>
 where
     T: Primitive + Ord,
 {
-    min: Option<T>,
+    greater: BinaryHeap<Reverse<T>>,
+    not_greater: BinaryHeap<T>,
+    n: u32,
+    p: f64,
 }
 
-impl<T> Argmin<T>
+impl<T> Percentile<T>
 where
     T: Primitive + Ord,
 {
     fn push(&mut self, value: T) {
-        self.min = match self.min {
-            Some(min) => {
-                if min < value {
-                    Some(min)
-                } else {
-                    Some(value)
-                }
+        self.n += 1;
+        if self.not_greater.is_empty() {
+            self.not_greater.push(value);
+            return;
+        }
+        // to keep the not_greater length == floor+1
+        // so to ensure the peek of the not_greater is array[floor]
+        // and the peek of the greater is array[floor+1]
+        let floor = (((self.n - 1) as f64) * self.p / (100 as f64)).floor();
+        if value <= *self.not_greater.peek().unwrap() {
+            self.not_greater.push(value);
+            if self.not_greater.len() > (floor + 1.0) as usize {
+                self.greater.push(Reverse(self.not_greater.pop().unwrap()));
             }
-            None => Some(value),
-        };
+        } else {
+            self.greater.push(Reverse(value));
+            if self.not_greater.len() < (floor + 1.0) as usize {
+                self.not_greater.push(self.greater.pop().unwrap().0);
+            }
+        }
     }
 }
 
-impl<T> Accumulator for Argmin<T>
+impl<T> Accumulator for Percentile<T>
 where
     T: Primitive + Ord,
     for<'a> T: Scalar<RefType<'a> = T>,
-    datatypes::prelude::Value: From<Option<T>>,
 {
     fn state(&self) -> Result<Vec<Value>> {
-        Ok(vec![self.min.into()])
+        let nums = self
+            .greater
+            .iter()
+            .map(|x| &x.0)
+            .chain(self.not_greater.iter())
+            .map(|&n| n.into())
+            .collect::<Vec<Value>>();
+        Ok(vec![Value::List(ListValue::new(
+            Some(Box::new(nums)),
+            T::default().into().data_type(),
+        ))])
     }
 
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<()> {
@@ -90,27 +116,47 @@ where
     }
 
     fn evaluate(&self) -> Result<Value> {
-        Ok(self.min.into())
+        if self.not_greater.is_empty() {
+            assert!(
+                self.greater.is_empty(),
+                "not expected in two-heap percentile algorithm, there must be a bug when implementing it"
+            );
+            return Ok(Value::Null);
+        }
+
+        let not_greater = *self.not_greater.peek().unwrap();
+        let percentile = if self.greater.is_empty() {
+            not_greater.into()
+        } else {
+            let greater = self.greater.peek().unwrap();
+            let fract = (((self.n - 1) as f64) * self.p / (100 as f64)).fract();
+            let not_greater_v: f64 = NumCast::from(not_greater).unwrap();
+            let greater_v: f64 = NumCast::from(greater.0).unwrap();
+            let percentile: T =
+                NumCast::from(not_greater_v * (1.0 - fract) + greater_v * fract).unwrap();
+            percentile.into()
+        };
+        Ok(percentile)
     }
 }
 
 #[derive(Debug, Default)]
-pub struct ArgminAccumulatorCreator {
+pub struct PercentileAccumulatorCreator {
     input_types: ArcSwapOption<Vec<ConcreteDataType>>,
 }
 
-impl AggregateFunctionCreator for ArgminAccumulatorCreator {
+impl AggregateFunctionCreator for PercentileAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
         let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
             let input_type = &types[0];
             with_match_ordered_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Argmin::<$S>::default()))
+                    Ok(Box::new(Percentile::<$S>::default()))
                 },
                 {
                     let err_msg = format!(
-                        "\"ARGMIN\" aggregate function not support data type {:?}",
+                        "\"PERCENTILE\" aggregate function not support data type {:?}",
                         input_type.logical_type_id(),
                     );
                     CreateAccumulatorSnafu { err_msg }.fail()?
@@ -153,7 +199,7 @@ impl AggregateFunctionCreator for ArgminAccumulatorCreator {
     }
 
     fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
-        Ok(vec![self.output_type()?])
+        Ok(vec![ConcreteDataType::list_datatype(self.output_type()?)])
     }
 }
 
@@ -172,51 +218,84 @@ mod test {
     #[test]
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
-        let mut argmin = Argmin::<i32>::default();
-        assert!(argmin.update_batch(&[]).is_ok());
-        assert_eq!(Value::Null, argmin.evaluate().unwrap());
+        let mut percentile = Percentile::<i32>::default();
+        percentile.p = 50.0;
+        assert!(percentile.update_batch(&[]).is_ok());
+        assert!(percentile.not_greater.is_empty());
+        assert!(percentile.greater.is_empty());
+        assert_eq!(Value::Null, percentile.evaluate().unwrap());
 
         // test update one not-null value
-        let mut argmin = Argmin::<i32>::default();
+        let mut percentile = Percentile::<i32>::default();
+        percentile.p = 50.0;
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
-        assert!(argmin.update_batch(&v).is_ok());
-        assert_eq!(Value::from(42_i32), argmin.evaluate().unwrap());
+        assert!(percentile.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(42), percentile.evaluate().unwrap());
 
         // test update one null value
-        let mut argmin = Argmin::<i32>::default();
+        let mut percentile = Percentile::<i32>::default();
+        percentile.p = 50.0;
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Option::<i32>::None,
         ]))];
-        assert!(argmin.update_batch(&v).is_ok());
-        assert_eq!(Value::Null, argmin.evaluate().unwrap());
+        assert!(percentile.update_batch(&v).is_ok());
+        percentile.p = 50.0;
+        assert_eq!(Value::Null, percentile.evaluate().unwrap());
 
         // test update no null-value batch
-        let mut argmin = Argmin::<i32>::default();
+        let mut percentile = Percentile::<i32>::default();
+        percentile.p = 50.0;
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Some(-1i32),
             Some(1),
-            Some(3),
+            Some(2),
         ]))];
-        assert!(argmin.update_batch(&v).is_ok());
-        assert_eq!(Value::from(-1_i32), argmin.evaluate().unwrap());
+        assert!(percentile.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(1), percentile.evaluate().unwrap());
 
         // test update null-value batch
-        let mut argmin = Argmin::<i32>::default();
+        let mut percentile = Percentile::<i32>::default();
+        percentile.p = 50.0;
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Some(-2i32),
             None,
+            Some(3),
             Some(4),
         ]))];
-        assert!(argmin.update_batch(&v).is_ok());
-        assert_eq!(Value::from(-2_i32), argmin.evaluate().unwrap());
+        assert!(percentile.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(3), percentile.evaluate().unwrap());
 
         // test update with constant vector
-        let mut argmin = Argmin::<i32>::default();
+        let mut percentile = Percentile::<i32>::default();
+        percentile.p = 50.0;
         let v: Vec<VectorRef> = vec![Arc::new(ConstantVector::new(
             Arc::new(PrimitiveVector::<i32>::from_vec(vec![4])),
             10,
         ))];
-        assert!(argmin.update_batch(&v).is_ok());
-        assert_eq!(Value::from(4_i32), argmin.evaluate().unwrap());
+        assert!(percentile.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(4), percentile.evaluate().unwrap());
+
+        // test left border
+        let mut percentile = Percentile::<i32>::default();
+        percentile.p = 0.0;
+        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+            Some(-1i32),
+            Some(1),
+            Some(2),
+        ]))];
+        assert!(percentile.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(-1), percentile.evaluate().unwrap());
+
+        // test right border
+        let mut percentile = Percentile::<i32>::default();
+        percentile.p = 100.0;
+        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+            Some(-1i32),
+            Some(1),
+            Some(2),
+        ]))];
+        assert!(percentile.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(2), percentile.evaluate().unwrap());
+
     }
 }

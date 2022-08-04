@@ -3,6 +3,7 @@ mod argmin;
 mod diff;
 mod mean;
 mod median;
+mod percentile;
 mod polyval;
 
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use diff::DiffAccumulatorCreator;
 pub use mean::MeanAccumulatorCreator;
 pub use median::MedianAccumulatorCreator;
+pub use percentile::PercentileAccumulatorCreator;
 pub use polyval::PolyvalAccumulatorCreator;
 
 use crate::scalars::FunctionRegistry;
@@ -75,6 +77,10 @@ impl AggregateFunctions {
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "argmin",
             Arc::new(|| Arc::new(ArgminAccumulatorCreator::default())),
+        )));
+        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
+            "percentile",
+            Arc::new(|| Arc::new(PercentileAccumulatorCreator::default())),
         )));
     }
 }
