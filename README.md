@@ -17,7 +17,8 @@ The easiest way to install Rust is to use [`rustup`](https://rustup.rs/), which 
 
 #### Protobuf
 `protoc` is required for compiling `.proto` files. `protobuf` is available from
-major package manager on macos and linux distributions.
+major package manager on macos and linux distributions. You can find an
+installation instructions [here](https://grpc.io/docs/protoc-installation/).
 
 #### OpenSSL
 
