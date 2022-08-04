@@ -367,8 +367,6 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
 
 /// convert a tuple of `PyVector` or one `PyVector`(wrapped in a Python Object Ref[`PyObjectRef`])
 /// to a `Vec<ArrayRef>`
-///
-/// TODO: add support for constant columns
 fn try_into_columns(
     obj: &PyObjectRef,
     vm: &VirtualMachine,
