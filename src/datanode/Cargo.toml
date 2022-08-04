@@ -28,7 +28,7 @@ store-api = { path = "../store-api" }
 table = { path = "../table" }
 table-engine = { path = "../table-engine" }
 tokio = { version = "1.18", features = ["full"] }
-tonic = "0.7"
+tonic = "0.8"
 tokio-stream = { version = "0.1.8", features = ["net"] }
 tower = { version = "0.4", features = ["full"]}
 tower-http = { version ="0.3", features = ["full"]}
