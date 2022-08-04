@@ -140,8 +140,7 @@ fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
 }
 
 /// use to bind to Data Fusion's UDF function
-/// P.S: seems due to fanky proc macro issues, can't just use #[pyfunction] in here
-/// TODO: remove Repetitions
+/// P.S: seems due to proc macro issues, can't just use #[pyfunction] in here
 macro_rules! bind_call_unary_math_function {
     ($DF_FUNC: ident, $vm: ident $(,$ARG: ident)*) => {
         fn inner_fn($($ARG: PyObjectRef,)* vm: &VirtualMachine) -> PyResult<PyObjectRef> {
@@ -160,7 +159,7 @@ macro_rules! bind_call_unary_math_function {
 /// - second is the python virtual machine ident `vm`
 /// - following is the actual args passing in(as a slice).i.e.`&[values.to_arrow_array()]`
 /// - the data type of passing in args, i.e: `Datatype::Float64`
-/// - lastly is the name given to expr of those function, i.e. `expr0, expr1,`....
+/// - lastly ARE names given to expr of those function, i.e. `expr0, expr1,`....
 macro_rules! bind_aggr_fn {
     ($AGGR_FUNC: ident, $VM: ident, $ARGS:expr, $DATA_TYPE: expr $(, $EXPR_ARGS: ident)*) => {
         // just a place holder, we just want the inner `XXXAccumulator`'s function
@@ -198,11 +197,11 @@ fn eval_aggr_fn<T: AggregateExpr>(
 
 /// GrepTime User Define Function module
 ///  
-/// design to allow Python Coprocessor Function to use already implmented udf functions
+/// allow Python Coprocessor Function to use already implmented udf functions from datafusion and GrepTime DB itself
 ///
 #[pymodule]
 pub(in crate::scalars::py_udf_module) mod udf_builtins {
-    // P.S.: not extract to file because not inline proc macro attribute is *unstable*
+    // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
     use arrow::array::NullArray;
