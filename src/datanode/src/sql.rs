@@ -1,8 +1,8 @@
 //! sql handler
 
 mod insert;
+use catalog::SchemaProviderRef;
 use common_error::ext::BoxedError;
-use query::catalog::schema::SchemaProviderRef;
 use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::statement::Statement;
@@ -58,15 +58,13 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
+    use catalog::SchemaProvider;
     use common_query::logical_plan::Expr;
     use common_recordbatch::SendableRecordBatchStream;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::value::Value;
     use log_store::fs::noop::NoopLogStore;
-    use query::catalog::memory;
-    use query::catalog::schema::SchemaProvider;
-    use query::error::Result as QueryResult;
     use query::QueryEngineFactory;
     use storage::config::EngineConfig;
     use storage::EngineImpl;
@@ -121,10 +119,14 @@ mod tests {
             Some(Arc::new(DemoTable {}))
         }
 
-        fn register_table(&self, _name: String, _table: TableRef) -> QueryResult<Option<TableRef>> {
+        fn register_table(
+            &self,
+            _name: String,
+            _table: TableRef,
+        ) -> catalog::error::Result<Option<TableRef>> {
             unimplemented!();
         }
-        fn deregister_table(&self, _name: &str) -> QueryResult<Option<TableRef>> {
+        fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {
             unimplemented!();
         }
         fn table_exist(&self, name: &str) -> bool {
@@ -137,7 +139,7 @@ mod tests {
         let dir = TempDir::new("setup_test_engine_and_table").unwrap();
         let store_dir = dir.path().to_string_lossy();
 
-        let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
         let factory = QueryEngineFactory::new(catalog_list);
         let query_engine = factory.query_engine().clone();
 

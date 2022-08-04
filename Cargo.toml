@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "src/api",
+    "src/catalog",
     "src/client",
     "src/common/base",
     "src/common/error",

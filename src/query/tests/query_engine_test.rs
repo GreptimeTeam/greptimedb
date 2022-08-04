@@ -4,6 +4,8 @@ mod testing_table;
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
+use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
@@ -15,9 +17,6 @@ use datatypes::prelude::*;
 use datatypes::types::DataTypeBuilder;
 use datatypes::vectors::PrimitiveVector;
 use num::NumCast;
-use query::catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use query::catalog::schema::SchemaProvider;
-use query::catalog::{memory, CatalogList, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::error::Result;
 use query::plan::LogicalPlan;
 use query::query_engine::{Output, QueryEngineFactory};
@@ -32,7 +31,7 @@ use crate::testing_table::TestingTable;
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    let catalog_list = memory::new_memory_catalog_list()?;
+    let catalog_list = catalog::memory::new_memory_catalog_list()?;
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
 
@@ -77,7 +76,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
 #[tokio::test]
 async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    let catalog_list = memory::new_memory_catalog_list()?;
+    let catalog_list = catalog::memory::new_memory_catalog_list()?;
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
 

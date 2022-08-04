@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
+use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 
-use crate::catalog::{self, CatalogListRef};
 use crate::datafusion::DfCatalogListAdapter;
 use crate::executor::Runtime;
 

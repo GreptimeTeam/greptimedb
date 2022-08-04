@@ -3,13 +3,13 @@ mod state;
 
 use std::sync::Arc;
 
+use catalog::CatalogList;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::prelude::ScalarUdf;
 use common_recordbatch::SendableRecordBatchStream;
 use sql::statements::statement::Statement;
 
-use crate::catalog::CatalogList;
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
 use crate::plan::LogicalPlan;
@@ -72,11 +72,10 @@ pub type QueryEngineRef = Arc<dyn QueryEngine>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::memory;
 
     #[test]
     fn test_query_engine_factory() {
-        let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
         let factory = QueryEngineFactory::new(catalog_list);
 
         let engine = factory.query_engine();

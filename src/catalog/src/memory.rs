@@ -7,12 +7,12 @@ use common_error::prelude::*;
 use table::table::numbers::NumbersTable;
 use table::TableRef;
 
-use crate::catalog::schema::SchemaProvider;
 use crate::catalog::{
     CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef, DEFAULT_CATALOG_NAME,
     DEFAULT_SCHEMA_NAME,
 };
 use crate::error::{Error, Result};
+use crate::schema::SchemaProvider;
 
 /// Error implementation of memory catalog.
 #[derive(Debug, Snafu)]
@@ -191,7 +191,6 @@ pub fn new_memory_catalog_list() -> Result<CatalogListRef> {
 
 #[cfg(test)]
 mod tests {
-    use table::table::numbers::NumbersTable;
 
     use super::*;
 

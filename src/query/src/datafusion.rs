@@ -7,6 +7,7 @@ mod planner;
 
 use std::sync::Arc;
 
+use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
@@ -21,7 +22,6 @@ pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 use crate::metric;
 use crate::query_engine::{QueryContext, QueryEngineState};
 use crate::{
-    catalog::CatalogListRef,
     datafusion::plan_adapter::PhysicalPlanAdapter,
     datafusion::planner::{DfContextProviderAdapter, DfPlanner},
     error::Result,
@@ -213,11 +213,10 @@ mod tests {
     use datafusion::field_util::FieldExt;
     use datafusion::field_util::SchemaExt;
 
-    use crate::catalog::memory;
     use crate::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 
     fn create_test_engine() -> QueryEngineRef {
-        let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
         let factory = QueryEngineFactory::new(catalog_list);
         factory.query_engine().clone()
     }

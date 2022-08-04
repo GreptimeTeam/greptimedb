@@ -5,6 +5,8 @@ use std::sync::Arc;
 mod testing_table;
 
 use arc_swap::ArcSwapOption;
+use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMeta;
 use common_query::error::CreateAccumulatorSnafu;
 use common_query::error::Result as QueryResult;
@@ -20,9 +22,6 @@ use datatypes::types::PrimitiveType;
 use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
-use query::catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use query::catalog::schema::SchemaProvider;
-use query::catalog::{CatalogList, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use query::error::Result;
 use query::query_engine::Output;
 use query::QueryEngineFactory;

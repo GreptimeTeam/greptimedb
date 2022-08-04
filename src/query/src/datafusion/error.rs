@@ -71,6 +71,12 @@ impl ErrorExt for InnerError {
     }
 }
 
+impl From<InnerError> for catalog::error::Error {
+    fn from(e: InnerError) -> Self {
+        catalog::error::Error::new(e)
+    }
+}
+
 impl From<InnerError> for Error {
     fn from(err: InnerError) -> Self {
         Self::new(err)
