@@ -42,7 +42,8 @@ where
 impl<T> Accumulator for Argmax<T>
 where
     T: Primitive + Ord,
-    for<'a> T: Scalar<RefType<'a> = T>, datatypes::prelude::Value: From<Option<T>>,
+    for<'a> T: Scalar<RefType<'a> = T>,
+    datatypes::prelude::Value: From<Option<T>>,
 {
     fn state(&self) -> Result<Vec<Value>> {
         Ok(vec![self.max.into()])
