@@ -31,6 +31,7 @@ struct Var {
     value: PyVar,
     ty: DataType,
 }
+const EPS: f64 = 1e-12f64;
 
 /// Null element just not supported for now for simplicity with writing test cases
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,9 +55,11 @@ enum PyVar {
 impl PartialEq for PyVar {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (PyVar::FloatVec(a), PyVar::FloatVec(b)) => a == b,
+            (PyVar::FloatVec(a), PyVar::FloatVec(b)) => a.iter().zip(b).fold(true, |acc, (x,y)|{
+                acc && (x-y).abs()<EPS
+            }),
             (PyVar::IntVec(a), PyVar::IntVec(b)) => a == b,
-            (PyVar::Float(a), PyVar::Float(b)) => a == b,
+            (PyVar::Float(a), PyVar::Float(b)) => (a-b).abs()<EPS,
             (PyVar::Int(a), PyVar::Int(b)) => a == b,
             // for just compare the length of vector
             (PyVar::LenFloatVec(len), PyVar::FloatVec(v)) => *len == v.len(),

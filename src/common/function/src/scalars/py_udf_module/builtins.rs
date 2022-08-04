@@ -101,7 +101,7 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
     }
 }
 
-/// Becuase datafusion's UDF only support f32/64, so cast all to f64 to use datafusion's UDF
+/// Becuase most of the datafusion's UDF only support f32/64, so cast all to f64 to use datafusion's UDF
 fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
     match col {
         DFColValue::Array(arr) => {
