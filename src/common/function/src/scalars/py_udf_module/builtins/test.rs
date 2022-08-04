@@ -198,6 +198,7 @@ fn run_testcases() {
         .expect("Fail to read to string");
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
     for (idx, case) in testcases.into_iter().enumerate() {
+        print!("Testcase {idx} ...");
         rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
             vm.add_native_module("udf_builtins", Box::new(udf_builtins::make_module));
             // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
@@ -265,8 +266,8 @@ fn run_testcases() {
                     };
                 }
             };
-            println!("Testcase {idx} ... passed!");
         });
+        println!(" passed!");
     }
 }
 
