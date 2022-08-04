@@ -5,7 +5,7 @@ pub struct BitSet {
 
 impl BitSet {
     pub fn from_vec(data: Vec<u8>, len: usize) -> Self {
-        assert!(data.len() * 8 >= len);
+        assert!(data.len() << 3 >= len);
         Self { buffer: data, len }
     }
 
@@ -45,7 +45,7 @@ impl BitSet {
     pub fn extend(&mut self, other: &BitSet) {
         let new_len = self.len() + other.len();
 
-        if self.buffer.len() * 8 < new_len {
+        if self.buffer.len() << 3 < new_len {
             let buffer_len = (new_len + 7) >> 3;
             self.buffer.resize(buffer_len, 0);
         }
@@ -56,22 +56,24 @@ impl BitSet {
             }
         }
 
-        self.len += other.len();
+        self.len = new_len;
     }
 
-    pub fn append(&mut self, is_set: bool) {
-        let new_len = self.len() + 1;
+    pub fn append(&mut self, is_sets: &[bool]) {
+        let new_len = self.len + is_sets.len();
 
-        if self.buffer.len() * 8 < new_len {
+        if self.buffer.len() << 3 < new_len {
             let buffer_len = (new_len + 7) >> 3;
             self.buffer.resize(buffer_len, 0);
         }
 
-        if is_set {
-            self.set_bit_uncheck(self.len);
+        for (idx, is_set) in is_sets.iter().enumerate() {
+            if *is_set {
+                self.set_bit_uncheck(self.len + idx);
+            }
         }
 
-        self.len += 1;
+        self.len = new_len;
     }
 
     pub fn set_bit(&mut self, idx: usize) {
@@ -156,8 +158,8 @@ mod tests {
     #[test]
     fn tsst_bit_set_append() {
         let mut bit_set: BitSet = vec![0b0000_0001, 0b0000_1000].into();
-        bit_set.append(true);
-        bit_set.append(false);
+
+        bit_set.append(&[true, false]);
 
         check_bit_set(&bit_set, &[0, 11, 16]);
         assert_eq!(None, bit_set.get_bit(18));
@@ -174,8 +176,7 @@ mod tests {
 
         let mut bit_set = BitSet::with_size(10);
 
-        bit_set.append(true);
-        bit_set.append(false);
+        bit_set.append(&[true, false]);
 
         let buffer = bit_set.buffer();
         assert_eq!(vec![1, 0], buffer);
