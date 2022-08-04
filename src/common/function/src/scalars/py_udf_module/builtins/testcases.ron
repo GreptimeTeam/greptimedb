@@ -378,6 +378,54 @@ random(42)"#,
         input: {
             "values": Var(
                 ty: Float64,
+                value: IntVec([1, 2, 2, 3])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+approx_distinct(values)"#,
+        expect: Ok((
+            value: Int(3),
+            ty: Float64
+        ))
+    ),
+    // not impl in datafusion
+    /*
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: IntVec([1, 2, 2, 3])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+approx_median(values)"#,
+        expect: Ok((
+            value: Int(2),
+            ty: Float64
+        ))
+    ),
+    */
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: IntVec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+approx_percentile_cont(values, 0.6)"#,
+        expect: Ok((
+            value: Int(6),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
                 value: FloatVec([1.0, 2.0, 3.0])
             )
         },
@@ -404,6 +452,186 @@ avg(values)"#,
             ty: Float64
         ))
     ),
+    TestCase(
+        input: {
+            "a": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "b": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 0.0, -1.0])
+            ),
+        },
+        script: r#"
+from udf_builtins import *
+correlation(a, b)"#,
+        expect: Ok((
+            value: Float(-1.0),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: IntVec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+count(values)"#,
+        expect: Ok((
+            value: Int(10),
+            ty: Int64
+        ))
+    ),
+    TestCase(
+        input: {
+            "a": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "b": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 0.0, -1.0])
+            ),
+        },
+        script: r#"
+from udf_builtins import *
+covariance(a, b)"#,
+        expect: Ok((
+            value: Float(-1.0),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "a": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "b": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 0.0, -1.0])
+            ),
+        },
+        script: r#"
+from udf_builtins import *
+covariance_pop(a, b)"#,
+        expect: Ok((
+            value: Float(-0.6666666666666666),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: IntVec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+max(values)"#,
+        expect: Ok((
+            value: Int(10),
+            ty: Int64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: IntVec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+min(values)"#,
+        expect: Ok((
+            value: Int(1),
+            ty: Int64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+stddev(values)"#,
+        expect: Ok((
+            value: Float(3.0276503540974917),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+stddev_pop(values)"#,
+        expect: Ok((
+            value: Float(2.8722813232690143),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+sum(values)"#,
+        expect: Ok((
+            value: Float(55),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+variance(values)"#,
+        expect: Ok((
+            value: Float(9.166666666666666),
+            ty: Float64
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+variance_pop(values)"#,
+        expect: Ok((
+            value: Float(8.25),
+            ty: Float64
+        ))
+    ),
+    
+
+
     TestCase(
         input: {
             "values": Var(

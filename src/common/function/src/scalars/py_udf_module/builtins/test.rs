@@ -34,6 +34,10 @@ enum PyVar {
     LenFloatVec(usize),
     /// just for test if the length of IntVec is of the same as `VagueInt.0`
     LenIntVec(usize),
+    FloatWithError {
+        value: f64,
+        error_percent: f64,
+    },
 }
 
 impl PartialEq for PyVar {
@@ -43,10 +47,25 @@ impl PartialEq for PyVar {
             (PyVar::IntVec(a), PyVar::IntVec(b)) => a == b,
             (PyVar::Float(a), PyVar::Float(b)) => a == b,
             (PyVar::Int(a), PyVar::Int(b)) => a == b,
+            // for just compare the length of vector
             (PyVar::LenFloatVec(len), PyVar::FloatVec(v)) => *len == v.len(),
             (PyVar::LenIntVec(len), PyVar::IntVec(v)) => *len == v.len(),
             (PyVar::FloatVec(v), PyVar::LenFloatVec(len)) => *len == v.len(),
             (PyVar::IntVec(v), PyVar::LenIntVec(len)) => *len == v.len(),
+            (
+                Self::Float(v),
+                Self::FloatWithError {
+                    value,
+                    error_percent,
+                },
+            ) => (v - value).abs() < (value.abs() * error_percent),
+            (
+                Self::FloatWithError {
+                    value,
+                    error_percent,
+                },
+                Self::Float(v),
+            ) => (v - value).abs() < (value.abs() * error_percent),
             (_, _) => false,
         }
     }
