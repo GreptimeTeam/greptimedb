@@ -130,7 +130,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         //TODO(dennis): supports multi regions
         let region_id: RegionId = 0;
         // TODO(yingwen): Maybe we should use table name as part of region name.
-        let name = storage::gen_region_name(region_id);
+        let name = request.name.clone();
 
         let host_column =
             ColumnDescriptorBuilder::new(0, "host", ConcreteDataType::string_datatype())
@@ -321,5 +321,39 @@ mod tests {
         assert_eq!(tss.to_arrow_array(), columns[1]);
         assert_eq!(cpus.to_arrow_array(), columns[2]);
         assert_eq!(memories.to_arrow_array(), columns[3]);
+    }
+
+    #[tokio::test]
+    async fn test_open_table() {
+        common_telemetry::init_default_ut_logging();
+
+        let ctx = EngineContext::default();
+        let open_req = OpenTableRequest {
+            catalog_name: String::new(),
+            schema_name: String::new(),
+            table_name: test_util::TABLE_NAME.to_string(),
+            // Currently the first table has id 0.
+            table_id: 0,
+        };
+
+        let (engine, table) = {
+            let (engine, table_engine, table) = test_util::setup_mock_engine_and_table().await;
+            // Now try to open the table again.
+            let reopened = table_engine
+                .open_table(&ctx, open_req.clone())
+                .await
+                .unwrap();
+            assert_eq!(table.schema(), reopened.schema());
+
+            (engine, table)
+        };
+
+        // Construct a new table engine, and try to open the table.
+        let table_engine = MitoEngine::new(engine);
+        let reopened = table_engine
+            .open_table(&ctx, open_req.clone())
+            .await
+            .unwrap();
+        assert_eq!(table.schema(), reopened.schema());
     }
 }

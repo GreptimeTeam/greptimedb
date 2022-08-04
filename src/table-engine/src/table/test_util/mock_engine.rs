@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common_error::mock::MockError;
 use common_error::prelude::StatusCode;
+use common_telemetry::logging;
 use storage::metadata::{RegionMetaImpl, RegionMetadataRef};
 use storage::write_batch::WriteBatch;
 use store_api::storage::{
@@ -127,6 +128,8 @@ impl StorageEngine for MockEngine {
         name: &str,
         _opts: &OpenOptions,
     ) -> Result<MockRegion> {
+        logging::info!("Mock engine create region, name: {}", name);
+
         let mut regions = self.regions.lock().unwrap();
         if let Some(region) = regions.opened_regions.get(name) {
             return Ok(region.clone());
@@ -151,6 +154,8 @@ impl StorageEngine for MockEngine {
         _ctx: &EngineContext,
         descriptor: RegionDescriptor,
     ) -> Result<MockRegion> {
+        logging::info!("Mock engine create region, descriptor: {:?}", descriptor);
+
         let mut regions = self.regions.lock().unwrap();
         if let Some(region) = regions.opened_regions.get(&descriptor.name) {
             return Ok(region.clone());

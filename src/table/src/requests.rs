@@ -22,7 +22,7 @@ pub struct CreateTableRequest {
 }
 
 /// Open table request
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OpenTableRequest {
     pub catalog_name: String,
     pub schema_name: String,

@@ -17,7 +17,7 @@ use tempdir::TempDir;
 use crate::engine::MitoEngine;
 use crate::table::test_util::mock_engine::MockEngine;
 
-const TABLE_NAME: &str = "demo";
+pub const TABLE_NAME: &str = "demo";
 
 fn schema_for_test() -> Schema {
     let column_schemas = vec![
@@ -30,7 +30,7 @@ fn schema_for_test() -> Schema {
     Schema::with_timestamp_index(column_schemas, 1).expect("ts must be timestamp column")
 }
 
-type MockMitoEngine = MitoEngine<MockEngine>;
+pub type MockMitoEngine = MitoEngine<MockEngine>;
 
 pub async fn setup_test_engine_and_table() -> (
     MitoEngine<EngineImpl<NoopLogStore>>,

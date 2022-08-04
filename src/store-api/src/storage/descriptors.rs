@@ -10,13 +10,6 @@ pub type ColumnId = u32;
 pub type ColumnFamilyId = u32;
 /// Id of the region.
 pub type RegionId = u32;
-/// Default region name prefix
-pub const REGION_PREFIX: &str = "r_";
-
-#[inline]
-pub fn gen_region_name(id: RegionId) -> String {
-    format!("{}{}", REGION_PREFIX, id)
-}
 
 // TODO(yingwen): Validate default value has same type with column, and name is a valid column name.
 /// A [ColumnDescriptor] contains information to create a column.
@@ -233,11 +226,5 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(1, desc.columns.len());
-    }
-
-    #[test]
-    fn test_gen_region_name() {
-        assert_eq!("r_0", gen_region_name(0));
-        assert_eq!("r_99", gen_region_name(99));
     }
 }
