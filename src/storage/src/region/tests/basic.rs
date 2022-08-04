@@ -145,6 +145,9 @@ async fn test_reopen() {
         // Scan after reopen.
         let output = tester.full_scan().await;
         assert_eq!(all_data, output);
+
+        // Check committed sequence.
+        assert_eq!(i + 1, tester.committed_sequence() as i64);
     }
 }
 

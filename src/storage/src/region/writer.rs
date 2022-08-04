@@ -202,19 +202,22 @@ impl WriterInner {
     ) -> Result<()> {
         let version_control = writer_ctx.version_control();
 
-        let (flushed_sequence, last_sequence) = {
+        let (flushed_sequence, mut last_sequence);
+        let mut num_requests = 0;
+        {
             let _lock = version_mutex.lock().await;
 
             // Data after flushed sequence need to be recovered.
-            let flushed_sequence = version_control.current().flushed_sequence();
+            flushed_sequence = version_control.current().flushed_sequence();
+            last_sequence = flushed_sequence;
             // FIXME(yingwen): Now log store will overwrite the entry id by its internal entry id,
             // which starts from 0. This is a hack to just make the test passes since we knows the
             // entry id of log store is always equals to `sequence - 1`. Change this to
             // `flushed_sequence + ` once the log store fixes this issue.
             let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence).await?;
-            let mut last_sequence = flushed_sequence;
             while let Some((req_sequence, _header, request)) = stream.try_next().await? {
                 if let Some(request) = request {
+                    num_requests += 1;
                     let time_ranges = self.prepare_memtables(&request, version_control)?;
                     // Note that memtables of `Version` may be updated during replay.
                     let version = version_control.current();
@@ -233,7 +236,7 @@ impl WriterInner {
                             writer_ctx.shared.name,
                         );
 
-                        error::SequenceDecreaseSnafu {
+                        error::SequenceNotMonotonicSnafu {
                             prev: last_sequence,
                             given: req_sequence,
                         }
@@ -248,14 +251,15 @@ impl WriterInner {
             }
 
             version_control.set_committed_sequence(last_sequence);
+        }
 
-            (flushed_sequence, last_sequence)
-        };
-
-        logging::debug!(
-            "Region replay finished, flushed_sequence: {}, last_sequence: {}",
+        logging::info!(
+            "Region replay finished, region_id: {}, region_name: {}, flushed_sequence: {}, last_sequence: {}, num_requests: {}",
+            writer_ctx.shared.id,
+            writer_ctx.shared.name,
             flushed_sequence,
-            last_sequence
+            last_sequence,
+            num_requests,
         );
 
         Ok(())

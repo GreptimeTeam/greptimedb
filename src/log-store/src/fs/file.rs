@@ -369,7 +369,6 @@ impl LogFile {
             let mut file = self.file.write().await;
             // generate entry id
             entry_id = self.inc_entry_id();
-
             // rewrite encoded data
             LittleEndian::write_u64(&mut serialized[0..8], entry_id);
             // TODO(hl): CRC was calculated twice

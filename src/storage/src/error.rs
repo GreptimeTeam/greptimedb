@@ -223,7 +223,7 @@ pub enum Error {
         prev,
         given
     ))]
-    SequenceDecrease {
+    SequenceNotMonotonic {
         prev: SequenceNumber,
         given: SequenceNumber,
         backtrace: Backtrace,
@@ -255,7 +255,7 @@ impl ErrorExt for Error {
             | SequenceColumnNotFound { .. }
             | WalDataCorrupted { .. }
             | VersionNotFound { .. }
-            | SequenceDecrease { .. } => StatusCode::Unexpected,
+            | SequenceNotMonotonic { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | InitBackend { .. }
