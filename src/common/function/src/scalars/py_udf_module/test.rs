@@ -33,7 +33,7 @@ struct Var {
 }
 
 /// for floating number comparsion
-const EPS: f64 = f64::EPSILON;
+const EPS: f64 = 2.0 * f64::EPSILON;
 
 /// Null element just not supported for now for simplicity with writing test cases
 #[derive(Debug, Serialize, Deserialize)]
@@ -60,9 +60,9 @@ impl PartialEq for PyVar {
             (PyVar::FloatVec(a), PyVar::FloatVec(b)) => a
                 .iter()
                 .zip(b)
-                .fold(true, |acc, (x, y)| acc && (x - y).abs() < EPS),
+                .fold(true, |acc, (x, y)| acc && (x - y).abs() <= EPS),
             (PyVar::IntVec(a), PyVar::IntVec(b)) => a == b,
-            (PyVar::Float(a), PyVar::Float(b)) => (a - b).abs() < EPS,
+            (PyVar::Float(a), PyVar::Float(b)) => (a - b).abs() <= EPS,
             (PyVar::Int(a), PyVar::Int(b)) => a == b,
             // for just compare the length of vector
             (PyVar::LenFloatVec(len), PyVar::FloatVec(v)) => *len == v.len(),
