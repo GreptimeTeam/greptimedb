@@ -1,4 +1,5 @@
 pub struct BitSet {
+    // TODO(fys): Is SmallVec or TinyVec better?
     buffer: Vec<u8>,
     nbits: usize,
 }
