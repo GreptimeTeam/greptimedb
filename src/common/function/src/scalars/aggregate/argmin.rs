@@ -12,7 +12,7 @@ use datatypes::vectors::{ConstantVector, ListVector};
 use datatypes::with_match_ordered_primitive_type_id;
 use snafu::{OptionExt, ResultExt};
 
-// https://numpy.org/doc/stable/reference/generated/numpy.diff.html
+// https://numpy.org/doc/stable/reference/generated/numpy.argmin.html
 #[derive(Debug, Default)]
 pub struct Argmin<T>
 where
