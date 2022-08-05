@@ -12,7 +12,7 @@ use rustpython_vm::{
     class::PyClassImpl,
     convert::ToPyObject,
     scope::Scope,
-    AsObject, PyObjectRef,  VirtualMachine,
+    AsObject, PyObjectRef, VirtualMachine,
 };
 use serde::{Deserialize, Serialize};
 

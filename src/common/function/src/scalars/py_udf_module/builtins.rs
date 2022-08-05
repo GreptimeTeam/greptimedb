@@ -338,7 +338,7 @@ pub(in crate::scalars::py_udf_module) mod udf_builtins {
     }
 
     /// Not implement in datafusion
-    /* 
+    /*
     #[pyfunction]
     fn approx_median(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_aggr_fn!(
