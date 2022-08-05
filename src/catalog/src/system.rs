@@ -76,7 +76,7 @@ fn build_system_catalog_schema() -> Schema {
     let mut cols = Vec::with_capacity(6);
     cols.push(ColumnSchema::new(
         "key".to_string(),
-        ConcreteDataType::binary_datatype(),
+        ConcreteDataType::uint8_datatype(),
         false,
     ));
     cols.push(ColumnSchema::new(
@@ -87,11 +87,11 @@ fn build_system_catalog_schema() -> Schema {
     Schema::new(cols)
 }
 
-pub fn decode_system_catalog(key: Option<&[u8]>, value: Option<&[u8]>) -> Result<Entry> {
+pub fn decode_system_catalog(key: Option<u8>, value: Option<&[u8]>) -> Result<Entry> {
     let key = key.context(InvalidKeySnafu { key: None })?;
     let value = value.context(EmptyValueSnafu)?;
 
-    match EntryType::try_from(*key.get(0).context(InvalidKeySnafu { key: None })?)? {
+    match EntryType::try_from(key)? {
         EntryType::Catalog => {
             let entry: CatalogEntry =
                 serde_json::from_slice(value).context(ValueDeserializeSnafu)?;

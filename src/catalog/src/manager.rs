@@ -4,7 +4,7 @@ use std::sync::Arc;
 use common_recordbatch::RecordBatch;
 use common_telemetry::info;
 use datatypes::prelude::ScalarVector;
-use datatypes::vectors::BinaryVector;
+use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::StreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::TableEngine;
@@ -91,7 +91,7 @@ impl CatalogManagerImpl {
             }
         );
 
-        let key = BinaryVector::try_from_arrow_array(&records.df_recordbatch.columns()[0])
+        let key = UInt8Vector::try_from_arrow_array(&records.df_recordbatch.columns()[0])
             .with_context(|_| SystemCatalogTypeMismatchSnafu {
                 data_type: records.df_recordbatch.columns()[1].data_type().clone(),
             })?;
