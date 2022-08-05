@@ -1161,6 +1161,7 @@ dependencies = [
  "axum-macros",
  "axum-test-helper",
  "catalog",
+ "common-base",
  "common-error",
  "common-query",
  "common-recordbatch",

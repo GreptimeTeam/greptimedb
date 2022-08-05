@@ -118,7 +118,7 @@ impl From<&[u8]> for BitSet {
 mod tests {
     use std::usize;
 
-    use crate::server::grpc::bitset::BitSet;
+    use crate::bitset::BitSet;
 
     #[test]
     fn test_bit_set_get_and_set() {

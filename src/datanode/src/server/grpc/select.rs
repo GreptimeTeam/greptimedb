@@ -3,6 +3,7 @@ use std::sync::Arc;
 use api::v1::{column::Values, Column, SelectResult};
 use api::v1::{ObjectResult, ResultHeader};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
+use common_base::bitset::BitSet;
 use common_recordbatch::{util, RecordBatch};
 use datatypes::arrow_array::{BinaryArray, StringArray};
 use query::Output;
@@ -10,7 +11,6 @@ use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result};
 use crate::server::grpc::{
-    bitset::BitSet,
     handler::{ERROR, SUCCESS},
     server::PROTOCOL_VERSION,
 };

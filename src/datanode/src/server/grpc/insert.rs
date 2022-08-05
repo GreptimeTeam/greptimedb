@@ -4,12 +4,12 @@ use std::{
 };
 
 use api::v1::{column::Values, Column, InsertBatch, InsertExpr};
+use common_base::bitset::BitSet;
 use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::{requests::InsertRequest, Table};
 
 use crate::error::{ColumnNotFoundSnafu, DecodeInsertSnafu, IllegalInsertDataSnafu, Result};
-use crate::server::grpc::bitset::BitSet;
 
 pub fn insertion_expr_to_request(
     insert: InsertExpr,
@@ -185,6 +185,7 @@ mod tests {
         column::{self, Values},
         Column, InsertBatch, InsertExpr,
     };
+    use common_base::bitset::BitSet;
     use common_query::prelude::Expr;
     use common_recordbatch::SendableRecordBatchStream;
     use datatypes::{
@@ -195,10 +196,7 @@ mod tests {
     use table::error::Result as TableResult;
     use table::Table;
 
-    use crate::server::grpc::{
-        bitset::BitSet,
-        insert::{convert_values, insertion_expr_to_request, is_null},
-    };
+    use crate::server::grpc::insert::{convert_values, insertion_expr_to_request, is_null};
 
     #[test]
     fn test_insertion_expr_to_request() {
