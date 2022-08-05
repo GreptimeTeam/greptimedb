@@ -1,0 +1,20 @@
+[package]
+name = "test-util"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies.arrow]
+package = "arrow2"
+version="0.10"
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+
+[dependencies]
+async-trait = "0.1"
+common-query = { path = "../src/common/query" }
+common-recordbatch = {path = "../src/common/recordbatch" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
+datatypes = {path = "../src/datatypes" }
+futures = "0.3"
+snafu = { version = "0.7", features = ["backtraces"] }
+table = { path = "../src/table" }
+tokio = { version = "1.20", features = ["full"] }

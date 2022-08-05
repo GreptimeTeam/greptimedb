@@ -2,8 +2,6 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-mod testing_table;
-
 use arc_swap::ArcSwapOption;
 use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -13,10 +11,11 @@ use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Accumulator;
 use common_query::logical_plan::AggregateFunctionCreator;
 use common_query::prelude::*;
-use common_recordbatch::util;
+use common_recordbatch::{util, RecordBatch};
 use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::prelude::*;
+use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::types::DataTypeBuilder;
 use datatypes::types::PrimitiveType;
 use datatypes::vectors::PrimitiveVector;
@@ -26,8 +25,7 @@ use query::error::Result;
 use query::query_engine::Output;
 use query::QueryEngineFactory;
 use table::TableRef;
-
-use crate::testing_table::TestingTable;
+use test_util::MemTable;
 
 #[derive(Debug, Default)]
 struct MySumAccumulator<T, SumT>
@@ -217,10 +215,15 @@ where
     let table_name = format!("{}_numbers", std::any::type_name::<T>());
     let column_name = format!("{}_number", std::any::type_name::<T>());
 
-    let testing_table = Arc::new(TestingTable::new(
-        &column_name,
-        Arc::new(PrimitiveVector::<T>::from_vec(numbers.clone())),
-    ));
+    let column_schemas = vec![ColumnSchema::new(
+        column_name.clone(),
+        T::build_data_type(),
+        true,
+    )];
+    let schema = Arc::new(Schema::new(column_schemas.clone()));
+    let column: VectorRef = Arc::new(PrimitiveVector::<T>::from_vec(numbers));
+    let recordbatch = RecordBatch::new(schema, vec![column]).unwrap();
+    let testing_table = Arc::new(MemTable::new(recordbatch));
 
     let factory = new_query_engine_factory(table_name.clone(), testing_table);
     let engine = factory.query_engine();

@@ -25,8 +25,8 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::error::{ArrowError, Result as ArrowResult};
-use datatypes::schema::SchemaRef as TableSchemaRef;
 use datatypes::schema::SchemaRef;
+use datatypes::schema::{Schema, SchemaRef as TableSchemaRef};
 use futures::Stream;
 use snafu::prelude::*;
 
@@ -215,10 +215,7 @@ impl Table for TableAdapter {
             .await
             .context(error::DatafusionSnafu)?;
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.schema.clone(),
-            df_stream,
-        )))
+        Ok(Box::pin(RecordBatchStreamAdapter::try_new(df_stream)?))
     }
 
     fn supports_filter_pushdown(&self, filter: &Expr) -> Result<FilterPushDownType> {
@@ -278,8 +275,10 @@ pub struct RecordBatchStreamAdapter {
 }
 
 impl RecordBatchStreamAdapter {
-    pub fn new(schema: SchemaRef, stream: DfSendableRecordBatchStream) -> Self {
-        Self { schema, stream }
+    pub fn try_new(stream: DfSendableRecordBatchStream) -> Result<Self> {
+        let schema =
+            Arc::new(Schema::try_from(stream.schema()).context(error::SchemaConversionSnafu)?);
+        Ok(Self { schema, stream })
     }
 }
 
