@@ -118,12 +118,8 @@ impl PyValue {
                 Arc::new(datatypes::vectors::Float64Vector::from_vec(v.clone()))
             }
             PyValue::IntVec(v) => Arc::new(datatypes::vectors::Int64Vector::from_vec(v.clone())),
-            PyValue::Int(v) => {
-                return Ok(vm.ctx.new_int(*v).into());
-            }
-            PyValue::Float(v) => {
-                return Ok(vm.ctx.new_float(*v).into());
-            }
+            PyValue::Int(v) => return Ok(vm.ctx.new_int(*v).into()),
+            PyValue::Float(v) => return Ok(vm.ctx.new_float(*v).into()),
             Self::Bool(v) => return Ok(vm.ctx.new_bool(*v).into()),
             _ => return Err(format!("Unsupported type:{self:#?}")),
         };
