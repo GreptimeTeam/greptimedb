@@ -611,7 +611,6 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
- "tracing-core",
  "tracing-subscriber",
 ]
 
