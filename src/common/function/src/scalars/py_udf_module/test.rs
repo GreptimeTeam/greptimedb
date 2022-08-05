@@ -56,8 +56,9 @@ enum PyValue {
     },
 }
 
-impl PartialEq for PyValue {
-    fn eq(&self, other: &Self) -> bool {
+impl PyValue {
+    /// compare if results is just as expect, not using PartialEq because it is not transtive .e.g. [1,2,3] == len(3) == [4,5,6]
+    fn just_as_expect(&self, other: &Self) -> bool {
         match (self, other) {
             (PyValue::FloatVec(a), PyValue::FloatVec(b)) => a
                 .iter()
@@ -273,7 +274,7 @@ fn run_testcases() {
                     let ser = PyValue::from_py_obj(&obj, vm);
                     match (ser, case.expect){
                         (Ok(real), Ok(expect)) => {
-                            if !(real == expect.value){
+                            if !(real.just_as_expect(&expect.value)){
                                 panic!("Not as Expected for code:\n{}\n Real Value is {real:#?}, but expect {expect:#?}", case.script)
                             }
                         },
