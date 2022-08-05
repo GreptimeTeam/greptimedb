@@ -11,7 +11,8 @@ use rustpython_vm::{
     builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt},
     AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
-
+#[cfg(test)]
+mod unit_tests;
 use crate::scalars::python::PyVector;
 
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
@@ -20,6 +21,9 @@ pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool
     obj.is_instance(T::class(vm).into(), vm).unwrap_or(false)
 }
 
+/// ```no_run
+/// vm.new_type_error(format!("Can't cast operand of type `{name}` into `{ty}`."))
+/// ```
 fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseExceptionRef {
     vm.new_type_error(format!("Can't cast operand of type `{name}` into `{ty}`."))
 }
@@ -50,6 +54,28 @@ fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DF
     } else if is_instance::<PyFloat>(&obj, vm) {
         let ret = obj.try_into_value::<f64>(vm)?;
         Ok(DFColValue::Scalar(ScalarValue::Float64(Some(ret))))
+    } else if is_instance::<PyList>(&obj, vm) {
+        let ret = obj
+            .payload::<PyList>()
+            .ok_or_else(|| type_cast_error(&obj.class().name(), "vector", vm))?;
+        let ret: Vec<ScalarValue> = ret
+            .borrow_vec()
+            .iter()
+            .map(|obj| -> PyResult<ScalarValue> {
+                let col = try_into_columnar_value(obj.to_owned(), vm)?;
+                match col {
+                    DFColValue::Array(arr) => Err(vm.new_type_error(format!(
+                        "Expect only scalar value in a list, found a array of type {:?} nested in list", arr.data_type()
+                    ))),
+                    DFColValue::Scalar(val) => Ok(val),
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        let ty = ret[0].get_datatype();
+        Ok(DFColValue::Scalar(ScalarValue::List(
+            Some(Box::new(ret)),
+            Box::new(ty),
+        )))
     } else {
         Err(vm.new_type_error(format!(
             "Can't cast object of type {} into vector or scalar",
@@ -79,6 +105,8 @@ fn try_into_py_obj(col: DFColValue, vm: &VirtualMachine) -> PyResult<PyObjectRef
 }
 
 /// turn a ScalarValue into a Python Object, currently support
+///
+/// ScalarValue -> Python Type
 /// - Float64 -> PyFloat
 /// - Int64 -> PyInt
 /// - UInt64 -> PyInt
@@ -93,8 +121,8 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
                 .into_iter()
                 .map(|v| scalar_val_try_into_py_obj(v, vm))
                 .collect::<Result<_, _>>()?;
-            let list = PyList::from(list).into_pyobject(vm);
-            Ok(list)
+            let list = vm.ctx.new_list(list);
+            Ok(list.into())
         }
         _ => Err(vm.new_type_error(format!(
             "Can't cast type {:#?} to a Python Object",
