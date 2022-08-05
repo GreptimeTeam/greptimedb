@@ -768,4 +768,17 @@ sin(num)"#,
             value: Float(0.0)
         ))
     ),
+    // test if string returns error correctly
+    TestCase(
+        input: {
+            "num": Var(
+                ty: Boolean,
+                value: Str("42")
+            )
+        },
+        script: r#"
+from udf_builtins import *
+sin(num)"#,
+        expect: Err("Can't cast object of type str into vector or scalar")
+    ),
 ]

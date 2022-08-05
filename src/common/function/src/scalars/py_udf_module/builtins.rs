@@ -40,15 +40,16 @@ fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DF
             .payload::<PyVector>()
             .ok_or_else(|| type_cast_error(&obj.class().name(), "vector", vm))?;
         Ok(DFColValue::Array(ret.to_arrow_array()))
+    } else if is_instance::<PyBool>(&obj, vm) {
+        // Note that a `PyBool` is also a `PyInt`, so check if it is a bool first to get a smaller type
+        let ret = obj.try_into_value::<bool>(vm)?;
+        Ok(DFColValue::Scalar(ScalarValue::Boolean(Some(ret))))
     } else if is_instance::<PyInt>(&obj, vm) {
         let ret = obj.try_into_value::<i64>(vm)?;
         Ok(DFColValue::Scalar(ScalarValue::Int64(Some(ret))))
     } else if is_instance::<PyFloat>(&obj, vm) {
         let ret = obj.try_into_value::<f64>(vm)?;
         Ok(DFColValue::Scalar(ScalarValue::Float64(Some(ret))))
-    } else if is_instance::<PyBool>(&obj, vm) {
-        let ret = obj.try_into_value::<bool>(vm)?;
-        Ok(DFColValue::Scalar(ScalarValue::Boolean(Some(ret))))
     } else {
         Err(vm.new_type_error(format!(
             "Can't cast object of type {} into vector or scalar",
@@ -337,6 +338,7 @@ pub(in crate::scalars::py_udf_module) mod udf_builtins {
     }
 
     /// Not implement in datafusion
+    /* 
     #[pyfunction]
     fn approx_median(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_aggr_fn!(
@@ -347,6 +349,7 @@ pub(in crate::scalars::py_udf_module) mod udf_builtins {
             expr0
         );
     }
+    */
 
     #[pyfunction]
     fn approx_percentile_cont(

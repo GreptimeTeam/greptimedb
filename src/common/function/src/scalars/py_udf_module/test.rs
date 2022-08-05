@@ -8,11 +8,11 @@ use arrow::{
 use datatypes::vectors::VectorRef;
 use ron::from_str as from_ron_string;
 use rustpython_vm::{
-    builtins::{PyBool, PyFloat, PyInt, PyList},
+    builtins::{PyFloat, PyInt, PyList},
     class::PyClassImpl,
     convert::ToPyObject,
     scope::Scope,
-    AsObject, PyObjectRef, PyPayload, VirtualMachine,
+    AsObject, PyObjectRef,  VirtualMachine,
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,7 @@ enum PyValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Str(String),
     /// for test if the length of FloatVec is of the same as `LenFloatVec.0`
     LenFloatVec(usize),
     /// for test if the length of IntVec is of the same as `LenIntVec.0`
@@ -121,6 +122,7 @@ impl PyValue {
             PyValue::Int(v) => return Ok(vm.ctx.new_int(*v).into()),
             PyValue::Float(v) => return Ok(vm.ctx.new_float(*v).into()),
             Self::Bool(v) => return Ok(vm.ctx.new_bool(*v).into()),
+            Self::Str(s) => return Ok(vm.ctx.new_str(s.as_str()).into()),
             _ => return Err(format!("Unsupported type:{self:#?}")),
         };
         let v = PyVector::from(v).to_pyobject(vm);
