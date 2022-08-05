@@ -116,7 +116,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     }
 }
 
-fn build_row_key_from_schema(
+fn build_row_key_desc_from_schema(
     mut column_id: ColumnId,
     request: &CreateTableRequest,
 ) -> Result<(ColumnId, RowKeyDescriptor)> {
@@ -168,7 +168,7 @@ fn build_row_key_from_schema(
     Ok((column_id, builder.build().unwrap()))
 }
 
-fn build_comlumn_family_from_request(
+fn build_column_family_from_request(
     mut column_id: ColumnId,
     request: &CreateTableRequest,
 ) -> Result<(ColumnId, ColumnFamilyDescriptor)> {
@@ -214,8 +214,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let table_name = &request.name;
 
         let (next_column_id, default_cf) =
-            build_comlumn_family_from_request(INIT_COLUMN_ID, &request)?;
-        let (next_column_id, row_key) = build_row_key_from_schema(next_column_id, &request)?;
+            build_column_family_from_request(INIT_COLUMN_ID, &request)?;
+        let (next_column_id, row_key) = build_row_key_desc_from_schema(next_column_id, &request)?;
 
         // Now we just use table name as region name. TODO(yingwen): Naming pattern of region.
         let region_name = table_name.clone();
