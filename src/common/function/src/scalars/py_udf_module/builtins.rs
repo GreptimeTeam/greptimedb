@@ -38,6 +38,7 @@ fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseException
 /// | float  | f64  |
 /// | bool   | bool |
 /// | vector | array|
+/// | list   | `ScalarValue::List` |
 fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DFColValue> {
     if is_instance::<PyVector>(&obj, vm) {
         let ret = obj
@@ -45,7 +46,7 @@ fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DF
             .ok_or_else(|| type_cast_error(&obj.class().name(), "vector", vm))?;
         Ok(DFColValue::Array(ret.to_arrow_array()))
     } else if is_instance::<PyBool>(&obj, vm) {
-        // Note that a `PyBool` is also a `PyInt`, so check if it is a bool first to get a smaller type
+        // Note that a `PyBool` is also a `PyInt`, so check if it is a bool first to get a more precise type
         let ret = obj.try_into_value::<bool>(vm)?;
         Ok(DFColValue::Scalar(ScalarValue::Boolean(Some(ret))))
     } else if is_instance::<PyInt>(&obj, vm) {
@@ -65,7 +66,7 @@ fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DF
                 let col = try_into_columnar_value(obj.to_owned(), vm)?;
                 match col {
                     DFColValue::Array(arr) => Err(vm.new_type_error(format!(
-                        "Expect only scalar value in a list, found a array of type {:?} nested in list", arr.data_type()
+                        "Expect only scalar value in a list, found a vector of type {:?} nested in list", arr.data_type()
                     ))),
                     DFColValue::Scalar(val) => Ok(val),
                 }
