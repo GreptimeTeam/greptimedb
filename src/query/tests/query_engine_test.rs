@@ -25,7 +25,7 @@ use query::query_engine::{Output, QueryEngineFactory};
 use query::QueryEngine;
 use rand::Rng;
 use table::table::adapter::DfTableProviderAdapter;
-use testutil::MemTable;
+use test_util::MemTable;
 
 use crate::pow::pow;
 

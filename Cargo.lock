@@ -511,7 +511,7 @@ dependencies = [
  "datatypes",
  "snafu",
  "table",
- "testutil",
+ "test-util",
  "tokio",
 ]
 
@@ -2996,7 +2996,7 @@ dependencies = [
  "snafu",
  "sql",
  "table",
- "testutil",
+ "test-util",
  "tokio",
  "tokio-stream",
 ]
@@ -3769,7 +3769,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "testutil"
+name = "test-util"
 version = "0.1.0"
 dependencies = [
  "arrow2",

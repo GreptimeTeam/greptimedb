@@ -9,7 +9,7 @@ use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::UInt32Vector;
 use table::TableRef;
-use testutil::MemTable;
+use test_util::MemTable;
 
 use crate::catalog::{
     CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef, DEFAULT_CATALOG_NAME,
@@ -185,7 +185,7 @@ pub fn new_memory_catalog_list() -> Result<CatalogListRef> {
     let catalog_list = Arc::new(MemoryCatalogList::default());
 
     // Add numbers table for test
-    // TODO(LFC): Use real table engine here when there's one, and get rid of "testutil" dependency
+    // TODO(LFC): Use real table engine here when there's one, and get rid of "test-util" dependency
     let table = new_numbers_table()?;
     schema_provider.register_table("numbers".to_string(), table)?;
     catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);

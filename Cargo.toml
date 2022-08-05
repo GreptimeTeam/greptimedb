@@ -23,5 +23,5 @@ members = [
     "src/store-api",
     "src/table",
     "src/table-engine",
-    "testutil",
+    "test-util",
 ]

@@ -25,7 +25,7 @@ use query::error::Result;
 use query::query_engine::Output;
 use query::QueryEngineFactory;
 use table::TableRef;
-use testutil::MemTable;
+use test_util::MemTable;
 
 #[derive(Debug, Default)]
 struct MySumAccumulator<T, SumT>

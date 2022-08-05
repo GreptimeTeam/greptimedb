@@ -13,7 +13,7 @@ datatypes = { path = "../datatypes" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
 snafu = { version = "0.7", features = ["backtraces"] }
 table = { path = "../table" }
-testutil = { path = "../../testutil" }
+test-util = { path = "../../test-util" }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
