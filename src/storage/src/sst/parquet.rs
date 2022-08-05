@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
+use common_telemetry::tracing::log::Log;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk;
 use datatypes::arrow::datatypes::{DataType, Field, Schema};

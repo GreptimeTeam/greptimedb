@@ -21,21 +21,10 @@ pub struct MemoryCatalogList {
     pub catalogs: RwLock<HashMap<String, CatalogProviderRef>>,
 }
 
-impl CatalogList for MemoryCatalogList {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn register_catalog(
-        &self,
-        name: String,
-        catalog: CatalogProviderRef,
-    ) -> Option<CatalogProviderRef> {
-        let mut catalogs = self.catalogs.write().unwrap();
-        catalogs.insert(name, catalog)
-    }
-
-    fn register_catalog_if_absent(
+impl MemoryCatalogList {
+    /// Registers a catalog and return `None` if no catalog with the same name was already
+    /// registered, or `Some` with the previously registered catalog.
+    pub fn register_catalog_if_absent(
         &self,
         name: String,
         catalog: Arc<dyn CatalogProvider>,
@@ -48,6 +37,21 @@ impl CatalogList for MemoryCatalogList {
                 None
             }
         }
+    }
+}
+
+impl CatalogList for MemoryCatalogList {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn register_catalog(
+        &self,
+        name: String,
+        catalog: CatalogProviderRef,
+    ) -> Option<CatalogProviderRef> {
+        let mut catalogs = self.catalogs.write().unwrap();
+        catalogs.insert(name, catalog)
     }
 
     fn catalog_names(&self) -> Vec<String> {

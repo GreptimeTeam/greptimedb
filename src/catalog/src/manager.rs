@@ -13,7 +13,7 @@ use super::error::Result;
 use crate::catalog::{CatalogList, CatalogProvider, CatalogProviderRef};
 use crate::consts::SYSTEM_CATALOG_NAME;
 use crate::error::{CatalogNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu};
-use crate::memory::MemoryCatalogProvider;
+use crate::memory::{MemoryCatalogList, MemoryCatalogProvider};
 use crate::system::{decode_system_catalog, Entry, SystemCatalogTable};
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -21,7 +21,7 @@ use crate::system::{decode_system_catalog, Entry, SystemCatalogTable};
 #[allow(dead_code)]
 pub struct CatalogManager {
     system: Arc<SystemCatalogTable>,
-    catalogs: Arc<dyn CatalogList>,
+    catalogs: Arc<MemoryCatalogList>,
     engine: Arc<dyn TableEngine>,
 }
 
@@ -36,14 +36,6 @@ impl CatalogList for CatalogManager {
         catalog: Arc<dyn CatalogProvider>,
     ) -> Option<Arc<dyn CatalogProvider>> {
         self.catalogs.register_catalog(name, catalog)
-    }
-
-    fn register_catalog_if_absent(
-        &self,
-        _name: String,
-        _catalog: Arc<dyn CatalogProvider>,
-    ) -> Option<CatalogProviderRef> {
-        todo!()
     }
 
     fn catalog_names(&self) -> Vec<String> {
