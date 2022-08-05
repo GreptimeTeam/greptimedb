@@ -54,3 +54,5 @@ pub const DEFAULT_SCHEMA_NAME: &str = "public";
 pub trait CatalogManager: CatalogList {
     // TODO(hl): Drop table and other catalog methods should be here
 }
+
+pub type CatalogManagerRef = Arc<dyn CatalogManager>;

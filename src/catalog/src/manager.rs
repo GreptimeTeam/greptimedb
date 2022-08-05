@@ -18,13 +18,14 @@ use crate::error::{
 };
 use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{decode_system_catalog, Entry, SystemCatalogTable, TableEntry};
+use crate::tables::SystemCatalog;
 use crate::{CatalogList, CatalogManager, CatalogProvider, SchemaProvider};
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
 // TODO(hl): Replace current `memory::new_memory_catalog_list()` with CatalogManager
 #[allow(dead_code)]
 pub struct CatalogManagerImpl {
-    system: Arc<SystemCatalogTable>,
+    system: Arc<SystemCatalog>,
     catalogs: Arc<MemoryCatalogList>,
     engine: TableEngineRef,
 }
@@ -33,9 +34,11 @@ pub struct CatalogManagerImpl {
 impl CatalogManagerImpl {
     /// Create a new [CatalogManager] with given user catalogs and table engine
     pub async fn try_new(catalogs: Arc<MemoryCatalogList>, engine: TableEngineRef) -> Result<Self> {
-        let system = Arc::new(SystemCatalogTable::new(engine.clone()).await?);
+        let table = SystemCatalogTable::new(engine.clone()).await?;
+        let system_catalog = Arc::new(SystemCatalog::new(table, catalogs.clone()));
+
         Ok(Self {
-            system,
+            system: system_catalog,
             catalogs,
             engine,
         })
@@ -43,9 +46,8 @@ impl CatalogManagerImpl {
 
     /// Scan all entries from system catalog table
     pub async fn init(&mut self) -> Result<()> {
-        self.init_system_catalog();
-        let mut system_records = self.system.records().await?;
-
+        self.init_system_catalog()?;
+        let mut system_records = self.system.information_schema.system.records().await?;
         while let Some(records) = system_records
             .next()
             .await
@@ -57,18 +59,17 @@ impl CatalogManagerImpl {
         Ok(())
     }
 
-    fn init_system_catalog(&mut self) {
+    fn init_system_catalog(&mut self) -> Result<()> {
         let system_schema = MemorySchemaProvider::new();
-        system_schema
-            .register_table(
-                SYSTEM_CATALOG_TABLE_NAME.to_string(),
-                self.system.table.clone(),
-            )
-            .unwrap();
+        system_schema.register_table(
+            SYSTEM_CATALOG_TABLE_NAME.to_string(),
+            self.system.information_schema.system.clone(),
+        )?;
         let system_catalog = MemoryCatalogProvider::new();
         system_catalog.register_schema(INFORMATION_SCHEMA_NAME, Arc::new(system_schema));
         self.catalogs
             .register_catalog(SYSTEM_CATALOG_NAME.to_string(), Arc::new(system_catalog));
+        Ok(())
     }
 
     async fn handle_system_catalog_entries(&self, records: RecordBatch) -> Result<()> {
@@ -122,7 +123,6 @@ impl CatalogManagerImpl {
                     info!("Registered table: {:?}", t)
                 }
             }
-            todo!()
         }
 
         Ok(())
@@ -191,8 +191,12 @@ impl CatalogList for CatalogManagerImpl {
         res
     }
 
-    fn catalog(&self, _name: &str) -> Option<Arc<dyn CatalogProvider>> {
-        todo!()
+    fn catalog(&self, name: &str) -> Option<Arc<dyn CatalogProvider>> {
+        if name.eq_ignore_ascii_case(SYSTEM_CATALOG_NAME) {
+            Some(self.system.clone())
+        } else {
+            self.catalogs.catalog(name)
+        }
     }
 }
 

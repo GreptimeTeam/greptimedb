@@ -1,5 +1,7 @@
+use std::any::Any;
 use std::sync::Arc;
 
+use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -7,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, OpenTableRequest};
-use table::TableRef;
+use table::{Table, TableRef};
 
 use crate::consts::{
     INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID,
@@ -22,6 +24,26 @@ use crate::error::{
 pub struct SystemCatalogTable {
     schema: SchemaRef,
     pub table: TableRef,
+}
+
+#[async_trait::async_trait]
+impl Table for SystemCatalogTable {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    async fn scan(
+        &self,
+        _projection: &Option<Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> table::Result<SendableRecordBatchStream> {
+        todo!()
+    }
 }
 
 #[allow(dead_code)]
