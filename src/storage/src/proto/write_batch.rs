@@ -27,6 +27,12 @@ pub enum Error {
 
     #[snafu(display("Empty column values read"))]
     EmptyColumnValues { backtrace: Backtrace },
+
+    #[snafu(display("Invalid data type: {}", data_type))]
+    InvalidDataType {
+        data_type: i32,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -43,6 +49,25 @@ impl From<&schema::ColumnSchema> for ColumnSchema {
             name: cs.name.clone(),
             data_type: DataType::from(&cs.data_type).into(),
             is_nullable: cs.is_nullable,
+        }
+    }
+}
+
+impl TryFrom<&ColumnSchema> for schema::ColumnSchema {
+    type Error = Error;
+
+    fn try_from(column_schema: &ColumnSchema) -> Result<Self> {
+        if let Some(data_type) = DataType::from_i32(column_schema.data_type) {
+            Ok(schema::ColumnSchema::new(
+                column_schema.name.clone(),
+                data_type.into(),
+                column_schema.is_nullable,
+            ))
+        } else {
+            InvalidDataTypeSnafu {
+                data_type: column_schema.data_type,
+            }
+            .fail()
         }
     }
 }
@@ -64,7 +89,7 @@ impl From<&ConcreteDataType> for DataType {
             ConcreteDataType::String(_) => DataType::String,
             ConcreteDataType::Null(_) => DataType::Null,
             ConcreteDataType::Binary(_) => DataType::Binary,
-            _ => unimplemented!(),
+            _ => unimplemented!(), // TODO(jiachun): Maybe support some composite types in the future , such as list, struct, etc.
         }
     }
 }
@@ -149,11 +174,11 @@ macro_rules! gen_put_data {
                 bit_vec::BitVec::from_bytes(&column.value_null_mask)
                     .iter()
                     .take(num_rows)
-                    .for_each(|mask| {
-                        if mask == false {
-                            builder.push(vector_iter.next().map(|$vari| $cast));
-                        } else {
+                    .for_each(|is_null| {
+                        if is_null {
                             builder.push(None);
+                        } else {
+                            builder.push(vector_iter.next().map(|$vari| $cast));
                         }
                     });
 
@@ -193,7 +218,7 @@ pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
         ConcreteDataType::Binary(_) => gen_columns_binary(vector),
         ConcreteDataType::String(_) => gen_columns_string(vector),
         _ => {
-            unimplemented!()
+            unimplemented!() // TODO(jiachun): Maybe support some composite types in the future , such as list, struct, etc.
         }
     }
 }
@@ -217,6 +242,6 @@ pub fn gen_put_data_vector(
         ConcreteDataType::Float64(_) => gen_put_data_f64(num_rows, column),
         ConcreteDataType::Binary(_) => gen_put_data_binary(num_rows, column),
         ConcreteDataType::String(_) => gen_put_data_string(num_rows, column),
-        _ => unimplemented!(),
+        _ => unimplemented!(), // TODO(jiachun): Maybe support some composite types in the future , such as list, struct, etc.
     }
 }

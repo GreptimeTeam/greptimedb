@@ -85,20 +85,17 @@ pub enum Error {
         source: ArrowError,
     },
 
-    #[snafu(display("Failed to encode, source: {}", source))]
+    #[snafu(display("Failed to encode into protobuf, source: {}", source))]
     EncodeProtobuf {
         backtrace: Backtrace,
         source: EncodeError,
     },
 
-    #[snafu(display("Failed to decode, source: {}", source))]
+    #[snafu(display("Failed to decode from protobuf, source: {}", source))]
     DecodeProtobuf {
         backtrace: Backtrace,
         source: DecodeError,
     },
-
-    #[snafu(display("No corresponding ConcreteDataType found"))]
-    UnknownConcreteDataType { backtrace: Backtrace },
 
     #[snafu(display("Failed to parse schema, source: {}", source))]
     ParseSchema {
@@ -128,8 +125,14 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Gernal codec error occurs, source {}", source))]
-    GernalProtoCodec {
+    #[snafu(display("Failed to convert into protobuf struct, source {}", source))]
+    ToProtobuf {
+        source: proto::write_batch::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to convert from protobuf struct, source {}", source))]
+    FromProtobuf {
         source: proto::write_batch::Error,
         backtrace: Backtrace,
     },
@@ -455,8 +458,8 @@ pub mod codec {
 
     use super::{
         DataCorruptedSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
-        Error as WriteBatchError, GernalProtoCodecSnafu, InvalidTimestampIndexSnafu, Mutation,
-        ParseSchemaSnafu, Result, WriteBatch,
+        Error as WriteBatchError, FromProtobufSnafu, InvalidTimestampIndexSnafu, Mutation,
+        ParseSchemaSnafu, Result, ToProtobufSnafu, WriteBatch,
     };
     use crate::proto::{
         wal::{MutationExtra, MutationType},
@@ -525,7 +528,7 @@ pub mod codec {
                     let valid_ipc_fields = ipc_fields
                         .iter()
                         .zip(bit_vec::BitVec::from_bytes(column_null_mask))
-                        .filter(|(_, mask)| !*mask)
+                        .filter(|(_, is_null)| !*is_null)
                         .map(|(ipc_field, _)| ipc_field.clone())
                         .collect::<Vec<_>>();
                     writer
@@ -634,7 +637,7 @@ pub mod codec {
                                 bit_vec::BitVec::from_bytes(&ext.column_null_mask)
                                     .iter()
                                     .zip(column_names.iter())
-                                    .filter(|(mask, _)| !*mask)
+                                    .filter(|(is_null, _)| !*is_null)
                                     .map(|(_, column_name)| column_name.clone())
                                     .collect::<Vec<_>>()
                             };
@@ -708,7 +711,7 @@ pub mod codec {
                         .collect::<write_batch::Result<Vec<_>>>(),
                 })
                 .collect::<write_batch::Result<Vec<_>>>()
-                .context(GernalProtoCodecSnafu {})?
+                .context(ToProtobufSnafu {})?
                 .into_iter()
                 .map(|columns| write_batch::Mutation {
                     mutation: Some(write_batch::mutation::Mutation::Put(write_batch::Put {
@@ -753,20 +756,7 @@ pub mod codec {
                 .column_schemas
                 .iter()
                 .map(|column_schema| {
-                    if let Some(data_type) =
-                        write_batch::DataType::from_i32(column_schema.data_type)
-                    {
-                        Ok(ColumnSchema::new(
-                            column_schema.name.clone(),
-                            data_type.into(),
-                            column_schema.is_nullable,
-                        ))
-                    } else {
-                        DataCorruptedSnafu {
-                            message: &format!("invalid data type {}", column_schema.data_type),
-                        }
-                        .fail()
-                    }
+                    ColumnSchema::try_from(column_schema).context(FromProtobufSnafu)
                 })
                 .collect::<Result<Vec<_>>>()?;
 
@@ -808,7 +798,7 @@ pub mod codec {
                             bit_vec::BitVec::from_bytes(&ext.column_null_mask)
                                 .iter()
                                 .zip(column_schemas.iter())
-                                .filter(|(mask, _)| !*mask)
+                                .filter(|(is_null, _)| !*is_null)
                                 .map(|(_, column)| (column.name.clone(), column.data_type.clone()))
                                 .collect::<Vec<_>>()
                         };
@@ -827,7 +817,7 @@ pub mod codec {
                                 .map(|v| (name, v))
                             })
                             .collect::<write_batch::Result<Vec<_>>>()
-                            .context(GernalProtoCodecSnafu {})?
+                            .context(FromProtobufSnafu {})?
                             .into_iter()
                             .map(|(name, vector_ref)| {
                                 put_data.add_column_by_name(&name, vector_ref)

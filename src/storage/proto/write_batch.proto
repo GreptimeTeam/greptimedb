@@ -43,6 +43,8 @@ message Column {
   bytes value_null_mask = 2;
 }
 
+// TODO(jiachun): Enum might be insufficient to represent some composite data type such as list, struct.
+// In the future, may be we can refer to https://github.com/apache/arrow/blob/master/format/Schema.fbs#L398
 enum DataType {
   NULL = 0;
   BOOLEAN = 1;
