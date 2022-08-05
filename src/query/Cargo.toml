@@ -5,31 +5,33 @@ edition = "2021"
 
 [dependencies.arrow]
 package = "arrow2"
-version="0.10"
+version = "0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
 
 [dependencies]
 arc-swap = "1.0"
 async-trait = "0.1"
+catalog = { path = "../catalog" }
 common-error = { path = "../common/error" }
 common-function = { path = "../common/function" }
 common-query = { path = "../common/query" }
-common-recordbatch = {path = "../common/recordbatch" }
+common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2" }
-datatypes = {path = "../datatypes" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"
 metrics = "0.18"
 snafu = { version = "0.7", features = ["backtraces"] }
+sql = { path = "../sql" }
 table = { path = "../table" }
 tokio = "1.0"
-sql = { path = "../sql" }
 
 [dev-dependencies]
 num = "0.4"
 num-traits = "0.2"
 rand = "0.8"
+test-util = { path = "../../test-util" }
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = "0.1"

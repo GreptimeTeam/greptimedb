@@ -1,4 +1,3 @@
-pub mod catalog;
 pub mod datanode;
 pub mod error;
 pub mod instance;

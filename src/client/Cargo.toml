@@ -9,7 +9,7 @@ edition = "2021"
 api = { path = "../api" }
 common-error = { path = "../common/error" }
 snafu = { version = "0.7", features = ["backtraces"] }
-tonic = "0.7"
+tonic = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }

@@ -15,7 +15,7 @@ use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
 use crate::memtable::{MemtableId, MemtableSchema, MemtableSet, MemtableVersion};
-use crate::metadata::{RegionMetadata, RegionMetadataRef};
+use crate::metadata::RegionMetadataRef;
 use crate::sst::LevelMetas;
 use crate::sst::{FileHandle, FileMeta};
 use crate::sync::CowCell;
@@ -36,10 +36,10 @@ pub struct VersionControl {
 }
 
 impl VersionControl {
-    /// Construct a new version control from `metadata`.
-    pub fn new(metadata: RegionMetadata, memtables: MemtableVersion) -> VersionControl {
+    /// Construct a new version control from existing `version`.
+    pub fn with_version(version: Version) -> VersionControl {
         VersionControl {
-            version: CowCell::new(Version::new(metadata, memtables)),
+            version: CowCell::new(version),
             committed_sequence: AtomicU64::new(0),
         }
     }
@@ -48,6 +48,11 @@ impl VersionControl {
     #[inline]
     pub fn current(&self) -> VersionRef {
         self.version.get()
+    }
+
+    #[inline]
+    pub fn current_manifest_version(&self) -> ManifestVersion {
+        self.current().manifest_version
     }
 
     /// Metadata of current version.
@@ -139,14 +144,29 @@ pub struct Version {
 }
 
 impl Version {
-    pub fn new(metadata: RegionMetadata, memtables: MemtableVersion) -> Version {
+    /// Create a new `Version` with given `metadata`.
+    #[cfg(test)]
+    pub fn new(metadata: RegionMetadataRef) -> Version {
+        Version::with_manifest_version(metadata, 0)
+    }
+
+    /// Create a new `Version` with given `metadata` and initial `manifest_version`.
+    pub fn with_manifest_version(
+        metadata: RegionMetadataRef,
+        manifest_version: ManifestVersion,
+    ) -> Version {
         Version {
-            metadata: Arc::new(metadata),
-            memtables: Arc::new(memtables),
+            metadata,
+            memtables: Arc::new(MemtableVersion::new()),
             ssts: Arc::new(LevelMetas::new()),
             flushed_sequence: 0,
-            manifest_version: 0,
+            manifest_version,
         }
+    }
+
+    #[inline]
+    pub fn metadata(&self) -> &RegionMetadataRef {
+        &self.metadata
     }
 
     #[inline]
@@ -167,6 +187,11 @@ impl Version {
     #[inline]
     pub fn ssts(&self) -> &LevelMetasRef {
         &self.ssts
+    }
+
+    #[inline]
+    pub fn flushed_sequence(&self) -> SequenceNumber {
+        self.flushed_sequence
     }
 
     /// Returns duration used to partition the memtables and ssts by time.
@@ -210,6 +235,7 @@ impl Version {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::RegionMetadata;
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     fn new_version_control() -> VersionControl {
@@ -218,7 +244,8 @@ mod tests {
             .build();
         let metadata: RegionMetadata = desc.try_into().unwrap();
 
-        VersionControl::new(metadata, MemtableVersion::new())
+        let version = Version::new(Arc::new(metadata));
+        VersionControl::with_version(version)
     }
 
     #[test]

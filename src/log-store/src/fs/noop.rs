@@ -17,7 +17,7 @@ impl LogStore for NoopLogStore {
 
     async fn append(
         &self,
-        _ns: Self::Namespace,
+        _ns: &Self::Namespace,
         mut _e: Self::Entry,
     ) -> Result<Self::AppendResponse> {
         Ok(AppendResponseImpl {
@@ -26,28 +26,36 @@ impl LogStore for NoopLogStore {
         })
     }
 
-    async fn append_batch(&self, _ns: Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
+    async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
         todo!()
     }
 
     async fn read(
         &self,
-        _ns: Self::Namespace,
+        _ns: &Self::Namespace,
         _id: Id,
     ) -> Result<store_api::logstore::entry_stream::SendableEntryStream<'_, Self::Entry, Self::Error>>
     {
         todo!()
     }
 
-    async fn create_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
+    async fn create_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
         todo!()
     }
 
-    async fn delete_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
+    async fn delete_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
         todo!()
     }
 
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
         todo!()
+    }
+
+    fn entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry {
+        EntryImpl::new(data)
+    }
+
+    fn namespace(&self, name: &str) -> Self::Namespace {
+        LocalNamespace::new(name)
     }
 }

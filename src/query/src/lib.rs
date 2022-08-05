@@ -1,4 +1,3 @@
-pub mod catalog;
 pub mod database;
 mod datafusion;
 pub mod error;

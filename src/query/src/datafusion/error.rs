@@ -39,8 +39,8 @@ pub enum InnerError {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Fail to convert table, source: {}", source))]
-    ConvertTable {
+    #[snafu(display("Failed to convert table schema, source: {}", source))]
+    TableSchemaMismatch {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
@@ -54,7 +54,7 @@ impl ErrorExt for InnerError {
             // TODO(yingwen): Further categorize datafusion error.
             Datafusion { .. } => StatusCode::EngineExecuteQuery,
             // This downcast should not fail in usual case.
-            PhysicalPlanDowncast { .. } | ConvertSchema { .. } | ConvertTable { .. } => {
+            PhysicalPlanDowncast { .. } | ConvertSchema { .. } | TableSchemaMismatch { .. } => {
                 StatusCode::Unexpected
             }
             ParseSql { source, .. } => source.status_code(),
@@ -68,6 +68,12 @@ impl ErrorExt for InnerError {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl From<InnerError> for catalog::error::Error {
+    fn from(e: InnerError) -> Self {
+        catalog::error::Error::new(e)
     }
 }
 

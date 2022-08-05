@@ -43,7 +43,6 @@ mod tests {
     use std::sync::Arc;
 
     use metrics::counter;
-    use query::catalog::memory;
 
     use super::*;
     use crate::instance::Instance;
@@ -60,7 +59,7 @@ mod tests {
     }
 
     async fn create_extension() -> Extension<InstanceRef> {
-        let catalog_list = memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
         let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Arc::new(Instance::new(&opts, catalog_list).await.unwrap());
         Extension(instance)

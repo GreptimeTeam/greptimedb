@@ -5,19 +5,30 @@ mod writer;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use snafu::ensure;
+use common_telemetry::logging;
+use datatypes::schema::SchemaRef;
+use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
-use store_api::storage::{ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse};
+use store_api::manifest::{
+    self, action::ProtocolAction, Manifest, ManifestVersion, MetaActionIterator,
+};
+use store_api::storage::{
+    OpenOptions, ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse,
+};
 
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
-use crate::manifest::region::RegionManifest;
-use crate::memtable::{MemtableBuilderRef, MemtableVersion};
+use crate::manifest::{
+    action::{RegionChange, RegionMetaAction, RegionMetaActionList},
+    region::RegionManifest,
+};
+use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{RegionWriter, RegionWriterRef, WriterContext};
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
-use crate::version::{VersionControl, VersionControlRef};
+use crate::version::VersionEdit;
+use crate::version::{Version, VersionControl, VersionControlRef};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
@@ -57,6 +68,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
     fn snapshot(&self, _ctx: &ReadContext) -> Result<SnapshotImpl> {
         Ok(self.inner.create_snapshot())
     }
+
+    fn write_request(&self, schema: SchemaRef) -> Self::WriteRequest {
+        WriteBatch::new(schema)
+    }
 }
 
 /// Storage related config for region.
@@ -73,15 +88,45 @@ pub struct StoreConfig<S> {
 }
 
 impl<S: LogStore> RegionImpl<S> {
-    pub fn new(
+    /// Create a new region and also persist the region metadata to manifest.
+    ///
+    /// The caller should avoid calling this method simultaneously.
+    // FIXME(yingwen): Region id is already specific in metadata, but name is not specific in metadata. We should
+    // add name to RegionMetadata.
+    pub async fn create(
         id: RegionId,
         name: String,
         metadata: RegionMetadata,
         store_config: StoreConfig<S>,
+    ) -> Result<RegionImpl<S>> {
+        let metadata = Arc::new(metadata);
+        // Try to persist region data to manifest, ensure the new region could be recovered from
+        // the manifest.
+        let manifest_version = store_config
+            .manifest
+            .update(RegionMetaActionList::new(vec![
+                RegionMetaAction::Protocol(ProtocolAction::new()),
+                RegionMetaAction::Change(RegionChange {
+                    metadata: metadata.clone(),
+                }),
+            ]))
+            .await?;
+
+        let version = Version::with_manifest_version(metadata, manifest_version);
+        let region = RegionImpl::new(id, name, version, store_config);
+
+        Ok(region)
+    }
+
+    /// Create a new region without persisting manifest.
+    fn new(
+        id: RegionId,
+        name: String,
+        version: Version,
+        store_config: StoreConfig<S>,
     ) -> RegionImpl<S> {
-        let memtable_version = MemtableVersion::new();
-        let version_control = VersionControl::new(metadata, memtable_version);
-        let wal = Wal::new(id, name.clone(), store_config.log_store);
+        let version_control = VersionControl::with_version(version);
+        let wal = Wal::new(name.clone(), store_config.log_store);
 
         let inner = Arc::new(RegionInner {
             shared: Arc::new(SharedData {
@@ -98,6 +143,132 @@ impl<S: LogStore> RegionImpl<S> {
         });
 
         RegionImpl { inner }
+    }
+
+    /// Open an exsiting region and recover its data.
+    ///
+    /// The caller should avoid calling this method simultaneously.
+    pub async fn open(
+        name: String,
+        store_config: StoreConfig<S>,
+        _opts: &OpenOptions,
+    ) -> Result<RegionImpl<S>> {
+        // Load version meta data from manifest.
+        let version = Self::recover_from_manifest(&name, &store_config.manifest).await?;
+
+        logging::debug!(
+            "Region recovered version from manifest, version: {:?}",
+            version
+        );
+
+        let metadata = version.metadata().clone();
+        let version_control = Arc::new(VersionControl::with_version(version));
+        let wal = Wal::new(name.clone(), store_config.log_store);
+        let shared = Arc::new(SharedData {
+            id: metadata.id,
+            name,
+            version_control,
+        });
+
+        let writer = Arc::new(RegionWriter::new(store_config.memtable_builder));
+        let writer_ctx = WriterContext {
+            shared: &shared,
+            flush_strategy: &store_config.flush_strategy,
+            flush_scheduler: &store_config.flush_scheduler,
+            sst_layer: &store_config.sst_layer,
+            wal: &wal,
+            writer: &writer,
+            manifest: &store_config.manifest,
+        };
+        // Replay all unflushed data.
+        writer.replay(writer_ctx).await?;
+
+        let inner = Arc::new(RegionInner {
+            shared,
+            writer,
+            wal,
+            flush_strategy: store_config.flush_strategy,
+            flush_scheduler: store_config.flush_scheduler,
+            sst_layer: store_config.sst_layer,
+            manifest: store_config.manifest,
+        });
+
+        Ok(RegionImpl { inner })
+    }
+
+    async fn recover_from_manifest(
+        region_name: &str,
+        manifest: &RegionManifest,
+    ) -> Result<Version> {
+        let (start, end) = Self::manifest_scan_range();
+        let mut iter = manifest.scan(start, end).await?;
+
+        let mut version = None;
+        let mut actions = Vec::new();
+        let mut last_manifest_version = manifest::MIN_VERSION;
+        while let Some((manifest_version, action_list)) = iter.next_action().await? {
+            last_manifest_version = manifest_version;
+
+            for action in action_list.actions {
+                match (action, version) {
+                    (RegionMetaAction::Change(c), None) => {
+                        version = Some(Version::with_manifest_version(
+                            c.metadata,
+                            last_manifest_version,
+                        ));
+                        for (manifest_version, action) in actions.drain(..) {
+                            version = Self::replay_edit(manifest_version, action, version);
+                        }
+                    }
+                    (RegionMetaAction::Change(_), Some(_)) => {
+                        unimplemented!("alter schema is not implemented")
+                    }
+                    (action, None) => {
+                        actions.push((manifest_version, action));
+                        version = None;
+                    }
+                    (action, Some(v)) => {
+                        version = Self::replay_edit(manifest_version, action, Some(v));
+                    }
+                }
+            }
+        }
+
+        assert!(actions.is_empty() || version.is_none());
+
+        if version.is_some() {
+            // update manifest state after recovering
+            let protocol = iter.last_protocol();
+            manifest.update_state(last_manifest_version + 1, protocol.clone());
+        }
+
+        version.context(error::VersionNotFoundSnafu { region_name })
+    }
+
+    fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
+        // TODO(dennis): use manifest version in WAL
+        (manifest::MIN_VERSION, manifest::MAX_VERSION)
+    }
+
+    fn replay_edit(
+        manifest_version: ManifestVersion,
+        action: RegionMetaAction,
+        version: Option<Version>,
+    ) -> Option<Version> {
+        if let RegionMetaAction::Edit(e) = action {
+            let edit = VersionEdit {
+                files_to_add: e.files_to_add,
+                flushed_sequence: Some(e.flushed_sequence),
+                manifest_version,
+                max_memtable_id: None,
+            };
+            version.map(|mut v| {
+                v.apply_edit(edit);
+                v
+            })
+        } else {
+            version
+        }
     }
 }
 

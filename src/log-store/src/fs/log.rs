@@ -3,14 +3,19 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use async_stream::stream;
 use common_telemetry::{error, info, warn};
+use futures::pin_mut;
+use futures::StreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{Encode, Id};
+use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::LogStore;
 use tokio::sync::RwLock;
 
 use crate::error::{
-    DuplicateFileSnafu, Error, FileNameIllegalSnafu, InternalSnafu, IoSnafu, Result,
+    CreateDirSnafu, DuplicateFileSnafu, Error, FileNameIllegalSnafu, InternalSnafu, IoSnafu,
+    ReadPathSnafu, Result,
 };
 use crate::fs::config::LogConfig;
 use crate::fs::entry::EntryImpl;
@@ -30,8 +35,14 @@ pub struct LocalFileLogStore {
 
 impl LocalFileLogStore {
     /// Opens a directory as log store directory, initialize directory if it is empty.
-    #[allow(unused)]
     pub async fn open(config: &LogConfig) -> Result<Self> {
+        // Create the log directory if missing.
+        tokio::fs::create_dir_all(&config.log_file_dir)
+            .await
+            .context(CreateDirSnafu {
+                path: &config.log_file_dir,
+            })?;
+
         let mut files = Self::load_dir(&config.log_file_dir, config).await?;
 
         if files.is_empty() {
@@ -96,7 +107,9 @@ impl LocalFileLogStore {
         let mut map = FileMap::new();
         let mut dir = tokio::fs::read_dir(Path::new(path.as_ref()))
             .await
-            .context(IoSnafu)?;
+            .context(ReadPathSnafu {
+                path: path.as_ref(),
+            })?;
 
         while let Some(f) = dir.next_entry().await.context(IoSnafu)? {
             let path_buf = f.path();
@@ -167,7 +180,7 @@ impl LogStore for LocalFileLogStore {
 
     async fn append(
         &self,
-        _ns: Self::Namespace,
+        _ns: &Self::Namespace,
         mut entry: Self::Entry,
     ) -> Result<Self::AppendResponse> {
         // TODO(hl): configurable retry times
@@ -202,29 +215,51 @@ impl LogStore for LocalFileLogStore {
         .fail();
     }
 
-    async fn append_batch(&self, _ns: Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
+    async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
         todo!()
     }
 
     async fn read(
         &self,
-        _ns: Self::Namespace,
-        _id: Id,
-    ) -> Result<store_api::logstore::entry_stream::SendableEntryStream<'_, Self::Entry, Self::Error>>
-    {
+        ns: &Self::Namespace,
+        id: Id,
+    ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>> {
+        let files = self.files.read().await;
+
+        let ns = ns.clone();
+        let s = stream!({
+            for (start_id, file) in files.iter() {
+                if *start_id >= id {
+                    let s = file.create_stream(&ns, *start_id);
+                    pin_mut!(s);
+                    while let Some(entries) = s.next().await {
+                        yield entries;
+                    }
+                }
+            }
+        });
+
+        Ok(Box::pin(s))
+    }
+
+    async fn create_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
         todo!()
     }
 
-    async fn create_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
-        todo!()
-    }
-
-    async fn delete_namespace(&mut self, _ns: Self::Namespace) -> Result<()> {
+    async fn delete_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
         todo!()
     }
 
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
         todo!()
+    }
+
+    fn entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry {
+        EntryImpl::new(data)
+    }
+
+    fn namespace(&self, name: &str) -> Self::Namespace {
+        LocalNamespace::new(name)
     }
 }
 
@@ -248,13 +283,11 @@ mod tests {
         };
 
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
+        let ns = LocalNamespace::default();
         assert_eq!(
             0,
             logstore
-                .append(
-                    LocalNamespace::default(),
-                    EntryImpl::new(generate_data(100)),
-                )
+                .append(&ns, EntryImpl::new(generate_data(100)),)
                 .await
                 .unwrap()
                 .entry_id
@@ -263,10 +296,7 @@ mod tests {
         assert_eq!(
             1,
             logstore
-                .append(
-                    LocalNamespace::default(),
-                    EntryImpl::new(generate_data(100)),
-                )
+                .append(&ns, EntryImpl::new(generate_data(100)),)
                 .await
                 .unwrap()
                 .entry_id
@@ -296,18 +326,15 @@ mod tests {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
+        let ns = LocalNamespace::default();
         let id = logstore
-            .append(
-                LocalNamespace::default(),
-                EntryImpl::new(generate_data(100)),
-            )
+            .append(&ns, EntryImpl::new(generate_data(100)))
             .await
             .unwrap()
             .entry_id;
         assert_eq!(0, id);
 
-        let active_file = logstore.active_file();
-        let stream = active_file.create_stream(LocalNamespace::default(), 0);
+        let stream = logstore.read(&ns, 0).await.unwrap();
         tokio::pin!(stream);
 
         let entries = stream.next().await.unwrap().unwrap();

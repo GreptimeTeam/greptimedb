@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use catalog::{CatalogListRef, CatalogProvider, SchemaProvider};
 use datafusion::catalog::{
     catalog::{CatalogList as DfCatalogList, CatalogProvider as DfCatalogProvider},
     schema::SchemaProvider as DfSchemaProvider,
@@ -16,9 +17,7 @@ use table::{
     TableRef,
 };
 
-use crate::catalog::{schema::SchemaProvider, CatalogListRef, CatalogProvider};
 use crate::datafusion::error;
-use crate::error::Result;
 
 pub struct DfCatalogListAdapter {
     runtime: Arc<RuntimeEnv>,
@@ -169,7 +168,7 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
     }
 }
 
-/// Datafuion SchemaProviderAdapter -> greptime SchemaProviderAdapter
+/// Datafusion SchemaProviderAdapter -> greptime SchemaProviderAdapter
 struct SchemaProviderAdapter {
     df_schema_provider: Arc<dyn DfSchemaProvider>,
     runtime: Arc<RuntimeEnv>,
@@ -202,7 +201,11 @@ impl SchemaProvider for SchemaProviderAdapter {
         })
     }
 
-    fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
+    fn register_table(
+        &self,
+        name: String,
+        table: TableRef,
+    ) -> catalog::error::Result<Option<TableRef>> {
         let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
         Ok(self
             .df_schema_provider
@@ -213,7 +216,7 @@ impl SchemaProvider for SchemaProviderAdapter {
             .map(|_| table))
     }
 
-    fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
+    fn deregister_table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
         self.df_schema_provider
             .deregister_table(name)
             .context(error::DatafusionSnafu {
@@ -221,7 +224,7 @@ impl SchemaProvider for SchemaProviderAdapter {
             })?
             .map(|table| {
                 let adapter = TableAdapter::new(table, self.runtime.clone())
-                    .context(error::ConvertTableSnafu)?;
+                    .context(error::TableSchemaMismatchSnafu)?;
                 Ok(Arc::new(adapter) as _)
             })
             .transpose()

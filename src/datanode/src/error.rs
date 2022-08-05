@@ -6,7 +6,6 @@ use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
-use table_engine::error::Error as TableEngineError;
 
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
@@ -21,14 +20,14 @@ pub enum Error {
     #[snafu(display("Fail to create catalog list, source: {}", source))]
     NewCatalog {
         #[snafu(backtrace)]
-        source: query::error::Error,
+        source: catalog::error::Error,
     },
 
     #[snafu(display("Fail to create table: {}, {}", table_name, source))]
     CreateTable {
         table_name: String,
         #[snafu(backtrace)]
-        source: TableEngineError,
+        source: TableError,
     },
 
     #[snafu(display("Fail to get table: {}, {}", table_name, source))]
@@ -119,7 +118,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ExecuteSql { source } | Error::NewCatalog { source } => source.status_code(),
+            Error::ExecuteSql { source } => source.status_code(),
+            Error::NewCatalog { source } => source.status_code(),
             Error::CreateTable { source, .. } => source.status_code(),
             Error::GetTable { source, .. } => source.status_code(),
             Error::Insert { source, .. } => source.status_code(),
@@ -169,6 +169,12 @@ mod tests {
         )))
     }
 
+    fn throw_catalog_error() -> std::result::Result<(), catalog::error::Error> {
+        Err(catalog::error::Error::new(MockError::with_backtrace(
+            StatusCode::Internal,
+        )))
+    }
+
     fn assert_internal_error(err: &Error) {
         assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::Internal, err.status_code());
@@ -184,7 +190,10 @@ mod tests {
         let err = throw_query_error().context(ExecuteSqlSnafu).err().unwrap();
         assert_internal_error(&err);
         assert_tonic_internal_error(err);
-        let err = throw_query_error().context(NewCatalogSnafu).err().unwrap();
+        let err = throw_catalog_error()
+            .context(NewCatalogSnafu)
+            .err()
+            .unwrap();
         assert_internal_error(&err);
         assert_tonic_internal_error(err);
     }

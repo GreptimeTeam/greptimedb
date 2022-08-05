@@ -4,8 +4,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use common_time::RangeMillis;
 use store_api::logstore::LogStore;
-use store_api::manifest::Manifest;
-use store_api::manifest::ManifestVersion;
+use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
 use store_api::storage::SequenceNumber;
 use uuid::Uuid;
 
@@ -200,18 +199,23 @@ impl<S: LogStore> FlushJob<S> {
 
     async fn write_to_manifest(&self, file_metas: &[FileMeta]) -> Result<ManifestVersion> {
         let edit = RegionEdit {
-            region_id: self.shared.id,
             region_version: self.shared.version_control.metadata().version,
-            flush_sequence: self.flush_sequence,
+            flushed_sequence: self.flush_sequence,
             files_to_add: file_metas.to_vec(),
             files_to_remove: Vec::default(),
         };
-        logging::debug!("Write region edit: {:?} to manifest.", edit);
-        self.manifest
-            .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
-                edit,
-            )))
-            .await
+        let prev_version = self.shared.version_control.current_manifest_version();
+
+        logging::debug!(
+            "Write region edit: {:?} to manifest, prev_version: {}.",
+            edit,
+            prev_version,
+        );
+
+        let mut action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+        action_list.set_prev_version(prev_version);
+
+        self.manifest.update(action_list).await
     }
 
     /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`

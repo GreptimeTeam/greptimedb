@@ -21,32 +21,40 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// Append an `Entry` to WAL with given namespace
     async fn append(
         &self,
-        ns: Self::Namespace,
+        ns: &Self::Namespace,
         mut e: Self::Entry,
     ) -> Result<Self::AppendResponse, Self::Error>;
 
-    // Append a batch of entries atomically and return the offset of first entry.
+    /// Append a batch of entries atomically and return the offset of first entry.
     async fn append_batch(
         &self,
-        ns: Self::Namespace,
+        ns: &Self::Namespace,
         e: Vec<Self::Entry>,
     ) -> Result<Id, Self::Error>;
 
-    // Create a new `EntryStream` to asynchronously generates `Entry`.
+    /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
+    /// starting from `id`.
     async fn read(
         &self,
-        ns: Self::Namespace,
+        ns: &Self::Namespace,
         id: Id,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error>;
 
-    // Create a new `Namespace`.
-    async fn create_namespace(&mut self, ns: Self::Namespace) -> Result<(), Self::Error>;
+    /// Create a new `Namespace`.
+    async fn create_namespace(&mut self, ns: &Self::Namespace) -> Result<(), Self::Error>;
 
-    // Delete an existing `Namespace` with given ref.
-    async fn delete_namespace(&mut self, ns: Self::Namespace) -> Result<(), Self::Error>;
+    /// Delete an existing `Namespace` with given ref.
+    async fn delete_namespace(&mut self, ns: &Self::Namespace) -> Result<(), Self::Error>;
 
-    // List all existing namespaces.
+    /// List all existing namespaces.
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
+
+    /// Create an entry of the associate Entry type
+    fn entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry;
+
+    /// Create a namespace of the associate Namespace type
+    // TODO(sunng87): confusion with `create_namespace`
+    fn namespace(&self, name: &str) -> Self::Namespace;
 }
 
 pub trait AppendResponse: Send + Sync {

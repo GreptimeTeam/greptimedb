@@ -70,6 +70,11 @@ impl LevelMetas {
 
         Ok(())
     }
+
+    #[cfg(test)]
+    pub fn levels(&self) -> &[LevelMeta] {
+        &self.levels
+    }
 }
 
 impl Default for LevelMetas {
@@ -95,6 +100,11 @@ impl LevelMeta {
 
     fn visit_level<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
         visitor.visit(self.level.into(), &self.files)
+    }
+
+    #[cfg(test)]
+    pub fn files(&self) -> &[FileHandle] {
+        &self.files
     }
 }
 

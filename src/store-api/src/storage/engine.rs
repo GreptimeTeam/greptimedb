@@ -21,6 +21,7 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
         &self,
         ctx: &EngineContext,
         name: &str,
+        opts: &OpenOptions,
     ) -> Result<Self::Region, Self::Error>;
 
     /// Closes given region.
@@ -60,3 +61,9 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
 /// Storage engine context.
 #[derive(Debug, Clone, Default)]
 pub struct EngineContext {}
+
+/// Options to open a region.
+#[derive(Debug, Clone, Default)]
+pub struct OpenOptions {
+    // TODO(yingwen): [open_region] Supports create if not exists.
+}

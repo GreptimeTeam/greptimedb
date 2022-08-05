@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use datatypes::schema::SchemaRef;
+use derive_builder::Builder;
 
 pub type TableId = u64;
 pub type TableVersion = u64;
@@ -40,22 +41,54 @@ pub struct TableIdent {
     pub version: TableVersion,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Builder)]
+#[builder(pattern = "owned")]
 pub struct TableMeta {
     pub schema: SchemaRef,
+    #[builder(default, setter(into))]
     pub engine: String,
+    #[builder(default)]
     pub engine_options: HashMap<String, String>,
+    #[builder(default)]
     pub options: HashMap<String, String>,
+    #[builder(default = "Utc::now()")]
     pub created_on: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Builder)]
+#[builder(pattern = "owned")]
 pub struct TableInfo {
+    #[builder(default, setter(into))]
     pub ident: TableIdent,
+    #[builder(setter(into))]
     pub name: String,
+    #[builder(default, setter(into))]
     pub desc: Option<String>,
     pub meta: TableMeta,
+    #[builder(default = "TableType::Base")]
     pub table_type: TableType,
+}
+
+impl TableInfoBuilder {
+    pub fn new<S: Into<String>>(name: S, meta: TableMeta) -> Self {
+        Self {
+            name: Some(name.into()),
+            meta: Some(meta),
+            ..Default::default()
+        }
+    }
+
+    pub fn table_id(mut self, id: impl Into<TableId>) -> Self {
+        let ident = self.ident.get_or_insert_with(TableIdent::default);
+        ident.table_id = id.into();
+        self
+    }
+
+    pub fn table_version(mut self, version: impl Into<TableVersion>) -> Self {
+        let ident = self.ident.get_or_insert_with(TableIdent::default);
+        ident.version = version.into();
+        self
+    }
 }
 
 impl TableIdent {
@@ -67,102 +100,8 @@ impl TableIdent {
     }
 }
 
-pub struct TableMetaBuilder {
-    schema: SchemaRef,
-    engine: String,
-    engine_options: HashMap<String, String>,
-    options: HashMap<String, String>,
-}
-
-impl TableMetaBuilder {
-    pub fn new(schema: SchemaRef) -> Self {
-        Self {
-            schema,
-            engine: String::default(),
-            engine_options: HashMap::default(),
-            options: HashMap::default(),
-        }
-    }
-
-    pub fn engine(mut self, engine: impl Into<String>) -> Self {
-        self.engine = engine.into();
-        self
-    }
-
-    pub fn table_option(mut self, name: &str, val: &str) -> Self {
-        self.options.insert(name.to_string(), val.to_string());
-        self
-    }
-
-    pub fn engine_option(mut self, name: &str, val: &str) -> Self {
-        self.engine_options
-            .insert(name.to_string(), val.to_string());
-        self
-    }
-
-    pub fn build(self) -> TableMeta {
-        TableMeta {
-            schema: self.schema,
-            engine: self.engine,
-            engine_options: self.engine_options,
-            options: self.options,
-            // TODO(dennis): use time utilities helper function
-            created_on: Utc.from_utc_datetime(&NaiveDateTime::from_timestamp(0, 0)),
-        }
-    }
-}
-
-pub struct TableInfoBuilder {
-    ident: TableIdent,
-    name: String,
-    desc: Option<String>,
-    meta: TableMeta,
-    table_type: TableType,
-}
-
-impl TableInfoBuilder {
-    pub fn new(name: impl Into<String>, meta: TableMeta) -> Self {
-        Self {
-            ident: TableIdent::new(0),
-            name: name.into(),
-            desc: None,
-            meta,
-            table_type: TableType::Base,
-        }
-    }
-
-    pub fn table_id(mut self, id: impl Into<TableId>) -> Self {
-        self.ident.table_id = id.into();
-        self
-    }
-
-    pub fn table_version(mut self, version: impl Into<TableVersion>) -> Self {
-        self.ident.version = version.into();
-        self
-    }
-
-    pub fn table_type(mut self, table_type: TableType) -> Self {
-        self.table_type = table_type;
-        self
-    }
-
-    pub fn metadata(mut self, meta: TableMeta) -> Self {
-        self.meta = meta;
-        self
-    }
-
-    pub fn desc(mut self, desc: Option<String>) -> Self {
-        self.desc = desc;
-        self
-    }
-
-    pub fn build(self) -> TableInfo {
-        TableInfo {
-            ident: self.ident,
-            name: self.name,
-            desc: self.desc,
-            meta: self.meta,
-            table_type: self.table_type,
-        }
+impl From<TableId> for TableIdent {
+    fn from(table_id: TableId) -> Self {
+        Self::new(table_id)
     }
 }

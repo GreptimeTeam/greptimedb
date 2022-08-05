@@ -8,9 +8,6 @@ pub type Id = u64;
 /// Entry is the minimal data storage unit in `LogStore`.
 pub trait Entry: Encode + Send + Sync {
     type Error: ErrorExt + Send + Sync;
-
-    fn new(data: impl AsRef<[u8]>) -> Self;
-
     /// Return contained data of entry.
     fn data(&self) -> &[u8];
 

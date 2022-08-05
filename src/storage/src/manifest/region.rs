@@ -11,7 +11,6 @@ use object_store::ObjectStore;
 use snafu::ensure;
 use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
-use store_api::storage::RegionId;
 
 use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result};
 use crate::manifest::action::*;
@@ -23,60 +22,48 @@ pub struct RegionManifest {
     inner: Arc<RegionManifestInner>,
 }
 
+impl RegionManifest {
+    pub fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
+        RegionManifest {
+            inner: Arc::new(RegionManifestInner::new(manifest_dir, object_store)),
+        }
+    }
+
+    /// Update inner state.
+    pub fn update_state(&self, version: ManifestVersion, protocol: Option<ProtocolAction>) {
+        self.inner.update_state(version, protocol);
+    }
+}
+
 #[async_trait]
 impl Manifest for RegionManifest {
     type Error = Error;
     type MetaAction = RegionMetaActionList;
-    type MetadataId = RegionId;
-    type Metadata = RegionManifestData;
-
-    fn new(id: Self::MetadataId, manifest_dir: &str, object_store: ObjectStore) -> Self {
-        RegionManifest {
-            inner: Arc::new(RegionManifestInner::new(id, manifest_dir, object_store)),
-        }
-    }
+    type MetaActionIterator = RegionMetaActionListIterator;
 
     async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         self.inner.save(action_list).await
     }
 
-    async fn load(&self) -> Result<Option<RegionManifestData>> {
-        let last_version = self.inner.last_version();
-
-        let start_bound = if last_version == MIN_VERSION {
-            // No actions have ever saved
-            MIN_VERSION
-        } else {
-            last_version - 1
-        };
-
-        let mut iter = self.inner.scan(start_bound, MAX_VERSION).await?;
-
-        while let Some((_v, action_list)) = iter.next_action().await? {
-            for action in action_list.actions {
-                if let RegionMetaAction::Change(c) = action {
-                    return Ok(Some(RegionManifestData {
-                        region_meta: c.metadata,
-                    }));
-                }
-            }
-        }
-
-        Ok(None)
+    async fn scan(
+        &self,
+        start: ManifestVersion,
+        end: ManifestVersion,
+    ) -> Result<RegionMetaActionListIterator> {
+        self.inner.scan(start, end).await
     }
 
     async fn checkpoint(&self) -> Result<ManifestVersion> {
         unimplemented!();
     }
 
-    fn metadata_id(&self) -> RegionId {
-        self.inner.region_id
+    fn last_version(&self) -> ManifestVersion {
+        self.inner.last_version()
     }
 }
 
 #[derive(Debug)]
 struct RegionManifestInner {
-    region_id: RegionId,
     store: Arc<ManifestObjectStore>,
     version: AtomicU64,
     /// Current using protocol
@@ -86,18 +73,33 @@ struct RegionManifestInner {
     supported_writer_version: ProtocolVersion,
 }
 
-struct RegionMetaActionListIterator {
+pub struct RegionMetaActionListIterator {
     log_iter: ObjectStoreLogIterator,
     reader_version: ProtocolVersion,
+    last_protocol: Option<ProtocolAction>,
 }
 
 impl RegionMetaActionListIterator {
+    pub fn last_protocol(&self) -> &Option<ProtocolAction> {
+        &self.last_protocol
+    }
+}
+
+#[async_trait]
+impl MetaActionIterator for RegionMetaActionListIterator {
+    type Error = Error;
+    type MetaAction = RegionMetaActionList;
+
     async fn next_action(&mut self) -> Result<Option<(ManifestVersion, RegionMetaActionList)>> {
         match self.log_iter.next_log().await? {
             Some((v, bytes)) => {
-                //TODO(dennis): save protocol into inner's protocol when recovering
-                let (action_list, _protocol) =
+                let (action_list, protocol) =
                     RegionMetaActionList::decode(&bytes, self.reader_version)?;
+
+                if protocol.is_some() {
+                    self.last_protocol = protocol;
+                }
+
                 Ok(Some((v, action_list)))
             }
             None => Ok(None),
@@ -106,13 +108,11 @@ impl RegionMetaActionListIterator {
 }
 
 impl RegionManifestInner {
-    fn new(region_id: RegionId, manifest_dir: &str, object_store: ObjectStore) -> Self {
+    fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
         let (reader_version, writer_version) = action::supported_protocol_version();
 
         Self {
-            region_id,
             store: Arc::new(ManifestObjectStore::new(manifest_dir, object_store)),
-            // TODO(dennis): recover the last version from history
             version: AtomicU64::new(0),
             protocol: ArcSwap::new(Arc::new(ProtocolAction::new())),
             supported_reader_version: reader_version,
@@ -123,6 +123,13 @@ impl RegionManifestInner {
     #[inline]
     fn inc_version(&self) -> ManifestVersion {
         self.version.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn update_state(&self, version: ManifestVersion, protocol: Option<ProtocolAction>) {
+        self.version.store(version, Ordering::Relaxed);
+        if let Some(p) = protocol {
+            self.protocol.store(Arc::new(p));
+        }
     }
 
     #[inline]
@@ -162,19 +169,18 @@ impl RegionManifestInner {
         Ok(RegionMetaActionListIterator {
             log_iter: self.store.scan(start, end).await?,
             reader_version: self.supported_reader_version,
+            last_protocol: None,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use datatypes::type_id::LogicalTypeId;
     use object_store::{backend::fs, ObjectStore};
     use tempdir::TempDir;
 
     use super::*;
-    use crate::metadata::RegionMetadata;
-    use crate::test_util::descriptor_util::RegionDescBuilder;
+    use crate::manifest::test_utils::*;
 
     #[tokio::test]
     async fn test_region_manifest() {
@@ -187,21 +193,19 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let region_id = 0;
 
-        let manifest = RegionManifest::new(region_id, "/manifest/", object_store);
-        assert_eq!(region_id, manifest.metadata_id());
+        let manifest = RegionManifest::new("/manifest/", object_store);
 
-        let region_name = "region-0";
-        let desc = RegionDescBuilder::new(region_name)
-            .id(region_id)
-            .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
-            .build();
-        let metadata: RegionMetadata = desc.try_into().unwrap();
-        let region_meta = Arc::new(metadata);
+        let region_meta = Arc::new(build_region_meta());
 
-        assert!(manifest.load().await.unwrap().is_none());
+        assert!(manifest
+            .scan(0, MAX_VERSION)
+            .await
+            .unwrap()
+            .next_action()
+            .await
+            .unwrap()
+            .is_none());
 
         manifest
             .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
@@ -212,30 +216,48 @@ mod tests {
             .await
             .unwrap();
 
-        let manifest_data = manifest.load().await.unwrap().unwrap();
-        assert_eq!(manifest_data.region_meta, region_meta);
+        let mut iter = manifest.scan(0, MAX_VERSION).await.unwrap();
 
-        // save another metadata
-        let region_name = "region-0";
-        let desc = RegionDescBuilder::new(region_name)
-            .id(region_id)
-            .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_key_column(("k2", LogicalTypeId::Int64, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
-            .push_value_column(("bool", LogicalTypeId::Boolean, true))
-            .build();
-        let metadata: RegionMetadata = desc.try_into().unwrap();
-        let region_meta = Arc::new(metadata);
+        let (v, action_list) = iter.next_action().await.unwrap().unwrap();
+        assert_eq!(0, v);
+        assert_eq!(1, action_list.actions.len());
+        let action = &action_list.actions[0];
+
+        match action {
+            RegionMetaAction::Change(c) => {
+                assert_eq!(c.metadata, region_meta);
+            }
+            _ => unreachable!(),
+        }
+
+        // Save some actions
         manifest
-            .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
-                RegionChange {
-                    metadata: region_meta.clone(),
-                },
-            )))
+            .update(RegionMetaActionList::new(vec![
+                RegionMetaAction::Edit(build_region_edit(1, &["f1"], &[])),
+                RegionMetaAction::Edit(build_region_edit(2, &["f2", "f3"], &[])),
+            ]))
             .await
             .unwrap();
 
-        let manifest_data = manifest.load().await.unwrap().unwrap();
-        assert_eq!(manifest_data.region_meta, region_meta);
+        let mut iter = manifest.scan(0, MAX_VERSION).await.unwrap();
+        let (v, action_list) = iter.next_action().await.unwrap().unwrap();
+        assert_eq!(0, v);
+        assert_eq!(1, action_list.actions.len());
+        let action = &action_list.actions[0];
+        match action {
+            RegionMetaAction::Change(c) => {
+                assert_eq!(c.metadata, region_meta);
+            }
+            _ => unreachable!(),
+        }
+
+        let (v, action_list) = iter.next_action().await.unwrap().unwrap();
+        assert_eq!(1, v);
+        assert_eq!(2, action_list.actions.len());
+        assert!(matches!(&action_list.actions[0], RegionMetaAction::Edit(_)));
+        assert!(matches!(&action_list.actions[1], RegionMetaAction::Edit(_)));
+
+        // Reach end
+        assert!(iter.next_action().await.unwrap().is_none());
     }
 }

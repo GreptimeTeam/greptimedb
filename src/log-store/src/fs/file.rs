@@ -274,10 +274,10 @@ impl LogFile {
     pub async fn replay(&mut self) -> Result<(usize, Id)> {
         let log_name = self.name.to_string();
         let previous_offset = self.flush_offset.load(Ordering::Relaxed);
+        let ns = LocalNamespace::default();
         let mut stream = self.create_stream(
             // TODO(hl): LocalNamespace should be filled
-            LocalNamespace::default(),
-            0,
+            &ns, 0,
         );
 
         let mut last_offset = 0usize;
@@ -313,7 +313,11 @@ impl LogFile {
     /// ### Notice
     /// If the entry with start entry id is not present, the first generated entry will start with
     /// the first entry with an id greater than `start_entry_id`.
-    pub fn create_stream(&self, _ns: impl Namespace, start_entry_id: u64) -> impl EntryStream + '_ {
+    pub fn create_stream(
+        &self,
+        _ns: &impl Namespace,
+        start_entry_id: u64,
+    ) -> impl EntryStream<Entry = EntryImpl, Error = Error> + '_ {
         let length = self.flush_offset.load(Ordering::Relaxed);
 
         let s = stream!({

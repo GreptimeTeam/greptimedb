@@ -1,5 +1,5 @@
 #[cfg(test)]
-pub mod test;
+pub mod test_util;
 
 use std::any::Any;
 use std::pin::Pin;
@@ -44,10 +44,10 @@ impl<R: Region> Table for MitoTable<R> {
             return Ok(0);
         }
 
-        let mut write_request = R::WriteRequest::new(self.schema());
+        let mut write_request = self.region.write_request(self.schema());
 
         //FIXME(dennis): we can only insert to demo table right now
-        let mut put_op = <<R as Region>::WriteRequest as WriteRequest>::PutOp::new();
+        let mut put_op = write_request.put_op();
         let mut columns_values = request.columns_values;
         let key_columns = vec!["ts", "host"];
         let value_columns = vec!["cpu", "memory"];

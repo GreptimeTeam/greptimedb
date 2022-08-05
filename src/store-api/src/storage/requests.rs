@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use common_error::ext::ErrorExt;
 use common_time::RangeMillis;
-use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 
 use crate::storage::SequenceNumber;
@@ -12,23 +11,21 @@ pub trait WriteRequest: Send {
     type Error: ErrorExt + Send + Sync;
     type PutOp: PutOperation;
 
-    fn new(schema: SchemaRef) -> Self;
-
     fn put(&mut self, put: Self::PutOp) -> Result<(), Self::Error>;
 
     /// Returns all possible time ranges that contain the timestamp in this batch.
     ///
     /// Each time range is aligned to given `duration`.
     fn time_ranges(&self, duration: Duration) -> Result<Vec<RangeMillis>, Self::Error>;
+
+    fn put_op(&self) -> Self::PutOp;
+
+    fn put_op_with_columns(num_columns: usize) -> Self::PutOp;
 }
 
 /// Put multiple rows.
 pub trait PutOperation: Send {
     type Error: ErrorExt + Send + Sync;
-
-    fn new() -> Self;
-
-    fn with_num_columns(num_columns: usize) -> Self;
 
     fn add_key_column(&mut self, name: &str, vector: VectorRef) -> Result<(), Self::Error>;
 

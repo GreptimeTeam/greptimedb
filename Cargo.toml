@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "src/api",
+    "src/catalog",
     "src/client",
     "src/common/base",
     "src/common/error",
@@ -22,4 +23,5 @@ members = [
     "src/store-api",
     "src/table",
     "src/table-engine",
+    "test-util",
 ]

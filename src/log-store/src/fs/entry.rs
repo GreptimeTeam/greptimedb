@@ -106,17 +106,19 @@ impl Encode for EntryImpl {
     }
 }
 
-impl Entry for EntryImpl {
-    type Error = Error;
-
-    fn new(data: impl AsRef<[u8]>) -> Self {
-        Self {
+impl EntryImpl {
+    pub(crate) fn new(data: impl AsRef<[u8]>) -> EntryImpl {
+        EntryImpl {
             id: 0,
             data: data.as_ref().to_vec(),
             offset: 0,
             epoch: 0,
         }
     }
+}
+
+impl Entry for EntryImpl {
+    type Error = Error;
 
     fn data(&self) -> &[u8] {
         &self.data

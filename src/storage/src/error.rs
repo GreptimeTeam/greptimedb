@@ -8,6 +8,7 @@ use datatypes::arrow::error::ArrowError;
 use serde_json::error::Error as JsonError;
 use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
+use store_api::storage::SequenceNumber;
 
 use crate::metadata::Error as MetadataError;
 
@@ -108,14 +109,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display(
-        "Failed to write WAL, region id: {}, WAL name: {}, source: {}",
-        region_id,
-        name,
-        source
-    ))]
+    #[snafu(display("Failed to write WAL, WAL name: {}, source: {}", name, source))]
     WriteWal {
-        region_id: u32,
         name: String,
         #[snafu(backtrace)]
         source: BoxedError,
@@ -196,6 +191,43 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Region is under {} state, cannot proceed operation", state))]
+    InvalidRegionState {
+        state: &'static str,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to read WAL, name: {}, source: {}", name, source))]
+    ReadWal {
+        name: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("WAL data corrupted, name: {}, message: {}", name, message))]
+    WalDataCorrupted {
+        name: String,
+        message: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Region version not found in manifest, the region: {}", region_name))]
+    VersionNotFound {
+        region_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Sequence of region should increase monotonically ({} > {})",
+        prev,
+        given
+    ))]
+    SequenceNotMonotonic {
+        prev: SequenceNumber,
+        given: SequenceNumber,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -220,7 +252,10 @@ impl ErrorExt for Error {
             | DecodeRegionMetaActionList { .. }
             | Readline { .. }
             | InvalidParquetSchema { .. }
-            | SequenceColumnNotFound { .. } => StatusCode::Unexpected,
+            | SequenceColumnNotFound { .. }
+            | WalDataCorrupted { .. }
+            | VersionNotFound { .. }
+            | SequenceNotMonotonic { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | InitBackend { .. }
@@ -235,7 +270,9 @@ impl ErrorExt for Error {
             | ManifestProtocolForbidRead { .. }
             | ManifestProtocolForbidWrite { .. }
             | ReadParquet { .. }
-            | ReadParquetIo { .. } => StatusCode::StorageUnavailable,
+            | ReadParquetIo { .. }
+            | InvalidRegionState { .. }
+            | ReadWal { .. } => StatusCode::StorageUnavailable,
         }
     }
 
