@@ -7,6 +7,7 @@ mod percentile;
 mod polyval;
 mod scipy_stats_norm_cdf;
 mod scipy_stats_norm_pdf;
+mod stddev;
 
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ pub use percentile::PercentileAccumulatorCreator;
 pub use polyval::PolyvalAccumulatorCreator;
 pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
 pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
+pub use stddev::StddevAccumulatorCreator;
 
 use crate::scalars::FunctionRegistry;
 
@@ -93,6 +95,10 @@ impl AggregateFunctions {
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "scipy_stats_norm_pdf",
             Arc::new(|| Arc::new(ScipyStatsNormPdfAccumulatorCreator::default())),
+        )));
+        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
+            "stddev",
+            Arc::new(|| Arc::new(StddevAccumulatorCreator::default())),
         )));
     }
 }
