@@ -180,7 +180,7 @@ fn is_null(null_mask: &BitSet, idx: usize) -> bool {
         "idx should be less than null_mask.len"
     );
 
-    matches!(null_mask.get_bit(idx), Some(true))
+    matches!(null_mask.get(idx), Some(true))
 }
 #[cfg(test)]
 mod tests {

@@ -1,15 +1,19 @@
 use api::v1::*;
 use client::{Client, Database};
 
-#[tokio::main]
-async fn main() {
-    let url = "http://127.0.0.1:3001";
-    let db_name = "db";
-    let table_name = "demo";
+fn main() {
+    tracing::subscriber::set_global_default(tracing_subscriber::FmtSubscriber::builder().finish())
+        .unwrap();
 
-    let client = Client::connect(url).await.unwrap();
-    let db = Database::new(db_name, client);
-    db.insert(table_name, insert_batches()).await.unwrap();
+    run();
+}
+
+#[tokio::main]
+async fn run() {
+    let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
+    let db = Database::new("greptime", client);
+
+    db.insert("demo", insert_batches()).await.unwrap();
 }
 
 fn insert_batches() -> Vec<Vec<u8>> {

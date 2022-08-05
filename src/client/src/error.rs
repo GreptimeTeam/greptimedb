@@ -25,9 +25,7 @@ pub enum Error {
     },
 
     #[snafu(display("Fail to decode select result, source: {}", source))]
-    DecodeSelect {
-        source: DecodeError
-    }
+    DecodeSelect { source: DecodeError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

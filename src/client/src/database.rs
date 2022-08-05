@@ -3,7 +3,7 @@ use api::v1::*;
 use snafu::{ensure, ResultExt};
 
 use crate::error;
-use crate::{Client, Result, error::DecodeSelectSnafu};
+use crate::{error::DecodeSelectSnafu, Client, Result};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -45,7 +45,10 @@ impl Database {
         Ok(())
     }
 
-    pub async fn select(&self, select_expr: SelectExpr) -> Result<(Option<ResultHeader>, SelectResult)> {
+    pub async fn select(
+        &self,
+        select_expr: SelectExpr,
+    ) -> Result<(Option<ResultHeader>, SelectResult)> {
         let header = Header {
             version: PROTOCOL_VERSION,
         };

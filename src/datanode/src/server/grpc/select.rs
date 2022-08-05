@@ -31,8 +31,7 @@ pub(crate) async fn select_result(select_result: Result<Output>) -> ObjectResult
             }
             Output::RecordBatch(stream) => match util::collect(stream).await {
                 Ok(record_batches) => {
-                    let aggregate: Aggregate = record_batches.into();
-                    let select_result: Result<SelectResult> = aggregate.try_into();
+                    let select_result = convert_record_batches_to_select_result(record_batches);
                     match select_result {
                         Ok(select_result) => {
                             header.code = SUCCESS;
@@ -59,70 +58,44 @@ pub(crate) async fn select_result(select_result: Result<Output>) -> ObjectResult
     object_resp
 }
 
-type ColumnName = String;
+fn convert_record_batches_to_select_result(
+    record_batches: Vec<RecordBatch>,
+) -> Result<SelectResult> {
+    let first = if let Some(r) = record_batches.get(0) {
+        r
+    } else {
+        return Ok(SelectResult::default());
+    };
 
-#[derive(Default)]
-pub struct Aggregate {
-    columns: Vec<(ColumnName, Vec<Arc<dyn Array>>)>,
-    row_count: usize,
-}
+    let row_count: usize = record_batches
+        .iter()
+        .map(|r| r.df_recordbatch.num_rows())
+        .sum();
 
-impl TryInto<SelectResult> for Aggregate {
-    type Error = crate::error::Error;
+    let schemas = first.schema.column_schemas();
+    let mut columns = Vec::with_capacity(schemas.len());
 
-    fn try_into(self) -> Result<SelectResult> {
-        let column_vec = self.columns;
+    for (idx, schema) in schemas.iter().enumerate() {
+        let column_name = schema.name.clone();
 
-        let mut columns = Vec::with_capacity(column_vec.len());
-        for (column_name, arrays) in column_vec {
-            let column = Column {
-                column_name,
-                values: Some(values(&arrays)?),
-                null_mask: null_mask(&arrays, self.row_count),
-                ..Default::default()
-            };
-            columns.push(column);
-        }
-
-        Ok(SelectResult {
-            columns,
-            row_count: self.row_count as u32,
-        })
-    }
-}
-
-impl From<Vec<RecordBatch>> for Aggregate {
-    fn from(record_batches: Vec<RecordBatch>) -> Self {
-        let first = if let Some(r) = record_batches.get(0) {
-            r
-        } else {
-            return Aggregate::default();
-        };
-
-        let row_count: usize = record_batches
+        let arrays: Vec<Arc<dyn Array>> = record_batches
             .iter()
-            .map(|r| r.df_recordbatch.num_rows())
-            .sum();
-
-        let columns = first
-            .schema
-            .column_schemas()
-            .iter()
-            .enumerate()
-            .map(|(idx, schema)| {
-                let column_name = schema.name.clone();
-
-                let arrays = record_batches
-                    .iter()
-                    .map(|r| r.df_recordbatch.columns()[idx].clone())
-                    .collect();
-
-                (column_name, arrays)
-            })
+            .map(|r| r.df_recordbatch.columns()[idx].clone())
             .collect();
 
-        Aggregate { columns, row_count }
+        let column = Column {
+            column_name,
+            values: Some(values(&arrays)?),
+            null_mask: null_mask(&arrays, row_count),
+            ..Default::default()
+        };
+        columns.push(column);
     }
+
+    Ok(SelectResult {
+        columns,
+        row_count: row_count as u32,
+    })
 }
 
 fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
@@ -136,7 +109,7 @@ fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
         return Vec::default();
     }
 
-    let mut bitset = BitSet::with_size(row_count);
+    let mut bitset = BitSet::with_capacity(row_count);
     for array in arrays {
         let validity = array.validity();
         if let Some(v) = validity {
@@ -210,7 +183,6 @@ fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::SelectResult;
     use arrow::{
         array::{Array, BooleanArray, PrimitiveArray},
         datatypes::{DataType, Field},
@@ -224,7 +196,27 @@ mod tests {
         vectors::{UInt32Vector, VectorRef},
     };
 
-    use crate::server::grpc::select::{null_mask, values, Aggregate};
+    use crate::server::grpc::select::{convert_record_batches_to_select_result, null_mask, values};
+
+    #[test]
+    fn test_convert_record_batches_to_select_result() {
+        let r1 = mock_record_batch();
+        let r2 = mock_record_batch();
+        let record_batches = vec![r1, r2];
+
+        let s = convert_record_batches_to_select_result(record_batches).unwrap();
+
+        let c1 = s.columns.get(0).unwrap();
+        let c2 = s.columns.get(1).unwrap();
+        assert_eq!("c1", c1.column_name);
+        assert_eq!("c2", c2.column_name);
+
+        assert_eq!(vec![0b0010_0100], c1.null_mask);
+        assert_eq!(vec![0b0011_0110], c2.null_mask);
+
+        assert_eq!(vec![1, 2, 1, 2], c1.values.as_ref().unwrap().u32_values);
+        assert_eq!(vec![1, 1], c2.values.as_ref().unwrap().u32_values);
+    }
 
     #[test]
     fn test_convert_arrow_arrays_i32() {
@@ -294,54 +286,6 @@ mod tests {
         let a2: Arc<dyn Array> = Arc::new(PrimitiveArray::from(vec![Some(4), Some(5), None]));
         let mask = null_mask(&vec![a1, a2], 3 + 3);
         assert_eq!(vec![0b0010_0000], mask);
-    }
-
-    #[test]
-    fn test_convert_record_batches_to_aggregate() {
-        let empty = Vec::new();
-
-        let a: Aggregate = empty.into();
-
-        assert_eq!(0, a.row_count);
-
-        let r1 = mock_record_batch();
-        let r2 = mock_record_batch();
-
-        let a: Aggregate = vec![r1, r2].into();
-
-        assert_eq!(6, a.row_count);
-
-        let (c1_name, c1) = &a.columns[0];
-        let (c2_name, c2) = &a.columns[1];
-
-        assert_eq!("c1", c1_name);
-        assert_eq!("c2", c2_name);
-
-        assert_eq!(2, c1.len());
-        assert_eq!(2, c2.len());
-    }
-
-    #[test]
-    fn test_convert_aggregate_to_select_result() {
-        let r1 = mock_record_batch();
-        let r2 = mock_record_batch();
-
-        let a: Aggregate = vec![r1, r2].into();
-
-        let s: SelectResult = a.try_into().unwrap();
-
-        assert_eq!(6, s.row_count);
-
-        let c1 = s.columns.get(0).unwrap();
-        let c2 = s.columns.get(1).unwrap();
-        assert_eq!("c1", c1.column_name);
-        assert_eq!("c2", c2.column_name);
-
-        assert_eq!(vec![0b0010_0100], c1.null_mask);
-        assert_eq!(vec![0b0011_0110], c2.null_mask);
-
-        assert_eq!(vec![1, 2, 1, 2], c1.values.as_ref().unwrap().u32_values);
-        assert_eq!(vec![1, 1], c2.values.as_ref().unwrap().u32_values);
     }
 
     fn mock_record_batch() -> RecordBatch {

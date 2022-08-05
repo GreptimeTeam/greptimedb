@@ -15,7 +15,9 @@ async fn run() {
     let db = Database::new("greptime", client);
 
     let select_expr = SelectExpr {
-        expr: Some(select_expr::Expr::Sql("select host,cpu,memory,ts from demo".to_string())),
+        expr: Some(select_expr::Expr::Sql(
+            "select * from demo".to_string(),
+        )),
     };
     let (header, body) = db.select(select_expr).await.unwrap();
 
