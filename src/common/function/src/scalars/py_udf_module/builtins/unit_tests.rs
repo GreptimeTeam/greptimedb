@@ -47,5 +47,20 @@ fn convert_scalar_to_py_obj_and_back() {
             assert_eq!(list.len(), 2);
             assert_eq!(ty.as_ref(), &DataType::Int64);
         }
+        let list: Vec<PyObjectRef> = vec![vm.ctx.new_int(1).into(), vm.ctx.new_int(2).into()];
+        let nested_list: Vec<PyObjectRef> =
+            vec![vm.ctx.new_list(list).into(), vm.ctx.new_int(3).into()];
+        let list_obj = vm.ctx.new_list(nested_list).into();
+        let col = try_into_columnar_value(list_obj, vm).unwrap();
+        if let DFColValue::Scalar(ScalarValue::List(Some(list), _))= col{
+            assert_eq!(list.len(), 2);
+            if let ScalarValue::List(Some(inner_list), _) = &list[0]{
+                assert_eq!(inner_list.len(), 2);
+            }else{
+                panic!("Expect a inner list!");
+            }
+        }else{
+            panic!("Expect a list!");
+        }
     })
 }
