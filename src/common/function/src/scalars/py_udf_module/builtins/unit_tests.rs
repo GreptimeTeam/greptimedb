@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use arrow::array::PrimitiveArray;
 use rustpython_vm::class::PyClassImpl;
 
 use super::*;
@@ -52,15 +55,26 @@ fn convert_scalar_to_py_obj_and_back() {
             vec![vm.ctx.new_list(list).into(), vm.ctx.new_int(3).into()];
         let list_obj = vm.ctx.new_list(nested_list).into();
         let col = try_into_columnar_value(list_obj, vm).unwrap();
-        if let DFColValue::Scalar(ScalarValue::List(Some(list), _))= col{
+        if let DFColValue::Scalar(ScalarValue::List(Some(list), _)) = col {
             assert_eq!(list.len(), 2);
-            if let ScalarValue::List(Some(inner_list), _) = &list[0]{
+            if let ScalarValue::List(Some(inner_list), _) = &list[0] {
                 assert_eq!(inner_list.len(), 2);
-            }else{
+            } else {
                 panic!("Expect a inner list!");
             }
-        }else{
+        } else {
             panic!("Expect a list!");
         }
+
+        let list: PyVector = PyVector::from(
+            HelperVec::try_into_vector(
+                Arc::new(PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4])) as ArrayRef,
+            )
+            .unwrap(),
+        );
+        let nested_list: Vec<PyObjectRef> = vec![list.into_pyobject(vm), vm.ctx.new_int(3).into()];
+        let list_obj = vm.ctx.new_list(nested_list).into();
+        let expect_err = try_into_columnar_value(list_obj, vm);
+        assert!(expect_err.is_err());
     })
 }
