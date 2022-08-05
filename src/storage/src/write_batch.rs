@@ -844,13 +844,15 @@ pub mod codec {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let write_bacth = WriteBatch {
-                schema,
-                mutations,
-                num_rows: write_batch.num_rows as usize,
-            };
+            let mut write_batch = WriteBatch::new(schema);
 
-            Ok(write_bacth)
+            mutations
+                .into_iter()
+                .try_for_each(|mutation| match mutation {
+                    Mutation::Put(put_data) => write_batch.put(put_data),
+                })?;
+
+            Ok(write_batch)
         }
     }
 }
