@@ -10,22 +10,22 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::TableEngine;
 
 use super::error::Result;
-use crate::catalog::{CatalogList, CatalogProvider, CatalogProviderRef};
 use crate::consts::SYSTEM_CATALOG_NAME;
 use crate::error::{CatalogNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu};
 use crate::memory::{MemoryCatalogList, MemoryCatalogProvider};
 use crate::system::{decode_system_catalog, Entry, SystemCatalogTable};
+use crate::{CatalogList, CatalogManager, CatalogProvider};
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
 // TODO(hl): Replace current `memory::new_memory_catalog_list()` with CatalogManager
 #[allow(dead_code)]
-pub struct CatalogManager {
+pub struct CatalogManagerImpl {
     system: Arc<SystemCatalogTable>,
     catalogs: Arc<MemoryCatalogList>,
     engine: Arc<dyn TableEngine>,
 }
 
-impl CatalogList for CatalogManager {
+impl CatalogList for CatalogManagerImpl {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -49,8 +49,10 @@ impl CatalogList for CatalogManager {
     }
 }
 
+impl CatalogManager for CatalogManagerImpl {}
+
 #[allow(dead_code)]
-impl CatalogManager {
+impl CatalogManagerImpl {
     pub fn new() -> Self {
         todo!()
     }

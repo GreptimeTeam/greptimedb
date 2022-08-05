@@ -7,12 +7,12 @@ use std::sync::RwLock;
 use table::table::numbers::NumbersTable;
 use table::TableRef;
 
-use crate::catalog::{
+use crate::error::{Result, TableExistsSnafu};
+use crate::schema::SchemaProvider;
+use crate::{
     CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef, DEFAULT_CATALOG_NAME,
     DEFAULT_SCHEMA_NAME,
 };
-use crate::error::{Result, TableExistsSnafu};
-use crate::schema::SchemaProvider;
 
 /// Simple in-memory list of catalogs
 #[derive(Default)]
@@ -185,6 +185,7 @@ mod tests {
     use common_error::prelude::StatusCode;
 
     use super::*;
+    use crate::DEFAULT_CATALOG_NAME;
 
     #[test]
     fn test_new_memory_catalog_list() {
