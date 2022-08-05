@@ -13,7 +13,7 @@ use datatypes::with_match_ordered_primitive_type_id;
 use num_traits::AsPrimitive;
 use snafu::{OptionExt, ResultExt};
 
-// https://numpy.org/doc/stable/reference/generated/numpy.diff.html
+// https://numpy.org/doc/stable/reference/generated/numpy.mean.html
 #[derive(Debug, Default)]
 pub struct Mean<T>
 where
