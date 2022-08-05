@@ -33,6 +33,7 @@ fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseException
 /// | integer| i64  |
 /// | float  | f64  |
 /// | bool   | bool |
+/// | vector | array|
 fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DFColValue> {
     if is_instance::<PyVector>(&obj, vm) {
         let ret = obj
@@ -124,6 +125,7 @@ fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
         }
         DFColValue::Scalar(val) => {
             let val_in_f64 = match val {
+                ScalarValue::Float64(Some(v)) => v,
                 ScalarValue::Int64(Some(v)) => v as f64,
                 ScalarValue::Boolean(Some(v)) => v as i64 as f64,
                 _ => {
@@ -531,11 +533,13 @@ pub(in crate::scalars::py_udf_module) mod udf_builtins {
 
     /// Pow function, bind from gp's [`PowFunction`]
     #[pyfunction]
-    fn pow(base: PyObjectRef, pow: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        // let res = try_into_columnar_value(base.clone(), vm);
+    fn pow(base: PyObjectRef, pow: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let base = base
             .payload::<PyVector>()
             .ok_or_else(|| type_cast_error(&base.class().name(), "vector", vm))?;
+        let pow = pow
+            .payload::<PyVector>()
+            .ok_or_else(|| type_cast_error(&pow.class().name(), "vector", vm))?;
         // pyfunction can return PyResult<...>, args can be like PyObjectRef or anything
         // impl IntoPyNativeFunc, see rustpython-vm function for more details
         let args = vec![base.as_vector_ref(), pow.as_vector_ref()];

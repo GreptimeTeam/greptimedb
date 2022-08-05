@@ -669,10 +669,103 @@ pow(values, pows)"#,
         },
         script: r#"
 from udf_builtins import *
-pow(values, pows)"#,
+pow(values, 1)"#,
+        expect: Err("TypeError: Can't cast operand of type `int` into `vector`.")
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "pows": Var(
+                ty: Int8,
+                value: IntVec([0, 0, 0])
+            ),
+            "num": Var(
+                ty: Int64,
+                value: Int(1)
+            )
+        },
+        script: r#"
+from udf_builtins import *
+pow(num, pows)"#,
+        expect: Err("TypeError: Can't cast operand of type `int` into `vector`")
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "pows": Var(
+                ty: Int8,
+                value: IntVec([0, 0, 0])
+            ),
+            "num": Var(
+                ty: Int64,
+                value: Int(1)
+            )
+        },
+        script: r#"
+from udf_builtins import *
+asin(num, pows)"#,
+        expect: Err("TypeError: Expected at most 1 arguments (2 given)")
+    ),
+    // Test Type Cast between float, int and bool
+    TestCase(
+        input: {
+            "num": Var(
+                ty: Int64,
+                value: Int(1)
+            )
+        },
+        script: r#"
+from udf_builtins import *
+sin(num)"#,
         expect: Ok((
-            value: FloatVec([ 1.0, 0.5, 27.0]),
-            ty: Float64
+            ty: Float64,
+            value: Float(0.8414709848078965)
+        ))
+    ),
+    TestCase(
+        input: {
+            "num": Var(
+                ty: Float64,
+                value: Float(1.0)
+            )
+        },
+        script: r#"
+from udf_builtins import *
+sin(num)"#,
+        expect: Ok((
+            ty: Float64,
+            value: Float(0.8414709848078965)
+        ))
+    ),
+    TestCase(
+        input: {},
+        script: r#"
+from udf_builtins import *
+sin(True)"#,
+        expect: Ok((
+            ty: Float64,
+            value: Float(0.8414709848078965)
+        ))
+    ),
+    TestCase(
+        input: {
+            "num": Var(
+                ty: Boolean,
+                value: Bool(false)
+            )
+        },
+        script: r#"
+from udf_builtins import *
+sin(num)"#,
+        expect: Ok((
+            ty: Float64,
+            value: Float(0.0)
         ))
     ),
 ]

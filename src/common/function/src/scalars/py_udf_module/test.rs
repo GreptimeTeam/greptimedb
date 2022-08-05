@@ -8,11 +8,11 @@ use arrow::{
 use datatypes::vectors::VectorRef;
 use ron::from_str as from_ron_string;
 use rustpython_vm::{
-    builtins::{PyFloat, PyInt, PyList},
+    builtins::{PyBool, PyFloat, PyInt, PyList},
     class::PyClassImpl,
     convert::ToPyObject,
     scope::Scope,
-    AsObject, PyObjectRef, VirtualMachine, PyPayload,
+    AsObject, PyObjectRef, PyPayload, VirtualMachine,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,7 @@ struct TestCase {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Var {
-    value: PyVar,
+    value: PyValue,
     ty: DataType,
 }
 
@@ -37,14 +37,15 @@ const EPS: f64 = 2.0 * f64::EPSILON;
 
 /// Null element just not supported for now for simplicity with writing test cases
 #[derive(Debug, Serialize, Deserialize)]
-enum PyVar {
+enum PyValue {
     FloatVec(Vec<f64>),
     IntVec(Vec<i64>),
     Int(i64),
     Float(f64),
-    /// for test if the length of FloatVec is of the same as `VagueFloat.0`
+    Bool(bool),
+    /// for test if the length of FloatVec is of the same as `LenFloatVec.0`
     LenFloatVec(usize),
-    /// for test if the length of IntVec is of the same as `VagueInt.0`
+    /// for test if the length of IntVec is of the same as `LenIntVec.0`
     LenIntVec(usize),
     /// for test if result is within the bound of err using formula:
     /// `(res - value).abs() < (value.abs()* error_percent)`
@@ -54,21 +55,21 @@ enum PyVar {
     },
 }
 
-impl PartialEq for PyVar {
+impl PartialEq for PyValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (PyVar::FloatVec(a), PyVar::FloatVec(b)) => a
+            (PyValue::FloatVec(a), PyValue::FloatVec(b)) => a
                 .iter()
                 .zip(b)
                 .fold(true, |acc, (x, y)| acc && (x - y).abs() <= EPS),
-            (PyVar::IntVec(a), PyVar::IntVec(b)) => a == b,
-            (PyVar::Float(a), PyVar::Float(b)) => (a - b).abs() <= EPS,
-            (PyVar::Int(a), PyVar::Int(b)) => a == b,
+            (PyValue::IntVec(a), PyValue::IntVec(b)) => a == b,
+            (PyValue::Float(a), PyValue::Float(b)) => (a - b).abs() <= EPS,
+            (PyValue::Int(a), PyValue::Int(b)) => a == b,
             // for just compare the length of vector
-            (PyVar::LenFloatVec(len), PyVar::FloatVec(v)) => *len == v.len(),
-            (PyVar::LenIntVec(len), PyVar::IntVec(v)) => *len == v.len(),
-            (PyVar::FloatVec(v), PyVar::LenFloatVec(len)) => *len == v.len(),
-            (PyVar::IntVec(v), PyVar::LenIntVec(len)) => *len == v.len(),
+            (PyValue::LenFloatVec(len), PyValue::FloatVec(v)) => *len == v.len(),
+            (PyValue::LenIntVec(len), PyValue::IntVec(v)) => *len == v.len(),
+            (PyValue::FloatVec(v), PyValue::LenFloatVec(len)) => *len == v.len(),
+            (PyValue::IntVec(v), PyValue::LenIntVec(len)) => *len == v.len(),
             (
                 Self::Float(v),
                 Self::FloatWithError {
@@ -110,19 +111,20 @@ fn is_int(ty: &DataType) -> bool {
     )
 }
 
-impl PyVar {
+impl PyValue {
     fn to_py_obj(&self, vm: &VirtualMachine) -> Result<PyObjectRef, String> {
         let v: VectorRef = match self {
-            PyVar::FloatVec(v) => Arc::new(datatypes::vectors::Float64Vector::from_vec(v.clone())),
-            PyVar::IntVec(v) => Arc::new(datatypes::vectors::Int64Vector::from_vec(v.clone())),
-            PyVar::Int(v) => {
-                let v = PyInt::from(*v).into_pyobject(vm);
-                return Ok(v);
+            PyValue::FloatVec(v) => {
+                Arc::new(datatypes::vectors::Float64Vector::from_vec(v.clone()))
             }
-            PyVar::Float(v) => {
-                let v = PyFloat::from(*v).into_pyobject(vm);
-                return Ok(v);
+            PyValue::IntVec(v) => Arc::new(datatypes::vectors::Int64Vector::from_vec(v.clone())),
+            PyValue::Int(v) => {
+                return Ok(vm.ctx.new_int(*v).into());
             }
+            PyValue::Float(v) => {
+                return Ok(vm.ctx.new_float(*v).into());
+            }
+            Self::Bool(v) => return Ok(vm.ctx.new_bool(*v).into()),
             _ => return Err(format!("Unsupported type:{self:#?}")),
         };
         let v = PyVector::from(v).to_pyobject(vm);
@@ -245,23 +247,8 @@ fn run_testcases() {
             case.input
                 .iter()
                 .try_for_each(|(k, v)| -> Result<(), String> {
-                    match &v.value {
-                        PyVar::FloatVec(v) => {
-                            let v: VectorRef =
-                                Arc::new(datatypes::vectors::Float64Vector::from_vec(v.clone()));
-                            let v = PyVector::from(v);
-                            set_item_into_scope(&scope, vm, k, v)
-                        }
-                        PyVar::IntVec(v) => {
-                            let v: VectorRef =
-                                Arc::new(datatypes::vectors::Int64Vector::from_vec(v.clone()));
-                            let v = PyVector::from(v);
-                            set_item_into_scope(&scope, vm, k, v)
-                        }
-                        PyVar::Int(v) => set_item_into_scope(&scope, vm, k, *v),
-                        PyVar::Float(v) => set_item_into_scope(&scope, vm, k, *v),
-                        _ => panic!("Vague not allowed in input!")
-                    }
+                    let v = PyValue::to_py_obj(&v.value, vm).unwrap();
+                    set_item_into_scope(&scope, vm, k, v)
                 })
                 .unwrap();
             let code_obj = vm
@@ -276,8 +263,8 @@ fn run_testcases() {
             match res {
                 Err(e) => {
                     let err_res = to_serde_excep(e, vm).unwrap();
-                    println!("Error:\n{err_res}");
                     if case.expect.is_ok(){
+                        println!("\nError:\n{err_res}");
                         panic!("Expect Ok, found Error")
                     }
                     if !err_res.contains(&case.expect.unwrap_err()){
@@ -285,7 +272,7 @@ fn run_testcases() {
                     }
                 }
                 Ok(obj) => {
-                    let ser = PyVar::from_py_obj(&obj, vm);
+                    let ser = PyValue::from_py_obj(&obj, vm);
                     match (ser, case.expect){
                         (Ok(real), Ok(expect)) => {
                             if !(real == expect.value){
@@ -388,7 +375,7 @@ sin(values)"#,
                 println!("Error:\n{err_res}");
             }
             Ok(obj) => {
-                let _ser = PyVar::from_py_obj(&obj, vm);
+                let _ser = PyValue::from_py_obj(&obj, vm);
                 dbg!(_ser);
             }
         }
