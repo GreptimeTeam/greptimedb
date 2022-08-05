@@ -3,7 +3,9 @@ mod pow;
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
-use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::memory::{
+    new_numbers_table, MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider,
+};
 use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_recordbatch::error::Result as RecordResult;
@@ -23,8 +25,7 @@ use query::query_engine::{Output, QueryEngineFactory};
 use query::QueryEngine;
 use rand::Rng;
 use table::table::adapter::DfTableProviderAdapter;
-use table::table::numbers::NumbersTable;
-use testutil::DfMemTable;
+use testutil::MemTable;
 
 use crate::pow::pow;
 
@@ -36,7 +37,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let engine = factory.query_engine();
 
     let limit = 10;
-    let table = Arc::new(NumbersTable::default());
+    let table = new_numbers_table().unwrap();
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
     let plan = LogicalPlan::DfPlan(
         LogicalPlanBuilder::scan("numbers", table_provider, None)
@@ -148,8 +149,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let even_number_table =
-        Arc::new(DfMemTable::try_new(column_schemas, vec![recordbatch]).unwrap());
+    let even_number_table = Arc::new(MemTable::new(recordbatch));
     schema_provider
         .register_table("even_numbers".to_string(), even_number_table)
         .unwrap();
@@ -176,8 +176,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let odd_number_table =
-        Arc::new(DfMemTable::try_new(column_schemas, vec![recordbatch]).unwrap());
+    let odd_number_table = Arc::new(MemTable::new(recordbatch));
     schema_provider
         .register_table("odd_numbers".to_string(), odd_number_table)
         .unwrap();
@@ -190,10 +189,9 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
     let f32_numbers: VectorRef = Arc::new(Float32Vector::from_vec(vec![1.0f32, 2.0, 3.0]));
     let f64_numbers: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0f64, 2.0, 3.0]));
     let columns = vec![f32_numbers, f64_numbers];
-    let schema = Arc::new(Schema::new(column_schemas.clone()));
+    let schema = Arc::new(Schema::new(column_schemas));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let float_number_table =
-        Arc::new(DfMemTable::try_new(column_schemas, vec![recordbatch]).unwrap());
+    let float_number_table = Arc::new(MemTable::new(recordbatch));
     schema_provider
         .register_table("float_numbers".to_string(), float_number_table)
         .unwrap();

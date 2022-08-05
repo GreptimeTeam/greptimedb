@@ -42,6 +42,12 @@ pub enum InnerError {
         source: datatypes::error::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Table projection error, source: {}", source))]
+    TableProjection {
+        source: ArrowError,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for InnerError {
@@ -49,7 +55,8 @@ impl ErrorExt for InnerError {
         match self {
             InnerError::Datafusion { .. }
             | InnerError::PollStream { .. }
-            | InnerError::SchemaConversion { .. } => StatusCode::EngineExecuteQuery,
+            | InnerError::SchemaConversion { .. }
+            | InnerError::TableProjection { .. } => StatusCode::EngineExecuteQuery,
             InnerError::MissingColumn { .. } => StatusCode::InvalidArguments,
             InnerError::ExecuteRepeatedly { .. } => StatusCode::Unexpected,
         }

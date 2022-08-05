@@ -25,7 +25,7 @@ use query::error::Result;
 use query::query_engine::Output;
 use query::QueryEngineFactory;
 use table::TableRef;
-use testutil::DfMemTable;
+use testutil::MemTable;
 
 #[derive(Debug, Default)]
 struct MySumAccumulator<T, SumT>
@@ -223,7 +223,7 @@ where
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let column: VectorRef = Arc::new(PrimitiveVector::<T>::from_vec(numbers));
     let recordbatch = RecordBatch::new(schema, vec![column]).unwrap();
-    let testing_table = Arc::new(DfMemTable::try_new(column_schemas, vec![recordbatch]).unwrap());
+    let testing_table = Arc::new(MemTable::new(recordbatch));
 
     let factory = new_query_engine_factory(table_name.clone(), testing_table);
     let engine = factory.query_engine();

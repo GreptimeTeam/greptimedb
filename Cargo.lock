@@ -505,10 +505,13 @@ name = "catalog"
 version = "0.1.0"
 dependencies = [
  "common-error",
+ "common-recordbatch",
  "common-telemetry",
  "datafusion",
+ "datatypes",
  "snafu",
  "table",
+ "testutil",
  "tokio",
 ]
 

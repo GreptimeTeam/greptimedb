@@ -1,3 +1,3 @@
 mod memtable;
 
-pub use memtable::DfMemTable;
+pub use memtable::MemTable;

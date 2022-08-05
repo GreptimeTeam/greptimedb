@@ -17,7 +17,7 @@ use snafu::ResultExt;
 use table::table::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
 
 use crate::datafusion::error;
-use crate::error::{Result, TableExecutionSnafu};
+use crate::error::Result;
 use crate::executor::Runtime;
 use crate::plan::{Partitioning, PhysicalPlan};
 
@@ -98,7 +98,8 @@ impl PhysicalPlan for PhysicalPlanAdapter {
                 })?;
 
         Ok(Box::pin(
-            RecordBatchStreamAdapter::try_new(df_stream).context(TableExecutionSnafu)?,
+            RecordBatchStreamAdapter::try_new(df_stream)
+                .context(error::TableSchemaMismatchSnafu)?,
         ))
     }
 

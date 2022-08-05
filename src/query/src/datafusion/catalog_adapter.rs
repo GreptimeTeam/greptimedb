@@ -224,7 +224,7 @@ impl SchemaProvider for SchemaProviderAdapter {
             })?
             .map(|table| {
                 let adapter = TableAdapter::new(table, self.runtime.clone())
-                    .context(error::ConvertTableSnafu)?;
+                    .context(error::TableSchemaMismatchSnafu)?;
                 Ok(Arc::new(adapter) as _)
             })
             .transpose()
