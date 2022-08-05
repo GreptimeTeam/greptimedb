@@ -21,9 +21,7 @@ pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool
     obj.is_instance(T::class(vm).into(), vm).unwrap_or(false)
 }
 
-/// ```no_run
-/// vm.new_type_error(format!("Can't cast operand of type `{name}` into `{ty}`."))
-/// ```
+/// "Can't cast operand of type `{name}` into `{ty}`."
 fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseExceptionRef {
     vm.new_type_error(format!("Can't cast operand of type `{name}` into `{ty}`."))
 }
