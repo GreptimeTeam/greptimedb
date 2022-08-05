@@ -21,7 +21,7 @@ use crate::error::{
 #[allow(dead_code)]
 pub struct SystemCatalogTable {
     schema: SchemaRef,
-    table: TableRef,
+    pub table: TableRef,
 }
 
 #[allow(dead_code)]

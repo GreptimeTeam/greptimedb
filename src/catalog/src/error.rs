@@ -78,6 +78,7 @@ pub enum Error {
         schema_name: String,
         table_name: String,
         table_id: u64,
+        #[snafu(backtrace)]
         source: table::error::Error,
     },
 
@@ -87,6 +88,12 @@ pub enum Error {
         schema_name: String,
         table_name: String,
         table_id: u64,
+    },
+
+    #[snafu(display("Failed to read system catalog table records"))]
+    ReadSystemCatalog {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
     },
 }
 
@@ -109,6 +116,7 @@ impl ErrorExt for Error {
             Error::SchemaNotFound { .. } => StatusCode::Unexpected,
             Error::OpenTable { .. } => StatusCode::StorageUnavailable,
             Error::TableNotFound { .. } => StatusCode::Unexpected,
+            Error::ReadSystemCatalog { .. } => StatusCode::StorageUnavailable,
         }
     }
 

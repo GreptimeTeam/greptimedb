@@ -7,18 +7,18 @@ use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::StreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
-use table::engine::{EngineContext, TableEngine};
+use table::engine::{EngineContext, TableEngineRef};
 use table::requests::OpenTableRequest;
 
 use super::error::Result;
-use crate::consts::SYSTEM_CATALOG_NAME;
+use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use crate::error::{
-    CatalogNotFoundSnafu, CatalogTypeMismatchSnafu, OpenTableSnafu, SchemaNotFoundSnafu,
-    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableNotFoundSnafu,
+    CatalogNotFoundSnafu, CatalogTypeMismatchSnafu, OpenTableSnafu, ReadSystemCatalogSnafu,
+    SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableNotFoundSnafu,
 };
 use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{decode_system_catalog, Entry, SystemCatalogTable, TableEntry};
-use crate::{CatalogList, CatalogManager, CatalogProvider};
+use crate::{CatalogList, CatalogManager, CatalogProvider, SchemaProvider};
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
 // TODO(hl): Replace current `memory::new_memory_catalog_list()` with CatalogManager
@@ -26,39 +26,19 @@ use crate::{CatalogList, CatalogManager, CatalogProvider};
 pub struct CatalogManagerImpl {
     system: Arc<SystemCatalogTable>,
     catalogs: Arc<MemoryCatalogList>,
-    engine: Arc<dyn TableEngine>,
+    engine: TableEngineRef,
 }
-
-impl CatalogList for CatalogManagerImpl {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn register_catalog(
-        &self,
-        name: String,
-        catalog: Arc<dyn CatalogProvider>,
-    ) -> Option<Arc<dyn CatalogProvider>> {
-        self.catalogs.register_catalog(name, catalog)
-    }
-
-    fn catalog_names(&self) -> Vec<String> {
-        let mut res = self.catalogs.catalog_names();
-        res.push(SYSTEM_CATALOG_NAME.to_string());
-        res
-    }
-
-    fn catalog(&self, _name: &str) -> Option<Arc<dyn CatalogProvider>> {
-        todo!()
-    }
-}
-
-impl CatalogManager for CatalogManagerImpl {}
 
 #[allow(dead_code)]
 impl CatalogManagerImpl {
-    pub fn new() -> Self {
-        todo!()
+    /// Create a new [CatalogManager] with given user catalogs and table engine
+    pub async fn try_new(catalogs: Arc<MemoryCatalogList>, engine: TableEngineRef) -> Result<Self> {
+        let system = Arc::new(SystemCatalogTable::new(engine.clone()).await?);
+        Ok(Self {
+            system,
+            catalogs,
+            engine,
+        })
     }
 
     /// Scan all entries from system catalog table
@@ -66,22 +46,29 @@ impl CatalogManagerImpl {
         self.init_system_catalog();
         let mut system_records = self.system.records().await?;
 
-        while let Some(maybe_records) = system_records.next().await {
-            match maybe_records {
-                Ok(records) => {
-                    self.handle_system_catalog_entries(records).await?;
-                }
-                Err(_e) => {
-                    panic!("Error while restore system catalog table during init");
-                }
-            }
+        while let Some(records) = system_records
+            .next()
+            .await
+            .transpose()
+            .context(ReadSystemCatalogSnafu)?
+        {
+            self.handle_system_catalog_entries(records).await?;
         }
-
         Ok(())
     }
 
     fn init_system_catalog(&mut self) {
-        todo!("Init system catalog table")
+        let system_schema = MemorySchemaProvider::new();
+        system_schema
+            .register_table(
+                SYSTEM_CATALOG_TABLE_NAME.to_string(),
+                self.system.table.clone(),
+            )
+            .unwrap();
+        let system_catalog = MemoryCatalogProvider::new();
+        system_catalog.register_schema(INFORMATION_SCHEMA_NAME, Arc::new(system_schema));
+        self.catalogs
+            .register_catalog(SYSTEM_CATALOG_NAME.to_string(), Arc::new(system_catalog));
     }
 
     async fn handle_system_catalog_entries(&self, records: RecordBatch) -> Result<()> {
@@ -127,11 +114,12 @@ impl CatalogManagerImpl {
                         .as_any()
                         .downcast_ref::<MemoryCatalogProvider>() // maybe remove this downcast
                         .context(CatalogTypeMismatchSnafu)?
-                        .register_schema(s.schema_name, Arc::new(MemorySchemaProvider::new()));
+                        .register_schema(&s.schema_name, Arc::new(MemorySchemaProvider::new()));
+                    info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
-                    self.open_table(&t).await?;
-                    info!("Successfully opened table: {:?}", t)
+                    self.open_and_register_table(&t).await?;
+                    info!("Registered table: {:?}", t)
                 }
             }
             todo!()
@@ -140,7 +128,7 @@ impl CatalogManagerImpl {
         Ok(())
     }
 
-    async fn open_table(&self, t: &TableEntry) -> Result<()> {
+    async fn open_and_register_table(&self, t: &TableEntry) -> Result<()> {
         let catalog = self
             .catalogs
             .catalog(&t.catalog_name)
@@ -183,3 +171,29 @@ impl CatalogManagerImpl {
         Ok(())
     }
 }
+
+impl CatalogList for CatalogManagerImpl {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn register_catalog(
+        &self,
+        name: String,
+        catalog: Arc<dyn CatalogProvider>,
+    ) -> Option<Arc<dyn CatalogProvider>> {
+        self.catalogs.register_catalog(name, catalog)
+    }
+
+    fn catalog_names(&self) -> Vec<String> {
+        let mut res = self.catalogs.catalog_names();
+        res.push(SYSTEM_CATALOG_NAME.to_string());
+        res
+    }
+
+    fn catalog(&self, _name: &str) -> Option<Arc<dyn CatalogProvider>> {
+        todo!()
+    }
+}
+
+impl CatalogManager for CatalogManagerImpl {}
