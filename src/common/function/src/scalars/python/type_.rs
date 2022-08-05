@@ -628,6 +628,7 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
     match val {
         // This comes from:https://github.com/RustPython/RustPython/blob/8ab4e770351d451cfdff5dc2bf8cce8df76a60ab/vm/src/builtins/singletons.rs#L37
         // None in Python is universally singleton so
+        // TODO: change to use `vm.ctx.new_int` and `new_float` instead
         value::Value::Null => vm.ctx.none(),
         value::Value::Boolean(v) => vm.ctx.new_bool(v).into(),
         value::Value::UInt8(v) => PyInt::from(v).into_pyobject(vm),
