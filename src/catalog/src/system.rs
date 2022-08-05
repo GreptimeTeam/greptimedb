@@ -28,7 +28,6 @@ pub struct SystemCatalogTable {
 impl SystemCatalogTable {
     pub async fn new(engine: TableEngineRef) -> Result<Self> {
         let request = OpenTableRequest {
-            engine: engine.name().to_string(),
             catalog_name: SYSTEM_CATALOG_NAME.to_string(),
             schema_name: INFORMATION_SCHEMA_NAME.to_string(),
             table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),

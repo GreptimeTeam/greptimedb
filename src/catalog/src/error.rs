@@ -47,8 +47,18 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Cannot find catalog by name: {}", name))]
-    CatalogNotFound { name: String },
+    #[snafu(display("Cannot find catalog by name: {}", catalog_name))]
+    CatalogNotFound { catalog_name: String },
+
+    #[snafu(display(
+        "Cannot find schema, catalog name: {}, schema name: {}",
+        catalog_name,
+        schema_name
+    ))]
+    SchemaNotFound {
+        catalog_name: String,
+        schema_name: String,
+    },
 
     #[snafu(display("Table {} already exists", table))]
     TableExists { table: String, backtrace: Backtrace },
@@ -57,6 +67,26 @@ pub enum Error {
     RegisterTable {
         #[snafu(backtrace)]
         source: BoxedError,
+    },
+
+    #[snafu(display("Unexpected CatalogProvider implementation"))]
+    CatalogTypeMismatch { backtrace: Backtrace },
+
+    #[snafu(display("Failed to open table, catalog name: {}, schema name: {}, table name: {}, table id: {}, source: {}", catalog_name, schema_name, table_name, table_id, source))]
+    OpenTable {
+        catalog_name: String,
+        schema_name: String,
+        table_name: String,
+        table_id: u64,
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Table not found while opening table, catalog name: {}, schema name: {}, table name: {}, table id: {}", catalog_name, schema_name, table_name, table_id))]
+    TableNotFound {
+        catalog_name: String,
+        schema_name: String,
+        table_name: String,
+        table_id: u64,
     },
 }
 
@@ -75,6 +105,10 @@ impl ErrorExt for Error {
             Error::ValueDeserialize { .. } => StatusCode::StorageUnavailable,
             Error::CatalogNotFound { .. } => StatusCode::StorageUnavailable,
             Error::RegisterTable { .. } => StatusCode::Internal,
+            Error::CatalogTypeMismatch { .. } => StatusCode::Unexpected,
+            Error::SchemaNotFound { .. } => StatusCode::Unexpected,
+            Error::OpenTable { .. } => StatusCode::StorageUnavailable,
+            Error::TableNotFound { .. } => StatusCode::Unexpected,
         }
     }
 

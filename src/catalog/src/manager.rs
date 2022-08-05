@@ -7,13 +7,17 @@ use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::StreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
-use table::engine::TableEngine;
+use table::engine::{EngineContext, TableEngine};
+use table::requests::OpenTableRequest;
 
 use super::error::Result;
 use crate::consts::SYSTEM_CATALOG_NAME;
-use crate::error::{CatalogNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu};
-use crate::memory::{MemoryCatalogList, MemoryCatalogProvider};
-use crate::system::{decode_system_catalog, Entry, SystemCatalogTable};
+use crate::error::{
+    CatalogNotFoundSnafu, CatalogTypeMismatchSnafu, OpenTableSnafu, SchemaNotFoundSnafu,
+    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableNotFoundSnafu,
+};
+use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use crate::system::{decode_system_catalog, Entry, SystemCatalogTable, TableEntry};
 use crate::{CatalogList, CatalogManager, CatalogProvider};
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -65,7 +69,7 @@ impl CatalogManagerImpl {
         while let Some(maybe_records) = system_records.next().await {
             match maybe_records {
                 Ok(records) => {
-                    self.handle_system_catalog_entries(records)?;
+                    self.handle_system_catalog_entries(records).await?;
                 }
                 Err(_e) => {
                     panic!("Error while restore system catalog table during init");
@@ -80,7 +84,7 @@ impl CatalogManagerImpl {
         todo!("Init system catalog table")
     }
 
-    fn handle_system_catalog_entries(&self, records: RecordBatch) -> Result<()> {
+    async fn handle_system_catalog_entries(&self, records: RecordBatch) -> Result<()> {
         ensure!(
             records.df_recordbatch.columns().len() >= 2,
             SystemCatalogSnafu {
@@ -113,21 +117,69 @@ impl CatalogManagerImpl {
                     info!("Register catalog: {}", c.catalog_name);
                 }
                 Entry::Schema(s) => {
-                    let _catalog =
+                    let catalog =
                         self.catalogs
                             .catalog(&s.catalog_name)
                             .context(CatalogNotFoundSnafu {
-                                name: &s.catalog_name,
+                                catalog_name: &s.catalog_name,
                             })?;
-                    todo!("register schema to catalog")
+                    catalog
+                        .as_any()
+                        .downcast_ref::<MemoryCatalogProvider>() // maybe remove this downcast
+                        .context(CatalogTypeMismatchSnafu)?
+                        .register_schema(s.schema_name, Arc::new(MemorySchemaProvider::new()));
                 }
-                Entry::Table(_t) => {
-                    todo!("register table to schema")
+                Entry::Table(t) => {
+                    self.open_table(&t).await?;
+                    info!("Successfully opened table: {:?}", t)
                 }
             }
             todo!()
         }
 
+        Ok(())
+    }
+
+    async fn open_table(&self, t: &TableEntry) -> Result<()> {
+        let catalog = self
+            .catalogs
+            .catalog(&t.catalog_name)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &t.catalog_name,
+            })?;
+        let schema = catalog
+            .schema(&t.schema_name)
+            .context(SchemaNotFoundSnafu {
+                catalog_name: &t.catalog_name,
+                schema_name: &t.schema_name,
+            })?;
+
+        let context = EngineContext {};
+        let request = OpenTableRequest {
+            catalog_name: t.catalog_name.clone(),
+            schema_name: t.schema_name.clone(),
+            table_name: t.table_name.clone(),
+            table_id: t.table_id,
+        };
+
+        let option = self
+            .engine
+            .open_table(&context, request)
+            .await
+            .context(OpenTableSnafu {
+                catalog_name: &t.catalog_name,
+                schema_name: &t.schema_name,
+                table_name: &t.table_name,
+                table_id: t.table_id,
+            })?
+            .context(TableNotFoundSnafu {
+                catalog_name: &t.catalog_name,
+                schema_name: &t.schema_name,
+                table_name: &t.table_name,
+                table_id: t.table_id,
+            })?;
+
+        schema.register_table(t.table_name.clone(), option)?;
         Ok(())
     }
 }

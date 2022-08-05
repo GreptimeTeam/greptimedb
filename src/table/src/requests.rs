@@ -17,7 +17,6 @@ pub struct OpenTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub table_id: u64,
-    pub engine: String,
 }
 
 /// Create table request
