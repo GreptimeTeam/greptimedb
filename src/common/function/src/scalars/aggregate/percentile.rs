@@ -41,7 +41,7 @@ where
         // to keep the not_greater length == floor+1
         // so to ensure the peek of the not_greater is array[floor]
         // and the peek of the greater is array[floor+1]
-        let floor = (((self.n - 1) as f64) * self.p / (100 as f64)).floor();
+        let floor = (((self.n - 1) as f64) * self.p / (100_f64)).floor();
         if value <= *self.not_greater.peek().unwrap() {
             self.not_greater.push(value);
             if self.not_greater.len() > (floor + 1.0) as usize {
@@ -129,7 +129,7 @@ where
             not_greater.into()
         } else {
             let greater = self.greater.peek().unwrap();
-            let fract = (((self.n - 1) as f64) * self.p / (100 as f64)).fract();
+            let fract = (((self.n - 1) as f64) * self.p / 100_f64).fract();
             let not_greater_v: f64 = NumCast::from(not_greater).unwrap();
             let greater_v: f64 = NumCast::from(greater.0).unwrap();
             let percentile: T =
@@ -218,33 +218,40 @@ mod test {
     #[test]
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
-        let mut percentile = Percentile::<i32>::default();
-        percentile.p = 50.0;
+        let mut percentile = Percentile::<i32> {
+            p: 100.0,
+            ..Default::default()
+        };
         assert!(percentile.update_batch(&[]).is_ok());
         assert!(percentile.not_greater.is_empty());
         assert!(percentile.greater.is_empty());
         assert_eq!(Value::Null, percentile.evaluate().unwrap());
 
         // test update one not-null value
-        let mut percentile = Percentile::<i32>::default();
-        percentile.p = 50.0;
+        let mut percentile = Percentile::<i32> {
+            p: 100.0,
+            ..Default::default()
+        };
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
         assert!(percentile.update_batch(&v).is_ok());
         assert_eq!(Value::Int32(42), percentile.evaluate().unwrap());
 
         // test update one null value
-        let mut percentile = Percentile::<i32>::default();
-        percentile.p = 50.0;
+        let mut percentile = Percentile::<i32> {
+            p: 100.0,
+            ..Default::default()
+        };
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Option::<i32>::None,
         ]))];
         assert!(percentile.update_batch(&v).is_ok());
-        percentile.p = 50.0;
         assert_eq!(Value::Null, percentile.evaluate().unwrap());
 
         // test update no null-value batch
-        let mut percentile = Percentile::<i32>::default();
-        percentile.p = 50.0;
+        let mut percentile = Percentile::<i32> {
+            p: 100.0,
+            ..Default::default()
+        };
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Some(-1i32),
             Some(1),
@@ -254,8 +261,10 @@ mod test {
         assert_eq!(Value::Int32(1), percentile.evaluate().unwrap());
 
         // test update null-value batch
-        let mut percentile = Percentile::<i32>::default();
-        percentile.p = 50.0;
+        let mut percentile = Percentile::<i32> {
+            p: 100.0,
+            ..Default::default()
+        };
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Some(-2i32),
             None,
@@ -266,8 +275,10 @@ mod test {
         assert_eq!(Value::Int32(3), percentile.evaluate().unwrap());
 
         // test update with constant vector
-        let mut percentile = Percentile::<i32>::default();
-        percentile.p = 50.0;
+        let mut percentile = Percentile::<i32> {
+            p: 100.0,
+            ..Default::default()
+        };
         let v: Vec<VectorRef> = vec![Arc::new(ConstantVector::new(
             Arc::new(PrimitiveVector::<i32>::from_vec(vec![4])),
             10,
@@ -276,8 +287,10 @@ mod test {
         assert_eq!(Value::Int32(4), percentile.evaluate().unwrap());
 
         // test left border
-        let mut percentile = Percentile::<i32>::default();
-        percentile.p = 0.0;
+        let mut percentile = Percentile::<i32> {
+            p: 100.0,
+            ..Default::default()
+        };
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Some(-1i32),
             Some(1),
@@ -287,8 +300,10 @@ mod test {
         assert_eq!(Value::Int32(-1), percentile.evaluate().unwrap());
 
         // test right border
-        let mut percentile = Percentile::<i32>::default();
-        percentile.p = 100.0;
+        let mut percentile = Percentile::<i32> {
+            p: 100.0,
+            ..Default::default()
+        };
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Some(-1i32),
             Some(1),
@@ -296,6 +311,5 @@ mod test {
         ]))];
         assert!(percentile.update_batch(&v).is_ok());
         assert_eq!(Value::Int32(2), percentile.evaluate().unwrap());
-
     }
 }
