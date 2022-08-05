@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use datatypes::schema::SchemaRef;
 use derive_builder::Builder;
+use store_api::storage::ColumnId;
 
 pub type TableId = u64;
 pub type TableVersion = u64;
@@ -45,14 +46,53 @@ pub struct TableIdent {
 #[builder(pattern = "owned")]
 pub struct TableMeta {
     pub schema: SchemaRef,
+    pub primary_key_indices: Vec<usize>,
     #[builder(default, setter(into))]
     pub engine: String,
+    pub next_column_id: ColumnId,
     #[builder(default)]
     pub engine_options: HashMap<String, String>,
     #[builder(default)]
     pub options: HashMap<String, String>,
     #[builder(default = "Utc::now()")]
     pub created_on: DateTime<Utc>,
+}
+
+impl TableMeta {
+    //TODO(dennis): we can keep this vector in table metadata to avoid construction.
+    pub fn row_key_column_names(&self) -> Vec<&String> {
+        let mut names = Vec::new();
+
+        // It's safe to unwrap here, the created table ensure the timestamp index exists.
+        let ts_column = self.schema.timestamp_column().unwrap();
+        let ts_index = self.schema.timestamp_index().unwrap();
+        names.push(&ts_column.name);
+
+        for index in &self.primary_key_indices {
+            if *index != ts_index {
+                let column_schema = &self.schema.column_schemas()[*index];
+                names.push(&column_schema.name);
+            }
+        }
+
+        names
+    }
+
+    //TODO(dennis): we can keep this vector in table metadata to avoid construction.
+    pub fn value_column_names(&self) -> Vec<&String> {
+        let mut names = Vec::new();
+
+        let ts_index = self.schema.timestamp_index().unwrap();
+        let primary_key_indices = &self.primary_key_indices;
+
+        for (index, column_schema) in self.schema.column_schemas().iter().enumerate() {
+            if index != ts_index && !primary_key_indices.contains(&index) {
+                names.push(&column_schema.name);
+            }
+        }
+
+        names
+    }
 }
 
 #[derive(Clone, Debug, Builder)]

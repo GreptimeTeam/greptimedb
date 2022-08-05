@@ -31,6 +31,12 @@ pub enum Error {
         source: TableInfoBuilderError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Missing timestamp index for table: {}", table_name))]
+    MissingTimestamIndex {
+        table_name: String,
+        backtrace: Backtrace,
+    },
 }
 
 impl From<Error> for table::error::Error {
@@ -48,6 +54,7 @@ impl ErrorExt for Error {
         match self {
             CreateRegion { source, .. } | OpenRegion { source, .. } => source.status_code(),
             BuildTableMeta { .. } | BuildTableInfo { .. } => StatusCode::Unexpected,
+            MissingTimestamIndex { .. } => StatusCode::InvalidArguments,
         }
     }
 

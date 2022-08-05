@@ -3728,6 +3728,7 @@ dependencies = [
  "futures",
  "serde",
  "snafu",
+ "store-api",
 ]
 
 [[package]]

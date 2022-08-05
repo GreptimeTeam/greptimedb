@@ -21,13 +21,13 @@ pub const TABLE_NAME: &str = "demo";
 
 fn schema_for_test() -> Schema {
     let column_schemas = vec![
-        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
     ];
 
-    Schema::with_timestamp_index(column_schemas, 1).expect("ts must be timestamp column")
+    Schema::with_timestamp_index(column_schemas, 0).expect("ts must be timestamp column")
 }
 
 pub type MockMitoEngine = MitoEngine<MockEngine>;
@@ -58,6 +58,8 @@ pub async fn setup_test_engine_and_table() -> (
                 name: TABLE_NAME.to_string(),
                 desc: Some("a test table".to_string()),
                 schema: schema.clone(),
+                create_if_not_exists: true,
+                primary_key_indices: Vec::default(),
             },
         )
         .await
@@ -78,6 +80,8 @@ pub async fn setup_mock_engine_and_table() -> (MockEngine, MockMitoEngine, Table
                 name: TABLE_NAME.to_string(),
                 desc: None,
                 schema: schema.clone(),
+                create_if_not_exists: true,
+                primary_key_indices: Vec::default(),
             },
         )
         .await
