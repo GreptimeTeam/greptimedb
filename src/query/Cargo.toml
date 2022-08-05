@@ -24,9 +24,9 @@ futures = "0.3"
 futures-util = "0.3"
 metrics = "0.18"
 snafu = { version = "0.7", features = ["backtraces"] }
+sql = { path = "../sql" }
 table = { path = "../table" }
 tokio = "1.0"
-sql = { path = "../sql" }
 
 [dev-dependencies]
 num = "0.4"
