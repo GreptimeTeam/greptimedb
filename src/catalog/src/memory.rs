@@ -4,12 +4,8 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use common_error::prelude::*;
-use common_recordbatch::RecordBatch;
-use datatypes::prelude::*;
-use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::vectors::UInt32Vector;
+use table::table::numbers::NumbersTable;
 use table::TableRef;
-use test_util::MemTable;
 
 use crate::catalog::{
     CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef, DEFAULT_CATALOG_NAME,
@@ -185,28 +181,12 @@ pub fn new_memory_catalog_list() -> Result<CatalogListRef> {
     let catalog_list = Arc::new(MemoryCatalogList::default());
 
     // Add numbers table for test
-    // TODO(LFC): Use real table engine here when there's one, and get rid of "test-util" dependency
-    let table = new_numbers_table()?;
+    let table = Arc::new(NumbersTable::default());
     schema_provider.register_table("numbers".to_string(), table)?;
     catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);
     catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
 
     Ok(catalog_list)
-}
-
-pub fn new_numbers_table() -> Result<TableRef> {
-    let column_schemas = vec![ColumnSchema::new(
-        "number",
-        ConcreteDataType::uint32_datatype(),
-        false,
-    )];
-    let schema = Arc::new(Schema::new(column_schemas));
-    let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(
-        (0..100).collect::<Vec<_>>(),
-    ))];
-    let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let table = MemTable::new(recordbatch);
-    Ok(Arc::new(table))
 }
 
 #[cfg(test)]
@@ -233,15 +213,15 @@ mod tests {
         let table_name = "numbers";
         assert!(!provider.table_exist(table_name));
         assert!(provider.deregister_table(table_name).unwrap().is_none());
-        let test_table = new_numbers_table().unwrap();
+        let test_table = NumbersTable::default();
         // register table successfully
         assert!(provider
-            .register_table(table_name.to_string(), test_table)
+            .register_table(table_name.to_string(), Arc::new(test_table))
             .unwrap()
             .is_none());
         assert!(provider.table_exist(table_name));
-        let other_table = new_numbers_table().unwrap();
-        let result = provider.register_table(table_name.to_string(), other_table);
+        let other_table = NumbersTable::default();
+        let result = provider.register_table(table_name.to_string(), Arc::new(other_table));
         let err = result.err().unwrap();
         assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::TableAlreadyExists, err.status_code());

@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod numbers;
 
 use std::any::Any;
 use std::sync::Arc;

@@ -3,9 +3,7 @@ mod pow;
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
-use catalog::memory::{
-    new_numbers_table, MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider,
-};
+use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_recordbatch::error::Result as RecordResult;
@@ -17,7 +15,7 @@ use datatypes::for_all_ordered_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::types::DataTypeBuilder;
-use datatypes::vectors::{Float32Vector, Float64Vector, PrimitiveVector};
+use datatypes::vectors::{Float32Vector, Float64Vector, PrimitiveVector, UInt32Vector};
 use num::NumCast;
 use query::error::Result;
 use query::plan::LogicalPlan;
@@ -36,8 +34,19 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
 
+    let column_schemas = vec![ColumnSchema::new(
+        "number",
+        ConcreteDataType::uint32_datatype(),
+        false,
+    )];
+    let schema = Arc::new(Schema::new(column_schemas));
+    let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(
+        (0..100).collect::<Vec<_>>(),
+    ))];
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    let table = Arc::new(MemTable::new(recordbatch));
+
     let limit = 10;
-    let table = new_numbers_table().unwrap();
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
     let plan = LogicalPlan::DfPlan(
         LogicalPlanBuilder::scan("numbers", table_provider, None)
