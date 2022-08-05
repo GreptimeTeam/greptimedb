@@ -634,7 +634,7 @@ variance_pop(values)"#,
     ),
     
 
-
+// GrepTime's own UDF
     TestCase(
         input: {
             "values": Var(
@@ -644,6 +644,27 @@ variance_pop(values)"#,
             "pows": Var(
                 ty: Int8,
                 value: IntVec([0, -1, 3])
+            )
+        },
+        script: r#"
+from udf_builtins import *
+pow(values, pows)"#,
+        expect: Ok((
+            value: FloatVec([ 1.0, 0.5, 27.0]),
+            ty: Float64
+        ))
+    ),
+
+// Error handling test
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "pows": Var(
+                ty: Int8,
+                value: IntVec([0, 0, 0])
             )
         },
         script: r#"

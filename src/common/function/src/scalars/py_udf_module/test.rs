@@ -12,7 +12,7 @@ use rustpython_vm::{
     class::PyClassImpl,
     convert::ToPyObject,
     scope::Scope,
-    AsObject, PyObjectRef, VirtualMachine,
+    AsObject, PyObjectRef, VirtualMachine, PyPayload,
 };
 use serde::{Deserialize, Serialize};
 
@@ -111,6 +111,24 @@ fn is_int(ty: &DataType) -> bool {
 }
 
 impl PyVar {
+    fn to_py_obj(&self, vm: &VirtualMachine) -> Result<PyObjectRef, String> {
+        let v: VectorRef = match self {
+            PyVar::FloatVec(v) => Arc::new(datatypes::vectors::Float64Vector::from_vec(v.clone())),
+            PyVar::IntVec(v) => Arc::new(datatypes::vectors::Int64Vector::from_vec(v.clone())),
+            PyVar::Int(v) => {
+                let v = PyInt::from(*v).into_pyobject(vm);
+                return Ok(v);
+            }
+            PyVar::Float(v) => {
+                let v = PyFloat::from(*v).into_pyobject(vm);
+                return Ok(v);
+            }
+            _ => return Err(format!("Unsupported type:{self:#?}")),
+        };
+        let v = PyVector::from(v).to_pyobject(vm);
+        Ok(v)
+    }
+
     fn from_py_obj(obj: &PyObjectRef, vm: &VirtualMachine) -> Result<Self, String> {
         if is_instance::<PyVector>(obj, vm) {
             let res = obj.payload::<PyVector>().unwrap();
@@ -166,7 +184,7 @@ impl PyVar {
                         ))
                         .map(|v| v.to_owned())
                     })
-                    .collect::<Result<Vec<_>, String>>()?;
+                    .collect::<Result<_, String>>()?;
                 Ok(Self::IntVec(ret))
             } else {
                 Err(format!("unspupported DataType:{ty:#?}"))
