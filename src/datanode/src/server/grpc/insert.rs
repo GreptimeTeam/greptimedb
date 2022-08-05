@@ -98,7 +98,7 @@ fn add_values_to_builder(
 
         let mut idx_of_values = 0;
         for idx in 0..row_count {
-            if is_null(&null_mask, row_count, idx) {
+            if is_null(&null_mask, idx) {
                 builder.push(&Value::Null);
             } else {
                 builder.push(&values[idx_of_values]);
@@ -174,9 +174,7 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
     }
 }
 
-fn is_null(null_mask: &BitSet, row_count: usize, idx: usize) -> bool {
-    debug_assert!(idx < row_count, "idx should be less than row_count");
-
+fn is_null(null_mask: &BitSet, idx: usize) -> bool {
     matches!(null_mask.get(idx), Some(true))
 }
 #[cfg(test)]
@@ -253,17 +251,16 @@ mod tests {
 
     #[test]
     fn test_is_null() {
-        let row_count = 100;
         let null_mask: BitSet = vec![0b0000_0001, 0b0000_1000].into();
 
-        assert!(is_null(&null_mask, row_count, 0));
-        assert!(!is_null(&null_mask, row_count, 1));
-        assert!(!is_null(&null_mask, row_count, 10));
-        assert!(is_null(&null_mask, row_count, 11));
-        assert!(!is_null(&null_mask, row_count, 12));
+        assert!(is_null(&null_mask, 0));
+        assert!(!is_null(&null_mask, 1));
+        assert!(!is_null(&null_mask, 10));
+        assert!(is_null(&null_mask, 11));
+        assert!(!is_null(&null_mask, 12));
 
-        assert!(!is_null(&null_mask, row_count, 16));
-        assert!(!is_null(&null_mask, row_count, 99));
+        assert!(!is_null(&null_mask, 16));
+        assert!(!is_null(&null_mask, 99));
     }
 
     struct DemoTable;
