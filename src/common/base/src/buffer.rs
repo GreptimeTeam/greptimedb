@@ -46,7 +46,7 @@ macro_rules! impl_read_le {
     ( $($num_ty: ty), *) => {
         $(
             paste!{
-                // TODO(hl): default implementation reaquires allocating a
+                // TODO(hl): default implementation requires allocating a
                 // temp buffer. maybe use more efficient impls in concrete buffers.
                 // see https://github.com/GrepTimeTeam/greptimedb/pull/97#discussion_r930798941
                 fn [<read_ $num_ty _le>](&mut self) -> Result<$num_ty> {
@@ -87,12 +87,15 @@ pub trait Buffer {
         self.remaining_size() == 0
     }
 
-    /// Reads data into dst. This method should not change internal cursor,
+    /// Peeks data into dst. This method should not change internal cursor,
     /// invoke `advance_by` if needed.
     /// # Panics
     /// This method **may** panic if buffer does not have enough data to be copied to dst.
     fn peek_to_slice(&self, dst: &mut [u8]) -> Result<()>;
 
+    /// Reads data into dst. This method will change internal cursor.
+    /// # Panics
+    /// This method **may** panic if buffer does not have enough data to be copied to dst.
     fn read_to_slice(&mut self, dst: &mut [u8]) -> Result<()> {
         self.peek_to_slice(dst)?;
         self.advance_by(dst.len());
