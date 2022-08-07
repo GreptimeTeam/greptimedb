@@ -19,7 +19,7 @@ use crate::error::{
 use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{decode_system_catalog, Entry, SystemCatalogTable, TableEntry};
 use crate::tables::SystemCatalog;
-use crate::{CatalogList, CatalogManager, CatalogProvider, SchemaProvider};
+use crate::{CatalogList, CatalogProvider, SchemaProvider};
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
 // TODO(hl): Replace current `memory::new_memory_catalog_list()` with CatalogManager
@@ -199,5 +199,3 @@ impl CatalogList for CatalogManagerImpl {
         }
     }
 }
-
-impl CatalogManager for CatalogManagerImpl {}

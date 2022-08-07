@@ -42,7 +42,7 @@ impl Table for SystemCatalogTable {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> table::Result<SendableRecordBatchStream> {
-        todo!()
+        panic!("System catalog table does not support scan!")
     }
 }
 

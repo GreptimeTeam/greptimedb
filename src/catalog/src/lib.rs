@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
 mod consts;
@@ -47,12 +48,3 @@ pub trait CatalogProvider: Sync + Send {
 
 pub type CatalogListRef = Arc<dyn CatalogList>;
 pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
-
-pub const DEFAULT_CATALOG_NAME: &str = "greptime";
-pub const DEFAULT_SCHEMA_NAME: &str = "public";
-
-pub trait CatalogManager: CatalogList {
-    // TODO(hl): Drop table and other catalog methods should be here
-}
-
-pub type CatalogManagerRef = Arc<dyn CatalogManager>;
