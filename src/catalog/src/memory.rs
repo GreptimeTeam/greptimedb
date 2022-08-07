@@ -10,7 +10,7 @@ use table::TableRef;
 use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use crate::error::{Result, TableExistsSnafu};
 use crate::schema::SchemaProvider;
-use crate::{CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef};
+use crate::{CatalogList, CatalogProvider, CatalogProviderRef};
 
 /// Simple in-memory list of catalogs
 #[derive(Default)]
@@ -163,7 +163,7 @@ impl SchemaProvider for MemorySchemaProvider {
 }
 
 /// Create a memory catalog list contains a numbers table for test
-pub fn new_memory_catalog_list() -> Result<CatalogListRef> {
+pub fn new_memory_catalog_list() -> Result<Arc<MemoryCatalogList>> {
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
     let catalog_list = Arc::new(MemoryCatalogList::default());

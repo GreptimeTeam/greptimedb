@@ -17,7 +17,8 @@ use table_engine::engine::MitoEngine;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::{
-    self, CreateTableSnafu, ExecuteSqlSnafu, InsertSnafu, Result, TableNotFoundSnafu,
+    self, CreateTableSnafu, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::server::grpc::insert::insertion_expr_to_request;
 use crate::sql::SqlHandler;
@@ -37,21 +38,26 @@ pub struct Instance {
 pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    pub async fn new(opts: &DatanodeOptions, catalog_list: CatalogListRef) -> Result<Self> {
+    pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
         let log_store = create_local_file_log_store(opts).await?;
-        let factory = QueryEngineFactory::new(catalog_list.clone());
-        let query_engine = factory.query_engine().clone();
         let table_engine = DefaultEngine::new(
             EngineImpl::new(EngineConfig::default(), Arc::new(log_store))
                 .await
                 .context(error::OpenStorageEngineSnafu)?,
         );
+        let catalog_manager = Arc::new(
+            catalog::MemoryCatalogManager::try_new(Arc::new(table_engine.clone()))
+                .await
+                .context(NewCatalogSnafu)?,
+        );
+        let factory = QueryEngineFactory::new(catalog_manager.clone());
+        let query_engine = factory.query_engine().clone();
 
         Ok(Self {
             query_engine,
             sql_handler: SqlHandler::new(table_engine.clone()),
             table_engine,
-            catalog_list,
+            catalog_list: catalog_manager,
         })
     }
 
@@ -114,6 +120,8 @@ impl Instance {
     }
 
     pub async fn start(&self) -> Result<()> {
+        todo!("Start system catalog to get all tables opened");
+
         // FIXME(dennis): create a demo table for test
         let column_schemas = vec![
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
@@ -185,9 +193,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_insert() {
-        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
         let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
-        let instance = Instance::new(&opts, catalog_list).await.unwrap();
+        let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
 
         let output = instance
@@ -205,9 +212,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_query() {
-        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
         let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
-        let instance = Instance::new(&opts, catalog_list).await.unwrap();
+        let instance = Instance::new(&opts).await.unwrap();
 
         let output = instance
             .execute_sql("select sum(number) from numbers limit 20")

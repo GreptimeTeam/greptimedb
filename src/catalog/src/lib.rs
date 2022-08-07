@@ -2,8 +2,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+pub use crate::manager::MemoryCatalogManager;
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
-
 mod consts;
 pub mod error;
 mod manager;
@@ -48,3 +48,10 @@ pub trait CatalogProvider: Sync + Send {
 
 pub type CatalogListRef = Arc<dyn CatalogList>;
 pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
+
+#[async_trait::async_trait]
+pub trait CatalogManager: CatalogList {
+    async fn start(&self) -> error::Result<()>;
+}
+
+pub type CatalogManagerRef = Arc<dyn CatalogManager>;
