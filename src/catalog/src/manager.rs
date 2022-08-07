@@ -35,7 +35,7 @@ impl CatalogManagerImpl {
     /// Create a new [CatalogManager] with given user catalogs and table engine
     pub async fn try_new(catalogs: Arc<MemoryCatalogList>, engine: TableEngineRef) -> Result<Self> {
         let table = SystemCatalogTable::new(engine.clone()).await?;
-        let system_catalog = Arc::new(SystemCatalog::new(table, catalogs.clone()));
+        let system_catalog = Arc::new(SystemCatalog::new(table, catalogs.clone(), engine.clone()));
 
         Ok(Self {
             system: system_catalog,

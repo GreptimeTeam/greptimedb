@@ -9,10 +9,12 @@ use async_stream::stream;
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType, VectorBuilder};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use futures::Stream;
+use table::engine::TableEngineRef;
 use table::{Table, TableRef};
 
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
@@ -23,13 +25,15 @@ use crate::{CatalogListRef, CatalogProvider, SchemaProvider};
 pub struct Tables {
     schema: SchemaRef,
     catalogs: CatalogListRef,
+    engine: TableEngineRef,
 }
 
 impl Tables {
-    pub fn new(catalogs: CatalogListRef) -> Self {
+    pub fn new(catalogs: CatalogListRef, engine: TableEngineRef) -> Self {
         Self {
             schema: Arc::new(build_schema_for_tables()),
             catalogs,
+            engine,
         }
     }
 }
@@ -52,6 +56,7 @@ impl Table for Tables {
     ) -> table::error::Result<SendableRecordBatchStream> {
         let catalogs = self.catalogs.clone();
         let schema_ref = self.schema.clone();
+        let engine_name = self.engine.name().to_string();
 
         let stream = stream!({
             for catalog_name in catalogs.catalog_names() {
@@ -63,7 +68,12 @@ impl Table for Tables {
                         tables_in_schema.push(table_name);
                     }
 
-                    let vec = tables_to_record_batch(&schema_name, tables_in_schema);
+                    let vec = tables_to_record_batch(
+                        &catalog_name,
+                        &schema_name,
+                        tables_in_schema,
+                        &engine_name,
+                    );
                     let record_batch_res = RecordBatch::new(schema_ref.clone(), vec);
                     yield record_batch_res;
                 }
@@ -77,8 +87,35 @@ impl Table for Tables {
     }
 }
 
-fn tables_to_record_batch(schema_name: &str, table_names: Vec<String>) -> Vec<VectorRef> {
-    todo!()
+/// Convert tables info to `RecordBatch`.
+fn tables_to_record_batch(
+    catalog_name: &str,
+    schema_name: &str,
+    table_names: Vec<String>,
+    engine: &str,
+) -> Vec<VectorRef> {
+    let mut catalog_vec =
+        VectorBuilder::with_capacity(ConcreteDataType::string_datatype(), table_names.len());
+    let mut schema_vec =
+        VectorBuilder::with_capacity(ConcreteDataType::string_datatype(), table_names.len());
+    let mut table_name_vec =
+        VectorBuilder::with_capacity(ConcreteDataType::string_datatype(), table_names.len());
+    let mut engine_vec =
+        VectorBuilder::with_capacity(ConcreteDataType::string_datatype(), table_names.len());
+
+    for table_name in table_names {
+        catalog_vec.push(&Value::String(catalog_name.into()));
+        schema_vec.push(&Value::String(schema_name.into()));
+        table_name_vec.push(&Value::String(table_name.into()));
+        engine_vec.push(&Value::String(engine.into()));
+    }
+
+    vec![
+        catalog_vec.finish(),
+        schema_vec.finish(),
+        table_name_vec.finish(),
+        engine_vec.finish(),
+    ]
 }
 
 pub struct TablesRecordBatchStream {
@@ -137,13 +174,7 @@ impl SchemaProvider for InformationSchema {
     }
 
     fn table_exist(&self, name: &str) -> bool {
-        if name.eq_ignore_ascii_case("tables")
-            || name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME)
-        {
-            true
-        } else {
-            false
-        }
+        name.eq_ignore_ascii_case("tables") || name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME)
     }
 }
 
@@ -152,9 +183,13 @@ pub struct SystemCatalog {
 }
 
 impl SystemCatalog {
-    pub fn new(system: SystemCatalogTable, catalogs: CatalogListRef) -> Self {
+    pub fn new(
+        system: SystemCatalogTable,
+        catalogs: CatalogListRef,
+        engine: TableEngineRef,
+    ) -> Self {
         let schema = InformationSchema {
-            tables: Arc::new(Tables::new(catalogs)),
+            tables: Arc::new(Tables::new(catalogs, engine)),
             system: Arc::new(system),
         };
         Self {
@@ -182,34 +217,27 @@ impl CatalogProvider for SystemCatalog {
 }
 
 fn build_schema_for_tables() -> Schema {
-    let mut cols = Vec::with_capacity(6);
-    cols.push(ColumnSchema::new(
-        "catalog".to_string(),
-        ConcreteDataType::string_datatype(),
-        false,
-    ));
-    cols.push(ColumnSchema::new(
-        "schema".to_string(),
-        ConcreteDataType::string_datatype(),
-        false,
-    ));
-
-    cols.push(ColumnSchema::new(
-        "table_name".to_string(),
-        ConcreteDataType::string_datatype(),
-        false,
-    ));
-
-    cols.push(ColumnSchema::new(
-        "table_id".to_string(),
-        ConcreteDataType::uint64_datatype(),
-        false,
-    ));
-
-    cols.push(ColumnSchema::new(
-        "engine".to_string(),
-        ConcreteDataType::string_datatype(),
-        false,
-    ));
+    let cols = vec![
+        ColumnSchema::new(
+            "catalog".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "schema".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "table_name".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "engine".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+    ];
     Schema::new(cols)
 }
