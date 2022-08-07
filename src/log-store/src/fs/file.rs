@@ -156,8 +156,8 @@ impl LogFile {
         let (actual_offset, next_entry_id) = log.replay().await?;
 
         info!(
-            "Log file {} replay finished, last offset: {}, file start entry id: {}, next entry id: {}, elapsed time: {}ms",
-            path, actual_offset, start_entry_id, next_entry_id,
+            "Log file {} replay finished, last offset: {}, file start entry id: {}, elapsed time: {}ms",
+            path, actual_offset, start_entry_id,
             time::Instant::now().duration_since(replay_start_time).as_millis()
         );
 
@@ -168,29 +168,15 @@ impl LogFile {
             .flush_offset
             .store(actual_offset, Ordering::Relaxed);
         log.state
-            .next_entry_id
+            .last_entry_id
             .store(next_entry_id, Ordering::Relaxed);
         Ok(log)
     }
 
     /// Returns the persisted size of current log file.
-    #[allow(unused)]
     #[inline]
     pub fn persisted_size(&self) -> usize {
         self.state.flush_offset()
-    }
-
-    #[inline]
-    pub fn next_entry_id(&self) -> Id {
-        self.state.next_entry_id.load(Ordering::Relaxed)
-    }
-
-    /// Increases next entry field by `delta` and return the previous value.
-    #[inline]
-    fn inc_entry_id(&self) -> u64 {
-        // Relaxed order is enough since no sync-with relationship
-        // between `offset` and any other field.
-        self.state.next_entry_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Starts log file and it's internal components(including flush task, etc.).
@@ -250,22 +236,27 @@ impl LogFile {
         // preserve previous write offset
         let prev_write_offset = state.write_offset();
 
+        let mut last_id = 0;
         for mut req in &mut batch {
             req.offset = state
                 .write_offset
                 .fetch_add(req.data.len(), Ordering::AcqRel);
-            debug!("Write offset, {}->{}", req.offset, state.write_offset());
+            last_id = req.id;
+            debug!("Entry id: {}, offset: {}", req.id, req.offset,);
         }
 
         match writer.write_batch(&batch).await {
             Ok(max_offset) => match writer.flush().await {
                 Ok(_) => {
-                    let prev = state.flush_offset.swap(max_offset, Ordering::Acquire);
+                    let prev_ofs = state.flush_offset.swap(max_offset, Ordering::Acquire);
+                    let prev_id = state.last_entry_id.swap(last_id, Ordering::Acquire);
                     debug!(
-                        "Flush offset: {} -> {}, max offset in batch: {}",
-                        prev,
+                        "Flush offset: {} -> {}, max offset in batch: {}, entry id: {}->{}",
+                        prev_ofs,
                         state.flush_offset.load(Ordering::Acquire),
-                        max_offset
+                        max_offset,
+                        prev_id,
+                        state.last_entry_id.load(Ordering::Acquire),
                     );
                     batch.into_iter().for_each(AppendRequest::complete);
                 }
@@ -352,16 +343,10 @@ impl LogFile {
             }
         }
         info!(
-            "Replay log {} finished, offset: {} -> {}",
-            log_name, previous_offset, last_offset
+            "Replay log {} finished, offset: {} -> {}, last entry id: {:?}",
+            log_name, previous_offset, last_offset, last_entry_id
         );
-        Ok((
-            last_offset,
-            match last_entry_id {
-                None => self.start_entry_id,
-                Some(v) => v + 1,
-            },
-        ))
+        Ok((last_offset, last_entry_id.unwrap_or(self.start_entry_id)))
     }
 
     /// Creates a reader stream that asynchronously generates entries start from given entry id.
@@ -417,7 +402,7 @@ impl LogFile {
         if self.state.is_stopped() {
             return Err(Error::Eof);
         }
-        e.set_id(0);
+        let entry_id = e.id();
         let mut serialized = BytesMut::with_capacity(e.encoded_size());
         e.encode_to(&mut serialized)
             .map_err(BoxedError::new)
@@ -428,7 +413,6 @@ impl LogFile {
             return Err(Error::Eof);
         }
 
-        let entry_id = self.inc_entry_id();
         // rewrite encoded data
         LittleEndian::write_u64(&mut serialized[0..8], entry_id);
         let checksum = CRC_ALGO.checksum(&serialized[0..size - 4]);
@@ -486,6 +470,11 @@ impl LogFile {
     pub fn file_name(&self) -> String {
         self.name.to_string()
     }
+
+    #[inline]
+    pub fn last_entry_id(&self) -> Id {
+        self.state.last_entry_id.load(Ordering::Acquire)
+    }
 }
 
 impl Debug for LogFile {
@@ -526,7 +515,7 @@ impl AppendRequest {
 struct State {
     write_offset: AtomicUsize,
     flush_offset: AtomicUsize,
-    next_entry_id: AtomicU64,
+    last_entry_id: AtomicU64,
     sealed: AtomicBool,
     stopped: AtomicBool,
 }
@@ -668,7 +657,7 @@ mod tests {
 
         assert_eq!(
             10,
-            file.append(&mut EntryImpl::new("test1".as_bytes()))
+            file.append(&mut EntryImpl::new("test1".as_bytes(), 10))
                 .await
                 .expect("Failed to append entry 1")
                 .entry_id
@@ -676,7 +665,7 @@ mod tests {
 
         assert_eq!(
             11,
-            file.append(&mut EntryImpl::new("test-2".as_bytes()))
+            file.append(&mut EntryImpl::new("test-2".as_bytes(), 11))
                 .await
                 .expect("Failed to append entry 2")
                 .entry_id

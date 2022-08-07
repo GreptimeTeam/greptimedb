@@ -144,9 +144,9 @@ impl LocalFileLogStore {
         }
 
         // create and start a new log file
-        let entry_id = active.next_entry_id();
+        let next_entry_id = active.last_entry_id() + 1;
         let path_buf =
-            Path::new(&self.config.log_file_dir).join(FileName::log(entry_id).to_string());
+            Path::new(&self.config.log_file_dir).join(FileName::log(next_entry_id).to_string());
         let path = path_buf.to_str().context(FileNameIllegalSnafu {
             file_name: self.config.log_file_dir.clone(),
         })?;
@@ -210,7 +210,7 @@ impl LogStore for LocalFileLogStore {
         }
 
         return InternalSnafu {
-            msg: "Failed to append entry with max retry time exceeds".to_string(),
+            msg: "Failed to append entry with max retry time exceeds",
         }
         .fail();
     }
@@ -254,8 +254,8 @@ impl LogStore for LocalFileLogStore {
         todo!()
     }
 
-    fn entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry {
-        EntryImpl::new(data)
+    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id) -> Self::Entry {
+        EntryImpl::new(data, id)
     }
 
     fn namespace(&self, name: &str) -> Self::Namespace {
@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(
             0,
             logstore
-                .append(&ns, EntryImpl::new(generate_data(100)),)
+                .append(&ns, EntryImpl::new(generate_data(100), 0),)
                 .await
                 .unwrap()
                 .entry_id
@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(
             1,
             logstore
-                .append(&ns, EntryImpl::new(generate_data(100)),)
+                .append(&ns, EntryImpl::new(generate_data(100), 1))
                 .await
                 .unwrap()
                 .entry_id
@@ -328,7 +328,7 @@ mod tests {
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
         let ns = LocalNamespace::default();
         let id = logstore
-            .append(&ns, EntryImpl::new(generate_data(100)))
+            .append(&ns, EntryImpl::new(generate_data(100), 0))
             .await
             .unwrap()
             .entry_id;

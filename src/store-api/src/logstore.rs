@@ -50,7 +50,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
 
     /// Create an entry of the associate Entry type
-    fn entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry;
+    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id) -> Self::Entry;
 
     /// Create a namespace of the associate Namespace type
     // TODO(sunng87): confusion with `create_namespace`

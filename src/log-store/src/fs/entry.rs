@@ -124,9 +124,9 @@ impl Encode for EntryImpl {
 }
 
 impl EntryImpl {
-    pub(crate) fn new(data: impl AsRef<[u8]>) -> EntryImpl {
+    pub(crate) fn new(data: impl AsRef<[u8]>, id: Id) -> EntryImpl {
         EntryImpl {
-            id: 0,
+            id,
             data: data.as_ref().to_vec(),
             offset: 0,
             epoch: 0,
@@ -220,8 +220,7 @@ mod tests {
     #[test]
     pub fn test_entry_deser() {
         let data = "hello, world";
-        let mut entry = EntryImpl::new(data.as_bytes());
-        entry.set_id(8);
+        let mut entry = EntryImpl::new(data.as_bytes(), 8);
         entry.epoch = 9;
         let mut buf = BytesMut::with_capacity(entry.encoded_size());
         entry.encode_to(&mut buf).unwrap();
@@ -233,10 +232,9 @@ mod tests {
     #[test]
     pub fn test_rewrite_entry_id() {
         let data = "hello, world";
-        let mut entry = EntryImpl::new(data.as_bytes());
+        let entry = EntryImpl::new(data.as_bytes(), 123);
         let mut buffer = BytesMut::with_capacity(entry.encoded_size());
         entry.encode_to(&mut buffer).unwrap();
-        entry.set_id(123);
         assert_eq!(123, entry.id());
 
         // rewrite entry id.
@@ -249,8 +247,8 @@ mod tests {
         assert_eq!(333, entry_impl.id());
     }
 
-    fn prepare_entry_bytes(data: &str) -> Bytes {
-        let mut entry = EntryImpl::new(data.as_bytes());
+    fn prepare_entry_bytes(data: &str, id: Id) -> Bytes {
+        let mut entry = EntryImpl::new(data.as_bytes(), id);
         entry.set_id(123);
         entry.set_offset(456);
         let mut buffer = BytesMut::with_capacity(entry.encoded_size());
@@ -265,12 +263,12 @@ mod tests {
     #[test]
     pub fn test_composite_buffer() {
         let data_1 = "hello, world";
-        let bytes = prepare_entry_bytes(data_1);
+        let bytes = prepare_entry_bytes(data_1, 0);
         EntryImpl::decode(&mut bytes.clone()).unwrap();
         let c1 = Chunk::copy_from_slice(&bytes);
 
         let data_2 = "LoremIpsumDolor";
-        let bytes = prepare_entry_bytes(data_2);
+        let bytes = prepare_entry_bytes(data_2, 1);
         EntryImpl::decode(&mut bytes.clone()).unwrap();
         let c2 = Chunk::copy_from_slice(&bytes);
 
@@ -299,7 +297,7 @@ mod tests {
     #[test]
     pub fn test_decode_split_data_from_composite_chunk() {
         let data = "hello, world";
-        let bytes = prepare_entry_bytes(data);
+        let bytes = prepare_entry_bytes(data, 42);
         assert_eq!(
             hex::decode("7B0000000000000000000000000000000C00000068656C6C6F2C20776F726C645B2EEC0F")
                 .unwrap()
@@ -324,7 +322,7 @@ mod tests {
     pub async fn test_decode_from_chunk_stream() {
         // prepare entry
         let data = "hello, world";
-        let bytes = prepare_entry_bytes(data);
+        let bytes = prepare_entry_bytes(data, 42);
         assert_eq!(
             hex::decode("7B0000000000000000000000000000000C00000068656C6C6F2C20776F726C645B2EEC0F")
                 .unwrap()

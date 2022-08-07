@@ -125,8 +125,7 @@ impl<S: LogStore> Wal<S> {
     }
 
     async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
-        let mut e = self.store.entry(bytes);
-        e.set_id(seq);
+        let e = self.store.entry(bytes, seq);
 
         let res = self
             .store
