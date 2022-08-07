@@ -1,12 +1,18 @@
 // The `tables` table in system catalog keeps a record of all tables created by user.
 
 use std::any::Any;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
+use async_stream::stream;
 use common_query::logical_plan::Expr;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::error::Result as RecordBatchResult;
+use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::vectors::VectorRef;
+use futures::Stream;
 use table::{Table, TableRef};
 
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
@@ -44,16 +50,53 @@ impl Table for Tables {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> table::error::Result<SendableRecordBatchStream> {
-        for catalog_name in self.catalogs.catalog_names() {
-            let catalog = self.catalogs.catalog(&catalog_name).unwrap();
-            for schema_name in catalog.schema_names() {
-                let schema = catalog.schema(&schema_name).unwrap();
-                for table_name in schema.table_names() {
-                    todo!()
+        let catalogs = self.catalogs.clone();
+        let schema_ref = self.schema.clone();
+
+        let stream = stream!({
+            for catalog_name in catalogs.catalog_names() {
+                let catalog = catalogs.catalog(&catalog_name).unwrap();
+                for schema_name in catalog.schema_names() {
+                    let mut tables_in_schema = Vec::with_capacity(catalog.schema_names().len());
+                    let schema = catalog.schema(&schema_name).unwrap();
+                    for table_name in schema.table_names() {
+                        tables_in_schema.push(table_name);
+                    }
+
+                    let vec = tables_to_record_batch(&schema_name, tables_in_schema);
+                    let record_batch_res = RecordBatch::new(schema_ref.clone(), vec);
+                    yield record_batch_res;
                 }
             }
-        }
-        todo!()
+        });
+
+        Ok(Box::pin(TablesRecordBatchStream {
+            schema: self.schema.clone(),
+            stream: Box::pin(stream),
+        }))
+    }
+}
+
+fn tables_to_record_batch(schema_name: &str, table_names: Vec<String>) -> Vec<VectorRef> {
+    todo!()
+}
+
+pub struct TablesRecordBatchStream {
+    schema: SchemaRef,
+    stream: Pin<Box<dyn Stream<Item = RecordBatchResult<RecordBatch>> + Send>>,
+}
+
+impl Stream for TablesRecordBatchStream {
+    type Item = RecordBatchResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.stream).poll_next(cx)
+    }
+}
+
+impl RecordBatchStream for TablesRecordBatchStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 }
 
