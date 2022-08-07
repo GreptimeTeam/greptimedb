@@ -1,7 +1,7 @@
 use std::{fs, path, sync::Arc};
 
 use api::v1::InsertExpr;
-use catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::logging::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -32,7 +32,7 @@ pub struct Instance {
     table_engine: DefaultEngine,
     sql_handler: SqlHandler<DefaultEngine>,
     // Catalog list
-    catalog_list: CatalogListRef,
+    catalog_manager: CatalogManagerRef,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -57,13 +57,13 @@ impl Instance {
             query_engine,
             sql_handler: SqlHandler::new(table_engine.clone()),
             table_engine,
-            catalog_list: catalog_manager,
+            catalog_manager,
         })
     }
 
     pub async fn execute_grpc_insert(&self, insert_expr: InsertExpr) -> Result<Output> {
         let schema_provider = self
-            .catalog_list
+            .catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
             .unwrap()
             .schema(DEFAULT_SCHEMA_NAME)
@@ -104,7 +104,7 @@ impl Instance {
             }
             Statement::Insert(_) => {
                 let schema_provider = self
-                    .catalog_list
+                    .catalog_manager
                     .catalog(DEFAULT_CATALOG_NAME)
                     .unwrap()
                     .schema(DEFAULT_SCHEMA_NAME)
@@ -120,8 +120,10 @@ impl Instance {
     }
 
     pub async fn start(&self) -> Result<()> {
-        todo!("Start system catalog to get all tables opened");
-
+        self.catalog_manager
+            .start()
+            .await
+            .context(NewCatalogSnafu)?;
         // FIXME(dennis): create a demo table for test
         let column_schemas = vec![
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
@@ -150,7 +152,7 @@ impl Instance {
             .context(CreateTableSnafu { table_name })?;
 
         let schema_provider = self
-            .catalog_list
+            .catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
             .unwrap()
             .schema(DEFAULT_SCHEMA_NAME)

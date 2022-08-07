@@ -19,7 +19,10 @@ use crate::error::{
 use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{decode_system_catalog, Entry, SystemCatalogTable, TableEntry};
 use crate::tables::SystemCatalog;
-use crate::{CatalogList, CatalogProvider, SchemaProvider};
+use crate::{
+    CatalogList, CatalogManager, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME,
+    DEFAULT_SCHEMA_NAME,
+};
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
 // TODO(hl): Replace current `memory::new_memory_catalog_list()` with CatalogManager
@@ -50,7 +53,7 @@ impl MemoryCatalogManager {
     }
 
     /// Scan all entries from system catalog table
-    pub async fn init(&mut self) -> Result<()> {
+    pub async fn init(&self) -> Result<()> {
         self.init_system_catalog()?;
         let mut system_records = self.system.information_schema.system.records().await?;
         while let Some(records) = system_records
@@ -64,16 +67,21 @@ impl MemoryCatalogManager {
         Ok(())
     }
 
-    fn init_system_catalog(&mut self) -> Result<()> {
-        let system_schema = MemorySchemaProvider::new();
+    fn init_system_catalog(&self) -> Result<()> {
+        let system_schema = Arc::new(MemorySchemaProvider::new());
         system_schema.register_table(
             SYSTEM_CATALOG_TABLE_NAME.to_string(),
             self.system.information_schema.system.clone(),
         )?;
-        let system_catalog = MemoryCatalogProvider::new();
-        system_catalog.register_schema(INFORMATION_SCHEMA_NAME, Arc::new(system_schema));
+        let system_catalog = Arc::new(MemoryCatalogProvider::new());
+        system_catalog.register_schema(INFORMATION_SCHEMA_NAME, system_schema);
         self.catalogs
-            .register_catalog(SYSTEM_CATALOG_NAME.to_string(), Arc::new(system_catalog));
+            .register_catalog(SYSTEM_CATALOG_NAME.to_string(), system_catalog);
+        let default_catalog = Arc::new(MemoryCatalogProvider::new());
+        let default_schema = Arc::new(MemorySchemaProvider::new());
+        default_catalog.register_schema(DEFAULT_SCHEMA_NAME, default_schema);
+        self.catalogs
+            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
         Ok(())
     }
 
@@ -202,5 +210,14 @@ impl CatalogList for MemoryCatalogManager {
         } else {
             self.catalogs.catalog(name)
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl CatalogManager for MemoryCatalogManager {
+    /// Start [MemoryCatalogManager] to load all information from system catalog table.
+    /// Make sure table engine is initialized before starting [MemoryCatalogManager].
+    async fn start(&self) -> Result<()> {
+        self.init().await
     }
 }

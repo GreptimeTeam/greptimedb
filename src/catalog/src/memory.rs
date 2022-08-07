@@ -169,6 +169,7 @@ pub fn new_memory_catalog_list() -> Result<Arc<MemoryCatalogList>> {
     let catalog_list = Arc::new(MemoryCatalogList::default());
 
     // Add numbers table for test
+    // TODO(hl): remove this registration
     let table = Arc::new(NumbersTable::default());
     schema_provider.register_table("numbers".to_string(), table)?;
     catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);
