@@ -117,8 +117,8 @@ impl<S: LogStore> RegionImpl<S> {
     /// Create a new region without persisting manifest.
     fn new(version: Version, store_config: StoreConfig<S>) -> RegionImpl<S> {
         let metadata = version.metadata();
-        let id = metadata.id;
-        let name = metadata.name.clone();
+        let id = metadata.id();
+        let name = metadata.name().to_string();
         let version_control = VersionControl::with_version(version);
         let wal = Wal::new(name.clone(), store_config.log_store);
 
@@ -159,7 +159,7 @@ impl<S: LogStore> RegionImpl<S> {
         let version_control = Arc::new(VersionControl::with_version(version));
         let wal = Wal::new(name.clone(), store_config.log_store);
         let shared = Arc::new(SharedData {
-            id: metadata.id,
+            id: metadata.id(),
             name,
             version_control,
         });
@@ -284,10 +284,22 @@ impl<S: LogStore> RegionImpl<S> {
 pub struct SharedData {
     // Region id and name is immutable, so we cache them in shared data to avoid loading
     // current version from `version_control` each time we need to access them.
-    pub id: RegionId,
-    pub name: String,
+    id: RegionId,
+    name: String,
     // TODO(yingwen): Maybe no need to use Arc for version control.
     pub version_control: VersionControlRef,
+}
+
+impl SharedData {
+    #[inline]
+    pub fn id(&self) -> RegionId {
+        self.id
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 pub type SharedDataRef = Arc<SharedData>;

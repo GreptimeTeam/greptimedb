@@ -60,8 +60,8 @@ pub type VersionNumber = u32;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RegionMetadata {
     // The following fields are immutable.
-    pub id: RegionId,
-    pub name: String,
+    id: RegionId,
+    name: String,
 
     // The following fields are mutable.
     /// Schema of the region.
@@ -76,6 +76,18 @@ pub struct RegionMetadata {
     /// Version of the metadata. Version is set to zero initially and bumped once the
     /// metadata have been altered.
     pub version: VersionNumber,
+}
+
+impl RegionMetadata {
+    #[inline]
+    pub fn id(&self) -> RegionId {
+        self.id
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
