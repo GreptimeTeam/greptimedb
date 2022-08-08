@@ -225,11 +225,11 @@ impl LogStore for LocalFileLogStore {
         id: Id,
     ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>> {
         let files = self.files.read().await;
-
         let ns = ns.clone();
         let s = stream!({
             for (start_id, file) in files.iter() {
-                if *start_id >= id {
+                // TODO(hl): Use index to lookup file
+                if *start_id <= id {
                     let s = file.create_stream(&ns, *start_id);
                     pin_mut!(s);
                     while let Some(entries) = s.next().await {

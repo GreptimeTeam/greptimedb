@@ -222,9 +222,6 @@ impl WriterInner {
                     // Note that memtables of `Version` may be updated during replay.
                     let version = version_control.current();
 
-                    // FIXME(yingwen): Use req_sequence instead of `req_sequence + 1` once logstore
-                    // won't overwrite the entry id.
-                    let req_sequence = req_sequence + 1;
                     if req_sequence > last_sequence {
                         last_sequence = req_sequence;
                     } else {
