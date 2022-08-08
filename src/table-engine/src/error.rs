@@ -20,20 +20,65 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to build table meta, source: {}", source))]
+    #[snafu(display(
+        "Failed to build table meta for table: {}, source: {}",
+        table_name,
+        source
+    ))]
     BuildTableMeta {
         source: TableMetaBuilderError,
+        table_name: String,
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to build table info, source: {}", source))]
+    #[snafu(display(
+        "Failed to build table info for table: {}, source: {}",
+        table_name,
+        source
+    ))]
     BuildTableInfo {
         source: TableInfoBuilderError,
+        table_name: String,
         backtrace: Backtrace,
     },
 
     #[snafu(display("Missing timestamp index for table: {}", table_name))]
     MissingTimestamIndex {
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to build row key descriptor for table: {}, source: {}",
+        table_name,
+        source
+    ))]
+    BuildRowKeyDescriptor {
+        source: store_api::storage::RowKeyDescriptorBuilderError,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to build column descriptor for table: {}, column: {}, source: {}",
+        table_name,
+        column_name,
+        source,
+    ))]
+    BuildColumnDescriptor {
+        source: store_api::storage::ColumnDescriptorBuilderError,
+        column_name: String,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to build column family descriptor for table: {}, source: {}",
+        table_name,
+        source
+    ))]
+    BuildColumnFamilyDescriptor {
+        source: store_api::storage::ColumnFamilyDescriptorBuilderError,
         table_name: String,
         backtrace: Backtrace,
     },
@@ -53,8 +98,13 @@ impl ErrorExt for Error {
 
         match self {
             CreateRegion { source, .. } | OpenRegion { source, .. } => source.status_code(),
-            BuildTableMeta { .. } | BuildTableInfo { .. } => StatusCode::Unexpected,
-            MissingTimestamIndex { .. } => StatusCode::InvalidArguments,
+
+            BuildRowKeyDescriptor { .. }
+            | BuildColumnDescriptor { .. }
+            | BuildColumnFamilyDescriptor { .. }
+            | BuildTableMeta { .. }
+            | BuildTableInfo { .. }
+            | MissingTimestamIndex { .. } => StatusCode::InvalidArguments,
         }
     }
 

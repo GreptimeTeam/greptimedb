@@ -16,4 +16,4 @@ derive_builder = "0.11"
 futures = "0.3"
 serde = "1.0.136"
 snafu = { version = "0.7", features = ["backtraces"] }
-store-api = {path = "../store-api" }
+store-api = { path = "../store-api" }

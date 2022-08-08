@@ -59,39 +59,20 @@ pub struct TableMeta {
 }
 
 impl TableMeta {
-    //TODO(dennis): we can keep this vector in table metadata to avoid construction.
-    pub fn row_key_column_names(&self) -> Vec<&String> {
-        let mut names = Vec::new();
-
-        // It's safe to unwrap here, the created table ensure the timestamp index exists.
-        let ts_column = self.schema.timestamp_column().unwrap();
-        let ts_index = self.schema.timestamp_index().unwrap();
-        names.push(&ts_column.name);
-
-        for index in &self.primary_key_indices {
-            if *index != ts_index {
-                let column_schema = &self.schema.column_schemas()[*index];
-                names.push(&column_schema.name);
-            }
-        }
-
-        names
+    pub fn row_key_column_names(&self) -> impl Iterator<Item = &String> {
+        let columns_schemas = &self.schema.column_schemas();
+        self.primary_key_indices
+            .iter()
+            .map(|idx| &columns_schemas[*idx].name)
     }
 
-    //TODO(dennis): we can keep this vector in table metadata to avoid construction.
-    pub fn value_column_names(&self) -> Vec<&String> {
-        let mut names = Vec::new();
-
-        let ts_index = self.schema.timestamp_index().unwrap();
-        let primary_key_indices = &self.primary_key_indices;
-
-        for (index, column_schema) in self.schema.column_schemas().iter().enumerate() {
-            if index != ts_index && !primary_key_indices.contains(&index) {
-                names.push(&column_schema.name);
-            }
-        }
-
-        names
+    pub fn value_column_names(&self) -> impl Iterator<Item = &String> {
+        self.schema
+            .column_schemas()
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !self.primary_key_indices.contains(idx))
+            .map(|(_, column_schema)| &column_schema.name)
     }
 }
 

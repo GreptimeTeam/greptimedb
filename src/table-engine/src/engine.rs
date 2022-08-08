@@ -21,7 +21,10 @@ use table::{
 };
 use tokio::sync::Mutex;
 
-use crate::error::{self, MissingTimestamIndexSnafu, Result};
+use crate::error::{
+    self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRowKeyDescriptorSnafu,
+    MissingTimestamIndexSnafu, Result,
+};
 use crate::table::MitoTable;
 
 pub const DEFAULT_ENGINE: &str = "mito";
@@ -136,7 +139,10 @@ fn build_row_key_desc_from_schema(
     )
     .is_nullable(ts_column_schema.is_nullable)
     .build()
-    .unwrap();
+    .context(BuildColumnDescriptorSnafu {
+        column_name: &ts_column_schema.name,
+        table_name: &request.name,
+    })?;
     column_id += 1;
 
     let column_schemas = &request.schema.column_schemas();
@@ -149,7 +155,6 @@ fn build_row_key_desc_from_schema(
             continue;
         }
 
-        assert!(*index < column_schemas.len());
         let column_schema = &column_schemas[*index];
 
         let column = ColumnDescriptorBuilder::new(
@@ -159,13 +164,21 @@ fn build_row_key_desc_from_schema(
         )
         .is_nullable(column_schema.is_nullable)
         .build()
-        .unwrap();
+        .context(BuildColumnDescriptorSnafu {
+            column_name: &column_schema.name,
+            table_name: &request.name,
+        })?;
 
         builder = builder.push_column(column);
         column_id += 1;
     }
 
-    Ok((column_id, builder.build().unwrap()))
+    Ok((
+        column_id,
+        builder.build().context(BuildRowKeyDescriptorSnafu {
+            table_name: &request.name,
+        })?,
+    ))
 }
 
 fn build_column_family_from_request(
@@ -196,13 +209,21 @@ fn build_column_family_from_request(
         )
         .is_nullable(column_schema.is_nullable)
         .build()
-        .unwrap();
+        .context(BuildColumnDescriptorSnafu {
+            column_name: &column_schema.name,
+            table_name: &request.name,
+        })?;
 
         builder = builder.push_column(column);
         column_id += 1;
     }
 
-    Ok((column_id, builder.build().unwrap()))
+    Ok((
+        column_id,
+        builder.build().context(BuildColumnFamilyDescriptorSnafu {
+            table_name: &request.name,
+        })?,
+    ))
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
@@ -212,6 +233,16 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         request: CreateTableRequest,
     ) -> Result<TableRef> {
         let table_name = &request.name;
+
+        if let Some(table) = self.get_table(table_name) {
+            return Ok(table);
+        }
+
+        let _lock = self.table_mutex.lock().await;
+        // Checks again, read lock should be enough since we are guarded by the mutex.
+        if let Some(table) = self.get_table(table_name) {
+            return Ok(table);
+        }
 
         let (next_column_id, default_cf) =
             build_column_family_from_request(INIT_COLUMN_ID, &request)?;
@@ -242,7 +273,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .next_column_id(next_column_id)
             .primary_key_indices(request.primary_key_indices.clone())
             .build()
-            .unwrap();
+            .context(error::BuildTableMetaSnafu { table_name })?;
 
         let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
             .ident(self.next_table_id())
@@ -250,7 +281,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .table_type(TableType::Base)
             .desc(request.desc)
             .build()
-            .unwrap();
+            .context(error::BuildTableInfoSnafu { table_name })?;
 
         //TODO(dennis): persist table info to table manifest service.
         logging::info!("Mito engine created table: {:?}.", table_info);
@@ -303,13 +334,14 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .next_column_id(INIT_COLUMN_ID)
                 .primary_key_indices(Vec::default())
                 .build()
-                .context(error::BuildTableMetaSnafu)?;
+                .context(error::BuildTableMetaSnafu { table_name })?;
+
             let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
                 .ident(request.table_id)
                 .table_version(0u64)
                 .table_type(TableType::Base)
                 .build()
-                .context(error::BuildTableInfoSnafu)?;
+                .context(error::BuildTableInfoSnafu { table_name })?;
 
             let table = Arc::new(MitoTable::new(table_info, region));
 
