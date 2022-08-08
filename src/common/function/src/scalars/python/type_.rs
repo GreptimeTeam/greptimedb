@@ -629,24 +629,25 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         // This comes from:https://github.com/RustPython/RustPython/blob/8ab4e770351d451cfdff5dc2bf8cce8df76a60ab/vm/src/builtins/singletons.rs#L37
         // None in Python is universally singleton so
         // TODO(discord9): change to use `vm.ctx.new_int` and `new_float` instead
+        // use `vm.ctx.new_int` and `new_***` is more idomtic for there are cerntain optimize can be use in this way(small int pool etc.)
         value::Value::Null => vm.ctx.none(),
         value::Value::Boolean(v) => vm.ctx.new_bool(v).into(),
-        value::Value::UInt8(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::UInt16(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::UInt32(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::UInt64(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::Int8(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::Int16(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::Int32(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::Int64(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::Float32(v) => PyFloat::from(v.0 as f64).into_pyobject(vm),
-        value::Value::Float64(v) => PyFloat::from(v.0).into_pyobject(vm),
-        value::Value::String(s) => PyStr::from(s.as_utf8()).into_pyobject(vm),
+        value::Value::UInt8(v) => vm.ctx.new_int(v).into(),
+        value::Value::UInt16(v) => vm.ctx.new_int(v).into(),
+        value::Value::UInt32(v) => vm.ctx.new_int(v).into(),
+        value::Value::UInt64(v) => vm.ctx.new_int(v).into(),
+        value::Value::Int8(v) => vm.ctx.new_int(v).into(),
+        value::Value::Int16(v) => vm.ctx.new_int(v).into(),
+        value::Value::Int32(v) => vm.ctx.new_int(v).into(),
+        value::Value::Int64(v) => vm.ctx.new_int(v).into(),
+        value::Value::Float32(v) => vm.ctx.new_float(v.0 as f64).into(),
+        value::Value::Float64(v) => vm.ctx.new_float(v.0).into(),
+        value::Value::String(s) => vm.ctx.new_str(s.as_utf8()).into(),
         // is this copy necessary?
-        value::Value::Binary(b) => PyBytes::from(b.deref().to_vec()).into_pyobject(vm),
+        value::Value::Binary(b) => vm.ctx.new_bytes(b.deref().to_vec()).into(),
         // is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt
-        value::Value::Date(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::DateTime(v) => PyInt::from(v).into_pyobject(vm),
+        value::Value::Date(v) => vm.ctx.new_int(v).into(),
+        value::Value::DateTime(v) => vm.ctx.new_int(v).into(),
         value::Value::List(_) => unreachable!(),
     }
 }
