@@ -15,7 +15,10 @@ use crate::{
     error::{self, Error, Result},
     proto::wal::{self, PayloadType, WalHeader},
     write_batch::{
-        codec::{WriteBatchArrowDecoder, WriteBatchArrowEncoder},
+        codec::{
+            WriteBatchArrowDecoder, WriteBatchArrowEncoder, WriteBatchProtobufDecoder,
+            WriteBatchProtobufEncoder,
+        },
         WriteBatch,
     },
 };
@@ -95,9 +98,15 @@ impl<S: LogStore> Wal<S> {
                 .encode(batch, &mut buf)
                 .map_err(BoxedError::new)
                 .context(error::WriteWalSnafu { name: self.name() })?;
+        } else if let Payload::WriteBatchProto(batch) = payload {
+            // entry
+            let encoder = WriteBatchProtobufEncoder {};
+            // TODO(jiachun): provide some way to compute data size before encode, so we can preallocate an exactly sized buf.
+            encoder
+                .encode(batch, &mut buf)
+                .map_err(BoxedError::new)
+                .context(error::WriteWalSnafu { name: self.name() })?;
         }
-
-        // TODO(jiachun): encode protobuf payload
 
         // write bytes to wal
         self.write(seq, &buf).await
@@ -173,7 +182,14 @@ impl<S: LogStore> Wal<S> {
                 Ok((seq_num, header, Some(write_batch)))
             }
             Some(PayloadType::WriteBatchProto) => {
-                todo!("protobuf decoder")
+                let mutation_extras = std::mem::take(&mut header.mutation_extras);
+                let decoder = WriteBatchProtobufDecoder::new(mutation_extras);
+                let write_batch = decoder
+                    .decode(&input[data_pos..])
+                    .map_err(BoxedError::new)
+                    .context(error::ReadWalSnafu { name: self.name() })?;
+
+                Ok((seq_num, header, Some(write_batch)))
             }
             _ => error::WalDataCorruptedSnafu {
                 name: self.name(),

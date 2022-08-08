@@ -43,6 +43,23 @@ impl TimestampIndex {
     }
 }
 
+impl From<&Arc<schema::Schema>> for Schema {
+    fn from(schema: &Arc<schema::Schema>) -> Self {
+        let column_schemas = schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| column_schema.into())
+            .collect();
+
+        Schema {
+            column_schemas,
+            timestamp_index: schema
+                .timestamp_index()
+                .map(|index| TimestampIndex::new(index as u64)),
+        }
+    }
+}
+
 impl From<&schema::ColumnSchema> for ColumnSchema {
     fn from(cs: &schema::ColumnSchema) -> Self {
         Self {

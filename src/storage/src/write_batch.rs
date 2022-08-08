@@ -684,20 +684,7 @@ pub mod codec {
         type Error = WriteBatchError;
 
         fn encode(&self, item: &WriteBatch, dst: &mut Vec<u8>) -> Result<()> {
-            let column_schemas = item
-                .schema()
-                .column_schemas()
-                .iter()
-                .map(|column_schema| column_schema.into())
-                .collect();
-
-            let schema = write_batch::Schema {
-                column_schemas,
-                timestamp_index: item
-                    .schema()
-                    .timestamp_index()
-                    .map(|index| write_batch::TimestampIndex::new(index as u64)),
-            };
+            let schema = item.schema().into();
 
             let mutations = item
                 .iter()
