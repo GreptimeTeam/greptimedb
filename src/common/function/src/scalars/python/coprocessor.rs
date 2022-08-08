@@ -519,7 +519,7 @@ fn set_items_in_scope(
 pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
-    // TODO: cache the result of parse_copr
+    // TODO(discord9): cache the result of parse_copr
     let copr = parse_copr(script)?;
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = select_from_rb(rb, &copr.args)?;
