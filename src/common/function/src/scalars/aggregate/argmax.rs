@@ -25,17 +25,11 @@ impl<T> Argmax<T>
 where
     T: Primitive + Ord,
 {
-    fn push(&mut self, value: T) {
-        self.max = match self.max {
-            Some(max) => {
-                if max < value {
-                    Some(value)
-                } else {
-                    Some(max)
-                }
-            }
-            None => Some(value),
-        };
+    fn update(&mut self, value: T) {
+        self.max = self
+            .max
+            .map(|mv| std::cmp::max(mv, value))
+            .or_else(|| Some(value));
     }
 }
 
@@ -50,20 +44,18 @@ where
     }
 
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<()> {
-        if values.is_empty() {
-            return Ok(());
-        };
-
-        let column = &values[0];
-        let column: &<T as Scalar>::VectorType = if column.is_const() {
-            let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
-            unsafe { VectorHelper::static_cast(column.inner()) }
-        } else {
-            unsafe { VectorHelper::static_cast(column) }
-        };
-        for v in column.iter_data().flatten() {
-            self.push(v);
-        }
+        let column = values.get(0);
+        column.map(|column| {
+            let column: &<T as Scalar>::VectorType = if column.is_const() {
+                let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
+                unsafe { VectorHelper::static_cast(column.inner()) }
+            } else {
+                unsafe { VectorHelper::static_cast(column) }
+            };
+            for v in column.iter_data().flatten() {
+                self.update(v);
+            }
+        });
         Ok(())
     }
 
@@ -71,7 +63,6 @@ where
         if states.is_empty() {
             return Ok(());
         };
-
         let states = &states[0];
         let states = states
             .as_any()
