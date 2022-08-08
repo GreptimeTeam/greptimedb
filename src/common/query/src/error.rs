@@ -4,6 +4,7 @@ use arrow::datatypes::DataType as ArrowDatatype;
 use common_error::prelude::*;
 use datafusion_common::DataFusionError;
 use datatypes::error::Error as DataTypeError;
+use statrs::StatsError;
 
 common_error::define_opaque_error!(Error);
 
@@ -13,6 +14,12 @@ pub enum InnerError {
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Fail to generate function, source: {}", source))]
+    GenerateFunction {
+        source: StatsError,
         backtrace: Backtrace,
     },
 
@@ -42,6 +49,7 @@ impl ErrorExt for InnerError {
     fn status_code(&self) -> StatusCode {
         match self {
             InnerError::ExecuteFunction { .. }
+            | InnerError::GenerateFunction { .. }
             | InnerError::CreateAccumulator { .. }
             | InnerError::DowncastVector { .. } => StatusCode::EngineExecuteQuery,
             InnerError::IntoVector { source, .. } => source.status_code(),
