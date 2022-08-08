@@ -257,7 +257,7 @@ mod tests {
     fn test_is_null() {
         let null_mask: BitSet = vec![0b0000_0001, 0b0000_1000].into();
 
-        assert_eq!(Some(true) ,is_null(&null_mask, 0));
+        assert_eq!(Some(true), is_null(&null_mask, 0));
         assert_eq!(Some(false), is_null(&null_mask, 1));
         assert_eq!(Some(false), is_null(&null_mask, 10));
         assert_eq!(Some(true), is_null(&null_mask, 11));

@@ -164,7 +164,7 @@ mod tests {
         let bit_set = BitSet::from_bytes(vec![0b1111_1111], 4);
 
         let ones_count = bit_set.ones_count();
-        
+
         assert_eq!(4, ones_count);
     }
 
