@@ -46,11 +46,11 @@ impl<R: Region> Table for MitoTable<R> {
 
         let mut write_request = self.region.write_request(self.schema());
 
-        //FIXME(dennis): we can only insert to demo table right now
         let mut put_op = write_request.put_op();
         let mut columns_values = request.columns_values;
-        let key_columns = vec!["ts", "host"];
-        let value_columns = vec!["cpu", "memory"];
+        let key_columns = self.table_info.meta.row_key_column_names();
+        let value_columns = self.table_info.meta.value_column_names();
+
         //Add row key and columns
         for name in key_columns {
             put_op
@@ -63,6 +63,7 @@ impl<R: Region> Table for MitoTable<R> {
                 )
                 .map_err(TableError::new)?;
         }
+
         // Add vaue columns
         let mut rows_num = 0;
         for name in value_columns {

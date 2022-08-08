@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use datatypes::schema::SchemaRef;
 use derive_builder::Builder;
+use store_api::storage::ColumnId;
 
 pub type TableId = u64;
 pub type TableVersion = u64;
@@ -42,17 +43,51 @@ pub struct TableIdent {
 }
 
 #[derive(Clone, Debug, Builder)]
-#[builder(pattern = "owned")]
+#[builder(pattern = "mutable")]
 pub struct TableMeta {
     pub schema: SchemaRef,
+    pub primary_key_indices: Vec<usize>,
+    #[builder(default = "self.default_value_indices()?")]
+    pub value_indices: Vec<usize>,
     #[builder(default, setter(into))]
     pub engine: String,
+    pub next_column_id: ColumnId,
     #[builder(default)]
     pub engine_options: HashMap<String, String>,
     #[builder(default)]
     pub options: HashMap<String, String>,
     #[builder(default = "Utc::now()")]
     pub created_on: DateTime<Utc>,
+}
+
+impl TableMetaBuilder {
+    fn default_value_indices(&self) -> Result<Vec<usize>, String> {
+        match (&self.primary_key_indices, &self.schema) {
+            (Some(v), Some(schema)) => {
+                let column_schemas = schema.column_schemas();
+                Ok((0..column_schemas.len())
+                    .filter(|idx| !v.contains(idx))
+                    .collect())
+            }
+            _ => Err("Missing primary_key_indices or schema to create value_indices".to_string()),
+        }
+    }
+}
+
+impl TableMeta {
+    pub fn row_key_column_names(&self) -> impl Iterator<Item = &String> {
+        let columns_schemas = &self.schema.column_schemas();
+        self.primary_key_indices
+            .iter()
+            .map(|idx| &columns_schemas[*idx].name)
+    }
+
+    pub fn value_column_names(&self) -> impl Iterator<Item = &String> {
+        let columns_schemas = &self.schema.column_schemas();
+        self.value_indices
+            .iter()
+            .map(|idx| &columns_schemas[*idx].name)
+    }
 }
 
 #[derive(Clone, Debug, Builder)]

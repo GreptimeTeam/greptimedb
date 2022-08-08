@@ -18,7 +18,9 @@ pub struct CreateTableRequest {
     pub name: String,
     pub desc: Option<String>,
     pub schema: SchemaRef,
-    // TODO(yingwen): 1. Add catalog_name/schema_name and other infos 2. Support create_if_not_exists.
+    pub primary_key_indices: Vec<usize>,
+    pub create_if_not_exists: bool,
+    // TODO(yingwen): 1. Add catalog_name/schema_name and other infos
 }
 
 /// Open table request

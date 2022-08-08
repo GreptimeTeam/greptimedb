@@ -134,6 +134,8 @@ impl Instance {
                         Schema::with_timestamp_index(column_schemas, 3)
                             .expect("ts is expected to be timestamp column"),
                     ),
+                    create_if_not_exists: true,
+                    primary_key_indices: Vec::default(),
                 },
             )
             .await
