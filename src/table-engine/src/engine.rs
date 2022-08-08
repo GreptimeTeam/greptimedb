@@ -9,8 +9,8 @@ use common_telemetry::logging;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{
     self, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
-    OpenOptions, Region, RegionDescriptor, RegionMeta, RowKeyDescriptor, RowKeyDescriptorBuilder,
-    StorageEngine,
+    OpenOptions, Region, RegionDescriptorBuilder, RegionMeta, RowKeyDescriptor,
+    RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
@@ -22,8 +22,8 @@ use table::{
 use tokio::sync::Mutex;
 
 use crate::error::{
-    self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRowKeyDescriptorSnafu,
-    MissingTimestamIndexSnafu, Result,
+    self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
+    BuildRowKeyDescriptorSnafu, MissingTimestamIndexSnafu, Result,
 };
 use crate::table::MitoTable;
 
@@ -250,18 +250,19 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         // Now we just use table name as region name. TODO(yingwen): Naming pattern of region.
         let region_name = table_name.clone();
+        let region_descriptor = RegionDescriptorBuilder::default()
+            .id(0)
+            .name(&region_name)
+            .row_key(row_key)
+            .default_cf(default_cf)
+            .build()
+            .context(BuildRegionDescriptorSnafu {
+                table_name,
+                region_name,
+            })?;
         let region = self
             .storage_engine
-            .create_region(
-                &storage::EngineContext::default(),
-                RegionDescriptor {
-                    id: 0,
-                    name: region_name,
-                    row_key,
-                    default_cf,
-                    extra_cfs: Vec::default(),
-                },
-            )
+            .create_region(&storage::EngineContext::default(), region_descriptor)
             .await
             .map_err(BoxedError::new)
             .context(error::CreateRegionSnafu)?;

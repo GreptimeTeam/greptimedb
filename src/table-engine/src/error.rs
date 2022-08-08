@@ -67,8 +67,8 @@ pub enum Error {
     ))]
     BuildColumnDescriptor {
         source: store_api::storage::ColumnDescriptorBuilderError,
-        column_name: String,
         table_name: String,
+        column_name: String,
         backtrace: Backtrace,
     },
 
@@ -80,6 +80,19 @@ pub enum Error {
     BuildColumnFamilyDescriptor {
         source: store_api::storage::ColumnFamilyDescriptorBuilderError,
         table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to build region descriptor for table: {}, region: {}, source: {}",
+        table_name,
+        region_name,
+        source,
+    ))]
+    BuildRegionDescriptor {
+        source: store_api::storage::RegionDescriptorBuilderError,
+        table_name: String,
+        region_name: String,
         backtrace: Backtrace,
     },
 }
@@ -104,6 +117,7 @@ impl ErrorExt for Error {
             | BuildColumnFamilyDescriptor { .. }
             | BuildTableMeta { .. }
             | BuildTableInfo { .. }
+            | BuildRegionDescriptor { .. }
             | MissingTimestamIndex { .. } => StatusCode::InvalidArguments,
         }
     }
