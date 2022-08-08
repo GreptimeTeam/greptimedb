@@ -125,11 +125,11 @@ fn build_row_key_desc_from_schema(
 ) -> Result<(ColumnId, RowKeyDescriptor)> {
     let ts_column_schema =
         request
-            .schema
-            .timestamp_column()
-            .context(MissingTimestamIndexSnafu {
-                table_name: &request.name,
-            })?;
+        .schema
+        .timestamp_column()
+        .context(MissingTimestamIndexSnafu {
+            table_name: &request.name,
+        })?;
     let timestamp_index = request.schema.timestamp_index().unwrap();
 
     let ts_column = ColumnDescriptorBuilder::new(
@@ -137,12 +137,12 @@ fn build_row_key_desc_from_schema(
         ts_column_schema.name.clone(),
         ts_column_schema.data_type.clone(),
     )
-    .is_nullable(ts_column_schema.is_nullable)
-    .build()
-    .context(BuildColumnDescriptorSnafu {
-        column_name: &ts_column_schema.name,
-        table_name: &request.name,
-    })?;
+        .is_nullable(ts_column_schema.is_nullable)
+        .build()
+        .context(BuildColumnDescriptorSnafu {
+            column_name: &ts_column_schema.name,
+            table_name: &request.name,
+        })?;
     column_id += 1;
 
     let column_schemas = &request.schema.column_schemas();
@@ -162,12 +162,12 @@ fn build_row_key_desc_from_schema(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
-        .is_nullable(column_schema.is_nullable)
-        .build()
-        .context(BuildColumnDescriptorSnafu {
-            column_name: &column_schema.name,
-            table_name: &request.name,
-        })?;
+            .is_nullable(column_schema.is_nullable)
+            .build()
+            .context(BuildColumnDescriptorSnafu {
+                column_name: &column_schema.name,
+                table_name: &request.name,
+            })?;
 
         builder = builder.push_column(column);
         column_id += 1;
@@ -207,12 +207,12 @@ fn build_column_family_from_request(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
-        .is_nullable(column_schema.is_nullable)
-        .build()
-        .context(BuildColumnDescriptorSnafu {
-            column_name: &column_schema.name,
-            table_name: &request.name,
-        })?;
+            .is_nullable(column_schema.is_nullable)
+            .build()
+            .context(BuildColumnDescriptorSnafu {
+                column_name: &column_schema.name,
+                table_name: &request.name,
+            })?;
 
         builder = builder.push_column(column);
         column_id += 1;
@@ -238,12 +238,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             return Ok(table);
         }
 
-        let _lock = self.table_mutex.lock().await;
-        // Checks again, read lock should be enough since we are guarded by the mutex.
-        if let Some(table) = self.get_table(table_name) {
-            return Ok(table);
-        }
-
         let (next_column_id, default_cf) =
             build_column_family_from_request(INIT_COLUMN_ID, &request)?;
         let (next_column_id, row_key) = build_row_key_desc_from_schema(next_column_id, &request)?;
@@ -260,6 +254,13 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 table_name,
                 region_name,
             })?;
+
+        let _lock = self.table_mutex.lock().await;
+        // Checks again, read lock should be enough since we are guarded by the mutex.
+        if let Some(table) = self.get_table(table_name) {
+            return Ok(table);
+        }
+
         let region = self
             .storage_engine
             .create_region(&storage::EngineContext::default(), region_descriptor)

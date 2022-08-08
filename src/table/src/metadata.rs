@@ -43,10 +43,12 @@ pub struct TableIdent {
 }
 
 #[derive(Clone, Debug, Builder)]
-#[builder(pattern = "owned")]
+#[builder(pattern = "mutable")]
 pub struct TableMeta {
     pub schema: SchemaRef,
     pub primary_key_indices: Vec<usize>,
+    #[builder(default = "self.default_value_indices()?")]
+    pub value_indices: Vec<usize>,
     #[builder(default, setter(into))]
     pub engine: String,
     pub next_column_id: ColumnId,
@@ -58,6 +60,20 @@ pub struct TableMeta {
     pub created_on: DateTime<Utc>,
 }
 
+impl TableMetaBuilder {
+    fn default_value_indices(&self) -> Result<Vec<usize>, String> {
+        match (self.primary_key_indices.as_ref(), self.schema.as_ref()) {
+            (Some(v), Some(schema)) => {
+                let column_schemas = schema.column_schemas();
+                Ok((0..column_schemas.len())
+                    .filter(|idx| !v.contains(idx))
+                    .collect())
+            }
+            _ => Err("Missing primary_key_indices or schema to create value_indices".to_string()),
+        }
+    }
+}
+
 impl TableMeta {
     pub fn row_key_column_names(&self) -> impl Iterator<Item = &String> {
         let columns_schemas = &self.schema.column_schemas();
@@ -67,12 +83,10 @@ impl TableMeta {
     }
 
     pub fn value_column_names(&self) -> impl Iterator<Item = &String> {
-        self.schema
-            .column_schemas()
+        let columns_schemas = &self.schema.column_schemas();
+        self.value_indices
             .iter()
-            .enumerate()
-            .filter(|(idx, _)| !self.primary_key_indices.contains(idx))
-            .map(|(_, column_schema)| &column_schema.name)
+            .map(|idx| &columns_schemas[*idx].name)
     }
 }
 
