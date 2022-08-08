@@ -56,7 +56,7 @@ impl Tester {
         self.try_reopen().await.unwrap();
     }
 
-    async fn try_reopen(&mut self) -> Result<Option<()>> {
+    async fn try_reopen(&mut self) -> Result<bool> {
         // Close the old region.
         self.base = None;
         // Reopen the region.
@@ -64,12 +64,11 @@ impl Tester {
         let opts = OpenOptions::default();
         let region = RegionImpl::open(self.region_name.clone(), store_config, &opts).await?;
         match region {
-            None => Ok(None),
+            None => Ok(false),
             Some(region) => {
                 let base = FileTesterBase::with_region(region);
                 self.base = Some(base);
-
-                Ok(Some(()))
+                Ok(true)
             }
         }
     }
@@ -163,5 +162,5 @@ async fn test_open_empty() {
     let mut tester = Tester::empty(REGION_NAME, store_dir).await;
 
     let ret = tester.try_reopen().await;
-    assert!(ret.unwrap().is_none());
+    assert!(!ret.unwrap());
 }
