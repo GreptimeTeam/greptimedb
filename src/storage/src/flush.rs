@@ -72,7 +72,7 @@ impl FlushStrategy for SizeBasedStrategy {
             logging::info!(
                 "Region should flush, region: {}, bytes_mutable: {}, mutable_limitation: {}, \
                  bytes_total: {}, max_write_buffer_size: {} .",
-                shared.name,
+                shared.name(),
                 bytes_mutable,
                 self.mutable_limitation,
                 bytes_total,
@@ -93,7 +93,7 @@ impl FlushStrategy for SizeBasedStrategy {
             logging::info!(
                 "Region should flush, region: {}, bytes_mutable: {}, mutable_limitation: {}, \
                  bytes_total: {}, max_write_buffer_size: {} .",
-                shared.name,
+                shared.name(),
                 bytes_mutable,
                 self.mutable_limitation,
                 bytes_total,

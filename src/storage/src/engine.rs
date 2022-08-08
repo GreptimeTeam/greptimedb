@@ -273,7 +273,6 @@ impl<S: LogStore> EngineInner<S> {
         }
 
         // Now the region in under `Creating` state.
-        let region_id = descriptor.id;
         let region_name = descriptor.name.clone();
         let mut guard = SlotGuard::new(&region_name, &self.regions);
 
@@ -285,13 +284,7 @@ impl<S: LogStore> EngineInner<S> {
                 })?;
         let store_config = self.region_store_config(&region_name);
 
-        let region = RegionImpl::create(
-            region_id,
-            region_name.clone(),
-            metadata.clone(),
-            store_config,
-        )
-        .await?;
+        let region = RegionImpl::create(metadata, store_config).await?;
 
         guard.update(RegionSlot::Ready(region.clone()));
 

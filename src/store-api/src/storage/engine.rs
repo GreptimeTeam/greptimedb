@@ -64,6 +64,4 @@ pub struct EngineContext {}
 
 /// Options to open a region.
 #[derive(Debug, Clone, Default)]
-pub struct OpenOptions {
-    // TODO(yingwen): [open_region] Supports create if not exists.
-}
+pub struct OpenOptions {}
