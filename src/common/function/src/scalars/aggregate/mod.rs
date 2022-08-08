@@ -1,9 +1,11 @@
 mod median;
+mod percentile;
 
 use std::sync::Arc;
 
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use median::MedianAccumulatorCreator;
+pub use percentile::PercentileAccumulatorCreator;
 
 use crate::scalars::FunctionRegistry;
 
@@ -45,6 +47,10 @@ impl AggregateFunctions {
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "median",
             Arc::new(|| Arc::new(MedianAccumulatorCreator::default())),
+        )));
+        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
+            "percentile",
+            Arc::new(|| Arc::new(PercentileAccumulatorCreator::default())),
         )));
     }
 }
