@@ -1,7 +1,9 @@
+mod argmin;
 mod median;
 
 use std::sync::Arc;
 
+pub use argmin::ArgminAccumulatorCreator;
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use median::MedianAccumulatorCreator;
 
@@ -45,6 +47,10 @@ impl AggregateFunctions {
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "median",
             Arc::new(|| Arc::new(MedianAccumulatorCreator::default())),
+        )));
+        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
+            "argmin",
+            Arc::new(|| Arc::new(ArgminAccumulatorCreator::default())),
         )));
     }
 }
