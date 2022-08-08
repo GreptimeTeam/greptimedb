@@ -6,7 +6,7 @@ pub struct BitSet {
 
 impl BitSet {
     pub fn from_bytes(data: Vec<u8>, nbits: usize) -> Self {
-        assert!(data.len() << 3 >= nbits);
+        debug_assert!(data.len() << 3 >= nbits);
         Self {
             buffer: data,
             nbits,
@@ -29,7 +29,7 @@ impl BitSet {
         self.nbits == 0
     }
 
-    pub fn set_count(&self) -> usize {
+    pub fn ones_count(&self) -> usize {
         (0..self.nbits)
             .into_iter()
             .filter(|&i| matches!(self.get(i), Some(true)))
@@ -127,7 +127,7 @@ mod tests {
 
         check_bit_set(&bit_set, &[]);
         assert_eq!(16, bit_set.len());
-        assert_eq!(0, bit_set.set_count());
+        assert_eq!(0, bit_set.ones_count());
 
         bit_set.set(0);
         bit_set.set(7);
@@ -136,7 +136,7 @@ mod tests {
         check_bit_set(&bit_set, &[0, 7, 15]);
         assert_eq!(None, bit_set.get(16));
         assert_eq!(16, bit_set.len());
-        assert_eq!(3, bit_set.set_count());
+        assert_eq!(3, bit_set.ones_count());
     }
 
     #[test]
@@ -148,7 +148,7 @@ mod tests {
         check_bit_set(&bit_set, &[0, 1, 2, 7]);
         assert_eq!(None, bit_set.get(9));
         assert_eq!(8, bit_set.len());
-        assert_eq!(4, bit_set.set_count());
+        assert_eq!(4, bit_set.ones_count());
 
         let other = BitSet::from_bytes(vec![0b0000_0111], 3);
         bit_set.extend(&other);
@@ -156,11 +156,20 @@ mod tests {
         check_bit_set(&bit_set, &[0, 1, 2, 7, 8, 9, 10]);
         assert_eq!(None, bit_set.get(11));
         assert_eq!(11, bit_set.len());
-        assert_eq!(7, bit_set.set_count());
+        assert_eq!(7, bit_set.ones_count());
     }
 
     #[test]
-    fn tsst_bit_set_append() {
+    fn test_ones_count() {
+        let bit_set = BitSet::from_bytes(vec![0b1111_1111], 4);
+
+        let ones_count = bit_set.ones_count();
+        
+        assert_eq!(4, ones_count);
+    }
+
+    #[test]
+    fn test_bit_set_append() {
         let mut bit_set: BitSet = vec![0b0000_0001, 0b0000_1000].into();
 
         bit_set.append(&[true, false]);
@@ -168,7 +177,7 @@ mod tests {
         check_bit_set(&bit_set, &[0, 11, 16]);
         assert_eq!(None, bit_set.get(18));
         assert_eq!(18, bit_set.len());
-        assert_eq!(3, bit_set.set_count());
+        assert_eq!(3, bit_set.ones_count());
     }
 
     #[test]

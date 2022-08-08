@@ -1,7 +1,7 @@
 use api::v1::*;
 use query::Output;
 
-use crate::server::grpc::{select::select_result, server::PROTOCOL_VERSION};
+use crate::server::grpc::{select::to_object_result, server::PROTOCOL_VERSION};
 use crate::{error::Result, instance::InstanceRef};
 
 // TODO(fys): Only one success code (200) was provided
@@ -81,7 +81,7 @@ impl BatchHandler {
         match expr {
             select_expr::Expr::Sql(sql) => {
                 let result = self.instance.execute_sql(&sql).await;
-                select_result(result).await
+                to_object_result(result).await
             }
         }
     }

@@ -92,17 +92,18 @@ fn add_values_to_builder(
         });
     } else {
         ensure!(
-            null_mask.set_count() + values.len() == row_count,
+            null_mask.ones_count() + values.len() == row_count,
             IllegalInsertDataSnafu
         );
 
         let mut idx_of_values = 0;
         for idx in 0..row_count {
-            if is_null(&null_mask, idx) {
-                builder.push(&Value::Null);
-            } else {
-                builder.push(&values[idx_of_values]);
-                idx_of_values += 1;
+            match is_null(&null_mask, idx) {
+                Some(true) => builder.push(&Value::Null),
+                _ => {
+                    builder.push(&values[idx_of_values]);
+                    idx_of_values += 1
+                }
             }
         }
     }
@@ -174,9 +175,14 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
     }
 }
 
-fn is_null(null_mask: &BitSet, idx: usize) -> bool {
-    matches!(null_mask.get(idx), Some(true))
+fn is_null(null_mask: &BitSet, idx: usize) -> Option<bool> {
+    match null_mask.get(idx) {
+        Some(true) => Some(true),
+        Some(false) => Some(false),
+        None => None,
+    }
 }
+
 #[cfg(test)]
 mod tests {
     use std::{any::Any, sync::Arc};
@@ -251,14 +257,14 @@ mod tests {
     fn test_is_null() {
         let null_mask: BitSet = vec![0b0000_0001, 0b0000_1000].into();
 
-        assert!(is_null(&null_mask, 0));
-        assert!(!is_null(&null_mask, 1));
-        assert!(!is_null(&null_mask, 10));
-        assert!(is_null(&null_mask, 11));
-        assert!(!is_null(&null_mask, 12));
+        assert_eq!(Some(true) ,is_null(&null_mask, 0));
+        assert_eq!(Some(false), is_null(&null_mask, 1));
+        assert_eq!(Some(false), is_null(&null_mask, 10));
+        assert_eq!(Some(true), is_null(&null_mask, 11));
+        assert_eq!(Some(false), is_null(&null_mask, 12));
 
-        assert!(!is_null(&null_mask, 16));
-        assert!(!is_null(&null_mask, 99));
+        assert_eq!(None, is_null(&null_mask, 16));
+        assert_eq!(None, is_null(&null_mask, 99));
     }
 
     struct DemoTable;

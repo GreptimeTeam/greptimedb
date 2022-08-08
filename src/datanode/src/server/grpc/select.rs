@@ -15,7 +15,7 @@ use crate::server::grpc::{
     server::PROTOCOL_VERSION,
 };
 
-pub(crate) async fn select_result(select_result: Result<Output>) -> ObjectResult {
+pub(crate) async fn to_object_result(result: Result<Output>) -> ObjectResult {
     let mut object_resp = ObjectResult::default();
 
     let mut header = ResultHeader {
@@ -23,7 +23,7 @@ pub(crate) async fn select_result(select_result: Result<Output>) -> ObjectResult
         ..Default::default()
     };
 
-    match select_result {
+    match result {
         Ok(output) => match output {
             Output::AffectedRows(rows) => {
                 header.code = SUCCESS;
@@ -31,7 +31,7 @@ pub(crate) async fn select_result(select_result: Result<Output>) -> ObjectResult
             }
             Output::RecordBatch(stream) => match util::collect(stream).await {
                 Ok(record_batches) => {
-                    let select_result = convert_record_batches_to_select_result(record_batches);
+                    let select_result = try_convert(record_batches);
                     match select_result {
                         Ok(select_result) => {
                             header.code = SUCCESS;
@@ -58,9 +58,8 @@ pub(crate) async fn select_result(select_result: Result<Output>) -> ObjectResult
     object_resp
 }
 
-fn convert_record_batches_to_select_result(
-    record_batches: Vec<RecordBatch>,
-) -> Result<SelectResult> {
+// All schemas of record_batches must be the same.
+fn try_convert(record_batches: Vec<RecordBatch>) -> Result<SelectResult> {
     let first = if let Some(r) = record_batches.get(0) {
         r
     } else {
@@ -196,7 +195,7 @@ mod tests {
         vectors::{UInt32Vector, VectorRef},
     };
 
-    use crate::server::grpc::select::{convert_record_batches_to_select_result, null_mask, values};
+    use crate::server::grpc::select::{null_mask, try_convert, values};
 
     #[test]
     fn test_convert_record_batches_to_select_result() {
@@ -204,7 +203,7 @@ mod tests {
         let r2 = mock_record_batch();
         let record_batches = vec![r1, r2];
 
-        let s = convert_record_batches_to_select_result(record_batches).unwrap();
+        let s = try_convert(record_batches).unwrap();
 
         let c1 = s.columns.get(0).unwrap();
         let c2 = s.columns.get(1).unwrap();
