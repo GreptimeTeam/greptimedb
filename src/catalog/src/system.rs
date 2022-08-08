@@ -57,6 +57,7 @@ impl SystemCatalogTable {
         };
         let schema = Arc::new(build_system_catalog_schema());
         let ctx = EngineContext::default(); // init engine context
+
         if let Some(table) = engine
             .open_table(&ctx, request)
             .await
@@ -67,8 +68,10 @@ impl SystemCatalogTable {
             // system catalog table is not yet created, try to create
             let request = CreateTableRequest {
                 name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
-                desc: Some("System catalog inner KV".to_string()),
+                desc: Some("System catalog table".to_string()),
                 schema: schema.clone(),
+                primary_key_indices: vec![], // TODO(hl): Specify system catalog table primary key indices.
+                create_if_not_exists: true,
             };
 
             let table = engine

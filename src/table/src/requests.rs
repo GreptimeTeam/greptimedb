@@ -12,13 +12,6 @@ pub struct InsertRequest {
     pub columns_values: HashMap<String, VectorRef>,
 }
 
-pub struct OpenTableRequest {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub table_id: u64,
-}
-
 /// Create table request
 #[derive(Debug)]
 pub struct CreateTableRequest {
