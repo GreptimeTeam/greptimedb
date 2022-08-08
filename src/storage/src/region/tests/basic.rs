@@ -62,7 +62,9 @@ impl Tester {
         // Reopen the region.
         let store_config = config_util::new_store_config(&self.region_name, &self.store_dir).await;
         let opts = OpenOptions::default();
-        let region = RegionImpl::open(self.region_name.clone(), store_config, &opts).await?;
+        let region = RegionImpl::open(self.region_name.clone(), store_config, &opts)
+            .await?
+            .unwrap();
         let base = FileTesterBase::with_region(region);
         self.base = Some(base);
 

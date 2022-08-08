@@ -22,7 +22,7 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
         ctx: &EngineContext,
         name: &str,
         opts: &OpenOptions,
-    ) -> Result<Self::Region, Self::Error>;
+    ) -> Result<Option<Self::Region>, Self::Error>;
 
     /// Closes given region.
     async fn close_region(

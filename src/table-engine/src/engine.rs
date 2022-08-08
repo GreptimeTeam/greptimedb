@@ -56,7 +56,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         &self,
         ctx: &EngineContext,
         request: OpenTableRequest,
-    ) -> TableResult<TableRef> {
+    ) -> TableResult<Option<TableRef>> {
         Ok(self.inner.open_table(ctx, request).await?)
     }
 
@@ -211,11 +211,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         &self,
         _ctx: &EngineContext,
         request: OpenTableRequest,
-    ) -> TableResult<TableRef> {
+    ) -> TableResult<Option<TableRef>> {
         let table_name = &request.table_name;
         if let Some(table) = self.get_table(table_name) {
             // Table has already been opened.
-            return Ok(table);
+            return Ok(Some(table));
         }
 
         // Acquires the mutex before opening a new table.
@@ -223,7 +223,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let _lock = self.table_mutex.lock().await;
             // Checks again, read lock should be enough since we are guarded by the mutex.
             if let Some(table) = self.get_table(table_name) {
-                return Ok(table);
+                return Ok(Some(table));
             }
 
             let engine_ctx = storage::EngineContext::default();
@@ -237,26 +237,31 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .map_err(BoxedError::new)
                 .context(error::OpenRegionSnafu { region_name })?;
 
-            let table_meta = TableMetaBuilder::default()
-                .schema(region.in_memory_metadata().schema().clone())
-                .engine(DEFAULT_ENGINE)
-                .build()
-                .context(error::BuildTableMetaSnafu)?;
-            let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
-                .ident(request.table_id)
-                .table_version(0u64)
-                .table_type(TableType::Base)
-                .build()
-                .context(error::BuildTableInfoSnafu)?;
+            match region {
+                None => None,
+                Some(region) => {
+                    let table_meta = TableMetaBuilder::default()
+                        .schema(region.in_memory_metadata().schema().clone())
+                        .engine(DEFAULT_ENGINE)
+                        .build()
+                        .context(error::BuildTableMetaSnafu)?;
+                    let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
+                        .ident(request.table_id)
+                        .table_version(0u64)
+                        .table_type(TableType::Base)
+                        .build()
+                        .context(error::BuildTableInfoSnafu)?;
 
-            let table = Arc::new(MitoTable::new(table_info, region));
+                    let table = Arc::new(MitoTable::new(table_info, region));
 
-            self.tables
-                .write()
-                .unwrap()
-                .insert(table_name.to_string(), table.clone());
+                    self.tables
+                        .write()
+                        .unwrap()
+                        .insert(table_name.to_string(), table.clone());
 
-            table
+                    Some(table as _)
+                }
+            }
         };
 
         logging::info!("Mito engine opened table {}", table_name);
@@ -349,6 +354,7 @@ mod tests {
             let reopened = table_engine
                 .open_table(&ctx, open_req.clone())
                 .await
+                .unwrap()
                 .unwrap();
             assert_eq!(table.schema(), reopened.schema());
 
@@ -360,6 +366,7 @@ mod tests {
         let reopened = table_engine
             .open_table(&ctx, open_req.clone())
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(table.schema(), reopened.schema());
     }

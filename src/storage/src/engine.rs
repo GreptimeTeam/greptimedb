@@ -43,7 +43,7 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         _ctx: &EngineContext,
         name: &str,
         opts: &OpenOptions,
-    ) -> Result<Self::Region> {
+    ) -> Result<Option<Self::Region>> {
         self.inner.open_region(name, opts).await
     }
 
@@ -247,11 +247,11 @@ impl<S: LogStore> EngineInner<S> {
         None
     }
 
-    async fn open_region(&self, name: &str, opts: &OpenOptions) -> Result<RegionImpl<S>> {
+    async fn open_region(&self, name: &str, opts: &OpenOptions) -> Result<Option<RegionImpl<S>>> {
         // We can wait until the state of the slot has been changed to ready, but this will
         // make the code more complicate, so we just return the error here.
         if let Some(slot) = self.get_or_occupy_slot(name, RegionSlot::Opening) {
-            return slot.try_get_ready_region();
+            return Some(slot.try_get_ready_region()).transpose();
         }
 
         let mut guard = SlotGuard::new(name, &self.regions);
@@ -260,11 +260,14 @@ impl<S: LogStore> EngineInner<S> {
         let store_config = self.region_store_config(name);
         let region = RegionImpl::open(name.to_string(), store_config, opts).await?;
 
-        guard.update(RegionSlot::Ready(region.clone()));
-
-        info!("Storage engine open region {:?}", &region);
-
-        Ok(region)
+        match region {
+            None => Ok(None),
+            Some(region) => {
+                guard.update(RegionSlot::Ready(region.clone()));
+                info!("Storage engine open region {:?}", &region);
+                Ok(Some(region))
+            }
+        }
     }
 
     async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl<S>> {

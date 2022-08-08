@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_telemetry::logging;
 use datatypes::schema::SchemaRef;
-use snafu::{ensure, OptionExt};
+use snafu::ensure;
 use store_api::logstore::LogStore;
 use store_api::manifest::{
     self, action::ProtocolAction, Manifest, ManifestVersion, MetaActionIterator,
@@ -152,9 +152,11 @@ impl<S: LogStore> RegionImpl<S> {
         name: String,
         store_config: StoreConfig<S>,
         _opts: &OpenOptions,
-    ) -> Result<RegionImpl<S>> {
+    ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
-        let version = Self::recover_from_manifest(&name, &store_config.manifest).await?;
+        let version = Self::recover_from_manifest(&store_config.manifest)
+            .await?
+            .unwrap();
 
         logging::debug!(
             "Region recovered version from manifest, version: {:?}",
@@ -193,13 +195,10 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: store_config.manifest,
         });
 
-        Ok(RegionImpl { inner })
+        Ok(Some(RegionImpl { inner }))
     }
 
-    async fn recover_from_manifest(
-        region_name: &str,
-        manifest: &RegionManifest,
-    ) -> Result<Version> {
+    async fn recover_from_manifest(manifest: &RegionManifest) -> Result<Option<Version>> {
         let (start, end) = Self::manifest_scan_range();
         let mut iter = manifest.scan(start, end).await?;
 
@@ -242,7 +241,7 @@ impl<S: LogStore> RegionImpl<S> {
             manifest.update_state(last_manifest_version + 1, protocol.clone());
         }
 
-        version.context(error::VersionNotFoundSnafu { region_name })
+        Ok(version)
     }
 
     fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {

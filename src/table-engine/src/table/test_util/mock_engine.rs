@@ -127,19 +127,19 @@ impl StorageEngine for MockEngine {
         _ctx: &EngineContext,
         name: &str,
         _opts: &OpenOptions,
-    ) -> Result<MockRegion> {
+    ) -> Result<Option<MockRegion>> {
         logging::info!("Mock engine create region, name: {}", name);
 
         let mut regions = self.regions.lock().unwrap();
         if let Some(region) = regions.opened_regions.get(name) {
-            return Ok(region.clone());
+            return Ok(Some(region.clone()));
         }
 
         if let Some(region) = regions.closed_regions.remove(name) {
             regions
                 .opened_regions
                 .insert(name.to_string(), region.clone());
-            return Ok(region);
+            return Ok(Some(region));
         }
 
         Err(MockError::with_backtrace(StatusCode::Unexpected))
