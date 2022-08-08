@@ -61,7 +61,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         &self,
         ctx: &EngineContext,
         request: OpenTableRequest,
-    ) -> TableResult<TableRef> {
+    ) -> TableResult<Option<TableRef>> {
         Ok(self.inner.open_table(ctx, request).await?)
     }
 
@@ -303,11 +303,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         &self,
         _ctx: &EngineContext,
         request: OpenTableRequest,
-    ) -> TableResult<TableRef> {
+    ) -> TableResult<Option<TableRef>> {
         let table_name = &request.table_name;
         if let Some(table) = self.get_table(table_name) {
             // Table has already been opened.
-            return Ok(table);
+            return Ok(Some(table));
         }
 
         // Acquires the mutex before opening a new table.
@@ -315,19 +315,24 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let _lock = self.table_mutex.lock().await;
             // Checks again, read lock should be enough since we are guarded by the mutex.
             if let Some(table) = self.get_table(table_name) {
-                return Ok(table);
+                return Ok(Some(table));
             }
 
             let engine_ctx = storage::EngineContext::default();
             let opts = OpenOptions::default();
             let region_name = table_name;
             // Now we just use table name as region name. TODO(yingwen): Naming pattern of region.
-            let region = self
+
+            let region = match self
                 .storage_engine
                 .open_region(&engine_ctx, region_name, &opts)
                 .await
                 .map_err(BoxedError::new)
-                .context(error::OpenRegionSnafu { region_name })?;
+                .context(error::OpenRegionSnafu { region_name })?
+            {
+                None => return Ok(None),
+                Some(region) => region,
+            };
 
             //FIXME(boyan): recover table meta from table manifest
             let table_meta = TableMetaBuilder::default()
@@ -351,8 +356,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .write()
                 .unwrap()
                 .insert(table_name.to_string(), table.clone());
-
-            table
+            Some(table as _)
         };
 
         logging::info!("Mito engine opened table {}", table_name);
@@ -445,6 +449,7 @@ mod tests {
             let reopened = table_engine
                 .open_table(&ctx, open_req.clone())
                 .await
+                .unwrap()
                 .unwrap();
             assert_eq!(table.schema(), reopened.schema());
 
@@ -456,6 +461,7 @@ mod tests {
         let reopened = table_engine
             .open_table(&ctx, open_req.clone())
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(table.schema(), reopened.schema());
     }

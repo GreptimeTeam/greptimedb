@@ -16,13 +16,13 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
     type Error: ErrorExt + Send + Sync;
     type Region: Region;
 
-    /// Opens an existing region.
+    /// Opens an existing region. Returns `Ok(None)` if region does not exists.
     async fn open_region(
         &self,
         ctx: &EngineContext,
         name: &str,
         opts: &OpenOptions,
-    ) -> Result<Self::Region, Self::Error>;
+    ) -> Result<Option<Self::Region>, Self::Error>;
 
     /// Closes given region.
     async fn close_region(
@@ -33,7 +33,7 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
 
     /// Creates and returns the created region.
     ///
-    /// Returns exsiting region if region with same name already exists. The region will
+    /// Returns existing region if region with same name already exists. The region will
     /// be opened before returning.
     async fn create_region(
         &self,
