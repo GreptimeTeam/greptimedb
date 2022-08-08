@@ -125,11 +125,11 @@ fn build_row_key_desc_from_schema(
 ) -> Result<(ColumnId, RowKeyDescriptor)> {
     let ts_column_schema =
         request
-        .schema
-        .timestamp_column()
-        .context(MissingTimestamIndexSnafu {
-            table_name: &request.name,
-        })?;
+            .schema
+            .timestamp_column()
+            .context(MissingTimestamIndexSnafu {
+                table_name: &request.name,
+            })?;
     let timestamp_index = request.schema.timestamp_index().unwrap();
 
     let ts_column = ColumnDescriptorBuilder::new(
@@ -137,12 +137,12 @@ fn build_row_key_desc_from_schema(
         ts_column_schema.name.clone(),
         ts_column_schema.data_type.clone(),
     )
-        .is_nullable(ts_column_schema.is_nullable)
-        .build()
-        .context(BuildColumnDescriptorSnafu {
-            column_name: &ts_column_schema.name,
-            table_name: &request.name,
-        })?;
+    .is_nullable(ts_column_schema.is_nullable)
+    .build()
+    .context(BuildColumnDescriptorSnafu {
+        column_name: &ts_column_schema.name,
+        table_name: &request.name,
+    })?;
     column_id += 1;
 
     let column_schemas = &request.schema.column_schemas();
@@ -162,12 +162,12 @@ fn build_row_key_desc_from_schema(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
-            .is_nullable(column_schema.is_nullable)
-            .build()
-            .context(BuildColumnDescriptorSnafu {
-                column_name: &column_schema.name,
-                table_name: &request.name,
-            })?;
+        .is_nullable(column_schema.is_nullable)
+        .build()
+        .context(BuildColumnDescriptorSnafu {
+            column_name: &column_schema.name,
+            table_name: &request.name,
+        })?;
 
         builder = builder.push_column(column);
         column_id += 1;
@@ -207,12 +207,12 @@ fn build_column_family_from_request(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
-            .is_nullable(column_schema.is_nullable)
-            .build()
-            .context(BuildColumnDescriptorSnafu {
-                column_name: &column_schema.name,
-                table_name: &request.name,
-            })?;
+        .is_nullable(column_schema.is_nullable)
+        .build()
+        .context(BuildColumnDescriptorSnafu {
+            column_name: &column_schema.name,
+            table_name: &request.name,
+        })?;
 
         builder = builder.push_column(column);
         column_id += 1;
