@@ -62,7 +62,7 @@ pub struct TableMeta {
 
 impl TableMetaBuilder {
     fn default_value_indices(&self) -> Result<Vec<usize>, String> {
-        match (self.primary_key_indices.as_ref(), self.schema.as_ref()) {
+        match (&self.primary_key_indices, &self.schema) {
             (Some(v), Some(schema)) => {
                 let column_schemas = schema.column_schemas();
                 Ok((0..column_schemas.len())
