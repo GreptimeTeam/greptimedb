@@ -15,12 +15,12 @@ use datatypes::with_match_ordered_primitive_type_id;
 use num_traits::AsPrimitive;
 use paste::paste;
 use snafu::{OptionExt, ResultExt};
-use statrs::distribution::{Continuous, Normal};
+use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::scipy_stats_norm_codec;
 
 // https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.norm.html
-scipy_stats_norm_codec!(pdf, ScipyStatsNormPdf);
+scipy_stats_norm_codec!(cdf, ScipyStatsNormCdf);
 
 #[cfg(test)]
 mod test {
@@ -31,16 +31,16 @@ mod test {
     #[test]
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
-        let mut scipy_stats_norm_pdf = ScipyStatsNormPdf::<i32> {
+        let mut scipy_stats_norm_cdf = ScipyStatsNormCdf::<i32> {
             x: 0.0,
             ..Default::default()
         };
-        assert!(scipy_stats_norm_pdf.update_batch(&[]).is_ok());
-        assert!(scipy_stats_norm_pdf.values.is_empty());
-        assert_eq!(Value::Null, scipy_stats_norm_pdf.evaluate().unwrap());
+        assert!(scipy_stats_norm_cdf.update_batch(&[]).is_ok());
+        assert!(scipy_stats_norm_cdf.values.is_empty());
+        assert_eq!(Value::Null, scipy_stats_norm_cdf.evaluate().unwrap());
 
         // test update no null-value batch
-        let mut scipy_stats_norm_pdf = ScipyStatsNormPdf::<i32> {
+        let mut scipy_stats_norm_cdf = ScipyStatsNormCdf::<i32> {
             x: 0.0,
             ..Default::default()
         };
@@ -49,17 +49,17 @@ mod test {
             Some(1),
             Some(0),
         ]))];
-        assert!(scipy_stats_norm_pdf.update_batch(&v).is_ok());
+        assert!(scipy_stats_norm_cdf.update_batch(&v).is_ok());
         let n = Normal::new(0.0, 0.816496580927726).unwrap();
-        assert_eq!(n.mean(), scipy_stats_norm_pdf.mean());
-        assert_eq!(n.std_dev(), scipy_stats_norm_pdf.std_deviation());
+        assert_eq!(n.mean(), scipy_stats_norm_cdf.mean());
+        assert_eq!(n.std_dev(), scipy_stats_norm_cdf.std_deviation());
         assert_eq!(
-            Value::from(n.pdf(0.0)),
-            scipy_stats_norm_pdf.evaluate().unwrap()
+            Value::from(n.cdf(0.0)),
+            scipy_stats_norm_cdf.evaluate().unwrap()
         );
 
         // test update null-value batch
-        let mut scipy_stats_norm_pdf = ScipyStatsNormPdf::<i32> {
+        let mut scipy_stats_norm_cdf = ScipyStatsNormCdf::<i32> {
             x: 1.0,
             ..Default::default()
         };
@@ -69,13 +69,13 @@ mod test {
             Some(2),
             Some(0),
         ]))];
-        assert!(scipy_stats_norm_pdf.update_batch(&v).is_ok());
+        assert!(scipy_stats_norm_cdf.update_batch(&v).is_ok());
         let n = Normal::new(0.0, 1.632993161855452).unwrap();
-        assert_eq!(scipy_stats_norm_pdf.mean(), n.mean());
-        assert_eq!(scipy_stats_norm_pdf.std_deviation(), n.std_dev());
+        assert_eq!(scipy_stats_norm_cdf.mean(), n.mean());
+        assert_eq!(scipy_stats_norm_cdf.std_deviation(), n.std_dev());
         assert_eq!(
-            Value::from(n.pdf(1.0)),
-            scipy_stats_norm_pdf.evaluate().unwrap()
+            Value::from(n.cdf(1.0)),
+            scipy_stats_norm_cdf.evaluate().unwrap()
         );
     }
 }

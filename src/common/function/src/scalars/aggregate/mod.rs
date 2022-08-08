@@ -1,10 +1,13 @@
+mod macros;
 mod median;
+mod scipy_stats_norm_cdf;
 mod scipy_stats_norm_pdf;
 
 use std::sync::Arc;
 
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use median::MedianAccumulatorCreator;
+pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
 pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
 
 use crate::scalars::FunctionRegistry;
@@ -47,6 +50,10 @@ impl AggregateFunctions {
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "median",
             Arc::new(|| Arc::new(MedianAccumulatorCreator::default())),
+        )));
+        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
+            "scipy_stats_norm_cdf",
+            Arc::new(|| Arc::new(ScipyStatsNormCdfAccumulatorCreator::default())),
         )));
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "scipy_stats_norm_pdf",
