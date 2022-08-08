@@ -231,6 +231,7 @@ where
 
     engine.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
         "my_sum",
+        1,
         Arc::new(|| Arc::new(MySumAccumulatorCreator::default())),
     )));
 

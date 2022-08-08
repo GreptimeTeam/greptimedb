@@ -4,17 +4,17 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use common_query::error::{
-    CreateAccumulatorSnafu, DowncastVectorSnafu, ExecuteFunctionSnafu, FromScalarValueSnafu, Result,
+    CreateAccumulatorSnafu, DowncastVectorSnafu, FromScalarValueSnafu, InvalidInputStateSnafu,
+    Result,
 };
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
-use datafusion_common::DataFusionError;
 use datatypes::prelude::*;
 use datatypes::value::ListValue;
 use datatypes::vectors::{ConstantVector, ListVector};
 use datatypes::with_match_ordered_primitive_type_id;
 use num::NumCast;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 // This median calculation algorithm's details can be found at
 // https://leetcode.cn/problems/find-median-from-data-stream/
@@ -98,19 +98,25 @@ where
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<()> {
         if values.is_empty() {
             return Ok(());
-        };
+        }
+
+        ensure!(values.len() == 1, InvalidInputStateSnafu);
 
         // This is a unary accumulator, so only one column is provided.
         let column = &values[0];
+        let mut len = 1;
         let column: &<T as Scalar>::VectorType = if column.is_const() {
+            len = column.len();
             let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
             unsafe { VectorHelper::static_cast(column.inner()) }
         } else {
             unsafe { VectorHelper::static_cast(column) }
         };
-        for v in column.iter_data().flatten() {
-            self.push(v);
-        }
+        (0..len).for_each(|_| {
+            for v in column.iter_data().flatten() {
+                self.push(v);
+            }
+        });
         Ok(())
     }
 
@@ -119,7 +125,7 @@ where
     fn merge_batch(&mut self, states: &[VectorRef]) -> Result<()> {
         if states.is_empty() {
             return Ok(());
-        };
+        }
 
         // The states here are returned by the `state` method. Since we only returned a vector
         // with one value in that method, `states[0]` is fine.
@@ -197,22 +203,16 @@ impl AggregateFunctionCreator for MedianAccumulatorCreator {
 
     fn input_types(&self) -> Result<Vec<ConcreteDataType>> {
         let input_types = self.input_types.load();
-        if input_types.is_none() {
-            return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
-        }
+        ensure!(input_types.is_some(), InvalidInputStateSnafu);
         Ok(input_types.as_ref().unwrap().as_ref().clone())
     }
 
     fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> Result<()> {
         let old = self.input_types.swap(Some(Arc::new(input_types.clone())));
         if let Some(old) = old {
-            if old.len() != input_types.len() {
-                return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
-            }
+            ensure!(old.len() == input_types.len(), InvalidInputStateSnafu);
             for (x, y) in old.iter().zip(input_types.iter()) {
-                if x != y {
-                    return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
-                }
+                ensure!(x == y, InvalidInputStateSnafu);
             }
         }
         Ok(())
@@ -220,9 +220,7 @@ impl AggregateFunctionCreator for MedianAccumulatorCreator {
 
     fn output_type(&self) -> Result<ConcreteDataType> {
         let input_types = self.input_types()?;
-        if input_types.len() != 1 {
-            return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
-        }
+        ensure!(input_types.len() == 1, InvalidInputStateSnafu);
         // unwrap is safe because we have checked input_types len must equals 1
         Ok(input_types.into_iter().next().unwrap())
     }
@@ -230,13 +228,6 @@ impl AggregateFunctionCreator for MedianAccumulatorCreator {
     fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
         Ok(vec![ConcreteDataType::list_datatype(self.output_type()?)])
     }
-}
-
-fn datafusion_internal_error() -> DataFusionError {
-    DataFusionError::Internal(
-        "Illegal input_types status, check if DataFusion has changed its UDAF execution logic."
-            .to_string(),
-    )
 }
 
 #[cfg(test)]

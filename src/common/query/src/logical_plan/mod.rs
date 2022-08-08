@@ -38,6 +38,7 @@ pub fn create_udf(
 
 pub fn create_aggregate_function(
     name: String,
+    args_count: u8,
     creator: Arc<dyn AggregateFunctionCreator>,
 ) -> AggregateFunction {
     let return_type = make_return_function(creator.clone());
@@ -45,7 +46,7 @@ pub fn create_aggregate_function(
     let state_type = make_state_function(creator.clone());
     AggregateFunction::new(
         name,
-        Signature::any(1, Volatility::Immutable),
+        Signature::any(args_count as usize, Volatility::Immutable),
         return_type,
         accumulator,
         state_type,
@@ -204,7 +205,7 @@ mod tests {
     #[test]
     fn test_create_udaf() {
         let creator = DummyAccumulatorCreator;
-        let udaf = create_aggregate_function("dummy".to_string(), Arc::new(creator));
+        let udaf = create_aggregate_function("dummy".to_string(), 1, Arc::new(creator));
         assert_eq!("dummy", udaf.name);
 
         let signature = udaf.signature;
