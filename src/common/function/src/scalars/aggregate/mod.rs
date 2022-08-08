@@ -1,11 +1,11 @@
-mod median;
 mod mean;
+mod median;
 
 use std::sync::Arc;
 
 use common_query::logical_plan::AggregateFunctionCreatorRef;
-pub use median::MedianAccumulatorCreator;
 pub use mean::MeanAccumulatorCreator;
+pub use median::MedianAccumulatorCreator;
 
 use crate::scalars::FunctionRegistry;
 
