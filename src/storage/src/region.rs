@@ -154,9 +154,10 @@ impl<S: LogStore> RegionImpl<S> {
         _opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
-        let version = Self::recover_from_manifest(&store_config.manifest)
-            .await?
-            .unwrap();
+        let version = match Self::recover_from_manifest(&store_config.manifest).await? {
+            None => return Ok(None),
+            Some(version) => version,
+        };
 
         logging::debug!(
             "Region recovered version from manifest, version: {:?}",

@@ -194,7 +194,8 @@ async fn test_recover_region_manifets() {
     // Recover from empty
     assert!(RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest)
         .await
-        .is_err());
+        .unwrap()
+        .is_none());
 
     {
         // save some actions into region_meta

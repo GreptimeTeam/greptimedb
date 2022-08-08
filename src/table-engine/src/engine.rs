@@ -230,38 +230,37 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let opts = OpenOptions::default();
             let region_name = table_name;
             // Now we just use table name as region name. TODO(yingwen): Naming pattern of region.
-            let region = self
+
+            let region = match self
                 .storage_engine
                 .open_region(&engine_ctx, region_name, &opts)
                 .await
                 .map_err(BoxedError::new)
-                .context(error::OpenRegionSnafu { region_name })?;
+                .context(error::OpenRegionSnafu { region_name })?
+            {
+                None => return Ok(None),
+                Some(region) => region,
+            };
 
-            match region {
-                None => None,
-                Some(region) => {
-                    let table_meta = TableMetaBuilder::default()
-                        .schema(region.in_memory_metadata().schema().clone())
-                        .engine(DEFAULT_ENGINE)
-                        .build()
-                        .context(error::BuildTableMetaSnafu)?;
-                    let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
-                        .ident(request.table_id)
-                        .table_version(0u64)
-                        .table_type(TableType::Base)
-                        .build()
-                        .context(error::BuildTableInfoSnafu)?;
+            let table_meta = TableMetaBuilder::default()
+                .schema(region.in_memory_metadata().schema().clone())
+                .engine(DEFAULT_ENGINE)
+                .build()
+                .context(error::BuildTableMetaSnafu)?;
+            let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
+                .ident(request.table_id)
+                .table_version(0u64)
+                .table_type(TableType::Base)
+                .build()
+                .context(error::BuildTableInfoSnafu)?;
 
-                    let table = Arc::new(MitoTable::new(table_info, region));
+            let table = Arc::new(MitoTable::new(table_info, region));
 
-                    self.tables
-                        .write()
-                        .unwrap()
-                        .insert(table_name.to_string(), table.clone());
-
-                    Some(table as _)
-                }
-            }
+            self.tables
+                .write()
+                .unwrap()
+                .insert(table_name.to_string(), table.clone());
+            Some(table as _)
         };
 
         logging::info!("Mito engine opened table {}", table_name);

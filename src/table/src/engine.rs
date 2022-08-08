@@ -16,7 +16,8 @@ pub trait TableEngine: Send + Sync {
         request: CreateTableRequest,
     ) -> Result<TableRef>;
 
-    /// Open an existing table by given `request`, returns the opened table.
+    /// Open an existing table by given `request`, returns the opened table. If the table does not
+    /// exist, returns an `Ok(None)`.
     async fn open_table(
         &self,
         ctx: &EngineContext,
