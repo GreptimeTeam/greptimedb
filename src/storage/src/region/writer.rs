@@ -210,10 +210,6 @@ impl WriterInner {
             // Data after flushed sequence need to be recovered.
             flushed_sequence = version_control.current().flushed_sequence();
             last_sequence = flushed_sequence;
-            // FIXME(yingwen): Now log store will overwrite the entry id by its internal entry id,
-            // which starts from 0. This is a hack to just make the test passes since we knows the
-            // entry id of log store is always equals to `sequence - 1`. Change this to
-            // `flushed_sequence + ` once the log store fixes this issue.
             let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence).await?;
             while let Some((req_sequence, _header, request)) = stream.try_next().await? {
                 if let Some(request) = request {

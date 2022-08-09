@@ -26,7 +26,9 @@ use tokio::task::JoinHandle;
 use tokio::time;
 
 use crate::error::Error::Eof;
-use crate::error::{AppendSnafu, Error, InternalSnafu, IoSnafu, OpenLogSnafu, Result, WriteSnafu};
+use crate::error::{
+    AppendSnafu, Error, InternalSnafu, IoSnafu, OpenLogSnafu, Result, WaitWriteSnafu, WriteSnafu,
+};
 use crate::fs::chunk::{Chunk, ChunkList};
 use crate::fs::config::LogConfig;
 use crate::fs::crc::CRC_ALGO;
@@ -84,13 +86,7 @@ impl FileWriter {
         let file = self.inner.clone();
         common_runtime::spawn_blocking_write(move || file.sync_all().context(IoSnafu))
             .await
-            .map_err(|e| {
-                InternalSnafu {
-                    msg: format!("Error while waiting for flush finish, error: {}", e),
-                }
-                .build()
-            })
-            .and_then(|e| e)
+            .context(WaitWriteSnafu)?
     }
 }
 

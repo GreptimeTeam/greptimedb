@@ -72,6 +72,9 @@ pub enum Error {
 
     #[snafu(display("Log file suffix is illegal: {}", suffix))]
     SuffixIllegal { suffix: String },
+
+    #[snafu(display("Failed while waiting for write to finish, source: {}", source))]
+    WaitWrite { source: tokio::task::JoinError },
 }
 
 impl ErrorExt for Error {
