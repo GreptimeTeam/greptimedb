@@ -191,7 +191,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[bool]):
     abc = cpu
     abc *= 2
-    return abc, cpu.__gt__(mem)
+    return abc, cpu.gt(0.4)
 "#;
     let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
     let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
