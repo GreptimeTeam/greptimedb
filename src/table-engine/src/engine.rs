@@ -23,7 +23,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
-    BuildRowKeyDescriptorSnafu, MissingTimestamIndexSnafu, Result,
+    BuildRowKeyDescriptorSnafu, MissingTimestampIndexSnafu, Result,
 };
 use crate::table::MitoTable;
 
@@ -131,7 +131,7 @@ fn build_row_key_desc_from_schema(
         request
             .schema
             .timestamp_column()
-            .context(MissingTimestamIndexSnafu {
+            .context(MissingTimestampIndexSnafu {
                 table_name: &request.name,
             })?;
     let timestamp_index = request.schema.timestamp_index().unwrap();
@@ -195,7 +195,7 @@ fn build_column_family_from_request(
     let ts_index = request
         .schema
         .timestamp_index()
-        .context(MissingTimestamIndexSnafu {
+        .context(MissingTimestampIndexSnafu {
             table_name: &request.name,
         })?;
     let column_schemas = request

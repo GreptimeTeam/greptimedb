@@ -35,8 +35,11 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Invalid system catalog entry type: {:?}", entry_type))]
+    InvalidEntryType { entry_type: Option<u8> },
+
     #[snafu(display("Invalid system catalog key: {:?}", key))]
-    InvalidKey { key: Option<u8> },
+    InvalidKey { key: Option<String> },
 
     #[snafu(display("Catalog value is not present"))]
     EmptyValue,
@@ -95,6 +98,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
+
+    #[snafu(display("Failed to build table schema for system catalog table"))]
+    SystemCatalogSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -103,7 +112,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
-            Error::InvalidKey { .. } => StatusCode::StorageUnavailable,
+            Error::InvalidKey { .. } => StatusCode::Unexpected,
             Error::OpenSystemCatalog { .. } => StatusCode::Unexpected,
             Error::CreateSystemCatalog { .. } => StatusCode::Unexpected,
             Error::SystemCatalog { .. } => StatusCode::StorageUnavailable,
@@ -117,6 +126,8 @@ impl ErrorExt for Error {
             Error::OpenTable { .. } => StatusCode::StorageUnavailable,
             Error::TableNotFound { .. } => StatusCode::Unexpected,
             Error::ReadSystemCatalog { .. } => StatusCode::StorageUnavailable,
+            Error::SystemCatalogSchema { .. } => StatusCode::Internal,
+            Error::InvalidEntryType { .. } => StatusCode::Unexpected,
         }
     }
 

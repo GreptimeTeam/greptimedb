@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::StreamExt;
@@ -38,13 +38,16 @@ impl MemoryCatalogManager {
     /// Create a new [CatalogManager] with given user catalogs and table engine
     pub async fn try_new(engine: TableEngineRef) -> Result<Self> {
         let table = SystemCatalogTable::new(engine.clone()).await?;
+        debug!("1");
         let memory_catalog_list = crate::memory::new_memory_catalog_list()?;
+        debug!("2");
         let system_catalog = Arc::new(SystemCatalog::new(
             table,
             memory_catalog_list.clone(),
             engine.clone(),
         ));
 
+        debug!("3");
         Ok(Self {
             system: system_catalog,
             catalogs: memory_catalog_list,
@@ -87,7 +90,7 @@ impl MemoryCatalogManager {
 
     async fn handle_system_catalog_entries(&self, records: RecordBatch) -> Result<()> {
         ensure!(
-            records.df_recordbatch.columns().len() >= 2,
+            records.df_recordbatch.columns().len() >= 4,
             SystemCatalogSnafu {
                 msg: format!(
                     "Length mismatch: {}",
@@ -96,19 +99,27 @@ impl MemoryCatalogManager {
             }
         );
 
-        let key = UInt8Vector::try_from_arrow_array(&records.df_recordbatch.columns()[0])
+        let entry_type = UInt8Vector::try_from_arrow_array(&records.df_recordbatch.columns()[0])
+            .with_context(|_| SystemCatalogTypeMismatchSnafu {
+                data_type: records.df_recordbatch.columns()[0].data_type().clone(),
+            })?;
+
+        let key = BinaryVector::try_from_arrow_array(&records.df_recordbatch.columns()[1])
             .with_context(|_| SystemCatalogTypeMismatchSnafu {
                 data_type: records.df_recordbatch.columns()[1].data_type().clone(),
             })?;
 
         let value = BinaryVector::try_from_arrow_array(&records.df_recordbatch.columns()[1])
             .with_context(|_| SystemCatalogTypeMismatchSnafu {
-                data_type: records.df_recordbatch.columns()[1].data_type().clone(),
+                data_type: records.df_recordbatch.columns()[3].data_type().clone(),
             })?;
 
-        for (k, v) in key.iter_data().zip(value.iter_data()) {
-            let entry = decode_system_catalog(k, v)?;
-
+        for ((t, k), v) in entry_type
+            .iter_data()
+            .zip(key.iter_data())
+            .zip(value.iter_data())
+        {
+            let entry = decode_system_catalog(t, k, v)?;
             match entry {
                 Entry::Catalog(c) => {
                     self.catalogs.register_catalog_if_absent(

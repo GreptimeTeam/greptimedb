@@ -6,7 +6,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::{Table, TableRef};
@@ -16,8 +16,8 @@ use crate::consts::{
     SYSTEM_CATALOG_TABLE_NAME,
 };
 use crate::error::{
-    CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidKeySnafu, OpenSystemCatalogSnafu,
-    Result, ValueDeserializeSnafu,
+    CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
+    OpenSystemCatalogSnafu, Result, SystemCatalogSchemaSnafu, ValueDeserializeSnafu,
 };
 
 #[allow(dead_code)]
@@ -55,7 +55,7 @@ impl SystemCatalogTable {
             table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
             table_id: SYSTEM_CATALOG_TABLE_ID,
         };
-        let schema = Arc::new(build_system_catalog_schema());
+        let schema = Arc::new(build_system_catalog_schema()?);
         let ctx = EngineContext::default(); // init engine context
 
         if let Some(table) = engine
@@ -70,7 +70,7 @@ impl SystemCatalogTable {
                 name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
                 desc: Some("System catalog table".to_string()),
                 schema: schema.clone(),
-                primary_key_indices: vec![], // TODO(hl): Specify system catalog table primary key indices.
+                primary_key_indices: vec![0, 1, 2],
                 create_if_not_exists: true,
             };
 
@@ -96,11 +96,21 @@ impl SystemCatalogTable {
 }
 
 /// Build system catalog table schema
-fn build_system_catalog_schema() -> Schema {
+fn build_system_catalog_schema() -> Result<Schema> {
     let mut cols = Vec::with_capacity(6);
     cols.push(ColumnSchema::new(
-        "key".to_string(),
+        "entry_type".to_string(),
         ConcreteDataType::uint8_datatype(),
+        false,
+    ));
+    cols.push(ColumnSchema::new(
+        "key".to_string(),
+        ConcreteDataType::binary_datatype(),
+        false,
+    ));
+    cols.push(ColumnSchema::new(
+        "timestamp".to_string(),
+        ConcreteDataType::int64_datatype(),
         false,
     ));
     cols.push(ColumnSchema::new(
@@ -108,27 +118,59 @@ fn build_system_catalog_schema() -> Schema {
         ConcreteDataType::binary_datatype(),
         false,
     ));
-    Schema::new(cols)
+    Schema::with_timestamp_index(cols, 2).context(SystemCatalogSchemaSnafu)
 }
 
-pub fn decode_system_catalog(key: Option<u8>, value: Option<&[u8]>) -> Result<Entry> {
-    let key = key.context(InvalidKeySnafu { key: None })?;
+pub fn decode_system_catalog(
+    entry_type: Option<u8>,
+    key: Option<&[u8]>,
+    value: Option<&[u8]>,
+) -> Result<Entry> {
+    let entry_type = entry_type.context(InvalidKeySnafu { key: None })?;
+    let key = String::from_utf8_lossy(key.context(InvalidKeySnafu { key: None })?);
     let value = value.context(EmptyValueSnafu)?;
 
-    match EntryType::try_from(key)? {
+    match EntryType::try_from(entry_type)? {
         EntryType::Catalog => {
-            let entry: CatalogEntry =
-                serde_json::from_slice(value).context(ValueDeserializeSnafu)?;
-            Ok(Entry::Catalog(entry))
+            // As for catalog entry, the key is a string with format: `<catalog_name>`
+            // and the value is current not used.
+            let catalog_name = key.to_string();
+            Ok(Entry::Catalog(CatalogEntry { catalog_name }))
         }
         EntryType::Schema => {
-            let entry: SchemaEntry =
-                serde_json::from_slice(value).context(ValueDeserializeSnafu)?;
-            Ok(Entry::Schema(entry))
+            // As for schema entry, the key is a string with format: `<catalog_name>.<schema_name>`
+            // and the value is current not used.
+            let schema_parts = key.split('.').collect::<Vec<_>>();
+            ensure!(
+                schema_parts.len() == 2,
+                InvalidKeySnafu {
+                    key: Some(key.to_string())
+                }
+            );
+            Ok(Entry::Schema(SchemaEntry {
+                catalog_name: schema_parts[0].to_string(),
+                schema_name: schema_parts[1].to_string(),
+            }))
         }
+
         EntryType::Table => {
-            let entry: TableEntry = serde_json::from_slice(value).context(ValueDeserializeSnafu)?;
-            Ok(Entry::Table(entry))
+            // As for table entry, the key is a string with format: `<catalog_name>.<schema_name>.<table_name>`
+            // and the value is a JSON string with format: `{"table_id": <table_id>}`
+            let table_parts = key.split('.').collect::<Vec<_>>();
+            ensure!(
+                table_parts.len() >= 3,
+                InvalidKeySnafu {
+                    key: Some(key.to_string())
+                }
+            );
+            let table_meta: TableEntryValue =
+                serde_json::from_slice(value).context(ValueDeserializeSnafu)?;
+            Ok(Entry::Table(TableEntry {
+                catalog_name: table_parts[0].to_string(),
+                schema_name: table_parts[1].to_string(),
+                table_name: table_parts[2].to_string(),
+                table_id: table_meta.table_id,
+            }))
         }
     }
 }
@@ -148,7 +190,10 @@ impl TryFrom<u8> for EntryType {
             b if b == Self::Catalog as u8 => Ok(Self::Catalog),
             b if b == Self::Schema as u8 => Ok(Self::Schema),
             b if b == Self::Table as u8 => Ok(Self::Table),
-            b => Err(InvalidKeySnafu { key: Some(b) }.build()),
+            b => Err(InvalidEntryTypeSnafu {
+                entry_type: Some(b),
+            }
+            .build()),
         }
     }
 }
@@ -177,6 +222,11 @@ pub struct TableEntry {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+    pub table_id: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct TableEntryValue {
     pub table_id: u64,
 }
 

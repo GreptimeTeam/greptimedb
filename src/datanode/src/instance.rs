@@ -2,6 +2,7 @@ use std::{fs, path, sync::Arc};
 
 use api::v1::InsertExpr;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_telemetry::debug;
 use common_telemetry::logging::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -50,7 +51,9 @@ impl Instance {
                 .await
                 .context(NewCatalogSnafu)?,
         );
+        debug!("Catalog manager created!");
         let factory = QueryEngineFactory::new(catalog_manager.clone());
+        debug!("Query engine factory created");
         let query_engine = factory.query_engine().clone();
 
         Ok(Self {
@@ -195,6 +198,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_insert() {
+        common_telemetry::init_default_ut_logging();
         let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
