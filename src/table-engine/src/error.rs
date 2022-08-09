@@ -95,6 +95,17 @@ pub enum Error {
         region_name: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Failed to update table metadata to manifest,  table: {}, source: {}",
+        table_name,
+        source,
+    ))]
+    UpdateTableManifest {
+        #[snafu(backtrace)]
+        source: storage::error::Error,
+        table_name: String,
+    },
 }
 
 impl From<Error> for table::error::Error {
@@ -111,6 +122,7 @@ impl ErrorExt for Error {
 
         match self {
             CreateRegion { source, .. } | OpenRegion { source, .. } => source.status_code(),
+
             BuildRowKeyDescriptor { .. }
             | BuildColumnDescriptor { .. }
             | BuildColumnFamilyDescriptor { .. }
@@ -118,6 +130,8 @@ impl ErrorExt for Error {
             | BuildTableInfo { .. }
             | BuildRegionDescriptor { .. }
             | MissingTimestampIndex { .. } => StatusCode::InvalidArguments,
+
+            UpdateTableManifest { .. } => StatusCode::StorageUnavailable,
         }
     }
 

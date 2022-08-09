@@ -1,5 +1,5 @@
 //! Table manifest service
-mod action;
+pub mod action;
 
 use storage::manifest::ManifestImpl;
 

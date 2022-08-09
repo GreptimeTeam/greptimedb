@@ -8,6 +8,7 @@ use common_error::ext::BoxedError;
 use common_telemetry::logging;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
+use store_api::manifest::{action::ProtocolAction, Manifest};
 use store_api::storage::{
     self, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
     CreateOptions, OpenOptions, Region, RegionDescriptorBuilder, RegionId, RegionMeta,
@@ -27,6 +28,7 @@ use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
     BuildRowKeyDescriptorSnafu, MissingTimestampIndexSnafu, Result,
 };
+use crate::manifest::action::*;
 use crate::manifest::TableManifest;
 use crate::table::MitoTable;
 
@@ -317,7 +319,16 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let manifest =
             TableManifest::new(&table_manifest_dir(table_name), self.object_store.clone());
 
-        //TODO(dennis): persist table info to table manifest service.
+        manifest
+            .update(TableMetaActionList::new(vec![
+                TableMetaAction::Protocol(ProtocolAction::new()),
+                TableMetaAction::Change(Box::new(TableChange {
+                    table_info: table_info.clone(),
+                })),
+            ]))
+            .await
+            .context(error::UpdateTableManifestSnafu { table_name })?;
+
         logging::info!("Mito engine created table: {:?}.", table_info);
 
         let table = Arc::new(MitoTable::new(table_info, region, manifest));

@@ -27,7 +27,8 @@ pub struct TableRemove {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum TableMetaAction {
     Protocol(ProtocolAction),
-    Change(TableChange),
+    // Boxed TableChange to reduce the total size of enum
+    Change(Box<TableChange>),
     Remove(TableRemove),
 }
 
@@ -35,6 +36,22 @@ pub enum TableMetaAction {
 pub struct TableMetaActionList {
     pub actions: Vec<TableMetaAction>,
     pub prev_version: ManifestVersion,
+}
+
+impl TableMetaActionList {
+    pub fn with_action(action: TableMetaAction) -> Self {
+        Self {
+            actions: vec![action],
+            prev_version: 0,
+        }
+    }
+
+    pub fn new(actions: Vec<TableMetaAction>) -> Self {
+        Self {
+            actions,
+            prev_version: 0,
+        }
+    }
 }
 
 impl MetaAction for TableMetaActionList {
