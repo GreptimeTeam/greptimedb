@@ -13,7 +13,7 @@ use store_api::storage::SequenceNumber;
 use crate::metadata::Error as MetadataError;
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub(crate)))]
+#[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Invalid region descriptor, region: {}, source: {}", region, source))]
     InvalidRegionDesc {
@@ -39,13 +39,6 @@ pub enum Error {
 
     #[snafu(display("Failed to write columns, source: {}", source))]
     FlushIo {
-        source: std::io::Error,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to init backend, source: {}", source))]
-    InitBackend {
-        dir: String,
         source: std::io::Error,
         backtrace: Backtrace,
     },
@@ -162,8 +155,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to decode region action list, {}", msg))]
-    DecodeRegionMetaActionList { msg: String, backtrace: Backtrace },
+    #[snafu(display("Failed to decode action list, {}", msg))]
+    DecodeMetaActionList { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to read line, err: {}", source))]
     Readline { source: IoError },
@@ -249,7 +242,7 @@ impl ErrorExt for Error {
             | DecodeJson { .. }
             | JoinTask { .. }
             | Cancelled { .. }
-            | DecodeRegionMetaActionList { .. }
+            | DecodeMetaActionList { .. }
             | Readline { .. }
             | InvalidParquetSchema { .. }
             | SequenceColumnNotFound { .. }
@@ -258,7 +251,6 @@ impl ErrorExt for Error {
             | SequenceNotMonotonic { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
-            | InitBackend { .. }
             | WriteParquet { .. }
             | ReadObject { .. }
             | WriteObject { .. }

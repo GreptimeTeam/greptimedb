@@ -4,11 +4,37 @@ use crate::error::Result;
 use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
+#[derive(Debug, Clone)]
+pub struct FileStoreConfig {
+    /// Storage path
+    pub store_dir: String,
+}
+
+impl Default for FileStoreConfig {
+    fn default() -> Self {
+        Self {
+            store_dir: "/tmp/greptimedb/data/".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ObjectStoreConfig {
+    File(FileStoreConfig),
+}
+
+impl Default for ObjectStoreConfig {
+    fn default() -> Self {
+        ObjectStoreConfig::File(FileStoreConfig::default())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DatanodeOptions {
     pub http_addr: String,
     pub rpc_addr: String,
     pub wal_dir: String,
+    pub store_config: ObjectStoreConfig,
 }
 
 impl Default for DatanodeOptions {
@@ -17,6 +43,7 @@ impl Default for DatanodeOptions {
             http_addr: Default::default(),
             rpc_addr: Default::default(),
             wal_dir: "/tmp/wal".to_string(),
+            store_config: ObjectStoreConfig::default(),
         }
     }
 }

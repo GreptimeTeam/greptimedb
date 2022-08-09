@@ -1,6 +1,8 @@
 ///! Common actions for manifest
 use serde::{Deserialize, Serialize};
 
+use crate::manifest::ManifestVersion;
+
 pub type ProtocolVersion = u16;
 
 /// Current reader and writer versions
@@ -21,6 +23,11 @@ pub fn supported_protocol_version() -> (ProtocolVersion, ProtocolVersion) {
 pub struct ProtocolAction {
     pub min_reader_version: ProtocolVersion,
     pub min_writer_version: ProtocolVersion,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct VersionHeader {
+    pub prev_version: ManifestVersion,
 }
 
 impl Default for ProtocolAction {

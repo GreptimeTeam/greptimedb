@@ -6,14 +6,29 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use serde::{de::DeserializeOwned, Serialize};
 
+use crate::manifest::action::ProtocolAction;
+use crate::manifest::action::ProtocolVersion;
 pub use crate::manifest::storage::*;
 
 pub type ManifestVersion = u64;
 pub const MIN_VERSION: u64 = 0;
 pub const MAX_VERSION: u64 = u64::MAX;
 
-pub trait MetaAction: Serialize + DeserializeOwned {
+pub trait MetaAction: Serialize + DeserializeOwned + Send + Sync + Clone + std::fmt::Debug {
+    type Error: ErrorExt + Send + Sync;
+
+    /// Set previous valid manifest version.
     fn set_prev_version(&mut self, version: ManifestVersion);
+
+    /// Encode this action into a byte vector
+    fn encode(&self) -> Result<Vec<u8>, Self::Error>;
+
+    /// Decode self from byte slice with reader protocol version,
+    /// return error when reader version is not supported.
+    fn decode(
+        bs: &[u8],
+        reader_version: ProtocolVersion,
+    ) -> Result<(Self, Option<ProtocolAction>), Self::Error>;
 }
 
 #[async_trait]

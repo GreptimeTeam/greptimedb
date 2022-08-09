@@ -10,9 +10,9 @@ use common_telemetry::logging;
 use storage::metadata::{RegionMetaImpl, RegionMetadataRef};
 use storage::write_batch::WriteBatch;
 use store_api::storage::{
-    Chunk, ChunkReader, EngineContext, GetRequest, GetResponse, OpenOptions, ReadContext, Region,
-    RegionDescriptor, ScanRequest, ScanResponse, SchemaRef, Snapshot, StorageEngine, WriteContext,
-    WriteResponse,
+    Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse, OpenOptions,
+    ReadContext, Region, RegionDescriptor, ScanRequest, ScanResponse, SchemaRef, Snapshot,
+    StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
@@ -153,6 +153,7 @@ impl StorageEngine for MockEngine {
         &self,
         _ctx: &EngineContext,
         descriptor: RegionDescriptor,
+        _opts: &CreateOptions,
     ) -> Result<MockRegion> {
         logging::info!("Mock engine create region, descriptor: {:?}", descriptor);
 

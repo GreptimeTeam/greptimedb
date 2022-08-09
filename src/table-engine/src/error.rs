@@ -111,7 +111,6 @@ impl ErrorExt for Error {
 
         match self {
             CreateRegion { source, .. } | OpenRegion { source, .. } => source.status_code(),
-
             BuildRowKeyDescriptor { .. }
             | BuildColumnDescriptor { .. }
             | BuildColumnFamilyDescriptor { .. }

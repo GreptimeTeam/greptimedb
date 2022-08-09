@@ -103,7 +103,7 @@ async fn test_flush_and_stall() {
     tester.put(&data).await;
 
     // Check parquet files.
-    let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir(REGION_NAME));
+    let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
     let mut has_parquet_file = false;
     for entry in std::fs::read_dir(sst_dir).unwrap() {
         let entry = entry.unwrap();

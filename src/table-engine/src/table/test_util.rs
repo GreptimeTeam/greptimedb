@@ -6,7 +6,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use datatypes::schema::{ColumnSchema, Schema};
 use log_store::fs::noop::NoopLogStore;
-use storage::config::EngineConfig;
+use object_store::{backend::fs::Backend, ObjectStore};
+use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::engine::EngineContext;
 use table::engine::TableEngine;
@@ -14,6 +15,7 @@ use table::requests::CreateTableRequest;
 use table::TableRef;
 use tempdir::TempDir;
 
+use crate::config::EngineConfig;
 use crate::engine::MitoEngine;
 use crate::table::test_util::mock_engine::MockEngine;
 
@@ -32,22 +34,30 @@ fn schema_for_test() -> Schema {
 
 pub type MockMitoEngine = MitoEngine<MockEngine>;
 
+pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
+    let dir = TempDir::new(prefix).unwrap();
+    let store_dir = dir.path().to_string_lossy();
+    let accessor = Backend::build().root(&store_dir).finish().await.unwrap();
+
+    (dir, ObjectStore::new(accessor))
+}
+
 pub async fn setup_test_engine_and_table() -> (
     MitoEngine<EngineImpl<NoopLogStore>>,
     TableRef,
     SchemaRef,
     TempDir,
 ) {
-    let dir = TempDir::new("setup_test_engine_and_table").unwrap();
-    let store_dir = dir.path().to_string_lossy();
+    let (dir, object_store) = new_test_object_store("setup_test_engine_and_table").await;
 
     let table_engine = MitoEngine::new(
+        EngineConfig::default(),
         EngineImpl::new(
-            EngineConfig::with_store_dir(&store_dir),
+            StorageEngineConfig::default(),
             Arc::new(NoopLogStore::default()),
-        )
-        .await
-        .unwrap(),
+            object_store.clone(),
+        ),
+        object_store,
     );
 
     let schema = Arc::new(schema_for_test());
@@ -68,9 +78,14 @@ pub async fn setup_test_engine_and_table() -> (
     (table_engine, table, schema, dir)
 }
 
-pub async fn setup_mock_engine_and_table() -> (MockEngine, MockMitoEngine, TableRef) {
+pub async fn setup_mock_engine_and_table() -> (MockEngine, MockMitoEngine, TableRef, ObjectStore) {
     let mock_engine = MockEngine::default();
-    let table_engine = MitoEngine::new(mock_engine.clone());
+    let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
+    let table_engine = MitoEngine::new(
+        EngineConfig::default(),
+        mock_engine.clone(),
+        object_store.clone(),
+    );
 
     let schema = Arc::new(schema_for_test());
     let table = table_engine
@@ -87,5 +102,5 @@ pub async fn setup_mock_engine_and_table() -> (MockEngine, MockMitoEngine, Table
         .await
         .unwrap();
 
-    (mock_engine, table_engine, table)
+    (mock_engine, table_engine, table, object_store)
 }

@@ -6,11 +6,12 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_telemetry::logging;
+use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{
     self, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
-    OpenOptions, Region, RegionDescriptorBuilder, RegionMeta, RowKeyDescriptor,
-    RowKeyDescriptorBuilder, StorageEngine,
+    CreateOptions, OpenOptions, Region, RegionDescriptorBuilder, RegionId, RegionMeta,
+    RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
@@ -21,14 +22,31 @@ use table::{
 };
 use tokio::sync::Mutex;
 
+use crate::config::EngineConfig;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
     BuildRowKeyDescriptorSnafu, MissingTimestampIndexSnafu, Result,
 };
+use crate::manifest::TableManifest;
 use crate::table::MitoTable;
 
 pub const MITO_ENGINE: &str = "mito";
 const INIT_COLUMN_ID: ColumnId = 0;
+
+#[inline]
+fn region_name(id: RegionId) -> String {
+    format!("{:010}", id)
+}
+
+#[inline]
+fn table_dir(table_name: &str) -> String {
+    format!("{}/", table_name)
+}
+
+#[inline]
+fn table_manifest_dir(table_name: &str) -> String {
+    format!("{}/manifest/", table_name)
+}
 
 /// [TableEngine] implementation.
 ///
@@ -40,9 +58,9 @@ pub struct MitoEngine<S: StorageEngine> {
 }
 
 impl<S: StorageEngine> MitoEngine<S> {
-    pub fn new(storage_engine: S) -> Self {
+    pub fn new(config: EngineConfig, storage_engine: S, object_store: ObjectStore) -> Self {
         Self {
-            inner: Arc::new(MitoEngineInner::new(storage_engine)),
+            inner: Arc::new(MitoEngineInner::new(config, storage_engine, object_store)),
         }
     }
 }
@@ -100,6 +118,7 @@ struct MitoEngineInner<S: StorageEngine> {
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
     tables: RwLock<HashMap<String, TableRef>>,
+    object_store: ObjectStore,
     storage_engine: S,
     // FIXME(yingwen): Remove `next_table_id`. Table id should be assigned by other module (maybe catalog).
     next_table_id: AtomicU64,
@@ -109,10 +128,11 @@ struct MitoEngineInner<S: StorageEngine> {
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
-    fn new(storage_engine: S) -> Self {
+    fn new(_config: EngineConfig, storage_engine: S, object_store: ObjectStore) -> Self {
         Self {
             tables: RwLock::new(HashMap::default()),
             storage_engine,
+            object_store,
             next_table_id: AtomicU64::new(0),
             table_mutex: Mutex::new(()),
         }
@@ -246,10 +266,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             build_column_family_from_request(INIT_COLUMN_ID, &request)?;
         let (next_column_id, row_key) = build_row_key_desc_from_schema(next_column_id, &request)?;
 
-        // Now we just use table name as region name. TODO(yingwen): Naming pattern of region.
-        let region_name = table_name.clone();
+        // TODO(dennis): supports multi regions;
+        let region_id = 0;
+        let region_name = region_name(region_id);
         let region_descriptor = RegionDescriptorBuilder::default()
-            .id(0)
+            .id(region_id)
             .name(&region_name)
             .row_key(row_key)
             .default_cf(default_cf)
@@ -265,9 +286,13 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             return Ok(table);
         }
 
+        let opts = CreateOptions {
+            parent_dir: table_dir(table_name),
+        };
+
         let region = self
             .storage_engine
-            .create_region(&storage::EngineContext::default(), region_descriptor)
+            .create_region(&storage::EngineContext::default(), region_descriptor, &opts)
             .await
             .map_err(BoxedError::new)
             .context(error::CreateRegionSnafu)?;
@@ -289,10 +314,13 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .build()
             .context(error::BuildTableInfoSnafu { table_name })?;
 
+        let manifest =
+            TableManifest::new(&table_manifest_dir(table_name), self.object_store.clone());
+
         //TODO(dennis): persist table info to table manifest service.
         logging::info!("Mito engine created table: {:?}.", table_info);
 
-        let table = Arc::new(MitoTable::new(table_info, region));
+        let table = Arc::new(MitoTable::new(table_info, region, manifest));
 
         self.tables
             .write()
@@ -323,13 +351,17 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             }
 
             let engine_ctx = storage::EngineContext::default();
-            let opts = OpenOptions::default();
-            let region_name = table_name;
-            // Now we just use table name as region name. TODO(yingwen): Naming pattern of region.
+            let opts = OpenOptions {
+                parent_dir: table_dir(table_name),
+            };
+
+            // TODO(dennis): supports multi regions
+            let region_id = 0;
+            let region_name = region_name(region_id);
 
             let region = match self
                 .storage_engine
-                .open_region(&engine_ctx, region_name, &opts)
+                .open_region(&engine_ctx, &region_name, &opts)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::OpenRegionSnafu { region_name })?
@@ -353,8 +385,10 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .table_type(TableType::Base)
                 .build()
                 .context(error::BuildTableInfoSnafu { table_name })?;
+            let manifest =
+                TableManifest::new(&table_manifest_dir(table_name), self.object_store.clone());
 
-            let table = Arc::new(MitoTable::new(table_info, region));
+            let table = Arc::new(MitoTable::new(table_info, region, manifest));
 
             self.tables
                 .write()
@@ -447,8 +481,9 @@ mod tests {
             table_id: 0,
         };
 
-        let (engine, table) = {
-            let (engine, table_engine, table) = test_util::setup_mock_engine_and_table().await;
+        let (engine, table, object_store) = {
+            let (engine, table_engine, table, object_store) =
+                test_util::setup_mock_engine_and_table().await;
             assert_eq!(MITO_ENGINE, table_engine.name());
             // Now try to open the table again.
             let reopened = table_engine
@@ -458,11 +493,11 @@ mod tests {
                 .unwrap();
             assert_eq!(table.schema(), reopened.schema());
 
-            (engine, table)
+            (engine, table, object_store)
         };
 
         // Construct a new table engine, and try to open the table.
-        let table_engine = MitoEngine::new(engine);
+        let table_engine = MitoEngine::new(EngineConfig::default(), engine, object_store);
         let reopened = table_engine
             .open_table(&ctx, open_req.clone())
             .await

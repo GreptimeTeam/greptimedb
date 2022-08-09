@@ -22,8 +22,11 @@ use table::{
     table::Table,
 };
 
+use crate::manifest::TableManifest;
+
 /// [Table] implementation.
 pub struct MitoTable<R: Region> {
+    _manifest: TableManifest,
     table_info: TableInfo,
     //TODO(dennis): a table contains multi regions
     region: R,
@@ -139,7 +142,11 @@ impl Stream for ChunkStream {
 }
 
 impl<R: Region> MitoTable<R> {
-    pub fn new(table_info: TableInfo, region: R) -> Self {
-        Self { table_info, region }
+    pub fn new(table_info: TableInfo, region: R, manifest: TableManifest) -> Self {
+        Self {
+            table_info,
+            region,
+            _manifest: manifest,
+        }
     }
 }

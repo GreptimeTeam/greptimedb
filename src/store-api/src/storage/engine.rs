@@ -39,6 +39,7 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
         &self,
         ctx: &EngineContext,
         descriptor: RegionDescriptor,
+        opts: &CreateOptions,
     ) -> Result<Self::Region, Self::Error>;
 
     /// Drops given region.
@@ -62,6 +63,16 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
 #[derive(Debug, Clone, Default)]
 pub struct EngineContext {}
 
+/// Options to create a region.
+#[derive(Debug, Clone, Default)]
+pub struct CreateOptions {
+    /// Region parent directory
+    pub parent_dir: String,
+}
+
 /// Options to open a region.
 #[derive(Debug, Clone, Default)]
-pub struct OpenOptions {}
+pub struct OpenOptions {
+    /// Region parent directory
+    pub parent_dir: String,
+}
