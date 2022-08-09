@@ -53,7 +53,7 @@ impl FileWriter {
         let handle = common_runtime::spawn_blocking_write(move || {
             crate::fs::io::pwrite_all(&file, &data, offset)
         });
-        handle.await.context(WriteSnafu).and_then(|e| e) // Result::flatten is unstable now
+        handle.await.context(WriteSnafu)?
     }
 
     /// Writes a batch of `AppendRequest` to file.
