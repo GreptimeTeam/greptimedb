@@ -20,7 +20,7 @@ macro_rules! for_all_scalar_types {
 }
 
 #[macro_export]
-macro_rules! for_all_primitive_types{
+macro_rules! for_all_primitive_types {
     ($macro:tt $(, $x:tt)*) => {
         $macro! {
             [$($x),*],
