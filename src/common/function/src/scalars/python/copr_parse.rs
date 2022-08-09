@@ -11,6 +11,16 @@ use snafu::{OptionExt, ResultExt};
 use crate::scalars::python::coprocessor::Coprocessor;
 use crate::scalars::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
 use crate::scalars::python::AnnotationInfo;
+
+#[derive(Default, Debug)]
+pub struct DecoratorArgs {
+    pub arg_names: Vec<String>,
+    pub return_names: Vec<String>,
+    pub sql: Option<String>,
+    // maybe add a URL for connecting or what?
+    // also predicate for timed triggered or conditional triggered?
+}
+
 /// Return a CoprParseSnafu for you to chain fail() to return correct err Result type
 pub(crate) fn ret_parse_error(
     reason: String,
@@ -27,27 +37,28 @@ macro_rules! fail_parse_error {
     };
 }
 
+fn py_str_to_string(s: &ast::Expr<()>) -> Result<String> {
+    if let ast::ExprKind::Constant {
+        value: ast::Constant::Str(v),
+        kind: _,
+    } = &s.node
+    {
+        Ok(v.to_owned())
+    } else {
+        fail_parse_error!(
+            format!(
+                "Expect a list of String, found one element to be: \n{:#?}",
+                &s.node
+            ),
+            Some(s.location)
+        )
+    }
+}
+
 /// turn a python list of string in ast form(a `ast::Expr`) of string into a `Vec<String>`
 fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
     if let ast::ExprKind::List { elts, ctx: _ } = &lst.node {
-        let mut ret = Vec::with_capacity(elts.len());
-        for s in elts {
-            if let ast::ExprKind::Constant {
-                value: ast::Constant::Str(v),
-                kind: _,
-            } = &s.node
-            {
-                ret.push(v.to_owned())
-            } else {
-                return fail_parse_error!(
-                    format!(
-                        "Expect a list of String, found one element to be: \n{:#?}",
-                        &s.node
-                    ),
-                    Some(s.location)
-                );
-            }
-        }
+        let ret = elts.iter().map(py_str_to_string).collect::<Result<_>>()?;
         Ok(ret)
     } else {
         fail_parse_error!(
@@ -238,37 +249,43 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 /// parse a list of keyword and return args and returns list from keywords
 fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<String>)> {
     // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
-    let avail_key = HashSet::from(["args", "returns"]);
+    let avail_key = HashSet::from(["args", "returns", "sql"]);
+    let mut visited_key = HashSet::new();
     ensure!(
-        keywords.len() == avail_key.len(),
+        // "sql" is optional(for now)
+        keywords.len() == 2 || keywords.len() == 3,
         CoprParseSnafu {
-            reason: format!(
-                "Expect {} keyword argument, found {}.",
-                avail_key.len(),
-                keywords.len()
-            ),
+            reason: format!("Expect 2 or 3 keyword argument, found {}.", keywords.len()),
             loc: keywords.get(0).map(|s| s.location)
         }
     );
+    let mut ret_args = DecoratorArgs::default();
     let mut kw_map = HashMap::new();
     for kw in keywords {
         match &kw.node.arg {
             Some(s) => {
                 let s = s.as_str();
-                if !kw_map.contains_key(s) {
-                    if !avail_key.contains(s) {
-                        return fail_parse_error!(
-                            format!("Expect one of {:?}, found `{}`", &avail_key, s),
-                            Some(kw.location),
-                        );
-                    }
-                    kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
-                } else {
+                if visited_key.contains(s) {
                     return fail_parse_error!(
                         format!("`{s}` occur multiple times in decorator's arguements' list."),
                         Some(kw.location),
                     );
                 }
+                if !avail_key.contains(s) {
+                    return fail_parse_error!(
+                        format!("Expect one of {:?}, found `{}`", &avail_key, s),
+                        Some(kw.location),
+                    );
+                } else {
+                    visited_key.insert(s);
+                }
+                match s {
+                    "args" => ret_args.arg_names = pylist_to_vec(&kw.node.value)?,
+                    "returns" => ret_args.return_names = pylist_to_vec(&kw.node.value)?,
+                    "sql" => todo!(),
+                    _ => unreachable!(),
+                }
+                kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
             }
             None => {
                 return fail_parse_error!(
