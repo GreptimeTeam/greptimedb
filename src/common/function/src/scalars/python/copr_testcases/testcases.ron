@@ -189,6 +189,18 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)]
         )
     ),
     (
+        name: "extra_keywords",
+        code: r#"
+@copr(args=["cpu", "mem"], sql=3,psql = 4,rets=5)
+def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: 
+            " keyword argument, found "
+        )
+    ),
+    (
         name: "missing_keywords",
         code: r#"
 @copr(args=["cpu", "mem"])

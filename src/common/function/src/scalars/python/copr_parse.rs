@@ -250,12 +250,16 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
     // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
     let avail_key = HashSet::from(["args", "returns", "sql"]);
+    let opt_keys = HashSet::from(["sql"]);
     let mut visited_key = HashSet::new();
+    let len_min = avail_key.len() - opt_keys.len();
+    let len_max = avail_key.len();
     ensure!(
         // "sql" is optional(for now)
-        keywords.len() == 2 || keywords.len() == 3,
+        keywords.len() >= len_min &&
+        keywords.len() <= len_max,
         CoprParseSnafu {
-            reason: format!("Expect 2 or 3 keyword argument, found {}.", keywords.len()),
+            reason: format!("Expect between {len_min} and {len_max} keyword argument, found {}.", keywords.len()),
             loc: keywords.get(0).map(|s| s.location)
         }
     );
@@ -299,14 +303,14 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
         }
     }
     let loc = keywords[0].location;
-    let arg_names = kw_map
-        .remove("args")
-        .context(ret_parse_error("Expect `args` keyword".into(), Some(loc)))?;
-    let ret_names = kw_map
-        .remove("returns")
-        .context(ret_parse_error("Expect `rets` keyword".into(), Some(loc)))?;
-    assert_eq!(arg_names, ret_args.arg_names);
-    assert_eq!(ret_names, ret_args.return_names);
+    for key in avail_key{
+        if !visited_key.contains(key) && !opt_keys.contains(key){
+            return fail_parse_error!(
+                format!("Expect `{key}` keyword"),
+                 Some(loc)
+            );
+        }
+    }
     Ok(ret_args)
 }
 
