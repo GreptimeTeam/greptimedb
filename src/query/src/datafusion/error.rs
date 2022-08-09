@@ -87,6 +87,8 @@ impl From<InnerError> for Error {
 
 #[cfg(test)]
 mod tests {
+    use common_error::mock::MockError;
+
     use super::*;
 
     fn throw_df_error() -> Result<(), DataFusionError> {
@@ -130,5 +132,16 @@ mod tests {
         assert!(err.backtrace_opt().is_none());
         let sql_err = raise_sql_error().err().unwrap();
         assert_eq!(sql_err.status_code(), err.status_code());
+    }
+
+    #[test]
+    pub fn test_from_inner_error() {
+        let err = InnerError::TableSchemaMismatch {
+            source: table::error::Error::new(MockError::new(StatusCode::Unexpected)),
+        };
+
+        let catalog_error: catalog::error::Error = err.into();
+        // [InnerError]  to [catalog::error::Error] is considered as Internal error
+        assert_eq!(StatusCode::Internal, catalog_error.status_code());
     }
 }

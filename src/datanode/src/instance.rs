@@ -194,6 +194,19 @@ mod tests {
     use crate::test_util;
 
     #[tokio::test]
+    pub async fn test_restart_instance() {
+        common_telemetry::init_default_ut_logging();
+        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let instance = Instance::new(&opts).await.unwrap();
+        instance.start().await.unwrap();
+        let default_catalog = instance
+            .catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap();
+        default_catalog.schema(DEFAULT_SCHEMA_NAME).unwrap();
+    }
+
+    #[tokio::test]
     async fn test_execute_insert() {
         common_telemetry::init_default_ut_logging();
         let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
