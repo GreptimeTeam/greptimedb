@@ -1,9 +1,9 @@
 use std::ops::Deref;
 
-use arrow::array::{Array, ArrayRef, PrimitiveArray};
-use arrow::compute::arithmetics;
-use arrow::compute::cast;
+use arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
 use arrow::compute::cast::CastOptions;
+use arrow::compute::{self, arithmetics};
+use arrow::compute::{cast, comparison};
 use arrow::datatypes::DataType;
 use arrow::scalar::{PrimitiveScalar, Scalar};
 use datatypes::data_type::ConcreteDataType;
@@ -12,6 +12,8 @@ use datatypes::{
     value,
     vectors::{Helper, VectorBuilder, VectorRef},
 };
+use rustpython_vm::function::{Either, PyComparisonValue};
+use rustpython_vm::types::{Comparable, PyComparisonOp};
 use rustpython_vm::{
     builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr, PyTypeRef},
     function::{FuncArgs, OptionalArg},
@@ -54,13 +56,13 @@ fn emit_cast_error(
         src_ty, dst_ty
     ))
 }
-fn arrow2_rsub(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
+fn arrow2_rsub_scalar(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
     // b - a => a * (-1) + b
     let neg = arithmetics::mul_scalar(arr, &PrimitiveScalar::new(DataType::Int64, Some(-1i64)));
     arithmetics::add_scalar(neg.as_ref(), val)
 }
 
-fn arrow2_rtruediv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
+fn arrow2_rtruediv_scalar(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
     // val / arr => one_arr / arr * val (this is simpler to write)
     let one_arr: Box<dyn Array> = if is_float(arr.data_type()) {
         Box::new(PrimitiveArray::from_values(vec![1f64; arr.len()]))
@@ -77,7 +79,7 @@ fn arrow2_rtruediv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
     arithmetics::div(tmp.as_ref(), arr)
 }
 
-fn arrow2_rfloordiv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
+fn arrow2_rfloordiv_scalar(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
     // val // arr => one_arr // arr * val (this is simpler to write)
     let one_arr: Box<dyn Array> = if is_float(arr.data_type()) {
         Box::new(PrimitiveArray::from_values(vec![1f64; arr.len()]))
@@ -151,6 +153,8 @@ impl AsRef<PyVector> for PyVector {
     }
 }
 
+/// support add/sub/mul/div(inclued true div and floor div)
+/// TODO: support comparsion
 #[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
 impl PyVector {
     #[inline]
@@ -298,6 +302,48 @@ impl PyVector {
         })
     }
 
+    /// same as `arith_op` but take &PyVector instead
+    fn vec_arith_op<F>(
+        &self,
+        right: &PyVector,
+        target_type: Option<DataType>,
+        op: F,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyVector>
+    where
+        F: Fn(&dyn Array, &dyn Array) -> Box<dyn Array>,
+    {
+        let left = self.vector.to_arrow_array();
+        let right = right.vector.to_arrow_array();
+
+        let left_type = &left.data_type();
+        let right_type = &right.data_type();
+
+        let target_type = target_type.unwrap_or_else(|| {
+            if is_signed(left_type) && is_signed(right_type) {
+                DataType::Int64
+            } else if is_unsigned(left_type) && is_unsigned(right_type) {
+                DataType::UInt64
+            } else {
+                DataType::Float64
+            }
+        });
+
+        let left = cast(left, &target_type, vm)?;
+        let right = cast(right, &target_type, vm)?;
+
+        let result = op(left.as_ref(), right.as_ref());
+
+        Ok(PyVector {
+            vector: Helper::try_into_vector(&*result).map_err(|e| {
+                vm.new_type_error(format!(
+                    "Can't cast result into vector, result: {:?}, err: {:?}",
+                    result, e
+                ))
+            })?,
+        })
+    }
+
     #[pymethod(name = "__radd__")]
     #[pymethod(magic)]
     fn add(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
@@ -320,7 +366,7 @@ impl PyVector {
     #[pymethod(magic)]
     fn rsub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, None, arrow2_rsub, vm)
+            self.scalar_arith_op(other, None, arrow2_rsub_scalar, vm)
         } else {
             self.arith_op(other, None, |a, b| arithmetics::sub(b, a), vm)
         }
@@ -348,7 +394,7 @@ impl PyVector {
     #[pymethod(magic)]
     fn rtruediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, Some(DataType::Float64), arrow2_rtruediv, vm)
+            self.scalar_arith_op(other, Some(DataType::Float64), arrow2_rtruediv_scalar, vm)
         } else {
             self.arith_op(
                 other,
@@ -372,7 +418,7 @@ impl PyVector {
     fn rfloordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
             // FIXME: DataType convert problem, target_type should be infered?
-            self.scalar_arith_op(other, Some(DataType::Int64), arrow2_rfloordiv, vm)
+            self.scalar_arith_op(other, Some(DataType::Int64), arrow2_rfloordiv_scalar, vm)
         } else {
             self.arith_op(
                 other,
@@ -454,6 +500,64 @@ impl PyVector {
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         unimplemented!()
+    }
+}
+
+/// get corrsponding arrow op function according to given PyComaprsionOp
+/// 
+/// TODO(discord9): return for is_scalar version
+fn get_arrow_op(
+    op: PyComparisonOp,
+    is_scalar: bool,
+) -> Option<impl Fn(&dyn Array, &dyn Array) -> Box<dyn Array>> {
+    let op_bool_arr = match op {
+        PyComparisonOp::Eq => comparison::eq,
+        PyComparisonOp::Ne => comparison::neq,
+        PyComparisonOp::Gt => comparison::gt,
+        PyComparisonOp::Lt => comparison::lt,
+        PyComparisonOp::Ge => comparison::gt_eq,
+        PyComparisonOp::Le => comparison::lt_eq,
+        _ => return None,
+    };
+    let ret = move |a: &dyn Array, b: &dyn Array| -> Box<dyn Array> {
+        let ret = op_bool_arr(a, b);
+        Box::new(ret) as _
+    };
+    Some(ret)
+}
+
+impl Comparable for PyVector {
+    fn slot_richcompare(
+        zelf: &PyObject,
+        other: &PyObject,
+        op: PyComparisonOp,
+        vm: &VirtualMachine,
+    ) -> PyResult<Either<PyObjectRef, PyComparisonValue>> {
+        let zelf = match zelf.downcast_ref::<PyVector>() {
+            Some(py_vec) => py_vec,
+            _ => return Ok(PyComparisonValue::NotImplemented).map(Either::B),
+        };
+        let other = match other.downcast_ref::<PyVector>() {
+            Some(py_vec) => py_vec,
+            _ => return Ok(PyComparisonValue::NotImplemented).map(Either::B),
+        };
+        let arr_op = get_arrow_op(op, false);
+        match arr_op {
+            Some(arr_op) => {
+                let ret = zelf.vec_arith_op(other, None, arr_op, vm);
+                ret.map(|v| v.into_pyobject(vm)).map(Either::A)
+            }
+            None => return Ok(PyComparisonValue::NotImplemented).map(Either::B),
+        }
+    }
+
+    fn cmp(
+        zelf: &rustpython_vm::Py<Self>,
+        other: &PyObject,
+        op: PyComparisonOp,
+        vm: &VirtualMachine,
+    ) -> PyResult<rustpython_vm::function::PyComparisonValue> {
+        Ok(PyComparisonValue::NotImplemented)
     }
 }
 

@@ -188,12 +188,12 @@ fn test_coprocessor() {
     let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
-    vector[f32]):
+    vector[bool]):
     abc = cpu
     abc *= 2
-    return abc, cpu - mem
+    return abc, cpu.__gt__(mem)
 "#;
-    let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
+    let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
     let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
     let schema = Arc::new(Schema::from(vec![
         Field::new("cpu", DataType::Float32, false),
@@ -216,5 +216,9 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
             "copr.py",
         );
         println!("{res}");
+    }else if let Ok(res) = ret{
+        dbg!(&res);
+    }else{
+        dbg!(ret);
     }
 }
