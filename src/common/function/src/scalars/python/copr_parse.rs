@@ -282,7 +282,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<
                 match s {
                     "args" => ret_args.arg_names = pylist_to_vec(&kw.node.value)?,
                     "returns" => ret_args.return_names = pylist_to_vec(&kw.node.value)?,
-                    "sql" => todo!(),
+                    "sql" => ret_args.sql = Some(py_str_to_string(&kw.node.value)?),
                     _ => unreachable!(),
                 }
                 kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
@@ -305,6 +305,8 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<
     let ret_names = kw_map
         .remove("returns")
         .context(ret_parse_error("Expect `rets` keyword".into(), Some(loc)))?;
+    assert_eq!(arg_names, ret_args.arg_names);
+    assert_eq!(ret_names, ret_args.return_names);
     Ok((arg_names, ret_names))
 }
 
