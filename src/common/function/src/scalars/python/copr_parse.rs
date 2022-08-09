@@ -247,7 +247,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 }
 
 /// parse a list of keyword and return args and returns list from keywords
-fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<String>)> {
+fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
     // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
     let avail_key = HashSet::from(["args", "returns", "sql"]);
     let mut visited_key = HashSet::new();
@@ -307,11 +307,11 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<
         .context(ret_parse_error("Expect `rets` keyword".into(), Some(loc)))?;
     assert_eq!(arg_names, ret_args.arg_names);
     assert_eq!(ret_names, ret_args.return_names);
-    Ok((arg_names, ret_names))
+    Ok(ret_args)
 }
 
 /// returns args and returns in Vec of String
-fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String>)> {
+fn parse_decorator(decorator: &ast::Expr<()>) -> Result<DecoratorArgs> {
     //check_decorator(decorator)?;
     if let ast::ExprKind::Call {
         func,
@@ -464,7 +464,9 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
     } = &python_ast[0].node
     {
         let decorator = &decorator_list[0];
-        let (arg_names, ret_names) = parse_decorator(decorator)?;
+        let arg_list = parse_decorator(decorator)?;
+        let (arg_names, ret_names) = (arg_list.arg_names, arg_list.return_names);
+        
 
         // get arg types from type annotation
         let arg_types = get_arg_annotations(fn_args)?;
