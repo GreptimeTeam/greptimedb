@@ -27,7 +27,7 @@ use crate::error::{
 };
 use crate::table::MitoTable;
 
-pub const DEFAULT_ENGINE: &str = "mito";
+pub const MITO_ENGINE: &str = "mito";
 const INIT_COLUMN_ID: ColumnId = 0;
 
 /// [TableEngine] implementation.
@@ -50,7 +50,7 @@ impl<S: StorageEngine> MitoEngine<S> {
 #[async_trait]
 impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     fn name(&self) -> &str {
-        DEFAULT_ENGINE
+        MITO_ENGINE
     }
 
     async fn create_table(
@@ -275,7 +275,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         // Use region meta schema instead of request schema
         let table_meta = TableMetaBuilder::default()
             .schema(region.in_memory_metadata().schema().clone())
-            .engine(DEFAULT_ENGINE)
+            .engine(MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(request.primary_key_indices.clone())
             .build()
@@ -341,7 +341,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             //FIXME(boyan): recover table meta from table manifest
             let table_meta = TableMetaBuilder::default()
                 .schema(region.in_memory_metadata().schema().clone())
-                .engine(DEFAULT_ENGINE)
+                .engine(MITO_ENGINE)
                 .next_column_id(INIT_COLUMN_ID)
                 .primary_key_indices(Vec::default())
                 .build()

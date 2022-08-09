@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use catalog::{CatalogListRef, CatalogProvider, SchemaProvider};
+use catalog::{CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef};
 use datafusion::catalog::{
     catalog::{CatalogList as DfCatalogList, CatalogProvider as DfCatalogProvider},
     schema::SchemaProvider as DfSchemaProvider,
@@ -44,7 +44,7 @@ impl DfCatalogList for DfCatalogListAdapter {
         catalog: Arc<dyn DfCatalogProvider>,
     ) -> Option<Arc<dyn DfCatalogProvider>> {
         let catalog_adapter = Arc::new(CatalogProviderAdapter {
-            df_cataglog_provider: catalog,
+            df_catalog_provider: catalog,
             runtime: self.runtime.clone(),
         });
         self.catalog_list
@@ -73,7 +73,7 @@ impl DfCatalogList for DfCatalogListAdapter {
 
 /// Datafusion's CatalogProvider ->  greptime CatalogProvider
 struct CatalogProviderAdapter {
-    df_cataglog_provider: Arc<dyn DfCatalogProvider>,
+    df_catalog_provider: Arc<dyn DfCatalogProvider>,
     runtime: Arc<RuntimeEnv>,
 }
 
@@ -83,11 +83,19 @@ impl CatalogProvider for CatalogProviderAdapter {
     }
 
     fn schema_names(&self) -> Vec<String> {
-        self.df_cataglog_provider.schema_names()
+        self.df_catalog_provider.schema_names()
+    }
+
+    fn register_schema(
+        &self,
+        _name: String,
+        _schema: SchemaProviderRef,
+    ) -> Option<SchemaProviderRef> {
+        todo!("register_schema is not supported in Datafusion catalog provider")
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.df_cataglog_provider
+        self.df_catalog_provider
             .schema(name)
             .map(|df_schema_provider| {
                 Arc::new(SchemaProviderAdapter {

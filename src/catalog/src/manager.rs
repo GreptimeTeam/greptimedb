@@ -14,27 +14,24 @@ use table::table::numbers::NumbersTable;
 use super::error::Result;
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use crate::error::{
-    CatalogNotFoundSnafu, CatalogTypeMismatchSnafu, OpenTableSnafu, ReadSystemCatalogSnafu,
-    SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableNotFoundSnafu,
+    CatalogNotFoundSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, SchemaNotFoundSnafu,
+    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableNotFoundSnafu,
 };
 use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{decode_system_catalog, Entry, SystemCatalogTable, TableEntry};
 use crate::tables::SystemCatalog;
 use crate::{
-    CatalogList, CatalogManager, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME,
-    DEFAULT_SCHEMA_NAME,
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, SchemaProvider,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
-// TODO(hl): Replace current `memory::new_memory_catalog_list()` with CatalogManager
-#[allow(dead_code)]
 pub struct MemoryCatalogManager {
     system: Arc<SystemCatalog>,
     catalogs: Arc<MemoryCatalogList>,
     engine: TableEngineRef,
 }
 
-#[allow(dead_code)]
 impl MemoryCatalogManager {
     /// Create a new [CatalogManager] with given user catalogs and table engine
     pub async fn try_new(engine: TableEngineRef) -> Result<Self> {
@@ -74,7 +71,7 @@ impl MemoryCatalogManager {
             self.system.information_schema.system.clone(),
         )?;
         let system_catalog = Arc::new(MemoryCatalogProvider::new());
-        system_catalog.register_schema(INFORMATION_SCHEMA_NAME, system_schema);
+        system_catalog.register_schema(INFORMATION_SCHEMA_NAME.to_string(), system_schema);
         self.catalogs
             .register_catalog(SYSTEM_CATALOG_NAME.to_string(), system_catalog);
 
@@ -86,7 +83,7 @@ impl MemoryCatalogManager {
         let table = Arc::new(NumbersTable::default());
         default_schema.register_table("numbers".to_string(), table)?;
 
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME, default_schema);
+        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema);
         self.catalogs
             .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
         Ok(())
@@ -139,11 +136,10 @@ impl MemoryCatalogManager {
                             .context(CatalogNotFoundSnafu {
                                 catalog_name: &s.catalog_name,
                             })?;
-                    catalog
-                        .as_any()
-                        .downcast_ref::<MemoryCatalogProvider>() // maybe remove this downcast
-                        .context(CatalogTypeMismatchSnafu)?
-                        .register_schema(&s.schema_name, Arc::new(MemorySchemaProvider::new()));
+                    catalog.register_schema(
+                        s.schema_name.clone(),
+                        Arc::new(MemorySchemaProvider::new()),
+                    );
                     info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
@@ -166,8 +162,7 @@ impl MemoryCatalogManager {
         let schema = catalog
             .schema(&t.schema_name)
             .context(SchemaNotFoundSnafu {
-                catalog_name: &t.catalog_name,
-                schema_name: &t.schema_name,
+                schema_info: format!("{}.{}", &t.catalog_name, &t.schema_name),
             })?;
 
         let context = EngineContext {};
@@ -183,16 +178,16 @@ impl MemoryCatalogManager {
             .open_table(&context, request)
             .await
             .context(OpenTableSnafu {
-                catalog_name: &t.catalog_name,
-                schema_name: &t.schema_name,
-                table_name: &t.table_name,
-                table_id: t.table_id,
+                table_info: format!(
+                    "{}.{}.{}, id: {}",
+                    &t.catalog_name, &t.schema_name, &t.table_name, t.table_id
+                ),
             })?
             .context(TableNotFoundSnafu {
-                catalog_name: &t.catalog_name,
-                schema_name: &t.schema_name,
-                table_name: &t.table_name,
-                table_id: t.table_id,
+                table_info: format!(
+                    "{}.{}.{}, id: {}",
+                    &t.catalog_name, &t.schema_name, &t.table_name, t.table_id
+                ),
             })?;
 
         schema.register_table(t.table_name.clone(), option)?;
@@ -208,7 +203,7 @@ impl CatalogList for MemoryCatalogManager {
     fn register_catalog(
         &self,
         name: String,
-        catalog: Arc<dyn CatalogProvider>,
+        catalog: CatalogProviderRef,
     ) -> Option<Arc<dyn CatalogProvider>> {
         self.catalogs.register_catalog(name, catalog)
     }

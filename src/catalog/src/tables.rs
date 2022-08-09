@@ -19,7 +19,7 @@ use table::{Table, TableRef};
 
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use crate::system::SystemCatalogTable;
-use crate::{CatalogListRef, CatalogProvider, SchemaProvider};
+use crate::{CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef};
 
 /// Tables holds all tables created by user.
 pub struct Tables {
@@ -205,6 +205,14 @@ impl CatalogProvider for SystemCatalog {
 
     fn schema_names(&self) -> Vec<String> {
         vec![INFORMATION_SCHEMA_NAME.to_string()]
+    }
+
+    fn register_schema(
+        &self,
+        _name: String,
+        _schema: SchemaProviderRef,
+    ) -> Option<SchemaProviderRef> {
+        panic!("System catalog does not support registering schema!")
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {

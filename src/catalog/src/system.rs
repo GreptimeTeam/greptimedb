@@ -20,7 +20,6 @@ use crate::error::{
     OpenSystemCatalogSnafu, Result, SystemCatalogSchemaSnafu, ValueDeserializeSnafu,
 };
 
-#[allow(dead_code)]
 pub struct SystemCatalogTable {
     schema: SchemaRef,
     pub table: TableRef,
@@ -46,7 +45,6 @@ impl Table for SystemCatalogTable {
     }
 }
 
-#[allow(dead_code)]
 impl SystemCatalogTable {
     pub async fn new(engine: TableEngineRef) -> Result<Self> {
         let request = OpenTableRequest {
@@ -84,13 +82,8 @@ impl SystemCatalogTable {
 
     /// Create a stream of all entries inside system catalog table
     pub async fn records(&self) -> Result<SendableRecordBatchStream> {
-        let empty_filters = vec![];
         let full_projection = None;
-        let stream = self
-            .table
-            .scan(&full_projection, &empty_filters, None)
-            .await
-            .unwrap();
+        let stream = self.table.scan(&full_projection, &[], None).await.unwrap();
         Ok(stream)
     }
 }

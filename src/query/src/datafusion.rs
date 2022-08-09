@@ -212,7 +212,9 @@ mod tests {
 
     use arrow::array::UInt64Array;
     use catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use catalog::{
+        CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+    };
     use common_recordbatch::util;
     use datafusion::field_util::FieldExt;
     use datafusion::field_util::SchemaExt;
@@ -228,7 +230,7 @@ mod tests {
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME, default_schema);
+        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema);
         catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
 
         let factory = QueryEngineFactory::new(catalog_list);

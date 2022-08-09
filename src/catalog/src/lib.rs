@@ -42,6 +42,10 @@ pub trait CatalogProvider: Sync + Send {
     /// Retrieves the list of available schema names in this catalog.
     fn schema_names(&self) -> Vec<String>;
 
+    /// Registers schema to this catalog.
+    fn register_schema(&self, name: String, schema: SchemaProviderRef)
+        -> Option<SchemaProviderRef>;
+
     /// Retrieves a specific schema from the catalog by name, provided it exists.
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>>;
 }

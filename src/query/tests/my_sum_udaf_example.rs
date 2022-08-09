@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::{
+    CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+};
 use common_function::scalars::aggregate::AggregateFunctionMeta;
 use common_query::error::CreateAccumulatorSnafu;
 use common_query::error::Result as QueryResult;
@@ -262,7 +264,7 @@ pub fn new_query_engine_factory(table_name: String, table: TableRef) -> QueryEng
     let catalog_list = Arc::new(MemoryCatalogList::default());
 
     schema_provider.register_table(table_name, table).unwrap();
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);
+    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
     catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
 
     QueryEngineFactory::new(catalog_list)

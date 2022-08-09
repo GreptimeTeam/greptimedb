@@ -8,7 +8,7 @@ use table::TableRef;
 
 use crate::error::{Result, TableExistsSnafu};
 use crate::schema::SchemaProvider;
-use crate::{CatalogList, CatalogProvider, CatalogProviderRef};
+use crate::{CatalogList, CatalogProvider, CatalogProviderRef, SchemaProviderRef};
 
 /// Simple in-memory list of catalogs
 #[derive(Default)]
@@ -79,15 +79,6 @@ impl MemoryCatalogProvider {
             schemas: RwLock::new(HashMap::new()),
         }
     }
-
-    pub fn register_schema(
-        &self,
-        name: impl Into<String>,
-        schema: Arc<dyn SchemaProvider>,
-    ) -> Option<Arc<dyn SchemaProvider>> {
-        let mut schemas = self.schemas.write().unwrap();
-        schemas.insert(name.into(), schema)
-    }
 }
 
 impl CatalogProvider for MemoryCatalogProvider {
@@ -98,6 +89,15 @@ impl CatalogProvider for MemoryCatalogProvider {
     fn schema_names(&self) -> Vec<String> {
         let schemas = self.schemas.read().unwrap();
         schemas.keys().cloned().collect()
+    }
+
+    fn register_schema(
+        &self,
+        name: String,
+        schema: SchemaProviderRef,
+    ) -> Option<SchemaProviderRef> {
+        let mut schemas = self.schemas.write().unwrap();
+        schemas.insert(name, schema)
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
@@ -184,7 +184,7 @@ mod tests {
 
         assert!(default_catalog.schema(DEFAULT_SCHEMA_NAME).is_none());
         let default_schema = Arc::new(MemorySchemaProvider::default());
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME, default_schema.clone());
+        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema.clone());
 
         default_schema
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
