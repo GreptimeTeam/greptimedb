@@ -264,7 +264,6 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
         }
     );
     let mut ret_args = DecoratorArgs::default();
-    let mut kw_map = HashMap::new();
     for kw in keywords {
         match &kw.node.arg {
             Some(s) => {
@@ -289,7 +288,6 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                     "sql" => ret_args.sql = Some(py_str_to_string(&kw.node.value)?),
                     _ => unreachable!(),
                 }
-                kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
             }
             None => {
                 return fail_parse_error!(
