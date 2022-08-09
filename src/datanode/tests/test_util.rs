@@ -5,7 +5,7 @@ use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
 use datanode::error::{CreateTableSnafu, Result};
 use datanode::instance::Instance;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use snafu::ResultExt;
 use table::engine::EngineContext;
 use table::engine::TableEngineRef;
@@ -62,7 +62,9 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
                 table_name: table_name.to_string(),
                 desc: Some(" a test table".to_string()),
                 schema: Arc::new(
-                    Schema::with_timestamp_index(column_schemas, 3)
+                    SchemaBuilder::from(column_schemas)
+                        .timestamp_index(3)
+                        .build()
                         .expect("ts is expected to be timestamp column"),
                 ),
                 create_if_not_exists: true,

@@ -15,22 +15,15 @@ use datatypes::arrow::io::parquet::read::{
 use datatypes::arrow::io::parquet::write::{
     Compression, Encoding, FileSink, Version, WriteOptions,
 };
-use datatypes::prelude::{ConcreteDataType, Vector};
-use datatypes::schema::ColumnSchema;
-use datatypes::vectors::{Helper, UInt64Vector, UInt8Vector};
 use futures_util::sink::SinkExt;
 use futures_util::{Stream, TryStreamExt};
 use object_store::{ObjectStore, SeekableReader};
-use snafu::{OptionExt, ResultExt};
-use store_api::storage::consts;
+use snafu::ResultExt;
 
-use crate::error::{
-    FlushIoSnafu, InvalidParquetSchemaSnafu, ReadParquetIoSnafu, ReadParquetSnafu, Result,
-    SequenceColumnNotFoundSnafu, WriteParquetSnafu,
-};
-use crate::memtable::{BoxedBatchIterator, MemtableSchema};
-use crate::metadata::ColumnMetadata;
+use crate::error::{self, Result};
+use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
+use crate::schema::SstSchema;
 use crate::sst;
 
 /// Parquet sst writer.
@@ -61,20 +54,23 @@ impl<'a> ParquetWriter<'a> {
     /// A chunk of records yielded from each iteration with a size given
     /// in config will be written to a single row group.
     async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
-        let schema = memtable_schema_to_arrow_schema(self.iter.schema());
+        let region_schema = self.iter.schema();
+        let sst_schema = region_schema.sst_schema();
+        let schema = sst_schema.arrow_schema();
         let object = self.object_store.object(self.file_path);
 
         // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
         // but in s3/azblob backend the Content-Length field of HTTP request is set
         // to this value.
-        let writer = object.writer(0).await.context(FlushIoSnafu)?;
+        let writer = object.writer(0).await.context(error::FlushIoSnafu)?;
 
         // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
-        let encodings = get_encoding_for_schema(&schema, |_| Encoding::Plain);
+        let encodings = get_encoding_for_schema(&*schema, |_| Encoding::Plain);
 
         let mut sink = FileSink::try_new(
             writer,
-            schema,
+            // The file sink needs the `Schema` instead of a reference.
+            (**schema).clone(),
             encodings,
             WriteOptions {
                 write_statistics: true,
@@ -82,22 +78,13 @@ impl<'a> ParquetWriter<'a> {
                 version: Version::V2,
             },
         )
-        .context(WriteParquetSnafu)?;
+        .context(error::WriteParquetSnafu)?;
 
         for batch in self.iter {
             let batch = batch?;
-            sink.send(Chunk::new(
-                batch
-                    .keys
-                    .iter()
-                    .map(|v| v.to_arrow_array())
-                    .chain(std::iter::once(batch.sequences.to_arrow_array()))
-                    .chain(std::iter::once(batch.value_types.to_arrow_array()))
-                    .chain(batch.values.iter().map(|v| v.to_arrow_array()))
-                    .collect(),
-            ))
-            .await
-            .context(WriteParquetSnafu)?;
+            sink.send(sst_schema.batch_to_arrow_chunk(&batch))
+                .await
+                .context(error::WriteParquetSnafu)?;
         }
 
         if let Some(meta) = extra_meta {
@@ -105,40 +92,11 @@ impl<'a> ParquetWriter<'a> {
                 sink.metadata.insert(k, Some(v));
             }
         }
-        sink.close().await.context(WriteParquetSnafu)?;
+        sink.close().await.context(error::WriteParquetSnafu)?;
         // FIXME(yingwen): Hack to workaround an [arrow2 BUG](https://github.com/jorgecarleitao/parquet2/issues/162),
         // upgrading to latest arrow2 can fixed this, but now datafusion is still using an old arrow2 version.
-        sink.flush().await.context(WriteParquetSnafu)
+        sink.flush().await.context(error::WriteParquetSnafu)
     }
-}
-
-/// Assembles arrow schema from memtable schema info.
-/// TODO(hl): implement `From<Schema>` for `MemtableSchema`/`Physical schema`
-fn memtable_schema_to_arrow_schema(schema: &MemtableSchema) -> Schema {
-    let col_meta_to_field: fn(&ColumnMetadata) -> Field = |col_meta| {
-        Field::from(&ColumnSchema::new(
-            col_meta.desc.name.clone(),
-            col_meta.desc.data_type.clone(),
-            col_meta.desc.is_nullable,
-        ))
-    };
-
-    let fields = schema
-        .row_key_columns()
-        .map(col_meta_to_field)
-        .chain(std::iter::once(Field::from(&ColumnSchema::new(
-            consts::SEQUENCE_COLUMN_NAME,
-            ConcreteDataType::uint64_datatype(),
-            false,
-        ))))
-        .chain(std::iter::once(Field::from(&ColumnSchema::new(
-            consts::VALUE_TYPE_COLUMN_NAME,
-            ConcreteDataType::uint8_datatype(),
-            false,
-        ))))
-        .chain(schema.value_columns().map(col_meta_to_field))
-        .collect::<Vec<_>>();
-    Schema::from(fields)
 }
 
 fn get_encoding_for_schema<F: Fn(&DataType) -> Encoding + Clone>(
@@ -213,9 +171,11 @@ impl<'a> ParquetReader<'a> {
         }
     }
 
+    // TODO(yingwen): Projection is not supported now, since field index would change after projection.
+    // To support projection, we may need to implement some helper methods in schema.
     pub async fn chunk_stream(
         &self,
-        projection: Option<FieldProjection>,
+        _projection: Option<FieldProjection>,
         chunk_size: usize,
     ) -> Result<ChunkStream> {
         let file_path = self.file_path.to_string();
@@ -229,17 +189,17 @@ impl<'a> ParquetReader<'a> {
         let file_path = self.file_path.to_string();
         let mut reader = reader_factory()
             .await
-            .context(ReadParquetIoSnafu { file: &file_path })?;
+            .context(error::ReadParquetIoSnafu { file: &file_path })?;
         let metadata = read_metadata_async(&mut reader)
             .await
-            .context(ReadParquetSnafu { file: &file_path })?;
-        let schema = infer_schema(&metadata).context(ReadParquetSnafu { file: &file_path })?;
+            .context(error::ReadParquetSnafu { file: &file_path })?;
+        let arrow_schema =
+            infer_schema(&metadata).context(error::ReadParquetSnafu { file: &file_path })?;
+        // Just read all fields.
+        let projected_fields = arrow_schema.fields.clone();
 
-        let projected_fields = projection.map_or_else(|| schema.fields.clone(), |p| p(&schema));
-        let projected_schema = Schema {
-            fields: projected_fields.clone(),
-            metadata: schema.metadata,
-        };
+        let sst_schema = SstSchema::try_from(arrow_schema)
+            .context(error::ConvertSstSchemaSnafu { file: &file_path })?;
 
         let chunk_stream = try_stream!({
             for rg in metadata.row_groups {
@@ -250,36 +210,31 @@ impl<'a> ParquetReader<'a> {
                     Some(chunk_size),
                 )
                 .await
-                .context(ReadParquetSnafu { file: &file_path })?;
+                .context(error::ReadParquetSnafu { file: &file_path })?;
 
                 let chunks = RowGroupDeserializer::new(column_chunks, rg.num_rows() as usize, None);
                 for maybe_chunk in chunks {
                     let columns_in_chunk =
-                        maybe_chunk.context(ReadParquetSnafu { file: &file_path })?;
+                        maybe_chunk.context(error::ReadParquetSnafu { file: &file_path })?;
                     yield columns_in_chunk;
                 }
             }
         });
 
-        ChunkStream::new(projected_schema, Box::pin(chunk_stream))
+        ChunkStream::new(sst_schema, Box::pin(chunk_stream))
     }
 }
-
-type ChunkConverter = Box<dyn Fn(Chunk<Arc<dyn Array>>) -> Result<Batch> + Send + Sync>;
 
 pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk<Arc<dyn Array>>>> + Send>>;
 
 pub struct ChunkStream {
+    schema: SstSchema,
     stream: SendableChunkStream,
-    converter: ChunkConverter,
 }
 
 impl ChunkStream {
-    pub fn new(schema: Schema, stream: SendableChunkStream) -> Result<Self> {
-        Ok(Self {
-            converter: batch_converter_factory(schema)?,
-            stream,
-        })
+    pub fn new(schema: SstSchema, stream: SendableChunkStream) -> Result<Self> {
+        Ok(Self { schema, stream })
     }
 }
 
@@ -289,61 +244,13 @@ impl BatchReader for ChunkStream {
         self.stream
             .try_next()
             .await?
-            .map(&self.converter)
+            .map(|chunk| {
+                self.schema
+                    .arrow_chunk_to_batch(&chunk)
+                    .context(error::InvalidParquetSchemaSnafu)
+            })
             .transpose()
     }
-}
-
-// TODO(hl): Currently rowkey/values/reserved columns are identified by their position in field:
-// all fields before `__sequence` column are rowkeys and fields after `__value_type` are values.
-// But it would be better to persist rowkey/value columns' positions to Parquet metadata and
-// parse `MemtableSchema` from metadata while building BatchReader.
-fn batch_converter_factory(schema: Schema) -> Result<ChunkConverter> {
-    let ts_idx = schema
-        .fields
-        .iter()
-        .position(|f| f.name == consts::SEQUENCE_COLUMN_NAME)
-        .with_context(|| SequenceColumnNotFoundSnafu {
-            msg: format!("Schema: {:?}", schema),
-        })?;
-
-    let field_len = schema.fields.len();
-
-    macro_rules! handle_err {
-        ($stmt: expr, $schema: ident) => {
-            $stmt.with_context(|_| InvalidParquetSchemaSnafu {
-                msg: format!("Schema type error: {:?}", $schema),
-            })?
-        };
-    }
-
-    let converter = move |c: Chunk<Arc<dyn Array>>| {
-        Ok(Batch {
-            sequences: handle_err!(
-                UInt64Vector::try_from_arrow_array(&c.arrays()[ts_idx].clone()),
-                schema
-            ),
-            value_types: handle_err!(
-                UInt8Vector::try_from_arrow_array(&c.arrays()[ts_idx + 1].clone()),
-                schema
-            ),
-            keys: handle_err!(
-                (0..ts_idx)
-                    .into_iter()
-                    .map(|i| Helper::try_into_vector(&c.arrays()[i].clone()))
-                    .collect::<std::result::Result<_, _>>(),
-                schema
-            ),
-            values: handle_err!(
-                (ts_idx + 2..field_len)
-                    .into_iter()
-                    .map(|i| Helper::try_into_vector(&c.arrays()[i].clone()))
-                    .collect::<std::result::Result<_, _>>(),
-                schema
-            ),
-        })
-    };
-    Ok(Box::new(converter))
 }
 
 #[cfg(test)]
@@ -398,10 +305,11 @@ mod tests {
         let reader = std::fs::File::open(dir.path().join(sst_file_name)).unwrap();
         let mut file_reader = FileReader::try_new(reader, None, Some(128), None, None).unwrap();
 
-        // chunk schema: timestamp, __version, __sequence, __value_type, v1
+        // chunk schema: timestamp, __version, v1, __sequence, __value_type
         let chunk = file_reader.next().unwrap().unwrap();
         assert_eq!(5, chunk.arrays().len());
 
+        // timestamp
         assert_eq!(
             Arc::new(Int64Array::from_slice(&[
                 1000, 1000, 1001, 2002, 2003, 2003
@@ -409,23 +317,27 @@ mod tests {
             chunk.arrays()[0]
         );
 
+        // version
         assert_eq!(
             Arc::new(UInt64Array::from_slice(&[1, 2, 1, 1, 1, 5])) as Arc<dyn Array>,
             chunk.arrays()[1]
         );
 
+        // v1
         assert_eq!(
-            Arc::new(UInt64Array::from_slice(&[10, 10, 10, 10, 10, 10])) as Arc<dyn Array>,
+            Arc::new(UInt64Array::from_slice(&[1, 2, 3, 7, 8, 9])) as Arc<dyn Array>,
             chunk.arrays()[2]
         );
 
+        // sequence
         assert_eq!(
-            Arc::new(UInt8Array::from_slice(&[0, 0, 0, 0, 0, 0])) as Arc<dyn Array>,
+            Arc::new(UInt64Array::from_slice(&[10, 10, 10, 10, 10, 10])) as Arc<dyn Array>,
             chunk.arrays()[3]
         );
 
+        // value type
         assert_eq!(
-            Arc::new(UInt64Array::from_slice(&[1, 2, 3, 7, 8, 9])) as Arc<dyn Array>,
+            Arc::new(UInt8Array::from_slice(&[0, 0, 0, 0, 0, 0])) as Arc<dyn Array>,
             chunk.arrays()[4]
         );
     }

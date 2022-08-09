@@ -12,7 +12,7 @@ mod snapshot;
 mod types;
 
 pub use datatypes::data_type::ConcreteDataType;
-pub use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+pub use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 
 pub use self::chunk::{Chunk, ChunkReader};
 pub use self::descriptors::*;

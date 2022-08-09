@@ -293,10 +293,9 @@ mod tests {
     use store_api::storage::{PutOperation, WriteRequest};
 
     use super::*;
-    use crate::memtable::{
-        DefaultMemtableBuilder, IterContext, MemtableBuilder, MemtableId, MemtableSchema,
-    };
+    use crate::memtable::{DefaultMemtableBuilder, IterContext, MemtableBuilder, MemtableId};
     use crate::metadata::RegionMetadata;
+    use crate::schema::RegionSchemaRef;
     use crate::test_util::descriptor_util::RegionDescBuilder;
     use crate::test_util::write_batch_util;
 
@@ -558,7 +557,7 @@ mod tests {
         )
     }
 
-    fn new_memtable_schema() -> MemtableSchema {
+    fn new_region_schema() -> RegionSchemaRef {
         let desc = RegionDescBuilder::new("test")
             .timestamp(("ts", LogicalTypeId::Int64, false))
             .push_value_column(("value", LogicalTypeId::Int64, true))
@@ -566,7 +565,7 @@ mod tests {
             .build();
         let metadata: RegionMetadata = desc.try_into().unwrap();
 
-        MemtableSchema::new(metadata.columns_row_key)
+        metadata.schema().clone()
     }
 
     fn put_batch(batch: &mut WriteBatch, data: &[(i64, Option<i64>)]) {
@@ -579,7 +578,7 @@ mod tests {
         batch.put(put_data).unwrap();
     }
 
-    fn new_memtable_set(time_ranges: &[RangeMillis], schema: &MemtableSchema) -> MemtableSet {
+    fn new_memtable_set(time_ranges: &[RangeMillis], schema: &RegionSchemaRef) -> MemtableSet {
         let mut set = MemtableSet::new();
         for (id, range) in time_ranges.iter().enumerate() {
             let mem = DefaultMemtableBuilder {}.build(id as MemtableId, schema.clone());
@@ -619,7 +618,7 @@ mod tests {
         let sequence = 11111;
         let bucket_duration = 100;
         let time_ranges = new_time_ranges(&[0], bucket_duration);
-        let memtable_schema = new_memtable_schema();
+        let memtable_schema = new_region_schema();
         let memtables = new_memtable_set(&time_ranges, &memtable_schema);
         let mut inserter = Inserter::new(
             sequence,
@@ -657,7 +656,7 @@ mod tests {
         let sequence = 11111;
         let bucket_duration = 100;
         let time_ranges = new_time_ranges(&[0, 100, 200], bucket_duration);
-        let memtable_schema = new_memtable_schema();
+        let memtable_schema = new_region_schema();
         let memtables = new_memtable_set(&time_ranges, &memtable_schema);
         let mut inserter = Inserter::new(
             sequence,

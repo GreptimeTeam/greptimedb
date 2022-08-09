@@ -14,6 +14,7 @@ pub mod metadata;
 mod proto;
 mod read;
 mod region;
+pub mod schema;
 mod snapshot;
 mod sst;
 mod sync;

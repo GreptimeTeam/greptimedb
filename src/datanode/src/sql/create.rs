@@ -4,7 +4,7 @@ use std::sync::Arc;
 use catalog::RegisterTableRequest;
 use common_telemetry::tracing::info;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, DataType as SqlDataType, ObjectName, TableConstraint};
@@ -134,7 +134,10 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             .collect::<Result<Vec<_>>>()?;
 
         let schema = Arc::new(
-            Schema::with_timestamp_index(columns_schemas, ts_index).context(CreateSchemaSnafu)?,
+            SchemaBuilder::from(columns_schemas)
+                .timestamp_index(ts_index)
+                .build()
+                .context(CreateSchemaSnafu)?,
         );
 
         let request = CreateTableRequest {

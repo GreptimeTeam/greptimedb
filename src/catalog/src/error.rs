@@ -81,12 +81,6 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to build table schema for system catalog table"))]
-    SystemCatalogSchema {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display(
         "Failed to insert table creation record to system catalog, source: {}",
         source
@@ -116,7 +110,7 @@ impl ErrorExt for Error {
             | Error::OpenTable { .. }
             | Error::ReadSystemCatalog { .. }
             | Error::InsertTableRecord { .. } => StatusCode::StorageUnavailable,
-            Error::RegisterTable { .. } | Error::SystemCatalogSchema { .. } => StatusCode::Internal,
+            Error::RegisterTable { .. } => StatusCode::Internal,
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
         }
     }

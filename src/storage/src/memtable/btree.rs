@@ -15,10 +15,10 @@ use store_api::storage::{SequenceNumber, ValueType};
 
 use crate::error::Result;
 use crate::memtable::{
-    BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId,
-    MemtableSchema, RowOrdering,
+    BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId, RowOrdering,
 };
 use crate::read::Batch;
+use crate::schema::RegionSchemaRef;
 
 type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
 
@@ -28,13 +28,13 @@ type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
 #[derive(Debug)]
 pub struct BTreeMemtable {
     id: MemtableId,
-    schema: MemtableSchema,
+    schema: RegionSchemaRef,
     map: Arc<RwLockMap>,
     estimated_bytes: AtomicUsize,
 }
 
 impl BTreeMemtable {
-    pub fn new(id: MemtableId, schema: MemtableSchema) -> BTreeMemtable {
+    pub fn new(id: MemtableId, schema: RegionSchemaRef) -> BTreeMemtable {
         BTreeMemtable {
             id,
             schema,
@@ -49,8 +49,8 @@ impl Memtable for BTreeMemtable {
         self.id
     }
 
-    fn schema(&self) -> &MemtableSchema {
-        &self.schema
+    fn schema(&self) -> RegionSchemaRef {
+        self.schema.clone()
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
@@ -81,14 +81,14 @@ impl Memtable for BTreeMemtable {
 
 struct BTreeIterator {
     ctx: IterContext,
-    schema: MemtableSchema,
+    schema: RegionSchemaRef,
     map: Arc<RwLockMap>,
     last_key: Option<InnerKey>,
 }
 
 impl BatchIterator for BTreeIterator {
-    fn schema(&self) -> &MemtableSchema {
-        &self.schema
+    fn schema(&self) -> RegionSchemaRef {
+        self.schema.clone()
     }
 
     fn ordering(&self) -> RowOrdering {
@@ -105,7 +105,7 @@ impl Iterator for BTreeIterator {
 }
 
 impl BTreeIterator {
-    fn new(ctx: IterContext, schema: MemtableSchema, map: Arc<RwLockMap>) -> BTreeIterator {
+    fn new(ctx: IterContext, schema: RegionSchemaRef, map: Arc<RwLockMap>) -> BTreeIterator {
         BTreeIterator {
             ctx,
             schema,

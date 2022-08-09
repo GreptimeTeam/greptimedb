@@ -309,7 +309,7 @@ impl WriterInner {
                 && memtables_to_add.get_by_range(range).is_none()
             {
                 // Memtable for this range is missing, need to create a new memtable.
-                let memtable_schema = current_version.memtable_schema();
+                let memtable_schema = current_version.schema().clone();
                 let id = self.alloc_memtable_id();
                 let memtable = self.memtable_builder.build(id, memtable_schema);
                 memtables_to_add.insert(*range, memtable);

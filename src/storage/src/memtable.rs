@@ -1,6 +1,5 @@
 mod btree;
 mod inserter;
-mod schema;
 #[cfg(test)]
 pub mod tests;
 mod version;
@@ -13,9 +12,9 @@ use store_api::storage::{consts, SequenceNumber, ValueType};
 use crate::error::Result;
 use crate::memtable::btree::BTreeMemtable;
 pub use crate::memtable::inserter::Inserter;
-pub use crate::memtable::schema::MemtableSchema;
 pub use crate::memtable::version::{MemtableSet, MemtableVersion};
 use crate::read::Batch;
+use crate::schema::RegionSchemaRef;
 
 /// Unique id for memtables under same region.
 pub type MemtableId = u32;
@@ -24,7 +23,7 @@ pub type MemtableId = u32;
 pub trait Memtable: Send + Sync + std::fmt::Debug {
     fn id(&self) -> MemtableId;
 
-    fn schema(&self) -> &MemtableSchema;
+    fn schema(&self) -> RegionSchemaRef;
 
     /// Write key/values to the memtable.
     ///
@@ -83,7 +82,7 @@ pub enum RowOrdering {
 /// as an async trait.
 pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
     /// Returns the schema of this iterator.
-    fn schema(&self) -> &MemtableSchema;
+    fn schema(&self) -> RegionSchemaRef;
 
     /// Returns the ordering of the output rows from this iterator.
     fn ordering(&self) -> RowOrdering;
@@ -92,7 +91,7 @@ pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
 pub type BoxedBatchIterator = Box<dyn BatchIterator>;
 
 pub trait MemtableBuilder: Send + Sync + std::fmt::Debug {
-    fn build(&self, id: MemtableId, schema: MemtableSchema) -> MemtableRef;
+    fn build(&self, id: MemtableId, schema: RegionSchemaRef) -> MemtableRef;
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
@@ -136,7 +135,7 @@ impl KeyValues {
 pub struct DefaultMemtableBuilder;
 
 impl MemtableBuilder for DefaultMemtableBuilder {
-    fn build(&self, id: MemtableId, schema: MemtableSchema) -> MemtableRef {
+    fn build(&self, id: MemtableId, schema: RegionSchemaRef) -> MemtableRef {
         Arc::new(BTreeMemtable::new(id, schema))
     }
 }

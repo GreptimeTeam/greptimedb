@@ -193,7 +193,7 @@ mod tests {
     use common_recordbatch::SendableRecordBatchStream;
     use datatypes::{
         data_type::ConcreteDataType,
-        schema::{ColumnSchema, Schema, SchemaRef},
+        schema::{ColumnSchema, SchemaBuilder, SchemaRef},
         value::Value,
     };
     use table::error::Result as TableResult;
@@ -280,7 +280,12 @@ mod tests {
                 ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
             ];
 
-            Arc::new(Schema::with_timestamp_index(column_schemas, 3).unwrap())
+            Arc::new(
+                SchemaBuilder::from(column_schemas)
+                    .timestamp_index(3)
+                    .build()
+                    .unwrap(),
+            )
         }
         async fn scan(
             &self,

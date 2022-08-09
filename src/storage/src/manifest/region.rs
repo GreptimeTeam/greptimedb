@@ -14,6 +14,7 @@ mod tests {
 
     use super::*;
     use crate::manifest::test_utils::*;
+    use crate::metadata::RegionMetadata;
 
     #[tokio::test]
     async fn test_region_manifest() {
@@ -43,7 +44,7 @@ mod tests {
         manifest
             .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
                 RegionChange {
-                    metadata: region_meta.clone(),
+                    metadata: (&*region_meta).into(),
                 },
             )))
             .await
@@ -58,7 +59,10 @@ mod tests {
 
         match action {
             RegionMetaAction::Change(c) => {
-                assert_eq!(c.metadata, region_meta);
+                assert_eq!(
+                    RegionMetadata::try_from(c.metadata.clone()).unwrap(),
+                    *region_meta
+                );
             }
             _ => unreachable!(),
         }
@@ -79,7 +83,10 @@ mod tests {
         let action = &action_list.actions[0];
         match action {
             RegionMetaAction::Change(c) => {
-                assert_eq!(c.metadata, region_meta);
+                assert_eq!(
+                    RegionMetadata::try_from(c.metadata.clone()).unwrap(),
+                    *region_meta
+                );
             }
             _ => unreachable!(),
         }

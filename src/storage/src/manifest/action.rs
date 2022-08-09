@@ -14,12 +14,38 @@ use crate::error::{
     ReadlineSnafu, Result,
 };
 use crate::manifest::helper;
-use crate::metadata::{RegionMetadataRef, VersionNumber};
+use crate::metadata::{ColumnFamilyMetadata, ColumnMetadata, VersionNumber};
 use crate::sst::FileMeta;
+
+/// Minimal data that could be used to persist and recover [RegionMetadata](crate::metadata::RegionMetadata).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawRegionMetadata {
+    pub id: RegionId,
+    pub name: String,
+    pub columns: RawColumnsMetadata,
+    pub column_families: RawColumnFamiliesMetadata,
+    pub version: VersionNumber,
+}
+
+/// Minimal data that could be used to persist and recover [ColumnsMetadata](crate::metadata::ColumnsMetadata).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawColumnsMetadata {
+    pub columns: Vec<ColumnMetadata>,
+    pub row_key_end: usize,
+    pub timestamp_key_index: usize,
+    pub enable_version_column: bool,
+    pub user_column_end: usize,
+}
+
+/// Minimal data that could be used to persist and recover [ColumnFamiliesMetadata](crate::metadata::ColumnFamiliesMetadata).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawColumnFamiliesMetadata {
+    pub column_families: Vec<ColumnFamilyMetadata>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RegionChange {
-    pub metadata: RegionMetadataRef,
+    pub metadata: RawRegionMetadata,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -36,17 +62,17 @@ pub struct RegionEdit {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct RegionMetaActionList {
-    pub actions: Vec<RegionMetaAction>,
-    pub prev_version: ManifestVersion,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum RegionMetaAction {
     Protocol(ProtocolAction),
     Change(RegionChange),
     Remove(RegionRemove),
     Edit(RegionEdit),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RegionMetaActionList {
+    pub actions: Vec<RegionMetaAction>,
+    pub prev_version: ManifestVersion,
 }
 
 impl RegionMetaActionList {

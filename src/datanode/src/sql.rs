@@ -64,7 +64,7 @@ mod tests {
     use common_query::logical_plan::Expr;
     use common_recordbatch::SendableRecordBatchStream;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+    use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
     use log_store::fs::noop::NoopLogStore;
     use object_store::{backend::fs::Backend, ObjectStore};
@@ -96,7 +96,12 @@ mod tests {
                 ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
             ];
 
-            Arc::new(Schema::with_timestamp_index(column_schemas, 3).unwrap())
+            Arc::new(
+                SchemaBuilder::from(column_schemas)
+                    .timestamp_index(3)
+                    .build()
+                    .unwrap(),
+            )
         }
         async fn scan(
             &self,
