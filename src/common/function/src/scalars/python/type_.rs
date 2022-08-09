@@ -403,6 +403,7 @@ impl PyVector {
     // The Comparable Trait only support normal cmp
     // (yes there is a slot_richcompare function, but it is not used in anywhere)
     // so use our own function
+    // TODO(discord9): test those funciton
     
     #[pymethod(name="eq")]
     fn eq(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector>{
