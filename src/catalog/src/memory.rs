@@ -4,10 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use table::table::numbers::NumbersTable;
 use table::TableRef;
 
-use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use crate::error::{Result, TableExistsSnafu};
 use crate::schema::SchemaProvider;
 use crate::{CatalogList, CatalogProvider, CatalogProviderRef};
@@ -164,38 +162,38 @@ impl SchemaProvider for MemorySchemaProvider {
 
 /// Create a memory catalog list contains a numbers table for test
 pub fn new_memory_catalog_list() -> Result<Arc<MemoryCatalogList>> {
-    let schema_provider = Arc::new(MemorySchemaProvider::new());
-    let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogList::default());
-
-    // Add numbers table for test
-    // TODO(hl): remove this registration
-    let table = Arc::new(NumbersTable::default());
-    schema_provider.register_table("numbers".to_string(), table)?;
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);
-    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
-
-    Ok(catalog_list)
+    Ok(Arc::new(MemoryCatalogList::default()))
 }
 
 #[cfg(test)]
 mod tests {
     use common_error::ext::ErrorExt;
     use common_error::prelude::StatusCode;
+    use table::table::numbers::NumbersTable;
 
     use super::*;
+    use crate::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
     #[test]
     fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_list().unwrap();
 
-        let catalog_provider = catalog_list.catalog(DEFAULT_CATALOG_NAME).unwrap();
-        let schema_provider = catalog_provider.schema(DEFAULT_SCHEMA_NAME).unwrap();
+        assert!(catalog_list.catalog(DEFAULT_CATALOG_NAME).is_none());
+        let default_catalog = Arc::new(MemoryCatalogProvider::default());
+        catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog.clone());
 
-        let table = schema_provider.table("numbers");
+        assert!(default_catalog.schema(DEFAULT_SCHEMA_NAME).is_none());
+        let default_schema = Arc::new(MemorySchemaProvider::default());
+        default_catalog.register_schema(DEFAULT_SCHEMA_NAME, default_schema.clone());
+
+        default_schema
+            .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+            .unwrap();
+
+        let table = default_schema.table("numbers");
         assert!(table.is_some());
 
-        assert!(schema_provider.table("not_exists").is_none());
+        assert!(default_schema.table("not_exists").is_none());
     }
 
     #[tokio::test]

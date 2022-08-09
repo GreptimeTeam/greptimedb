@@ -2,13 +2,14 @@ use std::any::Any;
 use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
-use common_telemetry::{debug, info};
+use common_telemetry::info;
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::StreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::OpenTableRequest;
+use table::table::numbers::NumbersTable;
 
 use super::error::Result;
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME};
@@ -38,16 +39,12 @@ impl MemoryCatalogManager {
     /// Create a new [CatalogManager] with given user catalogs and table engine
     pub async fn try_new(engine: TableEngineRef) -> Result<Self> {
         let table = SystemCatalogTable::new(engine.clone()).await?;
-        debug!("1");
         let memory_catalog_list = crate::memory::new_memory_catalog_list()?;
-        debug!("2");
         let system_catalog = Arc::new(SystemCatalog::new(
             table,
             memory_catalog_list.clone(),
             engine.clone(),
         ));
-
-        debug!("3");
         Ok(Self {
             system: system_catalog,
             catalogs: memory_catalog_list,
@@ -80,8 +77,15 @@ impl MemoryCatalogManager {
         system_catalog.register_schema(INFORMATION_SCHEMA_NAME, system_schema);
         self.catalogs
             .register_catalog(SYSTEM_CATALOG_NAME.to_string(), system_catalog);
+
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         let default_schema = Arc::new(MemorySchemaProvider::new());
+
+        // Add numbers table for test
+        // TODO(hl): remove this registration
+        let table = Arc::new(NumbersTable::default());
+        default_schema.register_table("numbers".to_string(), table)?;
+
         default_catalog.register_schema(DEFAULT_SCHEMA_NAME, default_schema);
         self.catalogs
             .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);

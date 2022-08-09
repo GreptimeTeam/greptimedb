@@ -61,6 +61,7 @@ mod tests {
     async fn create_extension() -> Extension<InstanceRef> {
         let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Arc::new(Instance::new(&opts).await.unwrap());
+        instance.start().await.unwrap();
         Extension(instance)
     }
 
@@ -81,6 +82,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sql_output_rows() {
+        common_telemetry::init_default_ut_logging();
         let query = create_params();
         let extension = create_extension().await;
 
@@ -88,7 +90,7 @@ mod tests {
 
         match json {
             HttpResponse::Json(json) => {
-                assert!(json.success);
+                assert!(json.success, "{:?}", json);
                 assert!(json.error.is_none());
                 assert!(json.output.is_some());
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::iter::Iterator;
 
 use async_trait::async_trait;
-use common_telemetry::{debug, logging};
+use common_telemetry::logging;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use object_store::{util, DirEntry, ObjectStore};
@@ -126,21 +126,16 @@ impl ManifestLogStorage for ManifestObjectStore {
     ) -> Result<ObjectStoreLogIterator> {
         ensure!(start <= end, InvalidScanIndexSnafu { start, end });
 
-        debug!("start");
         let dir = self.object_store.object(&self.path);
-        debug!("start 2");
         let dir_exists = dir
             .is_exist()
             .await
             .context(ReadObjectSnafu { path: &self.path })?;
-        debug!("dir_exists: {}", dir_exists);
         if !dir_exists {
-            debug!("dir does not exist");
             return Ok(ObjectStoreLogIterator {
                 iter: Box::new(Vec::default().into_iter()),
             });
         }
-        debug!("dir exists");
 
         let streamer = dir
             .list()

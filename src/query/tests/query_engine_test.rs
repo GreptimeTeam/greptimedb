@@ -23,6 +23,7 @@ use query::query_engine::{Output, QueryEngineFactory};
 use query::QueryEngine;
 use rand::Rng;
 use table::table::adapter::DfTableProviderAdapter;
+use table::table::numbers::NumbersTable;
 use test_util::MemTable;
 
 use crate::pow::pow;
@@ -87,6 +88,15 @@ async fn test_datafusion_query_engine() -> Result<()> {
 async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let catalog_list = catalog::memory::new_memory_catalog_list()?;
+
+    let default_schema = Arc::new(MemorySchemaProvider::new());
+    default_schema
+        .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+        .unwrap();
+    let default_catalog = Arc::new(MemoryCatalogProvider::new());
+    default_catalog.register_schema(DEFAULT_SCHEMA_NAME, default_schema);
+    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
+
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
 
