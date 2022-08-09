@@ -5,7 +5,6 @@ package greptime.storage.write_batch.v1;
 message WriteBatch {
   Schema schema = 1;
   repeated Mutation mutations = 2;
-  uint64 num_rows = 3;
 }
 
 message Schema {
@@ -41,6 +40,7 @@ message Delete {
 message Column {
   Values values = 1;
   bytes value_null_mask = 2;
+  uint64 num_rows = 3;
 }
 
 // TODO(jiachun): Enum might be insufficient to represent some composite data type such as list, struct.

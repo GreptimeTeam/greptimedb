@@ -33,6 +33,13 @@ pub enum Error {
         data_type: i32,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Invalid timestamp index: {}", index))]
+    InvalidTimestampIndex {
+        index: usize,
+        source: datatypes::error::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -43,8 +50,8 @@ impl TimestampIndex {
     }
 }
 
-impl From<&Arc<schema::Schema>> for Schema {
-    fn from(schema: &Arc<schema::Schema>) -> Self {
+impl From<&schema::SchemaRef> for Schema {
+    fn from(schema: &schema::SchemaRef) -> Self {
         let column_schemas = schema
             .column_schemas()
             .iter()
@@ -57,6 +64,30 @@ impl From<&Arc<schema::Schema>> for Schema {
                 .timestamp_index()
                 .map(|index| TimestampIndex::new(index as u64)),
         }
+    }
+}
+
+impl TryFrom<Schema> for schema::SchemaRef {
+    type Error = Error;
+
+    fn try_from(schema: Schema) -> Result<Self> {
+        let column_schemas = schema
+            .column_schemas
+            .iter()
+            .map(schema::ColumnSchema::try_from)
+            .collect::<Result<Vec<_>>>()?;
+
+        let schema: schema::SchemaRef = match schema.timestamp_index {
+            Some(index) => Arc::new(
+                schema::Schema::with_timestamp_index(column_schemas, index.value as usize)
+                    .context(InvalidTimestampIndexSnafu {
+                        index: index.value as usize,
+                    })?,
+            ),
+            None => Arc::new(schema::Schema::new(column_schemas)),
+        };
+
+        Ok(schema)
     }
 }
 
@@ -157,8 +188,16 @@ macro_rules! gen_columns {
                         Some($vari) => values.[<$key _values>].push($cast),
                         None => value_null_mask.set(i, true),
                     });
-                column.value_null_mask = value_null_mask.to_bytes();
+
+                let null_mask = if vector_ref.len() == values.[<$key _values>].len() {
+                    vec![]
+                } else {
+                    value_null_mask.to_bytes()
+                };
+
                 column.values = Some(values);
+                column.value_null_mask = null_mask;
+                column.num_rows = vector_ref.len() as u64;
 
                 Ok(column)
             }
@@ -184,20 +223,27 @@ gen_columns!(string, StringVector, v, v.to_string());
 macro_rules! gen_put_data {
     ($key: tt, $builder_type: ty, $vari: ident, $cast: expr) => {
         paste! {
-            pub fn [<gen_put_data_ $key>](num_rows: usize, column: Column) -> Result<VectorRef> {
+            pub fn [<gen_put_data_ $key>](column: Column) -> Result<VectorRef> {
                 let values = column.values.context(EmptyColumnValuesSnafu {})?;
                 let mut vector_iter = values.[<$key _values>].iter();
+                let num_rows = column.num_rows as usize;
                 let mut builder = <$builder_type>::with_capacity(num_rows);
-                bit_vec::BitVec::from_bytes(&column.value_null_mask)
-                    .iter()
-                    .take(num_rows)
-                    .for_each(|is_null| {
-                        if is_null {
-                            builder.push(None);
-                        } else {
-                            builder.push(vector_iter.next().map(|$vari| $cast));
-                        }
-                    });
+                if column.value_null_mask.is_empty() {
+                    (0..num_rows)
+                        .for_each(|_| builder.push(vector_iter.next().map(|$vari| $cast)));
+                } else {
+                    bit_vec::BitVec::from_bytes(&column.value_null_mask)
+                        .iter()
+                        .take(num_rows)
+                        .for_each(|is_null| {
+                            if is_null {
+                                builder.push(None);
+                            } else {
+                                builder.push(vector_iter.next().map(|$vari| $cast));
+                            }
+                        });
+                }
+
 
                 Ok(Arc::new(builder.finish()))
             }
@@ -240,25 +286,21 @@ pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
     }
 }
 
-pub fn gen_put_data_vector(
-    data_type: ConcreteDataType,
-    num_rows: usize,
-    column: Column,
-) -> Result<VectorRef> {
+pub fn gen_put_data_vector(data_type: ConcreteDataType, column: Column) -> Result<VectorRef> {
     match data_type {
-        ConcreteDataType::Boolean(_) => gen_put_data_bool(num_rows, column),
-        ConcreteDataType::Int8(_) => gen_put_data_i8(num_rows, column),
-        ConcreteDataType::Int16(_) => gen_put_data_i16(num_rows, column),
-        ConcreteDataType::Int32(_) => gen_put_data_i32(num_rows, column),
-        ConcreteDataType::Int64(_) => gen_put_data_i64(num_rows, column),
-        ConcreteDataType::UInt8(_) => gen_put_data_u8(num_rows, column),
-        ConcreteDataType::UInt16(_) => gen_put_data_u16(num_rows, column),
-        ConcreteDataType::UInt32(_) => gen_put_data_u32(num_rows, column),
-        ConcreteDataType::UInt64(_) => gen_put_data_u64(num_rows, column),
-        ConcreteDataType::Float32(_) => gen_put_data_f32(num_rows, column),
-        ConcreteDataType::Float64(_) => gen_put_data_f64(num_rows, column),
-        ConcreteDataType::Binary(_) => gen_put_data_binary(num_rows, column),
-        ConcreteDataType::String(_) => gen_put_data_string(num_rows, column),
+        ConcreteDataType::Boolean(_) => gen_put_data_bool(column),
+        ConcreteDataType::Int8(_) => gen_put_data_i8(column),
+        ConcreteDataType::Int16(_) => gen_put_data_i16(column),
+        ConcreteDataType::Int32(_) => gen_put_data_i32(column),
+        ConcreteDataType::Int64(_) => gen_put_data_i64(column),
+        ConcreteDataType::UInt8(_) => gen_put_data_u8(column),
+        ConcreteDataType::UInt16(_) => gen_put_data_u16(column),
+        ConcreteDataType::UInt32(_) => gen_put_data_u32(column),
+        ConcreteDataType::UInt64(_) => gen_put_data_u64(column),
+        ConcreteDataType::Float32(_) => gen_put_data_f32(column),
+        ConcreteDataType::Float64(_) => gen_put_data_f64(column),
+        ConcreteDataType::Binary(_) => gen_put_data_binary(column),
+        ConcreteDataType::String(_) => gen_put_data_string(column),
         _ => unimplemented!(), // TODO(jiachun): Maybe support some composite types in the future , such as list, struct, etc.
     }
 }

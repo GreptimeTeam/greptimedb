@@ -118,13 +118,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Invalid timestamp index: {}", index))]
-    InvalidTimestampIndex {
-        index: usize,
-        source: datatypes::error::Error,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to convert into protobuf struct, source {}", source))]
     ToProtobuf {
         source: proto::write_batch::Error,
@@ -449,7 +442,7 @@ pub mod codec {
             },
         },
         error::Result as DataTypesResult,
-        schema::{ColumnSchema, Schema, SchemaRef},
+        schema::{Schema, SchemaRef},
         vectors::Helper,
     };
     use prost::Message;
@@ -458,8 +451,8 @@ pub mod codec {
 
     use super::{
         DataCorruptedSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
-        Error as WriteBatchError, FromProtobufSnafu, InvalidTimestampIndexSnafu, Mutation,
-        ParseSchemaSnafu, Result, ToProtobufSnafu, WriteBatch,
+        Error as WriteBatchError, FromProtobufSnafu, Mutation, ParseSchemaSnafu, Result,
+        ToProtobufSnafu, WriteBatch,
     };
     use crate::proto::{
         wal::{MutationExtra, MutationType},
@@ -710,7 +703,6 @@ pub mod codec {
             let write_batch = write_batch::WriteBatch {
                 schema: Some(schema),
                 mutations,
-                num_rows: item.num_rows as u64,
             };
 
             write_batch.encode(dst).context(EncodeProtobufSnafu)
@@ -739,24 +731,7 @@ pub mod codec {
                 message: "schema required",
             })?;
 
-            let column_schemas = schema
-                .column_schemas
-                .iter()
-                .map(|column_schema| {
-                    ColumnSchema::try_from(column_schema).context(FromProtobufSnafu)
-                })
-                .collect::<Result<Vec<_>>>()?;
-
-            let schema: SchemaRef = match schema.timestamp_index {
-                Some(index) => Arc::new(
-                    Schema::with_timestamp_index(column_schemas, index.value as usize).context(
-                        InvalidTimestampIndexSnafu {
-                            index: index.value as usize,
-                        },
-                    )?,
-                ),
-                None => Arc::new(Schema::new(column_schemas)),
-            };
+            let schema: SchemaRef = SchemaRef::try_from(schema).context(FromProtobufSnafu {})?;
 
             ensure!(
                 write_batch.mutations.len() == self.mutation_extras.len(),
@@ -796,19 +771,12 @@ pub mod codec {
                             .into_iter()
                             .zip(put.columns.into_iter())
                             .map(|((name, data_type), column)| {
-                                gen_put_data_vector(
-                                    data_type,
-                                    write_batch.num_rows as usize,
-                                    column,
-                                )
-                                .map(|v| (name, v))
+                                gen_put_data_vector(data_type, column).map(|vector| (name, vector))
                             })
                             .collect::<write_batch::Result<Vec<_>>>()
                             .context(FromProtobufSnafu {})?
                             .into_iter()
-                            .map(|(name, vector_ref)| {
-                                put_data.add_column_by_name(&name, vector_ref)
-                            })
+                            .map(|(name, vector)| put_data.add_column_by_name(&name, vector))
                             .collect::<Result<Vec<_>>>();
 
                         res.map(|_| Mutation::Put(put_data))
@@ -1067,20 +1035,20 @@ mod tests {
     }
 
     fn gen_new_batch_and_extras() -> (WriteBatch, Vec<MutationExtra>) {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-        let boolv = Arc::new(BooleanVector::from(vec![Some(true), Some(false), None]));
-        let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
-
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", intv.clone()).unwrap();
-        put_data.add_version_column(intv).unwrap();
-        put_data.add_value_column("v1", boolv).unwrap();
-        put_data.add_key_column("ts", tsv).unwrap();
-
         let mut batch = new_test_batch();
-        assert!(batch.is_empty());
-        batch.put(put_data).unwrap();
-        assert!(!batch.is_empty());
+        for i in 0..10 {
+            let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
+            let boolv = Arc::new(BooleanVector::from(vec![Some(true), Some(false), None]));
+            let tsv = Arc::new(Int64Vector::from_vec(vec![i, i, i]));
+
+            let mut put_data = PutData::new();
+            put_data.add_key_column("k1", intv.clone()).unwrap();
+            put_data.add_version_column(intv).unwrap();
+            put_data.add_value_column("v1", boolv).unwrap();
+            put_data.add_key_column("ts", tsv).unwrap();
+
+            batch.put(put_data).unwrap();
+        }
 
         let extras = proto::wal::gen_mutation_extras(&batch);
 
@@ -1122,18 +1090,18 @@ mod tests {
     }
 
     fn gen_new_batch_and_extras_with_none_column() -> (WriteBatch, Vec<MutationExtra>) {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-        let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
-
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", intv.clone()).unwrap();
-        put_data.add_version_column(intv).unwrap();
-        put_data.add_key_column("ts", tsv).unwrap();
-
         let mut batch = new_test_batch();
-        assert!(batch.is_empty());
-        batch.put(put_data).unwrap();
-        assert!(!batch.is_empty());
+        for _ in 0..10 {
+            let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
+            let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
+
+            let mut put_data = PutData::new();
+            put_data.add_key_column("k1", intv.clone()).unwrap();
+            put_data.add_version_column(intv).unwrap();
+            put_data.add_key_column("ts", tsv).unwrap();
+
+            batch.put(put_data).unwrap();
+        }
 
         let extras = proto::wal::gen_mutation_extras(&batch);
 
