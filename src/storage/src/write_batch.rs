@@ -454,14 +454,17 @@ pub mod codec {
         Error as WriteBatchError, FromProtobufSnafu, Mutation, ParseSchemaSnafu, Result,
         ToProtobufSnafu, WriteBatch,
     };
-    use crate::proto::{
-        wal::{MutationExtra, MutationType},
-        write_batch::{self, gen_columns, gen_put_data_vector},
-    };
     use crate::write_batch::{DecodeProtobufSnafu, EncodeProtobufSnafu, PutData};
     use crate::{
         arrow_stream::ArrowStreamReader,
         codec::{Decoder, Encoder},
+    };
+    use crate::{
+        bit_vec,
+        proto::{
+            wal::{MutationExtra, MutationType},
+            write_batch::{self, gen_columns, gen_put_data_vector},
+        },
     };
 
     // TODO(jiachun): The codec logic is too complex, maybe we should use protobuf to
@@ -520,7 +523,7 @@ pub mod codec {
                 } else {
                     let valid_ipc_fields = ipc_fields
                         .iter()
-                        .zip(bit_vec::BitVec::from_bytes(column_null_mask))
+                        .zip(bit_vec::BitVec::from_slice(column_null_mask))
                         .filter(|(_, is_null)| !*is_null)
                         .map(|(ipc_field, _)| ipc_field.clone())
                         .collect::<Vec<_>>();
@@ -627,8 +630,8 @@ pub mod codec {
                             let valid_column_names = if ext.column_null_mask.is_empty() {
                                 column_names.clone()
                             } else {
-                                bit_vec::BitVec::from_bytes(&ext.column_null_mask)
-                                    .iter()
+                                bit_vec::BitVec::from_slice(&ext.column_null_mask)
+                                    .into_iter()
                                     .zip(column_names.iter())
                                     .filter(|(is_null, _)| !*is_null)
                                     .map(|(_, column_name)| column_name.clone())
@@ -757,8 +760,8 @@ pub mod codec {
                                 .map(|column| (column.name.clone(), column.data_type.clone()))
                                 .collect::<Vec<_>>()
                         } else {
-                            bit_vec::BitVec::from_bytes(&ext.column_null_mask)
-                                .iter()
+                            bit_vec::BitVec::from_slice(&ext.column_null_mask)
+                                .into_iter()
                                 .zip(column_schemas.iter())
                                 .filter(|(is_null, _)| !*is_null)
                                 .map(|(_, column)| (column.name.clone(), column.data_type.clone()))
