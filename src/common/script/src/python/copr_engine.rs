@@ -4,7 +4,7 @@
 //! TODO(discord9): resolve cyclic package dependency of `query` crate
 
 use super::copr_parse::parse_copr;
-use crate::scalars::python::{coprocessor::Coprocessor, error::Result};
+use crate::python::{coprocessor::Coprocessor, error::Result};
 
 pub struct CoprEngine {
     copr: Coprocessor

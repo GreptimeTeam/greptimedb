@@ -786,6 +786,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-script"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "arrow2",
+ "chrono-tz",
+ "common-error",
+ "common-query",
+ "common-recordbatch",
+ "console",
+ "datafusion-common",
+ "datatypes",
+ "libc",
+ "num",
+ "num-traits",
+ "once_cell",
+ "paste",
+ "ron",
+ "rustpython-ast",
+ "rustpython-bytecode",
+ "rustpython-compiler",
+ "rustpython-compiler-core",
+ "rustpython-parser",
+ "rustpython-vm",
+ "serde",
+ "snafu",
+]
+
+[[package]]
 name = "common-telemetry"
 version = "0.1.0"
 dependencies = [

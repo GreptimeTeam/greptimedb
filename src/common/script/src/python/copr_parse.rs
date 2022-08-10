@@ -8,9 +8,9 @@ use rustpython_parser::{
 };
 use snafu::ResultExt;
 
-use crate::scalars::python::coprocessor::Coprocessor;
-use crate::scalars::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
-use crate::scalars::python::AnnotationInfo;
+use crate::python::coprocessor::Coprocessor;
+use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
+use crate::python::AnnotationInfo;
 
 #[derive(Default, Debug)]
 pub struct DecoratorArgs {

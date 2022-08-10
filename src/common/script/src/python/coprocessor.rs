@@ -23,12 +23,12 @@ use vm::scope::Scope;
 use vm::{PyObjectRef, PyPayload, VirtualMachine};
 
 use crate::fail_parse_error;
-use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
-use crate::scalars::python::error::{
+use crate::python::copr_parse::{parse_copr, ret_parse_error};
+use crate::python::error::{
     ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
     PyRuntimeSnafu, Result, TypeCastSnafu,
 };
-use crate::scalars::python::type_::{is_instance, PyVector};
+use crate::python::type_::{is_instance, PyVector};
 
 fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
     OtherSnafu { reason }

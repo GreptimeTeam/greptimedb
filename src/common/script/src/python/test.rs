@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{get_error_reason_loc, visualize_loc};
 use super::*;
-use crate::scalars::python::error::pretty_print_error_in_src;
-use crate::scalars::python::{copr_parse::parse_copr, coprocessor::Coprocessor, error::Error};
+use crate::python::error::pretty_print_error_in_src;
+use crate::python::{copr_parse::parse_copr, coprocessor::Coprocessor, error::Error};
 
 #[derive(Deserialize, Debug)]
 struct TestCase {
@@ -67,7 +67,7 @@ fn create_sample_recordbatch() -> DfRecordBatch {
 /// and exec/parse (depending on the type of predicate) then decide if result is as expected
 #[test]
 fn run_ron_testcases() {
-    let loc = Path::new("src/scalars/python/copr_testcases/testcases.ron");
+    let loc = Path::new("src/python/copr_testcases/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
     let mut buf = String::new();
