@@ -51,11 +51,13 @@ pub struct AnnotationInfo {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Coprocessor {
     pub name: String,
-    // get from python decorator args&returns
+    /// get from python decorator (args = `[`a list of string`]`)
     pub args: Vec<String>,
+    /// get from python decorator (returns = `[`a list of string`]`)
     pub returns: Vec<String>,
-    // get from python function args& returns' annotation, first is type, second is is_nullable
+    /// get from python function args' annotation, first is type, second is is_nullable
     pub arg_types: Vec<Option<AnnotationInfo>>,
+    /// get from python function returns' annotation, first is type, second is is_nullable
     pub return_types: Vec<Option<AnnotationInfo>>,
     /// store its corresponding script, also skip serde when in `cfg(test)` to reduce work in compare
     #[cfg_attr(test, serde(skip))]

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use arrow::datatypes::DataType;
 use rustpython_parser::{
@@ -6,7 +6,7 @@ use rustpython_parser::{
     ast::{Arguments, Location},
     parser,
 };
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
 use crate::scalars::python::coprocessor::Coprocessor;
 use crate::scalars::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
