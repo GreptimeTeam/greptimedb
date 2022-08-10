@@ -6,6 +6,7 @@ mod error;
 #[cfg(test)]
 mod test;
 mod type_;
+mod copr_engine;
 
 use coprocessor::AnnotationInfo;
 pub use coprocessor::{exec_copr_print, exec_coprocessor};
