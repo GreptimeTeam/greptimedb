@@ -3,7 +3,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use catalog::{CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef};
+use catalog::{
+    CatalogListRef, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
+};
 use datafusion::catalog::{
     catalog::{CatalogList as DfCatalogList, CatalogProvider as DfCatalogProvider},
     schema::SchemaProvider as DfSchemaProvider,
@@ -108,7 +110,7 @@ impl CatalogProvider for CatalogProviderAdapter {
 
 ///Greptime CatalogProvider -> datafusion's CatalogProvider
 struct DfCatalogProviderAdapter {
-    catalog_provider: Arc<dyn CatalogProvider>,
+    catalog_provider: CatalogProviderRef,
     runtime: Arc<RuntimeEnv>,
 }
 
@@ -240,5 +242,28 @@ impl SchemaProvider for SchemaProviderAdapter {
 
     fn table_exist(&self, name: &str) -> bool {
         self.df_schema_provider.table_exist(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use catalog::memory::MemorySchemaProvider;
+
+    use super::*;
+
+    #[test]
+    #[should_panic]
+    pub fn test_register_table() {
+        let adapter = CatalogProviderAdapter {
+            df_catalog_provider: Arc::new(
+                datafusion::catalog::catalog::MemoryCatalogProvider::new(),
+            ),
+            runtime: Arc::new(RuntimeEnv::default()),
+        };
+
+        adapter.register_schema(
+            "whatever".to_string(),
+            Arc::new(MemorySchemaProvider::new()),
+        );
     }
 }

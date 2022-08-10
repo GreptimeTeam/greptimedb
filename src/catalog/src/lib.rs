@@ -23,14 +23,14 @@ pub trait CatalogList: Sync + Send {
     fn register_catalog(
         &self,
         name: String,
-        catalog: Arc<dyn CatalogProvider>,
-    ) -> Option<Arc<dyn CatalogProvider>>;
+        catalog: CatalogProviderRef,
+    ) -> Option<CatalogProviderRef>;
 
     /// Retrieves the list of available catalog names
     fn catalog_names(&self) -> Vec<String>;
 
     /// Retrieves a specific catalog by name, provided it exists.
-    fn catalog(&self, name: &str) -> Option<Arc<dyn CatalogProvider>>;
+    fn catalog(&self, name: &str) -> Option<CatalogProviderRef>;
 }
 
 /// Represents a catalog, comprising a number of named schemas.
@@ -47,7 +47,7 @@ pub trait CatalogProvider: Sync + Send {
         -> Option<SchemaProviderRef>;
 
     /// Retrieves a specific schema from the catalog by name, provided it exists.
-    fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>>;
+    fn schema(&self, name: &str) -> Option<SchemaProviderRef>;
 }
 
 pub type CatalogListRef = Arc<dyn CatalogList>;
