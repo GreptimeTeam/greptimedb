@@ -39,7 +39,7 @@ fn table_manifest_dir(table_name: &str) -> String {
 
 /// [Table] implementation.
 pub struct MitoTable<R: Region> {
-    _manifest: TableManifest,
+    manifest: TableManifest,
     table_info: TableInfo,
     // TODO(dennis): a table contains multi regions
     region: R,
@@ -159,7 +159,7 @@ impl<R: Region> MitoTable<R> {
         Self {
             table_info,
             region,
-            _manifest: manifest,
+            manifest,
         }
     }
 
@@ -249,8 +249,24 @@ impl<R: Region> MitoTable<R> {
         &self.table_info
     }
 
+    #[inline]
+    pub fn manifest(&self) -> &TableManifest {
+        &self.manifest
+    }
+
     fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
         // TODO(dennis): use manifest version in catalog ?
         (manifest::MIN_VERSION, manifest::MAX_VERSION)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_manifest_dir() {
+        assert_eq!("demo/manifest/", table_manifest_dir("demo"));
+        assert_eq!("numbers/manifest/", table_manifest_dir("numbers"));
     }
 }

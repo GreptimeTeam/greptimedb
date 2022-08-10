@@ -11,17 +11,20 @@ use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::engine::EngineContext;
 use table::engine::TableEngine;
+use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::CreateTableRequest;
 use table::TableRef;
 use tempdir::TempDir;
 
 use crate::config::EngineConfig;
 use crate::engine::MitoEngine;
-use crate::table::test_util::mock_engine::MockEngine;
+use crate::engine::DEFAULT_ENGINE;
+pub use crate::table::test_util::mock_engine::MockEngine;
+pub use crate::table::test_util::mock_engine::MockRegion;
 
 pub const TABLE_NAME: &str = "demo";
 
-fn schema_for_test() -> Schema {
+pub fn schema_for_test() -> Schema {
     let column_schemas = vec![
         ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
@@ -33,6 +36,23 @@ fn schema_for_test() -> Schema {
 }
 
 pub type MockMitoEngine = MitoEngine<MockEngine>;
+
+pub fn build_test_table_info() -> TableInfo {
+    let table_meta = TableMetaBuilder::default()
+        .schema(Arc::new(schema_for_test()))
+        .engine(DEFAULT_ENGINE)
+        .next_column_id(1)
+        .primary_key_indices(vec![0, 1])
+        .build()
+        .unwrap();
+
+    TableInfoBuilder::new(TABLE_NAME.to_string(), table_meta)
+        .ident(0)
+        .table_version(0u64)
+        .table_type(TableType::Base)
+        .build()
+        .unwrap()
+}
 
 pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     let dir = TempDir::new(prefix).unwrap();
@@ -78,9 +98,10 @@ pub async fn setup_test_engine_and_table() -> (
     (table_engine, table, schema, dir)
 }
 
-pub async fn setup_mock_engine_and_table() -> (MockEngine, MockMitoEngine, TableRef, ObjectStore) {
+pub async fn setup_mock_engine_and_table(
+) -> (MockEngine, MockMitoEngine, TableRef, ObjectStore, TempDir) {
     let mock_engine = MockEngine::default();
-    let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
+    let (dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
     let table_engine = MitoEngine::new(
         EngineConfig::default(),
         mock_engine.clone(),
@@ -102,5 +123,5 @@ pub async fn setup_mock_engine_and_table() -> (MockEngine, MockMitoEngine, Table
         .await
         .unwrap();
 
-    (mock_engine, table_engine, table, object_store)
+    (mock_engine, table_engine, table, object_store, dir)
 }

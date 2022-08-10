@@ -123,6 +123,12 @@ pub enum Error {
         backtrace: Backtrace,
         table_name: String,
     },
+
+    #[snafu(display("Table already exists: {}", table_name))]
+    TableExists {
+        backtrace: Backtrace,
+        table_name: String,
+    },
 }
 
 impl From<Error> for table::error::Error {
@@ -146,6 +152,7 @@ impl ErrorExt for Error {
             | BuildTableMeta { .. }
             | BuildTableInfo { .. }
             | BuildRegionDescriptor { .. }
+            | TableExists { .. }
             | MissingTimestampIndex { .. } => StatusCode::InvalidArguments,
 
             UpdateTableManifest { .. } => StatusCode::StorageUnavailable,

@@ -25,7 +25,7 @@ use tokio::sync::Mutex;
 use crate::config::EngineConfig;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
-    BuildRowKeyDescriptorSnafu, MissingTimestampIndexSnafu, Result,
+    BuildRowKeyDescriptorSnafu, MissingTimestampIndexSnafu, Result, TableExistsSnafu
 };
 use crate::table::MitoTable;
 
@@ -238,7 +238,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let table_name = &request.name;
 
         if let Some(table) = self.get_table(table_name) {
-            return Ok(table);
+            if request.create_if_not_exists {
+                return Ok(table);
+            } else {
+                return TableExistsSnafu { table_name }.fail();
+            }
         }
 
         let (next_column_id, default_cf) =
@@ -262,7 +266,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let _lock = self.table_mutex.lock().await;
         // Checks again, read lock should be enough since we are guarded by the mutex.
         if let Some(table) = self.get_table(table_name) {
-            return Ok(table);
+            if request.create_if_not_exists {
+                return Ok(table);
+            } else {
+                return TableExistsSnafu { table_name }.fail();
+            }
         }
 
         let opts = CreateOptions {
@@ -389,10 +397,26 @@ mod tests {
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;
     use datatypes::vectors::*;
+    use store_api::manifest::Manifest;
     use table::requests::InsertRequest;
 
     use super::*;
     use crate::table::test_util;
+    use crate::table::test_util::MockRegion;
+
+    #[test]
+    fn test_region_name() {
+        assert_eq!("0000000000", region_name(0));
+        assert_eq!("0000000001", region_name(1));
+        assert_eq!("0000000100", region_name(100));
+        assert_eq!("0000009999", region_name(9999));
+    }
+
+    #[test]
+    fn test_table_dir() {
+        assert_eq!("test_table/", table_dir("test_table"));
+        assert_eq!("demo/", table_dir("demo"));
+    }
 
     #[tokio::test]
     async fn test_create_table_insert_scan() {
@@ -445,6 +469,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_if_not_exists() {
+        common_telemetry::init_default_ut_logging();
+        let ctx = EngineContext::default();
+
+        let (_engine, table_engine, table, _object_store, _dir) =
+            test_util::setup_mock_engine_and_table().await;
+
+        let table = table
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+        let table_info = table.table_info();
+
+        let request = CreateTableRequest {
+            name: table_info.name.to_string(),
+            schema: table_info.meta.schema.clone(),
+            create_if_not_exists: true,
+            desc: None,
+            primary_key_indices: Vec::default(),
+        };
+
+        let created_table = table_engine.create_table(&ctx, request).await.unwrap();
+        assert_eq!(
+            table_info,
+            created_table
+                .as_any()
+                .downcast_ref::<MitoTable<MockRegion>>()
+                .unwrap()
+                .table_info()
+        );
+
+        // test create_if_not_exists=false
+        let request = CreateTableRequest {
+            name: table_info.name.to_string(),
+            schema: table_info.meta.schema.clone(),
+            create_if_not_exists: false,
+            desc: None,
+            primary_key_indices: Vec::default(),
+        };
+
+        let result = table_engine.create_table(&ctx, request).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, Err(e) if format!("{:?}", e).contains("Table already exists")));
+    }
+
+    #[tokio::test]
     async fn test_open_table() {
         common_telemetry::init_default_ut_logging();
 
@@ -457,8 +528,8 @@ mod tests {
             table_id: 0,
         };
 
-        let (engine, table, object_store) = {
-            let (engine, table_engine, table, object_store) =
+        let (engine, table, object_store, _dir) = {
+            let (engine, table_engine, table, object_store, dir) =
                 test_util::setup_mock_engine_and_table().await;
             assert_eq!(MITO_ENGINE, table_engine.name());
             // Now try to open the table again.
@@ -469,7 +540,7 @@ mod tests {
                 .unwrap();
             assert_eq!(table.schema(), reopened.schema());
 
-            (engine, table, object_store)
+            (engine, table, object_store, dir)
         };
 
         // Construct a new table engine, and try to open the table.
@@ -480,5 +551,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(table.schema(), reopened.schema());
+
+        let table = table
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+        let reopened = reopened
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+
+        assert_eq!(table.table_info(), reopened.table_info());
+        assert_eq!(reopened.manifest().last_version(), 1);
     }
 }

@@ -113,4 +113,42 @@ impl MetaAction for TableMetaActionList {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use common_telemetry::logging;
+
+    use super::*;
+    use crate::table::test_util;
+
+    #[test]
+    fn test_encode_decode_action_list() {
+        common_telemetry::init_default_ut_logging();
+        let mut protocol = ProtocolAction::new();
+        protocol.min_reader_version = 1;
+
+        let table_info = test_util::build_test_table_info();
+
+        let mut action_list = TableMetaActionList::new(vec![
+            TableMetaAction::Protocol(protocol.clone()),
+            TableMetaAction::Change(Box::new(TableChange { table_info })),
+        ]);
+        action_list.set_prev_version(3);
+
+        let bs = action_list.encode().unwrap();
+
+        logging::debug!(
+            "Encoded action list: \r\n{}",
+            String::from_utf8(bs.clone()).unwrap()
+        );
+
+        let e = TableMetaActionList::decode(&bs, 0);
+        assert!(e.is_err());
+        assert_eq!(
+            "Manifest protocol forbid to read, min_version: 1, supported_version: 0",
+            format!("{}", e.err().unwrap())
+        );
+
+        let (decode_list, p) = TableMetaActionList::decode(&bs, 1).unwrap();
+        assert_eq!(decode_list, action_list);
+        assert_eq!(p.unwrap(), protocol);
+    }
+}
