@@ -1,20 +1,22 @@
 use std::ops::Deref;
 
-use arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
-use arrow::compute::cast::CastOptions;
-use arrow::compute::{self, arithmetics};
-use arrow::compute::{cast, comparison};
 use arrow::datatypes::DataType;
 use arrow::scalar::{PrimitiveScalar, Scalar};
+use arrow::{
+    array::{Array, ArrayRef, PrimitiveArray},
+    compute::{
+        arithmetics,
+        cast::{self, CastOptions},
+        comparison,
+    },
+};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
 use datatypes::{
     value,
     vectors::{Helper, VectorBuilder, VectorRef},
 };
-use libc::EAI_BADFLAGS;
-use rustpython_vm::function::{Either, PyComparisonValue};
-use rustpython_vm::types::{Comparable, PyComparisonOp};
+use rustpython_vm::types::PyComparisonOp;
 use rustpython_vm::{
     builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr, PyTypeRef},
     function::{FuncArgs, OptionalArg},
@@ -389,11 +391,16 @@ impl PyVector {
     }
 
     /// rich compare, return a boolean array, accept type are vec and vec and vec and number
-    fn richcompare(&self, other: PyObjectRef, op:PyComparisonOp, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm){
+    fn richcompare(
+        &self,
+        other: PyObjectRef,
+        op: PyComparisonOp,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyVector> {
+        if is_pyobj_scalar(&other, vm) {
             let scalar_op = get_arrow_scalar_op(op);
             self.scalar_arith_op(other, None, scalar_op, vm)
-        }else{
+        } else {
             let arr_op = get_arrow_op(op);
             self.arith_op(other, None, arr_op, vm)
         }
@@ -404,29 +411,29 @@ impl PyVector {
     // (yes there is a slot_richcompare function, but it is not used in anywhere)
     // so use our own function
     // TODO(discord9): test those funciton
-    
-    #[pymethod(name="eq")]
-    fn eq(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector>{
+
+    #[pymethod(name = "eq")]
+    fn eq(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Eq, vm)
     }
-    #[pymethod(name="ne")]
-    fn ne(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector>{
+    #[pymethod(name = "ne")]
+    fn ne(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Ne, vm)
     }
-    #[pymethod(name="gt")]
-    fn gt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector>{
+    #[pymethod(name = "gt")]
+    fn gt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Gt, vm)
     }
-    #[pymethod(name="lt")]
-    fn lt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector>{
+    #[pymethod(name = "lt")]
+    fn lt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Lt, vm)
     }
-    #[pymethod(name="ge")]
-    fn ge(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector>{
+    #[pymethod(name = "ge")]
+    fn ge(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Ge, vm)
     }
-    #[pymethod(name="le")]
-    fn le(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector>{
+    #[pymethod(name = "le")]
+    fn le(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Le, vm)
     }
 
@@ -516,11 +523,11 @@ fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> Box<dy
         PyComparisonOp::Ge => comparison::gt_eq,
         PyComparisonOp::Le => comparison::lt_eq,
     };
-    let ret = move |a: &dyn Array, b: &dyn Array| -> Box<dyn Array> {
+
+    move |a: &dyn Array, b: &dyn Array| -> Box<dyn Array> {
         let ret = op_bool_arr(a, b);
         Box::new(ret) as _
-    };
-    ret
+    }
 }
 
 /// get corrsponding arrow scalar op function according to given PyComaprsionOp
@@ -535,11 +542,11 @@ fn get_arrow_scalar_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Scalar) -
         PyComparisonOp::Ge => comparison::gt_eq_scalar,
         PyComparisonOp::Le => comparison::lt_eq_scalar,
     };
-    let ret = move |a: &dyn Array, b: &dyn Scalar| -> Box<dyn Array> {
+
+    move |a: &dyn Array, b: &dyn Scalar| -> Box<dyn Array> {
         let ret = op_bool_arr(a, b);
         Box::new(ret) as _
-    };
-    ret
+    }
 }
 
 /// if this pyobj can be cast to a scalar value(i.e Null/Int/Float/Bool)
