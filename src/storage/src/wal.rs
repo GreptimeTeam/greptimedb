@@ -134,8 +134,7 @@ impl<S: LogStore> Wal<S> {
     }
 
     async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
-        let mut e = self.store.entry(bytes);
-        e.set_id(seq);
+        let e = self.store.entry(bytes, seq);
 
         let res = self
             .store
@@ -275,13 +274,14 @@ mod tests {
 
     #[tokio::test]
     pub async fn test_read_wal_only_header() -> Result<()> {
+        common_telemetry::init_default_ut_logging();
         let (log_store, _tmp) =
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
         let wal = Wal::new("test_region", Arc::new(log_store));
         let header = WalHeader::with_last_manifest_version(111);
         let (seq_num, _) = wal.write_to_wal(3, header, Payload::None).await?;
 
-        assert_eq!(0, seq_num);
+        assert_eq!(3, seq_num);
 
         let mut stream = wal.read_from_wal(seq_num).await?;
         let mut data = vec![];

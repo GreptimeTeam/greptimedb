@@ -51,8 +51,8 @@ impl LogStore for NoopLogStore {
         todo!()
     }
 
-    fn entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry {
-        EntryImpl::new(data)
+    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id) -> Self::Entry {
+        EntryImpl::new(data, id)
     }
 
     fn namespace(&self, name: &str) -> Self::Namespace {

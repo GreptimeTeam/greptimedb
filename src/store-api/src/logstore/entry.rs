@@ -17,8 +17,6 @@ pub trait Entry: Encode + Send + Sync {
     /// Return file offset of entry.
     fn offset(&self) -> Offset;
 
-    fn set_offset(&mut self, offset: Offset);
-
     fn set_id(&mut self, id: Id);
 
     /// Returns epoch of entry.
