@@ -24,7 +24,6 @@ use num_traits::AsPrimitive;
 use query::error::Result;
 use query::query_engine::Output;
 use query::QueryEngineFactory;
-use table::TableRef;
 use test_util::MemTable;
 
 #[derive(Debug, Default)]
@@ -223,9 +222,9 @@ where
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let column: VectorRef = Arc::new(PrimitiveVector::<T>::from_vec(numbers));
     let recordbatch = RecordBatch::new(schema, vec![column]).unwrap();
-    let testing_table = Arc::new(MemTable::new(recordbatch));
+    let testing_table = MemTable::new(&table_name, recordbatch);
 
-    let factory = new_query_engine_factory(table_name.clone(), testing_table);
+    let factory = new_query_engine_factory(testing_table);
     let engine = factory.query_engine();
 
     engine.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
@@ -256,7 +255,10 @@ where
     Ok(())
 }
 
-pub fn new_query_engine_factory(table_name: String, table: TableRef) -> QueryEngineFactory {
+fn new_query_engine_factory(table: MemTable) -> QueryEngineFactory {
+    let table_name = table.table_name().to_string();
+    let table = Arc::new(table);
+
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
     let catalog_list = Arc::new(MemoryCatalogList::default());

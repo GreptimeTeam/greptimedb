@@ -44,7 +44,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
         (0..100).collect::<Vec<_>>(),
     ))];
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let table = Arc::new(MemTable::new(recordbatch));
+    let table = Arc::new(MemTable::new("numbers", recordbatch));
 
     let limit = 10;
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
@@ -158,9 +158,12 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let even_number_table = Arc::new(MemTable::new(recordbatch));
+    let even_number_table = Arc::new(MemTable::new("even_numbers", recordbatch));
     schema_provider
-        .register_table("even_numbers".to_string(), even_number_table)
+        .register_table(
+            even_number_table.table_name().to_string(),
+            even_number_table,
+        )
         .unwrap();
 
     // create table with ordered primitives, and all columns' length are odd
@@ -185,9 +188,9 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let odd_number_table = Arc::new(MemTable::new(recordbatch));
+    let odd_number_table = Arc::new(MemTable::new("odd_numbers", recordbatch));
     schema_provider
-        .register_table("odd_numbers".to_string(), odd_number_table)
+        .register_table(odd_number_table.table_name().to_string(), odd_number_table)
         .unwrap();
 
     // create table with floating numbers
@@ -200,9 +203,12 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
     let columns = vec![f32_numbers, f64_numbers];
     let schema = Arc::new(Schema::new(column_schemas));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let float_number_table = Arc::new(MemTable::new(recordbatch));
+    let float_number_table = Arc::new(MemTable::new("float_numbers", recordbatch));
     schema_provider
-        .register_table("float_numbers".to_string(), float_number_table)
+        .register_table(
+            float_number_table.table_name().to_string(),
+            float_number_table,
+        )
         .unwrap();
 
     catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);

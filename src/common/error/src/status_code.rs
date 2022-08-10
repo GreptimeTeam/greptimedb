@@ -39,6 +39,11 @@ pub enum StatusCode {
     /// Storage is temporarily unable to handle the request
     StorageUnavailable,
     // ====== End of storage related status code =======
+
+    // ====== Begin of server related status code =====
+    /// Runtime resources exhausted, like creating threads failed.
+    RuntimeResourcesExhausted,
+    // ====== End of server related status code =======
 }
 
 impl fmt::Display for StatusCode {
