@@ -26,13 +26,13 @@ use crate::{
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
-pub struct MemoryCatalogManager {
+pub struct LocalCatalogManager {
     system: Arc<SystemCatalog>,
     catalogs: Arc<MemoryCatalogList>,
     engine: TableEngineRef,
 }
 
-impl MemoryCatalogManager {
+impl LocalCatalogManager {
     /// Create a new [CatalogManager] with given user catalogs and table engine
     pub async fn try_new(engine: TableEngineRef) -> Result<Self> {
         let table = SystemCatalogTable::new(engine.clone()).await?;
@@ -177,13 +177,13 @@ impl MemoryCatalogManager {
             .engine
             .open_table(&context, request)
             .await
-            .context(OpenTableSnafu {
+            .with_context(|_| OpenTableSnafu {
                 table_info: format!(
                     "{}.{}.{}, id: {}",
                     &t.catalog_name, &t.schema_name, &t.table_name, t.table_id
                 ),
             })?
-            .context(TableNotFoundSnafu {
+            .with_context(|| TableNotFoundSnafu {
                 table_info: format!(
                     "{}.{}.{}, id: {}",
                     &t.catalog_name, &t.schema_name, &t.table_name, t.table_id
@@ -195,7 +195,7 @@ impl MemoryCatalogManager {
     }
 }
 
-impl CatalogList for MemoryCatalogManager {
+impl CatalogList for LocalCatalogManager {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -224,7 +224,7 @@ impl CatalogList for MemoryCatalogManager {
 }
 
 #[async_trait::async_trait]
-impl CatalogManager for MemoryCatalogManager {
+impl CatalogManager for LocalCatalogManager {
     /// Start [MemoryCatalogManager] to load all information from system catalog table.
     /// Make sure table engine is initialized before starting [MemoryCatalogManager].
     async fn start(&self) -> Result<()> {

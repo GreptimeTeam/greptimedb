@@ -46,7 +46,7 @@ impl Instance {
                 .context(error::OpenStorageEngineSnafu)?,
         );
         let catalog_manager = Arc::new(
-            catalog::MemoryCatalogManager::try_new(Arc::new(table_engine.clone()))
+            catalog::LocalCatalogManager::try_new(Arc::new(table_engine.clone()))
                 .await
                 .context(NewCatalogSnafu)?,
         );

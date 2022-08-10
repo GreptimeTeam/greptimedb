@@ -121,7 +121,6 @@ pub fn decode_system_catalog(
 ) -> Result<Entry> {
     let entry_type = entry_type.context(InvalidKeySnafu { key: None })?;
     let key = String::from_utf8_lossy(key.context(InvalidKeySnafu { key: None })?);
-    let value = value.context(EmptyValueSnafu)?;
 
     match EntryType::try_from(entry_type)? {
         EntryType::Catalog => {
@@ -156,6 +155,7 @@ pub fn decode_system_catalog(
                     key: Some(key.to_string())
                 }
             );
+            let value = value.context(EmptyValueSnafu)?;
             let table_meta: TableEntryValue =
                 serde_json::from_slice(value).context(ValueDeserializeSnafu)?;
             Ok(Entry::Table(TableEntry {
@@ -168,7 +168,7 @@ pub fn decode_system_catalog(
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum EntryType {
     Catalog = 1,
     Schema = 2,
@@ -183,34 +183,33 @@ impl TryFrom<u8> for EntryType {
             b if b == Self::Catalog as u8 => Ok(Self::Catalog),
             b if b == Self::Schema as u8 => Ok(Self::Schema),
             b if b == Self::Table as u8 => Ok(Self::Table),
-            b => Err(InvalidEntryTypeSnafu {
+            b => InvalidEntryTypeSnafu {
                 entry_type: Some(b),
             }
-            .build()),
+            .fail(),
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
+#[derive(Debug, PartialEq)]
 pub enum Entry {
     Catalog(CatalogEntry),
     Schema(SchemaEntry),
     Table(TableEntry),
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct CatalogEntry {
     pub catalog_name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct SchemaEntry {
     pub catalog_name: String,
     pub schema_name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct TableEntry {
     pub catalog_name: String,
     pub schema_name: String,
@@ -228,30 +227,72 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn test_serialize() {
-        let entry = CatalogEntry {
-            catalog_name: "test_catalog".to_string(),
-        };
-        let serialized = serde_json::to_string(&entry).unwrap();
-        let result: CatalogEntry = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(entry, result);
+    pub fn test_decode_catalog_enrty() {
+        let entry = decode_system_catalog(
+            Some(EntryType::Catalog as u8),
+            Some("some_catalog".as_bytes()),
+            None,
+        )
+        .unwrap();
+        if let Entry::Catalog(e) = entry {
+            assert_eq!("some_catalog", e.catalog_name);
+        } else {
+            panic!("Unexpected type: {:?}", entry);
+        }
+    }
 
-        let entry = SchemaEntry {
-            catalog_name: "test_catalog".to_string(),
-            schema_name: "test_schema".to_string(),
-        };
-        let string = serde_json::to_string(&entry).unwrap();
-        let result: SchemaEntry = serde_json::from_str(&string).unwrap();
-        assert_eq!(entry, result);
+    #[test]
+    pub fn test_decode_schema_entry() {
+        let entry = decode_system_catalog(
+            Some(EntryType::Schema as u8),
+            Some("some_catalog.some_schema".as_bytes()),
+            None,
+        )
+        .unwrap();
 
-        let entry = TableEntry {
-            catalog_name: "test_catalog".to_string(),
-            schema_name: "test_schema".to_string(),
-            table_name: "test_table".to_string(),
-            table_id: 42,
-        };
-        let string = serde_json::to_string(&entry).unwrap();
-        let result: TableEntry = serde_json::from_str(&string).unwrap();
-        assert_eq!(entry, result);
+        if let Entry::Schema(e) = entry {
+            assert_eq!("some_catalog", e.catalog_name);
+            assert_eq!("some_schema", e.schema_name);
+        } else {
+            panic!("Unexpected type: {:?}", entry);
+        }
+    }
+
+    #[test]
+    pub fn test_decode_table() {
+        let entry = decode_system_catalog(
+            Some(EntryType::Table as u8),
+            Some("some_catalog.some_schema.some_table".as_bytes()),
+            Some("{\"table_id\":42}".as_bytes()),
+        )
+        .unwrap();
+
+        if let Entry::Table(e) = entry {
+            assert_eq!("some_catalog", e.catalog_name);
+            assert_eq!("some_schema", e.schema_name);
+            assert_eq!("some_table", e.table_name);
+            assert_eq!(42, e.table_id);
+        } else {
+            panic!("Unexpected type: {:?}", entry);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    pub fn test_decode_mismatch() {
+        decode_system_catalog(
+            Some(EntryType::Table as u8),
+            Some("some_catalog.some_schema.some_table".as_bytes()),
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    pub fn test_entry_type() {
+        assert_eq!(EntryType::Catalog, EntryType::try_from(1).unwrap());
+        assert_eq!(EntryType::Schema, EntryType::try_from(2).unwrap());
+        assert_eq!(EntryType::Table, EntryType::try_from(3).unwrap());
+        assert!(EntryType::try_from(4).is_err());
     }
 }
