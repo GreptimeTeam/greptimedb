@@ -39,13 +39,6 @@ pub struct TableMetaActionList {
 }
 
 impl TableMetaActionList {
-    pub fn with_action(action: TableMetaAction) -> Self {
-        Self {
-            actions: vec![action],
-            prev_version: 0,
-        }
-    }
-
     pub fn new(actions: Vec<TableMetaAction>) -> Self {
         Self {
             actions,

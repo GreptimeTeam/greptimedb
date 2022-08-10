@@ -8,7 +8,6 @@ use common_error::ext::BoxedError;
 use common_telemetry::logging;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
-use store_api::manifest::{action::ProtocolAction, Manifest};
 use store_api::storage::{
     self, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
     CreateOptions, OpenOptions, Region, RegionDescriptorBuilder, RegionId, RegionMeta,
@@ -18,7 +17,7 @@ use table::engine::{EngineContext, TableEngine};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::Result as TableResult;
 use table::{
-    metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType},
+    metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion},
     table::TableRef,
 };
 use tokio::sync::Mutex;
@@ -28,12 +27,11 @@ use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
     BuildRowKeyDescriptorSnafu, MissingTimestampIndexSnafu, Result,
 };
-use crate::manifest::action::*;
-use crate::manifest::TableManifest;
 use crate::table::MitoTable;
 
 pub const MITO_ENGINE: &str = "mito";
 const INIT_COLUMN_ID: ColumnId = 0;
+const INIT_TABLE_VERSION: TableVersion = 0;
 
 #[inline]
 fn region_name(id: RegionId) -> String {
@@ -43,11 +41,6 @@ fn region_name(id: RegionId) -> String {
 #[inline]
 fn table_dir(table_name: &str) -> String {
     format!("{}/", table_name)
-}
-
-#[inline]
-fn table_manifest_dir(table_name: &str) -> String {
-    format!("{}/manifest/", table_name)
 }
 
 /// [TableEngine] implementation.
@@ -127,22 +120,6 @@ struct MitoEngineInner<S: StorageEngine> {
     /// Table mutex is used to protect the operations such as creating/opening/closing
     /// a table, to avoid things like opening the same table simultaneously.
     table_mutex: Mutex<()>,
-}
-
-impl<S: StorageEngine> MitoEngineInner<S> {
-    fn new(_config: EngineConfig, storage_engine: S, object_store: ObjectStore) -> Self {
-        Self {
-            tables: RwLock::new(HashMap::default()),
-            storage_engine,
-            object_store,
-            next_table_id: AtomicU64::new(0),
-            table_mutex: Mutex::new(()),
-        }
-    }
-
-    fn next_table_id(&self) -> TableId {
-        self.next_table_id.fetch_add(1, Ordering::Relaxed)
-    }
 }
 
 fn build_row_key_desc_from_schema(
@@ -310,28 +287,17 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
             .ident(self.next_table_id())
-            .table_version(0u64)
+            .table_version(INIT_TABLE_VERSION)
             .table_type(TableType::Base)
             .desc(request.desc)
             .build()
             .context(error::BuildTableInfoSnafu { table_name })?;
 
-        let manifest =
-            TableManifest::new(&table_manifest_dir(table_name), self.object_store.clone());
+        let table = Arc::new(
+            MitoTable::create(table_name, table_info, region, self.object_store.clone()).await?,
+        );
 
-        manifest
-            .update(TableMetaActionList::new(vec![
-                TableMetaAction::Protocol(ProtocolAction::new()),
-                TableMetaAction::Change(Box::new(TableChange {
-                    table_info: table_info.clone(),
-                })),
-            ]))
-            .await
-            .context(error::UpdateTableManifestSnafu { table_name })?;
-
-        logging::info!("Mito engine created table: {:?}.", table_info);
-
-        let table = Arc::new(MitoTable::new(table_info, region, manifest));
+        logging::info!("Mito engine created table: {:?}.", table.table_info());
 
         self.tables
             .write()
@@ -381,25 +347,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 Some(region) => region,
             };
 
-            //FIXME(boyan): recover table meta from table manifest
-            let table_meta = TableMetaBuilder::default()
-                .schema(region.in_memory_metadata().schema().clone())
-                .engine(MITO_ENGINE)
-                .next_column_id(INIT_COLUMN_ID)
-                .primary_key_indices(Vec::default())
-                .build()
-                .context(error::BuildTableMetaSnafu { table_name })?;
-
-            let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
-                .ident(request.table_id)
-                .table_version(0u64)
-                .table_type(TableType::Base)
-                .build()
-                .context(error::BuildTableInfoSnafu { table_name })?;
-            let manifest =
-                TableManifest::new(&table_manifest_dir(table_name), self.object_store.clone());
-
-            let table = Arc::new(MitoTable::new(table_info, region, manifest));
+            let table =
+                Arc::new(MitoTable::open(table_name, region, self.object_store.clone()).await?);
 
             self.tables
                 .write()
@@ -415,6 +364,22 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
     fn get_table(&self, name: &str) -> Option<TableRef> {
         self.tables.read().unwrap().get(name).cloned()
+    }
+}
+
+impl<S: StorageEngine> MitoEngineInner<S> {
+    fn new(_config: EngineConfig, storage_engine: S, object_store: ObjectStore) -> Self {
+        Self {
+            tables: RwLock::new(HashMap::default()),
+            storage_engine,
+            object_store,
+            next_table_id: AtomicU64::new(0),
+            table_mutex: Mutex::new(()),
+        }
+    }
+
+    fn next_table_id(&self) -> TableId {
+        self.next_table_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 

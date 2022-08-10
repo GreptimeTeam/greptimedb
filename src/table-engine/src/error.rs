@@ -106,6 +106,23 @@ pub enum Error {
         source: storage::error::Error,
         table_name: String,
     },
+
+    #[snafu(display(
+        "Failed to scan table metadata from manifest,  table: {}, source: {}",
+        table_name,
+        source,
+    ))]
+    ScanTableManifest {
+        #[snafu(backtrace)]
+        source: storage::error::Error,
+        table_name: String,
+    },
+
+    #[snafu(display("Table info not found in manifest, table: {}", table_name))]
+    TableInfoNotFound {
+        backtrace: Backtrace,
+        table_name: String,
+    },
 }
 
 impl From<Error> for table::error::Error {
@@ -132,6 +149,10 @@ impl ErrorExt for Error {
             | MissingTimestampIndex { .. } => StatusCode::InvalidArguments,
 
             UpdateTableManifest { .. } => StatusCode::StorageUnavailable,
+
+            TableInfoNotFound { .. } => StatusCode::Unexpected,
+
+            ScanTableManifest { .. } | UpdateTableManifest { .. } => StatusCode::StorageUnavailable,
         }
     }
 
