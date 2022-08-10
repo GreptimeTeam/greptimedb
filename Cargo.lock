@@ -786,6 +786,7 @@ dependencies = [
  "console",
  "datafusion-common",
  "datatypes",
+ "query",
  "ron",
  "rustpython-ast",
  "rustpython-bytecode",

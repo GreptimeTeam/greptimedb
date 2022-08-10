@@ -3,25 +3,29 @@
 //! 2. store other metadata so other module can call it when needed
 //! TODO(discord9): resolve cyclic package dependency of `query` crate
 
+use query::QueryEngineRef;
+
 use super::copr_parse::parse_copr;
 use crate::python::{coprocessor::Coprocessor, error::Result};
 
 pub struct CoprEngine {
-    copr: Coprocessor
+    copr: Coprocessor,
+    query_engine: QueryEngineRef
 }
 
 impl CoprEngine {
-    fn try_new(script: &str) -> Result<Self> {
+    pub fn try_new(script: &str, query_engine: QueryEngineRef) -> Result<Self> {
         Ok(Self {
             copr: parse_copr(script)?,
+            query_engine
         })
     }
-    fn update_script(&mut self, script: &str) -> Result<()> {
+    pub fn update_script(&mut self, script: &str) -> Result<()> {
         let copr = parse_copr(script)?;
         self.copr = copr;
         Ok(())
     }
-    fn evaluate(&self) {
+    pub fn evaluate(&self) {
         todo!()
     }
 }

@@ -21,6 +21,7 @@ python-udf = [
 
 [dependencies]
 common-error = {path = "../error"}
+query = { path = "../../query" }
 console = "0.15.1"
 datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}
 datatypes = {path = "../../datatypes"}
