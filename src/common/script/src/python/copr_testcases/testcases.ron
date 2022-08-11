@@ -12,8 +12,10 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
         predicate: ParseIsOk(
             result: (
                 name: "a",
-                args: ["cpu", "mem"],
-                returns: ["perf", "what", "how", "why"],
+                deco_args: (
+                    arg_names: ["cpu", "mem"],
+                    ret_names: ["perf", "what", "how", "why"],
+                ),
                 arg_types: [
                     Some((
                         datatype: Some(Float32),
