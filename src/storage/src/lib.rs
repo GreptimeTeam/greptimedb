@@ -1,6 +1,7 @@
 //! Storage engine implementation.
 mod arrow_stream;
 mod background;
+mod bit_vec;
 mod chunk;
 mod codec;
 pub mod config;

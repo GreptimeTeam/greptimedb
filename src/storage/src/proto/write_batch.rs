@@ -20,6 +20,8 @@ use datatypes::{
 use paste::paste;
 use snafu::OptionExt;
 
+use crate::bit_vec;
+
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("Failed to convert datafusion type: {}", from))]
@@ -170,7 +172,6 @@ macro_rules! gen_columns {
             pub fn [<gen_columns_ $key>](vector: &VectorRef) -> Result<Column> {
                 let mut column = Column::default();
                 let mut values = Values::default();
-
                 let vector_ref =
                     vector
                         .as_any()
@@ -178,21 +179,25 @@ macro_rules! gen_columns {
                         .with_context(|| ConversionSnafu {
                             from: std::format!("{:?}", vector.as_ref().data_type()),
                         })?;
-
-                let mut value_null_mask = bit_vec::BitVec::from_elem(vector_ref.len(), false);
+                let mut bits: Option<bit_vec::BitVec> = None;
 
                 vector_ref
                     .iter_data()
                     .enumerate()
                     .for_each(|(i, value)| match value {
                         Some($vari) => values.[<$key _values>].push($cast),
-                        None => value_null_mask.set(i, true),
+                        None => {
+                            if (bits.is_none()) {
+                                bits = Some(bit_vec::BitVec::repeat(false, vector_ref.len()));
+                            }
+                            bits.as_mut().map(|x| x.set(i, true));
+                        }
                     });
 
-                let null_mask = if vector_ref.len() == values.[<$key _values>].len() {
-                    vec![]
+                let null_mask = if let Some(bits) = bits {
+                    bits.into_vec()
                 } else {
-                    value_null_mask.to_bytes()
+                    Default::default()
                 };
 
                 column.values = Some(values);
@@ -228,12 +233,13 @@ macro_rules! gen_put_data {
                 let mut vector_iter = values.[<$key _values>].iter();
                 let num_rows = column.num_rows as usize;
                 let mut builder = <$builder_type>::with_capacity(num_rows);
+
                 if column.value_null_mask.is_empty() {
                     (0..num_rows)
                         .for_each(|_| builder.push(vector_iter.next().map(|$vari| $cast)));
                 } else {
-                    bit_vec::BitVec::from_bytes(&column.value_null_mask)
-                        .iter()
+                    bit_vec::BitVec::from_vec(column.value_null_mask)
+                        .into_iter()
                         .take(num_rows)
                         .for_each(|is_null| {
                             if is_null {
@@ -281,7 +287,7 @@ pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
         ConcreteDataType::Binary(_) => gen_columns_binary(vector),
         ConcreteDataType::String(_) => gen_columns_string(vector),
         _ => {
-            unimplemented!() // TODO(jiachun): Maybe support some composite types in the future , such as list, struct, etc.
+            unimplemented!() // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
         }
     }
 }
@@ -301,6 +307,6 @@ pub fn gen_put_data_vector(data_type: ConcreteDataType, column: Column) -> Resul
         ConcreteDataType::Float64(_) => gen_put_data_f64(column),
         ConcreteDataType::Binary(_) => gen_put_data_binary(column),
         ConcreteDataType::String(_) => gen_put_data_string(column),
-        _ => unimplemented!(), // TODO(jiachun): Maybe support some composite types in the future , such as list, struct, etc.
+        _ => unimplemented!(), // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
     }
 }

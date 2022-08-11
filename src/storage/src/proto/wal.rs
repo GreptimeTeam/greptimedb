@@ -1,7 +1,10 @@
 #![allow(clippy::all)]
 tonic::include_proto!("greptime.storage.wal.v1");
 
-use crate::write_batch::{Mutation, WriteBatch};
+use crate::{
+    bit_vec,
+    write_batch::{Mutation, WriteBatch},
+};
 
 pub fn gen_mutation_extras(write_batch: &WriteBatch) -> Vec<MutationExtra> {
     let column_schemas = write_batch.schema().column_schemas();
@@ -15,8 +18,7 @@ pub fn gen_mutation_extras(write_batch: &WriteBatch) -> Vec<MutationExtra> {
                         column_null_mask: Default::default(),
                     }
                 } else {
-                    let mut column_null_mask =
-                        bit_vec::BitVec::from_elem(column_schemas.len(), false);
+                    let mut column_null_mask = bit_vec::BitVec::repeat(false, column_schemas.len());
                     for (i, cs) in column_schemas.iter().enumerate() {
                         if put.column_by_name(&cs.name).is_none() {
                             column_null_mask.set(i, true);
@@ -24,7 +26,7 @@ pub fn gen_mutation_extras(write_batch: &WriteBatch) -> Vec<MutationExtra> {
                     }
                     MutationExtra {
                         mutation_type: MutationType::Put.into(),
-                        column_null_mask: column_null_mask.to_bytes(),
+                        column_null_mask: column_null_mask.into_vec(),
                     }
                 }
             }

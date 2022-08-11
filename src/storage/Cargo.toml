@@ -10,7 +10,7 @@ arc-swap = "1.0"
 arrow-format = { version = "0.4", features = ["ipc"] }
 async-stream = "0.3"
 async-trait = "0.1"
-bit-vec = "0.6"
+bitvec = "1.0"
 bytes = "1.1"
 common-error = { path = "../common/error" }
 common-runtime = { path = "../common/runtime" }
