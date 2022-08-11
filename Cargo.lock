@@ -783,9 +783,11 @@ version = "0.1.0"
 dependencies = [
  "arrow2",
  "common-error",
+ "common-recordbatch",
  "console",
  "datafusion-common",
  "datatypes",
+ "futures-util",
  "query",
  "ron",
  "rustpython-ast",

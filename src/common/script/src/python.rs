@@ -10,3 +10,4 @@ mod copr_engine;
 
 use coprocessor::AnnotationInfo;
 pub use coprocessor::{exec_copr_print, exec_coprocessor};
+pub use copr_engine::CoprEngine;

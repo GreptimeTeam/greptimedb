@@ -4,6 +4,7 @@ use console::{style, Style};
 use datatypes::error::Error as DataTypeError;
 use rustpython_compiler_core::error::CompileError as CoreCompileError;
 use rustpython_parser::{ast::Location, error::ParseError};
+use query::error::Error as QueryError;
 pub use snafu::ensure;
 use snafu::{prelude::Snafu, Backtrace};
 pub type Result<T> = std::result::Result<T, Error>;
@@ -23,6 +24,11 @@ pub enum Error {
     TypeCast {
         #[snafu(backtrace)]
         source: DataTypeError,
+    },
+    #[snafu(display("Database query error: {}", source))]
+    DatabaseQuery {
+        #[snafu(backtrace)]
+        source: QueryError
     },
     #[snafu(display("Python Parsing error: {}", source))]
     PyParse {
@@ -64,6 +70,12 @@ pub enum Error {
         backtrace: Backtrace,
         reason: String,
     },
+}
+
+impl From<QueryError> for Error {
+    fn from(source: QueryError) -> Self {
+        Self::DatabaseQuery { source }
+    }
 }
 
 impl ErrorExt for Error {
