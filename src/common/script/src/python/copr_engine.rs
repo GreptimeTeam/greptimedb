@@ -42,16 +42,16 @@ impl CoprEngine {
     /// this function use sql query to return a async iterator of (a stream) Resulting RecordBatch
     /// computed from input record batch from sql and execute python code
     ///
-    /// TODO: return a Stream of Result\<RecordBatch\>
-    pub async fn evaluate<'a>(&'a self) -> Result<Vec<Result<DfRecordBatch>>> {
+    /// TODO: make a function that return a Stream of Result\<RecordBatch\>
+    pub async fn evaluate(&self) -> Result<Vec<Result<DfRecordBatch>>> {
         if let Some(sql) = &self.copr.deco_args.sql {
             let plan = self.query_engine.sql_to_plan(sql)?;
             let res = self.query_engine.execute(&plan).await?;
-            let copr = Arc::new((&self.copr).clone());
+            let copr = Arc::new((self.copr).clone());
             match res {
                 query::Output::AffectedRows(_) => todo!(),
                 query::Output::RecordBatch(stream) => {
-                    let run_copr = |rb: StdResult<RecordBatch, RbError>| async{
+                    let run_copr = |rb: StdResult<RecordBatch, RbError>| {
                         match rb.map(|rb| {
                             let df_rb = rb.df_recordbatch;
                             exec_parsed(&copr.clone(), &df_rb)
@@ -61,7 +61,7 @@ impl CoprEngine {
                             Err(rb_err) => todo!(),
                         }
                     };
-                    let stream = stream.then(run_copr);
+                    let stream = stream.map(run_copr);
                     // let ret = Box::pin(stream) as CoprocessorStream;
                     let res = stream.collect::<Vec<Result<DfRecordBatch>>>().await;
                     Ok(res)
