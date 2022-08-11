@@ -627,28 +627,33 @@ pub mod codec {
                 .map(
                     |(ext, mtn)| match MutationType::from_i32(ext.mutation_type) {
                         Some(MutationType::Put) => {
-                            let valid_column_names = if ext.column_null_mask.is_empty() {
-                                column_names.clone()
-                            } else {
-                                bit_vec::BitVec::from_slice(&ext.column_null_mask)
-                                    .into_iter()
-                                    .zip(column_names.iter())
-                                    .filter(|(is_null, _)| !*is_null)
-                                    .map(|(_, column_name)| column_name.clone())
-                                    .collect::<Vec<_>>()
+                            let gen_mutation_put = |valid_columns: &[String]| {
+                                let mut put_data = PutData::with_num_columns(valid_columns.len());
+
+                                let res = valid_columns
+                                    .iter()
+                                    .zip(mtn)
+                                    .map(|(name, vector)| {
+                                        put_data.add_column_by_name(name, vector.clone())
+                                    })
+                                    .collect::<Result<Vec<_>>>();
+
+                                res.map(|_| Mutation::Put(put_data))
                             };
 
-                            let mut put_data = PutData::with_num_columns(valid_column_names.len());
+                            if ext.column_null_mask.is_empty() {
+                                gen_mutation_put(&column_names)
+                            } else {
+                                let valid_columns =
+                                    bit_vec::BitVec::from_slice(&ext.column_null_mask)
+                                        .into_iter()
+                                        .zip(column_names.iter())
+                                        .filter(|(is_null, _)| !*is_null)
+                                        .map(|(_, column_name)| column_name.clone())
+                                        .collect::<Vec<_>>();
 
-                            let res = valid_column_names
-                                .iter()
-                                .zip(mtn)
-                                .map(|(name, vector)| {
-                                    put_data.add_column_by_name(name, vector.clone())
-                                })
-                                .collect::<Result<Vec<_>>>();
-
-                            res.map(|_| Mutation::Put(put_data))
+                                gen_mutation_put(&valid_columns)
+                            }
                         }
                         Some(MutationType::Delete) => {
                             todo!("delete mutation")
