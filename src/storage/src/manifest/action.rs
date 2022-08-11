@@ -6,6 +6,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion, VersionHeader};
 use store_api::manifest::ManifestVersion;
 use store_api::manifest::MetaAction;
+use store_api::storage::RegionId;
 use store_api::storage::SequenceNumber;
 
 use crate::error::{
@@ -23,7 +24,7 @@ pub struct RegionChange {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RegionRemove {
-    pub region_name: String,
+    pub region_id: RegionId,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

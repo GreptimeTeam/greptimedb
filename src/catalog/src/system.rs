@@ -65,7 +65,6 @@ impl SystemCatalogTable {
         } else {
             // system catalog table is not yet created, try to create
             let request = CreateTableRequest {
-                table_id: SYSTEM_CATALOG_TABLE_ID,
                 name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
                 desc: Some("System catalog table".to_string()),
                 schema: schema.clone(),

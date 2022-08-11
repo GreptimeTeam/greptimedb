@@ -15,7 +15,6 @@ pub struct InsertRequest {
 /// Create table request
 #[derive(Debug)]
 pub struct CreateTableRequest {
-    pub table_id: TableId,
     pub name: String,
     pub desc: Option<String>,
     pub schema: SchemaRef,

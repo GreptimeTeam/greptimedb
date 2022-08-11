@@ -9,6 +9,7 @@ use crate::test_util::descriptor_util::RegionDescBuilder;
 pub fn build_region_meta() -> RegionMetadata {
     let region_name = "region-0";
     let desc = RegionDescBuilder::new(region_name)
+        .id(0)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
         .push_value_column(("v1", LogicalTypeId::Float32, true))
         .build();
