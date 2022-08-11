@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use arrow::array::UInt32Array;
 use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::{
+    CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+};
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
@@ -23,6 +25,7 @@ use query::query_engine::{Output, QueryEngineFactory};
 use query::QueryEngine;
 use rand::Rng;
 use table::table::adapter::DfTableProviderAdapter;
+use table::table::numbers::NumbersTable;
 use test_util::MemTable;
 
 use crate::pow::pow;
@@ -87,6 +90,15 @@ async fn test_datafusion_query_engine() -> Result<()> {
 async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let catalog_list = catalog::memory::new_memory_catalog_list()?;
+
+    let default_schema = Arc::new(MemorySchemaProvider::new());
+    default_schema
+        .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+        .unwrap();
+    let default_catalog = Arc::new(MemoryCatalogProvider::new());
+    default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema);
+    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
+
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
 
@@ -205,7 +217,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
         .register_table("float_numbers".to_string(), float_number_table)
         .unwrap();
 
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);
+    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
     catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
 
     let factory = QueryEngineFactory::new(catalog_list);

@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use catalog::CatalogListRef;
-use snafu::ResultExt;
-
-use crate::error::{NewCatalogSnafu, Result};
+use crate::error::Result;
 use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
@@ -28,19 +25,16 @@ impl Default for DatanodeOptions {
 pub struct Datanode {
     opts: DatanodeOptions,
     services: Services,
-    _catalog_list: CatalogListRef,
     instance: InstanceRef,
 }
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
-        let catalog_list = catalog::memory::new_memory_catalog_list().context(NewCatalogSnafu)?;
-        let instance = Arc::new(Instance::new(&opts, catalog_list.clone()).await?);
+        let instance = Arc::new(Instance::new(&opts).await?);
 
         Ok(Self {
             opts,
             services: Services::new(instance.clone()),
-            _catalog_list: catalog_list,
             instance,
         })
     }

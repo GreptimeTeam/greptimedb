@@ -43,7 +43,7 @@ pub enum Error {
     },
 
     #[snafu(display("Missing timestamp index for table: {}", table_name))]
-    MissingTimestamIndex {
+    MissingTimestampIndex {
         table_name: String,
         backtrace: Backtrace,
     },
@@ -118,7 +118,7 @@ impl ErrorExt for Error {
             | BuildTableMeta { .. }
             | BuildTableInfo { .. }
             | BuildRegionDescriptor { .. }
-            | MissingTimestamIndex { .. } => StatusCode::InvalidArguments,
+            | MissingTimestampIndex { .. } => StatusCode::InvalidArguments,
         }
     }
 

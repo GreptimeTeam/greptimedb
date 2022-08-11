@@ -166,9 +166,9 @@ mod tests {
     }
 
     fn throw_catalog_error() -> std::result::Result<(), catalog::error::Error> {
-        Err(catalog::error::Error::new(MockError::with_backtrace(
-            StatusCode::Internal,
-        )))
+        Err(catalog::error::Error::RegisterTable {
+            source: BoxedError::new(MockError::with_backtrace(StatusCode::Internal)),
+        })
     }
 
     fn assert_internal_error(err: &Error) {
