@@ -12,10 +12,14 @@ use crate::python::coprocessor::Coprocessor;
 use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
 use crate::python::AnnotationInfo;
 
-#[derive(Default, Debug)]
+#[cfg(test)]
+use serde::Deserialize;
+
+#[cfg_attr(test, derive(Deserialize))]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DecoratorArgs {
     pub arg_names: Vec<String>,
-    pub return_names: Vec<String>,
+    pub ret_names: Vec<String>,
     pub sql: Option<String>,
     // maybe add a URL for connecting or what?
     // also predicate for timed triggered or conditional triggered?
@@ -284,7 +288,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                 }
                 match s {
                     "args" => ret_args.arg_names = pylist_to_vec(&kw.node.value)?,
-                    "returns" => ret_args.return_names = pylist_to_vec(&kw.node.value)?,
+                    "returns" => ret_args.ret_names = pylist_to_vec(&kw.node.value)?,
                     "sql" => ret_args.sql = Some(py_str_to_string(&kw.node.value)?),
                     _ => unreachable!(),
                 }
@@ -466,9 +470,7 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
     } = &python_ast[0].node
     {
         let decorator = &decorator_list[0];
-        let arg_list = parse_decorator(decorator)?;
-        let (arg_names, ret_names) = (arg_list.arg_names, arg_list.return_names);
-        
+        let deco_args = parse_decorator(decorator)?;
 
         // get arg types from type annotation
         let arg_types = get_arg_annotations(fn_args)?;
@@ -478,28 +480,28 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             get_return_annotations(rets)?
         } else {
             // if no anntation at all, set it to all None
-            std::iter::repeat(None).take(ret_names.len()).collect()
+            std::iter::repeat(None).take(deco_args.ret_names.len()).collect()
         };
 
         // make sure both arguments&returns in fucntion
         // and in decorator have same length
         ensure!(
-            arg_names.len() == arg_types.len(),
+            deco_args.arg_names.len() == arg_types.len(),
             CoprParseSnafu {
                 reason: format!(
                     "args number in decorator({}) and function({}) doesn't match",
-                    arg_names.len(),
+                    deco_args.arg_names.len(),
                     arg_types.len()
                 ),
                 loc: None
             }
         );
         ensure!(
-            ret_names.len() == return_types.len(),
+            deco_args.ret_names.len() == return_types.len(),
             CoprParseSnafu {
                 reason: format!(
                     "returns number in decorator( {} ) and function annotation( {} ) doesn't match",
-                    ret_names.len(),
+                    deco_args.ret_names.len(),
                     return_types.len()
                 ),
                 loc: None
@@ -507,8 +509,7 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
         );
         Ok(Coprocessor {
             name: name.to_string(),
-            args: arg_names,
-            returns: ret_names,
+            deco_args,
             arg_types,
             return_types,
             script: script.to_owned(),

@@ -37,7 +37,8 @@ fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 #[cfg(test)]
 use serde::Deserialize;
 
-use super::error::pretty_print_error_in_src;
+use crate::python::copr_parse::DecoratorArgs;
+use crate::python::error::pretty_print_error_in_src;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,10 +52,7 @@ pub struct AnnotationInfo {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Coprocessor {
     pub name: String,
-    /// get from python decorator (args = `[`a list of string`]`)
-    pub args: Vec<String>,
-    /// get from python decorator (returns = `[`a list of string`]`)
-    pub returns: Vec<String>,
+    pub deco_args: DecoratorArgs,
     /// get from python function args' annotation, first is type, second is is_nullable
     pub arg_types: Vec<Option<AnnotationInfo>>,
     /// get from python function returns' annotation, first is type, second is is_nullable
@@ -75,7 +73,7 @@ impl Coprocessor {
         // instead of point to any of existing code written by user.
         loc.newline();
         let args: Vec<Located<ast::ExprKind>> = self
-            .args
+            .deco_args.arg_names
             .iter()
             .map(|v| {
                 let node = ast::ExprKind::Name {
@@ -200,7 +198,7 @@ impl Coprocessor {
     /// if no annotation
     /// the datatypes of the actual columns is used directly
     fn gen_schema(&self, cols: &[ArrayRef]) -> Result<Arc<Schema>> {
-        let names = &self.returns;
+        let names = &self.deco_args.ret_names;
         let anno = &self.return_types;
         ensure!(
             cols.len() == names.len() && names.len() == anno.len(),
@@ -438,7 +436,7 @@ fn check_args_anno_real_type(
             OtherSnafu {
                 reason: format!(
                     "column {}'s Type annotation is {:?}, but actual type is {:?}",
-                    copr.args[idx], anno_ty, real_ty
+                    copr.deco_args.arg_names[idx], anno_ty, real_ty
                 )
             }
         )
@@ -526,7 +524,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     // TODO: cache the result of parse_copr
     let copr = parse_copr(script)?;
     // 3. get args from `rb`, and cast them into PyVector
-    let args: Vec<PyVector> = select_from_rb(rb, &copr.args)?;
+    let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
     check_args_anno_real_type(&args, &copr, rb)?;
 
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
@@ -534,7 +532,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         PyVector::make_class(&vm.ctx);
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
-        set_items_in_scope(&scope, vm, &copr.args, args)?;
+        set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
 
         let code_obj = copr.strip_append_and_compile()?;
         let code_obj = vm.ctx.new_code(code_obj);
@@ -549,11 +547,11 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         let col_len = rb.num_rows();
         let mut cols: Vec<ArrayRef> = try_into_columns(&ret, vm, col_len)?;
         ensure!(
-            cols.len() == copr.returns.len(),
+            cols.len() == copr.deco_args.ret_names.len(),
             OtherSnafu {
                 reason: format!(
                     "The number of return Vector is wrong, expect {}, found {}",
-                    copr.returns.len(),
+                    copr.deco_args.ret_names.len(),
                     cols.len()
                 )
             }
