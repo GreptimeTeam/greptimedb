@@ -93,22 +93,21 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
+            Error::InvalidKey { .. }
+            | Error::OpenSystemCatalog { .. }
+            | Error::CreateSystemCatalog { .. }
+            | Error::SchemaNotFound { .. }
+            | Error::TableNotFound { .. }
+            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
+            Error::SystemCatalog { .. }
+            | Error::SystemCatalogTypeMismatch { .. }
+            | Error::EmptyValue
+            | Error::ValueDeserialize { .. }
+            | Error::CatalogNotFound { .. }
+            | Error::OpenTable { .. }
+            | Error::ReadSystemCatalog { .. } => StatusCode::StorageUnavailable,
+            Error::RegisterTable { .. } | Error::SystemCatalogSchema { .. } => StatusCode::Internal,
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
-            Error::InvalidKey { .. } => StatusCode::Unexpected,
-            Error::OpenSystemCatalog { .. } => StatusCode::Unexpected,
-            Error::CreateSystemCatalog { .. } => StatusCode::Unexpected,
-            Error::SystemCatalog { .. } => StatusCode::StorageUnavailable,
-            Error::SystemCatalogTypeMismatch { .. } => StatusCode::StorageUnavailable,
-            Error::EmptyValue => StatusCode::StorageUnavailable,
-            Error::ValueDeserialize { .. } => StatusCode::StorageUnavailable,
-            Error::CatalogNotFound { .. } => StatusCode::StorageUnavailable,
-            Error::RegisterTable { .. } => StatusCode::Internal,
-            Error::SchemaNotFound { .. } => StatusCode::Unexpected,
-            Error::OpenTable { .. } => StatusCode::StorageUnavailable,
-            Error::TableNotFound { .. } => StatusCode::Unexpected,
-            Error::ReadSystemCatalog { .. } => StatusCode::StorageUnavailable,
-            Error::SystemCatalogSchema { .. } => StatusCode::Internal,
-            Error::InvalidEntryType { .. } => StatusCode::Unexpected,
         }
     }
 

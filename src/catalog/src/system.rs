@@ -54,7 +54,7 @@ impl SystemCatalogTable {
             table_id: SYSTEM_CATALOG_TABLE_ID,
         };
         let schema = Arc::new(build_system_catalog_schema()?);
-        let ctx = EngineContext::default(); // init engine context
+        let ctx = EngineContext::default();
 
         if let Some(table) = engine
             .open_table(&ctx, request)
@@ -88,7 +88,12 @@ impl SystemCatalogTable {
     }
 }
 
-/// Build system catalog table schema
+/// Build system catalog table schema.
+/// A system catalog table consists of 4 columns, namely
+/// - entry_type: type of entry in current row, can be any variant of [EntryType].
+/// - key: a binary encoded key of entry, differs according to different entry type.
+/// - timestamp: currently not used.
+/// - value: JSON-encoded value of entry's metadata.
 fn build_system_catalog_schema() -> Result<Schema> {
     let mut cols = Vec::with_capacity(6);
     cols.push(ColumnSchema::new(
