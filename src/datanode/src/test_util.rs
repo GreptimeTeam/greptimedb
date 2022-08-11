@@ -6,7 +6,13 @@ use crate::datanode::{DatanodeOptions, FileStoreConfig, ObjectStoreConfig};
 /// Only for test.
 ///
 /// TODO: Add a test feature
-pub fn create_tmp_dir_and_datanode_opts() -> (DatanodeOptions, TempDir, TempDir) {
+
+pub struct TestGuard {
+    _wal_tmp_dir: TempDir,
+    _data_tmp_dir: TempDir,
+}
+
+pub fn create_tmp_dir_and_datanode_opts() -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = TempDir::new("/tmp/greptimedb_test_wal").unwrap();
     let data_tmp_dir = TempDir::new("/tmp/greptimedb_test_data").unwrap();
     let opts = DatanodeOptions {
@@ -17,5 +23,11 @@ pub fn create_tmp_dir_and_datanode_opts() -> (DatanodeOptions, TempDir, TempDir)
         ..Default::default()
     };
 
-    (opts, wal_tmp_dir, data_tmp_dir)
+    (
+        opts,
+        TestGuard {
+            _wal_tmp_dir: wal_tmp_dir,
+            _data_tmp_dir: data_tmp_dir,
+        },
+    )
 }

@@ -225,7 +225,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_insert() {
         common_telemetry::init_default_ut_logging();
-        let (opts, _wal_dir, _data_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
 
@@ -244,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_query() {
-        let (opts, _wal_dir, _data_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
 
