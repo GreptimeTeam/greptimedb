@@ -2,9 +2,9 @@ use arrow::error::ArrowError;
 use common_error::prelude::{ErrorExt, StatusCode};
 use console::{style, Style};
 use datatypes::error::Error as DataTypeError;
+use query::error::Error as QueryError;
 use rustpython_compiler_core::error::CompileError as CoreCompileError;
 use rustpython_parser::{ast::Location, error::ParseError};
-use query::error::Error as QueryError;
 pub use snafu::ensure;
 use snafu::{prelude::Snafu, Backtrace};
 pub type Result<T> = std::result::Result<T, Error>;
@@ -28,7 +28,7 @@ pub enum Error {
     #[snafu(display("Database query error: {}", source))]
     DatabaseQuery {
         #[snafu(backtrace)]
-        source: QueryError
+        source: QueryError,
     },
     #[snafu(display("Python Parsing error: {}", source))]
     PyParse {

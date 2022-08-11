@@ -216,9 +216,9 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
             "copr.py",
         );
         println!("{res}");
-    }else if let Ok(res) = ret{
+    } else if let Ok(res) = ret {
         dbg!(&res);
-    }else{
+    } else {
         dbg!(ret);
     }
 }

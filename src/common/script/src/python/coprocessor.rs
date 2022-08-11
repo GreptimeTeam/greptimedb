@@ -73,7 +73,8 @@ impl Coprocessor {
         // instead of point to any of existing code written by user.
         loc.newline();
         let args: Vec<Located<ast::ExprKind>> = self
-            .deco_args.arg_names
+            .deco_args
+            .arg_names
             .iter()
             .map(|v| {
                 let node = ast::ExprKind::Name {
@@ -523,14 +524,14 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO: cache the result of parse_copr
     let copr = parse_copr(script)?;
-    exec_parsed(copr, rb)
+    exec_parsed(&copr, rb)
 }
 
 /// using a parsed `Coprocessor` struct as input to execute python code
-fn exec_parsed(copr: Coprocessor, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
+pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
-    check_args_anno_real_type(&args, &copr, rb)?;
+    check_args_anno_real_type(&args, copr, rb)?;
 
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
     vm::Interpreter::without_stdlib(Default::default()).enter(|vm| -> Result<DfRecordBatch> {

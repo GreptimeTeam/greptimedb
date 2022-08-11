@@ -6,14 +6,13 @@ use rustpython_parser::{
     ast::{Arguments, Location},
     parser,
 };
+#[cfg(test)]
+use serde::Deserialize;
 use snafu::ResultExt;
 
 use crate::python::coprocessor::Coprocessor;
 use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
 use crate::python::AnnotationInfo;
-
-#[cfg(test)]
-use serde::Deserialize;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -260,10 +259,12 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
     let len_max = avail_key.len();
     ensure!(
         // "sql" is optional(for now)
-        keywords.len() >= len_min &&
-        keywords.len() <= len_max,
+        keywords.len() >= len_min && keywords.len() <= len_max,
         CoprParseSnafu {
-            reason: format!("Expect between {len_min} and {len_max} keyword argument, found {}.", keywords.len()),
+            reason: format!(
+                "Expect between {len_min} and {len_max} keyword argument, found {}.",
+                keywords.len()
+            ),
             loc: keywords.get(0).map(|s| s.location)
         }
     );
@@ -305,12 +306,9 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
         }
     }
     let loc = keywords[0].location;
-    for key in avail_key{
-        if !visited_key.contains(key) && !opt_keys.contains(key){
-            return fail_parse_error!(
-                format!("Expect `{key}` keyword"),
-                 Some(loc)
-            );
+    for key in avail_key {
+        if !visited_key.contains(key) && !opt_keys.contains(key) {
+            return fail_parse_error!(format!("Expect `{key}` keyword"), Some(loc));
         }
     }
     Ok(ret_args)
@@ -480,7 +478,9 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             get_return_annotations(rets)?
         } else {
             // if no anntation at all, set it to all None
-            std::iter::repeat(None).take(deco_args.ret_names.len()).collect()
+            std::iter::repeat(None)
+                .take(deco_args.ret_names.len())
+                .collect()
         };
 
         // make sure both arguments&returns in fucntion
