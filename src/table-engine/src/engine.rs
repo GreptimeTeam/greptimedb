@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -25,7 +24,7 @@ use tokio::sync::Mutex;
 use crate::config::EngineConfig;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
-    BuildRowKeyDescriptorSnafu, MissingTimestampIndexSnafu, Result, TableExistsSnafu
+    BuildRowKeyDescriptorSnafu, MissingTimestampIndexSnafu, Result, TableExistsSnafu,
 };
 use crate::table::MitoTable;
 
@@ -33,9 +32,15 @@ pub const MITO_ENGINE: &str = "mito";
 const INIT_COLUMN_ID: ColumnId = 0;
 const INIT_TABLE_VERSION: TableVersion = 0;
 
+/// Generate region name in the form of "{TABLE_ID}_{REGION_NUMBER}"
 #[inline]
-fn region_name(id: RegionId) -> String {
-    format!("{:010}", id)
+fn region_name(table_id: TableId, n: u32) -> String {
+    format!("{}_{:010}", table_id, n)
+}
+
+#[inline]
+fn region_id(table_id: TableId, n: u32) -> RegionId {
+    (u64::from(table_id) << 32) | u64::from(n)
 }
 
 #[inline]
@@ -115,8 +120,6 @@ struct MitoEngineInner<S: StorageEngine> {
     tables: RwLock<HashMap<String, TableRef>>,
     object_store: ObjectStore,
     storage_engine: S,
-    // FIXME(yingwen): Remove `next_table_id`. Table id should be assigned by other module (maybe catalog).
-    next_table_id: AtomicU64,
     /// Table mutex is used to protect the operations such as creating/opening/closing
     /// a table, to avoid things like opening the same table simultaneously.
     table_mutex: Mutex<()>,
@@ -249,9 +252,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             build_column_family_from_request(INIT_COLUMN_ID, &request)?;
         let (next_column_id, row_key) = build_row_key_desc_from_schema(next_column_id, &request)?;
 
+        let table_id = request.id;
         // TODO(dennis): supports multi regions;
-        let region_id = 0;
-        let region_name = region_name(region_id);
+        let region_number = 0;
+        let region_id = region_id(table_id, region_number);
+
+        let region_name = region_name(table_id, region_number);
         let region_descriptor = RegionDescriptorBuilder::default()
             .id(region_id)
             .name(&region_name)
@@ -294,7 +300,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .context(error::BuildTableMetaSnafu { table_name })?;
 
         let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
-            .ident(self.next_table_id())
+            .ident(table_id)
             .table_version(INIT_TABLE_VERSION)
             .table_type(TableType::Base)
             .desc(request.desc)
@@ -340,9 +346,10 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 parent_dir: table_dir(table_name),
             };
 
-            // TODO(dennis): supports multi regions
-            let region_id = 0;
-            let region_name = region_name(region_id);
+            let table_id = request.table_id;
+            // TODO(dennis): supports multi regions;
+            let region_number = 0;
+            let region_name = region_name(table_id, region_number);
 
             let region = match self
                 .storage_engine
@@ -381,13 +388,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             tables: RwLock::new(HashMap::default()),
             storage_engine,
             object_store,
-            next_table_id: AtomicU64::new(0),
             table_mutex: Mutex::new(()),
         }
-    }
-
-    fn next_table_id(&self) -> TableId {
-        self.next_table_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -406,10 +408,10 @@ mod tests {
 
     #[test]
     fn test_region_name() {
-        assert_eq!("0000000000", region_name(0));
-        assert_eq!("0000000001", region_name(1));
-        assert_eq!("0000000100", region_name(100));
-        assert_eq!("0000009999", region_name(9999));
+        assert_eq!("1_0000000000", region_name(1, 0));
+        assert_eq!("1_0000000001", region_name(1, 1));
+        assert_eq!("99_0000000100", region_name(99, 100));
+        assert_eq!("1000_0000009999", region_name(1000, 9999));
     }
 
     #[test]
@@ -483,6 +485,7 @@ mod tests {
         let table_info = table.table_info();
 
         let request = CreateTableRequest {
+            id: 1,
             name: table_info.name.to_string(),
             schema: table_info.meta.schema.clone(),
             create_if_not_exists: true,
@@ -502,6 +505,7 @@ mod tests {
 
         // test create_if_not_exists=false
         let request = CreateTableRequest {
+            id: 1,
             name: table_info.name.to_string(),
             schema: table_info.meta.schema.clone(),
             create_if_not_exists: false,
@@ -524,8 +528,8 @@ mod tests {
             catalog_name: String::new(),
             schema_name: String::new(),
             table_name: test_util::TABLE_NAME.to_string(),
-            // Currently the first table has id 0.
-            table_id: 0,
+            // the test table id is 1
+            table_id: 1,
         };
 
         let (engine, table, object_store, _dir) = {
@@ -561,7 +565,18 @@ mod tests {
             .downcast_ref::<MitoTable<MockRegion>>()
             .unwrap();
 
+        // assert recovered table_info is correct
         assert_eq!(table.table_info(), reopened.table_info());
         assert_eq!(reopened.manifest().last_version(), 1);
+    }
+
+    #[test]
+    fn test_region_id() {
+        assert_eq!(1, region_id(0, 1));
+        assert_eq!(4294967296, region_id(1, 0));
+        assert_eq!(4294967297, region_id(1, 1));
+        assert_eq!(4294967396, region_id(1, 100));
+        assert_eq!(8589934602, region_id(2, 10));
+        assert_eq!(18446744069414584330, region_id(u32::MAX, 10));
     }
 }

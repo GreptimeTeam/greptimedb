@@ -40,7 +40,7 @@ pub struct Instance {
 pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    pub async fn new(opts: &DatanodeOptions, catalog_list: CatalogListRef) -> Result<Self> {
+    pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
         let object_store = new_object_store(&opts.store_config).await?;
         let log_store = create_local_file_log_store(opts).await?;
 
@@ -146,6 +146,7 @@ impl Instance {
             .create_table(
                 &EngineContext::default(),
                 CreateTableRequest {
+                    id: 1,
                     name: table_name.to_string(),
                     desc: Some(" a test table".to_string()),
                     schema: Arc::new(

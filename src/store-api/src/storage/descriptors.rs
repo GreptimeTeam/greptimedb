@@ -9,7 +9,7 @@ pub type ColumnId = u32;
 /// Id of column family, unique in each region.
 pub type ColumnFamilyId = u32;
 /// Id of the region.
-pub type RegionId = u32;
+pub type RegionId = u64;
 
 // TODO(yingwen): Validate default value has same type with column, and name is a valid column name.
 /// A [ColumnDescriptor] contains information to create a column.

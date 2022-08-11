@@ -282,7 +282,7 @@ impl<S: LogStore> RegionImpl<S> {
 /// Shared data of region.
 #[derive(Debug)]
 pub struct SharedData {
-    // Region name is immutable, so we cache it in shared data to avoid loading
+    // Region id and name is immutable, so we cache them in shared data to avoid loading
     // current version from `version_control` each time we need to access them.
     id: RegionId,
     name: String,

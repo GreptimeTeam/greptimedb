@@ -18,7 +18,7 @@ use tempdir::TempDir;
 
 use crate::config::EngineConfig;
 use crate::engine::MitoEngine;
-use crate::engine::DEFAULT_ENGINE;
+use crate::engine::MITO_ENGINE;
 pub use crate::table::test_util::mock_engine::MockEngine;
 pub use crate::table::test_util::mock_engine::MockRegion;
 
@@ -40,7 +40,7 @@ pub type MockMitoEngine = MitoEngine<MockEngine>;
 pub fn build_test_table_info() -> TableInfo {
     let table_meta = TableMetaBuilder::default()
         .schema(Arc::new(schema_for_test()))
-        .engine(DEFAULT_ENGINE)
+        .engine(MITO_ENGINE)
         .next_column_id(1)
         .primary_key_indices(vec![0, 1])
         .build()
@@ -85,6 +85,7 @@ pub async fn setup_test_engine_and_table() -> (
         .create_table(
             &EngineContext::default(),
             CreateTableRequest {
+                id: 1,
                 name: TABLE_NAME.to_string(),
                 desc: Some("a test table".to_string()),
                 schema: schema.clone(),
@@ -113,6 +114,7 @@ pub async fn setup_mock_engine_and_table(
         .create_table(
             &EngineContext::default(),
             CreateTableRequest {
+                id: 1,
                 name: TABLE_NAME.to_string(),
                 desc: None,
                 schema: schema.clone(),

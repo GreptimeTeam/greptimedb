@@ -6,7 +6,7 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use store_api::storage::ColumnId;
 
-pub type TableId = u64;
+pub type TableId = u32;
 pub type TableVersion = u64;
 
 /// Indicates whether and how a filter expression can be handled by a
