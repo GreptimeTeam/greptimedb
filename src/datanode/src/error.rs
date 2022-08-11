@@ -109,7 +109,7 @@ pub enum Error {
     #[snafu(display("Failed to storage engine, source: {}", source))]
     OpenStorageEngine { source: StorageError },
 
-    #[snafu(display("Failed to init backend, source: {}", source))]
+    #[snafu(display("Failed to init backend, dir: {}, source: {}", dir, source))]
     InitBackend {
         dir: String,
         source: std::io::Error,

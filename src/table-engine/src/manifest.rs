@@ -3,7 +3,7 @@ pub mod action;
 
 use storage::manifest::ManifestImpl;
 
-use crate::manifest::action::*;
+use crate::manifest::action::TableMetaActionList;
 
 pub type TableManifest = ManifestImpl<TableMetaActionList>;
 
@@ -15,6 +15,7 @@ mod tests {
     use table::metadata::TableInfo;
 
     use super::*;
+    use crate::manifest::action::{TableChange, TableMetaAction, TableRemove};
     use crate::table::test_util;
     type TableManifestActionIter = MetaActionIteratorImpl<TableMetaActionList>;
 

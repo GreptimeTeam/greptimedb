@@ -241,7 +241,6 @@ impl<S: LogStore> EngineInner<S> {
 
         let mut guard = SlotGuard::new(name, &self.regions);
 
-        // FIXME(yingwen): Get region id or remove dependency of region id.
         let store_config = self.region_store_config(&opts.parent_dir, name);
 
         let region = match RegionImpl::open(name.to_string(), store_config, opts).await? {
