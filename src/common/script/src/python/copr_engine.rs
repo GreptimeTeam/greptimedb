@@ -1,11 +1,10 @@
 //! This is the python coprocessor's engine, which should:
 //! 1. store a parsed `Coprocessor` struct
 //! 2. store other metadata so other module can call it when needed
-//! TODO(discord9): resolve cyclic package dependency of `query` crate
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::Context;
+use std::task::{Context, Waker, Poll};
 use std::{pin::Pin, result::Result as StdResult};
 
 use common_recordbatch::{
@@ -24,7 +23,34 @@ pub struct CoprEngine {
     query_engine: QueryEngineRef,
 }
 
-pub type CoprocessorStream = Pin<Box<dyn Stream<Item = Result<DfRecordBatch>>>>;
+// pub type CoprocessorStream = Pin<Box<dyn Stream<Item = Result<DfRecordBatch>>>>;
+
+pub struct CoprocessorStream {
+    copr: Arc<Coprocessor>,
+    stream: SendableRecordBatchStream
+}
+
+impl Stream for CoprocessorStream {
+    type Item = Result<DfRecordBatch>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        let res = self.stream.as_mut().poll_next(cx);
+        if let Poll::Ready(Some(rb)) = res{
+            match rb{
+                Ok(rb) => {
+                    let df_rb = rb.df_recordbatch;
+                    let ret = exec_parsed(&self.copr, &df_rb);
+                    Poll::Ready(Some(ret))
+                    },
+                Err(_err) => todo!(),
+            }
+        }else if let Poll::Ready(None) = res{
+            Poll::Ready(None)
+        }
+        else{
+            Poll::Pending
+        }
+    }
+}
 
 impl CoprEngine {
     pub fn try_new(script: &str, query_engine: QueryEngineRef) -> Result<Self> {
