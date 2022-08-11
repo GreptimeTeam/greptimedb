@@ -34,8 +34,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
+            Error::Internal { .. } | Error::InternalIo { .. } | Error::TokioIo { .. } => {
+                StatusCode::Unexpected
+            }
+            Error::VectorConversion { .. } | Error::CollectRecordbatch { .. } => {
+                StatusCode::Internal
+            }
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
-            _ => StatusCode::Internal,
         }
     }
 

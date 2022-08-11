@@ -37,7 +37,7 @@ fn create_mysql_server(table: MemTable) -> Result<Box<dyn Server>> {
     let mysql_instance = Arc::new(DummyMysqlInstance { query_engine });
     let io_runtime = Arc::new(
         RuntimeBuilder::default()
-            .worker_threads(num_cpus::get())
+            .worker_threads(4)
             .thread_name("mysql-io-handlers")
             .build()
             .context(RuntimeResourceSnafu)?,

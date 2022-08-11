@@ -383,12 +383,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bit-vec"
-version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
-
-[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2185,12 +2179,12 @@ dependencies = [
  "bytes",
  "common-base",
  "common-error",
+ "common-runtime",
  "common-telemetry",
  "crc",
  "futures",
  "futures-util",
  "hex",
- "memmap2",
  "rand 0.8.5",
  "snafu",
  "store-api",
@@ -2281,15 +2275,6 @@ name = "memchr"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
-
-[[package]]
-name = "memmap2"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5172b50c23043ff43dd53e51392f36519d9b35a8f3a410d30ece5d1aedd58ae"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "memoffset"
@@ -3973,7 +3958,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "atomic_float",
- "bit-vec",
+ "bitvec",
  "bytes",
  "common-error",
  "common-runtime",

@@ -126,15 +126,16 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
 fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
     let column_type = match column_schema.data_type {
         ConcreteDataType::Null(_) => Ok(ColumnType::MYSQL_TYPE_NULL),
-        ConcreteDataType::Boolean(_) => Ok(ColumnType::MYSQL_TYPE_SHORT),
-        ConcreteDataType::Int8(_)
-        | ConcreteDataType::Int16(_)
-        | ConcreteDataType::Int32(_)
-        | ConcreteDataType::Int64(_)
-        | ConcreteDataType::UInt8(_)
-        | ConcreteDataType::UInt16(_)
-        | ConcreteDataType::UInt32(_)
-        | ConcreteDataType::UInt64(_) => Ok(ColumnType::MYSQL_TYPE_LONG),
+        ConcreteDataType::Boolean(_) | ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => {
+            Ok(ColumnType::MYSQL_TYPE_TINY)
+        }
+        ConcreteDataType::Int16(_) | ConcreteDataType::UInt16(_) => {
+            Ok(ColumnType::MYSQL_TYPE_SHORT)
+        }
+        ConcreteDataType::Int32(_) | ConcreteDataType::UInt32(_) => Ok(ColumnType::MYSQL_TYPE_LONG),
+        ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => {
+            Ok(ColumnType::MYSQL_TYPE_LONGLONG)
+        }
         ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
             Ok(ColumnType::MYSQL_TYPE_FLOAT)
         }
