@@ -247,13 +247,14 @@ impl SchemaProvider for SchemaProviderAdapter {
 
 #[cfg(test)]
 mod tests {
-    use catalog::memory::MemorySchemaProvider;
+    use catalog::memory::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
+    use table::table::numbers::NumbersTable;
 
     use super::*;
 
     #[test]
     #[should_panic]
-    pub fn test_register_table() {
+    pub fn test_register_schema() {
         let adapter = CatalogProviderAdapter {
             df_catalog_provider: Arc::new(
                 datafusion::catalog::catalog::MemoryCatalogProvider::new(),
@@ -265,5 +266,43 @@ mod tests {
             "whatever".to_string(),
             Arc::new(MemorySchemaProvider::new()),
         );
+    }
+
+    #[test]
+    pub fn test_register_table() {
+        let adapter = DfSchemaProviderAdapter {
+            runtime: Arc::new(RuntimeEnv::default()),
+            schema_provider: Arc::new(MemorySchemaProvider::new()),
+        };
+
+        adapter
+            .register_table(
+                "test_table".to_string(),
+                Arc::new(DfTableProviderAdapter::new(Arc::new(
+                    NumbersTable::default(),
+                ))),
+            )
+            .unwrap();
+        adapter.table("test_table").unwrap();
+    }
+
+    #[test]
+    pub fn test_register_catalog() {
+        let rt = Arc::new(RuntimeEnv::default());
+        let catalog_list = DfCatalogListAdapter {
+            runtime: rt.clone(),
+            catalog_list: new_memory_catalog_list().unwrap(),
+        };
+        assert!(catalog_list
+            .register_catalog(
+                "test_catalog".to_string(),
+                Arc::new(DfCatalogProviderAdapter {
+                    catalog_provider: Arc::new(MemoryCatalogProvider::new()),
+                    runtime: rt,
+                }),
+            )
+            .is_none());
+
+        catalog_list.catalog("test_catalog").unwrap();
     }
 }

@@ -1,3 +1,5 @@
+#![feature(assert_matches)]
+
 use std::any::Any;
 use std::sync::Arc;
 

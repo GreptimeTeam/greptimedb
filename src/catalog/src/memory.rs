@@ -215,4 +215,21 @@ mod tests {
         assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
     }
+
+    #[test]
+    pub fn test_register_if_absent() {
+        let list = MemoryCatalogList::default();
+        assert!(list
+            .register_catalog_if_absent(
+                "test_catalog".to_string(),
+                Arc::new(MemoryCatalogProvider::new())
+            )
+            .is_none());
+        list.register_catalog_if_absent(
+            "test_catalog".to_string(),
+            Arc::new(MemoryCatalogProvider::new()),
+        )
+        .unwrap();
+        list.as_any().downcast_ref::<MemoryCatalogList>().unwrap();
+    }
 }

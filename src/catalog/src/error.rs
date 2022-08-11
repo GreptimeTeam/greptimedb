@@ -126,3 +126,85 @@ impl From<Error> for DataFusionError {
         DataFusionError::Internal(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use common_error::mock::MockError;
+    use datatypes::arrow::datatypes::DataType;
+    use snafu::GenerateImplicitData;
+
+    use super::*;
+
+    #[test]
+    pub fn test_error_status_code() {
+        assert_eq!(
+            StatusCode::TableAlreadyExists,
+            Error::TableExists {
+                table: "some_table".to_string(),
+                backtrace: Backtrace::generate(),
+            }
+            .status_code()
+        );
+
+        assert_eq!(
+            StatusCode::Unexpected,
+            Error::InvalidKey { key: None }.status_code()
+        );
+
+        assert_eq!(
+            StatusCode::Unexpected,
+            Error::OpenSystemCatalog {
+                source: table::error::Error::new(MockError::new(StatusCode::StorageUnavailable))
+            }
+            .status_code()
+        );
+
+        assert_eq!(
+            StatusCode::Unexpected,
+            Error::CreateSystemCatalog {
+                source: table::error::Error::new(MockError::new(StatusCode::StorageUnavailable))
+            }
+            .status_code()
+        );
+
+        assert_eq!(
+            StatusCode::StorageUnavailable,
+            Error::SystemCatalog {
+                msg: "".to_string(),
+                backtrace: Backtrace::generate(),
+            }
+            .status_code()
+        );
+
+        assert_eq!(
+            StatusCode::StorageUnavailable,
+            Error::SystemCatalogTypeMismatch {
+                data_type: DataType::Boolean,
+                source: datatypes::error::Error::UnsupportedArrowType {
+                    arrow_type: DataType::Boolean,
+                    backtrace: Backtrace::generate()
+                }
+            }
+            .status_code()
+        );
+        assert_eq!(
+            StatusCode::StorageUnavailable,
+            Error::EmptyValue.status_code()
+        );
+    }
+
+    #[test]
+    pub fn test_errors_to_datafusion_error() {
+        let e: DataFusionError = Error::TableExists {
+            table: "test_table".to_string(),
+            backtrace: Backtrace::generate(),
+        }
+        .into();
+        match e {
+            DataFusionError::Internal(_) => {}
+            _ => {
+                panic!("catalog error should be converted to DataFusionError::Internal")
+            }
+        }
+    }
+}

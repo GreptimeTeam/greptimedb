@@ -449,6 +449,7 @@ mod tests {
 
         let (engine, table) = {
             let (engine, table_engine, table) = test_util::setup_mock_engine_and_table().await;
+            assert_eq!(MITO_ENGINE, table_engine.name());
             // Now try to open the table again.
             let reopened = table_engine
                 .open_table(&ctx, open_req.clone())

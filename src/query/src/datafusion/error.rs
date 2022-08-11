@@ -140,7 +140,7 @@ mod tests {
             source: table::error::Error::new(MockError::new(StatusCode::Unexpected)),
         };
 
-        let catalog_error: catalog::error::Error = err.into();
+        let catalog_error = catalog::error::Error::from(err);
         // [InnerError]  to [catalog::error::Error] is considered as Internal error
         assert_eq!(StatusCode::Internal, catalog_error.status_code());
     }
