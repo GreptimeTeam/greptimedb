@@ -46,10 +46,8 @@ message DeleteExpr {}
 message ObjectResult {
   ResultHeader header = 1;
   oneof result {
-    SelectResult select_result = 2;
-    InsertResult insert_result = 3;
-    UpdateResult update_result = 4;
-    DeleteResult delete_result = 5;
+    bytes select = 2;
+    MutateResult mutate = 3;
   }
 }
 
@@ -59,16 +57,7 @@ message ResultHeader {
   string err_msg = 3;
 }
 
-message SelectResult {
-  bytes result = 1;
-}
-
-message InsertResult {
+message MutateResult {
   uint32 success = 1;
   uint32 failure = 2;
 }
-
-// TODO(fys)
-message UpdateResult {}
-// TODO(fys)
-message DeleteResult {}
