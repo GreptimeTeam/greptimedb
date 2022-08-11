@@ -59,7 +59,7 @@ mod tests {
     }
 
     async fn create_extension() -> Extension<InstanceRef> {
-        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let (opts, _wal_dir, _data_dir) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Arc::new(Instance::new(&opts).await.unwrap());
         instance.start().await.unwrap();
         Extension(instance)

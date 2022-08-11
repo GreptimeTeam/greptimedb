@@ -49,6 +49,9 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
                 table_name: &table_name,
             })?;
         let schema = table.schema();
+
+        println!("{:?}", schema);
+
         let columns_num = if columns.is_empty() {
             schema.column_schemas().len()
         } else {

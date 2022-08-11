@@ -40,7 +40,7 @@ pub struct Instance {
 pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    pub async fn new(opts: &DatanodeOptions, catalog_list: CatalogListRef) -> Result<Self> {
+    pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
         let object_store = new_object_store(&opts.store_config).await?;
         let log_store = create_local_file_log_store(opts).await?;
 
@@ -146,6 +146,7 @@ impl Instance {
             .create_table(
                 &EngineContext::default(),
                 CreateTableRequest {
+                    table_id: 1,
                     name: table_name.to_string(),
                     desc: Some(" a test table".to_string()),
                     schema: Arc::new(
@@ -224,7 +225,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_insert() {
         common_telemetry::init_default_ut_logging();
-        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let (opts, _wal_dir, _data_dir) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
 
@@ -243,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_query() {
-        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let (opts, _wal_dir, _data_dir) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
 

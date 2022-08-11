@@ -155,8 +155,6 @@ impl ErrorExt for Error {
             | TableExists { .. }
             | MissingTimestampIndex { .. } => StatusCode::InvalidArguments,
 
-            UpdateTableManifest { .. } => StatusCode::StorageUnavailable,
-
             TableInfoNotFound { .. } => StatusCode::Unexpected,
 
             ScanTableManifest { .. } | UpdateTableManifest { .. } => StatusCode::StorageUnavailable,

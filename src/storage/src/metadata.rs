@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use store_api::storage::{
     consts, ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyId,
-    ColumnId, ColumnSchema, RegionDescriptor, RegionId, RegionMeta, RowKeyDescriptor, Schema,
-    SchemaRef,
+    ColumnId, ColumnSchema, RegionDescriptor, RegionMeta, RowKeyDescriptor, Schema, SchemaRef,
 };
 
 /// Error for handling metadata.
@@ -59,8 +58,6 @@ pub type VersionNumber = u32;
 /// In memory metadata of region.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RegionMetadata {
-    // The following fields are immutable.
-    id: RegionId,
     name: String,
 
     // The following fields are mutable.
@@ -79,11 +76,6 @@ pub struct RegionMetadata {
 }
 
 impl RegionMetadata {
-    #[inline]
-    pub fn id(&self) -> RegionId {
-        self.id
-    }
-
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
@@ -178,7 +170,6 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
         // created from descriptor, using initial version is reasonable.
         let mut builder = RegionMetadataBuilder::new()
             .name(desc.name)
-            .id(desc.id)
             .row_key(desc.row_key)?
             .add_column_family(desc.default_cf)?;
         for cf in desc.extra_cfs {
@@ -191,7 +182,6 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
 
 #[derive(Default)]
 struct RegionMetadataBuilder {
-    id: RegionId,
     name: String,
     columns: Vec<ColumnMetadata>,
     column_schemas: Vec<ColumnSchema>,
@@ -210,11 +200,6 @@ impl RegionMetadataBuilder {
 
     fn name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
-        self
-    }
-
-    fn id(mut self, id: RegionId) -> Self {
-        self.id = id;
         self
     }
 
@@ -293,7 +278,6 @@ impl RegionMetadataBuilder {
         });
 
         Ok(RegionMetadata {
-            id: self.id,
             name: self.name,
             schema,
             columns_row_key,

@@ -222,10 +222,9 @@ impl WriterInner {
                         last_sequence = req_sequence;
                     } else {
                         logging::error!(
-                            "Sequence should not decrease during replay, found {} < {}, region_id: {}, region_name: {}",
+                            "Sequence should not decrease during replay, found {} < {}, region_name: {}",
                             req_sequence,
                             last_sequence,
-                            writer_ctx.shared.id,
                             writer_ctx.shared.name,
                         );
 
@@ -247,8 +246,7 @@ impl WriterInner {
         }
 
         logging::info!(
-            "Region replay finished, region_id: {}, region_name: {}, flushed_sequence: {}, last_sequence: {}, num_requests: {}",
-            writer_ctx.shared.id,
+            "Region replay finished, region_name: {}, flushed_sequence: {}, last_sequence: {}, num_requests: {}",
             writer_ctx.shared.name,
             flushed_sequence,
             last_sequence,
