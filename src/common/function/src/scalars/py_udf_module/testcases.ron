@@ -15,7 +15,7 @@
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 sqrt(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -36,7 +36,7 @@ sqrt(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 sin(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -57,7 +57,7 @@ sin(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 cos(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -78,7 +78,7 @@ cos(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 tan(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -99,7 +99,7 @@ tan(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 asin(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -120,7 +120,7 @@ asin(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 acos(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -141,7 +141,7 @@ acos(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 atan(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -162,7 +162,7 @@ atan(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 floor(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -183,7 +183,7 @@ floor(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 ceil(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -204,7 +204,7 @@ ceil(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 round(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -225,7 +225,7 @@ round(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 trunc(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -246,7 +246,7 @@ trunc(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 abs(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -267,7 +267,7 @@ abs(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 signum(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -288,7 +288,7 @@ signum(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 exp(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -309,7 +309,7 @@ exp(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 ln(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -330,7 +330,7 @@ ln(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 log2(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -351,7 +351,7 @@ log2(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 log10(values)"#,
         expect: Ok((
             value: FloatVec(
@@ -367,7 +367,7 @@ log10(values)"#,
     TestCase(
         input: {},
         script: r#"
-from udf_builtins import *
+from greptime import *
 random(42)"#,
         expect: Ok((
             value: LenFloatVec(42),
@@ -385,7 +385,7 @@ random(42)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 approx_distinct(values)"#,
         expect: Ok((
             value: Int(3),
@@ -402,7 +402,7 @@ approx_distinct(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 approx_median(values)"#,
         expect: Ok((
             value: Int(2),
@@ -418,7 +418,7 @@ approx_median(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 approx_percentile_cont(values, 0.6)"#,
         expect: Ok((
             value: Int(6),
@@ -433,7 +433,7 @@ approx_percentile_cont(values, 0.6)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 array_agg(values)"#,
         expect: Ok((
             value: FloatVec([1.0, 2.0, 3.0]),
@@ -448,7 +448,7 @@ array_agg(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 avg(values)"#,
         expect: Ok((
             value: Float(2.0),
@@ -467,7 +467,7 @@ avg(values)"#,
             ),
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 correlation(a, b)"#,
         expect: Ok((
             value: Float(-1.0),
@@ -482,7 +482,7 @@ correlation(a, b)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 count(values)"#,
         expect: Ok((
             value: Int(10),
@@ -501,7 +501,7 @@ count(values)"#,
             ),
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 covariance(a, b)"#,
         expect: Ok((
             value: Float(-1.0),
@@ -520,7 +520,7 @@ covariance(a, b)"#,
             ),
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 covariance_pop(a, b)"#,
         expect: Ok((
             value: Float(-0.6666666666666666),
@@ -535,7 +535,7 @@ covariance_pop(a, b)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 max(values)"#,
         expect: Ok((
             value: Int(10),
@@ -550,7 +550,7 @@ max(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 min(values)"#,
         expect: Ok((
             value: Int(1),
@@ -565,7 +565,7 @@ min(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 stddev(values)"#,
         expect: Ok((
             value: Float(3.0276503540974917),
@@ -580,7 +580,7 @@ stddev(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 stddev_pop(values)"#,
         expect: Ok((
             value: Float(2.8722813232690143),
@@ -595,7 +595,7 @@ stddev_pop(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 sum(values)"#,
         expect: Ok((
             value: Float(55),
@@ -610,7 +610,7 @@ sum(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 variance(values)"#,
         expect: Ok((
             value: Float(9.166666666666666),
@@ -625,7 +625,7 @@ variance(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 variance_pop(values)"#,
         expect: Ok((
             value: Float(8.25),
@@ -647,7 +647,7 @@ variance_pop(values)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 pow(values, pows)"#,
         expect: Ok((
             value: FloatVec([ 1.0, 0.5, 27.0]),
@@ -668,7 +668,7 @@ pow(values, pows)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 pow(values, 1)"#,
         expect: Err("TypeError: Can't cast operand of type `int` into `vector`.")
     ),
@@ -688,7 +688,7 @@ pow(values, 1)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 pow(num, pows)"#,
         expect: Err("TypeError: Can't cast operand of type `int` into `vector`")
     ),
@@ -708,7 +708,7 @@ pow(num, pows)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 asin(num, pows)"#,
         expect: Err("TypeError: Expected at most 1 arguments (2 given)")
     ),
@@ -721,7 +721,7 @@ asin(num, pows)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 sin(num)"#,
         expect: Ok((
             ty: Float64,
@@ -736,7 +736,7 @@ sin(num)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 sin(num)"#,
         expect: Ok((
             ty: Float64,
@@ -746,7 +746,7 @@ sin(num)"#,
     TestCase(
         input: {},
         script: r#"
-from udf_builtins import *
+from greptime import *
 sin(True)"#,
         expect: Ok((
             ty: Float64,
@@ -761,7 +761,7 @@ sin(True)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 sin(num)"#,
         expect: Ok((
             ty: Float64,
@@ -777,7 +777,7 @@ sin(num)"#,
             )
         },
         script: r#"
-from udf_builtins import *
+from greptime import *
 sin(num)"#,
         expect: Err("Can't cast object of type str into vector or scalar")
     ),

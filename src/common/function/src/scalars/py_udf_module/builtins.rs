@@ -65,7 +65,27 @@ fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DF
                 }
             })
             .collect::<Result<_, _>>()?;
+        
         let ty = ret[0].get_datatype();
+        if ret.iter().any(|i|i.get_datatype()!=ty){
+            let diff = ret.clone().iter().enumerate()
+            .filter_map(|(idx,val)|
+                if val.get_datatype()!=ty{
+                    Some((idx, val.get_datatype()))
+                }else{
+                    None
+                }
+            ).collect::<Vec<_>>();
+            return Err(vm.new_type_error(format!(
+                "All elements in a list should be same type to cast to Datafusion list!\nExpect {ty:?}, found {}",
+                diff.iter().map(|(idx, ty)|{
+                    format!(" {:?} at {}th location\n", ty, idx+1)
+                }).reduce(|mut acc, item|{
+                    acc.push_str(&item);
+                    acc
+                }).unwrap_or("Nothing".to_string())
+            )))
+        }
         Ok(DFColValue::Scalar(ScalarValue::List(
             Some(Box::new(ret)),
             Box::new(ty),
