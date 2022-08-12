@@ -65,11 +65,13 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::value::Value;
     use log_store::fs::noop::NoopLogStore;
+    use object_store::{backend::fs::Backend, ObjectStore};
     use query::QueryEngineFactory;
-    use storage::config::EngineConfig;
+    use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use table::error::Result as TableResult;
     use table::{Table, TableRef};
+    use table_engine::config::EngineConfig as TableEngineConfig;
     use table_engine::engine::MitoEngine;
     use tempdir::TempDir;
 
@@ -138,6 +140,8 @@ mod tests {
     async fn test_statement_to_request() {
         let dir = TempDir::new("setup_test_engine_and_table").unwrap();
         let store_dir = dir.path().to_string_lossy();
+        let accessor = Backend::build().root(&store_dir).finish().await.unwrap();
+        let object_store = ObjectStore::new(accessor);
 
         let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
         let factory = QueryEngineFactory::new(catalog_list);
@@ -149,12 +153,13 @@ mod tests {
                            "#;
 
         let table_engine = MitoEngine::<EngineImpl<NoopLogStore>>::new(
+            TableEngineConfig::default(),
             EngineImpl::new(
-                EngineConfig::with_store_dir(&store_dir),
+                StorageEngineConfig::default(),
                 Arc::new(NoopLogStore::default()),
-            )
-            .await
-            .unwrap(),
+                object_store.clone(),
+            ),
+            object_store,
         );
         let sql_handler = SqlHandler::new(table_engine);
 

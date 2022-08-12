@@ -6,3 +6,5 @@ coverage:
       default:
         enable: yes
         threshold: 1%
+ignore:
+  - "**/error*.rs" # ignore all error.rs files

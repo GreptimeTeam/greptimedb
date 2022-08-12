@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use arrow::array::UInt32Array;
 use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::{
+    CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+};
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
@@ -23,6 +25,7 @@ use query::query_engine::{Output, QueryEngineFactory};
 use query::QueryEngine;
 use rand::Rng;
 use table::table::adapter::DfTableProviderAdapter;
+use table::table::numbers::NumbersTable;
 use test_util::MemTable;
 
 use crate::pow::pow;
@@ -44,7 +47,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
         (0..100).collect::<Vec<_>>(),
     ))];
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let table = Arc::new(MemTable::new(recordbatch));
+    let table = Arc::new(MemTable::new("numbers", recordbatch));
 
     let limit = 10;
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
@@ -87,6 +90,15 @@ async fn test_datafusion_query_engine() -> Result<()> {
 async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let catalog_list = catalog::memory::new_memory_catalog_list()?;
+
+    let default_schema = Arc::new(MemorySchemaProvider::new());
+    default_schema
+        .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+        .unwrap();
+    let default_catalog = Arc::new(MemoryCatalogProvider::new());
+    default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema);
+    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
+
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
 
@@ -158,9 +170,12 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let even_number_table = Arc::new(MemTable::new(recordbatch));
+    let even_number_table = Arc::new(MemTable::new("even_numbers", recordbatch));
     schema_provider
-        .register_table("even_numbers".to_string(), even_number_table)
+        .register_table(
+            even_number_table.table_name().to_string(),
+            even_number_table,
+        )
         .unwrap();
 
     // create table with ordered primitives, and all columns' length are odd
@@ -185,9 +200,9 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let odd_number_table = Arc::new(MemTable::new(recordbatch));
+    let odd_number_table = Arc::new(MemTable::new("odd_numbers", recordbatch));
     schema_provider
-        .register_table("odd_numbers".to_string(), odd_number_table)
+        .register_table(odd_number_table.table_name().to_string(), odd_number_table)
         .unwrap();
 
     // create table with floating numbers
@@ -200,12 +215,15 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
     let columns = vec![f32_numbers, f64_numbers];
     let schema = Arc::new(Schema::new(column_schemas));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let float_number_table = Arc::new(MemTable::new(recordbatch));
+    let float_number_table = Arc::new(MemTable::new("float_numbers", recordbatch));
     schema_provider
-        .register_table("float_numbers".to_string(), float_number_table)
+        .register_table(
+            float_number_table.table_name().to_string(),
+            float_number_table,
+        )
         .unwrap();
 
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);
+    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
     catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
 
     let factory = QueryEngineFactory::new(catalog_list);

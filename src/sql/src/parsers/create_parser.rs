@@ -144,7 +144,7 @@ impl<'a> ParserContext<'a> {
     /// Parses the set of valid formats
     fn parse_table_engine(&mut self) -> Result<String> {
         if !self.consume_token(ENGINE) {
-            return Ok(engine::DEFAULT_ENGINE.to_string());
+            return Ok(engine::MITO_ENGINE.to_string());
         }
 
         self.parser

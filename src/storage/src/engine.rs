@@ -3,15 +3,15 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_telemetry::logging::info;
-use object_store::{backend::fs::Backend, util, ObjectStore};
+use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::{
     logstore::LogStore,
-    storage::{EngineContext, OpenOptions, RegionDescriptor, StorageEngine},
+    storage::{CreateOptions, EngineContext, OpenOptions, RegionDescriptor, StorageEngine},
 };
 
 use crate::background::JobPoolImpl;
-use crate::config::{EngineConfig, ObjectStoreConfig};
+use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
 use crate::manifest::region::RegionManifest;
@@ -43,7 +43,7 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         _ctx: &EngineContext,
         name: &str,
         opts: &OpenOptions,
-    ) -> Result<Self::Region> {
+    ) -> Result<Option<Self::Region>> {
         self.inner.open_region(name, opts).await
     }
 
@@ -55,8 +55,9 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         &self,
         _ctx: &EngineContext,
         descriptor: RegionDescriptor,
+        opts: &CreateOptions,
     ) -> Result<Self::Region> {
-        self.inner.create_region(descriptor).await
+        self.inner.create_region(descriptor, opts).await
     }
 
     async fn drop_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
@@ -69,36 +70,25 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
 }
 
 impl<S: LogStore> EngineImpl<S> {
-    pub async fn new(config: EngineConfig, log_store: Arc<S>) -> Result<Self> {
-        Ok(Self {
-            inner: Arc::new(EngineInner::new(config, log_store).await?),
-        })
+    pub fn new(config: EngineConfig, log_store: Arc<S>, object_store: ObjectStore) -> Self {
+        Self {
+            inner: Arc::new(EngineInner::new(config, log_store, object_store)),
+        }
     }
 }
 
-async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
-    // TODO(dennis): supports other backend
-    let store_dir = util::normalize_dir(match store_config {
-        ObjectStoreConfig::File(file) => &file.store_dir,
-    });
-
-    let accessor = Backend::build()
-        .root(&store_dir)
-        .finish()
-        .await
-        .context(error::InitBackendSnafu { dir: &store_dir })?;
-
-    Ok(ObjectStore::new(accessor))
+/// Generate region sst path,
+/// parent_dir is resolved in function `region_store_config` to ensure it's ended with '/'.
+#[inline]
+pub fn region_sst_dir(parent_dir: &str, region_name: &str) -> String {
+    format!("{}{}/", parent_dir, region_name)
 }
 
+/// Generate region manifest path,
+/// parent_dir is resolved in function `region_store_config` to ensure it's ended with '/'.
 #[inline]
-pub fn region_sst_dir(region_name: &str) -> String {
-    format!("{}/", region_name)
-}
-
-#[inline]
-pub fn region_manifest_dir(region_name: &str) -> String {
-    format!("{}/manifest/", region_name)
+pub fn region_manifest_dir(parent_dir: &str, region_name: &str) -> String {
+    format!("{}{}/manifest/", parent_dir, region_name)
 }
 
 /// A slot for region in the engine.
@@ -209,19 +199,18 @@ struct EngineInner<S: LogStore> {
 }
 
 impl<S: LogStore> EngineInner<S> {
-    pub async fn new(config: EngineConfig, log_store: Arc<S>) -> Result<Self> {
+    pub fn new(_config: EngineConfig, log_store: Arc<S>, object_store: ObjectStore) -> Self {
         let job_pool = Arc::new(JobPoolImpl {});
         let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
-        let object_store = new_object_store(&config.store_config).await?;
 
-        Ok(Self {
+        Self {
             object_store,
             log_store,
             regions: RwLock::new(Default::default()),
             memtable_builder: Arc::new(DefaultMemtableBuilder {}),
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
-        })
+        }
     }
 
     /// Returns the `Some(slot)` if there is existing slot with given `name`, or insert
@@ -247,33 +236,36 @@ impl<S: LogStore> EngineInner<S> {
         None
     }
 
-    async fn open_region(&self, name: &str, opts: &OpenOptions) -> Result<RegionImpl<S>> {
+    async fn open_region(&self, name: &str, opts: &OpenOptions) -> Result<Option<RegionImpl<S>>> {
         // We can wait until the state of the slot has been changed to ready, but this will
         // make the code more complicate, so we just return the error here.
         if let Some(slot) = self.get_or_occupy_slot(name, RegionSlot::Opening) {
-            return slot.try_get_ready_region();
+            return slot.try_get_ready_region().map(Some);
         }
 
         let mut guard = SlotGuard::new(name, &self.regions);
 
-        // FIXME(yingwen): Get region id or remove dependency of region id.
-        let store_config = self.region_store_config(name);
-        let region = RegionImpl::open(name.to_string(), store_config, opts).await?;
+        let store_config = self.region_store_config(&opts.parent_dir, name);
 
+        let region = match RegionImpl::open(name.to_string(), store_config, opts).await? {
+            None => return Ok(None),
+            Some(v) => v,
+        };
         guard.update(RegionSlot::Ready(region.clone()));
-
         info!("Storage engine open region {:?}", &region);
-
-        Ok(region)
+        Ok(Some(region))
     }
 
-    async fn create_region(&self, descriptor: RegionDescriptor) -> Result<RegionImpl<S>> {
+    async fn create_region(
+        &self,
+        descriptor: RegionDescriptor,
+        opts: &CreateOptions,
+    ) -> Result<RegionImpl<S>> {
         if let Some(slot) = self.get_or_occupy_slot(&descriptor.name, RegionSlot::Creating) {
             return slot.try_get_ready_region();
         }
 
         // Now the region in under `Creating` state.
-        let region_id = descriptor.id;
         let region_name = descriptor.name.clone();
         let mut guard = SlotGuard::new(&region_name, &self.regions);
 
@@ -283,15 +275,9 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let store_config = self.region_store_config(&region_name);
+        let store_config = self.region_store_config(&opts.parent_dir, &region_name);
 
-        let region = RegionImpl::create(
-            region_id,
-            region_name.clone(),
-            metadata.clone(),
-            store_config,
-        )
-        .await?;
+        let region = RegionImpl::create(metadata, store_config).await?;
 
         guard.update(RegionSlot::Ready(region.clone()));
 
@@ -305,10 +291,12 @@ impl<S: LogStore> EngineInner<S> {
         slot.get_ready_region()
     }
 
-    fn region_store_config(&self, region_name: &str) -> StoreConfig<S> {
-        let sst_dir = &region_sst_dir(region_name);
+    fn region_store_config(&self, parent_dir: &str, region_name: &str) -> StoreConfig<S> {
+        let parent_dir = util::normalize_dir(parent_dir);
+
+        let sst_dir = &region_sst_dir(&parent_dir, region_name);
         let sst_layer = Arc::new(FsAccessLayer::new(sst_dir, self.object_store.clone()));
-        let manifest_dir = region_manifest_dir(region_name);
+        let manifest_dir = region_manifest_dir(&parent_dir, region_name);
         let manifest = RegionManifest::new(&manifest_dir, self.object_store.clone());
 
         StoreConfig {
@@ -326,6 +314,7 @@ impl<S: LogStore> EngineInner<S> {
 mod tests {
     use datatypes::type_id::LogicalTypeId;
     use log_store::test_util::log_store_util;
+    use object_store::backend::fs::Backend;
     use store_api::storage::Region;
     use tempdir::TempDir;
 
@@ -338,9 +327,12 @@ mod tests {
             log_store_util::create_tmp_local_file_log_store("test_engine_wal").await;
         let dir = TempDir::new("test_create_new_region").unwrap();
         let store_dir = dir.path().to_string_lossy();
-        let config = EngineConfig::with_store_dir(&store_dir);
+        let accessor = Backend::build().root(&store_dir).finish().await.unwrap();
+        let object_store = ObjectStore::new(accessor);
 
-        let engine = EngineImpl::new(config, Arc::new(log_store)).await.unwrap();
+        let config = EngineConfig::default();
+
+        let engine = EngineImpl::new(config, Arc::new(log_store), object_store);
 
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)
@@ -348,7 +340,10 @@ mod tests {
             .push_value_column(("v1", LogicalTypeId::Float32, true))
             .build();
         let ctx = EngineContext::default();
-        let region = engine.create_region(&ctx, desc).await.unwrap();
+        let region = engine
+            .create_region(&ctx, desc, &CreateOptions::default())
+            .await
+            .unwrap();
 
         assert_eq!(region_name, region.name());
 

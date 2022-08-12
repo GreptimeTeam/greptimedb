@@ -3,7 +3,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use catalog::{CatalogListRef, CatalogProvider, SchemaProvider};
+use catalog::{
+    CatalogListRef, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
+};
 use datafusion::catalog::{
     catalog::{CatalogList as DfCatalogList, CatalogProvider as DfCatalogProvider},
     schema::SchemaProvider as DfSchemaProvider,
@@ -44,7 +46,7 @@ impl DfCatalogList for DfCatalogListAdapter {
         catalog: Arc<dyn DfCatalogProvider>,
     ) -> Option<Arc<dyn DfCatalogProvider>> {
         let catalog_adapter = Arc::new(CatalogProviderAdapter {
-            df_cataglog_provider: catalog,
+            df_catalog_provider: catalog,
             runtime: self.runtime.clone(),
         });
         self.catalog_list
@@ -73,7 +75,7 @@ impl DfCatalogList for DfCatalogListAdapter {
 
 /// Datafusion's CatalogProvider ->  greptime CatalogProvider
 struct CatalogProviderAdapter {
-    df_cataglog_provider: Arc<dyn DfCatalogProvider>,
+    df_catalog_provider: Arc<dyn DfCatalogProvider>,
     runtime: Arc<RuntimeEnv>,
 }
 
@@ -83,11 +85,19 @@ impl CatalogProvider for CatalogProviderAdapter {
     }
 
     fn schema_names(&self) -> Vec<String> {
-        self.df_cataglog_provider.schema_names()
+        self.df_catalog_provider.schema_names()
+    }
+
+    fn register_schema(
+        &self,
+        _name: String,
+        _schema: SchemaProviderRef,
+    ) -> Option<SchemaProviderRef> {
+        todo!("register_schema is not supported in Datafusion catalog provider")
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.df_cataglog_provider
+        self.df_catalog_provider
             .schema(name)
             .map(|df_schema_provider| {
                 Arc::new(SchemaProviderAdapter {
@@ -100,7 +110,7 @@ impl CatalogProvider for CatalogProviderAdapter {
 
 ///Greptime CatalogProvider -> datafusion's CatalogProvider
 struct DfCatalogProviderAdapter {
-    catalog_provider: Arc<dyn CatalogProvider>,
+    catalog_provider: CatalogProviderRef,
     runtime: Arc<RuntimeEnv>,
 }
 
@@ -232,5 +242,67 @@ impl SchemaProvider for SchemaProviderAdapter {
 
     fn table_exist(&self, name: &str) -> bool {
         self.df_schema_provider.table_exist(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use catalog::memory::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
+    use table::table::numbers::NumbersTable;
+
+    use super::*;
+
+    #[test]
+    #[should_panic]
+    pub fn test_register_schema() {
+        let adapter = CatalogProviderAdapter {
+            df_catalog_provider: Arc::new(
+                datafusion::catalog::catalog::MemoryCatalogProvider::new(),
+            ),
+            runtime: Arc::new(RuntimeEnv::default()),
+        };
+
+        adapter.register_schema(
+            "whatever".to_string(),
+            Arc::new(MemorySchemaProvider::new()),
+        );
+    }
+
+    #[test]
+    pub fn test_register_table() {
+        let adapter = DfSchemaProviderAdapter {
+            runtime: Arc::new(RuntimeEnv::default()),
+            schema_provider: Arc::new(MemorySchemaProvider::new()),
+        };
+
+        adapter
+            .register_table(
+                "test_table".to_string(),
+                Arc::new(DfTableProviderAdapter::new(Arc::new(
+                    NumbersTable::default(),
+                ))),
+            )
+            .unwrap();
+        adapter.table("test_table").unwrap();
+    }
+
+    #[test]
+    pub fn test_register_catalog() {
+        let rt = Arc::new(RuntimeEnv::default());
+        let catalog_list = DfCatalogListAdapter {
+            runtime: rt.clone(),
+            catalog_list: new_memory_catalog_list().unwrap(),
+        };
+        assert!(catalog_list
+            .register_catalog(
+                "test_catalog".to_string(),
+                Arc::new(DfCatalogProviderAdapter {
+                    catalog_provider: Arc::new(MemoryCatalogProvider::new()),
+                    runtime: rt,
+                }),
+            )
+            .is_none());
+
+        catalog_list.catalog("test_catalog").unwrap();
     }
 }

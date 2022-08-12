@@ -1,20 +1,19 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 
 use serde::{Deserialize, Serialize};
 use serde_json as json;
-use serde_json::ser::to_writer;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::manifest::action::ProtocolAction;
-use store_api::manifest::action::ProtocolVersion;
+use store_api::manifest::action::{ProtocolAction, ProtocolVersion, VersionHeader};
 use store_api::manifest::ManifestVersion;
 use store_api::manifest::MetaAction;
 use store_api::storage::RegionId;
 use store_api::storage::SequenceNumber;
 
 use crate::error::{
-    DecodeJsonSnafu, DecodeRegionMetaActionListSnafu, EncodeJsonSnafu,
-    ManifestProtocolForbidReadSnafu, ReadlineSnafu, Result,
+    self, DecodeJsonSnafu, DecodeMetaActionListSnafu, ManifestProtocolForbidReadSnafu,
+    ReadlineSnafu, Result,
 };
+use crate::manifest::helper;
 use crate::metadata::{RegionMetadataRef, VersionNumber};
 use crate::sst::FileMeta;
 
@@ -50,13 +49,6 @@ pub enum RegionMetaAction {
     Edit(RegionEdit),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-struct VersionHeader {
-    prev_version: ManifestVersion,
-}
-
-const NEWLINE: &[u8] = b"\n";
-
 impl RegionMetaActionList {
     pub fn with_action(action: RegionMetaAction) -> Self {
         Self {
@@ -71,31 +63,21 @@ impl RegionMetaActionList {
             prev_version: 0,
         }
     }
+}
 
-    /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
-    pub(crate) fn encode(&self) -> Result<Vec<u8>> {
-        let mut bytes = Vec::default();
+impl MetaAction for RegionMetaActionList {
+    type Error = error::Error;
 
-        {
-            // Encode prev_version
-            let v = VersionHeader {
-                prev_version: self.prev_version,
-            };
-
-            to_writer(&mut bytes, &v).context(EncodeJsonSnafu)?;
-            // unwrap is fine here, because we write into a buffer.
-            bytes.write_all(NEWLINE).unwrap();
-        }
-
-        for action in &self.actions {
-            to_writer(&mut bytes, action).context(EncodeJsonSnafu)?;
-            bytes.write_all(NEWLINE).unwrap();
-        }
-
-        Ok(bytes)
+    fn set_prev_version(&mut self, version: ManifestVersion) {
+        self.prev_version = version;
     }
 
-    pub(crate) fn decode(
+    /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
+    fn encode(&self) -> Result<Vec<u8>> {
+        helper::encode_actions(self.prev_version, &self.actions)
+    }
+
+    fn decode(
         bs: &[u8],
         reader_version: ProtocolVersion,
     ) -> Result<(Self, Option<ProtocolAction>)> {
@@ -109,7 +91,7 @@ impl RegionMetaActionList {
         {
             let first_line = lines
                 .next()
-                .with_context(|| DecodeRegionMetaActionListSnafu {
+                .with_context(|| DecodeMetaActionListSnafu {
                     msg: format!(
                         "Invalid content in manifest: {}",
                         std::str::from_utf8(bs).unwrap_or("**invalid bytes**")
@@ -145,12 +127,6 @@ impl RegionMetaActionList {
         action_list.actions = actions;
 
         Ok((action_list, protocol_action))
-    }
-}
-
-impl MetaAction for RegionMetaActionList {
-    fn set_prev_version(&mut self, version: ManifestVersion) {
-        self.prev_version = version;
     }
 }
 

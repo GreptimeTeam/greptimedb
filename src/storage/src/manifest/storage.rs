@@ -131,7 +131,6 @@ impl ManifestLogStorage for ManifestObjectStore {
             .is_exist()
             .await
             .context(ReadObjectSnafu { path: &self.path })?;
-
         if !dir_exists {
             return Ok(ObjectStoreLogIterator {
                 iter: Box::new(Vec::default().into_iter()),

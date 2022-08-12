@@ -155,12 +155,7 @@ async fn test_new_region() {
 
     let store_config = config_util::new_store_config(region_name, &store_dir).await;
 
-    let region = RegionImpl::new(
-        0,
-        region_name.to_string(),
-        Version::new(Arc::new(metadata)),
-        store_config,
-    );
+    let region = RegionImpl::new(Version::new(Arc::new(metadata)), store_config);
 
     let expect_schema = schema_util::new_schema_ref(
         &[
@@ -189,15 +184,13 @@ async fn test_recover_region_manifets() {
     );
 
     let manifest = RegionManifest::new("/manifest/", object_store);
-    let region_name = "region-0";
     let region_meta = Arc::new(build_region_meta());
 
     // Recover from empty
-    assert!(
-        RegionImpl::<NoopLogStore>::recover_from_manifest(region_name, &manifest)
-            .await
-            .is_err()
-    );
+    assert!(RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest)
+        .await
+        .unwrap()
+        .is_none());
 
     {
         // save some actions into region_meta
@@ -220,8 +213,9 @@ async fn test_recover_region_manifets() {
     }
 
     // try to recover
-    let version = RegionImpl::<NoopLogStore>::recover_from_manifest(region_name, &manifest)
+    let version = RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest)
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(*version.metadata(), region_meta);
     assert_eq!(version.flushed_sequence(), 2);

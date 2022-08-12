@@ -8,20 +8,20 @@ use axum_test_helper::TestClient;
 
 use crate::instance::Instance;
 use crate::server::http::HttpServer;
-use crate::test_util;
+use crate::test_util::{self, TestGuard};
 
-async fn make_test_app() -> Router {
-    let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
-    let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
-    let instance = Arc::new(Instance::new(&opts, catalog_list).await.unwrap());
+async fn make_test_app() -> (Router, TestGuard) {
+    let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let instance = Arc::new(Instance::new(&opts).await.unwrap());
+    instance.start().await.unwrap();
     let http_server = HttpServer::new(instance);
-    http_server.make_app()
+    (http_server.make_app(), guard)
 }
 
 #[tokio::test]
 async fn test_sql_api() {
     common_telemetry::init_default_ut_logging();
-    let app = make_test_app().await;
+    let (app, _guard) = make_test_app().await;
     let client = TestClient::new(app);
     let res = client.get("/sql").send().await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -49,7 +49,7 @@ async fn test_sql_api() {
 async fn test_metrics_api() {
     common_telemetry::init_default_ut_logging();
     common_telemetry::init_default_metrics_recorder();
-    let app = make_test_app().await;
+    let (app, _guard) = make_test_app().await;
     let client = TestClient::new(app);
 
     // Send a sql

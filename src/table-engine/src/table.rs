@@ -8,9 +8,13 @@ use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_telemetry::logging;
 use futures::task::{Context, Poll};
 use futures::Stream;
-use snafu::OptionExt;
+use object_store::ObjectStore;
+use snafu::{OptionExt, ResultExt};
+use store_api::manifest::action::ProtocolAction;
+use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
     ChunkReader, PutOperation, ReadContext, Region, ScanRequest, SchemaRef, Snapshot, WriteContext,
     WriteRequest,
@@ -22,10 +26,22 @@ use table::{
     table::Table,
 };
 
+use crate::error::{
+    Result, ScanTableManifestSnafu, TableInfoNotFoundSnafu, UpdateTableManifestSnafu,
+};
+use crate::manifest::action::*;
+use crate::manifest::TableManifest;
+
+#[inline]
+fn table_manifest_dir(table_name: &str) -> String {
+    format!("{}/manifest/", table_name)
+}
+
 /// [Table] implementation.
 pub struct MitoTable<R: Region> {
+    manifest: TableManifest,
     table_info: TableInfo,
-    //TODO(dennis): a table contains multi regions
+    // TODO(dennis): a table contains multi regions
     region: R,
 }
 
@@ -46,11 +62,11 @@ impl<R: Region> Table for MitoTable<R> {
 
         let mut write_request = self.region.write_request(self.schema());
 
-        //FIXME(dennis): we can only insert to demo table right now
         let mut put_op = write_request.put_op();
         let mut columns_values = request.columns_values;
-        let key_columns = vec!["ts", "host"];
-        let value_columns = vec!["cpu", "memory"];
+        let key_columns = self.table_info.meta.row_key_column_names();
+        let value_columns = self.table_info.meta.value_column_names();
+
         //Add row key and columns
         for name in key_columns {
             put_op
@@ -63,6 +79,7 @@ impl<R: Region> Table for MitoTable<R> {
                 )
                 .map_err(TableError::new)?;
         }
+
         // Add vaue columns
         let mut rows_num = 0;
         for name in value_columns {
@@ -138,7 +155,118 @@ impl Stream for ChunkStream {
 }
 
 impl<R: Region> MitoTable<R> {
-    pub fn new(table_info: TableInfo, region: R) -> Self {
-        Self { table_info, region }
+    fn new(table_info: TableInfo, region: R, manifest: TableManifest) -> Self {
+        Self {
+            table_info,
+            region,
+            manifest,
+        }
+    }
+
+    pub async fn create(
+        table_name: &str,
+        table_info: TableInfo,
+        region: R,
+        object_store: ObjectStore,
+    ) -> Result<MitoTable<R>> {
+        let manifest = TableManifest::new(&table_manifest_dir(table_name), object_store);
+
+        // TODO(dennis): save  manifest version into catalog?
+        let _manifest_version = manifest
+            .update(TableMetaActionList::new(vec![
+                TableMetaAction::Protocol(ProtocolAction::new()),
+                TableMetaAction::Change(Box::new(TableChange {
+                    table_info: table_info.clone(),
+                })),
+            ]))
+            .await
+            .context(UpdateTableManifestSnafu { table_name })?;
+
+        Ok(MitoTable::new(table_info, region, manifest))
+    }
+
+    pub async fn open(
+        table_name: &str,
+        region: R,
+        object_store: ObjectStore,
+    ) -> Result<MitoTable<R>> {
+        let manifest = TableManifest::new(&table_manifest_dir(table_name), object_store);
+
+        let table_info = Self::recover_table_info(table_name, &manifest)
+            .await?
+            .context(TableInfoNotFoundSnafu { table_name })?;
+
+        Ok(MitoTable::new(table_info, region, manifest))
+    }
+
+    async fn recover_table_info(
+        table_name: &str,
+        manifest: &TableManifest,
+    ) -> Result<Option<TableInfo>> {
+        let (start, end) = Self::manifest_scan_range();
+        let mut iter = manifest
+            .scan(start, end)
+            .await
+            .context(ScanTableManifestSnafu { table_name })?;
+
+        let mut last_manifest_version = manifest::MIN_VERSION;
+        let mut table_info = None;
+        while let Some((manifest_version, action_list)) = iter
+            .next_action()
+            .await
+            .context(ScanTableManifestSnafu { table_name })?
+        {
+            last_manifest_version = manifest_version;
+
+            for action in action_list.actions {
+                match action {
+                    TableMetaAction::Change(c) => {
+                        table_info = Some(c.table_info);
+                    }
+                    TableMetaAction::Protocol(_) => {}
+                    _ => unimplemented!(),
+                }
+            }
+        }
+
+        if table_info.is_some() {
+            // update manifest state after recovering
+            let protocol = iter.last_protocol();
+            manifest.update_state(last_manifest_version + 1, protocol.clone());
+        }
+
+        logging::debug!(
+            "Recovered table info {:?} for table: {}",
+            table_info,
+            table_name
+        );
+
+        Ok(table_info)
+    }
+
+    #[inline]
+    pub fn table_info(&self) -> &TableInfo {
+        &self.table_info
+    }
+
+    #[inline]
+    pub fn manifest(&self) -> &TableManifest {
+        &self.manifest
+    }
+
+    fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
+        // TODO(dennis): use manifest version in catalog ?
+        (manifest::MIN_VERSION, manifest::MAX_VERSION)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_manifest_dir() {
+        assert_eq!("demo/manifest/", table_manifest_dir("demo"));
+        assert_eq!("numbers/manifest/", table_manifest_dir("numbers"));
     }
 }

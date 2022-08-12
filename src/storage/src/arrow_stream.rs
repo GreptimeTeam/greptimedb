@@ -14,6 +14,8 @@ use datatypes::arrow::{
     },
 };
 
+use crate::bit_vec;
+
 const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
 
 pub struct ArrowStreamReader<R: Read> {
@@ -90,7 +92,7 @@ impl<R: Read> ArrowStreamReader<R> {
 }
 
 fn valid_metadata(metadata: &StreamMetadata, column_null_mask: &[u8]) -> StreamMetadata {
-    let column_null_mask = bit_vec::BitVec::from_bytes(column_null_mask);
+    let column_null_mask = bit_vec::BitVec::from_slice(column_null_mask);
 
     let schema = Schema::from(
         metadata
@@ -98,7 +100,7 @@ fn valid_metadata(metadata: &StreamMetadata, column_null_mask: &[u8]) -> StreamM
             .fields
             .iter()
             .zip(&column_null_mask)
-            .filter(|(_, mask)| !*mask)
+            .filter(|(_, is_null)| !**is_null)
             .map(|(field, _)| field.clone())
             .collect::<Vec<_>>(),
     )
@@ -110,7 +112,7 @@ fn valid_metadata(metadata: &StreamMetadata, column_null_mask: &[u8]) -> StreamM
             .fields
             .iter()
             .zip(&column_null_mask)
-            .filter(|(_, mask)| !*mask)
+            .filter(|(_, is_null)| !**is_null)
             .map(|(ipc_field, _)| ipc_field.clone())
             .collect::<Vec<_>>(),
         is_little_endian: metadata.ipc_schema.is_little_endian,

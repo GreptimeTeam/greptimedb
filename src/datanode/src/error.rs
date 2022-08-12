@@ -109,6 +109,13 @@ pub enum Error {
     #[snafu(display("Failed to storage engine, source: {}", source))]
     OpenStorageEngine { source: StorageError },
 
+    #[snafu(display("Failed to init backend, dir: {}, source: {}", dir, source))]
+    InitBackend {
+        dir: String,
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to convert datafusion type: {}", from))]
     Conversion { from: String },
 }
@@ -137,6 +144,7 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::CreateDir { .. }
             | Error::Conversion { .. } => StatusCode::Internal,
+            Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
         }
@@ -170,9 +178,9 @@ mod tests {
     }
 
     fn throw_catalog_error() -> std::result::Result<(), catalog::error::Error> {
-        Err(catalog::error::Error::new(MockError::with_backtrace(
-            StatusCode::Internal,
-        )))
+        Err(catalog::error::Error::RegisterTable {
+            source: BoxedError::new(MockError::with_backtrace(StatusCode::Internal)),
+        })
     }
 
     fn assert_internal_error(err: &Error) {

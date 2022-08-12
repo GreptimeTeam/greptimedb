@@ -13,9 +13,12 @@ use store_api::{
 use crate::{
     codec::{Decoder, Encoder},
     error::{self, Error, Result},
-    proto::{self, PayloadType, WalHeader},
+    proto::wal::{self, PayloadType, WalHeader},
     write_batch::{
-        codec::{WriteBatchArrowDecoder, WriteBatchArrowEncoder},
+        codec::{
+            WriteBatchArrowDecoder, WriteBatchArrowEncoder, WriteBatchProtobufDecoder,
+            WriteBatchProtobufEncoder,
+        },
         WriteBatch,
     },
 };
@@ -78,7 +81,7 @@ impl<S: LogStore> Wal<S> {
         header.payload_type = payload.payload_type();
 
         if let Payload::WriteBatchArrow(batch) = payload {
-            header.mutation_extras = proto::gen_mutation_extras(batch);
+            header.mutation_extras = wal::gen_mutation_extras(batch);
         }
 
         let mut buf = vec![];
@@ -95,9 +98,15 @@ impl<S: LogStore> Wal<S> {
                 .encode(batch, &mut buf)
                 .map_err(BoxedError::new)
                 .context(error::WriteWalSnafu { name: self.name() })?;
+        } else if let Payload::WriteBatchProto(batch) = payload {
+            // entry
+            let encoder = WriteBatchProtobufEncoder {};
+            // TODO(jiachun): provide some way to compute data size before encode, so we can preallocate an exactly sized buf.
+            encoder
+                .encode(batch, &mut buf)
+                .map_err(BoxedError::new)
+                .context(error::WriteWalSnafu { name: self.name() })?;
         }
-
-        // TODO(jiachun): encode protobuf payload
 
         // write bytes to wal
         self.write(seq, &buf).await
@@ -125,8 +134,7 @@ impl<S: LogStore> Wal<S> {
     }
 
     async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
-        let mut e = self.store.entry(bytes);
-        e.set_id(seq);
+        let e = self.store.entry(bytes, seq);
 
         let res = self
             .store
@@ -173,7 +181,14 @@ impl<S: LogStore> Wal<S> {
                 Ok((seq_num, header, Some(write_batch)))
             }
             Some(PayloadType::WriteBatchProto) => {
-                todo!("protobuf decoder")
+                let mutation_extras = std::mem::take(&mut header.mutation_extras);
+                let decoder = WriteBatchProtobufDecoder::new(mutation_extras);
+                let write_batch = decoder
+                    .decode(&input[data_pos..])
+                    .map_err(BoxedError::new)
+                    .context(error::ReadWalSnafu { name: self.name() })?;
+
+                Ok((seq_num, header, Some(write_batch)))
             }
             _ => error::WalDataCorruptedSnafu {
                 name: self.name(),
@@ -259,13 +274,14 @@ mod tests {
 
     #[tokio::test]
     pub async fn test_read_wal_only_header() -> Result<()> {
+        common_telemetry::init_default_ut_logging();
         let (log_store, _tmp) =
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
         let wal = Wal::new("test_region", Arc::new(log_store));
         let header = WalHeader::with_last_manifest_version(111);
         let (seq_num, _) = wal.write_to_wal(3, header, Payload::None).await?;
 
-        assert_eq!(0, seq_num);
+        assert_eq!(3, seq_num);
 
         let mut stream = wal.read_from_wal(seq_num).await?;
         let mut data = vec![];

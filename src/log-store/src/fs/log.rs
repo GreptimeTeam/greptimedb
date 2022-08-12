@@ -67,7 +67,7 @@ impl LocalFileLogStore {
             .expect("Not expected to fail when initing log store");
 
         active_file.unseal();
-        let active_file_name = active_file.to_string();
+        let active_file_name = active_file.file_name();
         info!("Log store active log file: {}", active_file_name);
 
         // Start active log file
@@ -144,9 +144,9 @@ impl LocalFileLogStore {
         }
 
         // create and start a new log file
-        let entry_id = active.next_entry_id();
+        let next_entry_id = active.last_entry_id() + 1;
         let path_buf =
-            Path::new(&self.config.log_file_dir).join(FileName::log(entry_id).to_string());
+            Path::new(&self.config.log_file_dir).join(FileName::log(next_entry_id).to_string());
         let path = path_buf.to_str().context(FileNameIllegalSnafu {
             file_name: self.config.log_file_dir.clone(),
         })?;
@@ -210,7 +210,7 @@ impl LogStore for LocalFileLogStore {
         }
 
         return InternalSnafu {
-            msg: "Failed to append entry with max retry time exceeds".to_string(),
+            msg: "Failed to append entry with max retry time exceeds",
         }
         .fail();
     }
@@ -225,11 +225,11 @@ impl LogStore for LocalFileLogStore {
         id: Id,
     ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>> {
         let files = self.files.read().await;
-
         let ns = ns.clone();
         let s = stream!({
             for (start_id, file) in files.iter() {
-                if *start_id >= id {
+                // TODO(hl): Use index to lookup file
+                if *start_id <= id {
                     let s = file.create_stream(&ns, *start_id);
                     pin_mut!(s);
                     while let Some(entries) = s.next().await {
@@ -254,8 +254,8 @@ impl LogStore for LocalFileLogStore {
         todo!()
     }
 
-    fn entry<D: AsRef<[u8]>>(&self, data: D) -> Self::Entry {
-        EntryImpl::new(data)
+    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id) -> Self::Entry {
+        EntryImpl::new(data, id)
     }
 
     fn namespace(&self, name: &str) -> Self::Namespace {
@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(
             0,
             logstore
-                .append(&ns, EntryImpl::new(generate_data(100)),)
+                .append(&ns, EntryImpl::new(generate_data(100), 0),)
                 .await
                 .unwrap()
                 .entry_id
@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(
             1,
             logstore
-                .append(&ns, EntryImpl::new(generate_data(100)),)
+                .append(&ns, EntryImpl::new(generate_data(100), 1))
                 .await
                 .unwrap()
                 .entry_id
@@ -328,7 +328,7 @@ mod tests {
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
         let ns = LocalNamespace::default();
         let id = logstore
-            .append(&ns, EntryImpl::new(generate_data(100)))
+            .append(&ns, EntryImpl::new(generate_data(100), 0))
             .await
             .unwrap()
             .entry_id;

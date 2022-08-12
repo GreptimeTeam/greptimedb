@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_telemetry::logging;
 use datatypes::schema::SchemaRef;
-use snafu::{ensure, OptionExt};
+use snafu::ensure;
 use store_api::logstore::LogStore;
 use store_api::manifest::{
     self, action::ProtocolAction, Manifest, ManifestVersion, MetaActionIterator,
@@ -91,11 +91,7 @@ impl<S: LogStore> RegionImpl<S> {
     /// Create a new region and also persist the region metadata to manifest.
     ///
     /// The caller should avoid calling this method simultaneously.
-    // FIXME(yingwen): Region id is already specific in metadata, but name is not specific in metadata. We should
-    // add name to RegionMetadata.
     pub async fn create(
-        id: RegionId,
-        name: String,
         metadata: RegionMetadata,
         store_config: StoreConfig<S>,
     ) -> Result<RegionImpl<S>> {
@@ -113,18 +109,16 @@ impl<S: LogStore> RegionImpl<S> {
             .await?;
 
         let version = Version::with_manifest_version(metadata, manifest_version);
-        let region = RegionImpl::new(id, name, version, store_config);
+        let region = RegionImpl::new(version, store_config);
 
         Ok(region)
     }
 
     /// Create a new region without persisting manifest.
-    fn new(
-        id: RegionId,
-        name: String,
-        version: Version,
-        store_config: StoreConfig<S>,
-    ) -> RegionImpl<S> {
+    fn new(version: Version, store_config: StoreConfig<S>) -> RegionImpl<S> {
+        let metadata = version.metadata();
+        let id = metadata.id();
+        let name = metadata.name().to_string();
         let version_control = VersionControl::with_version(version);
         let wal = Wal::new(name.clone(), store_config.log_store);
 
@@ -152,9 +146,12 @@ impl<S: LogStore> RegionImpl<S> {
         name: String,
         store_config: StoreConfig<S>,
         _opts: &OpenOptions,
-    ) -> Result<RegionImpl<S>> {
+    ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
-        let version = Self::recover_from_manifest(&name, &store_config.manifest).await?;
+        let version = match Self::recover_from_manifest(&store_config.manifest).await? {
+            None => return Ok(None),
+            Some(version) => version,
+        };
 
         logging::debug!(
             "Region recovered version from manifest, version: {:?}",
@@ -165,7 +162,7 @@ impl<S: LogStore> RegionImpl<S> {
         let version_control = Arc::new(VersionControl::with_version(version));
         let wal = Wal::new(name.clone(), store_config.log_store);
         let shared = Arc::new(SharedData {
-            id: metadata.id,
+            id: metadata.id(),
             name,
             version_control,
         });
@@ -193,13 +190,10 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: store_config.manifest,
         });
 
-        Ok(RegionImpl { inner })
+        Ok(Some(RegionImpl { inner }))
     }
 
-    async fn recover_from_manifest(
-        region_name: &str,
-        manifest: &RegionManifest,
-    ) -> Result<Version> {
+    async fn recover_from_manifest(manifest: &RegionManifest) -> Result<Option<Version>> {
         let (start, end) = Self::manifest_scan_range();
         let mut iter = manifest.scan(start, end).await?;
 
@@ -242,7 +236,7 @@ impl<S: LogStore> RegionImpl<S> {
             manifest.update_state(last_manifest_version + 1, protocol.clone());
         }
 
-        version.context(error::VersionNotFoundSnafu { region_name })
+        Ok(version)
     }
 
     fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
@@ -288,10 +282,24 @@ impl<S: LogStore> RegionImpl<S> {
 /// Shared data of region.
 #[derive(Debug)]
 pub struct SharedData {
-    pub id: RegionId,
-    pub name: String,
+    // Region id and name is immutable, so we cache them in shared data to avoid loading
+    // current version from `version_control` each time we need to access them.
+    id: RegionId,
+    name: String,
     // TODO(yingwen): Maybe no need to use Arc for version control.
     pub version_control: VersionControlRef,
+}
+
+impl SharedData {
+    #[inline]
+    pub fn id(&self) -> RegionId {
+        self.id
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 pub type SharedDataRef = Arc<SharedData>;

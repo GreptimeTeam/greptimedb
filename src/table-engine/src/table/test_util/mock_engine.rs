@@ -10,9 +10,9 @@ use common_telemetry::logging;
 use storage::metadata::{RegionMetaImpl, RegionMetadataRef};
 use storage::write_batch::WriteBatch;
 use store_api::storage::{
-    Chunk, ChunkReader, EngineContext, GetRequest, GetResponse, OpenOptions, ReadContext, Region,
-    RegionDescriptor, ScanRequest, ScanResponse, SchemaRef, Snapshot, StorageEngine, WriteContext,
-    WriteResponse,
+    Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse, OpenOptions,
+    ReadContext, Region, RegionDescriptor, ScanRequest, ScanResponse, SchemaRef, Snapshot,
+    StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
@@ -127,19 +127,19 @@ impl StorageEngine for MockEngine {
         _ctx: &EngineContext,
         name: &str,
         _opts: &OpenOptions,
-    ) -> Result<MockRegion> {
+    ) -> Result<Option<MockRegion>> {
         logging::info!("Mock engine create region, name: {}", name);
 
         let mut regions = self.regions.lock().unwrap();
         if let Some(region) = regions.opened_regions.get(name) {
-            return Ok(region.clone());
+            return Ok(Some(region.clone()));
         }
 
         if let Some(region) = regions.closed_regions.remove(name) {
             regions
                 .opened_regions
                 .insert(name.to_string(), region.clone());
-            return Ok(region);
+            return Ok(Some(region));
         }
 
         Err(MockError::with_backtrace(StatusCode::Unexpected))
@@ -153,6 +153,7 @@ impl StorageEngine for MockEngine {
         &self,
         _ctx: &EngineContext,
         descriptor: RegionDescriptor,
+        _opts: &CreateOptions,
     ) -> Result<MockRegion> {
         logging::info!("Mock engine create region, descriptor: {:?}", descriptor);
 

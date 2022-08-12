@@ -1,13 +1,14 @@
 //! Storage engine implementation.
 mod arrow_stream;
 mod background;
+mod bit_vec;
 mod chunk;
 mod codec;
 pub mod config;
 mod engine;
 pub mod error;
 mod flush;
-mod manifest;
+pub mod manifest;
 pub mod memtable;
 pub mod metadata;
 mod proto;

@@ -12,7 +12,7 @@ use crate::background::JobHandle;
 use crate::error::{self, Result};
 use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
-use crate::proto::WalHeader;
+use crate::proto::wal::WalHeader;
 use crate::region::RegionManifest;
 use crate::region::SharedDataRef;
 use crate::sst::AccessLayerRef;
@@ -210,10 +210,6 @@ impl WriterInner {
             // Data after flushed sequence need to be recovered.
             flushed_sequence = version_control.current().flushed_sequence();
             last_sequence = flushed_sequence;
-            // FIXME(yingwen): Now log store will overwrite the entry id by its internal entry id,
-            // which starts from 0. This is a hack to just make the test passes since we knows the
-            // entry id of log store is always equals to `sequence - 1`. Change this to
-            // `flushed_sequence + ` once the log store fixes this issue.
             let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence).await?;
             while let Some((req_sequence, _header, request)) = stream.try_next().await? {
                 if let Some(request) = request {
@@ -222,9 +218,6 @@ impl WriterInner {
                     // Note that memtables of `Version` may be updated during replay.
                     let version = version_control.current();
 
-                    // FIXME(yingwen): Use req_sequence instead of `req_sequence + 1` once logstore
-                    // won't overwrite the entry id.
-                    let req_sequence = req_sequence + 1;
                     if req_sequence > last_sequence {
                         last_sequence = req_sequence;
                     } else {

@@ -8,7 +8,7 @@ use common_telemetry::{self, logging::error, logging::info};
 #[derive(Parser)]
 #[clap(name = "greptimedb")]
 struct Command {
-    #[clap(long, default_value = "/tmp/greptime/logs")]
+    #[clap(long, default_value = "/tmp/greptimedb/logs")]
     log_dir: String,
     #[clap(long, default_value = "info")]
     log_level: String,

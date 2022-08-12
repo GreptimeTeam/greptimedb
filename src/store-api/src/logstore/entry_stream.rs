@@ -83,8 +83,6 @@ mod tests {
             self.offset
         }
 
-        fn set_offset(&mut self, _offset: Offset) {}
-
         fn set_id(&mut self, _id: Id) {}
 
         fn epoch(&self) -> Epoch {

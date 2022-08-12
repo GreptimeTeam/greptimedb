@@ -12,7 +12,8 @@ common-recordbatch = {path = "../common/recordbatch" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
 datatypes = { path = "../datatypes" }
+derive_builder = "0.11"
 futures = "0.3"
 serde = "1.0.136"
 snafu = { version = "0.7", features = ["backtraces"] }
-derive_builder = "0.11"
+store-api = { path = "../store-api" }

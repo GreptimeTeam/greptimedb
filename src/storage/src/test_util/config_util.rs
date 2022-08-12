@@ -20,8 +20,9 @@ pub async fn new_store_config(
     region_name: &str,
     store_dir: &str,
 ) -> StoreConfig<LocalFileLogStore> {
-    let sst_dir = engine::region_sst_dir(region_name);
-    let manifest_dir = engine::region_manifest_dir(region_name);
+    let parent_dir = "";
+    let sst_dir = engine::region_sst_dir(parent_dir, region_name);
+    let manifest_dir = engine::region_manifest_dir(parent_dir, region_name);
 
     let accessor = Backend::build().root(store_dir).finish().await.unwrap();
     let object_store = ObjectStore::new(accessor);

@@ -47,7 +47,7 @@ mod tests {
     use super::*;
     use crate::instance::Instance;
     use crate::server::http::JsonOutput;
-    use crate::test_util;
+    use crate::test_util::{self, TestGuard};
 
     fn create_params() -> Query<HashMap<String, String>> {
         let mut map = HashMap::new();
@@ -58,16 +58,16 @@ mod tests {
         Query(map)
     }
 
-    async fn create_extension() -> Extension<InstanceRef> {
-        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
-        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
-        let instance = Arc::new(Instance::new(&opts, catalog_list).await.unwrap());
-        Extension(instance)
+    async fn create_extension() -> (Extension<InstanceRef>, TestGuard) {
+        let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts();
+        let instance = Arc::new(Instance::new(&opts).await.unwrap());
+        instance.start().await.unwrap();
+        (Extension(instance), guard)
     }
 
     #[tokio::test]
     async fn test_sql_not_provided() {
-        let extension = create_extension().await;
+        let (extension, _guard) = create_extension().await;
 
         let json = sql(extension, Query(HashMap::default())).await;
         match json {
@@ -82,14 +82,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_sql_output_rows() {
+        common_telemetry::init_default_ut_logging();
         let query = create_params();
-        let extension = create_extension().await;
+        let (extension, _guard) = create_extension().await;
 
         let json = sql(extension, query).await;
 
         match json {
             HttpResponse::Json(json) => {
-                assert!(json.success);
+                assert!(json.success, "{:?}", json);
                 assert!(json.error.is_none());
                 assert!(json.output.is_some());
 
@@ -111,7 +112,7 @@ mod tests {
         counter!("test_metrics", 1);
 
         let query = create_params();
-        let extension = create_extension().await;
+        let (extension, _guard) = create_extension().await;
         let text = metrics(extension, query).await;
 
         match text {
