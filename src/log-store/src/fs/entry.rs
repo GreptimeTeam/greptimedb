@@ -7,20 +7,23 @@ use futures::Stream;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::{Encode, Entry, Epoch, Id, Offset};
 use store_api::logstore::entry_stream::{EntryStream, SendableEntryStream};
+use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 
 use crate::error::{CorruptedSnafu, DecodeAgainSnafu, DecodeSnafu, EncodeSnafu, Error};
 use crate::fs::crc;
+use crate::fs::namespace::LocalNamespace;
 
-// length + offset + epoch + crc
-const ENTRY_MIN_LEN: usize = 4 + 8 + 8 + 4;
-// length + offset + epoch
-const HEADER_LENGTH: usize = 4 + 8 + 8;
+// length + offset + namespace id + epoch + crc
+const ENTRY_MIN_LEN: usize = HEADER_LENGTH + 4;
+// length + offset + namespace id + epoch
+const HEADER_LENGTH: usize = 4 + 8 + 8 + 8;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct EntryImpl {
     pub data: Vec<u8>,
     pub offset: Offset,
     pub id: Id,
+    pub namespace_id: NamespaceId,
     pub epoch: Epoch,
 }
 
@@ -36,15 +39,18 @@ impl Encode for EntryImpl {
 
     /// Entry binary format (Little endian):
     ///
-    /// +--------+--------+--------+--------+--------+
-    //  |entry id|  epoch | length |  data  |  CRC   |
-    //  +--------+--------+--------+--------+--------+
-    //  | 8 bytes| 8 bytes| 4 bytes|<length>| 4 bytes|
-    //  +--------+--------+--------+--------+--------+
+    //  ```text
+    //  +--------+--------------+-------+--------+--------+--------+
+    //  |entry id| namespace id | epoch | length |  data  |  CRC   |
+    //  +--------+--------------+-------+--------+--------+--------+
+    //  | 8 bytes|    8 bytes   |8 bytes| 4 bytes|<length>| 4 bytes|
+    //  +--------+--------------+-------+--------+--------+--------+
+    // ```
     ///
     fn encode_to<T: BufferMut>(&self, buf: &mut T) -> Result<usize, Self::Error> {
         let data_length = self.data.len();
         buf.write_u64_le(self.id).context(EncodeSnafu)?;
+        buf.write_u64_le(self.namespace_id).context(EncodeSnafu)?;
         buf.write_u64_le(self.epoch).context(EncodeSnafu)?;
         buf.write_u32_le(data_length as u32).context(EncodeSnafu)?;
         buf.write_from_slice(self.data.as_slice())
@@ -75,6 +81,9 @@ impl Encode for EntryImpl {
         let mut header = &header[..];
         let id = header.read_u64_le().unwrap(); // unwrap here is safe because header bytes must be present
         digest.update(&id.to_le_bytes());
+
+        let namespace_id = header.read_u64_le().unwrap();
+        digest.update(&namespace_id.to_le_bytes());
 
         let epoch = header.read_u64_le().unwrap();
         digest.update(&epoch.to_le_bytes());
@@ -115,6 +124,7 @@ impl Encode for EntryImpl {
             data,
             epoch,
             offset: 0,
+            namespace_id,
         })
     }
 
@@ -124,18 +134,20 @@ impl Encode for EntryImpl {
 }
 
 impl EntryImpl {
-    pub(crate) fn new(data: impl AsRef<[u8]>, id: Id) -> EntryImpl {
+    pub(crate) fn new(data: impl AsRef<[u8]>, id: Id, namespace: LocalNamespace) -> EntryImpl {
         EntryImpl {
             id,
             data: data.as_ref().to_vec(),
             offset: 0,
             epoch: 0,
+            namespace_id: namespace.id(),
         }
     }
 }
 
 impl Entry for EntryImpl {
     type Error = Error;
+    type Namespace = LocalNamespace;
 
     fn data(&self) -> &[u8] {
         &self.data
@@ -163,6 +175,10 @@ impl Entry for EntryImpl {
 
     fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+
+    fn namespace(&self) -> Self::Namespace {
+        LocalNamespace::new(self.namespace_id)
     }
 }
 
@@ -220,7 +236,7 @@ mod tests {
     #[test]
     pub fn test_entry_deser() {
         let data = "hello, world";
-        let mut entry = EntryImpl::new(data.as_bytes(), 8);
+        let mut entry = EntryImpl::new(data.as_bytes(), 8, LocalNamespace::new(42));
         entry.epoch = 9;
         let mut buf = BytesMut::with_capacity(entry.encoded_size());
         entry.encode_to(&mut buf).unwrap();
@@ -232,7 +248,7 @@ mod tests {
     #[test]
     pub fn test_rewrite_entry_id() {
         let data = "hello, world";
-        let entry = EntryImpl::new(data.as_bytes(), 123);
+        let entry = EntryImpl::new(data.as_bytes(), 123, LocalNamespace::new(42));
         let mut buffer = BytesMut::with_capacity(entry.encoded_size());
         entry.encode_to(&mut buffer).unwrap();
         assert_eq!(123, entry.id());
@@ -248,7 +264,7 @@ mod tests {
     }
 
     fn prepare_entry_bytes(data: &str, id: Id) -> Bytes {
-        let mut entry = EntryImpl::new(data.as_bytes(), id);
+        let mut entry = EntryImpl::new(data.as_bytes(), id, LocalNamespace::new(42));
         entry.set_id(123);
         entry.set_offset(456);
         let mut buffer = BytesMut::with_capacity(entry.encoded_size());
@@ -299,7 +315,7 @@ mod tests {
         let data = "hello, world";
         let bytes = prepare_entry_bytes(data, 42);
         assert_eq!(
-            hex::decode("7B0000000000000000000000000000000C00000068656C6C6F2C20776F726C645B2EEC0F")
+            hex::decode("7B000000000000002A0000000000000000000000000000000C00000068656C6C6F2C20776F726C64E8EE2E57")
                 .unwrap()
                 .as_slice(),
             &bytes[..]
@@ -324,7 +340,7 @@ mod tests {
         let data = "hello, world";
         let bytes = prepare_entry_bytes(data, 42);
         assert_eq!(
-            hex::decode("7B0000000000000000000000000000000C00000068656C6C6F2C20776F726C645B2EEC0F")
+            hex::decode("7b000000000000002a0000000000000000000000000000000c00000068656c6c6f2c20776f726c64e8ee2e57")
                 .unwrap()
                 .as_slice(),
             &bytes[..]

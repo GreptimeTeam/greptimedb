@@ -120,7 +120,7 @@ impl<S: LogStore> RegionImpl<S> {
         let id = metadata.id();
         let name = metadata.name().to_string();
         let version_control = VersionControl::with_version(version);
-        let wal = Wal::new(name.clone(), store_config.log_store);
+        let wal = Wal::new(id, store_config.log_store);
 
         let inner = Arc::new(RegionInner {
             shared: Arc::new(SharedData {
@@ -160,7 +160,7 @@ impl<S: LogStore> RegionImpl<S> {
 
         let metadata = version.metadata().clone();
         let version_control = Arc::new(VersionControl::with_version(version));
-        let wal = Wal::new(name.clone(), store_config.log_store);
+        let wal = Wal::new(metadata.id(), store_config.log_store);
         let shared = Arc::new(SharedData {
             id: metadata.id(),
             name,
