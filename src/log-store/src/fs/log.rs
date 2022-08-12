@@ -362,4 +362,57 @@ mod tests {
         assert_eq!(entries[0].id(), 0);
         assert_eq!(42, entries[0].namespace_id);
     }
+
+    #[tokio::test]
+    pub async fn test_namespace() {
+        common_telemetry::logging::init_default_ut_logging();
+        let dir = TempDir::new("greptimedb").unwrap();
+        let config = LogConfig {
+            append_buffer_size: 128,
+            max_log_file_size: 1024 * 1024,
+            log_file_dir: dir.path().to_str().unwrap().to_string(),
+        };
+        let logstore = LocalFileLogStore::open(&config).await.unwrap();
+        assert_eq!(
+            0,
+            logstore
+                .append(EntryImpl::new(
+                    generate_data(96),
+                    0,
+                    LocalNamespace::new(42),
+                ))
+                .await
+                .unwrap()
+                .entry_id
+        );
+
+        assert_eq!(
+            1,
+            logstore
+                .append(EntryImpl::new(
+                    generate_data(96),
+                    1,
+                    LocalNamespace::new(43),
+                ))
+                .await
+                .unwrap()
+                .entry_id
+        );
+
+        let stream = logstore.read(&LocalNamespace::new(42), 0).await.unwrap();
+        tokio::pin!(stream);
+
+        let entries = stream.next().await.unwrap().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id(), 0);
+        assert_eq!(42, entries[0].namespace_id);
+
+        let stream = logstore.read(&LocalNamespace::new(43), 0).await.unwrap();
+        tokio::pin!(stream);
+
+        let entries = stream.next().await.unwrap().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id(), 1);
+        assert_eq!(43, entries[0].namespace_id);
+    }
 }
