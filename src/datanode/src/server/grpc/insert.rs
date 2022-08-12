@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use api::v1::{column::Values, Column, InsertBatch, InsertExpr};
+use api::v1::{codec::InsertBatch, column::Values, Column, InsertExpr};
 use common_base::bitset::BitSet;
 use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -176,11 +176,7 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
 }
 
 fn is_null(null_mask: &BitSet, idx: usize) -> Option<bool> {
-    match null_mask.get(idx) {
-        Some(true) => Some(true),
-        Some(false) => Some(false),
-        None => None,
-    }
+    null_mask.get(idx)
 }
 
 #[cfg(test)]
@@ -188,8 +184,9 @@ mod tests {
     use std::{any::Any, sync::Arc};
 
     use api::v1::{
+        codec::InsertBatch,
         column::{self, Values},
-        Column, InsertBatch, InsertExpr,
+        Column, InsertExpr,
     };
     use common_base::bitset::BitSet;
     use common_query::prelude::Expr;

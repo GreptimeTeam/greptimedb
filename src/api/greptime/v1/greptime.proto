@@ -4,8 +4,6 @@ package greptime.v1;
 
 import "greptime/v1/admin.proto";
 import "greptime/v1/database.proto";
-import "greptime/v1/insert.proto";
-import "greptime/v1/select.proto";
 
 service Greptime {
   rpc Batch(BatchRequest) returns (BatchResponse) {}

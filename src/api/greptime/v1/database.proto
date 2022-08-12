@@ -46,9 +46,13 @@ message DeleteExpr {}
 message ObjectResult {
   ResultHeader header = 1;
   oneof result {
-    bytes select = 2;
+    SelectResult select = 2;
     MutateResult mutate = 3;
   }
+}
+
+message SelectResult {
+  bytes raw_data = 1;
 }
 
 message ResultHeader {

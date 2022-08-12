@@ -1,4 +1,4 @@
-use api::v1::*;
+use api::v1::{codec::InsertBatch, *};
 use client::{Client, Database};
 
 fn main() {

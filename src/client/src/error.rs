@@ -18,6 +18,9 @@ pub enum Error {
         actual: usize,
     },
 
+    #[snafu(display("Missing result header"))]
+    MissingHeader,
+
     #[snafu(display("Tonic internal error, source: {}", source))]
     TonicStatus {
         source: tonic::Status,

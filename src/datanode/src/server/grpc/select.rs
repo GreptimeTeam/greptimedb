@@ -1,61 +1,43 @@
 use std::sync::Arc;
 
-use api::v1::{column::Values, Column, SelectResult};
-use api::v1::{ObjectResult, ResultHeader};
+use api::v1::{codec::SelectResult, column::Values, Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::bitset::BitSet;
-use common_recordbatch::{util, RecordBatch};
+use common_recordbatch::{util, RecordBatch, SendableRecordBatchStream};
 use datatypes::arrow_array::{BinaryArray, StringArray};
 use query::Output;
 use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result};
-use crate::server::grpc::{
-    handler::{ERROR, SUCCESS},
-    server::PROTOCOL_VERSION,
-};
+use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
+use crate::server::grpc::handler::{ERROR, SUCCESS};
 
 pub(crate) async fn to_object_result(result: Result<Output>) -> ObjectResult {
-    let mut object_resp = ObjectResult::default();
-
-    let mut header = ResultHeader {
-        version: PROTOCOL_VERSION,
-        ..Default::default()
-    };
-
     match result {
-        Ok(output) => match output {
-            Output::AffectedRows(rows) => {
-                header.code = SUCCESS;
-                header.success = rows as u32;
-            }
-            Output::RecordBatch(stream) => match util::collect(stream).await {
-                Ok(record_batches) => {
-                    let select_result = try_convert(record_batches);
-                    match select_result {
-                        Ok(select_result) => {
-                            header.code = SUCCESS;
-                            object_resp.results = select_result.into();
-                        }
-                        Err(err) => {
-                            header.code = ERROR;
-                            header.err_msg = err.to_string();
-                        }
-                    }
-                }
-                Err(err) => {
-                    header.code = ERROR;
-                    header.err_msg = err.to_string();
-                }
-            },
-        },
-        Err(err) => {
-            header.code = ERROR;
-            header.err_msg = err.to_string();
-        }
+        Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
+            .status_code(SUCCESS)
+            .mutate_result(rows as u32, 0)
+            .build(),
+        Ok(Output::RecordBatch(stream)) => record_batchs(stream).await,
+        Err(err) => ObjectResultBuilder::new()
+            .status_code(ERROR)
+            .err_msg(err.to_string())
+            .build(),
     }
-    object_resp.header = Some(header);
-    object_resp
+}
+
+async fn record_batchs(stream: SendableRecordBatchStream) -> ObjectResult {
+    let builder = ObjectResultBuilder::new();
+    match util::collect(stream).await {
+        Ok(record_batches) => match try_convert(record_batches) {
+            Ok(select_result) => builder
+                .status_code(SUCCESS)
+                .select_result(select_result)
+                .build(),
+            Err(err) => build_err_result(ERROR, err.to_string()),
+        },
+        Err(err) => build_err_result(ERROR, err.to_string()),
+    }
 }
 
 // All schemas of record_batches must be the same.
@@ -108,18 +90,18 @@ fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
         return Vec::default();
     }
 
-    let mut bitset = BitSet::with_capacity(row_count);
+    let mut nulls_set = BitSet::with_capacity(row_count);
     for array in arrays {
         let validity = array.validity();
         if let Some(v) = validity {
-            let is_sets: Vec<bool> = v.iter().map(|x| !x).collect();
-            bitset.append(&is_sets);
+            let nulls: Vec<bool> = v.iter().map(|x| !x).collect();
+            nulls_set.append(&nulls);
         } else {
-            bitset.append(&vec![false; array.len()]);
+            nulls_set.append(&vec![false; array.len()]);
         }
     }
 
-    bitset.buffer()
+    nulls_set.buffer()
 }
 
 macro_rules! convert_arrow_array_to_grpc_vals {

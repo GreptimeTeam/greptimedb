@@ -1,7 +1,7 @@
 pub use prost::DecodeError;
 use prost::Message;
 
-use crate::v1::{InsertBatch, SelectResult};
+use crate::v1::codec::{InsertBatch, SelectResult};
 
 impl From<InsertBatch> for Vec<u8> {
     fn from(insert: InsertBatch) -> Self {
@@ -33,7 +33,9 @@ impl TryFrom<Vec<u8>> for SelectResult {
 
 #[cfg(test)]
 mod tests {
-    use crate::v1::*;
+    use crate::v1::codec::*;
+    use crate::v1::column;
+    use crate::v1::Column;
 
     const SEMANTIC_TAG: i32 = 0;
 
