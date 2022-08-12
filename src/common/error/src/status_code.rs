@@ -44,6 +44,7 @@ pub enum StatusCode {
 
     // ====== Begin of server related status code =====
     /// Runtime resources exhausted, like creating threads failed.
+<<<<<<< HEAD
     RuntimeResourcesExhausted = 13,
     // ====== End of server related status code =======
 }
@@ -52,6 +53,10 @@ impl StatusCode {
     pub fn is_success(code: u32) -> bool {
         Self::Success as u32 == code
     }
+=======
+    RuntimeResourcesExhausted,
+    // ====== End of server related status code =======
+>>>>>>> c3320d3 (feat: MySQL protocol server (#158))
 }
 
 impl fmt::Display for StatusCode {

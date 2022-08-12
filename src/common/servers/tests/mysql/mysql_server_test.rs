@@ -4,9 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{
-    CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-};
+use catalog::{CatalogList, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
 use common_runtime::Builder as RuntimeBuilder;
 use common_servers::mysql::error::{Result, RuntimeResourceSnafu};
@@ -30,7 +28,11 @@ fn create_mysql_server(table: MemTable) -> Result<Box<dyn Server>> {
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     schema_provider.register_table(table_name, table).unwrap();
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
+<<<<<<< HEAD
     catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
+=======
+    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME, schema_provider);
+>>>>>>> c3320d3 (feat: MySQL protocol server (#158))
     let catalog_list = Arc::new(MemoryCatalogList::default());
     catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
     let factory = QueryEngineFactory::new(catalog_list);
