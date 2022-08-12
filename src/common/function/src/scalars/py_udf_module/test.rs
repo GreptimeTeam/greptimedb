@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::builtins::*;
 use crate::scalars::python::PyVector;
+use crate::scalars::python::is_instance;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TestCase {
@@ -386,7 +387,7 @@ fn to_serde_excep(
 ) -> Result<String, String> {
     let mut chain = String::new();
     let r = vm.write_exception(&mut chain, &excep);
-    // FIXME: better error handling, perhaps with chain calls?
+    // FIXME(discord9): better error handling, perhaps with chain calls?
     if let Err(r) = r {
         return Err(format!("Fail to write to string, error: {:#?}", r));
     }

@@ -14,12 +14,8 @@ use rustpython_vm::{
 #[cfg(test)]
 mod unit_tests;
 use crate::scalars::python::PyVector;
+use crate::scalars::python::is_instance;
 
-/// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
-/// if `PyResult` is Err, then this function return `false`
-pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
-    obj.is_instance(T::class(vm).into(), vm).unwrap_or(false)
-}
 
 /// "Can't cast operand of type `{name}` into `{ty}`."
 fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseExceptionRef {
@@ -365,6 +361,7 @@ pub(in crate::scalars::py_udf_module) mod udf_builtins {
     }
 
     /// Not implement in datafusion
+    /// TODO(discord9): use greptime's own impl instead
     /*
     #[pyfunction]
     fn approx_median(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
