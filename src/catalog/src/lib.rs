@@ -3,9 +3,12 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use table::metadata::TableId;
+
 pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 pub use crate::manager::LocalCatalogManager;
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
+
 mod consts;
 pub mod error;
 mod manager;
@@ -58,6 +61,7 @@ pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
 #[async_trait::async_trait]
 pub trait CatalogManager: CatalogList {
     async fn start(&self) -> error::Result<()>;
+    fn next_table_id(&self) -> TableId;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;

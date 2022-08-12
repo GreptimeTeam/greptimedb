@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
@@ -8,6 +9,7 @@ use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::StreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
+use table::metadata::TableId;
 use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
 
@@ -30,6 +32,7 @@ pub struct LocalCatalogManager {
     system: Arc<SystemCatalog>,
     catalogs: Arc<MemoryCatalogList>,
     engine: TableEngineRef,
+    next_table_id: AtomicU32,
 }
 
 impl LocalCatalogManager {
@@ -46,6 +49,7 @@ impl LocalCatalogManager {
             system: system_catalog,
             catalogs: memory_catalog_list,
             engine,
+            next_table_id: AtomicU32::new(0),
         })
     }
 
@@ -53,14 +57,22 @@ impl LocalCatalogManager {
     pub async fn init(&self) -> Result<()> {
         self.init_system_catalog()?;
         let mut system_records = self.system.information_schema.system.records().await?;
+        let mut max_table_id = 0;
         while let Some(records) = system_records
             .next()
             .await
             .transpose()
             .context(ReadSystemCatalogSnafu)?
         {
-            self.handle_system_catalog_entries(records).await?;
+            let table_id = self.handle_system_catalog_entries(records).await?;
+            max_table_id = max_table_id.max(table_id);
         }
+        info!(
+            "All system catalog entries processed, max table id: {}",
+            max_table_id
+        );
+        self.next_table_id
+            .store(max_table_id + 1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -89,7 +101,9 @@ impl LocalCatalogManager {
         Ok(())
     }
 
-    async fn handle_system_catalog_entries(&self, records: RecordBatch) -> Result<()> {
+    /// Processes records from system catalog table and returns the max table id persisted
+    /// in system catalog table.
+    async fn handle_system_catalog_entries(&self, records: RecordBatch) -> Result<TableId> {
         ensure!(
             records.df_recordbatch.columns().len() >= 4,
             SystemCatalogSnafu {
@@ -115,6 +129,7 @@ impl LocalCatalogManager {
                 data_type: records.df_recordbatch.columns()[3].data_type().clone(),
             })?;
 
+        let mut max_table_id = 0;
         for ((t, k), v) in entry_type
             .iter_data()
             .zip(key.iter_data())
@@ -144,12 +159,12 @@ impl LocalCatalogManager {
                 }
                 Entry::Table(t) => {
                     self.open_and_register_table(&t).await?;
-                    info!("Registered table: {:?}", t)
+                    info!("Registered table: {:?}", t);
+                    max_table_id = max_table_id.max(t.table_id);
                 }
             }
         }
-
-        Ok(())
+        Ok(max_table_id)
     }
 
     async fn open_and_register_table(&self, t: &TableEntry) -> Result<()> {
@@ -229,5 +244,10 @@ impl CatalogManager for LocalCatalogManager {
     /// Make sure table engine is initialized before starting [MemoryCatalogManager].
     async fn start(&self) -> Result<()> {
         self.init().await
+    }
+
+    #[inline]
+    fn next_table_id(&self) -> TableId {
+        self.next_table_id.fetch_add(1, Ordering::Relaxed)
     }
 }

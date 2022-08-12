@@ -30,7 +30,6 @@ pub struct OpenTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
-    // TODO(yingwen): TableId could be recovered from the table metadata.
     pub table_id: TableId,
 }
 
