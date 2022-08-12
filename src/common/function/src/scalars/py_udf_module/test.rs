@@ -235,7 +235,7 @@ fn run_testcases() {
         .expect("Fail to read to string");
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
     let cached_vm = rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
-        vm.add_native_module("udf_builtins", Box::new(udf_builtins::make_module));
+        vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
         // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
         PyVector::make_class(&vm.ctx);
     });
@@ -341,7 +341,7 @@ fn set_items_in_scope(
 #[test]
 fn test_vm() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
-        vm.add_native_module("udf_builtins", Box::new(udf_builtins::make_module));
+        vm.add_native_module("udf_builtins", Box::new(greptime_builtin::make_module));
         // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
         PyVector::make_class(&vm.ctx);
     })
