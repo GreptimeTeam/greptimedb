@@ -17,8 +17,8 @@ use rustpython_vm::{
 use serde::{Deserialize, Serialize};
 
 use super::builtins::*;
-use crate::scalars::python::PyVector;
 use crate::scalars::python::is_instance;
+use crate::scalars::python::PyVector;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TestCase {

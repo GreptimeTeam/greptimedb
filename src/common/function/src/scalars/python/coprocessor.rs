@@ -20,7 +20,7 @@ use rustpython_vm::{class::PyClassImpl, AsObject};
 use snafu::{OptionExt, ResultExt};
 use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
-use vm::{PyObjectRef, PyPayload, VirtualMachine};
+use vm::{PyObjectRef, VirtualMachine};
 
 use crate::fail_parse_error;
 use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
@@ -28,8 +28,8 @@ use crate::scalars::python::error::{
     ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
     PyRuntimeSnafu, Result, TypeCastSnafu,
 };
-use crate::scalars::python::type_::PyVector;
 use crate::scalars::python::is_instance;
+use crate::scalars::python::type_::PyVector;
 fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
     OtherSnafu { reason }
 }

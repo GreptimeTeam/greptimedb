@@ -465,7 +465,7 @@ fn is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
     //let is_instance = |ty: &PyObject| obj.is_instance(ty, vm).unwrap_or(false);
     is_instance::<PyNone>(obj, vm)
         || is_instance::<PyInt>(obj, vm)
-        || is_instance::<PyFloat>(obj,  vm)
+        || is_instance::<PyFloat>(obj, vm)
         || is_instance::<PyBool>(obj, vm)
 }
 
@@ -489,9 +489,7 @@ pub fn pyobj_try_to_typed_val(
                 }
             }
             ConcreteDataType::Boolean(_) => {
-                if is_instance::<PyBool>(&obj, vm)
-                    || is_instance::<PyInt>(&obj, vm)
-                {
+                if is_instance::<PyBool>(&obj, vm) || is_instance::<PyInt>(&obj, vm) {
                     Some(value::Value::Boolean(
                         obj.try_into_value::<bool>(vm).unwrap_or(false),
                     ))

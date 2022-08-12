@@ -1,4 +1,4 @@
-use rustpython_vm::{PyPayload, PyObjectRef, VirtualMachine};
+use rustpython_vm::{PyObjectRef, PyPayload, VirtualMachine};
 
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`

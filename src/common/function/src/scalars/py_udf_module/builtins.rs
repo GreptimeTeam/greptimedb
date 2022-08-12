@@ -13,9 +13,8 @@ use rustpython_vm::{
 };
 #[cfg(test)]
 mod unit_tests;
-use crate::scalars::python::PyVector;
 use crate::scalars::python::is_instance;
-
+use crate::scalars::python::PyVector;
 
 /// "Can't cast operand of type `{name}` into `{ty}`."
 fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseExceptionRef {

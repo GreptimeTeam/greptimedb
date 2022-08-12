@@ -3,12 +3,12 @@
 mod copr_parse;
 mod coprocessor;
 mod error;
+mod py_utils;
 #[cfg(test)]
 mod test;
 mod type_;
-mod py_utils;
 
 use coprocessor::AnnotationInfo;
-pub(crate) use py_utils::is_instance;
 pub use coprocessor::{exec_copr_print, exec_coprocessor};
+pub(crate) use py_utils::is_instance;
 pub use type_::PyVector;
