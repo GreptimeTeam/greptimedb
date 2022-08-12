@@ -80,10 +80,6 @@ fn try_convert(record_batches: Vec<RecordBatch>) -> Result<SelectResult> {
 }
 
 fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
-    if arrays.is_empty() {
-        return Vec::default();
-    }
-
     let null_count: usize = arrays.iter().map(|a| a.null_count()).sum();
 
     if null_count == 0 {
