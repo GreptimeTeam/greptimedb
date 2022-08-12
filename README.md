@@ -53,3 +53,9 @@ OR
 // Start datanode with `log-dir` and `log-level` options.
 cargo run -- --log-dir=logs --log-level=debug datanode start
 ```
+
+Start datanode with config file:
+
+```
+cargo run -- --log-dir=logs --log-level=debug datanode start -c ./config/datanode.example.toml
+```

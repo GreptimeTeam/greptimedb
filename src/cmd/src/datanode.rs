@@ -33,9 +33,9 @@ impl SubCommand {
 
 #[derive(Debug, Parser)]
 struct StartCommand {
-    #[clap(long, short)]
+    #[clap(long)]
     http_addr: Option<String>,
-    #[clap(long, short)]
+    #[clap(long)]
     rpc_addr: Option<String>,
     #[clap(short, long)]
     config_file: Option<String>,
