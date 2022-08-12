@@ -1,0 +1,27 @@
+[package]
+name = "common-servers"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+common-error = { path = "../error" }
+common-recordbatch = { path = "../recordbatch" }
+common-runtime = { path = "../runtime" }
+common-telemetry = { path = "../telemetry" }
+datatypes = { path = "../../datatypes"}
+futures = "0.3"
+metrics = "0.20"
+num_cpus = "1.13"
+opensrv-mysql = "0.1"
+query = { path = "../../query" }
+snafu = { version = "0.7", features = ["backtraces"] }
+tokio = { version = "1.20", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[dev-dependencies]
+common-base = { path = "../base" }
+catalog = { path = "../../catalog" }
+mysql_async = "0.30"
+rand = "0.8"
+test-util = { path = "../../../test-util" }

@@ -9,6 +9,7 @@ members = [
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",
+    "src/common/servers",
     "src/common/telemetry",
     "src/common/time",
     "src/cmd",
