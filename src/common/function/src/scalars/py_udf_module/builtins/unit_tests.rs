@@ -4,6 +4,7 @@ use arrow::array::PrimitiveArray;
 use rustpython_vm::class::PyClassImpl;
 
 use super::*;
+use crate::scalars::python::py_utils::to_serde_excep;
 #[test]
 fn convert_scalar_to_py_obj_and_back() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
@@ -54,16 +55,12 @@ fn convert_scalar_to_py_obj_and_back() {
         let nested_list: Vec<PyObjectRef> =
             vec![vm.ctx.new_list(list).into(), vm.ctx.new_int(3).into()];
         let list_obj = vm.ctx.new_list(nested_list).into();
-        let col = try_into_columnar_value(list_obj, vm).unwrap();
-        if let DFColValue::Scalar(ScalarValue::List(Some(list), _)) = col {
-            assert_eq!(list.len(), 2);
-            if let ScalarValue::List(Some(inner_list), _) = &list[0] {
-                assert_eq!(inner_list.len(), 2);
-            } else {
-                panic!("Expect a inner list!");
-            }
-        } else {
-            panic!("Expect a list!");
+        let col = try_into_columnar_value(list_obj, vm);
+        if let Err(err) = col {
+            let reason = to_serde_excep(err, vm).unwrap();
+            assert!(reason.contains(
+                "TypeError: All elements in a list should be same type to cast to Datafusion list!"
+            ));
         }
 
         let list: PyVector = PyVector::from(

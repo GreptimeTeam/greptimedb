@@ -3,7 +3,7 @@
 mod copr_parse;
 mod coprocessor;
 mod error;
-mod py_utils;
+pub(crate) mod py_utils;
 #[cfg(test)]
 mod test;
 mod type_;
