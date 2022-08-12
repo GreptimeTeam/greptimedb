@@ -3,14 +3,15 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use datatypes::schema::SchemaRef;
 use derive_builder::Builder;
+use serde::{Deserialize, Serialize};
 use store_api::storage::ColumnId;
 
-pub type TableId = u64;
+pub type TableId = u32;
 pub type TableVersion = u64;
 
 /// Indicates whether and how a filter expression can be handled by a
 /// Table for table scans.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum FilterPushDownType {
     /// The expression cannot be used by the provider.
     Unsupported,
@@ -26,7 +27,7 @@ pub enum FilterPushDownType {
 }
 
 /// Indicates the type of this table for metadata/catalog purposes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub enum TableType {
     /// An ordinary physical table.
     Base,
@@ -36,13 +37,13 @@ pub enum TableType {
     Temporary,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Default)]
 pub struct TableIdent {
     pub table_id: TableId,
     pub version: TableVersion,
 }
 
-#[derive(Clone, Debug, Builder)]
+#[derive(Serialize, Deserialize, Clone, Debug, Builder, PartialEq)]
 #[builder(pattern = "mutable")]
 pub struct TableMeta {
     pub schema: SchemaRef,
@@ -90,7 +91,7 @@ impl TableMeta {
     }
 }
 
-#[derive(Clone, Debug, Builder)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Builder)]
 #[builder(pattern = "owned")]
 pub struct TableInfo {
     #[builder(default, setter(into))]

@@ -1182,6 +1182,7 @@ dependencies = [
  "hyper",
  "log-store",
  "metrics 0.18.1",
+ "object-store",
  "query",
  "serde",
  "serde_json",
@@ -3757,6 +3758,7 @@ dependencies = [
 name = "table-engine"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-stream",
  "async-trait",
  "chrono",
@@ -3768,6 +3770,9 @@ dependencies = [
  "datatypes",
  "futures",
  "log-store",
+ "object-store",
+ "serde",
+ "serde_json",
  "snafu",
  "storage",
  "store-api",

@@ -6,16 +6,18 @@ use common_telemetry::logging::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
+use object_store::{backend::fs::Backend, util, ObjectStore};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::{OptionExt, ResultExt};
 use sql::statements::statement::Statement;
-use storage::{config::EngineConfig, EngineImpl};
+use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
 use table::engine::EngineContext;
 use table::engine::TableEngine;
 use table::requests::CreateTableRequest;
+use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
-use crate::datanode::DatanodeOptions;
+use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
     self, CreateTableSnafu, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result,
     TableNotFoundSnafu,
@@ -39,11 +41,17 @@ pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
     pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
+        let object_store = new_object_store(&opts.store_config).await?;
         let log_store = create_local_file_log_store(opts).await?;
+
         let table_engine = DefaultEngine::new(
-            EngineImpl::new(EngineConfig::default(), Arc::new(log_store))
-                .await
-                .context(error::OpenStorageEngineSnafu)?,
+            TableEngineConfig::default(),
+            EngineImpl::new(
+                StorageEngineConfig::default(),
+                Arc::new(log_store),
+                object_store.clone(),
+            ),
+            object_store,
         );
         let catalog_manager = Arc::new(
             catalog::LocalCatalogManager::try_new(Arc::new(table_engine.clone()))
@@ -138,6 +146,7 @@ impl Instance {
             .create_table(
                 &EngineContext::default(),
                 CreateTableRequest {
+                    id: 1,
                     name: table_name.to_string(),
                     desc: Some(" a test table".to_string()),
                     schema: Arc::new(
@@ -164,6 +173,26 @@ impl Instance {
 
         Ok(())
     }
+}
+
+async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
+    // TODO(dennis): supports other backend
+    let store_dir = util::normalize_dir(match store_config {
+        ObjectStoreConfig::File(file) => &file.store_dir,
+    });
+
+    fs::create_dir_all(path::Path::new(&store_dir))
+        .context(error::CreateDirSnafu { dir: &store_dir })?;
+
+    info!("The storage directory is: {}", &store_dir);
+
+    let accessor = Backend::build()
+        .root(&store_dir)
+        .finish()
+        .await
+        .context(error::InitBackendSnafu { dir: &store_dir })?;
+
+    Ok(ObjectStore::new(accessor))
 }
 
 async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFileLogStore> {
@@ -196,7 +225,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_insert() {
         common_telemetry::init_default_ut_logging();
-        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
 
@@ -215,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_query() {
-        let (opts, _tmp_dir) = test_util::create_tmp_dir_and_datanode_opts();
+        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
 

@@ -108,6 +108,13 @@ pub enum Error {
 
     #[snafu(display("Failed to storage engine, source: {}", source))]
     OpenStorageEngine { source: StorageError },
+
+    #[snafu(display("Failed to init backend, dir: {}, source: {}", dir, source))]
+    InitBackend {
+        dir: String,
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -133,6 +140,7 @@ impl ErrorExt for Error {
             | Error::TcpBind { .. }
             | Error::StartGrpc { .. }
             | Error::CreateDir { .. } => StatusCode::Internal,
+            Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
         }

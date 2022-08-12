@@ -95,6 +95,40 @@ pub enum Error {
         region_name: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Failed to update table metadata to manifest,  table: {}, source: {}",
+        table_name,
+        source,
+    ))]
+    UpdateTableManifest {
+        #[snafu(backtrace)]
+        source: storage::error::Error,
+        table_name: String,
+    },
+
+    #[snafu(display(
+        "Failed to scan table metadata from manifest,  table: {}, source: {}",
+        table_name,
+        source,
+    ))]
+    ScanTableManifest {
+        #[snafu(backtrace)]
+        source: storage::error::Error,
+        table_name: String,
+    },
+
+    #[snafu(display("Table info not found in manifest, table: {}", table_name))]
+    TableInfoNotFound {
+        backtrace: Backtrace,
+        table_name: String,
+    },
+
+    #[snafu(display("Table already exists: {}", table_name))]
+    TableExists {
+        backtrace: Backtrace,
+        table_name: String,
+    },
 }
 
 impl From<Error> for table::error::Error {
@@ -118,7 +152,12 @@ impl ErrorExt for Error {
             | BuildTableMeta { .. }
             | BuildTableInfo { .. }
             | BuildRegionDescriptor { .. }
+            | TableExists { .. }
             | MissingTimestampIndex { .. } => StatusCode::InvalidArguments,
+
+            TableInfoNotFound { .. } => StatusCode::Unexpected,
+
+            ScanTableManifest { .. } | UpdateTableManifest { .. } => StatusCode::StorageUnavailable,
         }
     }
 

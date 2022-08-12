@@ -3,61 +3,43 @@ use std::io::{BufRead, BufReader};
 use serde::{Deserialize, Serialize};
 use serde_json as json;
 use snafu::{ensure, OptionExt, ResultExt};
+use storage::error::{
+    DecodeJsonSnafu, DecodeMetaActionListSnafu, Error as StorageError,
+    ManifestProtocolForbidReadSnafu, ReadlineSnafu,
+};
+use storage::manifest::helper;
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion, VersionHeader};
 use store_api::manifest::ManifestVersion;
 use store_api::manifest::MetaAction;
-use store_api::storage::RegionId;
-use store_api::storage::SequenceNumber;
-
-use crate::error::{
-    self, DecodeJsonSnafu, DecodeMetaActionListSnafu, ManifestProtocolForbidReadSnafu,
-    ReadlineSnafu, Result,
-};
-use crate::manifest::helper;
-use crate::metadata::{RegionMetadataRef, VersionNumber};
-use crate::sst::FileMeta;
+use table::metadata::{TableIdent, TableInfo};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct RegionChange {
-    pub metadata: RegionMetadataRef,
+pub struct TableChange {
+    pub table_info: TableInfo,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct RegionRemove {
-    pub region_id: RegionId,
+pub struct TableRemove {
+    pub table_ident: TableIdent,
+    pub table_name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct RegionEdit {
-    pub region_version: VersionNumber,
-    pub flushed_sequence: SequenceNumber,
-    pub files_to_add: Vec<FileMeta>,
-    pub files_to_remove: Vec<FileMeta>,
+pub enum TableMetaAction {
+    Protocol(ProtocolAction),
+    // Boxed TableChange to reduce the total size of enum
+    Change(Box<TableChange>),
+    Remove(TableRemove),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct RegionMetaActionList {
-    pub actions: Vec<RegionMetaAction>,
+pub struct TableMetaActionList {
+    pub actions: Vec<TableMetaAction>,
     pub prev_version: ManifestVersion,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub enum RegionMetaAction {
-    Protocol(ProtocolAction),
-    Change(RegionChange),
-    Remove(RegionRemove),
-    Edit(RegionEdit),
-}
-
-impl RegionMetaActionList {
-    pub fn with_action(action: RegionMetaAction) -> Self {
-        Self {
-            actions: vec![action],
-            prev_version: 0,
-        }
-    }
-
-    pub fn new(actions: Vec<RegionMetaAction>) -> Self {
+impl TableMetaActionList {
+    pub fn new(actions: Vec<TableMetaAction>) -> Self {
         Self {
             actions,
             prev_version: 0,
@@ -65,25 +47,25 @@ impl RegionMetaActionList {
     }
 }
 
-impl MetaAction for RegionMetaActionList {
-    type Error = error::Error;
+impl MetaAction for TableMetaActionList {
+    type Error = StorageError;
 
     fn set_prev_version(&mut self, version: ManifestVersion) {
         self.prev_version = version;
     }
 
-    /// Encode self into json in the form of string lines, starts with prev_version and then action json list.
-    fn encode(&self) -> Result<Vec<u8>> {
+    fn encode(&self) -> Result<Vec<u8>, Self::Error> {
         helper::encode_actions(self.prev_version, &self.actions)
     }
 
+    /// TODO(dennis): duplicated code with RegionMetaActionList::decode, try to refactor it.
     fn decode(
         bs: &[u8],
         reader_version: ProtocolVersion,
-    ) -> Result<(Self, Option<ProtocolAction>)> {
+    ) -> Result<(Self, Option<ProtocolAction>), Self::Error> {
         let mut lines = BufReader::new(bs).lines();
 
-        let mut action_list = RegionMetaActionList {
+        let mut action_list = TableMetaActionList {
             actions: Vec::default(),
             prev_version: 0,
         };
@@ -109,9 +91,9 @@ impl MetaAction for RegionMetaActionList {
         let mut actions = Vec::default();
         for line in lines {
             let line = &line.context(ReadlineSnafu)?;
-            let action: RegionMetaAction = json::from_str(line).context(DecodeJsonSnafu)?;
+            let action: TableMetaAction = json::from_str(line).context(DecodeJsonSnafu)?;
 
-            if let RegionMetaAction::Protocol(p) = &action {
+            if let TableMetaAction::Protocol(p) = &action {
                 ensure!(
                     p.is_readable(reader_version),
                     ManifestProtocolForbidReadSnafu {
@@ -135,41 +117,37 @@ mod tests {
     use common_telemetry::logging;
 
     use super::*;
-    use crate::manifest::test_utils;
+    use crate::table::test_util;
 
     #[test]
     fn test_encode_decode_action_list() {
         common_telemetry::init_default_ut_logging();
         let mut protocol = ProtocolAction::new();
         protocol.min_reader_version = 1;
-        let mut action_list = RegionMetaActionList::new(vec![
-            RegionMetaAction::Protocol(protocol.clone()),
-            RegionMetaAction::Edit(test_utils::build_region_edit(
-                99,
-                &["test1", "test2"],
-                &["test3"],
-            )),
+
+        let table_info = test_util::build_test_table_info();
+
+        let mut action_list = TableMetaActionList::new(vec![
+            TableMetaAction::Protocol(protocol.clone()),
+            TableMetaAction::Change(Box::new(TableChange { table_info })),
         ]);
         action_list.set_prev_version(3);
 
         let bs = action_list.encode().unwrap();
-        // {"prev_version":3}
-        // {"Protocol":{"min_reader_version":1,"min_writer_version":0}}
-        // {"Edit":{"region_version":0,"flush_sequence":99,"files_to_add":[{"file_name":"test1","level":1},{"file_name":"test2","level":2}],"files_to_remove":[{"file_name":"test0","level":0}]}}
 
         logging::debug!(
             "Encoded action list: \r\n{}",
             String::from_utf8(bs.clone()).unwrap()
         );
 
-        let e = RegionMetaActionList::decode(&bs, 0);
+        let e = TableMetaActionList::decode(&bs, 0);
         assert!(e.is_err());
         assert_eq!(
             "Manifest protocol forbid to read, min_version: 1, supported_version: 0",
             format!("{}", e.err().unwrap())
         );
 
-        let (decode_list, p) = RegionMetaActionList::decode(&bs, 1).unwrap();
+        let (decode_list, p) = TableMetaActionList::decode(&bs, 1).unwrap();
         assert_eq!(decode_list, action_list);
         assert_eq!(p.unwrap(), protocol);
     }

@@ -8,6 +8,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
+use table::metadata::TableId;
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::{Table, TableRef};
 
@@ -65,6 +66,7 @@ impl SystemCatalogTable {
         } else {
             // system catalog table is not yet created, try to create
             let request = CreateTableRequest {
+                id: SYSTEM_CATALOG_TABLE_ID,
                 name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
                 desc: Some("System catalog table".to_string()),
                 schema: schema.clone(),
@@ -219,12 +221,12 @@ pub struct TableEntry {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
-    pub table_id: u64,
+    pub table_id: TableId,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct TableEntryValue {
-    pub table_id: u64,
+    pub table_id: TableId,
 }
 
 #[cfg(test)]

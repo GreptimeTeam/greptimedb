@@ -8,7 +8,7 @@ pub mod config;
 mod engine;
 pub mod error;
 mod flush;
-mod manifest;
+pub mod manifest;
 pub mod memtable;
 pub mod metadata;
 mod proto;

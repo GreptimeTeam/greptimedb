@@ -18,6 +18,7 @@ datatypes = { path = "../datatypes"}
 hyper = { version = "0.14", features = ["full"] }
 log-store = { path = "../log-store" }
 metrics = "0.18"
+object-store = { path = "../object-store" }
 query = { path = "../query" }
 serde = "1.0"
 serde_json = "1.0"
