@@ -5,7 +5,7 @@ use common_telemetry::tracing::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use query::query_engine::Output;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, DataType as SqlDataType, ObjectName, TableConstraint};
 use sql::statements::create_table::CreateTable;
 use store_api::storage::consts::TIME_INDEX_NAME;
@@ -15,7 +15,7 @@ use table::requests::*;
 
 use crate::error::{
     CreateSchemaSnafu, CreateTableSnafu, InvalidCreateTableSqlSnafu, KeyColumnNotFoundSnafu,
-    Result, SqlTypeNotSupportedSnafu,
+    PrimaryKeyNotSpecifiedSnafu, Result, SqlTypeNotSupportedSnafu,
 };
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -93,6 +93,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             }
         }
 
+        ensure!(!primary_keys.is_empty(), PrimaryKeyNotSpecifiedSnafu);
         let columns_schemas: Vec<_> = stmt
             .columns
             .iter()
@@ -183,20 +184,27 @@ fn sql_data_type_to_concrete_data_type(t: &SqlDataType) -> Result<ConcreteDataTy
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use sql::ast::{DataType, Ident};
     use store_api::storage::consts;
     use table_engine::config::EngineConfig;
+    use table_engine::engine::MitoEngine;
     use table_engine::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 
     use super::*;
+    use crate::error::Error;
 
-    #[tokio::test]
-    pub async fn test_create_to_request() {
+    async fn create_mock_sql_handler() -> SqlHandler<MitoEngine<MockEngine>> {
         let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
         let mock_engine =
             MockMitoEngine::new(EngineConfig::default(), MockEngine::default(), object_store);
+        SqlHandler::new(mock_engine)
+    }
 
-        let handler = SqlHandler::new(mock_engine);
+    #[tokio::test]
+    pub async fn test_create_to_request() {
+        let handler = create_mock_sql_handler().await;
 
         let constraints = vec![
             TableConstraint::Unique {
@@ -250,5 +258,94 @@ mod tests {
                 assert_eq!(2, c.schema.column_schemas().len());
             }
         }
+    }
+
+    /// Time index not specified in specified
+    #[tokio::test]
+    pub async fn test_time_index_not_specified() {
+        let handler = create_mock_sql_handler().await;
+        let constraints = vec![TableConstraint::Unique {
+            name: None,
+            columns: vec![Ident::new("host"), Ident::new("ts")],
+            is_primary: true,
+        }];
+
+        let parsed_stmt = CreateTable {
+            if_not_exists: false,
+            table_id: 0,
+            name: ObjectName(vec![Ident::new("demo_table")]),
+            columns: vec![
+                ColumnDef {
+                    name: Ident::new("host"),
+                    data_type: DataType::String,
+                    collation: None,
+                    options: vec![],
+                },
+                ColumnDef {
+                    name: Ident::new("ts"),
+                    data_type: DataType::BigInt(None),
+                    collation: None,
+                    options: vec![],
+                },
+            ],
+            engine: "".to_string(),
+            constraints,
+            options: vec![],
+        };
+
+        let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
+        assert_matches!(error, Error::CreateSchema { .. });
+    }
+
+    #[tokio::test]
+    pub async fn test_primary_key_not_specified() {
+        let handler = create_mock_sql_handler().await;
+
+        let constraints = vec![TableConstraint::Unique {
+            name: Some(Ident::new(consts::TIME_INDEX_NAME)),
+            columns: vec![Ident::new("ts")],
+            is_primary: false,
+        }];
+
+        let parsed_stmt = CreateTable {
+            if_not_exists: false,
+            table_id: 0,
+            name: ObjectName(vec![Ident::new("demo_table")]),
+            columns: vec![ColumnDef {
+                name: Ident::new("ts"),
+                data_type: DataType::BigInt(None),
+                collation: None,
+                options: vec![],
+            }],
+            engine: "".to_string(),
+            constraints,
+            options: vec![],
+        };
+
+        let err = handler.create_to_request(42, parsed_stmt).unwrap_err();
+        assert_matches!(err, Error::PrimaryKeyNotSpecified { .. });
+    }
+
+    /// Constraints specified, not column cannot be found.
+    #[tokio::test]
+    pub async fn test_key_not_found() {
+        let handler = create_mock_sql_handler().await;
+        let constraints = vec![TableConstraint::Unique {
+            name: Some(Ident::new(consts::TIME_INDEX_NAME)),
+            columns: vec![Ident::new("ts")],
+            is_primary: false,
+        }];
+        let parsed_stmt = CreateTable {
+            if_not_exists: false,
+            table_id: 0,
+            name: ObjectName(vec![Ident::new("demo_table")]),
+            columns: vec![],
+            engine: "".to_string(),
+            constraints,
+            options: vec![],
+        };
+
+        let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
+        assert_matches!(error, Error::KeyColumnNotFound { .. });
     }
 }

@@ -139,6 +139,9 @@ pub enum Error {
 
     #[snafu(display("Specified timestamp key or primary key column not found: {}", name))]
     KeyColumnNotFound { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Primary key not specified when creating table"))]
+    PrimaryKeyNotSpecified,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -161,7 +164,8 @@ impl ErrorExt for Error {
             | Error::InvalidCreateTableSql { .. }
             | Error::SqlTypeNotSupported { .. }
             | Error::CreateSchema { .. }
-            | Error::KeyColumnNotFound { .. } => StatusCode::InvalidArguments,
+            | Error::KeyColumnNotFound { .. }
+            | Error::PrimaryKeyNotSpecified => StatusCode::InvalidArguments,
             // TODO(yingwen): Further categorize http error.
             Error::StartHttp { .. }
             | Error::ParseAddr { .. }

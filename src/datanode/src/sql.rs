@@ -12,6 +12,7 @@ use crate::error::{GetTableSnafu, Result, TableNotFoundSnafu};
 mod create;
 mod insert;
 
+#[derive(Debug)]
 pub enum SqlRequest {
     Insert(InsertRequest),
     Create(CreateTableRequest),

@@ -7,6 +7,7 @@ use datatypes::schema::SchemaRef;
 use crate::metadata::TableId;
 
 /// Insert request
+#[derive(Debug)]
 pub struct InsertRequest {
     pub table_name: String,
     pub columns_values: HashMap<String, VectorRef>,
