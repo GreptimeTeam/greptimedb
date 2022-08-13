@@ -26,13 +26,17 @@ pub const VERSION_COLUMN_ID: ColumnId = 1;
 
 /// Name of version column.
 pub const VERSION_COLUMN_NAME: &str = "__version";
-// Names for default column family.
+
+/// Names for default column family.
 pub const DEFAULT_CF_NAME: &str = "default";
 
-// Name for reserved column: sequence
+/// Name for reserved column: sequence
 pub const SEQUENCE_COLUMN_NAME: &str = "__sequence";
 
-// Name for reserved column: value_type
+/// Name for time index constraint name.
+pub const TIME_INDEX_NAME: &str = "__time_index";
+
+/// Name for reserved column: value_type
 pub const VALUE_TYPE_COLUMN_NAME: &str = "__value_type";
 
 // -----------------------------------------------------------------------------

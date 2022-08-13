@@ -14,7 +14,7 @@ use crate::statements::statement::Statement;
 
 const ENGINE: &str = "ENGINE";
 
-/// Pasre create [table] statement
+/// Parses create [table] statement
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_create(&mut self) -> Result<Statement> {
         self.parser
@@ -42,6 +42,7 @@ impl<'a> ParserContext<'a> {
             engine,
             constraints,
             options,
+            table_id: 0, // table id is assigned by catalog manager
         }))
     }
 

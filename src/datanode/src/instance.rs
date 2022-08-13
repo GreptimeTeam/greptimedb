@@ -110,7 +110,7 @@ impl Instance {
                     .await
                     .context(ExecuteSqlSnafu)
             }
-            Statement::Insert(_) => {
+            Statement::Insert(i) => {
                 let schema_provider = self
                     .catalog_manager
                     .catalog(DEFAULT_CATALOG_NAME)
@@ -118,11 +118,17 @@ impl Instance {
                     .schema(DEFAULT_SCHEMA_NAME)
                     .unwrap();
 
-                let request = self
-                    .sql_handler
-                    .statement_to_request(schema_provider, stmt)?;
+                let request = self.sql_handler.insert_to_request(schema_provider, *i)?;
                 self.sql_handler.execute(request).await
             }
+
+            Statement::Create(c) => {
+                let table_id = self.catalog_manager.next_table_id();
+                let request = self.sql_handler.create_to_request(table_id, c)?;
+                // info!("Creating table with request: {:?}, table id: {}", &request, table_id );
+                self.sql_handler.execute(request).await
+            }
+
             _ => unimplemented!(),
         }
     }
@@ -147,7 +153,9 @@ impl Instance {
                 &EngineContext::default(),
                 CreateTableRequest {
                     id: 1,
-                    name: table_name.to_string(),
+                    catalog_name: None,
+                    schema_name: None,
+                    table_name: table_name.to_string(),
                     desc: Some(" a test table".to_string()),
                     schema: Arc::new(
                         Schema::with_timestamp_index(column_schemas, 3)

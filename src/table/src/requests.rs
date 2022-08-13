@@ -16,12 +16,13 @@ pub struct InsertRequest {
 #[derive(Debug)]
 pub struct CreateTableRequest {
     pub id: TableId,
-    pub name: String,
+    pub catalog_name: Option<String>,
+    pub schema_name: Option<String>,
+    pub table_name: String,
     pub desc: Option<String>,
     pub schema: SchemaRef,
     pub primary_key_indices: Vec<usize>,
     pub create_if_not_exists: bool,
-    // TODO(yingwen): 1. Add catalog_name/schema_name and other infos
 }
 
 /// Open table request

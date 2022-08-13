@@ -1,19 +1,20 @@
 //! sql handler
 
-mod insert;
-use catalog::SchemaProviderRef;
 use common_error::ext::BoxedError;
 use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
-use sql::statements::statement::Statement;
 use table::engine::{EngineContext, TableEngine};
 use table::requests::*;
 use table::TableRef;
 
 use crate::error::{GetTableSnafu, Result, TableNotFoundSnafu};
 
+mod create;
+mod insert;
+
 pub enum SqlRequest {
     Insert(InsertRequest),
+    Create(CreateTableRequest),
 }
 
 // Handler to execute SQL except query
@@ -29,6 +30,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
     pub async fn execute(&self, request: SqlRequest) -> Result<Output> {
         match request {
             SqlRequest::Insert(req) => self.insert(req).await,
+            SqlRequest::Create(req) => self.create(req).await,
         }
     }
 
@@ -38,18 +40,6 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             .map_err(BoxedError::new)
             .context(GetTableSnafu { table_name })?
             .context(TableNotFoundSnafu { table_name })
-    }
-
-    // Cast sql statement into sql request
-    pub(crate) fn statement_to_request(
-        &self,
-        schema_provider: SchemaProviderRef,
-        statement: Statement,
-    ) -> Result<SqlRequest> {
-        match statement {
-            Statement::Insert(stmt) => self.insert_to_request(schema_provider, *stmt),
-            _ => unimplemented!(),
-        }
     }
 }
 
@@ -67,6 +57,7 @@ mod tests {
     use log_store::fs::noop::NoopLogStore;
     use object_store::{backend::fs::Backend, ObjectStore};
     use query::QueryEngineFactory;
+    use sql::statements::statement::Statement;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use table::error::Result as TableResult;
@@ -163,10 +154,15 @@ mod tests {
         );
         let sql_handler = SqlHandler::new(table_engine);
 
-        let stmt = query_engine.sql_to_statement(sql).unwrap();
+        let stmt = match query_engine.sql_to_statement(sql).unwrap() {
+            Statement::Insert(i) => i,
+            _ => {
+                unreachable!()
+            }
+        };
         let schema_provider = Arc::new(MockSchemaProvider {});
         let request = sql_handler
-            .statement_to_request(schema_provider, stmt)
+            .insert_to_request(schema_provider, *stmt)
             .unwrap();
 
         match request {
@@ -194,6 +190,9 @@ mod tests {
                 assert_eq!(2, ts.len());
                 assert_eq!(Value::from(1655276557000i64), ts.get(0));
                 assert_eq!(Value::from(1655276558000i64), ts.get(1));
+            }
+            _ => {
+                panic!("Not supposed to reach here")
             }
         }
     }
