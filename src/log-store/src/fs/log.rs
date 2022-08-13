@@ -235,9 +235,7 @@ impl LogStore for LocalFileLogStore {
                             Ok(entries) => {
                                 yield Ok(entries
                                     .into_iter()
-                                    .filter(|e| {
-                                        e.namespace().id() == ns.id()
-                                    })
+                                    .filter(|e| e.namespace().id() == ns.id())
                                     .collect::<Vec<_>>())
                             }
                             Err(e) => yield Err(e),
