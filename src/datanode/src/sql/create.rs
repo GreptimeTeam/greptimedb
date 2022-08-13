@@ -168,14 +168,87 @@ fn sql_data_type_to_concrete_data_type(t: &SqlDataType) -> Result<ConcreteDataTy
         SqlDataType::BigInt(_) => Ok(ConcreteDataType::int64_datatype()),
         SqlDataType::Int(_) => Ok(ConcreteDataType::int32_datatype()),
         SqlDataType::SmallInt(_) => Ok(ConcreteDataType::int16_datatype()),
-        SqlDataType::Char(_) | SqlDataType::Varchar(_) | SqlDataType::Text => {
-            Ok(ConcreteDataType::string_datatype())
-        }
+        SqlDataType::Char(_)
+        | SqlDataType::Varchar(_)
+        | SqlDataType::Text
+        | SqlDataType::String => Ok(ConcreteDataType::string_datatype()),
         SqlDataType::Float(_) => Ok(ConcreteDataType::float32_datatype()),
         SqlDataType::Real => Ok(ConcreteDataType::float32_datatype()),
         SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
-        // TODO(hl): Date/DateTime not supported
+        // TODO(hl): Date/DateTime/Timestamp not supported
         _ => SqlTypeNotSupportedSnafu { t: t.clone() }.fail(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sql::ast::{DataType, Ident};
+    use store_api::storage::consts;
+    use table_engine::config::EngineConfig;
+    use table_engine::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
+
+    use super::*;
+
+    #[tokio::test]
+    pub async fn test_create_to_request() {
+        let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
+        let mock_engine =
+            MockMitoEngine::new(EngineConfig::default(), MockEngine::default(), object_store);
+
+        let handler = SqlHandler::new(mock_engine);
+
+        let constraints = vec![
+            TableConstraint::Unique {
+                name: Some(Ident::new(consts::TIME_INDEX_NAME)),
+                columns: vec![Ident::new("ts")],
+                is_primary: false,
+            },
+            TableConstraint::Unique {
+                name: None,
+                columns: vec![Ident::new("host"), Ident::new("ts")],
+                is_primary: true,
+            },
+        ];
+
+        let parsed_stmt = CreateTable {
+            if_not_exists: false,
+            table_id: 0,
+            name: ObjectName(vec![Ident::new("demo_table")]),
+            columns: vec![
+                ColumnDef {
+                    name: Ident::new("host"),
+                    data_type: DataType::String,
+                    collation: None,
+                    options: vec![],
+                },
+                ColumnDef {
+                    name: Ident::new("ts"),
+                    data_type: DataType::BigInt(None),
+                    collation: None,
+                    options: vec![],
+                },
+            ],
+            engine: "".to_string(),
+            constraints,
+            options: vec![],
+        };
+
+        let request = handler.create_to_request(42, parsed_stmt).unwrap();
+        match request {
+            SqlRequest::Insert(_) => {
+                panic!("Not supposed to be an insert statement")
+            }
+            SqlRequest::Create(c) => {
+                assert_eq!("demo_table", c.table_name);
+                assert_eq!(42, c.id);
+                assert!(c.schema_name.is_none());
+                assert!(c.catalog_name.is_none());
+                assert!(!c.create_if_not_exists);
+                assert_eq!(vec![0, 1], c.primary_key_indices);
+                assert_eq!(1, c.schema.timestamp_index().unwrap());
+                assert_eq!(2, c.schema.column_schemas().len());
+            }
+        }
     }
 }

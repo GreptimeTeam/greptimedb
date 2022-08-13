@@ -132,7 +132,10 @@ pub enum Error {
     },
 
     #[snafu(display("SQL data type not supported yet: {:?}", t))]
-    SqlTypeNotSupported { t: sql::ast::DataType },
+    SqlTypeNotSupported {
+        t: sql::ast::DataType,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Specified timestamp key or primary key column not found: {}", name))]
     KeyColumnNotFound { name: String, backtrace: Backtrace },
