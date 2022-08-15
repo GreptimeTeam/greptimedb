@@ -1,49 +1,40 @@
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::Result;
 use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
-#[derive(Debug, Clone)]
-pub struct FileStoreConfig {
-    /// Storage path
-    pub store_dir: String,
-}
-
-impl Default for FileStoreConfig {
-    fn default() -> Self {
-        Self {
-            store_dir: "/tmp/greptimedb/data/".to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ObjectStoreConfig {
-    File(FileStoreConfig),
+    File { data_dir: String },
 }
 
 impl Default for ObjectStoreConfig {
     fn default() -> Self {
-        ObjectStoreConfig::File(FileStoreConfig::default())
+        ObjectStoreConfig::File {
+            data_dir: "/tmp/greptimedb/data/".to_string(),
+        }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DatanodeOptions {
     pub http_addr: String,
     pub rpc_addr: String,
     pub wal_dir: String,
-    pub store_config: ObjectStoreConfig,
+    pub storage: ObjectStoreConfig,
 }
 
 impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
-            http_addr: Default::default(),
-            rpc_addr: Default::default(),
+            http_addr: "0.0.0.0:3000".to_string(),
+            rpc_addr: "0.0.0.0:3001".to_string(),
             wal_dir: "/tmp/wal".to_string(),
-            store_config: ObjectStoreConfig::default(),
+            storage: ObjectStoreConfig::default(),
         }
     }
 }

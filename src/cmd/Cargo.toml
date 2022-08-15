@@ -14,3 +14,8 @@ common-telemetry = { path = "../common/telemetry", features = ["deadlock_detecti
 datanode = { path = "../datanode" }
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.18", features = ["full"] }
+toml = "0.5"
+
+[dev-dependencies]
+serde = "1.0"
+tempdir = "0.3"

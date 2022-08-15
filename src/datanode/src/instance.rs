@@ -41,7 +41,7 @@ pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
     pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
-        let object_store = new_object_store(&opts.store_config).await?;
+        let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
 
         let table_engine = DefaultEngine::new(
@@ -177,20 +177,20 @@ impl Instance {
 
 async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
     // TODO(dennis): supports other backend
-    let store_dir = util::normalize_dir(match store_config {
-        ObjectStoreConfig::File(file) => &file.store_dir,
+    let data_dir = util::normalize_dir(match store_config {
+        ObjectStoreConfig::File { data_dir } => data_dir,
     });
 
-    fs::create_dir_all(path::Path::new(&store_dir))
-        .context(error::CreateDirSnafu { dir: &store_dir })?;
+    fs::create_dir_all(path::Path::new(&data_dir))
+        .context(error::CreateDirSnafu { dir: &data_dir })?;
 
-    info!("The storage directory is: {}", &store_dir);
+    info!("The storage directory is: {}", &data_dir);
 
     let accessor = Backend::build()
-        .root(&store_dir)
+        .root(&data_dir)
         .finish()
         .await
-        .context(error::InitBackendSnafu { dir: &store_dir })?;
+        .context(error::InitBackendSnafu { dir: &data_dir })?;
 
     Ok(ObjectStore::new(accessor))
 }
