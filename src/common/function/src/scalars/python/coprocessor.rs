@@ -20,7 +20,7 @@ use rustpython_vm::{class::PyClassImpl, AsObject};
 use snafu::{OptionExt, ResultExt};
 use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
-use vm::{PyObjectRef, PyPayload, VirtualMachine};
+use vm::{PyObjectRef, VirtualMachine};
 
 use crate::fail_parse_error;
 use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
@@ -28,8 +28,8 @@ use crate::scalars::python::error::{
     ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
     PyRuntimeSnafu, Result, TypeCastSnafu,
 };
-use crate::scalars::python::type_::{is_instance, PyVector};
-
+use crate::scalars::python::is_instance;
+use crate::scalars::python::type_::PyVector;
 fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
     OtherSnafu { reason }
 }
@@ -328,7 +328,7 @@ fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
 
 /// convert a single PyVector or a number(a constant) into a Array(or a constant array)
 fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<ArrayRef> {
-    if is_instance(obj, PyVector::class(vm).into(), vm) {
+    if is_instance::<PyVector>(obj, vm) {
         let pyv = obj
             .payload::<PyVector>()
             .context(ret_other_error_with(format!(
@@ -336,7 +336,7 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
                 obj
             )))?;
         Ok(pyv.to_arrow_array())
-    } else if is_instance(obj, PyInt::class(vm).into(), vm) {
+    } else if is_instance::<PyInt>(obj, vm) {
         let val = obj.to_owned().try_into_value::<i64>(vm);
         let val = match val {
             Ok(val) => val,
@@ -344,7 +344,7 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
         };
         let ret = PrimitiveArray::from_vec(vec![val; col_len]);
         Ok(Arc::new(ret) as _)
-    } else if is_instance(obj, PyFloat::class(vm).into(), vm) {
+    } else if is_instance::<PyFloat>(obj, vm) {
         let val = obj.to_owned().try_into_value::<f64>(vm);
         let val = match val {
             Ok(val) => val,
@@ -352,7 +352,7 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
         };
         let ret = PrimitiveArray::from_vec(vec![val; col_len]);
         Ok(Arc::new(ret) as _)
-    } else if is_instance(obj, PyBool::class(vm).into(), vm) {
+    } else if is_instance::<PyBool>(obj, vm) {
         let val = obj.to_owned().try_into_value::<bool>(vm);
         let val = match val {
             Ok(val) => val,
@@ -367,14 +367,12 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
 
 /// convert a tuple of `PyVector` or one `PyVector`(wrapped in a Python Object Ref[`PyObjectRef`])
 /// to a `Vec<ArrayRef>`
-///
-/// TODO: add support for constant columns
 fn try_into_columns(
     obj: &PyObjectRef,
     vm: &VirtualMachine,
     col_len: usize,
 ) -> Result<Vec<ArrayRef>> {
-    if is_instance(obj, PyTuple::class(vm).into(), vm) {
+    if is_instance::<PyTuple>(obj, vm) {
         let tuple = obj
             .payload::<PyTuple>()
             .context(ret_other_error_with(format!(
@@ -521,7 +519,7 @@ fn set_items_in_scope(
 pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
-    // TODO: cache the result of parse_copr
+    // TODO(discord9): cache the result of parse_copr
     let copr = parse_copr(script)?;
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = select_from_rb(rb, &copr.args)?;

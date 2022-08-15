@@ -24,12 +24,12 @@ pub struct RegionChange {
     pub metadata: RegionMetadataRef,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionRemove {
     pub region_id: RegionId,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionEdit {
     pub region_id: RegionId,
     pub region_version: VersionNumber,
