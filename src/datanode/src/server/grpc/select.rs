@@ -21,7 +21,7 @@ pub(crate) async fn to_object_result(result: Result<Output>) -> ObjectResult {
             .build(),
         Ok(Output::RecordBatch(stream)) => record_batchs(stream).await,
         Err(err) => ObjectResultBuilder::new()
-            .status_code(StatusCode::SUCCESS as u32)
+            .status_code(err.status_code() as u32)
             .err_msg(err.to_string())
             .build(),
     }
