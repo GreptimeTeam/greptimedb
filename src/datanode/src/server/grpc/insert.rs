@@ -3,7 +3,8 @@ use std::{
     sync::Arc,
 };
 
-use api::v1::{column::Values, Column, InsertBatch, InsertExpr};
+use api::v1::{codec::InsertBatch, column::Values, Column, InsertExpr};
+use common_base::bitset::BitSet;
 use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::{requests::InsertRequest, Table};
@@ -80,10 +81,10 @@ fn add_values_to_builder(
     null_mask: impl Into<BitSet>,
 ) -> Result<()> {
     let data_type = builder.data_type();
-    let null_mask = null_mask.into();
+    let null_mask: BitSet = null_mask.into();
     let values = convert_values(&data_type, values);
 
-    if null_mask.len() == 0 {
+    if null_mask.is_empty() {
         ensure!(values.len() == row_count, IllegalInsertDataSnafu);
 
         values.iter().for_each(|value| {
@@ -91,17 +92,18 @@ fn add_values_to_builder(
         });
     } else {
         ensure!(
-            null_mask.set_count() + values.len() == row_count,
+            null_mask.ones_count() + values.len() == row_count,
             IllegalInsertDataSnafu
         );
 
         let mut idx_of_values = 0;
         for idx in 0..row_count {
-            if is_null(&null_mask, idx) {
-                builder.push(&Value::Null);
-            } else {
-                builder.push(&values[idx_of_values]);
-                idx_of_values += 1;
+            match is_null(&null_mask, idx) {
+                Some(true) => builder.push(&Value::Null),
+                _ => {
+                    builder.push(&values[idx_of_values]);
+                    idx_of_values += 1
+                }
             }
         }
     }
@@ -173,57 +175,8 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
     }
 }
 
-fn is_null(null_mask: &BitSet, idx: usize) -> bool {
-    debug_assert!(idx < null_mask.len, "idx should be less than null_mask.len");
-
-    matches!(null_mask.get_bit(idx), Some(true))
-}
-
-// TOOD(fys): move BitSet to better location
-struct BitSet {
-    buffer: Vec<u8>,
-    len: usize,
-}
-
-impl BitSet {
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn set_count(&self) -> usize {
-        (0..self.len)
-            .into_iter()
-            .filter(|&i| matches!(self.get_bit(i), Some(true)))
-            .count()
-    }
-
-    fn get_bit(&self, idx: usize) -> Option<bool> {
-        if idx >= self.len {
-            return None;
-        }
-
-        let byte_idx = idx >> 3;
-        let bit_idx = idx & 7;
-        Some((self.buffer[byte_idx] >> bit_idx) & 1 != 0)
-    }
-}
-
-impl From<Vec<u8>> for BitSet {
-    fn from(data: Vec<u8>) -> Self {
-        BitSet {
-            len: data.len() << 3,
-            buffer: data,
-        }
-    }
-}
-
-impl From<&[u8]> for BitSet {
-    fn from(data: &[u8]) -> Self {
-        BitSet {
-            buffer: data.into(),
-            len: data.len() << 3,
-        }
-    }
+fn is_null(null_mask: &BitSet, idx: usize) -> Option<bool> {
+    null_mask.get(idx)
 }
 
 #[cfg(test)]
@@ -231,9 +184,11 @@ mod tests {
     use std::{any::Any, sync::Arc};
 
     use api::v1::{
+        codec::InsertBatch,
         column::{self, Values},
-        Column, InsertBatch, InsertExpr,
+        Column, InsertExpr,
     };
+    use common_base::bitset::BitSet;
     use common_query::prelude::Expr;
     use common_recordbatch::SendableRecordBatchStream;
     use datatypes::{
@@ -244,7 +199,7 @@ mod tests {
     use table::error::Result as TableResult;
     use table::Table;
 
-    use crate::server::grpc::insert::{convert_values, insertion_expr_to_request, is_null, BitSet};
+    use crate::server::grpc::insert::{convert_values, insertion_expr_to_request, is_null};
 
     #[test]
     fn test_insertion_expr_to_request() {
@@ -299,37 +254,14 @@ mod tests {
     fn test_is_null() {
         let null_mask: BitSet = vec![0b0000_0001, 0b0000_1000].into();
 
-        assert!(is_null(&null_mask, 0));
-        assert!(!is_null(&null_mask, 1));
-        assert!(!is_null(&null_mask, 10));
-        assert!(is_null(&null_mask, 11));
-        assert!(!is_null(&null_mask, 12));
-    }
+        assert_eq!(Some(true), is_null(&null_mask, 0));
+        assert_eq!(Some(false), is_null(&null_mask, 1));
+        assert_eq!(Some(false), is_null(&null_mask, 10));
+        assert_eq!(Some(true), is_null(&null_mask, 11));
+        assert_eq!(Some(false), is_null(&null_mask, 12));
 
-    #[test]
-    fn test_bit_set() {
-        let bit_set: BitSet = vec![0b0000_0001, 0b0000_1000].into();
-
-        assert!(bit_set.get_bit(0).unwrap());
-        assert!(!bit_set.get_bit(1).unwrap());
-        assert!(!bit_set.get_bit(10).unwrap());
-        assert!(bit_set.get_bit(11).unwrap());
-        assert!(!bit_set.get_bit(12).unwrap());
-
-        assert!(bit_set.get_bit(16).is_none());
-
-        assert_eq!(2, bit_set.set_count());
-        assert_eq!(16, bit_set.len());
-
-        let bit_set: BitSet = vec![0b0000_0000, 0b0000_0000].into();
-        assert_eq!(0, bit_set.set_count());
-        assert_eq!(16, bit_set.len());
-
-        let bit_set: BitSet = vec![0b1111_1111, 0b1111_1111].into();
-        assert_eq!(16, bit_set.set_count());
-
-        let bit_set: BitSet = vec![].into();
-        assert_eq!(0, bit_set.len());
+        assert_eq!(None, is_null(&null_mask, 16));
+        assert_eq!(None, is_null(&null_mask, 99));
     }
 
     struct DemoTable;

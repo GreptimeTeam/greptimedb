@@ -1,5 +1,6 @@
 mod handler;
 pub mod insert;
+mod select;
 mod server;
 
 use common_telemetry::logging::info;

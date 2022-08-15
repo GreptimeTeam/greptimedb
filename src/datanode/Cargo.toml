@@ -5,12 +5,18 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[dependencies.arrow]
+package = "arrow2"
+version = "0.10"
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+
 [dependencies]
 api = { path = "../api" }
 async-trait = "0.1"
 axum = "0.5"
 axum-macros = "0.2"
 catalog = { path = "../catalog" }
+common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
@@ -37,6 +43,7 @@ tower-http = { version ="0.3", features = ["full"]}
 [dev-dependencies]
 axum-test-helper = "0.1"
 common-query = { path = "../common/query" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
 tempdir = "0.3"
 
 [dev-dependencies.arrow]

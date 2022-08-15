@@ -12,7 +12,7 @@ message DatabaseResponse {
 }
 
 message ObjectExpr {
-  Header header = 1;
+  ExprHeader header = 1;
   oneof expr {
     InsertExpr insert = 2;
     SelectExpr select = 3;
@@ -21,8 +21,16 @@ message ObjectExpr {
   }
 }
 
+message ExprHeader {
+  uint32 version = 1;
+}
+
+// TODO(fys): Only support sql now, and 
+// will support promql etc in the future
 message SelectExpr {
-  string select = 1; // sql, promql, etc.
+  oneof expr {
+    string sql = 1;
+  }
 }
 
 message InsertExpr {
@@ -37,17 +45,23 @@ message DeleteExpr {}
 
 message ObjectResult {
   ResultHeader header = 1;
-  bytes results = 2;
+  oneof result {
+    SelectResult select = 2;
+    MutateResult mutate = 3;
+  }
 }
 
-message Header {
-  uint32 version = 1;
+message SelectResult {
+  bytes raw_data = 1;
 }
 
 message ResultHeader {
   uint32 version = 1;
-  uint32 success = 2;
-  uint32 failure = 3;
-  uint32 code = 4;
-  string err_msg = 5;
+  uint32 code = 2;
+  string err_msg = 3;
+}
+
+message MutateResult {
+  uint32 success = 1;
+  uint32 failure = 2;
 }

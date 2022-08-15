@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package greptime.v1;
+package greptime.v1.codec;
 
 import "greptime/v1/column.proto";
 
@@ -8,4 +8,3 @@ message InsertBatch {
   repeated Column columns = 1;
   uint32 row_count = 2;
 }
-
