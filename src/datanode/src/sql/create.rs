@@ -42,7 +42,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
         let mut ts_index = usize::MAX;
         let mut primary_keys = vec![];
 
-        let (catalog_name, schema_name, table_name) = table_idents_to_fqn(stmt.name)?;
+        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(stmt.name)?;
 
         let col_map = stmt
             .columns
@@ -133,7 +133,9 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
 
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when catalog and schema are default)
 /// to tuples  
-fn table_idents_to_fqn(obj_name: ObjectName) -> Result<(Option<String>, Option<String>, String)> {
+fn table_idents_to_full_name(
+    obj_name: ObjectName,
+) -> Result<(Option<String>, Option<String>, String)> {
     match &obj_name.0[..] {
         [table] => Ok((None, None, table.value.clone())),
         [catalog, schema, table] => Ok((
@@ -185,6 +187,9 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use sql::ast::{DataType, Ident};
+    use sql::dialect::GenericDialect;
+    use sql::parser::ParserContext;
+    use sql::statements::statement::Statement;
     use store_api::storage::consts;
     use table_engine::config::EngineConfig;
     use table_engine::engine::MitoEngine;
@@ -343,5 +348,72 @@ mod tests {
 
         let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
         assert_matches!(error, Error::KeyColumnNotFound { .. });
+    }
+
+    #[tokio::test]
+    pub async fn test_parse_create_sql() {
+        let sql = r"create table c.s.demo(
+                             host string,
+                             ts bigint,
+                             cpu double default 0,
+                             memory double,
+                             TIME INDEX (ts),
+                             PRIMARY KEY(ts, host)) engine=mito
+                             with(regions=1);
+         ";
+        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, result.len());
+
+        let create_table = match result.pop().unwrap() {
+            Statement::Create(c) => c,
+            _ => {
+                panic!("unexpected statement type: {:?}", result[0])
+            }
+        };
+
+        let handler = create_mock_sql_handler().await;
+
+        let request = handler.create_to_request(42, create_table).unwrap();
+
+        assert_eq!(42, request.id);
+        assert_eq!(Some("c".to_string()), request.catalog_name);
+        assert_eq!(Some("s".to_string()), request.schema_name);
+        assert_eq!("demo".to_string(), request.table_name);
+        assert!(!request.create_if_not_exists);
+        assert_eq!(4, request.schema.column_schemas().len());
+
+        assert_eq!(vec![1, 0], request.primary_key_indices);
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            request
+                .schema
+                .column_schema_by_name("host")
+                .unwrap()
+                .data_type
+        );
+        assert_eq!(
+            ConcreteDataType::int64_datatype(),
+            request
+                .schema
+                .column_schema_by_name("ts")
+                .unwrap()
+                .data_type
+        );
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            request
+                .schema
+                .column_schema_by_name("cpu")
+                .unwrap()
+                .data_type
+        );
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            request
+                .schema
+                .column_schema_by_name("memory")
+                .unwrap()
+                .data_type
+        );
     }
 }
