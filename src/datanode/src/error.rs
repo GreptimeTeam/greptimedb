@@ -148,6 +148,12 @@ pub enum Error {
         constraint: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to insert into system catalog table: {}", source))]
+    InsertSystemCatalog {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -177,6 +183,8 @@ impl ErrorExt for Error {
             | Error::ParseAddr { .. }
             | Error::TcpBind { .. }
             | Error::StartGrpc { .. }
+            | Error::CreateDir { .. }
+            | Error::InsertSystemCatalog { .. }
             | Error::CreateDir { .. }
             | Error::Conversion { .. }
             | Error::UnsupportedExpr { .. } => StatusCode::Internal,

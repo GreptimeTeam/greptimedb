@@ -250,4 +250,18 @@ impl CatalogManager for LocalCatalogManager {
     fn next_table_id(&self) -> TableId {
         self.next_table_id.fetch_add(1, Ordering::Relaxed)
     }
+
+    async fn register_table(
+        &self,
+        catalog: Option<String>,
+        schema: Option<String>,
+        table_name: String,
+        table_id: TableId,
+    ) -> Result<usize> {
+        let catalog = catalog.unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
+        let schema = schema.unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+        self.system
+            .register_table(catalog, schema, table_name, table_id)
+            .await
+    }
 }

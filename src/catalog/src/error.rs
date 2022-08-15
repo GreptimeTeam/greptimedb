@@ -86,6 +86,15 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display(
+        "Failed to insert table creation record to system catalog, source: {}",
+        source
+    ))]
+    InsertTableRecord {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -105,7 +114,8 @@ impl ErrorExt for Error {
             | Error::ValueDeserialize { .. }
             | Error::CatalogNotFound { .. }
             | Error::OpenTable { .. }
-            | Error::ReadSystemCatalog { .. } => StatusCode::StorageUnavailable,
+            | Error::ReadSystemCatalog { .. }
+            | Error::InsertTableRecord { .. } => StatusCode::StorageUnavailable,
             Error::RegisterTable { .. } | Error::SystemCatalogSchema { .. } => StatusCode::Internal,
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
         }

@@ -17,7 +17,7 @@ use crate::error::{
     ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu, InvalidCreateTableSqlSnafu,
     KeyColumnNotFoundSnafu, Result, SqlTypeNotSupportedSnafu,
 };
-use crate::sql::{SqlHandler, SqlRequest};
+use crate::sql::SqlHandler;
 
 impl<Engine: TableEngine> SqlHandler<Engine> {
     pub(crate) async fn create(&self, req: CreateTableRequest) -> Result<Output> {
@@ -38,7 +38,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
         &self,
         table_id: TableId,
         stmt: CreateTable,
-    ) -> Result<SqlRequest> {
+    ) -> Result<CreateTableRequest> {
         let mut ts_index = usize::MAX;
         let mut primary_keys = vec![];
 
@@ -127,7 +127,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             primary_key_indices: primary_keys,
             create_if_not_exists: stmt.if_not_exists,
         };
-        Ok(SqlRequest::Create(request))
+        Ok(request)
     }
 }
 
@@ -240,22 +240,15 @@ mod tests {
             options: vec![],
         };
 
-        let request = handler.create_to_request(42, parsed_stmt).unwrap();
-        match request {
-            SqlRequest::Insert(_) => {
-                panic!("Not supposed to be an insert statement")
-            }
-            SqlRequest::Create(c) => {
-                assert_eq!("demo_table", c.table_name);
-                assert_eq!(42, c.id);
-                assert!(c.schema_name.is_none());
-                assert!(c.catalog_name.is_none());
-                assert!(!c.create_if_not_exists);
-                assert_eq!(vec![0, 1], c.primary_key_indices);
-                assert_eq!(1, c.schema.timestamp_index().unwrap());
-                assert_eq!(2, c.schema.column_schemas().len());
-            }
-        }
+        let c = handler.create_to_request(42, parsed_stmt).unwrap();
+        assert_eq!("demo_table", c.table_name);
+        assert_eq!(42, c.id);
+        assert!(c.schema_name.is_none());
+        assert!(c.catalog_name.is_none());
+        assert!(!c.create_if_not_exists);
+        assert_eq!(vec![0, 1], c.primary_key_indices);
+        assert_eq!(1, c.schema.timestamp_index().unwrap());
+        assert_eq!(2, c.schema.column_schemas().len());
     }
 
     /// Time index not specified in specified
@@ -321,20 +314,12 @@ mod tests {
             options: vec![],
         };
 
-        let req = handler.create_to_request(42, parsed_stmt).unwrap();
-
-        match req {
-            SqlRequest::Insert(_) => {
-                panic!("Not supposed to be an Insert request")
-            }
-            SqlRequest::Create(c) => {
-                assert_eq!(1, c.primary_key_indices.len());
-                assert_eq!(
-                    c.schema.timestamp_index().unwrap(),
-                    c.primary_key_indices[0]
-                );
-            }
-        }
+        let c = handler.create_to_request(42, parsed_stmt).unwrap();
+        assert_eq!(1, c.primary_key_indices.len());
+        assert_eq!(
+            c.schema.timestamp_index().unwrap(),
+            c.primary_key_indices[0]
+        );
     }
 
     /// Constraints specified, not column cannot be found.

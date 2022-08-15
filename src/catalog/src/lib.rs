@@ -60,8 +60,20 @@ pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
 
 #[async_trait::async_trait]
 pub trait CatalogManager: CatalogList {
+    /// Starts a catalog manager.
     async fn start(&self) -> error::Result<()>;
+
+    /// Returns next available table id.
     fn next_table_id(&self) -> TableId;
+
+    /// Registers a table given given catalog/schema to catalog manager.
+    async fn register_table(
+        &self,
+        catalog: Option<String>,
+        schema: Option<String>,
+        table_name: String,
+        table_id: TableId,
+    ) -> error::Result<usize>;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;

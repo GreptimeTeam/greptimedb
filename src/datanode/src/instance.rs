@@ -2,6 +2,7 @@ use std::{fs, path, sync::Arc};
 
 use api::v1::InsertExpr;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_telemetry::debug;
 use common_telemetry::logging::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -19,11 +20,11 @@ use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
-    self, CreateTableSnafu, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result,
-    TableNotFoundSnafu,
+    self, CreateTableSnafu, ExecuteSqlSnafu, InsertSnafu, InsertSystemCatalogSnafu,
+    NewCatalogSnafu, Result, TableNotFoundSnafu,
 };
 use crate::server::grpc::insert::insertion_expr_to_request;
-use crate::sql::SqlHandler;
+use crate::sql::{SqlHandler, SqlRequest};
 
 type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 
@@ -126,12 +127,24 @@ impl Instance {
                 let table_id = self.catalog_manager.next_table_id();
                 let _engine_name = c.engine.clone();
                 // TODO(hl): Select table engine by engine_name
+
                 let request = self.sql_handler.create_to_request(table_id, c)?;
+                let catalog_name = request.catalog_name.clone();
+                let schema_name = request.schema_name.clone();
+                let table_name = request.table_name.clone();
+                let table_id = request.id;
                 info!(
                     "Creating table with request: {:?}, table id: {}",
                     &request, table_id
                 );
-                self.sql_handler.execute(request).await
+
+                self.catalog_manager
+                    .register_table(catalog_name, schema_name, table_name, table_id)
+                    .await
+                    .context(InsertSystemCatalogSnafu)?;
+                debug!("Inserted into system catalog table");
+
+                self.sql_handler.execute(SqlRequest::Create(request)).await
             }
 
             _ => unimplemented!(),
