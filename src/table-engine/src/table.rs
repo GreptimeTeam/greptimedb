@@ -1,4 +1,4 @@
-#[cfg(any(test, feature = "test-util"))]
+#[cfg(any(test, feature = "test"))]
 pub mod test_util;
 
 use std::any::Any;

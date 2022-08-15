@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["test-util"]
-test-util = []
+default = []
+test = ["tempdir"]
 
 [dependencies]
 arc-swap = "1.0"
@@ -27,10 +27,9 @@ snafu = { version = "0.7", features = ["backtraces"] }
 storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
+tempdir = { version = "0.3", optional = true }
 tokio = { version = "1.0", features = ["full"] }
-tempdir = "0.3"
 
 [dev-dependencies]
 datatypes = { path = "../datatypes" }
-
 tokio = { version = "1.18", features = ["full"] }
