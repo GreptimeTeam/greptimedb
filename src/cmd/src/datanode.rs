@@ -3,7 +3,7 @@ use common_telemetry::logging;
 use datanode::datanode::{Datanode, DatanodeOptions};
 use snafu::ResultExt;
 
-use crate::error::{Error, Result, SerializeConfigSnafu, StartDatanodeSnafu};
+use crate::error::{Error, Result, StartDatanodeSnafu};
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -43,12 +43,11 @@ struct StartCommand {
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
+        logging::info!("Datanode start command: {:#?}", self);
+
         let opts: DatanodeOptions = self.try_into()?;
 
-        logging::info!(
-            "Datanode options: \n{}",
-            toml::to_string_pretty(&opts).context(SerializeConfigSnafu)?
-        );
+        logging::info!("Datanode options: {:#?}", opts);
 
         Datanode::new(opts)
             .await

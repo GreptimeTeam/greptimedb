@@ -19,8 +19,6 @@ pub enum Error {
 
     #[snafu(display("Failed to parse config, source: {}", source))]
     ParseConfig { source: toml::de::Error },
-    #[snafu(display("Failed to serialize config, source: {}", source))]
-    SerializeConfig { source: toml::ser::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -29,7 +27,6 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::StartDatanode { source } => source.status_code(),
-            Error::SerializeConfig { .. } => StatusCode::Unexpected,
             Error::ReadConfig { .. } | Error::ParseConfig { .. } => StatusCode::InvalidArguments,
         }
     }
@@ -40,5 +37,25 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raise_read_config_error() -> std::result::Result<(), std::io::Error> {
+        Err(std::io::ErrorKind::NotFound.into())
+    }
+
+    #[test]
+    fn test_error() {
+        let e = raise_read_config_error()
+            .context(ReadConfigSnafu { path: "test" })
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_none());
+        assert_eq!(e.status_code(), StatusCode::InvalidArguments);
     }
 }
