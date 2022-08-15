@@ -19,11 +19,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     type AppendResponse: AppendResponse;
 
     /// Append an `Entry` to WAL with given namespace
-    async fn append(
-        &self,
-        ns: &Self::Namespace,
-        mut e: Self::Entry,
-    ) -> Result<Self::AppendResponse, Self::Error>;
+    async fn append(&self, mut e: Self::Entry) -> Result<Self::AppendResponse, Self::Error>;
 
     /// Append a batch of entries atomically and return the offset of first entry.
     async fn append_batch(
@@ -50,11 +46,11 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
 
     /// Create an entry of the associate Entry type
-    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id) -> Self::Entry;
+    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id, ns: Self::Namespace) -> Self::Entry;
 
     /// Create a namespace of the associate Namespace type
     // TODO(sunng87): confusion with `create_namespace`
-    fn namespace(&self, name: &str) -> Self::Namespace;
+    fn namespace(&self, id: namespace::Id) -> Self::Namespace;
 }
 
 pub trait AppendResponse: Send + Sync {

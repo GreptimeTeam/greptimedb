@@ -8,8 +8,9 @@ use common_telemetry::{error, info, warn};
 use futures::pin_mut;
 use futures::StreamExt;
 use snafu::{OptionExt, ResultExt};
-use store_api::logstore::entry::{Encode, Id};
+use store_api::logstore::entry::{Encode, Entry, Id};
 use store_api::logstore::entry_stream::SendableEntryStream;
+use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::logstore::LogStore;
 use tokio::sync::RwLock;
 
@@ -178,11 +179,7 @@ impl LogStore for LocalFileLogStore {
     type Entry = EntryImpl;
     type AppendResponse = AppendResponseImpl;
 
-    async fn append(
-        &self,
-        _ns: &Self::Namespace,
-        mut entry: Self::Entry,
-    ) -> Result<Self::AppendResponse> {
+    async fn append(&self, mut entry: Self::Entry) -> Result<Self::AppendResponse> {
         // TODO(hl): configurable retry times
         for _ in 0..3 {
             let current_active_file = self.active_file();
@@ -226,6 +223,7 @@ impl LogStore for LocalFileLogStore {
     ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>> {
         let files = self.files.read().await;
         let ns = ns.clone();
+
         let s = stream!({
             for (start_id, file) in files.iter() {
                 // TODO(hl): Use index to lookup file
@@ -233,7 +231,15 @@ impl LogStore for LocalFileLogStore {
                     let s = file.create_stream(&ns, *start_id);
                     pin_mut!(s);
                     while let Some(entries) = s.next().await {
-                        yield entries;
+                        match entries {
+                            Ok(entries) => {
+                                yield Ok(entries
+                                    .into_iter()
+                                    .filter(|e| e.namespace().id() == ns.id())
+                                    .collect::<Vec<_>>())
+                            }
+                            Err(e) => yield Err(e),
+                        }
                     }
                 }
             }
@@ -254,12 +260,12 @@ impl LogStore for LocalFileLogStore {
         todo!()
     }
 
-    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id) -> Self::Entry {
-        EntryImpl::new(data, id)
+    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id, namespace: Self::Namespace) -> Self::Entry {
+        EntryImpl::new(data, id, namespace)
     }
 
-    fn namespace(&self, name: &str) -> Self::Namespace {
-        LocalNamespace::new(name)
+    fn namespace(&self, id: NamespaceId) -> Self::Namespace {
+        LocalNamespace::new(id)
     }
 }
 
@@ -283,11 +289,14 @@ mod tests {
         };
 
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
-        let ns = LocalNamespace::default();
         assert_eq!(
             0,
             logstore
-                .append(&ns, EntryImpl::new(generate_data(100), 0),)
+                .append(EntryImpl::new(
+                    generate_data(96),
+                    0,
+                    LocalNamespace::new(42)
+                ),)
                 .await
                 .unwrap()
                 .entry_id
@@ -296,7 +305,11 @@ mod tests {
         assert_eq!(
             1,
             logstore
-                .append(&ns, EntryImpl::new(generate_data(100), 1))
+                .append(EntryImpl::new(
+                    generate_data(96),
+                    1,
+                    LocalNamespace::new(42)
+                ))
                 .await
                 .unwrap()
                 .entry_id
@@ -326,9 +339,13 @@ mod tests {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
         };
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
-        let ns = LocalNamespace::default();
+        let ns = LocalNamespace::new(42);
         let id = logstore
-            .append(&ns, EntryImpl::new(generate_data(100), 0))
+            .append(EntryImpl::new(
+                generate_data(96),
+                0,
+                LocalNamespace::new(42),
+            ))
             .await
             .unwrap()
             .entry_id;
@@ -340,5 +357,59 @@ mod tests {
         let entries = stream.next().await.unwrap().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id(), 0);
+        assert_eq!(42, entries[0].namespace_id);
+    }
+
+    #[tokio::test]
+    pub async fn test_namespace() {
+        common_telemetry::logging::init_default_ut_logging();
+        let dir = TempDir::new("greptimedb").unwrap();
+        let config = LogConfig {
+            append_buffer_size: 128,
+            max_log_file_size: 1024 * 1024,
+            log_file_dir: dir.path().to_str().unwrap().to_string(),
+        };
+        let logstore = LocalFileLogStore::open(&config).await.unwrap();
+        assert_eq!(
+            0,
+            logstore
+                .append(EntryImpl::new(
+                    generate_data(96),
+                    0,
+                    LocalNamespace::new(42),
+                ))
+                .await
+                .unwrap()
+                .entry_id
+        );
+
+        assert_eq!(
+            1,
+            logstore
+                .append(EntryImpl::new(
+                    generate_data(96),
+                    1,
+                    LocalNamespace::new(43),
+                ))
+                .await
+                .unwrap()
+                .entry_id
+        );
+
+        let stream = logstore.read(&LocalNamespace::new(42), 0).await.unwrap();
+        tokio::pin!(stream);
+
+        let entries = stream.next().await.unwrap().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id(), 0);
+        assert_eq!(42, entries[0].namespace_id);
+
+        let stream = logstore.read(&LocalNamespace::new(43), 0).await.unwrap();
+        tokio::pin!(stream);
+
+        let entries = stream.next().await.unwrap().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id(), 1);
+        assert_eq!(43, entries[0].namespace_id);
     }
 }

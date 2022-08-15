@@ -1,34 +1,24 @@
-use std::sync::Arc;
-
-use store_api::logstore::namespace::Namespace;
+use store_api::logstore::namespace::{Id, Namespace};
 
 #[derive(Clone, Debug)]
 pub struct LocalNamespace {
-    inner: Arc<LocalNamespaceInner>,
+    pub(crate) id: Id,
 }
 
 impl Default for LocalNamespace {
     fn default() -> Self {
-        LocalNamespace::new("")
+        LocalNamespace::new(0)
     }
 }
 
-#[derive(Debug)]
-struct LocalNamespaceInner {
-    name: String,
-}
-
 impl LocalNamespace {
-    pub(crate) fn new(name: &str) -> Self {
-        let inner = Arc::new(LocalNamespaceInner {
-            name: name.to_string(),
-        });
-        Self { inner }
+    pub(crate) fn new(id: Id) -> Self {
+        Self { id }
     }
 }
 
 impl Namespace for LocalNamespace {
-    fn name(&self) -> &str {
-        self.inner.name.as_str()
+    fn id(&self) -> Id {
+        self.id
     }
 }

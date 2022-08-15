@@ -41,6 +41,15 @@ mod tests {
     #[snafu(visibility(pub))]
     pub struct Error {}
 
+    #[derive(Debug, Clone)]
+    pub struct Namespace {}
+
+    impl crate::logstore::Namespace for Namespace {
+        fn id(&self) -> crate::logstore::namespace::Id {
+            0
+        }
+    }
+
     impl ErrorExt for Error {
         fn backtrace_opt(&self) -> Option<&Backtrace> {
             ErrorCompat::backtrace(self)
@@ -70,6 +79,7 @@ mod tests {
 
     impl Entry for SimpleEntry {
         type Error = Error;
+        type Namespace = Namespace;
 
         fn data(&self) -> &[u8] {
             &self.data
@@ -95,6 +105,10 @@ mod tests {
 
         fn is_empty(&self) -> bool {
             self.data.is_empty()
+        }
+
+        fn namespace(&self) -> Self::Namespace {
+            Namespace {}
         }
     }
 

@@ -5,8 +5,9 @@ use common_error::prelude::BoxedError;
 use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
+use store_api::storage::RegionId;
 use store_api::{
-    logstore::{entry::Entry, namespace::Namespace, AppendResponse, LogStore},
+    logstore::{entry::Entry, AppendResponse, LogStore},
     storage::SequenceNumber,
 };
 
@@ -25,6 +26,7 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Wal<S: LogStore> {
+    name: String,
     namespace: S::Namespace,
     store: Arc<S>,
 }
@@ -37,6 +39,7 @@ pub type WriteBatchStream<'a> = Pin<
 impl<S: LogStore> Clone for Wal<S> {
     fn clone(&self) -> Self {
         Self {
+            name: self.name.clone(),
             namespace: self.namespace.clone(),
             store: self.store.clone(),
         }
@@ -44,16 +47,18 @@ impl<S: LogStore> Clone for Wal<S> {
 }
 
 impl<S: LogStore> Wal<S> {
-    pub fn new(region_name: impl Into<String>, store: Arc<S>) -> Self {
-        let region_name = region_name.into();
-        let namespace = store.namespace(&region_name);
-
-        Self { namespace, store }
+    pub fn new(region_id: RegionId, store: Arc<S>) -> Self {
+        let namespace = store.namespace(region_id);
+        Self {
+            name: region_id.to_string(),
+            namespace,
+            store,
+        }
     }
 
     #[inline]
     pub fn name(&self) -> &str {
-        self.namespace.name()
+        &self.name
     }
 }
 
@@ -72,11 +77,11 @@ impl<S: LogStore> Wal<S> {
     /// +---------------------+----------------------------------------------------+--------------+-------------+--------------+
     /// ```
     ///
-    pub async fn write_to_wal<'a>(
+    pub async fn write_to_wal(
         &self,
         seq: SequenceNumber,
         mut header: WalHeader,
-        payload: Payload<'a>,
+        payload: Payload<'_>,
     ) -> Result<(u64, usize)> {
         header.payload_type = payload.payload_type();
 
@@ -134,11 +139,11 @@ impl<S: LogStore> Wal<S> {
     }
 
     async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
-        let e = self.store.entry(bytes, seq);
+        let e = self.store.entry(bytes, seq, self.namespace.clone());
 
         let res = self
             .store
-            .append(&self.namespace, e)
+            .append(e)
             .await
             .map_err(BoxedError::new)
             .context(error::WriteWalSnafu { name: self.name() })?;
@@ -259,7 +264,7 @@ mod tests {
     pub async fn test_write_wal() {
         let (log_store, _tmp) =
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
-        let wal = Wal::new("test_region", Arc::new(log_store));
+        let wal = Wal::new(0, Arc::new(log_store));
 
         let res = wal.write(0, b"test1").await.unwrap();
 
@@ -269,7 +274,7 @@ mod tests {
         let res = wal.write(1, b"test2").await.unwrap();
 
         assert_eq!(1, res.0);
-        assert_eq!(29, res.1);
+        assert_eq!(5 + 32, res.1);
     }
 
     #[tokio::test]
@@ -277,7 +282,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let (log_store, _tmp) =
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
-        let wal = Wal::new("test_region", Arc::new(log_store));
+        let wal = Wal::new(0, Arc::new(log_store));
         let header = WalHeader::with_last_manifest_version(111);
         let (seq_num, _) = wal.write_to_wal(3, header, Payload::None).await?;
 

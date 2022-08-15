@@ -1,3 +1,4 @@
+use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{entry::Id, LogStore};
 
 use crate::error::{Error, Result};
@@ -15,11 +16,7 @@ impl LogStore for NoopLogStore {
     type Entry = EntryImpl;
     type AppendResponse = AppendResponseImpl;
 
-    async fn append(
-        &self,
-        _ns: &Self::Namespace,
-        mut _e: Self::Entry,
-    ) -> Result<Self::AppendResponse> {
+    async fn append(&self, mut _e: Self::Entry) -> Result<Self::AppendResponse> {
         Ok(AppendResponseImpl {
             entry_id: 0,
             offset: 0,
@@ -51,11 +48,11 @@ impl LogStore for NoopLogStore {
         todo!()
     }
 
-    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id) -> Self::Entry {
-        EntryImpl::new(data, id)
+    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id, ns: Self::Namespace) -> Self::Entry {
+        EntryImpl::new(data, id, ns)
     }
 
-    fn namespace(&self, name: &str) -> Self::Namespace {
-        LocalNamespace::new(name)
+    fn namespace(&self, id: NamespaceId) -> Self::Namespace {
+        LocalNamespace::new(id)
     }
 }

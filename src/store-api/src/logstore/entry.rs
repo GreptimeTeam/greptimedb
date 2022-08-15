@@ -1,6 +1,8 @@
 use common_base::buffer::{Buffer, BufferMut};
 use common_error::ext::ErrorExt;
 
+use crate::logstore::namespace::Namespace;
+
 pub type Offset = usize;
 pub type Epoch = u64;
 pub type Id = u64;
@@ -8,6 +10,8 @@ pub type Id = u64;
 /// Entry is the minimal data storage unit in `LogStore`.
 pub trait Entry: Encode + Send + Sync {
     type Error: ErrorExt + Send + Sync;
+    type Namespace: Namespace;
+
     /// Return contained data of entry.
     fn data(&self) -> &[u8];
 
@@ -25,6 +29,8 @@ pub trait Entry: Encode + Send + Sync {
     fn len(&self) -> usize;
 
     fn is_empty(&self) -> bool;
+
+    fn namespace(&self) -> Self::Namespace;
 }
 
 pub trait Encode: Sized {

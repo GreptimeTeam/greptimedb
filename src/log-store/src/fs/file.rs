@@ -653,25 +653,33 @@ mod tests {
 
         assert_eq!(
             10,
-            file.append(&mut EntryImpl::new("test1".as_bytes(), 10))
-                .await
-                .expect("Failed to append entry 1")
-                .entry_id
+            file.append(&mut EntryImpl::new(
+                "test1".as_bytes(),
+                10,
+                LocalNamespace::new(42)
+            ))
+            .await
+            .expect("Failed to append entry 1")
+            .entry_id
         );
 
         assert_eq!(
             11,
-            file.append(&mut EntryImpl::new("test-2".as_bytes(), 11))
-                .await
-                .expect("Failed to append entry 2")
-                .entry_id
+            file.append(&mut EntryImpl::new(
+                "test-2".as_bytes(),
+                11,
+                LocalNamespace::new(42)
+            ))
+            .await
+            .expect("Failed to append entry 2")
+            .entry_id
         );
 
         let mut log_file = std::fs::File::open(path.clone()).expect("Test log file does not exist");
         let metadata = log_file.metadata().expect("Failed to read file metadata");
         info!("Log file metadata: {:?}", metadata);
 
-        assert_eq!(59, metadata.len()); // 24+5+24+6
+        assert_eq!(75, metadata.len()); // 32+5+32+6
         let mut content = vec![0; metadata.len() as usize];
         log_file
             .read_exact(&mut content)
@@ -684,7 +692,7 @@ mod tests {
             metadata.len()
         );
 
-        let ns = LocalNamespace::default();
+        let ns = LocalNamespace::new(42);
         let mut stream = file.create_stream(&ns, 0);
         let mut data = vec![];
 
