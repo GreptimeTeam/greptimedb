@@ -8,7 +8,7 @@ use common_error::status_code::StatusCode;
 use query::Output;
 
 use crate::server::grpc::{select::to_object_result, server::PROTOCOL_VERSION};
-use crate::{error::Result, instance::InstanceRef};
+use crate::{error::Result, error::UnsupportedExprSnafu, instance::InstanceRef};
 
 #[derive(Clone)]
 pub struct BatchHandler {
@@ -36,7 +36,12 @@ impl BatchHandler {
                     Some(object_expr::Expr::Select(select_expr)) => {
                         self.handle_select(select_expr).await
                     }
-                    _ => unimplemented!(),
+                    other => {
+                        return UnsupportedExprSnafu {
+                            name: format!("{:?}", other),
+                        }
+                        .fail();
+                    }
                 };
 
                 db_resp.results.push(object_resp);
@@ -49,12 +54,12 @@ impl BatchHandler {
     pub async fn handle_insert(&self, insert_expr: InsertExpr) -> ObjectResult {
         match self.instance.execute_grpc_insert(insert_expr).await {
             Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
-                .status_code(StatusCode::SUCCESS as u32)
+                .status_code(StatusCode::Success as u32)
                 .mutate_result(rows as u32, 0)
                 .build(),
             Err(err) => {
                 // TODO(fys): failure count
-                build_err_result(err.status_code() as u32, err.to_string())
+                build_err_result(&err)
             }
             _ => unreachable!(),
         }
@@ -148,18 +153,20 @@ impl ObjectResultBuilder {
     }
 }
 
-pub(crate) fn build_err_result(err_code: u32, err_msg: String) -> ObjectResult {
+pub(crate) fn build_err_result(err: &impl ErrorExt) -> ObjectResult {
     ObjectResultBuilder::new()
-        .status_code(err_code)
-        .err_msg(err_msg)
+        .status_code(err.status_code() as u32)
+        .err_msg(err.to_string())
         .build()
 }
 
 #[cfg(test)]
 mod tests {
     use api::v1::{object_result, MutateResult};
+    use common_error::status_code::StatusCode;
 
     use super::{build_err_result, ObjectResultBuilder};
+    use crate::server::grpc::handler::UnsupportedExprSnafu;
     use crate::server::grpc::server::PROTOCOL_VERSION;
 
     #[test]
@@ -187,13 +194,14 @@ mod tests {
 
     #[test]
     fn test_build_err_result() {
-        let err_result = build_err_result(500, "Failed to read!".to_string());
+        let err = UnsupportedExprSnafu { name: "select" }.build();
+        let err_result = build_err_result(&err);
         let header = err_result.header.unwrap();
         let result = err_result.result;
 
         assert_eq!(PROTOCOL_VERSION, header.version);
-        assert_eq!(500, header.code);
-        assert_eq!("Failed to read!", header.err_msg);
+        assert_eq!(StatusCode::Internal as u32, header.code);
+        assert_eq!("Unsupported expr: select", header.err_msg);
         assert!(result.is_none());
     }
 }

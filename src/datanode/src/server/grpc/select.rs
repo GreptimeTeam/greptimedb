@@ -16,7 +16,7 @@ use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 pub(crate) async fn to_object_result(result: Result<Output>) -> ObjectResult {
     match result {
         Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
-            .status_code(StatusCode::SUCCESS as u32)
+            .status_code(StatusCode::Success as u32)
             .mutate_result(rows as u32, 0)
             .build(),
         Ok(Output::RecordBatch(stream)) => record_batchs(stream).await,
@@ -32,12 +32,12 @@ async fn record_batchs(stream: SendableRecordBatchStream) -> ObjectResult {
     match util::collect(stream).await {
         Ok(record_batches) => match try_convert(record_batches) {
             Ok(select_result) => builder
-                .status_code(StatusCode::SUCCESS as u32)
+                .status_code(StatusCode::Success as u32)
                 .select_result(select_result)
                 .build(),
-            Err(err) => build_err_result(err.status_code() as u32, err.to_string()),
+            Err(err) => build_err_result(&err),
         },
-        Err(err) => build_err_result(err.status_code() as u32, err.to_string()),
+        Err(err) => build_err_result(&err),
     }
 }
 
@@ -90,6 +90,7 @@ fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
     let mut nulls_set = BitSet::with_capacity(row_count);
     for array in arrays {
         let validity = array.validity();
+        // TODO(fys): Improve in the future
         if let Some(v) = validity {
             let nulls: Vec<bool> = v.iter().map(|x| !x).collect();
             nulls_set.append(&nulls);
@@ -134,26 +135,26 @@ fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
     convert_arrow_array_to_grpc_vals!(
         data_type, arrays,
 
-        (Boolean,   BooleanArray,           bool_values,    |x| {x}),
+        (Boolean,       BooleanArray,           bool_values,    |x| {x}),
 
-        (Int8,      PrimitiveArray<i8>,     i8_values,      |x| {*x as i32}),
-        (Int16,     PrimitiveArray<i16>,    i16_values,     |x| {*x as i32}),
-        (Int32,     PrimitiveArray<i32>,    i32_values,     |x| {*x}),
-        (Int64,     PrimitiveArray<i64>,    i64_values,     |x| {*x}),
+        (Int8,          PrimitiveArray<i8>,     i8_values,      |x| {*x as i32}),
+        (Int16,         PrimitiveArray<i16>,    i16_values,     |x| {*x as i32}),
+        (Int32,         PrimitiveArray<i32>,    i32_values,     |x| {*x}),
+        (Int64,         PrimitiveArray<i64>,    i64_values,     |x| {*x}),
 
-        (UInt8,     PrimitiveArray<u8>,     u8_values,      |x| {*x as u32}),
-        (UInt16,    PrimitiveArray<u16>,    u16_values,     |x| {*x as u32}),
-        (UInt32,    PrimitiveArray<u32>,    u32_values,     |x| {*x}),
-        (UInt64,    PrimitiveArray<u64>,    u64_values,     |x| {*x}),
+        (UInt8,         PrimitiveArray<u8>,     u8_values,      |x| {*x as u32}),
+        (UInt16,        PrimitiveArray<u16>,    u16_values,     |x| {*x as u32}),
+        (UInt32,        PrimitiveArray<u32>,    u32_values,     |x| {*x}),
+        (UInt64,        PrimitiveArray<u64>,    u64_values,     |x| {*x}),
 
-        (Float32,   PrimitiveArray<f32>,    f32_values,     |x| {*x}),
-        (Float64,   PrimitiveArray<f64>,    f64_values,     |x| {*x}),
+        (Float32,       PrimitiveArray<f32>,    f32_values,     |x| {*x}),
+        (Float64,       PrimitiveArray<f64>,    f64_values,     |x| {*x}),
 
-        (Binary,    BinaryArray,            binary_values,  |x| {x.into()}),
-        (LargeBinary, BinaryArray,          binary_values,  |x| {x.into()}),
+        (Binary,        BinaryArray,            binary_values,  |x| {x.into()}),
+        (LargeBinary,   BinaryArray,            binary_values,  |x| {x.into()}),
 
-        (Utf8,      StringArray,            string_values,  |x| {x.into()}),
-        (LargeUtf8, StringArray,            string_values,  |x| {x.into()})
+        (Utf8,          StringArray,            string_values,  |x| {x.into()}),
+        (LargeUtf8,     StringArray,            string_values,  |x| {x.into()})
     )
 }
 

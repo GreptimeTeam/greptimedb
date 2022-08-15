@@ -31,7 +31,7 @@ pub enum Error {
     DecodeSelect { source: DecodeError },
 
     #[snafu(display("Error occurred on the data node, code: {}, msg: {}", code, msg))]
-    DataNodeErr { code: u32, msg: String },
+    DataNode { code: u32, msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

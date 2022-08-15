@@ -118,6 +118,9 @@ pub enum Error {
 
     #[snafu(display("Failed to convert datafusion type: {}", from))]
     Conversion { from: String },
+
+    #[snafu(display("Unsupported expr type: {}", name))]
+    UnsupportedExpr { name: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -143,7 +146,8 @@ impl ErrorExt for Error {
             | Error::TcpBind { .. }
             | Error::StartGrpc { .. }
             | Error::CreateDir { .. }
-            | Error::Conversion { .. } => StatusCode::Internal,
+            | Error::Conversion { .. }
+            | Error::UnsupportedExpr { .. } => StatusCode::Internal,
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),

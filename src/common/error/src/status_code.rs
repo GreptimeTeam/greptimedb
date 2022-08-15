@@ -5,7 +5,7 @@ use std::fmt;
 pub enum StatusCode {
     // ====== Begin of common status code ==============
     /// Success.
-    SUCCESS = 0,
+    Success = 0,
     /// Unknown error.
     Unknown = 1,
     /// Unsupported operation.
@@ -48,6 +48,12 @@ pub enum StatusCode {
     // ====== End of server related status code =======
 }
 
+impl StatusCode {
+    pub fn is_success(code: u32) -> bool {
+        Self::Success as u32 == code
+    }
+}
+
 impl fmt::Display for StatusCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The current debug format is suitable to display.
@@ -68,5 +74,13 @@ mod tests {
     fn test_display_status_code() {
         assert_status_code_display(StatusCode::Unknown, "Unknown");
         assert_status_code_display(StatusCode::TableAlreadyExists, "TableAlreadyExists");
+    }
+
+    #[test]
+    fn test_is_success() {
+        assert!(StatusCode::is_success(0));
+        assert!(!StatusCode::is_success(1));
+        assert!(!StatusCode::is_success(2));
+        assert!(!StatusCode::is_success(3));
     }
 }

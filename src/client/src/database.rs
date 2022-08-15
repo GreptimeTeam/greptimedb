@@ -8,7 +8,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{self, MissingResultSnafu};
 use crate::{
-    error::DataNodeErrSnafu, error::DecodeSelectSnafu, error::MissingHeaderSnafu, Client, Result,
+    error::DataNodeSnafu, error::DecodeSelectSnafu, error::MissingHeaderSnafu, Client, Result,
 };
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -65,8 +65,8 @@ impl Database {
 
         let header = obj_result.header.context(MissingHeaderSnafu)?;
 
-        if header.code != StatusCode::SUCCESS as u32 {
-            return DataNodeErrSnafu {
+        if StatusCode::is_success(header.code) {
+            return DataNodeSnafu {
                 code: header.code,
                 msg: header.err_msg,
             }
