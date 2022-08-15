@@ -62,7 +62,6 @@ impl TryFrom<StartCommand> for DatanodeOptions {
     type Error = Error;
     fn try_from(cmd: StartCommand) -> Result<Self> {
         let mut opts: DatanodeOptions = if let Some(path) = cmd.config_file {
-            logging::info!("Datanode config file: {}", path);
             toml_loader::from_file!(&path)?
         } else {
             DatanodeOptions::default()
