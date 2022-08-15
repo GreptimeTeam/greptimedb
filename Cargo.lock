@@ -2296,6 +2296,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "meta-srv"
+version = "0.1.0"
+dependencies = [
+ "prost 0.11.0",
+ "tonic-build",
+]
+
+[[package]]
 name = "metrics"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

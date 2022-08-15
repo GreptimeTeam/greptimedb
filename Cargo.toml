@@ -17,6 +17,7 @@ members = [
     "src/datatypes",
     "src/log-store",
     "src/logical-plans",
+    "src/meta-srv",
     "src/object-store",
     "src/query",
     "src/sql",

@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package v1metarpc;
+
+message RequestHeader {
+  uint64 protocol_version = 1;
+  // cluster_id is the ID of the cluster which be sent to.
+  uint64 cluster_id = 2;
+  // member_id is the ID of the sender server.
+  uint64 member_id = 3;
+}
+
+message ResponseHeader {
+  uint64 protocol_version = 1;
+  // cluster_id is the ID of the cluster which sent the response.
+  uint64 cluster_id = 2;
+  Error error = 3;
+}
+
+message Error {
+  int32 code = 1;
+  string err_msg = 2;
+}
