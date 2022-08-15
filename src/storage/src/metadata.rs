@@ -257,7 +257,7 @@ impl From<RawColumnsMetadata> for ColumnsMetadata {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnFamiliesMetadata {
     /// Map column family id to column family metadata.
     id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
@@ -287,7 +287,7 @@ impl From<RawColumnFamiliesMetadata> for ColumnFamiliesMetadata {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnFamilyMetadata {
     /// Column family name.
     pub name: String,

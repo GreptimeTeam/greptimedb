@@ -2,7 +2,7 @@ mod pow;
 
 use std::sync::Arc;
 
-use pow::PowFunction;
+pub(crate) use pow::PowFunction;
 
 use crate::scalars::function_registry::FunctionRegistry;
 
