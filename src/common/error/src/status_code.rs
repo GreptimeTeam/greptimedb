@@ -4,45 +4,47 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StatusCode {
     // ====== Begin of common status code ==============
+    /// Success.
+    SUCCESS = 0,
     /// Unknown error.
-    Unknown,
+    Unknown = 1,
     /// Unsupported operation.
-    Unsupported,
+    Unsupported = 2,
     /// Unexpected error, maybe there is a BUG.
-    Unexpected,
+    Unexpected = 3,
     /// Internal server error.
-    Internal,
+    Internal = 4,
     /// Invalid arguments.
-    InvalidArguments,
+    InvalidArguments = 5,
     // ====== End of common status code ================
 
     // ====== Begin of SQL related status code =========
     /// SQL Syntax error.
-    InvalidSyntax,
+    InvalidSyntax = 6,
     // ====== End of SQL related status code ===========
 
     // ====== Begin of query related status code =======
     /// Fail to create a plan for the query.
-    PlanQuery,
+    PlanQuery = 7,
     /// The query engine fail to execute query.
-    EngineExecuteQuery,
+    EngineExecuteQuery = 8,
     // ====== End of query related status code =========
 
     // ====== Begin of catalog related status code =====
     /// Table already exists.
-    TableAlreadyExists,
-    TableNotFound,
-    TableColumnNotFound,
+    TableAlreadyExists = 9,
+    TableNotFound = 10,
+    TableColumnNotFound = 11,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
     /// Storage is temporarily unable to handle the request
-    StorageUnavailable,
+    StorageUnavailable = 12,
     // ====== End of storage related status code =======
 
     // ====== Begin of server related status code =====
     /// Runtime resources exhausted, like creating threads failed.
-    RuntimeResourcesExhausted,
+    RuntimeResourcesExhausted = 13,
     // ====== End of server related status code =======
 }
 

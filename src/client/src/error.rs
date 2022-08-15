@@ -29,6 +29,9 @@ pub enum Error {
 
     #[snafu(display("Fail to decode select result, source: {}", source))]
     DecodeSelect { source: DecodeError },
+
+    #[snafu(display("Error occurred on the data node, code: {}, msg: {}", code, msg))]
+    DataNodeErr { code: u32, msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

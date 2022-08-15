@@ -3,18 +3,12 @@ use api::v1::{
     DatabaseResponse, InsertExpr, MutateResult, ObjectResult, ResultHeader, SelectExpr,
     SelectResult as SelectResultRaw,
 };
+use common_error::prelude::ErrorExt;
+use common_error::status_code::StatusCode;
 use query::Output;
 
 use crate::server::grpc::{select::to_object_result, server::PROTOCOL_VERSION};
 use crate::{error::Result, instance::InstanceRef};
-
-// TODO(fys): Only one success code (200) was provided
-// in the early stage and we will refine it later
-pub const SUCCESS: u32 = 200;
-
-// TODO(fys): Only one error code (500) was provided
-// in the early stage and we will refine it later
-pub const ERROR: u32 = 500;
 
 #[derive(Clone)]
 pub struct BatchHandler {
@@ -55,12 +49,12 @@ impl BatchHandler {
     pub async fn handle_insert(&self, insert_expr: InsertExpr) -> ObjectResult {
         match self.instance.execute_grpc_insert(insert_expr).await {
             Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
-                .status_code(SUCCESS)
+                .status_code(StatusCode::SUCCESS as u32)
                 .mutate_result(rows as u32, 0)
                 .build(),
             Err(err) => {
                 // TODO(fys): failure count
-                build_err_result(ERROR, err.to_string())
+                build_err_result(err.status_code() as u32, err.to_string())
             }
             _ => unreachable!(),
         }

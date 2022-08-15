@@ -1,13 +1,15 @@
 use api::v1::codec::SelectResult as GrpcSelectResult;
 use api::v1::{
     object_expr, object_result, DatabaseRequest, ExprHeader, InsertExpr,
-    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, ResultHeader,
-    SelectExpr,
+    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, SelectExpr,
 };
+use common_error::status_code::StatusCode;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error;
-use crate::{error::DecodeSelectSnafu, error::MissingHeaderSnafu, Client, Result};
+use crate::error::{self, MissingResultSnafu};
+use crate::{
+    error::DataNodeErrSnafu, error::DecodeSelectSnafu, error::MissingHeaderSnafu, Client, Result,
+};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -49,10 +51,7 @@ impl Database {
         Ok(())
     }
 
-    pub async fn select(
-        &self,
-        select_expr: SelectExpr,
-    ) -> Result<(ResultHeader, Option<ObjectResult>)> {
+    pub async fn select(&self, select_expr: SelectExpr) -> Result<ObjectResult> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
         };
@@ -65,16 +64,30 @@ impl Database {
         let obj_result = self.object(expr).await?;
 
         let header = obj_result.header.context(MissingHeaderSnafu)?;
-        let result = match obj_result.result {
-            Some(object_result::Result::Select(select)) => {
-                let result = select.raw_data.try_into().context(DecodeSelectSnafu)?;
-                Some(ObjectResult::Select(result))
+
+        if header.code != StatusCode::SUCCESS as u32 {
+            return DataNodeErrSnafu {
+                code: header.code,
+                msg: header.err_msg,
             }
-            Some(object_result::Result::Mutate(mutate)) => Some(ObjectResult::Mutate(mutate)),
-            None => None,
+            .fail();
+        }
+
+        let obj_result = obj_result.result.context(MissingResultSnafu {
+            name: "select_result".to_string(),
+            expected: 1_usize,
+            actual: 0_usize,
+        })?;
+
+        let result = match obj_result {
+            object_result::Result::Select(select) => {
+                let result = select.raw_data.try_into().context(DecodeSelectSnafu)?;
+                ObjectResult::Select(result)
+            }
+            object_result::Result::Mutate(mutate) => ObjectResult::Mutate(mutate),
         };
 
-        Ok((header, result))
+        Ok(result)
     }
 
     // TODO(jiachun) update/delete

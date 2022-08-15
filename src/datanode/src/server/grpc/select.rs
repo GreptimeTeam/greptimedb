@@ -3,6 +3,8 @@ use std::sync::Arc;
 use api::v1::{codec::SelectResult, column::Values, Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::bitset::BitSet;
+use common_error::prelude::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_recordbatch::{util, RecordBatch, SendableRecordBatchStream};
 use datatypes::arrow_array::{BinaryArray, StringArray};
 use query::Output;
@@ -10,17 +12,16 @@ use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result};
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
-use crate::server::grpc::handler::{ERROR, SUCCESS};
 
 pub(crate) async fn to_object_result(result: Result<Output>) -> ObjectResult {
     match result {
         Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
-            .status_code(SUCCESS)
+            .status_code(StatusCode::SUCCESS as u32)
             .mutate_result(rows as u32, 0)
             .build(),
         Ok(Output::RecordBatch(stream)) => record_batchs(stream).await,
         Err(err) => ObjectResultBuilder::new()
-            .status_code(ERROR)
+            .status_code(StatusCode::SUCCESS as u32)
             .err_msg(err.to_string())
             .build(),
     }
@@ -31,12 +32,12 @@ async fn record_batchs(stream: SendableRecordBatchStream) -> ObjectResult {
     match util::collect(stream).await {
         Ok(record_batches) => match try_convert(record_batches) {
             Ok(select_result) => builder
-                .status_code(SUCCESS)
+                .status_code(StatusCode::SUCCESS as u32)
                 .select_result(select_result)
                 .build(),
-            Err(err) => build_err_result(ERROR, err.to_string()),
+            Err(err) => build_err_result(err.status_code() as u32, err.to_string()),
         },
-        Err(err) => build_err_result(ERROR, err.to_string()),
+        Err(err) => build_err_result(err.status_code() as u32, err.to_string()),
     }
 }
 

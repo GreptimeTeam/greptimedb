@@ -17,8 +17,7 @@ async fn run() {
     let select_expr = SelectExpr {
         expr: Some(select_expr::Expr::Sql("select * from demo".to_string())),
     };
-    let (header, body) = db.select(select_expr).await.unwrap();
+    let result = db.select(select_expr).await.unwrap();
 
-    event!(Level::INFO, "response header: {:#?}", header);
-    event!(Level::INFO, "response body: {:#?}", body);
+    event!(Level::INFO, "result: {:#?}", result);
 }

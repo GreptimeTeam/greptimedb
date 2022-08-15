@@ -1,3 +1,4 @@
+// TODO(fys): Use bitset crate to replace it
 pub struct BitSet {
     // TODO(fys): Is SmallVec or TinyVec better?
     buffer: Vec<u8>,
