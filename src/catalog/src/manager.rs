@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::StreamExt;
@@ -12,12 +12,13 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
+use table::TableRef;
 
 use super::error::Result;
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use crate::error::{
     CatalogNotFoundSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, SchemaNotFoundSnafu,
-    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableNotFoundSnafu,
+    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
 use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{decode_system_catalog, Entry, SystemCatalogTable, TableEntry};
@@ -124,7 +125,7 @@ impl LocalCatalogManager {
                 data_type: records.df_recordbatch.columns()[1].data_type().clone(),
             })?;
 
-        let value = BinaryVector::try_from_arrow_array(&records.df_recordbatch.columns()[1])
+        let value = BinaryVector::try_from_arrow_array(&records.df_recordbatch.columns()[3])
             .with_context(|_| SystemCatalogTypeMismatchSnafu {
                 data_type: records.df_recordbatch.columns()[3].data_type().clone(),
             })?;
@@ -158,6 +159,7 @@ impl LocalCatalogManager {
                     info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
+                    debug!("t: {:?}", t);
                     self.open_and_register_table(&t).await?;
                     info!("Registered table: {:?}", t);
                     max_table_id = max_table_id.max(t.table_id);
@@ -257,11 +259,33 @@ impl CatalogManager for LocalCatalogManager {
         schema: Option<String>,
         table_name: String,
         table_id: TableId,
+        table: TableRef,
     ) -> Result<usize> {
-        let catalog = catalog.unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-        let schema = schema.unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+        let catalog_name = catalog.unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
+        let schema_name = schema.unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+
+        let catalog = self
+            .catalogs
+            .catalog(&catalog_name)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: catalog_name.clone(),
+            })?;
+        let schema = catalog.schema(&schema_name).context(SchemaNotFoundSnafu {
+            schema_info: format!("{}.{}", catalog_name, schema_name),
+        })?;
+        // TODO(hl): add lock
+        if schema.table_exist(&table_name) {
+            return TableExistsSnafu {
+                table: format!("{}.{}.{}", catalog_name, schema_name, table_name.clone()),
+            }
+            .fail();
+        }
+
         self.system
-            .register_table(catalog, schema, table_name, table_id)
-            .await
+            .register_table(catalog_name, schema_name, table_name.clone(), table_id)
+            .await?;
+
+        schema.register_table(table_name, table)?;
+        Ok(1)
     }
 }

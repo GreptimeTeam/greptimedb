@@ -2,26 +2,19 @@ use std::{fs, path, sync::Arc};
 
 use api::v1::InsertExpr;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_telemetry::debug;
 use common_telemetry::logging::info;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::{OptionExt, ResultExt};
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
-use table::engine::EngineContext;
-use table::engine::TableEngine;
-use table::requests::CreateTableRequest;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
-    self, CreateTableSnafu, ExecuteSqlSnafu, InsertSnafu, InsertSystemCatalogSnafu,
-    NewCatalogSnafu, Result, TableNotFoundSnafu,
+    self, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result, TableNotFoundSnafu,
 };
 use crate::server::grpc::insert::insertion_expr_to_request;
 use crate::sql::{SqlHandler, SqlRequest};
@@ -32,7 +25,6 @@ type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 pub struct Instance {
     // Query service
     query_engine: QueryEngineRef,
-    table_engine: DefaultEngine,
     sql_handler: SqlHandler<DefaultEngine>,
     // Catalog list
     catalog_manager: CatalogManagerRef,
@@ -64,8 +56,7 @@ impl Instance {
 
         Ok(Self {
             query_engine,
-            sql_handler: SqlHandler::new(table_engine.clone()),
-            table_engine,
+            sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
             catalog_manager,
         })
     }
@@ -134,15 +125,9 @@ impl Instance {
                 let table_name = request.table_name.clone();
                 let table_id = request.id;
                 info!(
-                    "Creating table with request: {:?}, table id: {}",
-                    &request, table_id
+                    "Creating table, catalog: {:?}, schema: {:?}, table name: {:?}, table id: {}",
+                    catalog_name, schema_name, table_name, table_id
                 );
-
-                self.catalog_manager
-                    .register_table(catalog_name, schema_name, table_name, table_id)
-                    .await
-                    .context(InsertSystemCatalogSnafu)?;
-                debug!("Inserted into system catalog table");
 
                 self.sql_handler.execute(SqlRequest::Create(request)).await
             }
@@ -156,47 +141,6 @@ impl Instance {
             .start()
             .await
             .context(NewCatalogSnafu)?;
-        // FIXME(dennis): create a demo table for test
-        let column_schemas = vec![
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
-        ];
-
-        let table_name = "demo";
-        let table = self
-            .table_engine
-            .create_table(
-                &EngineContext::default(),
-                CreateTableRequest {
-                    id: 1,
-                    catalog_name: None,
-                    schema_name: None,
-                    table_name: table_name.to_string(),
-                    desc: Some(" a test table".to_string()),
-                    schema: Arc::new(
-                        Schema::with_timestamp_index(column_schemas, 3)
-                            .expect("ts is expected to be timestamp column"),
-                    ),
-                    create_if_not_exists: true,
-                    primary_key_indices: Vec::default(),
-                },
-            )
-            .await
-            .context(CreateTableSnafu { table_name })?;
-
-        let schema_provider = self
-            .catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .unwrap()
-            .schema(DEFAULT_SCHEMA_NAME)
-            .unwrap();
-
-        schema_provider
-            .register_table(table_name.to_string(), table)
-            .unwrap();
-
         Ok(())
     }
 }

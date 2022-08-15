@@ -4,6 +4,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use table::metadata::TableId;
+use table::TableRef;
 
 pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 pub use crate::manager::LocalCatalogManager;
@@ -73,6 +74,7 @@ pub trait CatalogManager: CatalogList {
         schema: Option<String>,
         table_name: String,
         table_id: TableId,
+        table: TableRef,
     ) -> error::Result<usize>;
 }
 

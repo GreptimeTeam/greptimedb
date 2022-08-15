@@ -1,5 +1,6 @@
 //! sql handler
 
+use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
@@ -21,11 +22,15 @@ pub enum SqlRequest {
 // Handler to execute SQL except query
 pub struct SqlHandler<Engine: TableEngine> {
     table_engine: Engine,
+    catalog_manager: CatalogManagerRef,
 }
 
 impl<Engine: TableEngine> SqlHandler<Engine> {
-    pub fn new(table_engine: Engine) -> Self {
-        Self { table_engine }
+    pub fn new(table_engine: Engine, catalog_manager: CatalogManagerRef) -> Self {
+        Self {
+            table_engine,
+            catalog_manager,
+        }
     }
 
     pub async fn execute(&self, request: SqlRequest) -> Result<Output> {
@@ -135,10 +140,6 @@ mod tests {
         let accessor = Backend::build().root(&store_dir).finish().await.unwrap();
         let object_store = ObjectStore::new(accessor);
 
-        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list);
-        let query_engine = factory.query_engine().clone();
-
         let sql = r#"insert into demo(host, cpu, memory, ts) values
                            ('host1', 66.6, 1024, 1655276557000),
                            ('host2', 88.8,  333.3, 1655276558000)
@@ -153,7 +154,15 @@ mod tests {
             ),
             object_store,
         );
-        let sql_handler = SqlHandler::new(table_engine);
+
+        let catalog_list = Arc::new(
+            catalog::LocalCatalogManager::try_new(Arc::new(table_engine.clone()))
+                .await
+                .unwrap(),
+        );
+        let factory = QueryEngineFactory::new(catalog_list.clone());
+        let query_engine = factory.query_engine().clone();
+        let sql_handler = SqlHandler::new(table_engine, catalog_list);
 
         let stmt = match query_engine.sql_to_statement(sql).unwrap() {
             Statement::Insert(i) => i,

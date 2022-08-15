@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
+use common_telemetry::debug;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
-use table::requests::{CreateTableRequest, OpenTableRequest};
+use table::requests::{CreateTableRequest, InsertRequest, OpenTableRequest};
 use table::{Table, TableRef};
 
 use crate::consts::{
@@ -43,6 +44,11 @@ impl Table for SystemCatalogTable {
         _limit: Option<usize>,
     ) -> table::Result<SendableRecordBatchStream> {
         panic!("System catalog table does not support scan!")
+    }
+
+    /// Insert values into table.
+    async fn insert(&self, request: InsertRequest) -> table::error::Result<usize> {
+        self.table.insert(request).await
     }
 }
 
@@ -128,6 +134,10 @@ pub fn decode_system_catalog(
     key: Option<&[u8]>,
     value: Option<&[u8]>,
 ) -> Result<Entry> {
+    debug!(
+        "Decode system catalog entry: {:?}, {:?}, {:?}",
+        entry_type, key, value
+    );
     let entry_type = entry_type.context(InvalidKeySnafu { key: None })?;
     let key = String::from_utf8_lossy(key.context(InvalidKeySnafu { key: None })?);
 
@@ -165,6 +175,7 @@ pub fn decode_system_catalog(
                 }
             );
             let value = value.context(EmptyValueSnafu)?;
+            debug!("Table meta value: {}", String::from_utf8_lossy(value));
             let table_meta: TableEntryValue =
                 serde_json::from_slice(value).context(ValueDeserializeSnafu)?;
             Ok(Entry::Table(TableEntry {

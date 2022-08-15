@@ -14,21 +14,37 @@ use table::metadata::TableId;
 use table::requests::*;
 
 use crate::error::{
-    ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu, InvalidCreateTableSqlSnafu,
-    KeyColumnNotFoundSnafu, Result, SqlTypeNotSupportedSnafu,
+    ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu, InsertSystemCatalogSnafu,
+    InvalidCreateTableSqlSnafu, KeyColumnNotFoundSnafu, Result, SqlTypeNotSupportedSnafu,
 };
 use crate::sql::SqlHandler;
 
 impl<Engine: TableEngine> SqlHandler<Engine> {
     pub(crate) async fn create(&self, req: CreateTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
+        let catalog_name = req.catalog_name.clone();
+        let schema_name = req.schema_name.clone();
         let table_name = req.table_name.clone();
-        self.table_engine
+        let table_id = req.id;
+
+        let table = self
+            .table_engine
             .create_table(&ctx, req)
             .await
             .with_context(|_| CreateTableSnafu {
                 table_name: table_name.clone(),
             })?;
+
+        self.catalog_manager
+            .register_table(
+                catalog_name,
+                schema_name,
+                table_name.clone(),
+                table_id,
+                table,
+            )
+            .await
+            .context(InsertSystemCatalogSnafu)?;
         info!("Successfully created table: {:?}", table_name);
         Ok(Output::AffectedRows(1)) // maybe support create multiple tables
     }
@@ -202,7 +218,12 @@ mod tests {
         let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
         let mock_engine =
             MockMitoEngine::new(EngineConfig::default(), MockEngine::default(), object_store);
-        SqlHandler::new(mock_engine)
+        let catalog_manager = Arc::new(
+            catalog::LocalCatalogManager::try_new(Arc::new(mock_engine.clone()))
+                .await
+                .unwrap(),
+        );
+        SqlHandler::new(mock_engine, catalog_manager)
     }
 
     #[tokio::test]
