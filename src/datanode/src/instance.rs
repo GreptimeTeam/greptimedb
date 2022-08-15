@@ -9,6 +9,8 @@ use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::{OptionExt, ResultExt};
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
+#[cfg(test)]
+use table::engine::TableEngineRef;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
@@ -25,6 +27,8 @@ type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 pub struct Instance {
     // Query service
     query_engine: QueryEngineRef,
+    #[cfg(test)]
+    table_engine: TableEngineRef,
     sql_handler: SqlHandler<DefaultEngine>,
     // Catalog list
     catalog_manager: CatalogManagerRef,
@@ -56,6 +60,8 @@ impl Instance {
 
         Ok(Self {
             query_engine,
+            #[cfg(test)]
+            table_engine: Arc::new(table_engine.clone()),
             sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
             catalog_manager,
         })
@@ -143,6 +149,58 @@ impl Instance {
             .context(NewCatalogSnafu)?;
         Ok(())
     }
+
+    #[cfg(test)]
+    pub async fn create_test_table(&self) -> Result<()> {
+        use datatypes::data_type::ConcreteDataType;
+        use datatypes::schema::{ColumnSchema, Schema};
+        use table::engine::EngineContext;
+        use table::requests::CreateTableRequest;
+
+        use crate::error::CreateTableSnafu;
+
+        let column_schemas = vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
+        ];
+
+        let table_name = "demo";
+        let table = self
+            .table_engine
+            .create_table(
+                &EngineContext::default(),
+                CreateTableRequest {
+                    id: 1,
+                    catalog_name: None,
+                    schema_name: None,
+                    table_name: table_name.to_string(),
+                    desc: Some(" a test table".to_string()),
+                    schema: Arc::new(
+                        Schema::with_timestamp_index(column_schemas, 3)
+                            .expect("ts is expected to be timestamp column"),
+                    ),
+                    create_if_not_exists: true,
+                    primary_key_indices: Vec::default(),
+                },
+            )
+            .await
+            .context(CreateTableSnafu { table_name })?;
+
+        let schema_provider = self
+            .catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .schema(DEFAULT_SCHEMA_NAME)
+            .unwrap();
+
+        schema_provider
+            .register_table(table_name.to_string(), table)
+            .unwrap();
+
+        Ok(())
+    }
 }
 
 async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
@@ -198,6 +256,7 @@ mod tests {
         let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
+        instance.create_test_table().await.unwrap();
 
         let output = instance
             .execute_sql(
