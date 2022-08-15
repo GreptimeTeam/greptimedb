@@ -201,7 +201,7 @@ mod tests {
 
         assert_eq!(PROTOCOL_VERSION, header.version);
         assert_eq!(StatusCode::Internal as u32, header.code);
-        assert_eq!("Unsupported expr: select", header.err_msg);
+        assert_eq!("Unsupported expr type: select", header.err_msg);
         assert!(result.is_none());
     }
 }
