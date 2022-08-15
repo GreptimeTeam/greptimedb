@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package greptime.v1.meta;
+
+message RequestHeader {
+  uint64 protocol_version = 1;
+  // cluster_id is the ID of the cluster which be sent to.
+  uint64 cluster_id = 2;
+  // member_id is the ID of the sender server.
+  uint64 member_id = 3;
+}
+
+message ResponseHeader {
+  uint64 protocol_version = 1;
+  // cluster_id is the ID of the cluster which sent the response.
+  uint64 cluster_id = 2;
+  Error error = 3;
+}
+
+message Error {
+  int32 code = 1;
+  string err_msg = 2;
+}
+
+message Peer {
+  uint64 id = 1;
+  Endpoint endpoint = 2;
+}
+
+message Endpoint {
+  string addr = 2;
+}
+
+message TimeInterval {
+  // The unix timestamp in seconds of the start of this period.
+  uint64 start_timestamp_secs = 1;
+  // The unix timestamp in seconds of the end of this period.
+  uint64 end_timestamp_secs = 2;
+}
+
+message Tenant {
+  uint64 id = 1;
+  string name = 2;
+  map<string, string> attrs = 3;
+}
+
+message Table {
+  string name = 1;
+  bytes schema = 2;
+}
+
+message Region {
+  uint64 id = 1;
+  string name = 2;
+  map<string, string> attrs = 3;
+}

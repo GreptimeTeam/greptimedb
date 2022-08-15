@@ -2712,6 +2712,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "meta-client"
+version = "0.1.0"
+dependencies = [
+ "api",
+ "common-error",
+ "snafu",
+ "tonic 0.8.0",
+]
+
+[[package]]
+name = "meta-srv"
+version = "0.1.0"
+dependencies = [
+ "api",
+ "common-error",
+ "snafu",
+ "tonic 0.8.0",
+]
+
+[[package]]
 name = "metrics"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

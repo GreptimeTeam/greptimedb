@@ -1,0 +1,129 @@
+syntax = "proto3";
+
+package greptime.v1.meta;
+
+import "greptime/v1/meta/common.proto";
+
+service MetaService {
+  // Heartbeat, there may be many contents of the heartbeat, such as:
+  // 1. Metadata to be registered to meta server and discoverable by other nodes.
+  // 2. Some performance metrics, such as Load, CPU usage, etc.
+  // 3. The number of computing tasks being executed.
+  rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse) {}
+
+  // Fetch routing information for tables. The smallest unit is the complete
+  // routing information(all regions) of a table.
+  // 
+  // table_1
+  //    table_name
+  //    table_schema
+  //    regions
+  //      region_1
+  //        mutate_endpoint
+  //        select_endpoint_1, select_endpoint_2
+  //      region_2
+  //        mutate_endpoint
+  //        select_endpoint_1, select_endpoint_2, select_endpoint_3
+  //      region_xxx
+  // table_2
+  //    ...
+  //
+  rpc Route(RouteRequest) returns (RouteResponse) {}
+
+  // Ask leader
+  rpc AskLeader(AskLeaderRequest) returns (AskLeaderResponse) {}
+}
+
+message HeartbeatRequest {
+  RequestHeader header = 1;
+
+  // Leader node
+  bool is_leader = 2;
+  // Leader Peer
+  Endpoint leader_endpoint = 3;
+  // Actually reported time interval
+  TimeInterval report_interval = 4;
+  // Node stat
+  NodeStat node_stat = 5;
+  // Region stats in this node
+  repeated RegionStat region_stats = 6;
+  // Follower nodes and stats, empty on follower nodes
+  repeated ReplicaStat replica_stats = 7;
+}
+
+message NodeStat {
+  // The read capacity units during this period
+  uint64 rcus = 1;
+  // The write capacity units during this period
+  uint64 wcus = 2;
+  // Table number in this node
+  uint64 table_num = 3;
+  // Regon number in this node
+  uint64 region_num = 4;
+
+  double cpu_usage = 5;
+  double load = 6;
+  // Read disk I/O in the node
+  double read_io_rate = 7;
+  // Write disk I/O in the node
+  double write_io_rate = 8;
+}
+
+message RegionStat {
+  string table_name = 1;
+  uint64 region_id = 2;
+  // The read capacity units during this period
+  uint64 rcus = 3;
+  // The write capacity units during this period
+  uint64 wcus = 4;
+}
+
+message ReplicaStat {
+  Peer peer = 1;
+  bool in_sync = 2;
+  bool is_learner = 3;
+}
+
+message HeartbeatResponse {
+  ResponseHeader header = 1;
+
+  bytes payload = 2;
+}
+
+message RouteRequest {
+  RequestHeader header = 1;
+
+  Tenant tenant = 2;
+  // Routing for multiple DBs is not supported
+  string db_name = 3;
+  repeated string table_names = 4;
+}
+
+message RouteResponse {
+  ResponseHeader header = 1;
+
+  repeated Endpoint endpoints = 2;
+  repeated TableRoute table_routes = 3;
+}
+
+message TableRoute {
+  Table table = 1;
+  repeated RegionRoute region_routes = 2;
+}
+
+message RegionRoute {
+  Region region = 1;
+  // Single node for write task
+  uint64 mutate_endpoint_index = 2;
+  // Multiple nodes for read task
+  repeated uint64 select_endpoint_indexes = 3;
+}
+
+message AskLeaderRequest {
+  RequestHeader header = 1;
+}
+
+message AskLeaderResponse {
+  ResponseHeader header = 1;
+  Endpoint leader = 2;
+}
