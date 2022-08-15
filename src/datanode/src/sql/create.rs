@@ -5,7 +5,7 @@ use common_telemetry::tracing::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use query::query_engine::Output;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, DataType as SqlDataType, ObjectName, TableConstraint};
 use sql::statements::create_table::CreateTable;
 use store_api::storage::consts::TIME_INDEX_NAME;
@@ -14,8 +14,8 @@ use table::metadata::TableId;
 use table::requests::*;
 
 use crate::error::{
-    CreateSchemaSnafu, CreateTableSnafu, InvalidCreateTableSqlSnafu, KeyColumnNotFoundSnafu,
-    PrimaryKeyNotSpecifiedSnafu, Result, SqlTypeNotSupportedSnafu,
+    ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu, InvalidCreateTableSqlSnafu,
+    KeyColumnNotFoundSnafu, Result, SqlTypeNotSupportedSnafu,
 };
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -41,6 +41,9 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
     ) -> Result<SqlRequest> {
         let mut ts_index = usize::MAX;
         let mut primary_keys = vec![];
+
+        let (catalog_name, schema_name, table_name) = table_idents_to_fqn(stmt.name)?;
+
         let col_map = stmt
             .columns
             .iter()
@@ -88,12 +91,22 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
                     }
                 }
                 _ => {
-                    unimplemented!()
+                    return ConstraintNotSupportedSnafu {
+                        constraint: format!("{:?}", c),
+                    }
+                    .fail()
                 }
             }
         }
 
-        ensure!(!primary_keys.is_empty(), PrimaryKeyNotSpecifiedSnafu);
+        if primary_keys.is_empty() {
+            info!(
+                "Creating table: {:?}.{:?}.{} but primary key not set, use time index column: {}",
+                catalog_name, schema_name, table_name, ts_index
+            );
+            primary_keys.push(ts_index);
+        }
+
         let columns_schemas: Vec<_> = stmt
             .columns
             .iter()
@@ -104,7 +117,6 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             Schema::with_timestamp_index(columns_schemas, ts_index).context(CreateSchemaSnafu)?,
         );
 
-        let (catalog_name, schema_name, table_name) = table_idents_to_fqn(stmt.name)?;
         let request = CreateTableRequest {
             id: table_id,
             catalog_name,
@@ -122,45 +134,32 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
 /// Converts maybe full-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when catalog and schema are default)
 /// to tuples  
 fn table_idents_to_fqn(obj_name: ObjectName) -> Result<(Option<String>, Option<String>, String)> {
-    if obj_name.0.len() == 1 {
-        Ok((None, None, obj_name.0[0].value.clone()))
-    } else if obj_name.0.len() == 3 {
-        Ok((
-            Some(obj_name.0[0].value.clone()),
-            Some(obj_name.0[1].value.clone()),
-            obj_name.0[2].value.clone(),
-        ))
-    } else {
-        InvalidCreateTableSqlSnafu {
+    match obj_name.0 {
+        names if names.len() == 1 => Ok((None, None, names[0].value.clone())),
+        names if names.len() == 3 => Ok((
+            Some(names[0].value.clone()),
+            Some(names[1].value.clone()),
+            names[2].value.clone(),
+        )),
+        _ => InvalidCreateTableSqlSnafu {
             msg: format!(
                 "table name can only be <catalog>.<schema>.<table> or <table>, but found: {}",
                 obj_name
             ),
         }
-        .fail()
+        .fail(),
     }
 }
 
 fn column_def_to_schema(def: &ColumnDef) -> Result<ColumnSchema> {
-    let mut nullable = true;
-    for o in &def.options {
-        match o.option {
-            ColumnOption::Null => {
-                nullable = true;
-            }
-            ColumnOption::NotNull => {
-                nullable = false;
-            }
-            _ => {
-                // other options currently not supported
-            }
-        }
-    }
-
+    let is_nullable = def
+        .options
+        .iter()
+        .any(|o| matches!(o.option, ColumnOption::Null));
     Ok(ColumnSchema {
         name: def.name.value.clone(),
         data_type: sql_data_type_to_concrete_data_type(&def.data_type)?,
-        is_nullable: nullable,
+        is_nullable,
     })
 }
 
@@ -174,7 +173,6 @@ fn sql_data_type_to_concrete_data_type(t: &SqlDataType) -> Result<ConcreteDataTy
         | SqlDataType::Text
         | SqlDataType::String => Ok(ConcreteDataType::string_datatype()),
         SqlDataType::Float(_) => Ok(ConcreteDataType::float32_datatype()),
-        SqlDataType::Real => Ok(ConcreteDataType::float32_datatype()),
         SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
         // TODO(hl): Date/DateTime/Timestamp not supported
@@ -297,6 +295,7 @@ mod tests {
         assert_matches!(error, Error::CreateSchema { .. });
     }
 
+    /// If primary key is not speicified, time index should be used as primary key.  
     #[tokio::test]
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;
@@ -322,8 +321,20 @@ mod tests {
             options: vec![],
         };
 
-        let err = handler.create_to_request(42, parsed_stmt).unwrap_err();
-        assert_matches!(err, Error::PrimaryKeyNotSpecified { .. });
+        let req = handler.create_to_request(42, parsed_stmt).unwrap();
+
+        match req {
+            SqlRequest::Insert(_) => {
+                panic!("Not supposed to be an Insert request")
+            }
+            SqlRequest::Create(c) => {
+                assert_eq!(1, c.primary_key_indices.len());
+                assert_eq!(
+                    c.schema.timestamp_index().unwrap(),
+                    c.primary_key_indices[0]
+                );
+            }
+        }
     }
 
     /// Constraints specified, not column cannot be found.

@@ -127,7 +127,10 @@ impl Instance {
                 let _engine_name = c.engine.clone();
                 // TODO(hl): Select table engine by engine_name
                 let request = self.sql_handler.create_to_request(table_id, c)?;
-                // info!("Creating table with request: {:?}, table id: {}", &request, table_id );
+                info!(
+                    "Creating table with request: {:?}, table id: {}",
+                    &request, table_id
+                );
                 self.sql_handler.execute(request).await
             }
 
