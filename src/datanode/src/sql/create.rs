@@ -131,15 +131,15 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
     }
 }
 
-/// Converts maybe full-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when catalog and schema are default)
+/// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when catalog and schema are default)
 /// to tuples  
 fn table_idents_to_fqn(obj_name: ObjectName) -> Result<(Option<String>, Option<String>, String)> {
-    match obj_name.0 {
-        names if names.len() == 1 => Ok((None, None, names[0].value.clone())),
-        names if names.len() == 3 => Ok((
-            Some(names[0].value.clone()),
-            Some(names[1].value.clone()),
-            names[2].value.clone(),
+    match &obj_name.0[..] {
+        [table] => Ok((None, None, table.value.clone())),
+        [catalog, schema, table] => Ok((
+            Some(catalog.value.clone()),
+            Some(schema.value.clone()),
+            table.value.clone(),
         )),
         _ => InvalidCreateTableSqlSnafu {
             msg: format!(
