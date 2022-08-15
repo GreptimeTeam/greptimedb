@@ -90,7 +90,7 @@ fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
     let mut nulls_set = BitSet::with_capacity(row_count);
     for array in arrays {
         let validity = array.validity();
-        // TODO(fys): Improve in the future
+        // TODO(fys): Improve in the future, better way: repeat(false, len).
         if let Some(v) = validity {
             let nulls: Vec<bool> = v.iter().map(|x| !x).collect();
             nulls_set.append(&nulls);
