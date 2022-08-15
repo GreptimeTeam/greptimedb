@@ -2,49 +2,30 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{
-    CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-};
 use common_recordbatch::RecordBatch;
 use common_runtime::Builder as RuntimeBuilder;
-use common_servers::mysql::error::{Result, RuntimeResourceSnafu};
-use common_servers::mysql::mysql_instance::MysqlInstance;
-use common_servers::mysql::mysql_server::MysqlServer;
-use common_servers::server::Server;
 use datatypes::schema::Schema;
 use mysql_async::prelude::*;
-use query::{Output, QueryEngineFactory, QueryEngineRef};
 use rand::rngs::StdRng;
 use rand::Rng;
-use snafu::prelude::*;
+use servers::error::Result;
+use servers::mysql::server::MysqlServer;
+use servers::server::Server;
 use test_util::MemTable;
 
+use crate::create_testing_sql_query_handler;
 use crate::mysql::{all_datatype_testing_data, MysqlTextRow, TestingData};
 
 fn create_mysql_server(table: MemTable) -> Result<Box<dyn Server>> {
-    let table_name = table.table_name().to_string();
-    let table = Arc::new(table);
-
-    let schema_provider = Arc::new(MemorySchemaProvider::new());
-    schema_provider.register_table(table_name, table).unwrap();
-    let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
-    let catalog_list = Arc::new(MemoryCatalogList::default());
-    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
-    let factory = QueryEngineFactory::new(catalog_list);
-    let query_engine = factory.query_engine().clone();
-
-    let mysql_instance = Arc::new(DummyMysqlInstance { query_engine });
+    let query_handler = create_testing_sql_query_handler(table);
     let io_runtime = Arc::new(
         RuntimeBuilder::default()
             .worker_threads(4)
             .thread_name("mysql-io-handlers")
             .build()
-            .context(RuntimeResourceSnafu)?,
+            .unwrap(),
     );
-    Ok(MysqlServer::create_server(mysql_instance, io_runtime))
+    Ok(MysqlServer::create_server(query_handler, io_runtime))
 }
 
 #[tokio::test]
@@ -208,16 +189,4 @@ async fn create_connection(port: u16) -> mysql_async::Result<mysql_async::Conn> 
         .prefer_socket(false)
         .wait_timeout(Some(1000));
     mysql_async::Conn::new(opts).await
-}
-
-struct DummyMysqlInstance {
-    query_engine: QueryEngineRef,
-}
-
-#[async_trait]
-impl MysqlInstance for DummyMysqlInstance {
-    async fn do_query(&self, query: &str) -> Result<Output> {
-        let plan = self.query_engine.sql_to_plan(query).unwrap();
-        Ok(self.query_engine.execute(&plan).await.unwrap())
-    }
 }

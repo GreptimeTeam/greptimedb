@@ -4,6 +4,6 @@ mod error;
 
 pub use self::{
     client::Client,
-    database::Database,
+    database::{Database, ObjectResult},
     error::{Error, Result},
 };

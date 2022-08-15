@@ -80,10 +80,11 @@ pub enum Error {
     #[snafu(display("Fail to convert bytes to insert batch, {}", source))]
     DecodeInsert { source: DecodeError },
 
-    // The error source of http error is clear even without backtrace now so
-    // a backtrace is not carried in this varaint.
-    #[snafu(display("Fail to start HTTP server, source: {}", source))]
-    StartHttp { source: hyper::Error },
+    #[snafu(display("Failed to start server, source: {}", source))]
+    StartServer {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
 
     #[snafu(display("Fail to parse address {}, source: {}", addr, source))]
     ParseAddr {
@@ -121,6 +122,12 @@ pub enum Error {
 
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String },
+
+    #[snafu(display("Runtime resource error, source: {}", source))]
+    RuntimeResource {
+        #[snafu(backtrace)]
+        source: common_runtime::error::Error,
+    },
 
     #[snafu(display("Invalid CREATE TABLE sql statement, cause: {}", msg))]
     InvalidCreateTableSql { msg: String, backtrace: Backtrace },
@@ -179,7 +186,7 @@ impl ErrorExt for Error {
             | Error::KeyColumnNotFound { .. }
             | Error::ConstraintNotSupported { .. } => StatusCode::InvalidArguments,
             // TODO(yingwen): Further categorize http error.
-            Error::StartHttp { .. }
+            Error::StartServer { .. }
             | Error::ParseAddr { .. }
             | Error::TcpBind { .. }
             | Error::StartGrpc { .. }
@@ -190,6 +197,7 @@ impl ErrorExt for Error {
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
+            Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
         }
     }
 

@@ -1,6 +1,5 @@
+use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
 use tempdir::TempDir;
-
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 
 /// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
 /// Only for test.

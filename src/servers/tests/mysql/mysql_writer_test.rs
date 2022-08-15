@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use common_servers::mysql::mysql_writer::create_mysql_column_def;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
+use servers::mysql::writer::create_mysql_column_def;
 
 use crate::mysql::{all_datatype_testing_data, TestingData};
 

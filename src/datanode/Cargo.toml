@@ -19,15 +19,17 @@ catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-recordbatch = { path = "../common/recordbatch" }
+common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 datatypes = { path = "../datatypes"}
 hyper = { version = "0.14", features = ["full"] }
 log-store = { path = "../log-store" }
-metrics = "0.18"
+metrics = "0.20"
 object-store = { path = "../object-store" }
 query = { path = "../query" }
 serde = "1.0"
 serde_json = "1.0"
+servers = { path = "../servers" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
 storage = { path = "../storage" }
@@ -42,6 +44,7 @@ tower-http = { version ="0.3", features = ["full"]}
 
 [dev-dependencies]
 axum-test-helper = "0.1"
+client = { path = "../client" }
 common-query = { path = "../common/query" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
 tempdir = "0.3"

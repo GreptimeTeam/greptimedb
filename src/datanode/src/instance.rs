@@ -1,12 +1,18 @@
 use std::{fs, path, sync::Arc};
 
-use api::v1::InsertExpr;
+use api::v1::{object_expr, select_expr, InsertExpr, ObjectExpr, ObjectResult, SelectExpr};
+use async_trait::async_trait;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::status_code::StatusCode;
 use common_telemetry::logging::info;
+use common_telemetry::timer;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, Schema};
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
-use snafu::{OptionExt, ResultExt};
+use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
+use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
 #[cfg(test)]
@@ -18,7 +24,10 @@ use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
     self, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result, TableNotFoundSnafu,
 };
+use crate::metric;
+use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::insertion_expr_to_request;
+use crate::server::grpc::select::to_object_result;
 use crate::sql::{SqlHandler, SqlRequest};
 
 type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
@@ -202,6 +211,30 @@ impl Instance {
 
         Ok(())
     }
+
+    async fn handle_insert(&self, insert_expr: InsertExpr) -> ObjectResult {
+        match self.execute_grpc_insert(insert_expr).await {
+            Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
+                .status_code(StatusCode::Success as u32)
+                .mutate_result(rows as u32, 0)
+                .build(),
+            Err(err) => {
+                // TODO(fys): failure count
+                build_err_result(&err)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    async fn handle_select(&self, select_expr: SelectExpr) -> ObjectResult {
+        match select_expr.expr {
+            Some(select_expr::Expr::Sql(sql)) => {
+                let result = self.execute_sql(&sql).await;
+                to_object_result(result).await
+            }
+            None => ObjectResult::default(),
+        }
+    }
 }
 
 async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
@@ -241,6 +274,44 @@ async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFile
         .context(error::OpenLogStoreSnafu)?;
 
     Ok(log_store)
+}
+
+#[async_trait]
+impl SqlQueryHandler for Instance {
+    async fn do_query(&self, query: &str) -> servers::error::Result<Output> {
+        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
+        self.execute_sql(query)
+            .await
+            // TODO(LFC): use snafu's `context` to include source error and backtrace.
+            // Ideally we should define a snafu in servers::error to wrap the error thrown
+            // by `execute_sql`. However, we cannot do that because that would introduce a circular
+            // dependency.
+            .map_err(|e| {
+                servers::error::ExecuteQuerySnafu {
+                    query,
+                    err_msg: format!("{}", e),
+                }
+                .fail::<servers::error::Error>()
+                .unwrap_err()
+            })
+    }
+}
+
+#[async_trait]
+impl GrpcQueryHandler for Instance {
+    async fn do_query(&self, query: ObjectExpr) -> servers::error::Result<ObjectResult> {
+        let object_resp = match query.expr {
+            Some(object_expr::Expr::Insert(insert_expr)) => self.handle_insert(insert_expr).await,
+            Some(object_expr::Expr::Select(select_expr)) => self.handle_select(select_expr).await,
+            other => {
+                return servers::error::NotSupportedSnafu {
+                    feat: format!("{:?}", other),
+                }
+                .fail();
+            }
+        };
+        Ok(object_resp)
+    }
 }
 
 #[cfg(test)]
@@ -309,12 +380,12 @@ mod tests {
 
         let output = instance
             .execute_sql(
-                r#"create table test_table( 
-                            host string, 
-                            ts bigint, 
-                            cpu double default 0, 
-                            memory double, 
-                            TIME INDEX (ts), 
+                r#"create table test_table(
+                            host string,
+                            ts bigint,
+                            cpu double default 0,
+                            memory double,
+                            TIME INDEX (ts),
                             PRIMARY KEY(ts, host)
                         ) engine=mito with(regions=1);"#,
             )

@@ -1,8 +1,9 @@
-mod handler;
+pub mod handler;
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::{
     error_handling::HandleErrorLayer,
     response::IntoResponse,
@@ -18,12 +19,12 @@ use snafu::ResultExt;
 use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
-use crate::error::{ParseAddrSnafu, Result, StartHttpSnafu};
-use crate::server::InstanceRef;
+use crate::error::{Result, StartHttpSnafu};
+use crate::query_handler::SqlQueryHandlerRef;
+use crate::server::Server;
 
-/// Http server
 pub struct HttpServer {
-    instance: InstanceRef,
+    query_handler: SqlQueryHandlerRef,
 }
 
 #[derive(Serialize, Debug)]
@@ -32,14 +33,12 @@ pub enum JsonOutput {
     Rows(Vec<RecordBatch>),
 }
 
-/// Http response
 #[derive(Serialize, Debug)]
 pub enum HttpResponse {
     Json(JsonResponse),
     Text(String),
 }
 
-/// Json response
 #[derive(Serialize, Debug)]
 pub struct JsonResponse {
     success: bool,
@@ -66,6 +65,7 @@ impl JsonResponse {
             output: None,
         }
     }
+
     fn with_output(output: Option<JsonOutput>) -> Self {
         JsonResponse {
             success: true,
@@ -87,6 +87,18 @@ impl JsonResponse {
             Err(e) => Self::with_error(Some(format!("Query engine output error: {}", e))),
         }
     }
+
+    pub fn success(&self) -> bool {
+        self.success
+    }
+
+    pub fn error(&self) -> Option<&String> {
+        self.error.as_ref()
+    }
+
+    pub fn output(&self) -> Option<&JsonOutput> {
+        self.output.as_ref()
+    }
 }
 
 async fn shutdown_signal() {
@@ -98,8 +110,8 @@ async fn shutdown_signal() {
 }
 
 impl HttpServer {
-    pub fn new(instance: InstanceRef) -> Self {
-        Self { instance }
+    pub fn new(query_handler: SqlQueryHandlerRef) -> Self {
+        Self { query_handler }
     }
 
     pub fn make_app(&self) -> Router {
@@ -112,20 +124,28 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
-                    .layer(Extension(self.instance.clone()))
-                    // TODO configure timeout
+                    .layer(Extension(self.query_handler.clone()))
+                    // TODO(LFC): make timeout configurable
                     .layer(TimeoutLayer::new(Duration::from_secs(30))),
             )
     }
+}
 
-    pub async fn start(&self, addr: &str) -> Result<()> {
+#[async_trait]
+impl Server for HttpServer {
+    async fn shutdown(&mut self) -> Result<()> {
+        // TODO(LFC): shutdown http server, and remove `shutdown_signal` above
+        unimplemented!()
+    }
+
+    async fn start(&mut self, listening: SocketAddr) -> Result<SocketAddr> {
         let app = self.make_app();
-        let socket_addr: SocketAddr = addr.parse().context(ParseAddrSnafu { addr })?;
-        info!("Datanode HTTP server is listening on {}", socket_addr);
-        let server = axum::Server::bind(&socket_addr).serve(app.into_make_service());
+        let server = axum::Server::bind(&listening).serve(app.into_make_service());
+        let listening = server.local_addr();
+        info!("HTTP server is bound to {}", listening);
         let graceful = server.with_graceful_shutdown(shutdown_signal());
-
-        graceful.await.context(StartHttpSnafu)
+        graceful.await.context(StartHttpSnafu)?;
+        Ok(listening)
     }
 }
 

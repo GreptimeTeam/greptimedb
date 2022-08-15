@@ -1,83 +1,10 @@
 use api::v1::{
-    codec::SelectResult, object_expr, object_result, select_expr, BatchRequest, BatchResponse,
-    DatabaseResponse, InsertExpr, MutateResult, ObjectResult, ResultHeader, SelectExpr,
+    codec::SelectResult, object_result, MutateResult, ObjectResult, ResultHeader,
     SelectResult as SelectResultRaw,
 };
 use common_error::prelude::ErrorExt;
-use common_error::status_code::StatusCode;
-use query::Output;
 
-use crate::server::grpc::{select::to_object_result, server::PROTOCOL_VERSION};
-use crate::{error::Result, error::UnsupportedExprSnafu, instance::InstanceRef};
-
-#[derive(Clone)]
-pub struct BatchHandler {
-    instance: InstanceRef,
-}
-
-impl BatchHandler {
-    pub fn new(instance: InstanceRef) -> Self {
-        Self { instance }
-    }
-
-    pub async fn batch(&self, batch_req: BatchRequest) -> Result<BatchResponse> {
-        let mut batch_resp = BatchResponse::default();
-        let mut db_resp = DatabaseResponse::default();
-        let databases = batch_req.databases;
-
-        for req in databases {
-            let exprs = req.exprs;
-
-            for obj_expr in exprs {
-                let object_resp = match obj_expr.expr {
-                    Some(object_expr::Expr::Insert(insert_expr)) => {
-                        self.handle_insert(insert_expr).await
-                    }
-                    Some(object_expr::Expr::Select(select_expr)) => {
-                        self.handle_select(select_expr).await
-                    }
-                    other => {
-                        return UnsupportedExprSnafu {
-                            name: format!("{:?}", other),
-                        }
-                        .fail();
-                    }
-                };
-
-                db_resp.results.push(object_resp);
-            }
-        }
-        batch_resp.databases.push(db_resp);
-        Ok(batch_resp)
-    }
-
-    pub async fn handle_insert(&self, insert_expr: InsertExpr) -> ObjectResult {
-        match self.instance.execute_grpc_insert(insert_expr).await {
-            Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
-                .status_code(StatusCode::Success as u32)
-                .mutate_result(rows as u32, 0)
-                .build(),
-            Err(err) => {
-                // TODO(fys): failure count
-                build_err_result(&err)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub async fn handle_select(&self, select_expr: SelectExpr) -> ObjectResult {
-        let expr = match select_expr.expr {
-            Some(expr) => expr,
-            None => return ObjectResult::default(),
-        };
-        match expr {
-            select_expr::Expr::Sql(sql) => {
-                let result = self.instance.execute_sql(&sql).await;
-                to_object_result(result).await
-            }
-        }
-    }
-}
+pub const PROTOCOL_VERSION: u32 = 1;
 
 pub type Success = u32;
 pub type Failure = u32;
@@ -165,9 +92,8 @@ mod tests {
     use api::v1::{object_result, MutateResult};
     use common_error::status_code::StatusCode;
 
-    use super::{build_err_result, ObjectResultBuilder};
-    use crate::server::grpc::handler::UnsupportedExprSnafu;
-    use crate::server::grpc::server::PROTOCOL_VERSION;
+    use super::*;
+    use crate::error::UnsupportedExprSnafu;
 
     #[test]
     fn test_object_result_builder() {

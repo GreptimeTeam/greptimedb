@@ -16,9 +16,9 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 
-use crate::error as server_error;
-use crate::mysql::error::{self, Result};
-use crate::mysql::mysql_instance::{MysqlInstanceRef, MysqlInstanceShim};
+use crate::error::{self, Result};
+use crate::mysql::handler::MysqlInstanceShim;
+use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::Server;
 
 pub struct MysqlServer {
@@ -32,14 +32,14 @@ pub struct MysqlServer {
     // A handle holding the TCP accepting task.
     join_handle: Option<JoinHandle<()>>,
 
-    mysql_handler: MysqlInstanceRef,
+    query_handler: SqlQueryHandlerRef,
     io_runtime: Arc<Runtime>,
 }
 
 impl MysqlServer {
     /// Creates a new MySQL server with provided [MysqlInstance] and [Runtime].
     pub fn create_server(
-        mysql_handler: MysqlInstanceRef,
+        query_handler: SqlQueryHandlerRef,
         io_runtime: Arc<Runtime>,
     ) -> Box<dyn Server> {
         let (abort_handle, registration) = AbortHandle::new_pair();
@@ -47,7 +47,7 @@ impl MysqlServer {
             abort_handle,
             abort_registration: Some(registration),
             join_handle: None,
-            mysql_handler,
+            query_handler,
             io_runtime,
         })
     }
@@ -59,21 +59,22 @@ impl MysqlServer {
                 err_msg: format!("Failed to bind addr {}", addr),
             })?;
         // get actually bond addr in case input addr use port 0
-        let listener_addr = listener.local_addr()?;
-        Ok((TcpListenerStream::new(listener), listener_addr))
+        let addr = listener.local_addr()?;
+        info!("MySQL server is bound to {}", addr);
+        Ok((TcpListenerStream::new(listener), addr))
     }
 
     fn accept(&self, accepting_stream: Abortable<TcpListenerStream>) -> impl Future<Output = ()> {
         let io_runtime = self.io_runtime.clone();
-        let mysql_handler = self.mysql_handler.clone();
+        let query_handler = self.query_handler.clone();
         accepting_stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
-            let mysql_handler = mysql_handler.clone();
+            let query_handler = query_handler.clone();
             async move {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error),
                     Ok(io_stream) => {
-                        if let Err(error) = Self::handle(io_stream, io_runtime, mysql_handler) {
+                        if let Err(error) = Self::handle(io_stream, io_runtime, query_handler) {
                             error!("Unexpected error when handling TcpStream: {:?}", error);
                         };
                     }
@@ -85,10 +86,10 @@ impl MysqlServer {
     pub fn handle(
         stream: TcpStream,
         io_runtime: Arc<Runtime>,
-        mysql_handler: MysqlInstanceRef,
+        query_handler: SqlQueryHandlerRef,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
-        let shim = MysqlInstanceShim::create(mysql_handler);
+        let shim = MysqlInstanceShim::create(query_handler);
         // TODO(LFC): Relate "handler" with MySQL session; also deal with panics there.
         let _handler = io_runtime.spawn(AsyncMysqlIntermediary::run_on(shim, stream));
         Ok(())
@@ -97,7 +98,7 @@ impl MysqlServer {
 
 #[async_trait]
 impl Server for MysqlServer {
-    async fn shutdown(&mut self) -> server_error::Result<()> {
+    async fn shutdown(&mut self) -> Result<()> {
         match self.join_handle.take() {
             Some(join_handle) => {
                 self.abort_handle.abort();
@@ -112,17 +113,14 @@ impl Server for MysqlServer {
             None => error::InternalSnafu {
                 err_msg: "MySQL server is not started.",
             }
-            .fail()
-            .context(server_error::MysqlServerSnafu),
+            .fail()?,
         }
     }
 
-    async fn start(&mut self, listening: SocketAddr) -> server_error::Result<SocketAddr> {
+    async fn start(&mut self, listening: SocketAddr) -> Result<SocketAddr> {
         match self.abort_registration.take() {
             Some(registration) => {
-                let (stream, listener) = Self::bind(listening)
-                    .await
-                    .context(server_error::MysqlServerSnafu)?;
+                let (stream, listener) = Self::bind(listening).await?;
                 let stream = Abortable::new(stream, registration);
                 self.join_handle = Some(tokio::spawn(self.accept(stream)));
                 Ok(listener)
@@ -130,8 +128,7 @@ impl Server for MysqlServer {
             None => error::InternalSnafu {
                 err_msg: "MySQL server has been started.",
             }
-            .fail()
-            .context(server_error::MysqlServerSnafu),
+            .fail()?,
         }
     }
 }
