@@ -24,7 +24,7 @@ where
 {
     greater: BinaryHeap<Reverse<T>>,
     not_greater: BinaryHeap<T>,
-    n: u32,
+    n: u64,
     p: f64,
 }
 

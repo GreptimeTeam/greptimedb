@@ -18,19 +18,20 @@ use snafu::{OptionExt, ResultExt};
 #[derive(Debug, Default)]
 pub struct Stddev<T>
 where
-    T: Primitive + AsPrimitive<f64> + std::iter::Sum<T>,
+    T: Primitive + AsPrimitive<f64>+std::iter::Sum,
 {
     values: Vec<T>,
 }
 
 impl<T> Stddev<T>
 where
-    T: Primitive + AsPrimitive<f64> + std::iter::Sum<T>,
+    T: Primitive + AsPrimitive<f64>+std::iter::Sum,
 {
     fn push(&mut self, value: T) {
         self.values.push(value);
     }
     fn mean(&self) -> Option<f64> {
+        // this will overflow
         let sum: T = self.values.clone().into_iter().sum();
         let count = self.values.len();
 
