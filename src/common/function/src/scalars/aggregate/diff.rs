@@ -7,10 +7,9 @@ use common_query::error::{
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datafusion_common::DataFusionError;
-use datatypes::prelude::*;
 use datatypes::value::ListValue;
 use datatypes::vectors::{ConstantVector, ListVector};
-use datatypes::with_match_ordered_primitive_type_id;
+use datatypes::{prelude::*, with_match_primitive_type_id};
 use snafu::{OptionExt, ResultExt};
 
 // https://numpy.org/doc/stable/reference/generated/numpy.diff.html
@@ -92,14 +91,11 @@ where
         if self.values.is_empty() || self.values.len() == 1 {
             return Ok(Value::Null);
         }
-
-        let mut diff = Vec::new();
-        for (i, &value) in self.values.iter().enumerate() {
-            if i != 0 {
-                diff.push(value - self.values[i - 1]);
-            }
-        }
-        let diff = diff.iter().map(|&x| x.into()).collect::<Vec<_>>();
+        let diff = self
+            .values
+            .windows(2)
+            .map(|x| (x[1] - x[0]).into())
+            .collect::<Vec<Value>>();
         let diff = Value::List(ListValue::new(
             Some(Box::new(diff)),
             T::default().into().data_type(),
@@ -117,7 +113,7 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
         let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
             let input_type = &types[0];
-            with_match_ordered_primitive_type_id!(
+            with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
                     Ok(Box::new(Diff::<$S>::default()))
@@ -162,8 +158,11 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
         if input_types.len() != 1 {
             return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
         }
+        // 输出结果是一个数组
         // unwrap is safe because we have checked input_types len must equals 1
-        Ok(input_types.into_iter().next().unwrap())
+        Ok(ConcreteDataType::list_datatype(
+            input_types.into_iter().next().unwrap(),
+        ))
     }
 
     fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
