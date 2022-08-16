@@ -126,17 +126,16 @@ where
 
         let not_greater = *self.not_greater.peek().unwrap();
         let percentile = if self.greater.is_empty() {
-            not_greater.into()
+            NumCast::from(not_greater).unwrap()
         } else {
             let greater = self.greater.peek().unwrap();
             let fract = (((self.n - 1) as f64) * self.p / 100_f64).fract();
             let not_greater_v: f64 = NumCast::from(not_greater).unwrap();
             let greater_v: f64 = NumCast::from(greater.0).unwrap();
-            let percentile: T =
-                NumCast::from(not_greater_v * (1.0 - fract) + greater_v * fract).unwrap();
-            percentile.into()
+            let percentile = not_greater_v * (1.0 - fract) + greater_v * fract;
+            percentile
         };
-        Ok(percentile)
+        Ok(Value::from(percentile))
     }
 }
 
@@ -195,11 +194,17 @@ impl AggregateFunctionCreator for PercentileAccumulatorCreator {
             return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
         }
         // unwrap is safe because we have checked input_types len must equals 1
-        Ok(input_types.into_iter().next().unwrap())
+        Ok(ConcreteDataType::float64_datatype())
     }
 
     fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
-        Ok(vec![ConcreteDataType::list_datatype(self.output_type()?)])
+        let input_types = self.input_types()?;
+        if input_types.len() != 1 {
+            return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
+        }
+        Ok(vec![ConcreteDataType::list_datatype(
+            input_types.into_iter().next().unwrap(),
+        )])
     }
 }
 
@@ -234,7 +239,7 @@ mod test {
         };
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
         assert!(percentile.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(42), percentile.evaluate().unwrap());
+        assert_eq!(Value::from(42.0_f64), percentile.evaluate().unwrap());
 
         // test update one null value
         let mut percentile = Percentile::<i32> {
@@ -258,7 +263,7 @@ mod test {
             Some(2),
         ]))];
         assert!(percentile.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(2), percentile.evaluate().unwrap());
+        assert_eq!(Value::from(2_f64), percentile.evaluate().unwrap());
 
         // test update null-value batch
         let mut percentile = Percentile::<i32> {
@@ -272,7 +277,7 @@ mod test {
             Some(4),
         ]))];
         assert!(percentile.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(4), percentile.evaluate().unwrap());
+        assert_eq!(Value::from(4_f64), percentile.evaluate().unwrap());
 
         // test update with constant vector
         let mut percentile = Percentile::<i32> {
@@ -284,7 +289,7 @@ mod test {
             10,
         ))];
         assert!(percentile.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(4), percentile.evaluate().unwrap());
+        assert_eq!(Value::from(4_f64), percentile.evaluate().unwrap());
 
         // test left border
         let mut percentile = Percentile::<i32> {
@@ -297,7 +302,7 @@ mod test {
             Some(2),
         ]))];
         assert!(percentile.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(-1), percentile.evaluate().unwrap());
+        assert_eq!(Value::from(-1.0_f64), percentile.evaluate().unwrap());
 
         // test medium
         let mut percentile = Percentile::<i32> {
@@ -310,7 +315,7 @@ mod test {
             Some(2),
         ]))];
         assert!(percentile.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(1), percentile.evaluate().unwrap());
+        assert_eq!(Value::from(1.0_f64), percentile.evaluate().unwrap());
 
         // test right border
         let mut percentile = Percentile::<i32> {
@@ -323,6 +328,6 @@ mod test {
             Some(2),
         ]))];
         assert!(percentile.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(2), percentile.evaluate().unwrap());
+        assert_eq!(Value::from(2.0_f64), percentile.evaluate().unwrap());
     }
 }
