@@ -10,6 +10,8 @@ use datatypes::vectors::ConstantVector;
 use datatypes::{prelude::*, with_match_primitive_type_id};
 use snafu::ResultExt;
 
+// https://numpy.org/doc/stable/reference/generated/numpy.argmax.html
+// return the index of the max value
 #[derive(Debug, Default)]
 pub struct Argmax<T>
 where
@@ -31,18 +33,11 @@ where
     }
 }
 
-// UDAFs are built using the trait `Accumulator`, that offers DataFusion the necessary functions
-// to use them.
 impl<T> Accumulator for Argmax<T>
 where
     T: Primitive + PartialOrd,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
-    // This function serializes our state to `ScalarValue`, which DataFusion uses to pass this
-    // state between execution stages. Note that this can be arbitrary data.
-    //
-    // The `ScalarValue`s returned here will be passed in as argument `states: &[VectorRef]` to
-    // `merge_batch` function.
     fn state(&self) -> Result<Vec<Value>> {
         match self.max {
             Some(max) => Ok(vec![max.into(), self.n.into()]),
@@ -50,15 +45,11 @@ where
         }
     }
 
-    // how to deal with the empty
-    // DataFusion calls this function to update the accumulator's state for a batch of inputs rows.
-    // It is expected this function to update the accumulator's state.
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<()> {
         if values.is_empty() {
             return Ok(());
         };
 
-        // This is a unary accumulator, so only one column is provided.
         let column = &values[0];
         let column: &<T as Scalar>::VectorType = if column.is_const() {
             let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
@@ -74,17 +65,15 @@ where
         Ok(())
     }
 
-    // DataFusion executes accumulators in partitions. In some execution stage, DataFusion will
-    // merge states from other accumulators (returned by `state()` method).
     fn merge_batch(&mut self, states: &[VectorRef]) -> Result<()> {
         if states.is_empty() {
             return Ok(());
         };
-        // ensure two
-        assert!(states.len() == 2);
-        // The states here are returned by the `state` method. Since we only returned a vector
-        // with one value in that method, `states[0]` is fine.
-        // for argmax we use two vector
+
+        if states.len() != 2 {
+            return Err(datafusion_states_error()).context(ExecuteFunctionSnafu)?;
+        }
+
         let max = &states[0];
         let index = &states[1];
         let max: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(max) };
@@ -97,7 +86,6 @@ where
         Ok(())
     }
 
-    // DataFusion expects this function to return the final value of this aggregator.
     fn evaluate(&self) -> Result<Value> {
         match self.max {
             Some(_) => Ok(self.n.into()),
@@ -161,11 +149,10 @@ impl AggregateFunctionCreator for ArgmaxAccumulatorCreator {
 
     fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
         let input_types = self.input_types()?;
-        // 确保输入的类型一定是1
+
         if input_types.len() != 1 {
             return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
         }
-        // unwrap is safe because we have checked input_types len must equals 1
 
         Ok(vec![
             input_types.into_iter().next().unwrap(),
@@ -179,6 +166,10 @@ fn datafusion_internal_error() -> DataFusionError {
         "Illegal input_types status, check if DataFusion has changed its UDAF execution logic."
             .to_string(),
     )
+}
+
+fn datafusion_states_error() -> DataFusionError {
+    DataFusionError::Internal("Illegal status, check if status is right.".to_string())
 }
 
 #[cfg(test)]

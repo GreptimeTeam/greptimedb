@@ -100,6 +100,10 @@ where
             return Ok(());
         };
 
+        if values.len() != 1 {
+            return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
+        }
+
         // This is a unary accumulator, so only one column is provided.
         let column = &values[0];
         let column: &<T as Scalar>::VectorType = if column.is_const() {

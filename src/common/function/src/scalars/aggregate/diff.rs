@@ -52,6 +52,10 @@ where
             return Ok(());
         };
 
+        if values.len() != 1 {
+            return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
+        }
+
         let column = &values[0];
         let column: &<T as Scalar>::VectorType = if column.is_const() {
             let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
