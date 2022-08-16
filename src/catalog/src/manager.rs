@@ -6,6 +6,7 @@ use common_recordbatch::RecordBatch;
 use common_telemetry::{debug, info};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
+use futures_util::lock::Mutex;
 use futures_util::StreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
@@ -33,6 +34,7 @@ pub struct LocalCatalogManager {
     catalogs: Arc<MemoryCatalogList>,
     engine: TableEngineRef,
     next_table_id: AtomicU32,
+    lock: Mutex<()>,
 }
 
 impl LocalCatalogManager {
@@ -50,6 +52,7 @@ impl LocalCatalogManager {
             catalogs: memory_catalog_list,
             engine,
             next_table_id: AtomicU32::new(0),
+            lock: Mutex::new(()),
         })
     }
 
@@ -253,6 +256,7 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+        let _lock = self.lock.lock().await;
         let catalog_name = request
             .catalog
             .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
