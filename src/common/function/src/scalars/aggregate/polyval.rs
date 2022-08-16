@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -11,31 +12,26 @@ use datatypes::prelude::*;
 use datatypes::value::ListValue;
 use datatypes::vectors::{ConstantVector, ListVector};
 use datatypes::with_match_ordered_primitive_type_id;
-use num_traits::Pow;
+use num_traits::{AsPrimitive, Pow};
 use snafu::{OptionExt, ResultExt};
 
 // https://numpy.org/doc/stable/reference/generated/numpy.polyval.html
 #[derive(Debug, Default)]
-pub struct Polyval<T>
+pub struct Polyval<T, PolyT>
 where
-    T: Primitive
-        + std::ops::Mul<Output = T>
-        + std::ops::Add<Output = T>
-        + Pow<u32, Output = T>
-        + std::ops::AddAssign,
+    T: Primitive + AsPrimitive<PolyT>,
+    PolyT: Primitive + std::ops::Mul<Output = PolyT> + Pow<usize, Output = PolyT>,
 {
     values: Vec<T>,
     x: T,
-    n: u32,
+    n: usize,
+    _phantom: PhantomData<PolyT>,
 }
 
-impl<T> Polyval<T>
+impl<T, PolyT> Polyval<T, PolyT>
 where
-    T: Primitive
-        + std::ops::Mul<Output = T>
-        + std::ops::Add<Output = T>
-        + Pow<u32, Output = T>
-        + std::ops::AddAssign,
+    T: Primitive + AsPrimitive<PolyT>,
+    PolyT: Primitive + std::ops::Mul<Output = PolyT> + Pow<usize, Output = PolyT>,
 {
     fn push(&mut self, value: T) {
         self.values.push(value);
@@ -43,15 +39,15 @@ where
     }
 }
 
-impl<T> Accumulator for Polyval<T>
+impl<T, PolyT> Accumulator for Polyval<T, PolyT>
 where
-    T: Primitive
-        + std::ops::Mul<Output = T>
-        + std::ops::Add<Output = T>
-        + Pow<u32, Output = T>
-        + std::ops::AddAssign,
+    T: Primitive + AsPrimitive<PolyT>,
+    PolyT: Primitive
+        + std::ops::Mul<Output = PolyT>
+        + Pow<usize, Output = PolyT>
+        + std::iter::Sum<PolyT>,
     for<'a> T: Scalar<RefType<'a> = T>,
-    T: std::iter::Sum,
+    for<'a> PolyT: Scalar<RefType<'a> = PolyT>,
 {
     fn state(&self) -> Result<Vec<Value>> {
         let nums = self
@@ -59,14 +55,10 @@ where
             .iter()
             .map(|&n| n.into())
             .collect::<Vec<Value>>();
-        Ok(vec![
-            Value::List(ListValue::new(
-                Some(Box::new(nums)),
-                T::default().into().data_type(),
-            )),
-            self.x.into(),
-            Value::from(self.n),
-        ])
+        Ok(vec![Value::List(ListValue::new(
+            Some(Box::new(nums)),
+            T::default().into().data_type(),
+        ))])
     }
 
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<()> {
@@ -117,12 +109,12 @@ where
         if self.n == 0 {
             return Ok(Value::Null);
         }
-        let polyval = self
+        let polyval: PolyT = self
             .values
             .iter()
             .enumerate()
-            .map(|(i, &value)| value * (self.x.pow(self.n - 1 - (i as u32))))
-            .sum::<T>();
+            .map(|(i, &value)| value.as_() * (self.x.as_().pow(self.n - 1 - i)))
+            .sum();
         Ok(polyval.into())
     }
 }
@@ -139,7 +131,7 @@ impl AggregateFunctionCreator for PolyvalAccumulatorCreator {
             with_match_ordered_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Polyval::<$S>::default()))
+                    Ok(Box::new(Polyval::<$S,<$S as Primitive>::LargestType>::default()))
                 },
                 {
                     let err_msg = format!(
@@ -209,7 +201,7 @@ mod test {
     #[test]
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
-        let mut polyval = Polyval::<i32> {
+        let mut polyval = Polyval::<i32, i64> {
             x: 5,
             ..Default::default()
         };
@@ -218,16 +210,16 @@ mod test {
         assert_eq!(Value::Null, polyval.evaluate().unwrap());
 
         // test update one not-null value
-        let mut polyval = Polyval::<i32> {
+        let mut polyval = Polyval::<i32, i64> {
             x: 5,
             ..Default::default()
         };
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(3)]))];
         assert!(polyval.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(3), polyval.evaluate().unwrap());
+        assert_eq!(Value::Int64(3), polyval.evaluate().unwrap());
 
         // test update one null value
-        let mut polyval = Polyval::<i32> {
+        let mut polyval = Polyval::<i32, i64> {
             x: 5,
             ..Default::default()
         };
@@ -238,7 +230,7 @@ mod test {
         assert_eq!(Value::Null, polyval.evaluate().unwrap());
 
         // test update no null-value batch
-        let mut polyval = Polyval::<i32> {
+        let mut polyval = Polyval::<i32, i64> {
             x: 5,
             ..Default::default()
         };
@@ -248,10 +240,10 @@ mod test {
             Some(1),
         ]))];
         assert!(polyval.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(76), polyval.evaluate().unwrap());
+        assert_eq!(Value::Int64(76), polyval.evaluate().unwrap());
 
         // test update null-value batch
-        let mut polyval = Polyval::<i32> {
+        let mut polyval = Polyval::<i32, i64> {
             x: 5,
             ..Default::default()
         };
@@ -262,10 +254,10 @@ mod test {
             Some(1),
         ]))];
         assert!(polyval.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(76), polyval.evaluate().unwrap());
+        assert_eq!(Value::Int64(76), polyval.evaluate().unwrap());
 
         // test update with constant vector
-        let mut polyval = Polyval::<i32> {
+        let mut polyval = Polyval::<i32, i64> {
             x: 5,
             ..Default::default()
         };
@@ -274,6 +266,6 @@ mod test {
             10,
         ))];
         assert!(polyval.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(4), polyval.evaluate().unwrap());
+        assert_eq!(Value::Int64(4), polyval.evaluate().unwrap());
     }
 }
