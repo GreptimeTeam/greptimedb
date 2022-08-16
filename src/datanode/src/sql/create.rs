@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use catalog::RegisterTableRequest;
 use common_telemetry::tracing::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -35,14 +36,16 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
                 table_name: table_name.clone(),
             })?;
 
+        let register_req = RegisterTableRequest {
+            catalog: catalog_name,
+            schema: schema_name,
+            table_name: table_name.clone(),
+            table_id,
+            table,
+        };
+
         self.catalog_manager
-            .register_table(
-                catalog_name,
-                schema_name,
-                table_name.clone(),
-                table_id,
-                table,
-            )
+            .register_table(register_req)
             .await
             .context(InsertSystemCatalogSnafu)?;
         info!("Successfully created table: {:?}", table_name);
@@ -202,11 +205,9 @@ fn sql_data_type_to_concrete_data_type(t: &SqlDataType) -> Result<ConcreteDataTy
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use sql::ast::{DataType, Ident};
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
-    use store_api::storage::consts;
     use table_engine::config::EngineConfig;
     use table_engine::engine::MitoEngine;
     use table_engine::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
@@ -226,119 +227,47 @@ mod tests {
         SqlHandler::new(mock_engine, catalog_manager)
     }
 
+    fn sql_to_statement(sql: &str) -> CreateTable {
+        let mut res = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, res.len());
+        match res.pop().unwrap() {
+            Statement::Create(c) => c,
+            _ => {
+                panic!("Unexpected statement!")
+            }
+        }
+    }
+
     #[tokio::test]
     pub async fn test_create_to_request() {
         let handler = create_mock_sql_handler().await;
-
-        let constraints = vec![
-            TableConstraint::Unique {
-                name: Some(Ident::new(consts::TIME_INDEX_NAME)),
-                columns: vec![Ident::new("ts")],
-                is_primary: false,
-            },
-            TableConstraint::Unique {
-                name: None,
-                columns: vec![Ident::new("host"), Ident::new("ts")],
-                is_primary: true,
-            },
-        ];
-
-        let parsed_stmt = CreateTable {
-            if_not_exists: false,
-            table_id: 0,
-            name: ObjectName(vec![Ident::new("demo_table")]),
-            columns: vec![
-                ColumnDef {
-                    name: Ident::new("host"),
-                    data_type: DataType::String,
-                    collation: None,
-                    options: vec![],
-                },
-                ColumnDef {
-                    name: Ident::new("ts"),
-                    data_type: DataType::BigInt(None),
-                    collation: None,
-                    options: vec![],
-                },
-            ],
-            engine: "".to_string(),
-            constraints,
-            options: vec![],
-        };
-
+        let parsed_stmt = sql_to_statement("create table demo_table( host string, ts bigint, cpu double default 0, memory double, TIME INDEX (ts), PRIMARY KEY(ts, host)) engine=mito with(regions=1);");
         let c = handler.create_to_request(42, parsed_stmt).unwrap();
         assert_eq!("demo_table", c.table_name);
         assert_eq!(42, c.id);
         assert!(c.schema_name.is_none());
         assert!(c.catalog_name.is_none());
         assert!(!c.create_if_not_exists);
-        assert_eq!(vec![0, 1], c.primary_key_indices);
+        assert_eq!(vec![1, 0], c.primary_key_indices);
         assert_eq!(1, c.schema.timestamp_index().unwrap());
-        assert_eq!(2, c.schema.column_schemas().len());
+        assert_eq!(4, c.schema.column_schemas().len());
     }
 
-    /// Time index not specified in specified
+    /// Time index not specified in sql
     #[tokio::test]
     pub async fn test_time_index_not_specified() {
         let handler = create_mock_sql_handler().await;
-        let constraints = vec![TableConstraint::Unique {
-            name: None,
-            columns: vec![Ident::new("host"), Ident::new("ts")],
-            is_primary: true,
-        }];
-
-        let parsed_stmt = CreateTable {
-            if_not_exists: false,
-            table_id: 0,
-            name: ObjectName(vec![Ident::new("demo_table")]),
-            columns: vec![
-                ColumnDef {
-                    name: Ident::new("host"),
-                    data_type: DataType::String,
-                    collation: None,
-                    options: vec![],
-                },
-                ColumnDef {
-                    name: Ident::new("ts"),
-                    data_type: DataType::BigInt(None),
-                    collation: None,
-                    options: vec![],
-                },
-            ],
-            engine: "".to_string(),
-            constraints,
-            options: vec![],
-        };
-
+        let parsed_stmt = sql_to_statement("create table demo_table( host string, ts bigint, cpu double default 0, memory double, PRIMARY KEY(ts, host)) engine=mito with(regions=1);");
         let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
         assert_matches!(error, Error::CreateSchema { .. });
     }
 
-    /// If primary key is not speicified, time index should be used as primary key.  
+    /// If primary key is not specified, time index should be used as primary key.  
     #[tokio::test]
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;
 
-        let constraints = vec![TableConstraint::Unique {
-            name: Some(Ident::new(consts::TIME_INDEX_NAME)),
-            columns: vec![Ident::new("ts")],
-            is_primary: false,
-        }];
-
-        let parsed_stmt = CreateTable {
-            if_not_exists: false,
-            table_id: 0,
-            name: ObjectName(vec![Ident::new("demo_table")]),
-            columns: vec![ColumnDef {
-                name: Ident::new("ts"),
-                data_type: DataType::BigInt(None),
-                collation: None,
-                options: vec![],
-            }],
-            engine: "".to_string(),
-            constraints,
-            options: vec![],
-        };
+        let parsed_stmt = sql_to_statement("create table demo_table( host string, ts bigint, cpu double default 0, memory double, TIME INDEX (ts)) engine=mito with(regions=1);");
 
         let c = handler.create_to_request(42, parsed_stmt).unwrap();
         assert_eq!(1, c.primary_key_indices.len());
@@ -352,20 +281,10 @@ mod tests {
     #[tokio::test]
     pub async fn test_key_not_found() {
         let handler = create_mock_sql_handler().await;
-        let constraints = vec![TableConstraint::Unique {
-            name: Some(Ident::new(consts::TIME_INDEX_NAME)),
-            columns: vec![Ident::new("ts")],
-            is_primary: false,
-        }];
-        let parsed_stmt = CreateTable {
-            if_not_exists: false,
-            table_id: 0,
-            name: ObjectName(vec![Ident::new("demo_table")]),
-            columns: vec![],
-            engine: "".to_string(),
-            constraints,
-            options: vec![],
-        };
+
+        let parsed_stmt = sql_to_statement(
+            "create table demo_table( host string, TIME INDEX (ts)) engine=mito with(regions=1);",
+        );
 
         let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
         assert_matches!(error, Error::KeyColumnNotFound { .. });

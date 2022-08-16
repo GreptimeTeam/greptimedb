@@ -361,20 +361,17 @@ impl LogFile {
             let mut chunks = ChunkList::new();
             while let Some(chunk) = chunk_stream.next().await {
                 let chunk = chunk.unwrap();
-                debug!("Read chunk size: {}", chunk.len());
                 chunks.push(chunk);
                 let mut batch = vec![];
                 loop {
                     match EntryImpl::decode(&mut chunks) {
                         Ok(e) => {
-                            debug!("Decode entry: {}", e.id());
                             if e.id() >= start_entry_id {
                                 batch.push(e);
                             }
                         }
                         Err(Error::DecodeAgain { .. }) => {
                             // no more data for decoding
-                            debug!("Decode again");
                             break;
                         }
                         Err(e) => {

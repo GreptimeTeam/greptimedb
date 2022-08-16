@@ -67,15 +67,22 @@ pub trait CatalogManager: CatalogList {
     /// Returns next available table id.
     fn next_table_id(&self) -> TableId;
 
-    /// Registers a table given given catalog/schema to catalog manager.
-    async fn register_table(
-        &self,
-        catalog: Option<String>,
-        schema: Option<String>,
-        table_name: String,
-        table_id: TableId,
-        table: TableRef,
-    ) -> error::Result<usize>;
+    /// Registers a table given given catalog/schema to catalog manager,
+    /// returns table registered.
+    async fn register_table(&self, request: RegisterTableRequest) -> error::Result<usize>;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;
+
+pub struct RegisterTableRequest {
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub table_name: String,
+    pub table_id: TableId,
+    pub table: TableRef,
+}
+
+/// Formats table fully-qualified name
+pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {
+    format!("{}.{}.{}", catalog, schema, table)
+}

@@ -25,7 +25,9 @@ use table::{Table, TableRef};
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use crate::error::InsertTableRecordSnafu;
 use crate::system::{EntryType, SystemCatalogTable, TableEntryValue};
-use crate::{CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef};
+use crate::{
+    format_full_table_name, CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef,
+};
 
 /// Tables holds all tables created by user.
 pub struct Tables {
@@ -210,7 +212,7 @@ impl SystemCatalog {
         table_name: String,
         table_id: TableId,
     ) -> crate::error::Result<usize> {
-        let full_table_name = format!("{}.{}.{}", catalog, schema, table_name);
+        let full_table_name = format_full_table_name(&catalog, &schema, &table_name);
         let mut columns_values = HashMap::with_capacity(4);
         columns_values.insert(
             "entry_type".to_string(),

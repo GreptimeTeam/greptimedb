@@ -12,7 +12,6 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
-use table::TableRef;
 
 use super::error::Result;
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME};
@@ -24,8 +23,8 @@ use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvid
 use crate::system::{decode_system_catalog, Entry, SystemCatalogTable, TableEntry};
 use crate::tables::SystemCatalog;
 use crate::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, SchemaProvider,
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+    format_full_table_name, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
+    RegisterTableRequest, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -253,39 +252,44 @@ impl CatalogManager for LocalCatalogManager {
         self.next_table_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    async fn register_table(
-        &self,
-        catalog: Option<String>,
-        schema: Option<String>,
-        table_name: String,
-        table_id: TableId,
-        table: TableRef,
-    ) -> Result<usize> {
-        let catalog_name = catalog.unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-        let schema_name = schema.unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+        let catalog_name = request
+            .catalog
+            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
+        let schema_name = request
+            .schema
+            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
 
         let catalog = self
             .catalogs
             .catalog(&catalog_name)
             .context(CatalogNotFoundSnafu {
-                catalog_name: catalog_name.clone(),
+                catalog_name: &catalog_name,
             })?;
-        let schema = catalog.schema(&schema_name).context(SchemaNotFoundSnafu {
-            schema_info: format!("{}.{}", catalog_name, schema_name),
-        })?;
+        let schema = catalog
+            .schema(&schema_name)
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", catalog_name, schema_name),
+            })?;
+
         // TODO(hl): add lock
-        if schema.table_exist(&table_name) {
+        if schema.table_exist(&request.table_name) {
             return TableExistsSnafu {
-                table: format!("{}.{}.{}", catalog_name, schema_name, table_name.clone()),
+                table: format_full_table_name(&catalog_name, &schema_name, &request.table_name),
             }
             .fail();
         }
 
         self.system
-            .register_table(catalog_name, schema_name, table_name.clone(), table_id)
+            .register_table(
+                catalog_name,
+                schema_name,
+                request.table_name.clone(),
+                request.table_id,
+            )
             .await?;
 
-        schema.register_table(table_name, table)?;
+        schema.register_table(request.table_name, request.table)?;
         Ok(1)
     }
 }
