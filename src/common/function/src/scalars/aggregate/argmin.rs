@@ -1,84 +1,115 @@
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use common_query::error::{
-    CreateAccumulatorSnafu, DowncastVectorSnafu, ExecuteFunctionSnafu, FromScalarValueSnafu, Result,
-};
+use common_query::error::{CreateAccumulatorSnafu, ExecuteFunctionSnafu, Result};
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datafusion_common::DataFusionError;
-use datatypes::prelude::*;
-use datatypes::vectors::{ConstantVector, ListVector};
-use datatypes::with_match_ordered_primitive_type_id;
-use snafu::{OptionExt, ResultExt};
+use datatypes::vectors::ConstantVector;
+use datatypes::{prelude::*, with_match_primitive_type_id};
+use snafu::ResultExt;
 
-// https://numpy.org/doc/stable/reference/generated/numpy.argmax.html
 #[derive(Debug, Default)]
 pub struct Argmin<T>
 where
-    T: Primitive + Ord,
+    T: Primitive + PartialOrd,
 {
     min: Option<T>,
+    n: u64,
 }
 
 impl<T> Argmin<T>
 where
-    T: Primitive + Ord,
+    T: Primitive + PartialOrd,
 {
-    fn update(&mut self, value: T) {
-        self.min = self.min.map(|mv| std::cmp::min(mv, value)).or(Some(value));
+    fn update(&mut self, value: T, index: u64) {
+        match self.min {
+            Some(min) => {
+                if let Some(Ordering::Greater) = min.partial_cmp(&value) {
+                    self.min = Some(value);
+                    self.n = index;
+                }
+            }
+            None => {
+                self.min = Some(value);
+                self.n = index;
+            }
+        }
     }
 }
-
+// UDAFs are built using the trait `Accumulator`, that offers DataFusion the necessary functions
+// to use them.
 impl<T> Accumulator for Argmin<T>
 where
-    T: Primitive + Ord,
+    T: Primitive + PartialOrd,
     for<'a> T: Scalar<RefType<'a> = T>,
-    datatypes::prelude::Value: From<Option<T>>,
 {
+    // This function serializes our state to `ScalarValue`, which DataFusion uses to pass this
+    // state between execution stages. Note that this can be arbitrary data.
+    //
+    // The `ScalarValue`s returned here will be passed in as argument `states: &[VectorRef]` to
+    // `merge_batch` function.
     fn state(&self) -> Result<Vec<Value>> {
-        Ok(vec![self.min.into()])
+        match self.min {
+            Some(min) => Ok(vec![min.into(), self.n.into()]),
+            _ => Ok(vec![Value::Null, self.n.into()]),
+        }
     }
 
+    // how to deal with the empty
+    // DataFusion calls this function to update the accumulator's state for a batch of inputs rows.
+    // It is expected this function to update the accumulator's state.
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<()> {
-        let column = values.get(0);
-        if let Some(column) = column {
-            let column: &<T as Scalar>::VectorType = if column.is_const() {
-                let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
-                unsafe { VectorHelper::static_cast(column.inner()) }
-            } else {
-                unsafe { VectorHelper::static_cast(column) }
-            };
-            for v in column.iter_data().flatten() {
-                self.update(v);
-            }
-        };
-        Ok(())
-    }
-
-    fn merge_batch(&mut self, states: &[VectorRef]) -> Result<()> {
-        if states.is_empty() {
+        if values.is_empty() {
             return Ok(());
         };
-        let states = &states[0];
-        let states = states
-            .as_any()
-            .downcast_ref::<ListVector>()
-            .with_context(|| DowncastVectorSnafu {
-                err_msg: format!(
-                    "expect ListVector, got vector type {}",
-                    states.vector_type_name()
-                ),
-            })?;
-        for state in states.values_iter() {
-            let state = state.context(FromScalarValueSnafu)?;
-            self.update_batch(&[state])?
+
+        // This is a unary accumulator, so only one column is provided.
+        let column = &values[0];
+        let column: &<T as Scalar>::VectorType = if column.is_const() {
+            let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
+            unsafe { VectorHelper::static_cast(column.inner()) }
+        } else {
+            unsafe { VectorHelper::static_cast(column) }
+        };
+        for (i, v) in column.iter_data().enumerate() {
+            if let Some(value) = v {
+                self.update(value, i as u64);
+            }
         }
         Ok(())
     }
 
+    // DataFusion executes accumulators in partitions. In some execution stage, DataFusion will
+    // merge states from other accumulators (returned by `state()` method).
+    fn merge_batch(&mut self, states: &[VectorRef]) -> Result<()> {
+        if states.is_empty() {
+            return Ok(());
+        };
+        // ensure two
+        assert!(states.len() == 2);
+        // The states here are returned by the `state` method. Since we only returned a vector
+        // with one value in that method, `states[0]` is fine.
+        // for argmin we use two vector
+        let min = &states[0];
+        let index = &states[1];
+        let min: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(min) };
+        let index: &<u64 as Scalar>::VectorType = unsafe { VectorHelper::static_cast(index) };
+        index
+            .iter_data()
+            .flatten()
+            .zip(min.iter_data().flatten())
+            .for_each(|(i, min)| self.update(min, i));
+        Ok(())
+    }
+
+    // DataFusion expects this function to return the final value of this aggregator.
     fn evaluate(&self) -> Result<Value> {
-        Ok(self.min.into())
+        match self.min {
+            Some(_) => Ok(self.n.into()),
+            _ => Ok(Value::Null),
+        }
     }
 }
 
@@ -91,7 +122,7 @@ impl AggregateFunctionCreator for ArgminAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
         let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
             let input_type = &types[0];
-            with_match_ordered_primitive_type_id!(
+            with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
                     Ok(Box::new(Argmin::<$S>::default()))
@@ -132,16 +163,20 @@ impl AggregateFunctionCreator for ArgminAccumulatorCreator {
     }
 
     fn output_type(&self) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::uint64_datatype())
+    }
+
+    fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
         let input_types = self.input_types()?;
         if input_types.len() != 1 {
             return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
         }
         // unwrap is safe because we have checked input_types len must equals 1
-        Ok(input_types.into_iter().next().unwrap())
-    }
 
-    fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
-        Ok(vec![self.output_type()?])
+        Ok(vec![
+            input_types.into_iter().next().unwrap(),
+            ConcreteDataType::uint64_datatype(),
+        ])
     }
 }
 
@@ -168,7 +203,7 @@ mod test {
         let mut argmin = Argmin::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
         assert!(argmin.update_batch(&v).is_ok());
-        assert_eq!(Value::from(42_i32), argmin.evaluate().unwrap());
+        assert_eq!(Value::from(0_u64), argmin.evaluate().unwrap());
 
         // test update one null value
         let mut argmin = Argmin::<i32>::default();
@@ -186,7 +221,7 @@ mod test {
             Some(3),
         ]))];
         assert!(argmin.update_batch(&v).is_ok());
-        assert_eq!(Value::from(-1_i32), argmin.evaluate().unwrap());
+        assert_eq!(Value::from(0_u64), argmin.evaluate().unwrap());
 
         // test update null-value batch
         let mut argmin = Argmin::<i32>::default();
@@ -196,7 +231,7 @@ mod test {
             Some(4),
         ]))];
         assert!(argmin.update_batch(&v).is_ok());
-        assert_eq!(Value::from(-2_i32), argmin.evaluate().unwrap());
+        assert_eq!(Value::from(0_u64), argmin.evaluate().unwrap());
 
         // test update with constant vector
         let mut argmin = Argmin::<i32>::default();
@@ -205,6 +240,6 @@ mod test {
             10,
         ))];
         assert!(argmin.update_batch(&v).is_ok());
-        assert_eq!(Value::from(4_i32), argmin.evaluate().unwrap());
+        assert_eq!(Value::from(0_u64), argmin.evaluate().unwrap());
     }
 }

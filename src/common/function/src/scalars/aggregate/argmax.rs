@@ -66,8 +66,10 @@ where
         } else {
             unsafe { VectorHelper::static_cast(column) }
         };
-        for (i, v) in column.iter_data().flatten().enumerate() {
-            self.update(v, i as u64);
+        for (i, v) in column.iter_data().enumerate() {
+            if let Some(value) = v {
+                self.update(value, i as u64);
+            }
         }
         Ok(())
     }
@@ -98,7 +100,7 @@ where
     // DataFusion expects this function to return the final value of this aggregator.
     fn evaluate(&self) -> Result<Value> {
         match self.max {
-            Some(max) => Ok(max.into()),
+            Some(_) => Ok(self.n.into()),
             _ => Ok(Value::Null),
         }
     }
@@ -195,7 +197,7 @@ mod test {
         let mut argmax = Argmax::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
         assert!(argmax.update_batch(&v).is_ok());
-        assert_eq!(Value::from(42_i32), argmax.evaluate().unwrap());
+        assert_eq!(Value::from(0_u64), argmax.evaluate().unwrap());
 
         // test update one null value
         let mut argmax = Argmax::<i32>::default();
@@ -213,7 +215,7 @@ mod test {
             Some(3),
         ]))];
         assert!(argmax.update_batch(&v).is_ok());
-        assert_eq!(Value::from(3_i32), argmax.evaluate().unwrap());
+        assert_eq!(Value::from(2_u64), argmax.evaluate().unwrap());
 
         // test update null-value batch
         let mut argmax = Argmax::<i32>::default();
@@ -223,7 +225,7 @@ mod test {
             Some(4),
         ]))];
         assert!(argmax.update_batch(&v).is_ok());
-        assert_eq!(Value::from(4_i32), argmax.evaluate().unwrap());
+        assert_eq!(Value::from(2_u64), argmax.evaluate().unwrap());
 
         // test update with constant vector
         let mut argmax = Argmax::<i32>::default();
@@ -232,6 +234,6 @@ mod test {
             10,
         ))];
         assert!(argmax.update_batch(&v).is_ok());
-        assert_eq!(Value::from(4_i32), argmax.evaluate().unwrap());
+        assert_eq!(Value::from(0_u64), argmax.evaluate().unwrap());
     }
 }
