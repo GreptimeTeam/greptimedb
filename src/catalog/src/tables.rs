@@ -1,7 +1,6 @@
 // The `tables` table in system catalog keeps a record of all tables created by user.
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -10,20 +9,19 @@ use async_stream::stream;
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorBuilder};
+use datatypes::prelude::{ConcreteDataType, VectorBuilder};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{BinaryVector, Int64Vector, UInt8Vector, VectorRef};
+use datatypes::vectors::VectorRef;
 use futures::Stream;
 use snafu::ResultExt;
 use table::engine::TableEngineRef;
 use table::metadata::TableId;
-use table::requests::InsertRequest;
 use table::{Table, TableRef};
 
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use crate::error::InsertTableRecordSnafu;
-use crate::system::{EntryType, SystemCatalogTable, TableEntryValue};
+use crate::system::{build_table_insert_request, SystemCatalogTable};
 use crate::{
     format_full_table_name, CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef,
 };
@@ -212,38 +210,7 @@ impl SystemCatalog {
         table_id: TableId,
     ) -> crate::error::Result<usize> {
         let full_table_name = format_full_table_name(&catalog, &schema, &table_name);
-        let mut columns_values = HashMap::with_capacity(4);
-        columns_values.insert(
-            "entry_type".to_string(),
-            Arc::new(UInt8Vector::from_vec(vec![EntryType::Table as u8])) as _,
-        );
-
-        columns_values.insert(
-            "key".to_string(),
-            Arc::new(BinaryVector::from_slice(&[full_table_name.as_bytes()])) as _,
-        );
-
-        columns_values.insert(
-            "timestamp".to_string(),
-            Arc::new(Int64Vector::from_vec(vec![
-                common_time::util::current_timestamp(),
-            ])) as _,
-        );
-
-        columns_values.insert(
-            "value".to_string(),
-            Arc::new(BinaryVector::from_slice(&[serde_json::to_string(
-                &TableEntryValue { table_id },
-            )
-            .unwrap()
-            .as_bytes()])) as _,
-        );
-
-        let request = InsertRequest {
-            table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
-            columns_values,
-        };
-
+        let request = build_table_insert_request(full_table_name, table_id);
         self.information_schema
             .system
             .insert(request)

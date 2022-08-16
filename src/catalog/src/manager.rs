@@ -21,7 +21,10 @@ use crate::error::{
     SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
 use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use crate::system::{decode_system_catalog, Entry, SystemCatalogTable, TableEntry};
+use crate::system::{
+    decode_system_catalog, Entry, SystemCatalogTable, TableEntry, ENTRY_TYPE_INDEX, KEY_INDEX,
+    VALUE_INDEX,
+};
 use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
@@ -108,7 +111,7 @@ impl LocalCatalogManager {
     /// in system catalog table.
     async fn handle_system_catalog_entries(&self, records: RecordBatch) -> Result<TableId> {
         ensure!(
-            records.df_recordbatch.columns().len() >= 4,
+            records.df_recordbatch.columns().len() >= 6,
             SystemCatalogSnafu {
                 msg: format!(
                     "Length mismatch: {}",
@@ -119,17 +122,23 @@ impl LocalCatalogManager {
 
         let entry_type = UInt8Vector::try_from_arrow_array(&records.df_recordbatch.columns()[0])
             .with_context(|_| SystemCatalogTypeMismatchSnafu {
-                data_type: records.df_recordbatch.columns()[0].data_type().clone(),
+                data_type: records.df_recordbatch.columns()[ENTRY_TYPE_INDEX]
+                    .data_type()
+                    .clone(),
             })?;
 
         let key = BinaryVector::try_from_arrow_array(&records.df_recordbatch.columns()[1])
             .with_context(|_| SystemCatalogTypeMismatchSnafu {
-                data_type: records.df_recordbatch.columns()[1].data_type().clone(),
+                data_type: records.df_recordbatch.columns()[KEY_INDEX]
+                    .data_type()
+                    .clone(),
             })?;
 
         let value = BinaryVector::try_from_arrow_array(&records.df_recordbatch.columns()[3])
             .with_context(|_| SystemCatalogTypeMismatchSnafu {
-                data_type: records.df_recordbatch.columns()[3].data_type().clone(),
+                data_type: records.df_recordbatch.columns()[VALUE_INDEX]
+                    .data_type()
+                    .clone(),
             })?;
 
         let mut max_table_id = 0;
