@@ -26,10 +26,7 @@ where
     T: Primitive + Ord,
 {
     fn update(&mut self, value: T) {
-        self.min = self
-            .min
-            .map(|mv| std::cmp::min(mv, value))
-            .or_else(|| Some(value));
+        self.min = self.min.map(|mv| std::cmp::min(mv, value)).or(Some(value));
     }
 }
 
@@ -45,7 +42,7 @@ where
 
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<()> {
         let column = values.get(0);
-        column.map(|column| {
+        if let Some(column) = column {
             let column: &<T as Scalar>::VectorType = if column.is_const() {
                 let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
                 unsafe { VectorHelper::static_cast(column.inner()) }
@@ -55,7 +52,7 @@ where
             for v in column.iter_data().flatten() {
                 self.update(v);
             }
-        });
+        };
         Ok(())
     }
 
