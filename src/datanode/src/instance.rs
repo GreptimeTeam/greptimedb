@@ -297,4 +297,29 @@ mod tests {
             _ => unreachable!(),
         }
     }
+
+    #[tokio::test]
+    pub async fn test_execute_create() {
+        common_telemetry::init_default_ut_logging();
+        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+        let instance = Instance::new(&opts).await.unwrap();
+        instance.start().await.unwrap();
+        instance.create_test_table().await.unwrap();
+
+        let output = instance
+            .execute_sql(
+                r#"create table test_table( 
+                            host string, 
+                            ts bigint, 
+                            cpu double default 0, 
+                            memory double, 
+                            TIME INDEX (ts), 
+                            PRIMARY KEY(ts, host)
+                        ) engine=mito with(regions=1);"#,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output, Output::AffectedRows(1)));
+    }
 }
