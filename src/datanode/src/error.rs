@@ -185,7 +185,6 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
-            | Error::CreateDir { .. }
             | Error::Conversion { .. }
             | Error::UnsupportedExpr { .. } => StatusCode::Internal,
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
