@@ -158,7 +158,6 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
         if input_types.len() != 1 {
             return Err(datafusion_internal_error()).context(ExecuteFunctionSnafu)?;
         }
-        // 输出结果是一个数组
         // unwrap is safe because we have checked input_types len must equals 1
         Ok(ConcreteDataType::list_datatype(
             input_types.into_iter().next().unwrap(),
