@@ -272,7 +272,6 @@ impl CatalogManager for LocalCatalogManager {
                 schema_info: format!("{}.{}", catalog_name, schema_name),
             })?;
 
-        // TODO(hl): add lock
         if schema.table_exist(&request.table_name) {
             return TableExistsSnafu {
                 table: format_full_table_name(&catalog_name, &schema_name, &request.table_name),

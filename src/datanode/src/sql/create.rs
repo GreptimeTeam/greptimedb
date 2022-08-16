@@ -33,7 +33,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             .create_table(&ctx, req)
             .await
             .with_context(|_| CreateTableSnafu {
-                table_name: table_name.clone(),
+                table_name: &table_name,
             })?;
 
         let register_req = RegisterTableRequest {
@@ -49,7 +49,8 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             .await
             .context(InsertSystemCatalogSnafu)?;
         info!("Successfully created table: {:?}", table_name);
-        Ok(Output::AffectedRows(1)) // maybe support create multiple tables
+        // TODO(hl): maybe support create multiple tables
+        Ok(Output::AffectedRows(1))
     }
 
     /// Converts [CreateTable] to [SqlRequest::Create].
@@ -292,7 +293,8 @@ mod tests {
 
     #[tokio::test]
     pub async fn test_parse_create_sql() {
-        let sql = r"create table c.s.demo(
+        let create_table = sql_to_statement(
+            r"create table c.s.demo(
                              host string,
                              ts bigint,
                              cpu double default 0,
@@ -300,16 +302,8 @@ mod tests {
                              TIME INDEX (ts),
                              PRIMARY KEY(ts, host)) engine=mito
                              with(regions=1);
-         ";
-        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        assert_eq!(1, result.len());
-
-        let create_table = match result.pop().unwrap() {
-            Statement::Create(c) => c,
-            _ => {
-                panic!("unexpected statement type: {:?}", result[0])
-            }
-        };
+         ",
+        );
 
         let handler = create_mock_sql_handler().await;
 

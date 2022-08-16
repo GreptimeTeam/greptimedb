@@ -27,8 +27,6 @@ type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 pub struct Instance {
     // Query service
     query_engine: QueryEngineRef,
-    #[cfg(test)]
-    table_engine: TableEngineRef,
     sql_handler: SqlHandler<DefaultEngine>,
     // Catalog list
     catalog_manager: CatalogManagerRef,
@@ -60,8 +58,6 @@ impl Instance {
 
         Ok(Self {
             query_engine,
-            #[cfg(test)]
-            table_engine: Arc::new(table_engine.clone()),
             sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
             catalog_manager,
         })
@@ -151,6 +147,11 @@ impl Instance {
     }
 
     #[cfg(test)]
+    pub fn table_engine(&self) -> TableEngineRef {
+        self.sql_handler.table_engine()
+    }
+
+    #[cfg(test)]
     pub async fn create_test_table(&self) -> Result<()> {
         use datatypes::data_type::ConcreteDataType;
         use datatypes::schema::{ColumnSchema, Schema};
@@ -168,7 +169,7 @@ impl Instance {
 
         let table_name = "demo";
         let table = self
-            .table_engine
+            .table_engine()
             .create_table(
                 &EngineContext::default(),
                 CreateTableRequest {

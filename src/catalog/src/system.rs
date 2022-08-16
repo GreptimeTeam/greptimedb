@@ -105,7 +105,7 @@ impl SystemCatalogTable {
 /// - timestamp: currently not used.
 /// - value: JSON-encoded value of entry's metadata.
 fn build_system_catalog_schema() -> Result<Schema> {
-    let mut cols = Vec::with_capacity(6);
+    let mut cols = Vec::with_capacity(4);
     cols.push(ColumnSchema::new(
         "entry_type".to_string(),
         ConcreteDataType::uint8_datatype(),

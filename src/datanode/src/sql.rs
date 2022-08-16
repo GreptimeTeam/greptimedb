@@ -1,5 +1,7 @@
 //! sql handler
 
+use std::sync::Arc;
+
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use query::query_engine::Output;
@@ -21,14 +23,14 @@ pub enum SqlRequest {
 
 // Handler to execute SQL except query
 pub struct SqlHandler<Engine: TableEngine> {
-    table_engine: Engine,
+    table_engine: Arc<Engine>,
     catalog_manager: CatalogManagerRef,
 }
 
 impl<Engine: TableEngine> SqlHandler<Engine> {
     pub fn new(table_engine: Engine, catalog_manager: CatalogManagerRef) -> Self {
         Self {
-            table_engine,
+            table_engine: Arc::new(table_engine),
             catalog_manager,
         }
     }
@@ -46,6 +48,11 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             .map_err(BoxedError::new)
             .context(GetTableSnafu { table_name })?
             .context(TableNotFoundSnafu { table_name })
+    }
+
+    #[cfg(test)]
+    pub fn table_engine(&self) -> Arc<Engine> {
+        self.table_engine.clone()
     }
 }
 

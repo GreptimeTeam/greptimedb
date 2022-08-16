@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_stream::stream;
 use common_query::logical_plan::Expr;
@@ -224,7 +223,12 @@ impl SystemCatalog {
             Arc::new(BinaryVector::from_slice(&[full_table_name.as_bytes()])) as _,
         );
 
-        columns_values.insert("timestamp".to_string(), generate_timestamp_value() as _);
+        columns_values.insert(
+            "timestamp".to_string(),
+            Arc::new(Int64Vector::from_vec(vec![
+                common_time::util::current_timestamp(),
+            ])) as _,
+        );
 
         columns_values.insert(
             "value".to_string(),
@@ -246,13 +250,6 @@ impl SystemCatalog {
             .await
             .context(InsertTableRecordSnafu)
     }
-}
-
-fn generate_timestamp_value() -> Arc<Int64Vector> {
-    Arc::new(Int64Vector::from_vec(vec![SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_micros(0))
-        .as_secs() as i64]))
 }
 
 impl CatalogProvider for SystemCatalog {
