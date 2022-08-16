@@ -258,7 +258,7 @@ mod test {
             Some(2),
         ]))];
         assert!(percentile.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(1), percentile.evaluate().unwrap());
+        assert_eq!(Value::Int32(2), percentile.evaluate().unwrap());
 
         // test update null-value batch
         let mut percentile = Percentile::<i32> {
@@ -272,7 +272,7 @@ mod test {
             Some(4),
         ]))];
         assert!(percentile.update_batch(&v).is_ok());
-        assert_eq!(Value::Int32(3), percentile.evaluate().unwrap());
+        assert_eq!(Value::Int32(4), percentile.evaluate().unwrap());
 
         // test update with constant vector
         let mut percentile = Percentile::<i32> {
@@ -288,7 +288,7 @@ mod test {
 
         // test left border
         let mut percentile = Percentile::<i32> {
-            p: 100.0,
+            p: 0.0,
             ..Default::default()
         };
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
@@ -298,6 +298,19 @@ mod test {
         ]))];
         assert!(percentile.update_batch(&v).is_ok());
         assert_eq!(Value::Int32(-1), percentile.evaluate().unwrap());
+
+        // test medium
+        let mut percentile = Percentile::<i32> {
+            p: 50.0,
+            ..Default::default()
+        };
+        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+            Some(-1i32),
+            Some(1),
+            Some(2),
+        ]))];
+        assert!(percentile.update_batch(&v).is_ok());
+        assert_eq!(Value::Int32(1), percentile.evaluate().unwrap());
 
         // test right border
         let mut percentile = Percentile::<i32> {
