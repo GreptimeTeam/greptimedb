@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -11,35 +12,42 @@ use datatypes::prelude::*;
 use datatypes::value::ListValue;
 use datatypes::vectors::{ConstantVector, ListVector};
 use datatypes::with_match_ordered_primitive_type_id;
+use num::NumCast;
 use num_traits::AsPrimitive;
 use snafu::{OptionExt, ResultExt};
 
 // https://numpy.org/doc/stable/reference/generated/numpy.std.html
 #[derive(Debug, Default)]
-pub struct Stddev<T>
+pub struct Stddev<T, SumT>
 where
-    T: Primitive + AsPrimitive<f64>+std::iter::Sum,
+    T: Primitive + AsPrimitive<SumT>,
+    SumT: Primitive + std::iter::Sum<SumT>,
 {
     values: Vec<T>,
+    _phantom: PhantomData<SumT>,
 }
 
-impl<T> Stddev<T>
+impl<T, SumT> Stddev<T, SumT>
 where
-    T: Primitive + AsPrimitive<f64>+std::iter::Sum,
+    T: Primitive + AsPrimitive<SumT>,
+    SumT: Primitive + std::iter::Sum<SumT>,
 {
     fn push(&mut self, value: T) {
         self.values.push(value);
     }
+
     fn mean(&self) -> Option<f64> {
-        // this will overflow
-        let sum: T = self.values.clone().into_iter().sum();
+        let sum: SumT = self.values.iter().map(|value| value.as_()).sum();
         let count = self.values.len();
 
+        let sum: f64 = NumCast::from(sum).unwrap();
+
         match count {
-            positive if positive > 0 => Some(sum.as_() / count as f64),
+            positive if positive > 0 => Some(sum / count as f64),
             _ => None,
         }
     }
+
     fn std_deviation(&self) -> Option<f64> {
         match (self.mean(), self.values.len()) {
             (Some(value_mean), count) if count > 0 => {
@@ -47,7 +55,8 @@ where
                     .values
                     .iter()
                     .map(|value| {
-                        let diff = value_mean - (*value).as_();
+                        let value: f64 = NumCast::from(*value).unwrap();
+                        let diff = value_mean - value;
                         diff * diff
                     })
                     .sum::<f64>()
@@ -60,10 +69,12 @@ where
     }
 }
 
-impl<T> Accumulator for Stddev<T>
+impl<T, SumT> Accumulator for Stddev<T, SumT>
 where
-    T: Primitive + AsPrimitive<f64> + std::iter::Sum<T>,
+    T: Primitive + AsPrimitive<SumT>,
+    SumT: Primitive + std::iter::Sum<SumT>,
     for<'a> T: Scalar<RefType<'a> = T>,
+    for<'a> SumT: Scalar<RefType<'a> = SumT>,
 {
     fn state(&self) -> Result<Vec<Value>> {
         let nums = self
@@ -137,7 +148,7 @@ impl AggregateFunctionCreator for StddevAccumulatorCreator {
             with_match_ordered_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Stddev::<$S>::default()))
+                    Ok(Box::new(Stddev::<$S, <$S as Primitive>::LargestType>::default()))
                 },
                 {
                     let err_msg = format!(
@@ -202,13 +213,13 @@ mod test {
     #[test]
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
-        let mut stddev = Stddev::<i32>::default();
+        let mut stddev = Stddev::<i32, i64>::default();
         assert!(stddev.update_batch(&[]).is_ok());
         assert!(stddev.values.is_empty());
         assert_eq!(Value::Null, stddev.evaluate().unwrap());
 
         // test update no null-value batch
-        let mut stddev = Stddev::<i32>::default();
+        let mut stddev = Stddev::<i32, i64>::default();
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Some(-1i32),
             Some(1),
@@ -218,7 +229,7 @@ mod test {
         assert_eq!(Value::from(1.247219128924647), stddev.evaluate().unwrap());
 
         // test update null-value batch
-        let mut stddev = Stddev::<i32>::default();
+        let mut stddev = Stddev::<i32, i64>::default();
         let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
             Some(-2i32),
             None,
