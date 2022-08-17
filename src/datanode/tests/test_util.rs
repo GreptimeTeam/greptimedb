@@ -14,8 +14,6 @@ use tempdir::TempDir;
 
 /// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
 /// Only for test.
-///
-/// TODO: Add a test feature
 pub struct TestGuard {
     _wal_tmp_dir: TempDir,
     _data_tmp_dir: TempDir,
@@ -31,7 +29,6 @@ pub fn create_tmp_dir_and_datanode_opts() -> (DatanodeOptions, TestGuard) {
         },
         ..Default::default()
     };
-
     (
         opts,
         TestGuard {
