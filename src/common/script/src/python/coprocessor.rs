@@ -20,7 +20,7 @@ use rustpython_vm::{class::PyClassImpl, AsObject};
 use snafu::{OptionExt, ResultExt};
 use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
-use vm::{Interpreter, PyObjectRef, PyPayload, VirtualMachine};
+use vm::{Interpreter, PyObjectRef, VirtualMachine};
 
 use crate::fail_parse_error;
 use crate::python::copr_parse::{parse_copr, ret_parse_error};
@@ -419,7 +419,7 @@ fn select_from_rb(rb: &DfRecordBatch, fetch_names: &[String]) -> Result<Vec<PyVe
 }
 
 /// match between arguments' real type and annotation types
-/// if type anno is vector[_] then use a 
+/// if type anno is vector[_] then use a
 fn check_args_anno_real_type(
     args: &[PyVector],
     copr: &Coprocessor,

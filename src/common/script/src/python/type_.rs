@@ -26,6 +26,7 @@ use rustpython_vm::{
     types::{AsMapping, AsSequence, Constructor, Initializer},
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
+
 use crate::python::is_instance;
 
 #[pyclass(module = false, name = "vector")]
@@ -580,9 +581,7 @@ pub fn pyobj_try_to_typed_val(
                 }
             }
             ConcreteDataType::Boolean(_) => {
-                if is_instance::<PyBool>(&obj, vm)
-                    || is_instance::<PyInt>(&obj, vm)
-                {
+                if is_instance::<PyBool>(&obj, vm) || is_instance::<PyInt>(&obj, vm) {
                     Some(value::Value::Boolean(
                         obj.try_into_value::<bool>(vm).unwrap_or(false),
                     ))

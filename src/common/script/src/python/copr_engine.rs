@@ -6,12 +6,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::{pin::Pin, result::Result as StdResult};
 
-use common_recordbatch::{
-    error::Error as RbError, RecordBatch, SendableRecordBatchStream,
-};
+use common_recordbatch::{error::Error as RbError, RecordBatch, SendableRecordBatchStream};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-use futures::Stream;
 use futures::stream::StreamExt;
+use futures::Stream;
 use query::QueryEngineRef;
 
 use super::{copr_parse::parse_copr, coprocessor::exec_parsed};
@@ -26,24 +24,25 @@ pub struct CoprEngine {
 
 pub struct CoprocessorStream {
     copr: Arc<Coprocessor>,
-    stream: SendableRecordBatchStream
+    stream: SendableRecordBatchStream,
 }
 
 impl Stream for CoprocessorStream {
     type Item = Result<DfRecordBatch>;
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
         let res = self.stream.as_mut().poll_next(cx);
         match res {
-            Poll::Ready(Some(rb)) => {
-                match rb{
-                    Ok(rb) => {
-                        let df_rb = rb.df_recordbatch;
-                        let ret = exec_parsed(&self.copr, &df_rb);
-                        Poll::Ready(Some(ret))
-                        },
-                    Err(_err) => todo!(),
+            Poll::Ready(Some(rb)) => match rb {
+                Ok(rb) => {
+                    let df_rb = rb.df_recordbatch;
+                    let ret = exec_parsed(&self.copr, &df_rb);
+                    Poll::Ready(Some(ret))
                 }
-            }
+                Err(_err) => todo!(),
+            },
             Poll::Ready(None) => Poll::Ready(None),
             _ => Poll::Pending,
         }
@@ -75,15 +74,13 @@ impl CoprEngine {
             match res {
                 query::Output::AffectedRows(_) => todo!(),
                 query::Output::RecordBatch(stream) => {
-                    let run_copr = |rb: StdResult<RecordBatch, RbError>| {
-                        match rb.map(|rb| {
-                            let df_rb = rb.df_recordbatch;
-                            exec_parsed(&copr.clone(), &df_rb)
-                        }) {
-                            Ok(Ok(df_rb)) => Ok(df_rb),
-                            Ok(Err(py_err)) => Err(py_err),
-                            Err(rb_err) => todo!(),
-                        }
+                    let run_copr = |rb: StdResult<RecordBatch, RbError>| match rb.map(|rb| {
+                        let df_rb = rb.df_recordbatch;
+                        exec_parsed(&copr.clone(), &df_rb)
+                    }) {
+                        Ok(Ok(df_rb)) => Ok(df_rb),
+                        Ok(Err(py_err)) => Err(py_err),
+                        Err(_rb_err) => todo!(),
                     };
                     let stream = stream.map(run_copr);
                     let res = stream.collect::<Vec<Result<DfRecordBatch>>>().await;

@@ -253,18 +253,18 @@ pub(in crate::py_udf_module) mod greptime_builtin {
     use std::sync::Arc;
 
     use arrow::array::NullArray;
+    use common_function::scalars::math::PowFunction;
+    use common_function::scalars::{function::FunctionContext, Function};
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
     use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
 
-    use common_function::scalars::math::PowFunction;
     use crate::py_udf_module::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
     use crate::python::PyVector;
-    use common_function::scalars::{function::FunctionContext, Function};
     type PyVectorRef = PyRef<PyVector>;
 
     // the main binding code, due to proc macro things, can't directly use a simpler macro
