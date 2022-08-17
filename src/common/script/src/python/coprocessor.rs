@@ -419,7 +419,7 @@ fn select_from_rb(rb: &DfRecordBatch, fetch_names: &[String]) -> Result<Vec<PyVe
 }
 
 /// match between arguments' real type and annotation types
-/// if type anno is vector[_] then use a
+/// if type anno is vector[_] then use real type
 fn check_args_anno_real_type(
     args: &[PyVector],
     copr: &Coprocessor,
@@ -509,6 +509,7 @@ fn set_items_in_scope(
 /// use `f64 | None` to mark if returning column is nullable like in [`DfRecordBatch`]'s schema's [`Field`]'s is_nullable
 ///
 /// you can also use single underscore `_` to let coprocessor infer what type it is, so `_` and `_ | None` are both valid in type annotation.
+/// Note: using `_` means not nullable column, using `_ | None` means nullable column
 ///
 /// a example (of python script) given below:
 /// ```python
