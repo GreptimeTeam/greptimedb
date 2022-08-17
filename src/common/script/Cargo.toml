@@ -9,7 +9,13 @@ package = "arrow2"
 version = "0.10"
 
 [features]
-default = ["python-udf"]
+default = ["python-udf", "py-builtins"]
+py-builtins = [
+  "dep:datafusion",
+  "dep:datafusion-expr",
+  "dep:datafusion-physical-expr",
+  "python-udf",
+]
 python-udf = [
   "dep:rustpython-vm",
   "dep:rustpython-parser",
@@ -21,12 +27,17 @@ python-udf = [
 
 [dependencies]
 common-error = {path = "../error"}
+common-query = {path = "../query"}
 common-recordbatch = {path = "../recordbatch" }
+common-function = { path = "../function" }
 futures-util = "0.3"
 futures = "0.3"
 query = { path = "../../query" }
 console = "0.15.1"
+datafusion = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}
+datafusion-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
+datafusion-physical-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datatypes = {path = "../../datatypes"}
 rustpython-ast = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 rustpython-bytecode = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}

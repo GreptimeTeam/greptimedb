@@ -26,6 +26,7 @@ use rustpython_vm::{
     types::{AsMapping, AsSequence, Constructor, Initializer},
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
+use crate::python::is_instance;
 
 #[pyclass(module = false, name = "vector")]
 #[derive(PyPayload, Clone)]
@@ -107,11 +108,6 @@ fn arrow2_rfloordiv_scalar(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> 
     )
     .expect("Can't cast to Int64: ")
 }
-/// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
-/// if `PyResult` is Err, then this function return `false`
-pub fn is_instance(obj: &PyObjectRef, ty: &PyObject, vm: &VirtualMachine) -> bool {
-    obj.is_instance(ty, vm).unwrap_or(false)
-}
 
 fn is_float(datatype: &DataType) -> bool {
     matches!(
@@ -160,6 +156,11 @@ impl AsRef<PyVector> for PyVector {
 /// TODO: support comparsion
 #[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
 impl PyVector {
+    /// create a ref to inner vector
+    #[inline]
+    pub fn as_vector_ref(&self) -> VectorRef {
+        self.vector.clone()
+    }
     #[inline]
     pub fn to_arrow_array(&self) -> ArrayRef {
         self.vector.to_arrow_array()
@@ -177,11 +178,11 @@ impl PyVector {
     {
         // the right operand only support PyInt or PyFloat,
         let (right, right_type) = {
-            if is_instance(&other, PyInt::class(vm).into(), vm) {
+            if is_instance::<PyInt>(&other, vm) {
                 other
                     .try_into_value::<i64>(vm)
                     .map(|v| (value::Value::Int64(v), DataType::Int64))?
-            } else if is_instance(&other, PyFloat::class(vm).into(), vm) {
+            } else if is_instance::<PyFloat>(&other, vm) {
                 other
                     .try_into_value::<f64>(vm)
                     .map(|v| (value::Value::Float64(OrderedFloat(v)), DataType::Float64))?
@@ -553,10 +554,10 @@ fn get_arrow_scalar_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Scalar) -
 #[inline]
 fn is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
     //let is_instance = |ty: &PyObject| obj.is_instance(ty, vm).unwrap_or(false);
-    is_instance(obj, PyNone::class(vm).into(), vm)
-        || is_instance(obj, PyInt::class(vm).into(), vm)
-        || is_instance(obj, PyFloat::class(vm).into(), vm)
-        || is_instance(obj, PyBool::class(vm).into(), vm)
+    is_instance::<PyNone>(obj, vm)
+        || is_instance::<PyInt>(obj, vm)
+        || is_instance::<PyFloat>(obj, vm)
+        || is_instance::<PyBool>(obj, vm)
 }
 
 /// convert a `PyObjectRef` into a `datatypes::Value`(is that ok?)
@@ -572,15 +573,15 @@ pub fn pyobj_try_to_typed_val(
     if let Some(dtype) = dtype {
         match dtype {
             ConcreteDataType::Null(_) => {
-                if is_instance(&obj, PyNone::class(vm).into(), vm) {
+                if is_instance::<PyNone>(&obj, vm) {
                     Some(value::Value::Null)
                 } else {
                     None
                 }
             }
             ConcreteDataType::Boolean(_) => {
-                if is_instance(&obj, PyBool::class(vm).into(), vm)
-                    || is_instance(&obj, PyInt::class(vm).into(), vm)
+                if is_instance::<PyBool>(&obj, vm)
+                    || is_instance::<PyInt>(&obj, vm)
                 {
                     Some(value::Value::Boolean(
                         obj.try_into_value::<bool>(vm).unwrap_or(false),
@@ -593,7 +594,7 @@ pub fn pyobj_try_to_typed_val(
             | ConcreteDataType::Int16(_)
             | ConcreteDataType::Int32(_)
             | ConcreteDataType::Int64(_) => {
-                if is_instance(&obj, PyInt::class(vm).into(), vm) {
+                if is_instance::<PyInt>(&obj, vm) {
                     match dtype {
                         ConcreteDataType::Int8(_) => {
                             obj.try_into_value::<i8>(vm).ok().map(value::Value::Int8)
@@ -617,7 +618,7 @@ pub fn pyobj_try_to_typed_val(
             | ConcreteDataType::UInt16(_)
             | ConcreteDataType::UInt32(_)
             | ConcreteDataType::UInt64(_) => {
-                if is_instance(&obj, PyInt::class(vm).into(), vm)
+                if is_instance::<PyInt>(&obj, vm)
                     && obj.clone().try_into_value::<i64>(vm).unwrap_or(-1) >= 0
                 {
                     match dtype {
@@ -640,7 +641,7 @@ pub fn pyobj_try_to_typed_val(
                 }
             }
             ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
-                if is_instance(&obj, PyFloat::class(vm).into(), vm) {
+                if is_instance::<PyFloat>(&obj, vm) {
                     match dtype {
                         ConcreteDataType::Float32(_) => obj
                             .try_into_value::<f32>(vm)
@@ -658,7 +659,7 @@ pub fn pyobj_try_to_typed_val(
             }
 
             ConcreteDataType::String(_) => {
-                if is_instance(&obj, PyStr::class(vm).into(), vm) {
+                if is_instance::<PyStr>(&obj, vm) {
                     obj.try_into_value::<String>(vm)
                         .ok()
                         .map(|v| value::Value::String(v.into()))
@@ -667,7 +668,7 @@ pub fn pyobj_try_to_typed_val(
                 }
             }
             ConcreteDataType::Binary(_) => {
-                if is_instance(&obj, PyBytes::class(vm).into(), vm) {
+                if is_instance::<PyBytes>(&obj, vm) {
                     obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
                         String::from_utf8(v)
                             .ok()
@@ -679,26 +680,26 @@ pub fn pyobj_try_to_typed_val(
             }
             ConcreteDataType::List(_) => unreachable!(),
         }
-    } else if is_instance(&obj, PyNone::class(vm).into(), vm) {
+    } else if is_instance::<PyNone>(&obj, vm) {
         // if Untyped then by default return types with highest precision
         Some(value::Value::Null)
-    } else if is_instance(&obj, PyBool::class(vm).into(), vm) {
+    } else if is_instance::<PyBool>(&obj, vm) {
         Some(value::Value::Boolean(
             obj.try_into_value::<bool>(vm).unwrap_or(false),
         ))
-    } else if is_instance(&obj, PyInt::class(vm).into(), vm) {
+    } else if is_instance::<PyInt>(&obj, vm) {
         obj.try_into_value::<i64>(vm).ok().map(value::Value::Int64)
-    } else if is_instance(&obj, PyFloat::class(vm).into(), vm) {
+    } else if is_instance::<PyFloat>(&obj, vm) {
         obj.try_into_value::<f64>(vm)
             .ok()
             .map(|v| value::Value::Float64(OrderedFloat(v)))
-    } else if is_instance(&obj, PyStr::class(vm).into(), vm) {
+    } else if is_instance::<PyStr>(&obj, vm) {
         obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
             String::from_utf8(v)
                 .ok()
                 .map(|v| value::Value::String(v.into()))
         })
-    } else if is_instance(&obj, PyBytes::class(vm).into(), vm) {
+    } else if is_instance::<PyBytes>(&obj, vm) {
         obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
             String::from_utf8(v)
                 .ok()
@@ -714,24 +715,25 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
     match val {
         // This comes from:https://github.com/RustPython/RustPython/blob/8ab4e770351d451cfdff5dc2bf8cce8df76a60ab/vm/src/builtins/singletons.rs#L37
         // None in Python is universally singleton so
+        // use `vm.ctx.new_int` and `new_***` is more idomtic for there are cerntain optimize can be use in this way(small int pool etc.)
         value::Value::Null => vm.ctx.none(),
         value::Value::Boolean(v) => vm.ctx.new_bool(v).into(),
-        value::Value::UInt8(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::UInt16(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::UInt32(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::UInt64(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::Int8(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::Int16(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::Int32(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::Int64(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::Float32(v) => PyFloat::from(v.0 as f64).into_pyobject(vm),
-        value::Value::Float64(v) => PyFloat::from(v.0).into_pyobject(vm),
-        value::Value::String(s) => PyStr::from(s.as_utf8()).into_pyobject(vm),
+        value::Value::UInt8(v) => vm.ctx.new_int(v).into(),
+        value::Value::UInt16(v) => vm.ctx.new_int(v).into(),
+        value::Value::UInt32(v) => vm.ctx.new_int(v).into(),
+        value::Value::UInt64(v) => vm.ctx.new_int(v).into(),
+        value::Value::Int8(v) => vm.ctx.new_int(v).into(),
+        value::Value::Int16(v) => vm.ctx.new_int(v).into(),
+        value::Value::Int32(v) => vm.ctx.new_int(v).into(),
+        value::Value::Int64(v) => vm.ctx.new_int(v).into(),
+        value::Value::Float32(v) => vm.ctx.new_float(v.0 as f64).into(),
+        value::Value::Float64(v) => vm.ctx.new_float(v.0).into(),
+        value::Value::String(s) => vm.ctx.new_str(s.as_utf8()).into(),
         // is this copy necessary?
-        value::Value::Binary(b) => PyBytes::from(b.deref().to_vec()).into_pyobject(vm),
+        value::Value::Binary(b) => vm.ctx.new_bytes(b.deref().to_vec()).into(),
         // is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt
-        value::Value::Date(v) => PyInt::from(v).into_pyobject(vm),
-        value::Value::DateTime(v) => PyInt::from(v).into_pyobject(vm),
+        value::Value::Date(v) => vm.ctx.new_int(v).into(),
+        value::Value::DateTime(v) => vm.ctx.new_int(v).into(),
         value::Value::List(_) => unreachable!(),
     }
 }

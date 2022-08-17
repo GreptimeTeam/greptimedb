@@ -2,17 +2,16 @@
 //! 1. store a parsed `Coprocessor` struct
 //! 2. store other metadata so other module can call it when needed
 
-use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Context, Waker, Poll};
+use std::task::{Context, Poll};
 use std::{pin::Pin, result::Result as StdResult};
 
 use common_recordbatch::{
-    error::Error as RbError, RecordBatch, RecordBatchStream, SendableRecordBatchStream,
+    error::Error as RbError, RecordBatch, SendableRecordBatchStream,
 };
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use futures::Stream;
-use futures::stream::{self, StreamExt};
+use futures::stream::StreamExt;
 use query::QueryEngineRef;
 
 use super::{copr_parse::parse_copr, coprocessor::exec_parsed};
