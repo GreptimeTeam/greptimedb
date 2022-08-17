@@ -1,9 +1,9 @@
-mod test_util;
-
 use arrow::array::UInt64Array;
 use common_recordbatch::util;
-use datanode::instance::Instance;
 use query::Output;
+
+use crate::instance::Instance;
+use crate::tests::test_util;
 
 #[tokio::test]
 async fn test_execute_insert() {
