@@ -527,7 +527,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     exec_parsed(&copr, rb)
 }
 
-pub(crate) fn exec_with_cached_vm(copr: &Coprocessor, rb: &DfRecordBatch, vm: &Interpreter) -> Result<DfRecordBatch> {
+pub(crate) fn exec_with_cached_vm(copr: &Coprocessor, rb: &DfRecordBatch, args:Vec<PyVector>,vm: &Interpreter) -> Result<DfRecordBatch> {
     vm.enter(|vm| -> Result<DfRecordBatch> {
         PyVector::make_class(&vm.ctx);
         // set arguments with given name and values
@@ -575,7 +575,7 @@ pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRe
         PyVector::make_class(&vm.ctx);
     });
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
-    exec_with_cached_vm(copr, rb, &interpreter)
+    exec_with_cached_vm(copr, rb, args, &interpreter)
 }
 
 /// execute script just like [`exec_coprocessor`] do,
