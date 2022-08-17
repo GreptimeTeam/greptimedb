@@ -1,5 +1,4 @@
 use std::io;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use opensrv_mysql::AsyncMysqlShim;
@@ -7,27 +6,19 @@ use opensrv_mysql::ErrorKind;
 use opensrv_mysql::ParamParser;
 use opensrv_mysql::QueryResultWriter;
 use opensrv_mysql::StatementMetaWriter;
-use query::query_engine::Output;
 
-use crate::mysql::error::{self, Result};
-use crate::mysql::mysql_writer::MysqlResultWriter;
-
-pub type MysqlInstanceRef = Arc<dyn MysqlInstance + Send + Sync>;
-
-// TODO(LFC): Move to instance layer.
-#[async_trait]
-pub trait MysqlInstance {
-    async fn do_query(&self, query: &str) -> Result<Output>;
-}
+use crate::error::{self, Result};
+use crate::mysql::writer::MysqlResultWriter;
+use crate::query_handler::SqlQueryHandlerRef;
 
 // An intermediate shim for executing MySQL queries.
 pub struct MysqlInstanceShim {
-    mysql_instance: MysqlInstanceRef,
+    query_handler: SqlQueryHandlerRef,
 }
 
 impl MysqlInstanceShim {
-    pub fn create(mysql_instance: MysqlInstanceRef) -> MysqlInstanceShim {
-        MysqlInstanceShim { mysql_instance }
+    pub fn create(query_handler: SqlQueryHandlerRef) -> MysqlInstanceShim {
+        MysqlInstanceShim { query_handler }
     }
 }
 
@@ -72,7 +63,7 @@ impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        let output = self.mysql_instance.do_query(query).await;
+        let output = self.query_handler.do_query(query).await;
 
         let mut writer = MysqlResultWriter::new(writer);
         writer.write(output).await

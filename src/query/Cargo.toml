@@ -22,7 +22,7 @@ datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", br
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"
-metrics = "0.18"
+metrics = "0.20"
 serde = "1.0"
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }

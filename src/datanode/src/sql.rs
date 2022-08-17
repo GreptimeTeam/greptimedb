@@ -50,7 +50,6 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             .context(TableNotFoundSnafu { table_name })
     }
 
-    #[cfg(test)]
     pub fn table_engine(&self) -> Arc<Engine> {
         self.table_engine.clone()
     }

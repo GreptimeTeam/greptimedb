@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 common-error = { path = "../error" }
 common-telemetry = { path = "../telemetry" }
-metrics = "0.18"
+metrics = "0.20"
 once_cell = "1.12"
 paste = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }

@@ -213,15 +213,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic-shim"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67cd4b51d303cf3501c301e8125df442128d3c6d7c69f71b27833d253de47e77"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "atomic_float"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -799,37 +790,12 @@ version = "0.1.0"
 dependencies = [
  "common-error",
  "common-telemetry",
- "metrics 0.18.1",
+ "metrics 0.20.1",
  "once_cell",
  "paste",
  "snafu",
  "tokio",
  "tokio-test",
-]
-
-[[package]]
-name = "common-servers"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "catalog",
- "common-base",
- "common-error",
- "common-recordbatch",
- "common-runtime",
- "common-telemetry",
- "datatypes",
- "futures",
- "metrics 0.20.1",
- "mysql_async",
- "num_cpus",
- "opensrv-mysql",
- "query",
- "rand 0.8.5",
- "snafu",
- "test-util",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]
@@ -839,7 +805,7 @@ dependencies = [
  "backtrace",
  "common-error",
  "console-subscriber",
- "metrics 0.18.1",
+ "metrics 0.20.1",
  "metrics-exporter-prometheus",
  "once_cell",
  "opentelemetry",
@@ -1267,20 +1233,23 @@ dependencies = [
  "axum-macros",
  "axum-test-helper",
  "catalog",
+ "client",
  "common-base",
  "common-error",
  "common-query",
  "common-recordbatch",
+ "common-runtime",
  "common-telemetry",
  "datafusion",
  "datatypes",
  "hyper",
  "log-store",
- "metrics 0.18.1",
+ "metrics 0.20.1",
  "object-store",
  "query",
  "serde",
  "serde_json",
+ "servers",
  "snafu",
  "sql",
  "storage",
@@ -1744,9 +1713,6 @@ name = "hashbrown"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab5ef0d4909ef3724cc8cce6ccc8572c5c817592e9285f5464f8e86f8bd3726e"
-dependencies = [
- "ahash",
-]
 
 [[package]]
 name = "hashbrown"
@@ -2308,16 +2274,6 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e52eb6380b6d2a10eb3434aec0885374490f5b82c8aaf5cd487a183c98be834"
-dependencies = [
- "ahash",
- "metrics-macros 0.5.1",
-]
-
-[[package]]
-name = "metrics"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "142c53885123b68d94108295a09d4afe1a1388ed95b54d5dacd9a454753030f2"
@@ -2339,14 +2295,15 @@ dependencies = [
 
 [[package]]
 name = "metrics-exporter-prometheus"
-version = "0.9.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b93b470b04c005178058e18ac8bb2eb3fda562cf87af5ea05ba8d44190d458c"
+checksum = "8603921e1f54ef386189335f288441af761e0fc61bcb552168d9cedfe63ebc70"
 dependencies = [
  "indexmap",
- "metrics 0.18.1",
+ "metrics 0.20.1",
  "metrics-util",
- "parking_lot 0.11.2",
+ "parking_lot 0.12.0",
+ "portable-atomic",
  "quanta",
  "thiserror",
 ]
@@ -2375,17 +2332,17 @@ dependencies = [
 
 [[package]]
 name = "metrics-util"
-version = "0.12.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65a9e83b833e1d2e07010a386b197c13aa199bbd0fca5cf69bfa147972db890a"
+checksum = "f7d24dc2dbae22bff6f1f9326ffce828c9f07ef9cc1e8002e5279f845432a30a"
 dependencies = [
- "atomic-shim",
  "crossbeam-epoch",
  "crossbeam-utils",
- "hashbrown 0.11.2",
- "metrics 0.18.1",
+ "hashbrown 0.12.1",
+ "metrics 0.20.1",
  "num_cpus",
- "parking_lot 0.11.2",
+ "parking_lot 0.12.0",
+ "portable-atomic",
  "quanta",
  "sketches-ddsketch",
 ]
@@ -3166,9 +3123,9 @@ dependencies = [
 
 [[package]]
 name = "portable-atomic"
-version = "0.3.7"
+version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ef3e12daa83946e79a4e22dff6ff8154138bfb34bef1769ec80c92bc3aa88e3"
+checksum = "b303a15aeda678da614ab23306232dbd282d532f8c5919cedd41b66b9dc96560"
 
 [[package]]
 name = "ppv-lite86"
@@ -3313,9 +3270,9 @@ dependencies = [
 
 [[package]]
 name = "quanta"
-version = "0.9.3"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20afe714292d5e879d8b12740aa223c6a88f118af41870e8b6196e39a02238a8"
+checksum = "b7e31331286705f455e56cca62e0e717158474ff02b7936c1fa596d983f4ae27"
 dependencies = [
  "crossbeam-utils",
  "libc",
@@ -3345,7 +3302,7 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
- "metrics 0.18.1",
+ "metrics 0.20.1",
  "num",
  "num-traits",
  "rand 0.8.5",
@@ -3453,9 +3410,9 @@ dependencies = [
 
 [[package]]
 name = "raw-cpuid"
-version = "10.3.0"
+version = "10.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "738bc47119e3eeccc7e94c4a506901aea5e7b4944ecd0829cbebf4af04ceda12"
+checksum = "2c49596760fce12ca21550ac21dc5a9617b2ea4b6e0aa7d8dab8ff2824fc2bba"
 dependencies = [
  "bitflags",
 ]
@@ -3804,6 +3761,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "servers"
+version = "0.1.0"
+dependencies = [
+ "api",
+ "async-trait",
+ "axum",
+ "axum-macros",
+ "catalog",
+ "common-base",
+ "common-error",
+ "common-recordbatch",
+ "common-runtime",
+ "common-telemetry",
+ "datatypes",
+ "futures",
+ "hyper",
+ "metrics 0.20.1",
+ "mysql_async",
+ "num_cpus",
+ "opensrv-mysql",
+ "query",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "snafu",
+ "test-util",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.8.0",
+ "tower",
+ "tower-http",
+]
+
+[[package]]
 name = "sha-1"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3875,9 +3866,9 @@ checksum = "7bd3e3206899af3f8b12af284fafc038cc1dc2b41d1b89dd17297221c5d225de"
 
 [[package]]
 name = "sketches-ddsketch"
-version = "0.1.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a77a8fd93886010f05e7ea0720e569d6d16c65329dbe3ec033bbbccccb017b"
+checksum = "ceb945e54128e09c43d8e4f1277851bd5044c6fc540bbaa2ad888f60b3da9ae7"
 
 [[package]]
 name = "slab"

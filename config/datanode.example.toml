@@ -2,6 +2,9 @@ http_addr = '0.0.0.0:3000'
 rpc_addr = '0.0.0.0:3001'
 wal_dir = '/tmp/wal'
 
+mysql_addr = '0.0.0.0:3306'
+mysql_runtime_size = 4
+
 [storage]
 type = 'File'
 data_dir = '/tmp/greptimedb/data/'

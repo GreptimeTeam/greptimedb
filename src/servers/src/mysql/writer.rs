@@ -9,7 +9,7 @@ use opensrv_mysql::{
 use query::Output;
 use snafu::prelude::*;
 
-use crate::mysql::error::{self, Error, Result};
+use crate::error::{self, Error, Result};
 
 struct QueryResult {
     recordbatches: Vec<RecordBatch>,

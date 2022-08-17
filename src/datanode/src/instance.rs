@@ -1,16 +1,18 @@
 use std::{fs, path, sync::Arc};
 
-use api::v1::InsertExpr;
+use api::v1::{object_expr, select_expr, InsertExpr, ObjectExpr, ObjectResult, SelectExpr};
+use async_trait::async_trait;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::status_code::StatusCode;
 use common_telemetry::logging::info;
+use common_telemetry::timer;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
-use snafu::{OptionExt, ResultExt};
+use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
+use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
-#[cfg(test)]
-use table::engine::TableEngineRef;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
@@ -18,7 +20,10 @@ use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
     self, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result, TableNotFoundSnafu,
 };
+use crate::metric;
+use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::insertion_expr_to_request;
+use crate::server::grpc::select::to_object_result;
 use crate::sql::{SqlHandler, SqlRequest};
 
 type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
@@ -146,61 +151,36 @@ impl Instance {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub fn table_engine(&self) -> TableEngineRef {
-        self.sql_handler.table_engine()
+    async fn handle_insert(&self, insert_expr: InsertExpr) -> ObjectResult {
+        match self.execute_grpc_insert(insert_expr).await {
+            Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
+                .status_code(StatusCode::Success as u32)
+                .mutate_result(rows as u32, 0)
+                .build(),
+            Err(err) => {
+                // TODO(fys): failure count
+                build_err_result(&err)
+            }
+            _ => unreachable!(),
+        }
     }
 
-    #[cfg(test)]
-    pub async fn create_test_table(&self) -> Result<()> {
-        use datatypes::data_type::ConcreteDataType;
-        use datatypes::schema::{ColumnSchema, Schema};
-        use table::engine::EngineContext;
-        use table::requests::CreateTableRequest;
+    async fn handle_select(&self, select_expr: SelectExpr) -> ObjectResult {
+        match select_expr.expr {
+            Some(select_expr::Expr::Sql(sql)) => {
+                let result = self.execute_sql(&sql).await;
+                to_object_result(result).await
+            }
+            None => ObjectResult::default(),
+        }
+    }
 
-        use crate::error::CreateTableSnafu;
+    pub fn sql_handler(&self) -> &SqlHandler<DefaultEngine> {
+        &self.sql_handler
+    }
 
-        let column_schemas = vec![
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
-        ];
-
-        let table_name = "demo";
-        let table = self
-            .table_engine()
-            .create_table(
-                &EngineContext::default(),
-                CreateTableRequest {
-                    id: 1,
-                    catalog_name: None,
-                    schema_name: None,
-                    table_name: table_name.to_string(),
-                    desc: Some(" a test table".to_string()),
-                    schema: Arc::new(
-                        Schema::with_timestamp_index(column_schemas, 3)
-                            .expect("ts is expected to be timestamp column"),
-                    ),
-                    create_if_not_exists: true,
-                    primary_key_indices: Vec::default(),
-                },
-            )
-            .await
-            .context(CreateTableSnafu { table_name })?;
-
-        let schema_provider = self
-            .catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .unwrap()
-            .schema(DEFAULT_SCHEMA_NAME)
-            .unwrap();
-
-        schema_provider
-            .register_table(table_name.to_string(), table)
-            .unwrap();
-
-        Ok(())
+    pub fn catalog_manager(&self) -> &CatalogManagerRef {
+        &self.catalog_manager
     }
 }
 
@@ -243,84 +223,40 @@ async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFile
     Ok(log_store)
 }
 
-#[cfg(test)]
-mod tests {
-    use arrow::array::UInt64Array;
-    use common_recordbatch::util;
-
-    use super::*;
-    use crate::test_util;
-
-    #[tokio::test]
-    async fn test_execute_insert() {
-        common_telemetry::init_default_ut_logging();
-        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
-        let instance = Instance::new(&opts).await.unwrap();
-        instance.start().await.unwrap();
-        instance.create_test_table().await.unwrap();
-
-        let output = instance
-            .execute_sql(
-                r#"insert into demo(host, cpu, memory, ts) values
-                           ('host1', 66.6, 1024, 1655276557000),
-                           ('host2', 88.8,  333.3, 1655276558000)
-                           "#,
-            )
+#[async_trait]
+impl SqlQueryHandler for Instance {
+    async fn do_query(&self, query: &str) -> servers::error::Result<Output> {
+        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
+        self.execute_sql(query)
             .await
-            .unwrap();
-
-        assert!(matches!(output, Output::AffectedRows(2)));
+            // TODO(LFC): use snafu's `context` to include source error and backtrace.
+            // Ideally we should define a snafu in servers::error to wrap the error thrown
+            // by `execute_sql`. However, we cannot do that because that would introduce a circular
+            // dependency.
+            .map_err(|e| {
+                servers::error::ExecuteQuerySnafu {
+                    query,
+                    err_msg: format!("{}", e),
+                }
+                .fail::<servers::error::Error>()
+                .unwrap_err()
+            })
     }
+}
 
-    #[tokio::test]
-    async fn test_execute_query() {
-        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
-        let instance = Instance::new(&opts).await.unwrap();
-        instance.start().await.unwrap();
-
-        let output = instance
-            .execute_sql("select sum(number) from numbers limit 20")
-            .await
-            .unwrap();
-
-        match output {
-            Output::RecordBatch(recordbatch) => {
-                let numbers = util::collect(recordbatch).await.unwrap();
-                let columns = numbers[0].df_recordbatch.columns();
-                assert_eq!(1, columns.len());
-                assert_eq!(columns[0].len(), 1);
-
-                assert_eq!(
-                    *columns[0].as_any().downcast_ref::<UInt64Array>().unwrap(),
-                    UInt64Array::from_slice(&[4950])
-                );
+#[async_trait]
+impl GrpcQueryHandler for Instance {
+    async fn do_query(&self, query: ObjectExpr) -> servers::error::Result<ObjectResult> {
+        let object_resp = match query.expr {
+            Some(object_expr::Expr::Insert(insert_expr)) => self.handle_insert(insert_expr).await,
+            Some(object_expr::Expr::Select(select_expr)) => self.handle_select(select_expr).await,
+            other => {
+                return servers::error::NotSupportedSnafu {
+                    feat: format!("{:?}", other),
+                }
+                .fail();
             }
-            _ => unreachable!(),
-        }
-    }
-
-    #[tokio::test]
-    pub async fn test_execute_create() {
-        common_telemetry::init_default_ut_logging();
-        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
-        let instance = Instance::new(&opts).await.unwrap();
-        instance.start().await.unwrap();
-        instance.create_test_table().await.unwrap();
-
-        let output = instance
-            .execute_sql(
-                r#"create table test_table( 
-                            host string, 
-                            ts bigint, 
-                            cpu double default 0, 
-                            memory double, 
-                            TIME INDEX (ts), 
-                            PRIMARY KEY(ts, host)
-                        ) engine=mito with(regions=1);"#,
-            )
-            .await
-            .unwrap();
-
-        assert!(matches!(output, Output::AffectedRows(1)));
+        };
+        Ok(object_resp)
     }
 }

@@ -13,7 +13,7 @@ use snafu::OptionExt;
 use crate::error::{ConversionSnafu, Result};
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 
-pub(crate) async fn to_object_result(result: Result<Output>) -> ObjectResult {
+pub async fn to_object_result(result: Result<Output>) -> ObjectResult {
     match result {
         Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
             .status_code(StatusCode::Success as u32)

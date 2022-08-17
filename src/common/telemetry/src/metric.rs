@@ -21,7 +21,16 @@ fn init_prometheus_recorder() {
     let recorder = PrometheusBuilder::new().build_recorder();
     let mut h = PROMETHEUS_HANDLE.as_ref().write().unwrap();
     *h = Some(recorder.handle());
-    metrics::clear_recorder();
+    // TODO(LFC): separate metrics for testing and metrics for production
+    // `clear_recorder` is likely not expected to be called in production code, recorder should be
+    // globally unique and used throughout the whole lifetime of an application.
+    // It's marked as "unsafe" since [this PR](https://github.com/metrics-rs/metrics/pull/302), and
+    // "metrics" version also upgraded to 0.19.
+    // A quick look in the metrics codes suggests that the "unsafe" call is of no harm. However,
+    // it required a further investigation in how to use metric properly.
+    unsafe {
+        metrics::clear_recorder();
+    }
     match metrics::set_boxed_recorder(Box::new(recorder)) {
         Ok(_) => (),
         Err(err) => crate::warn!("Install prometheus recorder failed, cause: {}", err),

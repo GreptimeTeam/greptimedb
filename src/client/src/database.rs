@@ -65,7 +65,7 @@ impl Database {
 
         let header = obj_result.header.context(MissingHeaderSnafu)?;
 
-        if StatusCode::is_success(header.code) {
+        if !StatusCode::is_success(header.code) {
             return DataNodeSnafu {
                 code: header.code,
                 msg: header.err_msg,
