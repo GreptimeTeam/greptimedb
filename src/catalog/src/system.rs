@@ -5,6 +5,7 @@ use std::sync::Arc;
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
+use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{BinaryVector, Int64Vector, UInt8Vector};
@@ -152,7 +153,7 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
     let mut columns_values = HashMap::with_capacity(6);
     columns_values.insert(
         "entry_type".to_string(),
-        Arc::new(UInt8Vector::from_vec(vec![EntryType::Table as u8])) as _,
+        Arc::new(UInt8Vector::from_slice(&[EntryType::Table as u8])) as _,
     );
 
     columns_values.insert(
@@ -163,7 +164,7 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
     // Timestamp in key part is intentionally left to 0
     columns_values.insert(
         "timestamp".to_string(),
-        Arc::new(Int64Vector::from_vec(vec![0])) as _,
+        Arc::new(Int64Vector::from_slice(&[0])) as _,
     );
 
     columns_values.insert(
@@ -177,12 +178,12 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
 
     columns_values.insert(
         "gmt_created".to_string(),
-        Arc::new(Int64Vector::from_vec(vec![0])) as _,
+        Arc::new(Int64Vector::from_slice(&[util::current_time_millis()])) as _,
     );
 
     columns_values.insert(
         "gmt_modified".to_string(),
-        Arc::new(Int64Vector::from_vec(vec![0])) as _,
+        Arc::new(Int64Vector::from_slice(&[util::current_time_millis()])) as _,
     );
 
     InsertRequest {
