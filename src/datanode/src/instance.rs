@@ -3,27 +3,23 @@ use std::{fs, path, sync::Arc};
 use api::v1::InsertExpr;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::logging::info;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
 use snafu::{OptionExt, ResultExt};
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
-use table::engine::EngineContext;
-use table::engine::TableEngine;
-use table::requests::CreateTableRequest;
+#[cfg(test)]
+use table::engine::TableEngineRef;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
-    self, CreateTableSnafu, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result,
-    TableNotFoundSnafu,
+    self, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result, TableNotFoundSnafu,
 };
 use crate::server::grpc::insert::insertion_expr_to_request;
-use crate::sql::SqlHandler;
+use crate::sql::{SqlHandler, SqlRequest};
 
 type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 
@@ -31,7 +27,6 @@ type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 pub struct Instance {
     // Query service
     query_engine: QueryEngineRef,
-    table_engine: DefaultEngine,
     sql_handler: SqlHandler<DefaultEngine>,
     // Catalog list
     catalog_manager: CatalogManagerRef,
@@ -63,8 +58,7 @@ impl Instance {
 
         Ok(Self {
             query_engine,
-            sql_handler: SqlHandler::new(table_engine.clone()),
-            table_engine,
+            sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
             catalog_manager,
         })
     }
@@ -110,7 +104,7 @@ impl Instance {
                     .await
                     .context(ExecuteSqlSnafu)
             }
-            Statement::Insert(_) => {
+            Statement::Insert(i) => {
                 let schema_provider = self
                     .catalog_manager
                     .catalog(DEFAULT_CATALOG_NAME)
@@ -118,11 +112,28 @@ impl Instance {
                     .schema(DEFAULT_SCHEMA_NAME)
                     .unwrap();
 
-                let request = self
-                    .sql_handler
-                    .statement_to_request(schema_provider, stmt)?;
+                let request = self.sql_handler.insert_to_request(schema_provider, *i)?;
                 self.sql_handler.execute(request).await
             }
+
+            Statement::Create(c) => {
+                let table_id = self.catalog_manager.next_table_id();
+                let _engine_name = c.engine.clone();
+                // TODO(hl): Select table engine by engine_name
+
+                let request = self.sql_handler.create_to_request(table_id, c)?;
+                let catalog_name = request.catalog_name.clone();
+                let schema_name = request.schema_name.clone();
+                let table_name = request.table_name.clone();
+                let table_id = request.id;
+                info!(
+                    "Creating table, catalog: {:?}, schema: {:?}, table name: {:?}, table id: {}",
+                    catalog_name, schema_name, table_name, table_id
+                );
+
+                self.sql_handler.execute(SqlRequest::Create(request)).await
+            }
+
             _ => unimplemented!(),
         }
     }
@@ -132,7 +143,23 @@ impl Instance {
             .start()
             .await
             .context(NewCatalogSnafu)?;
-        // FIXME(dennis): create a demo table for test
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn table_engine(&self) -> TableEngineRef {
+        self.sql_handler.table_engine()
+    }
+
+    #[cfg(test)]
+    pub async fn create_test_table(&self) -> Result<()> {
+        use datatypes::data_type::ConcreteDataType;
+        use datatypes::schema::{ColumnSchema, Schema};
+        use table::engine::EngineContext;
+        use table::requests::CreateTableRequest;
+
+        use crate::error::CreateTableSnafu;
+
         let column_schemas = vec![
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
@@ -142,12 +169,14 @@ impl Instance {
 
         let table_name = "demo";
         let table = self
-            .table_engine
+            .table_engine()
             .create_table(
                 &EngineContext::default(),
                 CreateTableRequest {
                     id: 1,
-                    name: table_name.to_string(),
+                    catalog_name: None,
+                    schema_name: None,
+                    table_name: table_name.to_string(),
                     desc: Some(" a test table".to_string()),
                     schema: Arc::new(
                         Schema::with_timestamp_index(column_schemas, 3)
@@ -228,6 +257,7 @@ mod tests {
         let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
+        instance.create_test_table().await.unwrap();
 
         let output = instance
             .execute_sql(
@@ -267,5 +297,30 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[tokio::test]
+    pub async fn test_execute_create() {
+        common_telemetry::init_default_ut_logging();
+        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+        let instance = Instance::new(&opts).await.unwrap();
+        instance.start().await.unwrap();
+        instance.create_test_table().await.unwrap();
+
+        let output = instance
+            .execute_sql(
+                r#"create table test_table( 
+                            host string, 
+                            ts bigint, 
+                            cpu double default 0, 
+                            memory double, 
+                            TIME INDEX (ts), 
+                            PRIMARY KEY(ts, host)
+                        ) engine=mito with(regions=1);"#,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output, Output::AffectedRows(1)));
     }
 }

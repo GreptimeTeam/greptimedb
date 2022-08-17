@@ -7,6 +7,7 @@ pub const TIME_INDEX: &str = "__time_index";
 pub struct CreateTable {
     /// Create if not exists
     pub if_not_exists: bool,
+    pub table_id: u32,
     /// Table name
     pub name: ObjectName,
     pub columns: Vec<ColumnDef>,

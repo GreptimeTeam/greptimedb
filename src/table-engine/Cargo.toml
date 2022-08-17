@@ -3,16 +3,20 @@ name = "table-engine"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+test = ["tempdir"]
+
 [dependencies]
 arc-swap = "1.0"
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-common-error = {path = "../common/error" }
-common-query = {path = "../common/query" }
-common-recordbatch = {path = "../common/recordbatch" }
-common-telemetry = {path = "../common/telemetry" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
+common-error = { path = "../common/error" }
+common-query = { path = "../common/query" }
+common-recordbatch = { path = "../common/recordbatch" }
+common-telemetry = { path = "../common/telemetry" }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 log-store = { path = "../log-store" }
@@ -20,12 +24,12 @@ object-store = { path = "../object-store" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-storage ={ path = "../storage" }
-store-api ={ path = "../store-api" }
+storage = { path = "../storage" }
+store-api = { path = "../store-api" }
 table = { path = "../table" }
+tempdir = { version = "0.3", optional = true }
 tokio = { version = "1.0", features = ["full"] }
 
 [dev-dependencies]
 datatypes = { path = "../datatypes" }
-tempdir = "0.3"
 tokio = { version = "1.18", features = ["full"] }

@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use common_error::mock::MockError;
-use common_error::prelude::StatusCode;
 use common_telemetry::logging;
 use storage::metadata::{RegionMetaImpl, RegionMetadataRef};
 use storage::write_batch::WriteBatch;
@@ -142,7 +141,7 @@ impl StorageEngine for MockEngine {
             return Ok(Some(region));
         }
 
-        Err(MockError::with_backtrace(StatusCode::Unexpected))
+        return Ok(None);
     }
 
     async fn close_region(&self, _ctx: &EngineContext, _region: MockRegion) -> Result<()> {

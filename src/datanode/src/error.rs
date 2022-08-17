@@ -121,6 +121,39 @@ pub enum Error {
 
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String },
+
+    #[snafu(display("Invalid CREATE TABLE sql statement, cause: {}", msg))]
+    InvalidCreateTableSql { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to create schema when creating table: {}", source))]
+    CreateSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("SQL data type not supported yet: {:?}", t))]
+    SqlTypeNotSupported {
+        t: sql::ast::DataType,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Specified timestamp key or primary key column not found: {}", name))]
+    KeyColumnNotFound { name: String, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Constraint in CREATE TABLE statement is not supported yet: {}",
+        constraint
+    ))]
+    ConstraintNotSupported {
+        constraint: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to insert into system catalog table: {}", source))]
+    InsertSystemCatalog {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -139,13 +172,19 @@ impl ErrorExt for Error {
             | Error::ParseSqlValue { .. }
             | Error::ColumnTypeMismatch { .. }
             | Error::IllegalInsertData { .. }
-            | Error::DecodeInsert { .. } => StatusCode::InvalidArguments,
+            | Error::DecodeInsert { .. }
+            | Error::InvalidCreateTableSql { .. }
+            | Error::SqlTypeNotSupported { .. }
+            | Error::CreateSchema { .. }
+            | Error::KeyColumnNotFound { .. }
+            | Error::ConstraintNotSupported { .. } => StatusCode::InvalidArguments,
             // TODO(yingwen): Further categorize http error.
             Error::StartHttp { .. }
             | Error::ParseAddr { .. }
             | Error::TcpBind { .. }
             | Error::StartGrpc { .. }
             | Error::CreateDir { .. }
+            | Error::InsertSystemCatalog { .. }
             | Error::Conversion { .. }
             | Error::UnsupportedExpr { .. } => StatusCode::Internal,
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,

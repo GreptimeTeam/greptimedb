@@ -546,6 +546,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "common-time",
  "datafusion",
  "datatypes",
  "futures",
@@ -856,6 +857,9 @@ dependencies = [
 [[package]]
 name = "common-time"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+]
 
 [[package]]
 name = "concurrent-queue"

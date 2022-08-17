@@ -86,7 +86,9 @@ pub async fn setup_test_engine_and_table() -> (
             &EngineContext::default(),
             CreateTableRequest {
                 id: 1,
-                name: TABLE_NAME.to_string(),
+                catalog_name: None,
+                schema_name: None,
+                table_name: TABLE_NAME.to_string(),
                 desc: Some("a test table".to_string()),
                 schema: schema.clone(),
                 create_if_not_exists: true,
@@ -115,7 +117,9 @@ pub async fn setup_mock_engine_and_table(
             &EngineContext::default(),
             CreateTableRequest {
                 id: 1,
-                name: TABLE_NAME.to_string(),
+                catalog_name: None,
+                schema_name: None,
+                table_name: TABLE_NAME.to_string(),
                 desc: None,
                 schema: schema.clone(),
                 create_if_not_exists: true,

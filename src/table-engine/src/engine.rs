@@ -134,7 +134,7 @@ fn build_row_key_desc_from_schema(
             .schema
             .timestamp_column()
             .context(MissingTimestampIndexSnafu {
-                table_name: &request.name,
+                table_name: &request.table_name,
             })?;
     let timestamp_index = request.schema.timestamp_index().unwrap();
 
@@ -147,7 +147,7 @@ fn build_row_key_desc_from_schema(
     .build()
     .context(BuildColumnDescriptorSnafu {
         column_name: &ts_column_schema.name,
-        table_name: &request.name,
+        table_name: &request.table_name,
     })?;
     column_id += 1;
 
@@ -172,7 +172,7 @@ fn build_row_key_desc_from_schema(
         .build()
         .context(BuildColumnDescriptorSnafu {
             column_name: &column_schema.name,
-            table_name: &request.name,
+            table_name: &request.table_name,
         })?;
 
         builder = builder.push_column(column);
@@ -182,7 +182,7 @@ fn build_row_key_desc_from_schema(
     Ok((
         column_id,
         builder.build().context(BuildRowKeyDescriptorSnafu {
-            table_name: &request.name,
+            table_name: &request.table_name,
         })?,
     ))
 }
@@ -198,7 +198,7 @@ fn build_column_family_from_request(
         .schema
         .timestamp_index()
         .context(MissingTimestampIndexSnafu {
-            table_name: &request.name,
+            table_name: &request.table_name,
         })?;
     let column_schemas = request
         .schema
@@ -217,7 +217,7 @@ fn build_column_family_from_request(
         .build()
         .context(BuildColumnDescriptorSnafu {
             column_name: &column_schema.name,
-            table_name: &request.name,
+            table_name: &request.table_name,
         })?;
 
         builder = builder.push_column(column);
@@ -227,7 +227,7 @@ fn build_column_family_from_request(
     Ok((
         column_id,
         builder.build().context(BuildColumnFamilyDescriptorSnafu {
-            table_name: &request.name,
+            table_name: &request.table_name,
         })?,
     ))
 }
@@ -238,7 +238,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         _ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> Result<TableRef> {
-        let table_name = &request.name;
+        let table_name = &request.table_name;
 
         if let Some(table) = self.get_table(table_name) {
             if request.create_if_not_exists {
@@ -486,7 +486,9 @@ mod tests {
 
         let request = CreateTableRequest {
             id: 1,
-            name: table_info.name.to_string(),
+            catalog_name: None,
+            schema_name: None,
+            table_name: table_info.name.to_string(),
             schema: table_info.meta.schema.clone(),
             create_if_not_exists: true,
             desc: None,
@@ -506,7 +508,9 @@ mod tests {
         // test create_if_not_exists=false
         let request = CreateTableRequest {
             id: 1,
-            name: table_info.name.to_string(),
+            catalog_name: None,
+            schema_name: None,
+            table_name: table_info.name.to_string(),
             schema: table_info.meta.schema.clone(),
             create_if_not_exists: false,
             desc: None,

@@ -3,9 +3,13 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use table::metadata::TableId;
+use table::TableRef;
+
 pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 pub use crate::manager::LocalCatalogManager;
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
+
 mod consts;
 pub mod error;
 mod manager;
@@ -57,7 +61,28 @@ pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
 
 #[async_trait::async_trait]
 pub trait CatalogManager: CatalogList {
+    /// Starts a catalog manager.
     async fn start(&self) -> error::Result<()>;
+
+    /// Returns next available table id.
+    fn next_table_id(&self) -> TableId;
+
+    /// Registers a table given given catalog/schema to catalog manager,
+    /// returns table registered.
+    async fn register_table(&self, request: RegisterTableRequest) -> error::Result<usize>;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;
+
+pub struct RegisterTableRequest {
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub table_name: String,
+    pub table_id: TableId,
+    pub table: TableRef,
+}
+
+/// Formats table fully-qualified name
+pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {
+    format!("{}.{}.{}", catalog, schema, table)
+}

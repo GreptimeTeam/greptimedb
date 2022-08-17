@@ -10,6 +10,7 @@ pub mod primitive;
 mod string;
 
 use std::any::Any;
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use arrow::array::ArrayRef;
@@ -51,7 +52,7 @@ impl<'a> Validity<'a> {
 }
 
 /// Vector of data values.
-pub trait Vector: Send + Sync + Serializable {
+pub trait Vector: Send + Sync + Serializable + Debug {
     /// Returns the data type of the vector.
     ///
     /// This may require heap allocation.

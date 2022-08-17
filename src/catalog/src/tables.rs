@@ -14,26 +14,31 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use futures::Stream;
+use snafu::ResultExt;
 use table::engine::TableEngineRef;
+use table::metadata::TableId;
 use table::{Table, TableRef};
 
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
-use crate::system::SystemCatalogTable;
-use crate::{CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef};
+use crate::error::InsertTableRecordSnafu;
+use crate::system::{build_table_insert_request, SystemCatalogTable};
+use crate::{
+    format_full_table_name, CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef,
+};
 
 /// Tables holds all tables created by user.
 pub struct Tables {
     schema: SchemaRef,
     catalogs: CatalogListRef,
-    engine: TableEngineRef,
+    engine_name: String,
 }
 
 impl Tables {
-    pub fn new(catalogs: CatalogListRef, engine: TableEngineRef) -> Self {
+    pub fn new(catalogs: CatalogListRef, engine_name: String) -> Self {
         Self {
             schema: Arc::new(build_schema_for_tables()),
             catalogs,
-            engine,
+            engine_name,
         }
     }
 }
@@ -56,7 +61,7 @@ impl Table for Tables {
     ) -> table::error::Result<SendableRecordBatchStream> {
         let catalogs = self.catalogs.clone();
         let schema_ref = self.schema.clone();
-        let engine_name = self.engine.name().to_string();
+        let engine_name = self.engine_name.clone();
 
         let stream = stream!({
             for catalog_name in catalogs.catalog_names() {
@@ -189,12 +194,28 @@ impl SystemCatalog {
         engine: TableEngineRef,
     ) -> Self {
         let schema = InformationSchema {
-            tables: Arc::new(Tables::new(catalogs, engine)),
+            tables: Arc::new(Tables::new(catalogs, engine.name().to_string())),
             system: Arc::new(system),
         };
         Self {
             information_schema: Arc::new(schema),
         }
+    }
+
+    pub async fn register_table(
+        &self,
+        catalog: String,
+        schema: String,
+        table_name: String,
+        table_id: TableId,
+    ) -> crate::error::Result<usize> {
+        let full_table_name = format_full_table_name(&catalog, &schema, &table_name);
+        let request = build_table_insert_request(full_table_name, table_id);
+        self.information_schema
+            .system
+            .insert(request)
+            .await
+            .context(InsertTableRecordSnafu)
     }
 }
 
@@ -248,4 +269,81 @@ fn build_schema_for_tables() -> Schema {
         ),
     ];
     Schema::new(cols)
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::arrow::array::Utf8Array;
+    use datatypes::arrow::datatypes::DataType;
+    use futures_util::StreamExt;
+    use table::table::numbers::NumbersTable;
+
+    use super::*;
+    use crate::memory::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
+    use crate::CatalogList;
+
+    #[tokio::test]
+    async fn test_tables() {
+        let catalog_list = new_memory_catalog_list().unwrap();
+        let catalog_provider = Arc::new(MemoryCatalogProvider::default());
+        let schema = Arc::new(MemorySchemaProvider::new());
+        schema
+            .register_table("test_table".to_string(), Arc::new(NumbersTable::default()))
+            .unwrap();
+        catalog_provider.register_schema("test_schema".to_string(), schema);
+        catalog_list.register_catalog("test_catalog".to_string(), catalog_provider);
+        let tables = Tables::new(catalog_list, "test_engine".to_string());
+
+        let mut tables_stream = tables.scan(&None, &[], None).await.unwrap();
+        if let Some(t) = tables_stream.next().await {
+            let batch = t.unwrap().df_recordbatch;
+            assert_eq!(1, batch.num_rows());
+            assert_eq!(4, batch.num_columns());
+            assert_eq!(&DataType::LargeUtf8, batch.column(0).data_type());
+            assert_eq!(&DataType::LargeUtf8, batch.column(1).data_type());
+            assert_eq!(&DataType::LargeUtf8, batch.column(2).data_type());
+            assert_eq!(&DataType::LargeUtf8, batch.column(3).data_type());
+            assert_eq!(
+                "test_catalog",
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Utf8Array<i64>>()
+                    .unwrap()
+                    .value(0)
+            );
+
+            assert_eq!(
+                "test_schema",
+                batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Utf8Array<i64>>()
+                    .unwrap()
+                    .value(0)
+            );
+
+            assert_eq!(
+                "test_table",
+                batch
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Utf8Array<i64>>()
+                    .unwrap()
+                    .value(0)
+            );
+
+            assert_eq!(
+                "test_engine",
+                batch
+                    .column(3)
+                    .as_any()
+                    .downcast_ref::<Utf8Array<i64>>()
+                    .unwrap()
+                    .value(0)
+            );
+        } else {
+            panic!("Record batch should not be empty!")
+        }
+    }
 }

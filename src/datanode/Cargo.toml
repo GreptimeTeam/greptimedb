@@ -33,7 +33,7 @@ sql = { path = "../sql" }
 storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
-table-engine = { path = "../table-engine" }
+table-engine = { path = "../table-engine", features = ["test"] }
 tokio = { version = "1.18", features = ["full"] }
 tonic = "0.8"
 tokio-stream = { version = "0.1.8", features = ["net"] }

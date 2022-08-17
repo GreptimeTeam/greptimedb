@@ -1,15 +1,18 @@
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
-use datatypes::prelude::ConcreteDataType;
+use common_telemetry::debug;
+use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::vectors::{BinaryVector, Int64Vector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
-use table::requests::{CreateTableRequest, OpenTableRequest};
+use table::requests::{CreateTableRequest, InsertRequest, OpenTableRequest};
 use table::{Table, TableRef};
 
 use crate::consts::{
@@ -20,6 +23,11 @@ use crate::error::{
     CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
     OpenSystemCatalogSnafu, Result, SystemCatalogSchemaSnafu, ValueDeserializeSnafu,
 };
+
+pub const ENTRY_TYPE_INDEX: usize = 0;
+pub const KEY_INDEX: usize = 1;
+pub const TIMESTAMP_INDEX: usize = 2;
+pub const VALUE_INDEX: usize = 3;
 
 pub struct SystemCatalogTable {
     schema: SchemaRef,
@@ -44,6 +52,11 @@ impl Table for SystemCatalogTable {
     ) -> table::Result<SendableRecordBatchStream> {
         panic!("System catalog table does not support scan!")
     }
+
+    /// Insert values into table.
+    async fn insert(&self, request: InsertRequest) -> table::error::Result<usize> {
+        self.table.insert(request).await
+    }
 }
 
 impl SystemCatalogTable {
@@ -67,10 +80,12 @@ impl SystemCatalogTable {
             // system catalog table is not yet created, try to create
             let request = CreateTableRequest {
                 id: SYSTEM_CATALOG_TABLE_ID,
-                name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
+                catalog_name: Some(SYSTEM_CATALOG_NAME.to_string()),
+                schema_name: Some(INFORMATION_SCHEMA_NAME.to_string()),
+                table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
                 desc: Some("System catalog table".to_string()),
                 schema: schema.clone(),
-                primary_key_indices: vec![0, 1, 2],
+                primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX, TIMESTAMP_INDEX],
                 create_if_not_exists: true,
             };
 
@@ -97,28 +112,83 @@ impl SystemCatalogTable {
 /// - timestamp: currently not used.
 /// - value: JSON-encoded value of entry's metadata.
 fn build_system_catalog_schema() -> Result<Schema> {
-    let mut cols = Vec::with_capacity(6);
-    cols.push(ColumnSchema::new(
+    let cols = vec![
+        ColumnSchema::new(
+            "entry_type".to_string(),
+            ConcreteDataType::uint8_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "key".to_string(),
+            ConcreteDataType::binary_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "timestamp".to_string(),
+            ConcreteDataType::int64_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "value".to_string(),
+            ConcreteDataType::binary_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "gmt_created".to_string(),
+            ConcreteDataType::int64_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "gmt_modified".to_string(),
+            ConcreteDataType::int64_datatype(),
+            false,
+        ),
+    ];
+
+    Schema::with_timestamp_index(cols, TIMESTAMP_INDEX).context(SystemCatalogSchemaSnafu)
+}
+
+pub fn build_table_insert_request(full_table_name: String, table_id: TableId) -> InsertRequest {
+    let mut columns_values = HashMap::with_capacity(6);
+    columns_values.insert(
         "entry_type".to_string(),
-        ConcreteDataType::uint8_datatype(),
-        false,
-    ));
-    cols.push(ColumnSchema::new(
+        Arc::new(UInt8Vector::from_vec(vec![EntryType::Table as u8])) as _,
+    );
+
+    columns_values.insert(
         "key".to_string(),
-        ConcreteDataType::binary_datatype(),
-        false,
-    ));
-    cols.push(ColumnSchema::new(
+        Arc::new(BinaryVector::from_slice(&[full_table_name.as_bytes()])) as _,
+    );
+
+    // Timestamp in key part is intentionally left to 0
+    columns_values.insert(
         "timestamp".to_string(),
-        ConcreteDataType::int64_datatype(),
-        false,
-    ));
-    cols.push(ColumnSchema::new(
+        Arc::new(Int64Vector::from_vec(vec![0])) as _,
+    );
+
+    columns_values.insert(
         "value".to_string(),
-        ConcreteDataType::binary_datatype(),
-        false,
-    ));
-    Schema::with_timestamp_index(cols, 2).context(SystemCatalogSchemaSnafu)
+        Arc::new(BinaryVector::from_slice(&[serde_json::to_string(
+            &TableEntryValue { table_id },
+        )
+        .unwrap()
+        .as_bytes()])) as _,
+    );
+
+    columns_values.insert(
+        "gmt_created".to_string(),
+        Arc::new(Int64Vector::from_vec(vec![0])) as _,
+    );
+
+    columns_values.insert(
+        "gmt_modified".to_string(),
+        Arc::new(Int64Vector::from_vec(vec![0])) as _,
+    );
+
+    InsertRequest {
+        table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
+        columns_values,
+    }
 }
 
 pub fn decode_system_catalog(
@@ -126,6 +196,10 @@ pub fn decode_system_catalog(
     key: Option<&[u8]>,
     value: Option<&[u8]>,
 ) -> Result<Entry> {
+    debug!(
+        "Decode system catalog entry: {:?}, {:?}, {:?}",
+        entry_type, key, value
+    );
     let entry_type = entry_type.context(InvalidKeySnafu { key: None })?;
     let key = String::from_utf8_lossy(key.context(InvalidKeySnafu { key: None })?);
 
@@ -163,6 +237,7 @@ pub fn decode_system_catalog(
                 }
             );
             let value = value.context(EmptyValueSnafu)?;
+            debug!("Table meta value: {}", String::from_utf8_lossy(value));
             let table_meta: TableEntryValue =
                 serde_json::from_slice(value).context(ValueDeserializeSnafu)?;
             Ok(Entry::Table(TableEntry {

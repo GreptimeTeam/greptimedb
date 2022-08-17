@@ -1,1 +1,4 @@
-pub use sqlparser::ast::{ColumnDef, Expr, Ident, ObjectName, SqlOption, TableConstraint, Value};
+pub use sqlparser::ast::{
+    ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Ident, ObjectName, SqlOption,
+    TableConstraint, Value,
+};

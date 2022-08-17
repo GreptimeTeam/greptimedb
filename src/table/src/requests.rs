@@ -7,6 +7,7 @@ use datatypes::schema::SchemaRef;
 use crate::metadata::TableId;
 
 /// Insert request
+#[derive(Debug)]
 pub struct InsertRequest {
     pub table_name: String,
     pub columns_values: HashMap<String, VectorRef>,
@@ -16,12 +17,13 @@ pub struct InsertRequest {
 #[derive(Debug)]
 pub struct CreateTableRequest {
     pub id: TableId,
-    pub name: String,
+    pub catalog_name: Option<String>,
+    pub schema_name: Option<String>,
+    pub table_name: String,
     pub desc: Option<String>,
     pub schema: SchemaRef,
     pub primary_key_indices: Vec<usize>,
     pub create_if_not_exists: bool,
-    // TODO(yingwen): 1. Add catalog_name/schema_name and other infos
 }
 
 /// Open table request
@@ -30,7 +32,6 @@ pub struct OpenTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
-    // TODO(yingwen): TableId could be recovered from the table metadata.
     pub table_id: TableId,
 }
 
