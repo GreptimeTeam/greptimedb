@@ -26,7 +26,7 @@ impl Snapshot for SnapshotImpl {
     type Reader = ChunkReaderImpl;
 
     fn schema(&self) -> &SchemaRef {
-        self.version.schema()
+        self.version.user_schema()
     }
 
     async fn scan(
@@ -41,7 +41,7 @@ impl Snapshot for SnapshotImpl {
         let immutables = memtable_version.immutable_memtables();
 
         let mut builder =
-            ChunkReaderBuilder::new(self.version.schema().clone(), self.sst_layer.clone())
+            ChunkReaderBuilder::new(self.version.user_schema().clone(), self.sst_layer.clone())
                 .reserve_num_memtables(memtable_version.num_memtables())
                 .iter_ctx(IterContext {
                     batch_size: ctx.batch_size,

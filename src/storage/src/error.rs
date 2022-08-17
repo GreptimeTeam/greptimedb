@@ -175,14 +175,10 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Parquet file schema is not valid: {}", msg))]
-    SequenceColumnNotFound { msg: String, backtrace: Backtrace },
-
-    #[snafu(display("Parquet file schema is not valid, msg: {}, source: {}", msg, source))]
+    #[snafu(display("Parquet file schema is invalid, source: {}", source))]
     InvalidParquetSchema {
-        msg: String,
         #[snafu(backtrace)]
-        source: datatypes::error::Error,
+        source: crate::schema::Error,
     },
 
     #[snafu(display("Region is under {} state, cannot proceed operation", state))]
@@ -221,6 +217,20 @@ pub enum Error {
         given: SequenceNumber,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to convert sst schema, file: {}, source: {}", file, source))]
+    ConvertSstSchema {
+        file: String,
+        #[snafu(backtrace)]
+        source: crate::schema::Error,
+    },
+
+    #[snafu(display("Invalid raw region metadata, region: {}, source: {}", region, source))]
+    InvalidRawRegion {
+        region: String,
+        #[snafu(backtrace)]
+        source: MetadataError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -245,10 +255,11 @@ impl ErrorExt for Error {
             | DecodeMetaActionList { .. }
             | Readline { .. }
             | InvalidParquetSchema { .. }
-            | SequenceColumnNotFound { .. }
             | WalDataCorrupted { .. }
             | VersionNotFound { .. }
-            | SequenceNotMonotonic { .. } => StatusCode::Unexpected,
+            | SequenceNotMonotonic { .. }
+            | ConvertSstSchema { .. }
+            | InvalidRawRegion { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | WriteParquet { .. }

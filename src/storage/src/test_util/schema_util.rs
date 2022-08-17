@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use datatypes::prelude::*;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 
 /// Column definition: (name, datatype, is_nullable)
 pub type ColumnDef<'a> = (&'a str, LogicalTypeId, bool);
@@ -16,7 +16,10 @@ pub fn new_schema(column_defs: &[ColumnDef], timestamp_index: Option<usize>) -> 
         .collect();
 
     if let Some(index) = timestamp_index {
-        Schema::with_timestamp_index(column_schemas, index).unwrap()
+        SchemaBuilder::from(column_schemas)
+            .timestamp_index(index)
+            .build()
+            .unwrap()
     } else {
         Schema::new(column_schemas)
     }

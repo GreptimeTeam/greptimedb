@@ -15,3 +15,4 @@ pub mod value;
 pub mod vectors;
 
 pub use arrow;
+pub use error::{Error, Result};

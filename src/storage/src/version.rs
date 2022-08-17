@@ -14,8 +14,9 @@ use std::time::Duration;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
-use crate::memtable::{MemtableId, MemtableSchema, MemtableSet, MemtableVersion};
+use crate::memtable::{MemtableId, MemtableSet, MemtableVersion};
 use crate::metadata::RegionMetadataRef;
+use crate::schema::RegionSchemaRef;
 use crate::sst::LevelMetas;
 use crate::sst::{FileHandle, FileMeta};
 use crate::sync::CowCell;
@@ -170,8 +171,13 @@ impl Version {
     }
 
     #[inline]
-    pub fn schema(&self) -> &SchemaRef {
-        &self.metadata.schema
+    pub fn schema(&self) -> &RegionSchemaRef {
+        self.metadata.schema()
+    }
+
+    #[inline]
+    pub fn user_schema(&self) -> &SchemaRef {
+        self.metadata.user_schema()
     }
 
     #[inline]
@@ -197,11 +203,6 @@ impl Version {
     /// Returns duration used to partition the memtables and ssts by time.
     pub fn bucket_duration(&self) -> Duration {
         DEFAULT_BUCKET_DURATION
-    }
-
-    #[inline]
-    pub fn memtable_schema(&self) -> MemtableSchema {
-        MemtableSchema::new(self.metadata.columns_row_key.clone())
     }
 
     pub fn apply_edit(&mut self, edit: VersionEdit) {

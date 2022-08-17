@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_telemetry::logging;
 use datatypes::schema::SchemaRef;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::manifest::{
     self, action::ProtocolAction, Manifest, ManifestVersion, MetaActionIterator,
@@ -103,7 +103,7 @@ impl<S: LogStore> RegionImpl<S> {
             .update(RegionMetaActionList::new(vec![
                 RegionMetaAction::Protocol(ProtocolAction::new()),
                 RegionMetaAction::Change(RegionChange {
-                    metadata: metadata.clone(),
+                    metadata: (&*metadata).into(),
                 }),
             ]))
             .await?;
@@ -206,8 +206,13 @@ impl<S: LogStore> RegionImpl<S> {
             for action in action_list.actions {
                 match (action, version) {
                     (RegionMetaAction::Change(c), None) => {
+                        let region = c.metadata.name.clone();
+                        let region_metadata = c
+                            .metadata
+                            .try_into()
+                            .context(error::InvalidRawRegionSnafu { region })?;
                         version = Some(Version::with_manifest_version(
-                            c.metadata,
+                            Arc::new(region_metadata),
                             last_manifest_version,
                         ));
                         for (manifest_version, action) in actions.drain(..) {

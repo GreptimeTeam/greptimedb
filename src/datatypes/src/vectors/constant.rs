@@ -114,7 +114,7 @@ impl Serializable for ConstantVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
         std::iter::repeat(self.try_get(0)?)
             .take(self.len())
-            .map(serde_json::to_value)
+            .map(serde_json::Value::try_from)
             .collect::<serde_json::Result<_>>()
             .context(SerializeSnafu)
     }

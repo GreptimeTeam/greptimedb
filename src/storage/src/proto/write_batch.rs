@@ -36,11 +36,10 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Invalid timestamp index: {}", index))]
-    InvalidTimestampIndex {
-        index: usize,
+    #[snafu(display("Failed to convert schema, source: {}", source))]
+    ConvertSchema {
+        #[snafu(backtrace)]
         source: datatypes::error::Error,
-        backtrace: Backtrace,
     },
 }
 
@@ -81,10 +80,10 @@ impl TryFrom<Schema> for schema::SchemaRef {
 
         let schema: schema::SchemaRef = match schema.timestamp_index {
             Some(index) => Arc::new(
-                schema::Schema::with_timestamp_index(column_schemas, index.value as usize)
-                    .context(InvalidTimestampIndexSnafu {
-                        index: index.value as usize,
-                    })?,
+                schema::SchemaBuilder::from(column_schemas)
+                    .timestamp_index(index.value as usize)
+                    .build()
+                    .context(ConvertSchemaSnafu)?,
             ),
             None => Arc::new(schema::Schema::new(column_schemas)),
         };

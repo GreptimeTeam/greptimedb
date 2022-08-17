@@ -4,6 +4,7 @@ use datatypes::vectors::{Int64VectorBuilder, UInt64VectorBuilder};
 
 use super::*;
 use crate::metadata::RegionMetadata;
+use crate::schema::RegionSchemaRef;
 use crate::test_util::descriptor_util::RegionDescBuilder;
 
 // For simplicity, all memtables in test share same memtable id.
@@ -12,15 +13,15 @@ const MEMTABLE_ID: MemtableId = 1;
 // Schema for testing memtable:
 // - key: Int64(timestamp), UInt64(version),
 // - value: UInt64
-pub fn schema_for_test() -> MemtableSchema {
-    // Just build a region desc and use its columns_row_key metadata.
+pub fn schema_for_test() -> RegionSchemaRef {
+    // Just build a region desc and use its columns metadata.
     let desc = RegionDescBuilder::new("test")
         .enable_version_column(true)
         .push_value_column(("v1", LogicalTypeId::UInt64, true))
         .build();
     let metadata: RegionMetadata = desc.try_into().unwrap();
 
-    MemtableSchema::new(metadata.columns_row_key)
+    metadata.schema().clone()
 }
 
 fn kvs_for_test_with_index(
@@ -128,10 +129,8 @@ fn check_iter_content(
     assert_eq!(keys.len(), index);
 }
 
-// TODO(yingwen): Check size of the returned batch.
-
 struct MemtableTester {
-    schema: MemtableSchema,
+    schema: RegionSchemaRef,
     builders: Vec<MemtableBuilderRef>,
 }
 
@@ -172,7 +171,7 @@ impl MemtableTester {
 }
 
 struct TestContext {
-    schema: MemtableSchema,
+    schema: RegionSchemaRef,
     memtable: MemtableRef,
 }
 
@@ -216,7 +215,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
             ..Default::default()
         };
         let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
-        assert_eq!(ctx.schema, *iter.schema());
+        assert_eq!(ctx.schema, iter.schema());
         assert_eq!(RowOrdering::Key, iter.ordering());
 
         check_iter_content(

@@ -7,7 +7,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::{BinaryVector, Int64Vector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -22,7 +22,7 @@ use crate::consts::{
 };
 use crate::error::{
     CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
-    OpenSystemCatalogSnafu, Result, SystemCatalogSchemaSnafu, ValueDeserializeSnafu,
+    OpenSystemCatalogSnafu, Result, ValueDeserializeSnafu,
 };
 
 pub const ENTRY_TYPE_INDEX: usize = 0;
@@ -68,7 +68,7 @@ impl SystemCatalogTable {
             table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
             table_id: SYSTEM_CATALOG_TABLE_ID,
         };
-        let schema = Arc::new(build_system_catalog_schema()?);
+        let schema = Arc::new(build_system_catalog_schema());
         let ctx = EngineContext::default();
 
         if let Some(table) = engine
@@ -107,12 +107,14 @@ impl SystemCatalogTable {
 }
 
 /// Build system catalog table schema.
-/// A system catalog table consists of 4 columns, namely
+/// A system catalog table consists of 6 columns, namely
 /// - entry_type: type of entry in current row, can be any variant of [EntryType].
 /// - key: a binary encoded key of entry, differs according to different entry type.
 /// - timestamp: currently not used.
 /// - value: JSON-encoded value of entry's metadata.
-fn build_system_catalog_schema() -> Result<Schema> {
+/// - gmt_created: create time of this metadata.
+/// - gmt_modified: last updated time of this metadata.
+fn build_system_catalog_schema() -> Schema {
     let cols = vec![
         ColumnSchema::new(
             "entry_type".to_string(),
@@ -146,7 +148,11 @@ fn build_system_catalog_schema() -> Result<Schema> {
         ),
     ];
 
-    Schema::with_timestamp_index(cols, TIMESTAMP_INDEX).context(SystemCatalogSchemaSnafu)
+    // The schema of this table must be valid.
+    SchemaBuilder::from(cols)
+        .timestamp_index(2)
+        .build()
+        .unwrap()
 }
 
 pub fn build_table_insert_request(full_table_name: String, table_id: TableId) -> InsertRequest {

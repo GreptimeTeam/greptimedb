@@ -3,8 +3,7 @@ mod mock_engine;
 use std::sync::Arc;
 
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::SchemaRef;
-use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use log_store::fs::noop::NoopLogStore;
 use object_store::{backend::fs::Backend, ObjectStore};
 use storage::config::EngineConfig as StorageEngineConfig;
@@ -32,7 +31,10 @@ pub fn schema_for_test() -> Schema {
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
     ];
 
-    Schema::with_timestamp_index(column_schemas, 0).expect("ts must be timestamp column")
+    SchemaBuilder::from(column_schemas)
+        .timestamp_index(0)
+        .build()
+        .expect("ts must be timestamp column")
 }
 
 pub type MockMitoEngine = MitoEngine<MockEngine>;

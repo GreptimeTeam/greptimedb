@@ -43,7 +43,7 @@ impl Snapshot for MockSnapshot {
     type Reader = MockChunkReader;
 
     fn schema(&self) -> &SchemaRef {
-        &self.metadata.schema
+        self.metadata.user_schema()
     }
 
     async fn scan(
@@ -52,7 +52,7 @@ impl Snapshot for MockSnapshot {
         _request: ScanRequest,
     ) -> Result<ScanResponse<MockChunkReader>> {
         let reader = MockChunkReader {
-            schema: self.metadata.schema.clone(),
+            schema: self.metadata.user_schema().clone(),
         };
 
         Ok(ScanResponse { reader })
