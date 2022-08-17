@@ -6,3 +6,5 @@ pub mod instance;
 mod metric;
 pub mod server;
 mod sql;
+#[cfg(test)]
+mod tests;

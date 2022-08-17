@@ -1,13 +1,13 @@
-mod test_util;
-
 use std::sync::Arc;
 
 use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
-use datanode::instance::Instance;
 use servers::http::HttpServer;
 use test_util::TestGuard;
+
+use crate::instance::Instance;
+use crate::tests::test_util;
 
 async fn make_test_app() -> (Router, TestGuard) {
     let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts();

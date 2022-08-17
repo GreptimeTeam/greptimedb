@@ -1,14 +1,14 @@
-mod test_util;
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::{codec::InsertBatch, column, select_expr, Column, SelectExpr};
 use client::{Client, Database, ObjectResult};
-use datanode::instance::Instance;
 use servers::grpc::GrpcServer;
 use servers::server::Server;
+
+use crate::instance::Instance;
+use crate::tests::test_util;
 
 #[tokio::test]
 async fn test_insert_and_select() {

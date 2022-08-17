@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
 use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
-use datanode::error::{CreateTableSnafu, Result};
-use datanode::instance::Instance;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use snafu::ResultExt;
@@ -11,6 +8,10 @@ use table::engine::EngineContext;
 use table::engine::TableEngineRef;
 use table::requests::CreateTableRequest;
 use tempdir::TempDir;
+
+use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
+use crate::error::{CreateTableSnafu, Result};
+use crate::instance::Instance;
 
 /// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
 /// Only for test.
@@ -38,10 +39,6 @@ pub fn create_tmp_dir_and_datanode_opts() -> (DatanodeOptions, TestGuard) {
     )
 }
 
-// It's actually not dead codes, at least been used in instance_test.rs and grpc_test.rs
-// However, clippy keeps warning us, so I temporary add an "allow" to bypass it.
-// TODO(LFC): further investigate why clippy falsely warning "dead_code"
-#[allow(dead_code)]
 pub async fn create_test_table(instance: &Instance) -> Result<()> {
     let column_schemas = vec![
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
