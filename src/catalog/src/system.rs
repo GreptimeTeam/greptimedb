@@ -5,6 +5,7 @@ use std::sync::Arc;
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
+use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{BinaryVector, Int64Vector, UInt8Vector};
@@ -177,12 +178,12 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
 
     columns_values.insert(
         "gmt_created".to_string(),
-        Arc::new(Int64Vector::from_slice(&[0])) as _,
+        Arc::new(Int64Vector::from_slice(&[util::current_time_millis()])) as _,
     );
 
     columns_values.insert(
         "gmt_modified".to_string(),
-        Arc::new(Int64Vector::from_slice(&[0])) as _,
+        Arc::new(Int64Vector::from_slice(&[util::current_time_millis()])) as _,
     );
 
     InsertRequest {
