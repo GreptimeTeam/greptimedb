@@ -20,7 +20,7 @@ use rustpython_vm::{class::PyClassImpl, AsObject};
 use snafu::{OptionExt, ResultExt};
 use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
-use vm::{PyObjectRef, PyPayload, VirtualMachine, Interpreter};
+use vm::{Interpreter, PyObjectRef, PyPayload, VirtualMachine};
 
 use crate::fail_parse_error;
 use crate::python::copr_parse::{parse_copr, ret_parse_error};
@@ -419,7 +419,7 @@ fn select_from_rb(rb: &DfRecordBatch, fetch_names: &[String]) -> Result<Vec<PyVe
 }
 
 /// match between arguments' real type and annotation types
-/// so as to double check you extract correct columns(with correct type) from RecordBatch
+/// if type anno is vector[_] then use a 
 fn check_args_anno_real_type(
     args: &[PyVector],
     copr: &Coprocessor,
@@ -432,7 +432,8 @@ fn check_args_anno_real_type(
         ensure!(
             anno_ty
                 .to_owned()
-                .map(|v| v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
+                .map(|v| v.datatype == None // like a vector[_]
+                    || v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
                 .unwrap_or(true),
             OtherSnafu {
                 reason: format!(
@@ -527,7 +528,12 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     exec_parsed(&copr, rb)
 }
 
-pub(crate) fn exec_with_cached_vm(copr: &Coprocessor, rb: &DfRecordBatch, args:Vec<PyVector>,vm: &Interpreter) -> Result<DfRecordBatch> {
+pub(crate) fn exec_with_cached_vm(
+    copr: &Coprocessor,
+    rb: &DfRecordBatch,
+    args: Vec<PyVector>,
+    vm: &Interpreter,
+) -> Result<DfRecordBatch> {
     vm.enter(|vm| -> Result<DfRecordBatch> {
         PyVector::make_class(&vm.ctx);
         // set arguments with given name and values
@@ -571,7 +577,7 @@ pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRe
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
     check_args_anno_real_type(&args, copr, rb)?;
-    let interpreter = vm::Interpreter::with_init(Default::default(), |vm|{
+    let interpreter = vm::Interpreter::with_init(Default::default(), |vm| {
         PyVector::make_class(&vm.ctx);
     });
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node

@@ -187,7 +187,7 @@ def a(cpu: vector[_], mem: vector[f64])->(vector[f64|None], vector[f64], vector[
 fn test_coprocessor() {
     let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+def a(cpu: vector[_], mem: vector[f64])->(vector[f64|None], 
     vector[bool]):
     abc = cpu
     abc *= 2
