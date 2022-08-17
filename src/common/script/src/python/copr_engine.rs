@@ -33,20 +33,19 @@ impl Stream for CoprocessorStream {
     type Item = Result<DfRecordBatch>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> std::task::Poll<Option<Self::Item>> {
         let res = self.stream.as_mut().poll_next(cx);
-        if let Poll::Ready(Some(rb)) = res{
-            match rb{
-                Ok(rb) => {
-                    let df_rb = rb.df_recordbatch;
-                    let ret = exec_parsed(&self.copr, &df_rb);
-                    Poll::Ready(Some(ret))
-                    },
-                Err(_err) => todo!(),
+        match res {
+            Poll::Ready(Some(rb)) => {
+                match rb{
+                    Ok(rb) => {
+                        let df_rb = rb.df_recordbatch;
+                        let ret = exec_parsed(&self.copr, &df_rb);
+                        Poll::Ready(Some(ret))
+                        },
+                    Err(_err) => todo!(),
+                }
             }
-        }else if let Poll::Ready(None) = res{
-            Poll::Ready(None)
-        }
-        else{
-            Poll::Pending
+            Poll::Ready(None) => Poll::Ready(None),
+            _ => Poll::Pending,
         }
     }
 }
@@ -87,7 +86,6 @@ impl CoprEngine {
                         }
                     };
                     let stream = stream.map(run_copr);
-                    // let ret = Box::pin(stream) as CoprocessorStream;
                     let res = stream.collect::<Vec<Result<DfRecordBatch>>>().await;
                     Ok(res)
                 }

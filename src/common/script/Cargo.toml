@@ -39,6 +39,7 @@ datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", bra
 datafusion-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-physical-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datatypes = {path = "../../datatypes"}
+# TODO: update RustPython Version Periodically(Per Month maybe?)
 rustpython-ast = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 rustpython-bytecode = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 rustpython-compiler = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}

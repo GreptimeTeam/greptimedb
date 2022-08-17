@@ -20,7 +20,7 @@ use rustpython_vm::{class::PyClassImpl, AsObject};
 use snafu::{OptionExt, ResultExt};
 use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
-use vm::{PyObjectRef, PyPayload, VirtualMachine};
+use vm::{PyObjectRef, PyPayload, VirtualMachine, Interpreter};
 
 use crate::fail_parse_error;
 use crate::python::copr_parse::{parse_copr, ret_parse_error};
@@ -527,14 +527,8 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     exec_parsed(&copr, rb)
 }
 
-/// using a parsed `Coprocessor` struct as input to execute python code
-pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
-    // 3. get args from `rb`, and cast them into PyVector
-    let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
-    check_args_anno_real_type(&args, copr, rb)?;
-
-    // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
-    vm::Interpreter::without_stdlib(Default::default()).enter(|vm| -> Result<DfRecordBatch> {
+pub(crate) fn exec_with_cached_vm(copr: &Coprocessor, rb: &DfRecordBatch, vm: &Interpreter) -> Result<DfRecordBatch> {
+    vm.enter(|vm| -> Result<DfRecordBatch> {
         PyVector::make_class(&vm.ctx);
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
@@ -570,6 +564,18 @@ pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRe
         let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
         Ok(res_rb)
     })
+}
+
+/// using a parsed `Coprocessor` struct as input to execute python code
+pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
+    // 3. get args from `rb`, and cast them into PyVector
+    let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
+    check_args_anno_real_type(&args, copr, rb)?;
+    let interpreter = vm::Interpreter::with_init(Default::default(), |vm|{
+        PyVector::make_class(&vm.ctx);
+    });
+    // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
+    exec_with_cached_vm(copr, rb, &interpreter)
 }
 
 /// execute script just like [`exec_coprocessor`] do,
