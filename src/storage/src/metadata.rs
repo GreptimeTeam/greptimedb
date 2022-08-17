@@ -26,6 +26,9 @@ pub enum Error {
     #[snafu(display("Column family id {} already exists", id))]
     CfIdExists { id: ColumnId, backtrace: Backtrace },
 
+    #[snafu(display("Column id {} already exists", id))]
+    ColIdExists { id: ColumnId, backtrace: Backtrace },
+
     #[snafu(display("Failed to build schema, source: {}", source))]
     InvalidSchema {
         #[snafu(backtrace)]
@@ -34,9 +37,6 @@ pub enum Error {
 
     #[snafu(display("Column name {} is reserved by the system", name))]
     ReservedColumn { name: String, backtrace: Backtrace },
-
-    #[snafu(display("Column id {} already exists", id))]
-    ColIdExists { id: ColumnId, backtrace: Backtrace },
 
     #[snafu(display("Missing timestamp key column"))]
     MissingTimestamp { backtrace: Backtrace },
