@@ -6,8 +6,6 @@ use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::status_code::StatusCode;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
@@ -15,8 +13,6 @@ use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
-#[cfg(test)]
-use table::engine::TableEngineRef;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
@@ -155,63 +151,6 @@ impl Instance {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub fn table_engine(&self) -> TableEngineRef {
-        self.sql_handler.table_engine()
-    }
-
-    #[cfg(test)]
-    pub async fn create_test_table(&self) -> Result<()> {
-        use datatypes::data_type::ConcreteDataType;
-        use datatypes::schema::{ColumnSchema, Schema};
-        use table::engine::EngineContext;
-        use table::requests::CreateTableRequest;
-
-        use crate::error::CreateTableSnafu;
-
-        let column_schemas = vec![
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
-        ];
-
-        let table_name = "demo";
-        let table = self
-            .table_engine()
-            .create_table(
-                &EngineContext::default(),
-                CreateTableRequest {
-                    id: 1,
-                    catalog_name: None,
-                    schema_name: None,
-                    table_name: table_name.to_string(),
-                    desc: Some(" a test table".to_string()),
-                    schema: Arc::new(
-                        Schema::with_timestamp_index(column_schemas, 3)
-                            .expect("ts is expected to be timestamp column"),
-                    ),
-                    create_if_not_exists: true,
-                    primary_key_indices: Vec::default(),
-                },
-            )
-            .await
-            .context(CreateTableSnafu { table_name })?;
-
-        let schema_provider = self
-            .catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .unwrap()
-            .schema(DEFAULT_SCHEMA_NAME)
-            .unwrap();
-
-        schema_provider
-            .register_table(table_name.to_string(), table)
-            .unwrap();
-
-        Ok(())
-    }
-
     async fn handle_insert(&self, insert_expr: InsertExpr) -> ObjectResult {
         match self.execute_grpc_insert(insert_expr).await {
             Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
@@ -234,6 +173,14 @@ impl Instance {
             }
             None => ObjectResult::default(),
         }
+    }
+
+    pub fn sql_handler(&self) -> &SqlHandler<DefaultEngine> {
+        &self.sql_handler
+    }
+
+    pub fn catalog_manager(&self) -> &CatalogManagerRef {
+        &self.catalog_manager
     }
 }
 
@@ -311,87 +258,5 @@ impl GrpcQueryHandler for Instance {
             }
         };
         Ok(object_resp)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use arrow::array::UInt64Array;
-    use common_recordbatch::util;
-
-    use super::*;
-    use crate::test_util;
-
-    #[tokio::test]
-    async fn test_execute_insert() {
-        common_telemetry::init_default_ut_logging();
-        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
-        let instance = Instance::new(&opts).await.unwrap();
-        instance.start().await.unwrap();
-        instance.create_test_table().await.unwrap();
-
-        let output = instance
-            .execute_sql(
-                r#"insert into demo(host, cpu, memory, ts) values
-                           ('host1', 66.6, 1024, 1655276557000),
-                           ('host2', 88.8,  333.3, 1655276558000)
-                           "#,
-            )
-            .await
-            .unwrap();
-
-        assert!(matches!(output, Output::AffectedRows(2)));
-    }
-
-    #[tokio::test]
-    async fn test_execute_query() {
-        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
-        let instance = Instance::new(&opts).await.unwrap();
-        instance.start().await.unwrap();
-
-        let output = instance
-            .execute_sql("select sum(number) from numbers limit 20")
-            .await
-            .unwrap();
-
-        match output {
-            Output::RecordBatch(recordbatch) => {
-                let numbers = util::collect(recordbatch).await.unwrap();
-                let columns = numbers[0].df_recordbatch.columns();
-                assert_eq!(1, columns.len());
-                assert_eq!(columns[0].len(), 1);
-
-                assert_eq!(
-                    *columns[0].as_any().downcast_ref::<UInt64Array>().unwrap(),
-                    UInt64Array::from_slice(&[4950])
-                );
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[tokio::test]
-    pub async fn test_execute_create() {
-        common_telemetry::init_default_ut_logging();
-        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
-        let instance = Instance::new(&opts).await.unwrap();
-        instance.start().await.unwrap();
-        instance.create_test_table().await.unwrap();
-
-        let output = instance
-            .execute_sql(
-                r#"create table test_table(
-                            host string,
-                            ts bigint,
-                            cpu double default 0,
-                            memory double,
-                            TIME INDEX (ts),
-                            PRIMARY KEY(ts, host)
-                        ) engine=mito with(regions=1);"#,
-            )
-            .await
-            .unwrap();
-
-        assert!(matches!(output, Output::AffectedRows(1)));
     }
 }

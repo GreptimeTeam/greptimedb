@@ -12,9 +12,13 @@ use servers::server::Server;
 
 #[tokio::test]
 async fn test_insert_and_select() {
+    common_telemetry::init_default_ut_logging();
+
     let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
     let instance = Arc::new(Instance::new(&opts).await.unwrap());
     instance.start().await.unwrap();
+
+    test_util::create_test_table(&instance).await.unwrap();
 
     tokio::spawn(async move {
         let mut grpc_server = GrpcServer::new(instance);
