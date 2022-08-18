@@ -6,19 +6,19 @@ pub type SequenceNumber = u64;
 
 /// Operation type of the value to write to storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ValueType {
+pub enum OpType {
     /// Put operation.
     Put,
 }
 
-impl ValueType {
+impl OpType {
     pub fn as_u8(&self) -> u8 {
         *self as u8
     }
 
-    /// Minimum value type after casting to u8.
-    pub const fn min_type() -> ValueType {
-        ValueType::Put
+    /// Minimal op type after casting to u8.
+    pub const fn min_type() -> OpType {
+        OpType::Put
     }
 }
 
@@ -27,8 +27,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_value_type() {
-        assert_eq!(0, ValueType::Put.as_u8());
-        assert_eq!(0, ValueType::min_type().as_u8());
+    fn test_op_type() {
+        assert_eq!(0, OpType::Put.as_u8());
+        assert_eq!(0, OpType::min_type().as_u8());
     }
 }

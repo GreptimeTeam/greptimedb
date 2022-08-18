@@ -7,7 +7,7 @@ mod version;
 use std::sync::Arc;
 
 use datatypes::vectors::VectorRef;
-use store_api::storage::{consts, SequenceNumber, ValueType};
+use store_api::storage::{consts, OpType, SequenceNumber};
 
 use crate::error::Result;
 use crate::memtable::btree::BTreeMemtable;
@@ -100,7 +100,7 @@ pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
 /// Key-value pairs in columnar format.
 pub struct KeyValues {
     pub sequence: SequenceNumber,
-    pub value_type: ValueType,
+    pub op_type: OpType,
     /// Start index of these key-value paris in batch. Each row in the same batch has
     /// a unique index to identify it.
     pub start_index_in_batch: usize,
@@ -110,8 +110,8 @@ pub struct KeyValues {
 
 impl KeyValues {
     // Note that `sequence` is not reset.
-    fn reset(&mut self, value_type: ValueType, index_in_batch: usize) {
-        self.value_type = value_type;
+    fn reset(&mut self, op_type: OpType, index_in_batch: usize) {
+        self.op_type = op_type;
         self.start_index_in_batch = index_in_batch;
         self.keys.clear();
         self.values.clear();
