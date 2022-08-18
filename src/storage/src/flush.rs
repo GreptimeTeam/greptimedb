@@ -164,16 +164,14 @@ impl<S: LogStore> FlushJob<S> {
         }
 
         let mut futures = Vec::with_capacity(self.memtables.len());
+        let iter_ctx = IterContext {
+            for_flush: true,
+            ..Default::default()
+        };
         for m in &self.memtables {
             let file_name = Self::generate_sst_file_name();
             // TODO(hl): Check if random file name already exists in meta.
-
-            let iter_ctx = IterContext {
-                for_flush: true,
-                ..Default::default()
-            };
-
-            let iter = m.memtable.iter(iter_ctx)?;
+            let iter = m.memtable.iter(&iter_ctx)?;
             futures.push(async move {
                 self.sst_layer
                     .write_sst(&file_name, iter, &WriteOptions::default())

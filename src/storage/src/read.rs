@@ -1,5 +1,7 @@
 //! Common structs and utilities for read.
 
+mod projector;
+
 use async_trait::async_trait;
 use datatypes::vectors::{UInt64Vector, UInt8Vector, VectorRef};
 
@@ -13,6 +15,18 @@ pub struct Batch {
     pub sequences: UInt64Vector,
     pub op_types: UInt8Vector,
     pub values: Vec<VectorRef>,
+}
+
+// TODO(yingwen): [projection] New batch struct. Replace Batch by it.
+/// A `Batch` holds multiple rows with same schema.
+// Now the structure of `Batch` is still unstable, all pub fields may be changed.
+#[derive(Debug)]
+struct NewBatch {
+    /// Rows organized in columnar format.
+    ///
+    /// Columns follow the same order convention of region schema:
+    /// key, value, internal columns.
+    columns: Vec<VectorRef>,
 }
 
 /// Async batch reader.

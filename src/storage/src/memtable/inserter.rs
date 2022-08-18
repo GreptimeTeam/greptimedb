@@ -593,7 +593,7 @@ mod tests {
         sequence: SequenceNumber,
         data: &[(i64, Option<i64>)],
     ) {
-        let iter = mem.iter(IterContext::default()).unwrap();
+        let iter = mem.iter(&IterContext::default()).unwrap();
 
         let mut index = 0;
         for batch in iter {

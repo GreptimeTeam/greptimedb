@@ -37,6 +37,8 @@ impl Snapshot for SnapshotImpl {
         let visible_sequence = self.sequence_to_read(request.sequence);
         let memtable_version = self.version.memtables();
 
+        // TODO(yingwen): [projection] Build ProjectedSchema from request.
+
         let mutables = memtable_version.mutable_memtables();
         let immutables = memtable_version.immutable_memtables();
 

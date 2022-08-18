@@ -73,6 +73,7 @@ fn batch_to_chunk(mut batch: Batch) -> Chunk {
     Chunk::new(columns)
 }
 
+// TODO(yingwen): [projection] Add projection field
 /// Builder to create a new [ChunkReaderImpl] from scan request.
 pub struct ChunkReaderBuilder {
     schema: SchemaRef,
@@ -106,7 +107,7 @@ impl ChunkReaderBuilder {
 
     pub fn pick_memtables(mut self, memtables: &MemtableSet) -> Result<Self> {
         for (_range, mem) in memtables.iter() {
-            let iter = mem.iter(self.iter_ctx.clone())?;
+            let iter = mem.iter(&self.iter_ctx)?;
 
             self.iters.push(iter);
         }

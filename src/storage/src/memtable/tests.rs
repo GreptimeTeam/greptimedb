@@ -177,7 +177,7 @@ struct TestContext {
 
 fn write_iter_memtable_case(ctx: &TestContext) {
     // Test iterating an empty memtable.
-    let mut iter = ctx.memtable.iter(IterContext::default()).unwrap();
+    let mut iter = ctx.memtable.iter(&IterContext::default()).unwrap();
     assert!(iter.next().is_none());
     // Poll the empty iterator again.
     assert!(iter.next().is_none());
@@ -214,7 +214,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
             batch_size,
             ..Default::default()
         };
-        let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+        let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
         assert_eq!(ctx.schema, iter.schema());
         assert_eq!(RowOrdering::Key, iter.ordering());
 
@@ -313,7 +313,7 @@ fn test_iter_batch_size() {
                 ..Default::default()
             };
 
-            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_batch_size(&mut *iter, total, batch_size);
         }
     });
@@ -346,7 +346,7 @@ fn test_duplicate_key_across_batch() {
                 ..Default::default()
             };
 
-            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
                 &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
@@ -377,7 +377,7 @@ fn test_duplicate_key_in_batch() {
                 ..Default::default()
             };
 
-            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
                 &[(1000, 1), (1000, 2), (2001, 2)],       // keys
@@ -424,7 +424,7 @@ fn test_sequence_visibility() {
                 for_flush: false,
             };
 
-            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
                 &[], // keys
@@ -441,7 +441,7 @@ fn test_sequence_visibility() {
                 for_flush: false,
             };
 
-            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
                 &[(1000, 1), (1000, 2)],     // keys
@@ -458,7 +458,7 @@ fn test_sequence_visibility() {
                 for_flush: false,
             };
 
-            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+            let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
                 &[(1000, 1), (1000, 2)],     // keys
@@ -487,7 +487,7 @@ fn test_iter_after_none() {
             ..Default::default()
         };
 
-        let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
+        let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
         assert!(iter.next().is_some());
         assert!(iter.next().is_none());
         assert!(iter.next().is_none());

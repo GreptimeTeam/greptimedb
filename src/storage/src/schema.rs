@@ -1,3 +1,4 @@
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use common_error::prelude::*;
@@ -64,6 +65,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Invalid projection, {}", msg))]
+    InvalidProjection { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -147,6 +151,26 @@ impl RegionSchema {
     #[inline]
     pub fn version(&self) -> u32 {
         self.user_schema.version()
+    }
+
+    #[inline]
+    fn sequence_index(&self) -> usize {
+        self.sst_schema.sequence_index()
+    }
+
+    #[inline]
+    fn value_type_index(&self) -> usize {
+        self.sst_schema.value_type_index()
+    }
+
+    #[inline]
+    fn row_key_indices(&self) -> impl Iterator<Item = usize> {
+        self.sst_schema.row_key_indices()
+    }
+
+    #[inline]
+    fn column_metadata(&self, idx: usize) -> &ColumnMetadata {
+        self.columns.column_metadata(idx)
     }
 }
 
@@ -312,6 +336,102 @@ impl TryFrom<ArrowSchema> for SstSchema {
             row_key_end,
             user_column_end,
         })
+    }
+}
+
+/// Metadata about projection.
+#[derive(Debug)]
+struct Projection {
+    /// Column indices of projection.
+    projected_columns: Vec<usize>,
+    /// Sorted and deduplicated indices of columns to read, includes all row key columns
+    /// and internal columns.
+    ///
+    /// We use these indices to read from data sources.
+    columns_to_read: Vec<usize>,
+    /// Maps index of `projected_columns` to index of the column in `columns_to_read`.
+    ///
+    /// Invariant:
+    /// - `projected_idx_to_read_idx.len() == projected_columns.len()`
+    projected_idx_to_read_idx: Vec<usize>,
+}
+
+impl Projection {
+    fn new(region_schema: &RegionSchema, projected_columns: Vec<usize>) -> Projection {
+        // Get a sorted list of column indices to read.
+        let mut column_indices: BTreeSet<_> = projected_columns.iter().cloned().collect();
+        column_indices.extend(region_schema.row_key_indices().chain([
+            region_schema.sequence_index(),
+            region_schema.value_type_index(),
+        ]));
+        let columns_to_read: Vec<_> = column_indices.into_iter().collect();
+        // Mapping: <column id> => <index in `columns_to_read`>
+        let id_to_read_idx: HashMap<_, _> = columns_to_read
+            .iter()
+            .enumerate()
+            .map(|(idx, col_idx)| (region_schema.column_metadata(*col_idx).id(), idx))
+            .collect();
+        // Use column id to find index in `columns_to_read` of a column in `projected_columns`.
+        let projected_idx_to_read_idx = projected_columns
+            .iter()
+            .map(|col_idx| {
+                let column_id = region_schema.column_metadata(*col_idx).id();
+                // This unwrap() should be safe since `columns_to_read` must contains all columns in `projected_columns`.
+                let read_idx = id_to_read_idx.get(&column_id).unwrap();
+                *read_idx
+            })
+            .collect();
+
+        Projection {
+            projected_columns,
+            columns_to_read,
+            projected_idx_to_read_idx,
+        }
+    }
+}
+
+/// Schema with projection info.
+#[derive(Debug)]
+pub struct ProjectedSchema {
+    region_schema: RegionSchemaRef,
+    /// Projection, `None` means all columns are needed.
+    projection: Option<Projection>,
+}
+
+impl ProjectedSchema {
+    fn new(
+        region_schema: RegionSchemaRef,
+        projected_columns: Option<Vec<usize>>,
+    ) -> Result<ProjectedSchema> {
+        if let Some(indices) = &projected_columns {
+            Self::validate_projection(&region_schema, &indices)?;
+        }
+
+        let projection = projected_columns.map(|indices| Projection::new(&region_schema, indices));
+
+        Ok(ProjectedSchema {
+            region_schema,
+            projection,
+        })
+    }
+
+    fn validate_projection(region_schema: &RegionSchema, indices: &[usize]) -> Result<()> {
+        // Now only allowed to read user columns.
+        let user_schema = region_schema.user_schema();
+        for i in indices {
+            ensure!(
+                *i < user_schema.num_columns(),
+                InvalidProjectionSnafu {
+                    msg: format!(
+                        "index {} out of bound, only contains {} columns",
+                        i,
+                        user_schema.num_columns()
+                    ),
+                }
+            );
+        }
+
+        Ok(())
     }
 }
 

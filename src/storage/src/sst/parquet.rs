@@ -292,7 +292,7 @@ mod tests {
         let backend = Backend::build().root(path).finish().await.unwrap();
         let object_store = ObjectStore::new(backend);
         let sst_file_name = "test-flush.parquet";
-        let iter = memtable.iter(IterContext::default()).unwrap();
+        let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, iter, object_store);
 
         writer
