@@ -1,6 +1,6 @@
 [package]
 edition = "2021"
-name = "common-script"
+name = "script"
 version = "0.1.0"
 
 [dependencies.arrow]
@@ -26,19 +26,19 @@ python-udf = [
 ]
 
 [dependencies]
-common-error = {path = "../error"}
-common-query = {path = "../query"}
-common-recordbatch = {path = "../recordbatch" }
-common-function = { path = "../function" }
+common-error = {path = "../common/error"}
+common-query = {path = "../common/query"}
+common-recordbatch = {path = "../common/recordbatch" }
+common-function = { path = "../common/function" }
 futures-util = "0.3"
 futures = "0.3"
-query = { path = "../../query" }
+query = { path = "../query" }
 console = "0.15.1"
 datafusion = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}
 datafusion-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-physical-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
-datatypes = {path = "../../datatypes"}
+datatypes = {path = "../datatypes"}
 # TODO: update RustPython Version Periodically(Per Month maybe?)
 rustpython-ast = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 rustpython-bytecode = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
