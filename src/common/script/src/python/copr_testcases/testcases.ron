@@ -12,8 +12,10 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
         predicate: ParseIsOk(
             result: (
                 name: "a",
-                args: ["cpu", "mem"],
-                returns: ["perf", "what", "how", "why"],
+                deco_args: (
+                    arg_names: ["cpu", "mem"],
+                    ret_names: ["perf", "what", "how", "why"],
+                ),
                 arg_types: [
                     Some((
                         datatype: Some(Float32),
@@ -186,6 +188,18 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)]
         predicate: ParseIsErr(
             reason: 
             "Expect decorator with name `copr` or `coprocessor`, found"
+        )
+    ),
+    (
+        name: "extra_keywords",
+        code: r#"
+@copr(args=["cpu", "mem"], sql=3,psql = 4,rets=5)
+def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)], vector[f64], vector[f64 | None]):
+    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+"#,
+        predicate: ParseIsErr(
+            reason: 
+            " keyword argument, found "
         )
     ),
     (
