@@ -231,6 +231,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: MetadataError,
     },
+
+    #[snafu(display("Invalid projection, source: {}", source))]
+    InvalidProjection {
+        #[snafu(backtrace)]
+        source: crate::schema::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -245,7 +251,8 @@ impl ErrorExt for Error {
             | InvalidInputSchema { .. }
             | BatchMissingColumn { .. }
             | BatchMissingTimestamp { .. }
-            | InvalidTimestamp { .. } => StatusCode::InvalidArguments,
+            | InvalidTimestamp { .. }
+            | InvalidProjection { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. }
             | EncodeJson { .. }

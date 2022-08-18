@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::arrow::array::Array;
-use datatypes::arrow::chunk::Chunk;
+use datatypes::arrow::chunk::Chunk as ArrowChunk;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::prelude::Vector;
 use datatypes::schema::Metadata;
@@ -103,7 +103,7 @@ pub struct RegionSchema {
 impl RegionSchema {
     pub fn new(columns: ColumnsMetadataRef, version: u32) -> Result<RegionSchema> {
         let user_schema = Arc::new(build_user_schema(&columns, version)?);
-        let sst_schema = SstSchema::new(&columns, version)?;
+        let sst_schema = SstSchema::from_columns_metadata(&columns, version)?;
 
         debug_assert_eq!(user_schema.version(), sst_schema.version());
         debug_assert_eq!(version, user_schema.version());
@@ -159,8 +159,8 @@ impl RegionSchema {
     }
 
     #[inline]
-    fn value_type_index(&self) -> usize {
-        self.sst_schema.value_type_index()
+    fn op_type_index(&self) -> usize {
+        self.sst_schema.op_type_index()
     }
 
     #[inline]
@@ -171,6 +171,16 @@ impl RegionSchema {
     #[inline]
     fn column_metadata(&self, idx: usize) -> &ColumnMetadata {
         self.columns.column_metadata(idx)
+    }
+
+    #[inline]
+    fn user_column_indices(&self) -> impl Iterator<Item = usize> {
+        self.columns.user_column_indices()
+    }
+
+    #[inline]
+    fn timestamp_key_index(&self) -> usize {
+        self.columns.timestamp_key_index()
     }
 }
 
@@ -187,37 +197,6 @@ pub struct SstSchema {
 }
 
 impl SstSchema {
-    fn new(columns: &ColumnsMetadata, version: u32) -> Result<SstSchema> {
-        let column_schemas: Vec<_> = columns
-            .iter_all_columns()
-            .map(|col| ColumnSchema::from(&col.desc))
-            .collect();
-
-        let schema = SchemaBuilder::from(column_schemas)
-            .timestamp_index(columns.timestamp_key_index())
-            .version(version)
-            .add_metadata(ROW_KEY_END_KEY, columns.row_key_end().to_string())
-            .add_metadata(USER_COLUMN_END_KEY, columns.user_column_end().to_string())
-            .build()
-            .context(BuildSchemaSnafu)?;
-
-        let user_column_end = columns.user_column_end();
-        assert_eq!(
-            consts::SEQUENCE_COLUMN_NAME,
-            schema.column_schemas()[user_column_end].name
-        );
-        assert_eq!(
-            consts::OP_TYPE_COLUMN_NAME,
-            schema.column_schemas()[user_column_end + 1].name
-        );
-
-        Ok(SstSchema {
-            schema: Arc::new(schema),
-            row_key_end: columns.row_key_end(),
-            user_column_end,
-        })
-    }
-
     #[inline]
     pub fn version(&self) -> u32 {
         self.schema.version()
@@ -233,14 +212,15 @@ impl SstSchema {
         self.schema.arrow_schema()
     }
 
-    pub fn batch_to_arrow_chunk(&self, batch: &Batch) -> Chunk<Arc<dyn Array>> {
+    // TODO(yingwen): [projection] Use the new batch struct.
+    pub fn batch_to_arrow_chunk(&self, batch: &Batch) -> ArrowChunk<Arc<dyn Array>> {
         assert_eq!(
             self.schema.num_columns(),
             // key columns + value columns + sequence + op_type
             batch.keys.len() + batch.values.len() + 2
         );
 
-        Chunk::new(
+        ArrowChunk::new(
             batch
                 .keys
                 .iter()
@@ -252,7 +232,7 @@ impl SstSchema {
         )
     }
 
-    pub fn arrow_chunk_to_batch(&self, chunk: &Chunk<Arc<dyn Array>>) -> Result<Batch> {
+    pub fn arrow_chunk_to_batch(&self, chunk: &ArrowChunk<Arc<dyn Array>>) -> Result<Batch> {
         let keys = self
             .row_key_indices()
             .map(|i| {
@@ -283,6 +263,52 @@ impl SstSchema {
             sequences,
             op_types,
             values,
+        })
+    }
+
+    fn from_columns_metadata(columns: &ColumnsMetadata, version: u32) -> Result<SstSchema> {
+        let column_schemas: Vec<_> = columns
+            .iter_all_columns()
+            .map(|col| ColumnSchema::from(&col.desc))
+            .collect();
+
+        SstSchema::new(
+            column_schemas,
+            version,
+            columns.timestamp_key_index(),
+            columns.row_key_end(),
+            columns.user_column_end(),
+        )
+    }
+
+    fn new(
+        column_schemas: Vec<ColumnSchema>,
+        version: u32,
+        timestamp_key_index: usize,
+        row_key_end: usize,
+        user_column_end: usize,
+    ) -> Result<SstSchema> {
+        let schema = SchemaBuilder::from(column_schemas)
+            .timestamp_index(timestamp_key_index)
+            .version(version)
+            .add_metadata(ROW_KEY_END_KEY, row_key_end.to_string())
+            .add_metadata(USER_COLUMN_END_KEY, user_column_end.to_string())
+            .build()
+            .context(BuildSchemaSnafu)?;
+
+        assert_eq!(
+            consts::SEQUENCE_COLUMN_NAME,
+            schema.column_schemas()[user_column_end].name
+        );
+        assert_eq!(
+            consts::OP_TYPE_COLUMN_NAME,
+            schema.column_schemas()[user_column_end + 1].name
+        );
+
+        Ok(SstSchema {
+            schema: Arc::new(schema),
+            row_key_end,
+            user_column_end,
         })
     }
 
@@ -354,17 +380,33 @@ struct Projection {
     /// Invariant:
     /// - `projected_idx_to_read_idx.len() == projected_columns.len()`
     projected_idx_to_read_idx: Vec<usize>,
+    /// Number of user columns to read.
+    num_user_columns: usize,
 }
 
 impl Projection {
     fn new(region_schema: &RegionSchema, projected_columns: Vec<usize>) -> Projection {
         // Get a sorted list of column indices to read.
         let mut column_indices: BTreeSet<_> = projected_columns.iter().cloned().collect();
-        column_indices.extend(region_schema.row_key_indices().chain([
+        column_indices.extend(region_schema.row_key_indices());
+        let num_user_columns = column_indices.len();
+        // Now insert internal columns.
+        column_indices.extend([
             region_schema.sequence_index(),
-            region_schema.value_type_index(),
-        ]));
+            region_schema.op_type_index(),
+        ]);
         let columns_to_read: Vec<_> = column_indices.into_iter().collect();
+
+        // The region schema ensure that last two column must be internal columns.
+        assert_eq!(
+            region_schema.sequence_index(),
+            columns_to_read[num_user_columns]
+        );
+        assert_eq!(
+            region_schema.op_type_index(),
+            columns_to_read[num_user_columns + 1]
+        );
+
         // Mapping: <column id> => <index in `columns_to_read`>
         let id_to_read_idx: HashMap<_, _> = columns_to_read
             .iter()
@@ -386,6 +428,7 @@ impl Projection {
             projected_columns,
             columns_to_read,
             projected_idx_to_read_idx,
+            num_user_columns,
         }
     }
 }
@@ -394,25 +437,110 @@ impl Projection {
 #[derive(Debug)]
 pub struct ProjectedSchema {
     region_schema: RegionSchemaRef,
-    /// Projection, `None` means all columns are needed.
-    projection: Option<Projection>,
+    projection: Projection,
+    /// Schema used to read from data sources.
+    schema_to_read: SstSchema,
+    /// User schema after projection.
+    projected_user_schema: SchemaRef,
 }
 
+pub type ProjectedSchemaRef = Arc<ProjectedSchema>;
+
 impl ProjectedSchema {
-    fn new(
+    pub fn new(
         region_schema: RegionSchemaRef,
         projected_columns: Option<Vec<usize>>,
     ) -> Result<ProjectedSchema> {
         if let Some(indices) = &projected_columns {
             Self::validate_projection(&region_schema, &indices)?;
         }
+        let indices = match projected_columns {
+            Some(indices) => {
+                Self::validate_projection(&region_schema, &indices)?;
+                indices
+            }
+            None => {
+                // If all user columns are needed, we convert `None` to full
+                // list of column indices, so we don't need to handle this case
+                // specially.
+                region_schema.user_column_indices().collect()
+            }
+        };
 
-        let projection = projected_columns.map(|indices| Projection::new(&region_schema, indices));
+        let projection = Projection::new(&region_schema, indices);
+
+        let schema_to_read = Self::build_schema_to_read(&region_schema, &projection)?;
+        let projected_user_schema = Self::build_projected_user_schema(&region_schema, &projection)?;
 
         Ok(ProjectedSchema {
             region_schema,
             projection,
+            schema_to_read,
+            projected_user_schema,
         })
+    }
+
+    // FIXME(yingwen): [projection] Replaced by projected user schema
+    #[inline]
+    pub fn user_schema(&self) -> &SchemaRef {
+        self.region_schema.user_schema()
+    }
+
+    #[inline]
+    pub fn schema_to_read(&self) -> &SstSchema {
+        &self.schema_to_read
+    }
+
+    fn build_schema_to_read(
+        region_schema: &RegionSchema,
+        projection: &Projection,
+    ) -> Result<SstSchema> {
+        let column_schemas: Vec<_> = projection
+            .columns_to_read
+            .iter()
+            .map(|col_idx| ColumnSchema::from(&region_schema.column_metadata(*col_idx).desc))
+            .collect();
+        // All row key columns are reserved in this schema, so we can use the row_key_end
+        // and timestamp_key_index from region schema.
+        SstSchema::new(
+            column_schemas,
+            region_schema.version(),
+            region_schema.timestamp_key_index(),
+            region_schema.columns.row_key_end(),
+            projection.num_user_columns,
+        )
+    }
+
+    fn build_projected_user_schema(
+        region_schema: &RegionSchema,
+        projection: &Projection,
+    ) -> Result<SchemaRef> {
+        let timestamp_index =
+            projection
+                .projected_columns
+                .iter()
+                .enumerate()
+                .find_map(|(idx, col_idx)| {
+                    if *col_idx == region_schema.timestamp_key_index() {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                });
+        let column_schemas: Vec<_> = projection
+            .projected_columns
+            .iter()
+            .map(|col_idx| ColumnSchema::from(&region_schema.column_metadata(*col_idx).desc))
+            .collect();
+
+        let mut builder = SchemaBuilder::from(column_schemas);
+        if let Some(timestamp_index) = timestamp_index {
+            builder = builder.timestamp_index(timestamp_index);
+        }
+
+        let schema = builder.build().context(BuildSchemaSnafu)?;
+
+        Ok(Arc::new(schema))
     }
 
     fn validate_projection(region_schema: &RegionSchema, indices: &[usize]) -> Result<()> {
@@ -476,7 +604,7 @@ mod tests {
         }
     }
 
-    fn check_chunk_batch(chunk: &Chunk<Arc<dyn Array>>, batch: &Batch) {
+    fn check_chunk_batch(chunk: &ArrowChunk<Arc<dyn Array>>, batch: &Batch) {
         assert_eq!(5, chunk.columns().len());
         assert_eq!(3, chunk.len());
 

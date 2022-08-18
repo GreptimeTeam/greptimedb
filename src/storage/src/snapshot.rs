@@ -37,14 +37,13 @@ impl Snapshot for SnapshotImpl {
         let visible_sequence = self.sequence_to_read(request.sequence);
         let memtable_version = self.version.memtables();
 
-        // TODO(yingwen): [projection] Build ProjectedSchema from request.
-
         let mutables = memtable_version.mutable_memtables();
         let immutables = memtable_version.immutable_memtables();
 
         let mut builder =
-            ChunkReaderBuilder::new(self.version.user_schema().clone(), self.sst_layer.clone())
+            ChunkReaderBuilder::new(self.version.schema().clone(), self.sst_layer.clone())
                 .reserve_num_memtables(memtable_version.num_memtables())
+                .projection(request.projection)
                 .iter_ctx(IterContext {
                     batch_size: ctx.batch_size,
                     visible_sequence,

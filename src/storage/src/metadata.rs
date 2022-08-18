@@ -233,6 +233,11 @@ impl ColumnsMetadata {
     pub fn column_metadata(&self, idx: usize) -> &ColumnMetadata {
         &self.columns[idx]
     }
+
+    #[inline]
+    pub fn user_column_indices(&self) -> impl Iterator<Item = usize> {
+        0..self.user_column_end
+    }
 }
 
 pub type ColumnsMetadataRef = Arc<ColumnsMetadata>;

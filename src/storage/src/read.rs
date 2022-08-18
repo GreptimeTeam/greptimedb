@@ -1,7 +1,5 @@
 //! Common structs and utilities for read.
 
-mod projector;
-
 use async_trait::async_trait;
 use datatypes::vectors::{UInt64Vector, UInt8Vector, VectorRef};
 

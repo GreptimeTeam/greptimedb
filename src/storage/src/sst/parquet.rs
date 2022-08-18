@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use crate::error::{self, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
-use crate::schema::SstSchema;
+use crate::schema::{ProjectedSchemaRef, SstSchema};
 use crate::sst;
 
 /// Parquet sst writer.
@@ -156,28 +156,26 @@ fn transverse_recursive<T, F: Fn(&DataType) -> T + Clone>(
 pub struct ParquetReader<'a> {
     file_path: &'a str,
     object_store: ObjectStore,
+    projected_schema: ProjectedSchemaRef,
 }
 
 type ReaderFactoryFuture<'a, R> =
     Pin<Box<dyn futures_util::Future<Output = std::io::Result<R>> + Send + 'a>>;
 
-pub type FieldProjection = Box<dyn Fn(&Schema) -> Vec<Field> + Send + Sync>;
-
 impl<'a> ParquetReader<'a> {
-    pub fn new(file_path: &str, object_store: ObjectStore) -> ParquetReader {
+    pub fn new(
+        file_path: &str,
+        object_store: ObjectStore,
+        projected_schema: ProjectedSchemaRef,
+    ) -> ParquetReader {
         ParquetReader {
             file_path,
             object_store,
+            projected_schema,
         }
     }
 
-    // TODO(yingwen): Projection is not supported now, since field index would change after projection.
-    // To support projection, we may need to implement some helper methods in schema.
-    pub async fn chunk_stream(
-        &self,
-        _projection: Option<FieldProjection>,
-        chunk_size: usize,
-    ) -> Result<ChunkStream> {
+    pub async fn chunk_stream(&self, chunk_size: usize) -> Result<ChunkStream> {
         let file_path = self.file_path.to_string();
         let operator = self.object_store.clone();
         let reader_factory = move || -> ReaderFactoryFuture<SeekableReader> {
@@ -195,12 +193,12 @@ impl<'a> ParquetReader<'a> {
             .context(error::ReadParquetSnafu { file: &file_path })?;
         let arrow_schema =
             infer_schema(&metadata).context(error::ReadParquetSnafu { file: &file_path })?;
-        // Just read all fields.
-        let projected_fields = arrow_schema.fields.clone();
-
-        let sst_schema = SstSchema::try_from(arrow_schema)
+        // Now the SstSchema is only used to validate metadata of the parquet file, but this schema
+        // would be useful once we support altering schema, as this is the actual schema of the SST.
+        let _sst_schema = SstSchema::try_from(arrow_schema)
             .context(error::ConvertSstSchemaSnafu { file: &file_path })?;
 
+        let projected_fields = self.projected_fields().to_vec();
         let chunk_stream = try_stream!({
             for rg in metadata.row_groups {
                 let column_chunks = read_columns_many_async(
@@ -221,20 +219,27 @@ impl<'a> ParquetReader<'a> {
             }
         });
 
-        ChunkStream::new(sst_schema, Box::pin(chunk_stream))
+        ChunkStream::new(self.projected_schema.clone(), Box::pin(chunk_stream))
+    }
+
+    fn projected_fields(&self) -> &[Field] {
+        &self.projected_schema.schema_to_read().arrow_schema().fields
     }
 }
 
 pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk<Arc<dyn Array>>>> + Send>>;
 
 pub struct ChunkStream {
-    schema: SstSchema,
+    projected_schema: ProjectedSchemaRef,
     stream: SendableChunkStream,
 }
 
 impl ChunkStream {
-    pub fn new(schema: SstSchema, stream: SendableChunkStream) -> Result<Self> {
-        Ok(Self { schema, stream })
+    pub fn new(projected_schema: ProjectedSchemaRef, stream: SendableChunkStream) -> Result<Self> {
+        Ok(Self {
+            projected_schema,
+            stream,
+        })
     }
 }
 
@@ -245,7 +250,8 @@ impl BatchReader for ChunkStream {
             .try_next()
             .await?
             .map(|chunk| {
-                self.schema
+                self.projected_schema
+                    .schema_to_read()
                     .arrow_chunk_to_batch(&chunk)
                     .context(error::InvalidParquetSchemaSnafu)
             })
