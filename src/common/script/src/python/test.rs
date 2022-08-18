@@ -183,8 +183,8 @@ def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[
 }
 
 #[test]
-#[allow(clippy::print_stdout)]
-// allow print in test function for debug purpose
+#[allow(clippy::print_stdout, unused_must_use)]
+// allow print in test function for debug purpose(like for quick testing a syntax&ideas)
 fn test_coprocessor() {
     let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
