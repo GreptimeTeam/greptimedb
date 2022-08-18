@@ -20,16 +20,16 @@ use rustpython_vm::{class::PyClassImpl, AsObject};
 use snafu::{OptionExt, ResultExt};
 use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
-use vm::{PyObjectRef, VirtualMachine};
+use vm::{Interpreter, PyObjectRef, VirtualMachine};
 
 use crate::fail_parse_error;
-use crate::scalars::python::copr_parse::{parse_copr, ret_parse_error};
-use crate::scalars::python::error::{
+use crate::python::copr_parse::{parse_copr, ret_parse_error};
+use crate::python::error::{
     ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
     PyRuntimeSnafu, Result, TypeCastSnafu,
 };
-use crate::scalars::python::is_instance;
-use crate::scalars::python::type_::PyVector;
+use crate::python::{is_instance, PyVector};
+
 fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
     OtherSnafu { reason }
 }
@@ -37,7 +37,8 @@ fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 #[cfg(test)]
 use serde::Deserialize;
 
-use super::error::pretty_print_error_in_src;
+use crate::python::copr_parse::DecoratorArgs;
+use crate::python::error::pretty_print_error_in_src;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,11 +52,10 @@ pub struct AnnotationInfo {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Coprocessor {
     pub name: String,
-    // get from python decorator args&returns
-    pub args: Vec<String>,
-    pub returns: Vec<String>,
-    // get from python function args& returns' annotation, first is type, second is is_nullable
+    pub deco_args: DecoratorArgs,
+    /// get from python function args' annotation, first is type, second is is_nullable
     pub arg_types: Vec<Option<AnnotationInfo>>,
+    /// get from python function returns' annotation, first is type, second is is_nullable
     pub return_types: Vec<Option<AnnotationInfo>>,
     /// store its corresponding script, also skip serde when in `cfg(test)` to reduce work in compare
     #[cfg_attr(test, serde(skip))]
@@ -73,7 +73,8 @@ impl Coprocessor {
         // instead of point to any of existing code written by user.
         loc.newline();
         let args: Vec<Located<ast::ExprKind>> = self
-            .args
+            .deco_args
+            .arg_names
             .iter()
             .map(|v| {
                 let node = ast::ExprKind::Name {
@@ -198,7 +199,7 @@ impl Coprocessor {
     /// if no annotation
     /// the datatypes of the actual columns is used directly
     fn gen_schema(&self, cols: &[ArrayRef]) -> Result<Arc<Schema>> {
-        let names = &self.returns;
+        let names = &self.deco_args.ret_names;
         let anno = &self.return_types;
         ensure!(
             cols.len() == names.len() && names.len() == anno.len(),
@@ -240,6 +241,10 @@ impl Coprocessor {
     /// check if real types and annotation types(if have) is the same, if not try cast columns to annotated type
     fn check_and_cast_type(&self, cols: &mut [ArrayRef]) -> Result<()> {
         let return_types = &self.return_types;
+        // allow ignore Return Type Annotation
+        if return_types.is_empty() {
+            return Ok(());
+        }
         ensure!(
             cols.len() == return_types.len(),
             OtherSnafu {
@@ -416,7 +421,7 @@ fn select_from_rb(rb: &DfRecordBatch, fetch_names: &[String]) -> Result<Vec<PyVe
 }
 
 /// match between arguments' real type and annotation types
-/// so as to double check you extract correct columns(with correct type) from RecordBatch
+/// if type anno is vector[_] then use real type
 fn check_args_anno_real_type(
     args: &[PyVector],
     copr: &Coprocessor,
@@ -429,12 +434,13 @@ fn check_args_anno_real_type(
         ensure!(
             anno_ty
                 .to_owned()
-                .map(|v| v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
+                .map(|v| v.datatype == None // like a vector[_]
+                    || v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
                 .unwrap_or(true),
             OtherSnafu {
                 reason: format!(
                     "column {}'s Type annotation is {:?}, but actual type is {:?}",
-                    copr.args[idx], anno_ty, real_ty
+                    copr.deco_args.arg_names[idx], anno_ty, real_ty
                 )
             }
         )
@@ -505,6 +511,7 @@ fn set_items_in_scope(
 /// use `f64 | None` to mark if returning column is nullable like in [`DfRecordBatch`]'s schema's [`Field`]'s is_nullable
 ///
 /// you can also use single underscore `_` to let coprocessor infer what type it is, so `_` and `_ | None` are both valid in type annotation.
+/// Note: using `_` means not nullable column, using `_ | None` means nullable column
 ///
 /// a example (of python script) given below:
 /// ```python
@@ -521,16 +528,20 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
     let copr = parse_copr(script)?;
-    // 3. get args from `rb`, and cast them into PyVector
-    let args: Vec<PyVector> = select_from_rb(rb, &copr.args)?;
-    check_args_anno_real_type(&args, &copr, rb)?;
+    exec_parsed(&copr, rb)
+}
 
-    // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
-    vm::Interpreter::without_stdlib(Default::default()).enter(|vm| -> Result<DfRecordBatch> {
+pub(crate) fn exec_with_cached_vm(
+    copr: &Coprocessor,
+    rb: &DfRecordBatch,
+    args: Vec<PyVector>,
+    vm: &Interpreter,
+) -> Result<DfRecordBatch> {
+    vm.enter(|vm| -> Result<DfRecordBatch> {
         PyVector::make_class(&vm.ctx);
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
-        set_items_in_scope(&scope, vm, &copr.args, args)?;
+        set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
 
         let code_obj = copr.strip_append_and_compile()?;
         let code_obj = vm.ctx.new_code(code_obj);
@@ -545,11 +556,11 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         let col_len = rb.num_rows();
         let mut cols: Vec<ArrayRef> = try_into_columns(&ret, vm, col_len)?;
         ensure!(
-            cols.len() == copr.returns.len(),
+            cols.len() == copr.deco_args.ret_names.len(),
             OtherSnafu {
                 reason: format!(
                     "The number of return Vector is wrong, expect {}, found {}",
-                    copr.returns.len(),
+                    copr.deco_args.ret_names.len(),
                     cols.len()
                 )
             }
@@ -562,6 +573,25 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatc
         let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
         Ok(res_rb)
     })
+}
+use crate::py_udf_module::greptime_builtin;
+
+/// init interpreter with type PyVector and Module: greptime
+pub(crate) fn init_interpreter() -> Interpreter {
+    vm::Interpreter::with_init(Default::default(), |vm| {
+        PyVector::make_class(&vm.ctx);
+        vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
+    })
+}
+
+/// using a parsed `Coprocessor` struct as input to execute python code
+pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
+    // 3. get args from `rb`, and cast them into PyVector
+    let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
+    check_args_anno_real_type(&args, copr, rb)?;
+    let interpreter = init_interpreter();
+    // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
+    exec_with_cached_vm(copr, rb, args, &interpreter)
 }
 
 /// execute script just like [`exec_coprocessor`] do,

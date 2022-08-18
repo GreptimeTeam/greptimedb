@@ -1,17 +1,22 @@
 use std::ops::Deref;
 
-use arrow::array::{Array, ArrayRef, PrimitiveArray};
-use arrow::compute::arithmetics;
-use arrow::compute::cast;
-use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
 use arrow::scalar::{PrimitiveScalar, Scalar};
+use arrow::{
+    array::{Array, ArrayRef, PrimitiveArray},
+    compute::{
+        arithmetics,
+        cast::{self, CastOptions},
+        comparison,
+    },
+};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
 use datatypes::{
     value,
     vectors::{Helper, VectorBuilder, VectorRef},
 };
+use rustpython_vm::types::PyComparisonOp;
 use rustpython_vm::{
     builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr, PyTypeRef},
     function::{FuncArgs, OptionalArg},
@@ -22,7 +27,7 @@ use rustpython_vm::{
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
-use crate::scalars::python::is_instance;
+use crate::python::is_instance;
 
 #[pyclass(module = false, name = "vector")]
 #[derive(PyPayload, Clone)]
@@ -56,13 +61,13 @@ fn emit_cast_error(
         src_ty, dst_ty
     ))
 }
-fn arrow2_rsub(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
+fn arrow2_rsub_scalar(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
     // b - a => a * (-1) + b
     let neg = arithmetics::mul_scalar(arr, &PrimitiveScalar::new(DataType::Int64, Some(-1i64)));
     arithmetics::add_scalar(neg.as_ref(), val)
 }
 
-fn arrow2_rtruediv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
+fn arrow2_rtruediv_scalar(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
     // val / arr => one_arr / arr * val (this is simpler to write)
     let one_arr: Box<dyn Array> = if is_float(arr.data_type()) {
         Box::new(PrimitiveArray::from_values(vec![1f64; arr.len()]))
@@ -79,7 +84,7 @@ fn arrow2_rtruediv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
     arithmetics::div(tmp.as_ref(), arr)
 }
 
-fn arrow2_rfloordiv(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
+fn arrow2_rfloordiv_scalar(arr: &dyn Array, val: &dyn Scalar) -> Box<dyn Array> {
     // val // arr => one_arr // arr * val (this is simpler to write)
     let one_arr: Box<dyn Array> = if is_float(arr.data_type()) {
         Box::new(PrimitiveArray::from_values(vec![1f64; arr.len()]))
@@ -148,6 +153,8 @@ impl AsRef<PyVector> for PyVector {
     }
 }
 
+/// support add/sub/mul/div(inclued true div and floor div)
+/// TODO: support comparsion
 #[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
 impl PyVector {
     /// create a ref to inner vector
@@ -322,7 +329,7 @@ impl PyVector {
     #[pymethod(magic)]
     fn rsub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, None, arrow2_rsub, vm)
+            self.scalar_arith_op(other, None, arrow2_rsub_scalar, vm)
         } else {
             self.arith_op(other, None, |a, b| arithmetics::sub(b, a), vm)
         }
@@ -350,7 +357,7 @@ impl PyVector {
     #[pymethod(magic)]
     fn rtruediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, Some(DataType::Float64), arrow2_rtruediv, vm)
+            self.scalar_arith_op(other, Some(DataType::Float64), arrow2_rtruediv_scalar, vm)
         } else {
             self.arith_op(
                 other,
@@ -374,7 +381,7 @@ impl PyVector {
     fn rfloordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
             // FIXME: DataType convert problem, target_type should be infered?
-            self.scalar_arith_op(other, Some(DataType::Int64), arrow2_rfloordiv, vm)
+            self.scalar_arith_op(other, Some(DataType::Int64), arrow2_rfloordiv_scalar, vm)
         } else {
             self.arith_op(
                 other,
@@ -383,6 +390,53 @@ impl PyVector {
                 vm,
             )
         }
+    }
+
+    /// rich compare, return a boolean array, accept type are vec and vec and vec and number
+    fn richcompare(
+        &self,
+        other: PyObjectRef,
+        op: PyComparisonOp,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyVector> {
+        if is_pyobj_scalar(&other, vm) {
+            let scalar_op = get_arrow_scalar_op(op);
+            self.scalar_arith_op(other, None, scalar_op, vm)
+        } else {
+            let arr_op = get_arrow_op(op);
+            self.arith_op(other, None, arr_op, vm)
+        }
+    }
+
+    // it seems rustpython's richcompare support is not good
+    // The Comparable Trait only support normal cmp
+    // (yes there is a slot_richcompare function, but it is not used in anywhere)
+    // so use our own function
+    // TODO(discord9): test those funciton
+
+    #[pymethod(name = "eq")]
+    fn eq(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        self.richcompare(other, PyComparisonOp::Eq, vm)
+    }
+    #[pymethod(name = "ne")]
+    fn ne(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        self.richcompare(other, PyComparisonOp::Ne, vm)
+    }
+    #[pymethod(name = "gt")]
+    fn gt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        self.richcompare(other, PyComparisonOp::Gt, vm)
+    }
+    #[pymethod(name = "lt")]
+    fn lt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        self.richcompare(other, PyComparisonOp::Lt, vm)
+    }
+    #[pymethod(name = "ge")]
+    fn ge(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        self.richcompare(other, PyComparisonOp::Ge, vm)
+    }
+    #[pymethod(name = "le")]
+    fn le(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        self.richcompare(other, PyComparisonOp::Le, vm)
     }
 
     #[pymethod(magic)]
@@ -456,6 +510,44 @@ impl PyVector {
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         unimplemented!()
+    }
+}
+
+/// get corrsponding arrow op function according to given PyComaprsionOp
+///
+/// TODO(discord9): impl scalar version function
+fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> Box<dyn Array> {
+    let op_bool_arr = match op {
+        PyComparisonOp::Eq => comparison::eq,
+        PyComparisonOp::Ne => comparison::neq,
+        PyComparisonOp::Gt => comparison::gt,
+        PyComparisonOp::Lt => comparison::lt,
+        PyComparisonOp::Ge => comparison::gt_eq,
+        PyComparisonOp::Le => comparison::lt_eq,
+    };
+
+    move |a: &dyn Array, b: &dyn Array| -> Box<dyn Array> {
+        let ret = op_bool_arr(a, b);
+        Box::new(ret) as _
+    }
+}
+
+/// get corrsponding arrow scalar op function according to given PyComaprsionOp
+///
+/// TODO(discord9): impl scalar version function
+fn get_arrow_scalar_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Scalar) -> Box<dyn Array> {
+    let op_bool_arr = match op {
+        PyComparisonOp::Eq => comparison::eq_scalar,
+        PyComparisonOp::Ne => comparison::neq_scalar,
+        PyComparisonOp::Gt => comparison::gt_scalar,
+        PyComparisonOp::Lt => comparison::lt_scalar,
+        PyComparisonOp::Ge => comparison::gt_eq_scalar,
+        PyComparisonOp::Le => comparison::lt_eq_scalar,
+    };
+
+    move |a: &dyn Array, b: &dyn Scalar| -> Box<dyn Array> {
+        let ret = op_bool_arr(a, b);
+        Box::new(ret) as _
     }
 }
 
@@ -621,7 +713,7 @@ pub fn pyobj_try_to_typed_val(
 pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
     match val {
         // This comes from:https://github.com/RustPython/RustPython/blob/8ab4e770351d451cfdff5dc2bf8cce8df76a60ab/vm/src/builtins/singletons.rs#L37
-        // None in Python is universally singleton
+        // None in Python is universally singleton so
         // use `vm.ctx.new_int` and `new_***` is more idomtic for there are cerntain optimize can be use in this way(small int pool etc.)
         value::Value::Null => vm.ctx.none(),
         value::Value::Boolean(v) => vm.ctx.new_bool(v).into(),

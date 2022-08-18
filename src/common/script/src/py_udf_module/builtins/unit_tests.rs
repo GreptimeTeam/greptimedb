@@ -4,7 +4,7 @@ use arrow::array::PrimitiveArray;
 use rustpython_vm::class::PyClassImpl;
 
 use super::*;
-use crate::scalars::python::py_utils::to_serde_excep;
+use crate::python::py_utils::to_serde_excep;
 #[test]
 fn convert_scalar_to_py_obj_and_back() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
