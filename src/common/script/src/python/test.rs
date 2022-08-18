@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{get_error_reason_loc, visualize_loc};
 use super::*;
-use crate::scalars::python::error::pretty_print_error_in_src;
-use crate::scalars::python::{copr_parse::parse_copr, coprocessor::Coprocessor, error::Error};
+use crate::python::error::pretty_print_error_in_src;
+use crate::python::{copr_parse::parse_copr, coprocessor::Coprocessor, error::Error};
 
 #[derive(Deserialize, Debug)]
 struct TestCase {
@@ -67,7 +67,7 @@ fn create_sample_recordbatch() -> DfRecordBatch {
 /// and exec/parse (depending on the type of predicate) then decide if result is as expected
 #[test]
 fn run_ron_testcases() {
-    let loc = Path::new("src/scalars/python/copr_testcases/testcases.ron");
+    let loc = Path::new("src/python/copr_testcases/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
     let mut buf = String::new();
@@ -174,26 +174,27 @@ fn run_ron_testcases() {
 fn test_type_anno() {
     let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[_], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[ _ | None]):
+def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[ _ | None]):
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#;
     let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
     let copr = parse_copr(python_source);
+    dbg!(copr);
 }
 
 #[test]
-#[allow(clippy::print_stdout)]
-// allow print in test function for debug purpose
+#[allow(clippy::print_stdout, unused_must_use)]
+// allow print in test function for debug purpose(like for quick testing a syntax&ideas)
 fn test_coprocessor() {
     let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
-    vector[f32]):
+def a(cpu, mem):
+    import greptime as gt
     abc = cpu
     abc *= 2
-    return abc, cpu - mem
+    return abc, gt.sqrt(cpu)
 "#;
-    let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
+    let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
     let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
     let schema = Arc::new(Schema::from(vec![
         Field::new("cpu", DataType::Float32, false),
@@ -216,5 +217,9 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
             "copr.py",
         );
         println!("{res}");
+    } else if let Ok(res) = ret {
+        dbg!(&res);
+    } else {
+        dbg!(ret);
     }
 }
