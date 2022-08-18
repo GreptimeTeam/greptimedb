@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::error::{get_error_reason_loc, visualize_loc};
 use super::*;
 use crate::python::error::pretty_print_error_in_src;
-use crate::python::{copr_parse::parse_copr, coprocessor::Coprocessor, error::Error};
+use crate::python::{coprocessor::parse::parse_copr, coprocessor::Coprocessor, error::Error};
 
 #[derive(Deserialize, Debug)]
 struct TestCase {

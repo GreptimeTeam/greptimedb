@@ -227,7 +227,7 @@ impl PyValue {
 
 #[test]
 fn run_testcases() {
-    let loc = Path::new("src/py_udf_module/testcases.ron");
+    let loc = Path::new("src/python/modules/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
     let mut buf = String::new();

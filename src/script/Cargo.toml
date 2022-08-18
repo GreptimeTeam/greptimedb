@@ -9,14 +9,11 @@ package = "arrow2"
 version = "0.10"
 
 [features]
-default = ["python-udf", "py-builtins"]
-py-builtins = [
+default = ["python"]
+python = [
   "dep:datafusion",
   "dep:datafusion-expr",
   "dep:datafusion-physical-expr",
-  "python-udf",
-]
-python-udf = [
   "dep:rustpython-vm",
   "dep:rustpython-parser",
   "dep:rustpython-compiler",

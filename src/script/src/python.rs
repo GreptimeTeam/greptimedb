@@ -1,16 +1,16 @@
-//! python udf supports
-//! use the function [`exec_coprocessor`](exec_coprocessor) to parse and run a python function with arguments from recordBatch, and return a newly assembled RecordBatch
-mod copr_engine;
-mod copr_parse;
+//! Python script coprocessor
+
 mod coprocessor;
 mod error;
+mod modules;
 pub(crate) mod py_utils;
 #[cfg(test)]
 mod test;
-mod type_;
+mod vector;
 
-pub use copr_engine::CoprEngine;
-use coprocessor::AnnotationInfo;
-pub use coprocessor::{exec_copr_print, exec_coprocessor};
 pub(crate) use py_utils::is_instance;
-pub use type_::PyVector;
+
+use self::coprocessor::AnnotationInfo;
+pub use self::coprocessor::CoprEngine;
+pub use self::coprocessor::{exec_copr_print, exec_coprocessor};
+pub use self::vector::PyVector;

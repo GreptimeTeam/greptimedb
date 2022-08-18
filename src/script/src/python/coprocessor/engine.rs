@@ -12,7 +12,7 @@ use futures::stream::StreamExt;
 use futures::Stream;
 use query::QueryEngineRef;
 
-use super::{copr_parse::parse_copr, coprocessor::exec_parsed};
+use crate::python::coprocessor::{exec_parsed, parse::parse_copr};
 use crate::python::{coprocessor::Coprocessor, error::Result};
 
 pub struct CoprEngine {

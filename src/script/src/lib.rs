@@ -1,4 +1,2 @@
-#[cfg(feature = "py-builtins")]
-pub mod py_udf_module;
-#[cfg(feature = "python-udf")]
+#[cfg(feature = "python")]
 pub mod python;

@@ -1,3 +1,6 @@
+mod engine;
+pub mod parse;
+
 use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::Arc;
@@ -22,12 +25,14 @@ use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
 use vm::{Interpreter, PyObjectRef, VirtualMachine};
 
+pub use self::engine::CoprEngine;
 use crate::fail_parse_error;
-use crate::python::copr_parse::{parse_copr, ret_parse_error};
+use crate::python::coprocessor::parse::{parse_copr, ret_parse_error, DecoratorArgs};
 use crate::python::error::{
     ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
     PyRuntimeSnafu, Result, TypeCastSnafu,
 };
+use crate::python::modules::greptime_builtin;
 use crate::python::{is_instance, PyVector};
 
 fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
@@ -37,7 +42,6 @@ fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 #[cfg(test)]
 use serde::Deserialize;
 
-use crate::python::copr_parse::DecoratorArgs;
 use crate::python::error::pretty_print_error_in_src;
 
 #[cfg_attr(test, derive(Deserialize))]
@@ -574,7 +578,6 @@ pub(crate) fn exec_with_cached_vm(
         Ok(res_rb)
     })
 }
-use crate::py_udf_module::greptime_builtin;
 
 /// init interpreter with type PyVector and Module: greptime
 pub(crate) fn init_interpreter() -> Interpreter {
