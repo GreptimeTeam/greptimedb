@@ -36,7 +36,10 @@ pub enum InnerError {
     DowncastVector { err_msg: String },
 
     #[snafu(display("Bad accumulator implementation: {}", err_msg))]
-    BadAccumulatorImpl { err_msg: String },
+    BadAccumulatorImpl {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

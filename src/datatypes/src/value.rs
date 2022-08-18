@@ -163,10 +163,10 @@ impl TryFrom<Value> for serde_json::Value {
 pub struct ListValue {
     /// List of nested Values (boxed to reduce size_of(Value))
     #[allow(clippy::box_collection)]
-    pub items: Option<Box<Vec<Value>>>,
+    items: Option<Box<Vec<Value>>>,
     /// Inner values datatype, to distinguish empty lists of different datatypes.
     /// Restricted by DataFusion, cannot use null datatype for empty list.
-    pub datatype: ConcreteDataType,
+    datatype: ConcreteDataType,
 }
 
 impl Eq for ListValue {}
@@ -174,6 +174,14 @@ impl Eq for ListValue {}
 impl ListValue {
     pub fn new(items: Option<Box<Vec<Value>>>, datatype: ConcreteDataType) -> Self {
         Self { items, datatype }
+    }
+
+    pub fn items(&self) -> &Option<Box<Vec<Value>>> {
+        &self.items
+    }
+
+    pub fn datatype(&self) -> &ConcreteDataType {
+        &self.datatype
     }
 }
 

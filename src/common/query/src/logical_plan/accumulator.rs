@@ -118,8 +118,9 @@ impl DfAccumulator for DfAccumulatorAdaptor {
         Ok(state_values
             .into_iter()
             .zip(state_types.iter())
-            .map(|(v, t)| to_scalar_value(v, t))
-            .collect())
+            .map(|(v, t)| try_into_scalar_value(v, t))
+            .collect::<Result<Vec<_>>>()
+            .map_err(Error::from)?)
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> DfResult<()> {
@@ -148,12 +149,12 @@ impl DfAccumulator for DfAccumulatorAdaptor {
     fn evaluate(&self) -> DfResult<ScalarValue> {
         let value = self.accumulator.evaluate()?;
         let output_type = self.creator.output_type()?;
-        Ok(to_scalar_value(value, &output_type))
+        Ok(try_into_scalar_value(value, &output_type)?)
     }
 }
 
-fn to_scalar_value(value: Value, datatype: &ConcreteDataType) -> ScalarValue {
-    match value {
+fn try_into_scalar_value(value: Value, datatype: &ConcreteDataType) -> Result<ScalarValue> {
+    Ok(match value {
         Value::Boolean(v) => ScalarValue::Boolean(Some(v)),
         Value::UInt8(v) => ScalarValue::UInt8(Some(v)),
         Value::UInt16(v) => ScalarValue::UInt16(Some(v)),
@@ -184,23 +185,29 @@ fn to_scalar_value(value: Value, datatype: &ConcreteDataType) -> ScalarValue {
             ConcreteDataType::Binary(_) => ScalarValue::LargeBinary(None),
             ConcreteDataType::String(_) => ScalarValue::LargeUtf8(None),
             _ => {
-                unimplemented!(
-                    "undefined transition from null value to datatype {:?}",
-                    datatype
-                )
+                return error::BadAccumulatorImplSnafu {
+                    err_msg: format!(
+                        "undefined transition from null value to datatype {:?}",
+                        datatype
+                    ),
+                }
+                .fail()?
             }
         },
-        Value::List(list) => ScalarValue::List(
-            list.items.map(|vs| {
-                Box::new(
-                    vs.into_iter()
-                        .map(|v| to_scalar_value(v, &list.datatype))
-                        .collect(),
-                )
-            }),
-            Box::new(list.datatype.as_arrow_type()),
-        ),
-    }
+        Value::List(list) => {
+            let vs = if let Some(items) = list.items() {
+                Some(Box::new(
+                    items
+                        .iter()
+                        .map(|v| try_into_scalar_value(v.clone(), list.datatype()))
+                        .collect::<Result<Vec<_>>>()?,
+                ))
+            } else {
+                None
+            };
+            ScalarValue::List(vs, Box::new(list.datatype().as_arrow_type()))
+        }
+    })
 }
 
 #[cfg(test)]
@@ -216,100 +223,115 @@ mod tests {
     fn test_not_null_value_to_scalar_value() {
         assert_eq!(
             ScalarValue::Boolean(Some(true)),
-            to_scalar_value(Value::Boolean(true), &ConcreteDataType::boolean_datatype())
+            try_into_scalar_value(Value::Boolean(true), &ConcreteDataType::boolean_datatype())
+                .unwrap()
         );
         assert_eq!(
             ScalarValue::Boolean(Some(false)),
-            to_scalar_value(Value::Boolean(false), &ConcreteDataType::boolean_datatype())
+            try_into_scalar_value(Value::Boolean(false), &ConcreteDataType::boolean_datatype())
+                .unwrap()
         );
         assert_eq!(
             ScalarValue::UInt8(Some(u8::MIN + 1)),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::UInt8(u8::MIN + 1),
                 &ConcreteDataType::uint8_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::UInt16(Some(u16::MIN + 2)),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::UInt16(u16::MIN + 2),
                 &ConcreteDataType::uint16_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::UInt32(Some(u32::MIN + 3)),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::UInt32(u32::MIN + 3),
                 &ConcreteDataType::uint32_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::UInt64(Some(u64::MIN + 4)),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::UInt64(u64::MIN + 4),
                 &ConcreteDataType::uint64_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::Int8(Some(i8::MIN + 4)),
-            to_scalar_value(Value::Int8(i8::MIN + 4), &ConcreteDataType::int8_datatype())
+            try_into_scalar_value(Value::Int8(i8::MIN + 4), &ConcreteDataType::int8_datatype())
+                .unwrap()
         );
         assert_eq!(
             ScalarValue::Int16(Some(i16::MIN + 5)),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::Int16(i16::MIN + 5),
                 &ConcreteDataType::int16_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::Int32(Some(i32::MIN + 6)),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::Int32(i32::MIN + 6),
                 &ConcreteDataType::int32_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::Int64(Some(i64::MIN + 7)),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::Int64(i64::MIN + 7),
                 &ConcreteDataType::int64_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::Float32(Some(8.0f32)),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::Float32(OrderedFloat(8.0f32)),
                 &ConcreteDataType::float32_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::Float64(Some(9.0f64)),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::Float64(OrderedFloat(9.0f64)),
                 &ConcreteDataType::float64_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::LargeUtf8(Some("hello".to_string())),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::String(StringBytes::from("hello")),
                 &ConcreteDataType::string_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::LargeBinary(Some("world".as_bytes().to_vec())),
-            to_scalar_value(
+            try_into_scalar_value(
                 Value::Binary(Bytes::from("world".as_bytes())),
                 &ConcreteDataType::binary_datatype()
             )
+            .unwrap()
         );
         assert_eq!(
             ScalarValue::Date32(Some(10i32)),
-            to_scalar_value(Value::Date(10i32), &ConcreteDataType::int32_datatype())
+            try_into_scalar_value(Value::Date(10i32), &ConcreteDataType::int32_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::Date64(Some(20i64)),
-            to_scalar_value(Value::DateTime(20i64), &ConcreteDataType::int64_datatype())
+            try_into_scalar_value(Value::DateTime(20i64), &ConcreteDataType::int64_datatype())
+                .unwrap()
         );
     }
 
@@ -317,55 +339,55 @@ mod tests {
     fn test_null_value_to_scalar_value() {
         assert_eq!(
             ScalarValue::Boolean(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::boolean_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::boolean_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::UInt8(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::uint8_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::uint8_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::UInt16(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::uint16_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::uint16_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::UInt32(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::uint32_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::uint32_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::UInt64(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::uint64_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::uint64_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::Int8(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::int8_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::int8_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::Int16(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::int16_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::int16_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::Int32(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::int32_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::int32_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::Int64(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::int64_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::int64_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::Float32(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::float32_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::float32_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::Float64(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::float64_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::float64_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::LargeUtf8(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::string_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::string_datatype()).unwrap()
         );
         assert_eq!(
             ScalarValue::LargeBinary(None),
-            to_scalar_value(Value::Null, &ConcreteDataType::binary_datatype())
+            try_into_scalar_value(Value::Null, &ConcreteDataType::binary_datatype()).unwrap()
         );
     }
 
@@ -373,7 +395,7 @@ mod tests {
     fn test_list_value_to_scalar_value() {
         let items = Some(Box::new(vec![Value::Int32(-1), Value::Null]));
         let list = Value::List(ListValue::new(items, ConcreteDataType::int32_datatype()));
-        let df_list = to_scalar_value(list, &ConcreteDataType::int32_datatype());
+        let df_list = try_into_scalar_value(list, &ConcreteDataType::int32_datatype()).unwrap();
         assert!(matches!(df_list, ScalarValue::List(_, _)));
         match df_list {
             ScalarValue::List(vs, datatype) => {
