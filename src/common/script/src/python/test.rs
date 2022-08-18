@@ -188,10 +188,7 @@ def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[
 fn test_coprocessor() {
     let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu, mem: vector[f64])->(
-    vector[_], 
-    vector[_]
-):
+def a(cpu, mem):
     import greptime as gt
     abc = cpu
     abc *= 2

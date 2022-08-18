@@ -3,7 +3,6 @@
 
 mod builtins;
 
-
 pub(crate) use builtins::greptime_builtin;
 #[cfg(test)]
 #[allow(clippy::print_stdout)]

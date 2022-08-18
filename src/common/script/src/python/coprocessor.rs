@@ -241,6 +241,10 @@ impl Coprocessor {
     /// check if real types and annotation types(if have) is the same, if not try cast columns to annotated type
     fn check_and_cast_type(&self, cols: &mut [ArrayRef]) -> Result<()> {
         let return_types = &self.return_types;
+        // allow ignore Return Type Annotation
+        if return_types.is_empty() {
+            return Ok(());
+        }
         ensure!(
             cols.len() == return_types.len(),
             OtherSnafu {
@@ -575,7 +579,7 @@ pub(crate) fn exec_with_cached_vm(
 use crate::py_udf_module::greptime_builtin;
 
 /// init interpreter with type PyVector and Module: greptime
-pub(crate) fn init_interpreter()->Interpreter{
+pub(crate) fn init_interpreter() -> Interpreter {
     vm::Interpreter::with_init(Default::default(), |vm| {
         PyVector::make_class(&vm.ctx);
         vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
