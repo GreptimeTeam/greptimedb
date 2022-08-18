@@ -1,8 +1,8 @@
 //! Python script coprocessor
 
+mod builtins;
 mod coprocessor;
 mod error;
-mod modules;
 pub(crate) mod py_utils;
 #[cfg(test)]
 mod test;

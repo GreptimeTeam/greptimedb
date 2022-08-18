@@ -67,7 +67,7 @@ fn create_sample_recordbatch() -> DfRecordBatch {
 /// and exec/parse (depending on the type of predicate) then decide if result is as expected
 #[test]
 fn run_ron_testcases() {
-    let loc = Path::new("src/python/copr_testcases/testcases.ron");
+    let loc = Path::new("src/python/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
     let mut buf = String::new();

@@ -27,12 +27,12 @@ use vm::{Interpreter, PyObjectRef, VirtualMachine};
 
 pub use self::engine::CoprEngine;
 use crate::fail_parse_error;
+use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::{parse_copr, ret_parse_error, DecoratorArgs};
 use crate::python::error::{
     ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
     PyRuntimeSnafu, Result, TypeCastSnafu,
 };
-use crate::python::modules::greptime_builtin;
 use crate::python::{is_instance, PyVector};
 
 fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
@@ -613,7 +613,7 @@ pub fn exec_copr_print(
 }
 
 /// transfer a Python Exception into a python call stack in `String` format
-fn to_serde_excep(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> Result<PyExceptionSerde> {
+pub fn to_serde_excep(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> Result<PyExceptionSerde> {
     let mut chain = String::new();
     let r = vm.write_exception(&mut chain, &excep);
     // FIXME: better error handling, perhaps with chain calls?

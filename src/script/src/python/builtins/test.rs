@@ -4,7 +4,7 @@ use arrow::array::PrimitiveArray;
 use rustpython_vm::class::PyClassImpl;
 
 use super::*;
-use crate::python::py_utils::to_serde_excep;
+use crate::python::coprocessor::to_serde_excep;
 #[test]
 fn convert_scalar_to_py_obj_and_back() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
@@ -58,7 +58,7 @@ fn convert_scalar_to_py_obj_and_back() {
         let col = try_into_columnar_value(list_obj, vm);
         if let Err(err) = col {
             let reason = to_serde_excep(err, vm).unwrap();
-            assert!(reason.contains(
+            assert!(reason.output.contains(
                 "TypeError: All elements in a list should be same type to cast to Datafusion list!"
             ));
         }

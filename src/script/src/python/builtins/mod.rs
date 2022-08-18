@@ -1,3 +1,9 @@
+//! Python udf module, that is udf function that you can use in
+//! python script(in Python Coprocessor more precisely)
+#[cfg(test)]
+#[allow(clippy::print_stdout)]
+mod test;
+
 use arrow::array::ArrayRef;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
@@ -11,8 +17,7 @@ use rustpython_vm::{
     builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt},
     AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
-#[cfg(test)]
-mod unit_tests;
+
 use crate::python::is_instance;
 use crate::python::PyVector;
 
@@ -260,7 +265,7 @@ pub(crate) mod greptime_builtin {
     use datafusion_physical_expr::math_expressions;
     use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
 
-    use crate::python::modules::builtins::{
+    use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
