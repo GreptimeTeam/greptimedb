@@ -739,7 +739,7 @@ pub mod codec {
                 message: "schema required",
             })?;
 
-            let schema: SchemaRef = SchemaRef::try_from(schema).context(FromProtobufSnafu {})?;
+            let schema = SchemaRef::try_from(schema).context(FromProtobufSnafu {})?;
 
             ensure!(
                 write_batch.mutations.len() == self.mutation_extras.len(),
