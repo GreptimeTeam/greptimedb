@@ -174,11 +174,12 @@ fn run_ron_testcases() {
 fn test_type_anno() {
     let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
-def a(cpu: vector[_], mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[ _ | None]):
+def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[ _ | None]):
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#;
     let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
     let copr = parse_copr(python_source);
+    dbg!(copr);
 }
 
 #[test]
@@ -187,13 +188,14 @@ def a(cpu: vector[_], mem: vector[f64])->(vector[f64|None], vector[f64], vector[
 fn test_coprocessor() {
     let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[_], mem: vector[f64])->(
+def a(cpu, mem: vector[f64])->(
     vector[_], 
     vector[_]
 ):
+    import greptime as gt
     abc = cpu
     abc *= 2
-    return abc, cpu.gt(0.4)
+    return abc, gt.sqrt(cpu)
 "#;
     let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
     let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);

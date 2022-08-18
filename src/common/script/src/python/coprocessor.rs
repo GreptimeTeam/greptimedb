@@ -572,15 +572,22 @@ pub(crate) fn exec_with_cached_vm(
         Ok(res_rb)
     })
 }
+use crate::py_udf_module::greptime_builtin;
+
+/// init interpreter with type PyVector and Module: greptime
+pub(crate) fn init_interpreter()->Interpreter{
+    vm::Interpreter::with_init(Default::default(), |vm| {
+        PyVector::make_class(&vm.ctx);
+        vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
+    })
+}
 
 /// using a parsed `Coprocessor` struct as input to execute python code
 pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
     check_args_anno_real_type(&args, copr, rb)?;
-    let interpreter = vm::Interpreter::with_init(Default::default(), |vm| {
-        PyVector::make_class(&vm.ctx);
-    });
+    let interpreter = init_interpreter();
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
     exec_with_cached_vm(copr, rb, args, &interpreter)
 }

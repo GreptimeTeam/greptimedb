@@ -248,7 +248,7 @@ fn eval_aggr_fn<T: AggregateExpr>(
 /// allow Python Coprocessor Function to use already implmented udf functions from datafusion and GrepTime DB itself
 ///
 #[pymodule]
-pub(in crate::py_udf_module) mod greptime_builtin {
+pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
