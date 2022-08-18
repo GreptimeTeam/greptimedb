@@ -147,12 +147,12 @@ impl BTreeIterator {
             .value_columns()
             .map(|column_meta| column_meta.desc.data_type.clone());
 
-        Some(Batch {
-            keys: rows_to_vectors(key_data_types, keys.as_slice()),
-            sequences,
-            op_types,
-            values: rows_to_vectors(value_data_types, values.as_slice()),
-        })
+        let mut columns = rows_to_vectors(key_data_types, keys.as_slice());
+        columns.append(&mut rows_to_vectors(value_data_types, values.as_slice()));
+        columns.push(Arc::new(sequences));
+        columns.push(Arc::new(op_types));
+
+        Some(Batch::new(columns))
     }
 }
 

@@ -10,7 +10,7 @@ use datatypes::schema::Metadata;
 use datatypes::vectors::{Helper, UInt64Vector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
-use store_api::storage::{consts, ColumnSchema, Schema, SchemaBuilder, SchemaRef};
+use store_api::storage::{consts, Chunk, ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 
 use crate::metadata::{ColumnMetadata, ColumnsMetadata, ColumnsMetadataRef};
 use crate::read::Batch;
@@ -212,58 +212,26 @@ impl SstSchema {
         self.schema.arrow_schema()
     }
 
-    // TODO(yingwen): [projection] Use the new batch struct.
     pub fn batch_to_arrow_chunk(&self, batch: &Batch) -> ArrowChunk<Arc<dyn Array>> {
-        assert_eq!(
-            self.schema.num_columns(),
-            // key columns + value columns + sequence + op_type
-            batch.keys.len() + batch.values.len() + 2
-        );
+        assert_eq!(self.schema.num_columns(), batch.num_columns());
 
-        ArrowChunk::new(
-            batch
-                .keys
-                .iter()
-                .map(|v| v.to_arrow_array())
-                .chain(batch.values.iter().map(|v| v.to_arrow_array()))
-                .chain(std::iter::once(batch.sequences.to_arrow_array()))
-                .chain(std::iter::once(batch.op_types.to_arrow_array()))
-                .collect(),
-        )
+        ArrowChunk::new(batch.columns.iter().map(|v| v.to_arrow_array()).collect())
     }
 
     pub fn arrow_chunk_to_batch(&self, chunk: &ArrowChunk<Arc<dyn Array>>) -> Result<Batch> {
-        let keys = self
-            .row_key_indices()
-            .map(|i| {
-                Helper::try_into_vector(&chunk[i].clone()).context(ConvertChunkSnafu {
-                    name: self.column_name(i),
-                })
-            })
-            .collect::<Result<_>>()?;
-        let sequences = UInt64Vector::try_from_arrow_array(&chunk[self.sequence_index()].clone())
-            .context(ConvertChunkSnafu {
-            name: consts::SEQUENCE_COLUMN_NAME,
-        })?;
-        let op_types = UInt8Vector::try_from_arrow_array(&chunk[self.op_type_index()].clone())
-            .context(ConvertChunkSnafu {
-                name: consts::OP_TYPE_COLUMN_NAME,
-            })?;
-        let values = self
-            .value_indices()
-            .map(|i| {
-                Helper::try_into_vector(&chunk[i].clone()).context(ConvertChunkSnafu {
+        assert_eq!(self.schema.num_columns(), chunk.columns().len());
+
+        let columns = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, column)| {
+                Helper::try_into_vector(column.clone()).context(ConvertChunkSnafu {
                     name: self.column_name(i),
                 })
             })
             .collect::<Result<_>>()?;
 
-        Ok(Batch {
-            keys,
-            sequences,
-            op_types,
-            values,
-        })
+        Ok(Batch::new(columns))
     }
 
     fn from_columns_metadata(columns: &ColumnsMetadata, version: u32) -> Result<SstSchema> {
@@ -480,10 +448,9 @@ impl ProjectedSchema {
         })
     }
 
-    // FIXME(yingwen): [projection] Replaced by projected user schema
     #[inline]
-    pub fn user_schema(&self) -> &SchemaRef {
-        self.region_schema.user_schema()
+    pub fn projected_user_schema(&self) -> &SchemaRef {
+        &self.projected_user_schema
     }
 
     #[inline]
@@ -595,25 +562,25 @@ mod tests {
         let k1 = Int64Vector::from_slice(&[1, 2, 3]);
         let timestamp = Int64Vector::from_slice(&[4, 5, 6]);
         let v1 = Int64Vector::from_slice(&[7, 8, 9]);
+        let sequences = UInt64Vector::from_slice(&[100, 100, 100]);
+        let op_types = UInt8Vector::from_slice(&[0, 0, 0]);
 
-        Batch {
-            keys: vec![Arc::new(k1), Arc::new(timestamp)],
-            values: vec![Arc::new(v1)],
-            sequences: UInt64Vector::from_slice(&[100, 100, 100]),
-            op_types: UInt8Vector::from_slice(&[0, 0, 0]),
-        }
+        Batch::new(vec![
+            Arc::new(k1),
+            Arc::new(timestamp),
+            Arc::new(v1),
+            Arc::new(sequences),
+            Arc::new(op_types),
+        ])
     }
 
     fn check_chunk_batch(chunk: &ArrowChunk<Arc<dyn Array>>, batch: &Batch) {
         assert_eq!(5, chunk.columns().len());
         assert_eq!(3, chunk.len());
 
-        for i in 0..2 {
-            assert_eq!(chunk[i], batch.keys[i].to_arrow_array());
+        for i in 0..5 {
+            assert_eq!(chunk[i], batch.column(i).to_arrow_array());
         }
-        assert_eq!(chunk[2], batch.values[0].to_arrow_array());
-        assert_eq!(chunk[3], batch.sequences.to_arrow_array());
-        assert_eq!(chunk[4], batch.op_types.to_arrow_array());
     }
 
     #[test]

@@ -598,13 +598,13 @@ mod tests {
         let mut index = 0;
         for batch in iter {
             let batch = batch.unwrap();
-            let row_num = batch.keys[0].len();
+            let row_num = batch.column(0).len();
             for i in 0..row_num {
-                let ts = batch.keys[0].get(i);
-                let v = batch.values[0].get(i);
+                let ts = batch.column(0).get(i);
+                let v = batch.column(1).get(i);
                 assert_eq!(Value::from(data[index].0), ts);
                 assert_eq!(Value::from(data[index].1), v);
-                assert_eq!(sequence, batch.sequences.get_data(i).unwrap());
+                assert_eq!(Value::from(sequence), batch.column(2).get(i));
 
                 index += 1;
             }

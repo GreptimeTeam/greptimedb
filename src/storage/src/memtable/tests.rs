@@ -88,13 +88,11 @@ pub fn write_kvs(
 }
 
 fn check_batch_valid(batch: &Batch) {
-    assert_eq!(2, batch.keys.len());
-    assert_eq!(1, batch.values.len());
-    let row_num = batch.keys[0].len();
-    assert_eq!(row_num, batch.keys[1].len());
-    assert_eq!(row_num, batch.sequences.len());
-    assert_eq!(row_num, batch.op_types.len());
-    assert_eq!(row_num, batch.values[0].len());
+    assert_eq!(5, batch.num_columns());
+    let row_num = batch.column(0).len();
+    for i in 1..5 {
+        assert_eq!(row_num, batch.column(i).len());
+    }
 }
 
 fn check_iter_content(
@@ -109,17 +107,17 @@ fn check_iter_content(
         let batch = batch.unwrap();
         check_batch_valid(&batch);
 
-        let row_num = batch.keys[0].len();
+        let row_num = batch.column(0).len();
         for i in 0..row_num {
-            let (k0, k1) = (batch.keys[0].get(i), batch.keys[1].get(i));
-            let sequence = batch.sequences.get_data(i).unwrap();
-            let op_type = batch.op_types.get_data(i).unwrap();
-            let v = batch.values[0].get(i);
+            let (k0, k1) = (batch.column(0).get(i), batch.column(1).get(i));
+            let sequence = batch.column(3).get(i);
+            let op_type = batch.column(4).get(i);
+            let v = batch.column(2).get(i);
 
             assert_eq!(Value::from(keys[index].0), k0);
             assert_eq!(Value::from(keys[index].1), k1);
-            assert_eq!(sequences[index], sequence);
-            assert_eq!(op_types[index].as_u8(), op_type);
+            assert_eq!(Value::from(sequences[index]), sequence);
+            assert_eq!(Value::from(op_types[index].as_u8()), op_type);
             assert_eq!(Value::from(values[index]), v);
 
             index += 1;
@@ -272,7 +270,7 @@ fn check_iter_batch_size(iter: &mut dyn BatchIterator, total: usize, batch_size:
         let batch = batch.unwrap();
         check_batch_valid(&batch);
 
-        let row_num = batch.keys[0].len();
+        let row_num = batch.column(0).len();
         if remains >= batch_size {
             assert_eq!(batch_size, row_num);
             remains -= batch_size;

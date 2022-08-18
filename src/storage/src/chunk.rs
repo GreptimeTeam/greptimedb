@@ -27,8 +27,7 @@ impl ChunkReader for ChunkReaderImpl {
     type Error = Error;
 
     fn schema(&self) -> &SchemaRef {
-        // FIXME(yingwen): Schema after projection.
-        self.schema.user_schema()
+        self.schema.projected_user_schema()
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
@@ -71,11 +70,8 @@ impl ChunkReaderImpl {
 
 // Assumes the schema is the same as key columns combine with value columns.
 fn batch_to_chunk(mut batch: Batch) -> Chunk {
-    let mut columns = Vec::with_capacity(batch.keys.len() + batch.values.len());
-    columns.append(&mut batch.keys);
-    columns.append(&mut batch.values);
-
-    Chunk::new(columns)
+    // FIXME(yingwen): [projection] Convert into chunk using projected schema.
+    Chunk::new(batch.columns)
 }
 
 /// Builder to create a new [ChunkReaderImpl] from scan request.
