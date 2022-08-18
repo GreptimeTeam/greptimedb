@@ -7,6 +7,7 @@ use arrow::array::ArrayRef;
 use datafusion_common::Result as DfResult;
 use datafusion_expr::Accumulator as DfAccumulator;
 use datatypes::prelude::*;
+use datatypes::value::ListValue;
 use datatypes::vectors::Helper as VectorHelper;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
@@ -154,6 +155,17 @@ impl DfAccumulator for DfAccumulatorAdaptor {
 }
 
 fn try_into_scalar_value(value: Value, datatype: &ConcreteDataType) -> Result<ScalarValue> {
+    if !matches!(value, Value::Null) && datatype != &value.data_type() {
+        return error::BadAccumulatorImplSnafu {
+            err_msg: format!(
+                "expect value to return datatype {:?}, actual: {:?}",
+                datatype,
+                value.data_type()
+            ),
+        }
+        .fail()?;
+    }
+
     Ok(match value {
         Value::Boolean(v) => ScalarValue::Boolean(Some(v)),
         Value::UInt8(v) => ScalarValue::UInt8(Some(v)),
@@ -170,44 +182,53 @@ fn try_into_scalar_value(value: Value, datatype: &ConcreteDataType) -> Result<Sc
         Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
         Value::Date(v) => ScalarValue::Date32(Some(v)),
         Value::DateTime(v) => ScalarValue::Date64(Some(v)),
-        Value::Null => match datatype {
-            ConcreteDataType::Boolean(_) => ScalarValue::Boolean(None),
-            ConcreteDataType::Int8(_) => ScalarValue::Int8(None),
-            ConcreteDataType::Int16(_) => ScalarValue::Int16(None),
-            ConcreteDataType::Int32(_) => ScalarValue::Int32(None),
-            ConcreteDataType::Int64(_) => ScalarValue::Int64(None),
-            ConcreteDataType::UInt8(_) => ScalarValue::UInt8(None),
-            ConcreteDataType::UInt16(_) => ScalarValue::UInt16(None),
-            ConcreteDataType::UInt32(_) => ScalarValue::UInt32(None),
-            ConcreteDataType::UInt64(_) => ScalarValue::UInt64(None),
-            ConcreteDataType::Float32(_) => ScalarValue::Float32(None),
-            ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
-            ConcreteDataType::Binary(_) => ScalarValue::LargeBinary(None),
-            ConcreteDataType::String(_) => ScalarValue::LargeUtf8(None),
-            _ => {
-                return error::BadAccumulatorImplSnafu {
-                    err_msg: format!(
-                        "undefined transition from null value to datatype {:?}",
-                        datatype
-                    ),
-                }
-                .fail()?
+        Value::Null => try_convert_null_value(datatype)?,
+        Value::List(list) => try_convert_list_value(list)?,
+    })
+}
+
+fn try_convert_null_value(datatype: &ConcreteDataType) -> Result<ScalarValue> {
+    Ok(match datatype {
+        ConcreteDataType::Boolean(_) => ScalarValue::Boolean(None),
+        ConcreteDataType::Int8(_) => ScalarValue::Int8(None),
+        ConcreteDataType::Int16(_) => ScalarValue::Int16(None),
+        ConcreteDataType::Int32(_) => ScalarValue::Int32(None),
+        ConcreteDataType::Int64(_) => ScalarValue::Int64(None),
+        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(None),
+        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(None),
+        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(None),
+        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(None),
+        ConcreteDataType::Float32(_) => ScalarValue::Float32(None),
+        ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
+        ConcreteDataType::Binary(_) => ScalarValue::LargeBinary(None),
+        ConcreteDataType::String(_) => ScalarValue::LargeUtf8(None),
+        _ => {
+            return error::BadAccumulatorImplSnafu {
+                err_msg: format!(
+                    "undefined transition from null value to datatype {:?}",
+                    datatype
+                ),
             }
-        },
-        Value::List(list) => {
-            let vs = if let Some(items) = list.items() {
-                Some(Box::new(
-                    items
-                        .iter()
-                        .map(|v| try_into_scalar_value(v.clone(), list.datatype()))
-                        .collect::<Result<Vec<_>>>()?,
-                ))
-            } else {
-                None
-            };
-            ScalarValue::List(vs, Box::new(list.datatype().as_arrow_type()))
+            .fail()?
         }
     })
+}
+
+fn try_convert_list_value(list: ListValue) -> Result<ScalarValue> {
+    let vs = if let Some(items) = list.items() {
+        Some(Box::new(
+            items
+                .iter()
+                .map(|v| try_into_scalar_value(v.clone(), list.datatype()))
+                .collect::<Result<Vec<_>>>()?,
+        ))
+    } else {
+        None
+    };
+    Ok(ScalarValue::List(
+        vs,
+        Box::new(list.datatype().as_arrow_type()),
+    ))
 }
 
 #[cfg(test)]
@@ -324,15 +345,6 @@ mod tests {
             )
             .unwrap()
         );
-        assert_eq!(
-            ScalarValue::Date32(Some(10i32)),
-            try_into_scalar_value(Value::Date(10i32), &ConcreteDataType::int32_datatype()).unwrap()
-        );
-        assert_eq!(
-            ScalarValue::Date64(Some(20i64)),
-            try_into_scalar_value(Value::DateTime(20i64), &ConcreteDataType::int64_datatype())
-                .unwrap()
-        );
     }
 
     #[test]
@@ -395,7 +407,11 @@ mod tests {
     fn test_list_value_to_scalar_value() {
         let items = Some(Box::new(vec![Value::Int32(-1), Value::Null]));
         let list = Value::List(ListValue::new(items, ConcreteDataType::int32_datatype()));
-        let df_list = try_into_scalar_value(list, &ConcreteDataType::int32_datatype()).unwrap();
+        let df_list = try_into_scalar_value(
+            list,
+            &ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
+        )
+        .unwrap();
         assert!(matches!(df_list, ScalarValue::List(_, _)));
         match df_list {
             ScalarValue::List(vs, datatype) => {

@@ -63,7 +63,8 @@ impl Value {
             Value::Float64(_) => ConcreteDataType::float64_datatype(),
             Value::String(_) => ConcreteDataType::string_datatype(),
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
-            Value::Date(_) | Value::DateTime(_) | Value::List(_) => {
+            Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
+            Value::Date(_) | Value::DateTime(_) => {
                 unimplemented!("Unsupported data type of value {:?}", self)
             }
         }
