@@ -76,7 +76,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// special usage. Reserved columns expect the version columns are also
 /// called internal columns (though the version could also be thought as a
 /// special kind of internal column), are not visible to user, such as our
-/// internal sequence, value_type columns.
+/// internal sequence, op_type columns.
 ///
 /// The user schema is the schema that only contains columns that user could visit,
 /// as well as what the schema user created.
@@ -183,7 +183,7 @@ impl SstSchema {
             schema.column_schemas()[user_column_end].name
         );
         assert_eq!(
-            consts::VALUE_TYPE_COLUMN_NAME,
+            consts::OP_TYPE_COLUMN_NAME,
             schema.column_schemas()[user_column_end + 1].name
         );
 
@@ -212,7 +212,7 @@ impl SstSchema {
     pub fn batch_to_arrow_chunk(&self, batch: &Batch) -> Chunk<Arc<dyn Array>> {
         assert_eq!(
             self.schema.num_columns(),
-            // key columns + value columns + sequence + value_type
+            // key columns + value columns + sequence + op_type
             batch.keys.len() + batch.values.len() + 2
         );
 
@@ -223,7 +223,7 @@ impl SstSchema {
                 .map(|v| v.to_arrow_array())
                 .chain(batch.values.iter().map(|v| v.to_arrow_array()))
                 .chain(std::iter::once(batch.sequences.to_arrow_array()))
-                .chain(std::iter::once(batch.value_types.to_arrow_array()))
+                .chain(std::iter::once(batch.op_types.to_arrow_array()))
                 .collect(),
         )
     }
@@ -241,12 +241,10 @@ impl SstSchema {
             .context(ConvertChunkSnafu {
             name: consts::SEQUENCE_COLUMN_NAME,
         })?;
-        let value_types = UInt8Vector::try_from_arrow_array(
-            &chunk[self.value_type_index()].clone(),
-        )
-        .context(ConvertChunkSnafu {
-            name: consts::VALUE_TYPE_COLUMN_NAME,
-        })?;
+        let op_types = UInt8Vector::try_from_arrow_array(&chunk[self.op_type_index()].clone())
+            .context(ConvertChunkSnafu {
+                name: consts::OP_TYPE_COLUMN_NAME,
+            })?;
         let values = self
             .value_indices()
             .map(|i| {
@@ -259,7 +257,7 @@ impl SstSchema {
         Ok(Batch {
             keys,
             sequences,
-            value_types,
+            op_types,
             values,
         })
     }
@@ -270,7 +268,7 @@ impl SstSchema {
     }
 
     #[inline]
-    fn value_type_index(&self) -> usize {
+    fn op_type_index(&self) -> usize {
         self.user_column_end + 1
     }
 
@@ -299,13 +297,13 @@ impl TryFrom<ArrowSchema> for SstSchema {
         let row_key_end = parse_index_from_metadata(schema.metadata(), ROW_KEY_END_KEY)?;
         let user_column_end = parse_index_from_metadata(schema.metadata(), USER_COLUMN_END_KEY)?;
 
-        // There should be sequence and value type columns.
+        // There should be sequence and op_type columns.
         ensure!(
             consts::SEQUENCE_COLUMN_NAME == schema.column_schemas()[user_column_end].name,
             InvalidIndexSnafu
         );
         ensure!(
-            consts::VALUE_TYPE_COLUMN_NAME == schema.column_schemas()[user_column_end + 1].name,
+            consts::OP_TYPE_COLUMN_NAME == schema.column_schemas()[user_column_end + 1].name,
             InvalidIndexSnafu
         );
 
@@ -354,7 +352,7 @@ mod tests {
             keys: vec![Arc::new(k1), Arc::new(timestamp)],
             values: vec![Arc::new(v1)],
             sequences: UInt64Vector::from_slice(&[100, 100, 100]),
-            value_types: UInt8Vector::from_slice(&[0, 0, 0]),
+            op_types: UInt8Vector::from_slice(&[0, 0, 0]),
         }
     }
 
@@ -367,7 +365,7 @@ mod tests {
         }
         assert_eq!(chunk[2], batch.values[0].to_arrow_array());
         assert_eq!(chunk[3], batch.sequences.to_arrow_array());
-        assert_eq!(chunk[4], batch.value_types.to_arrow_array());
+        assert_eq!(chunk[4], batch.op_types.to_arrow_array());
     }
 
     #[test]
@@ -422,7 +420,7 @@ mod tests {
                 ("timestamp", LogicalTypeId::Int64, false),
                 ("v1", LogicalTypeId::Int64, true),
                 (consts::SEQUENCE_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                (consts::VALUE_TYPE_COLUMN_NAME, LogicalTypeId::UInt8, false),
+                (consts::OP_TYPE_COLUMN_NAME, LogicalTypeId::UInt8, false),
             ],
             Some(1),
         );
@@ -431,7 +429,7 @@ mod tests {
             sst_schema.schema().column_schemas()
         );
         assert_eq!(3, sst_schema.sequence_index());
-        assert_eq!(4, sst_schema.value_type_index());
+        assert_eq!(4, sst_schema.op_type_index());
         let row_key_indices: Vec<_> = sst_schema.row_key_indices().collect();
         assert_eq!([0, 1], &row_key_indices[..]);
         let value_indices: Vec<_> = sst_schema.value_indices().collect();

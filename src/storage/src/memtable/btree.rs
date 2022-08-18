@@ -11,7 +11,7 @@ use datatypes::value::Value;
 use datatypes::vectors::{
     UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder, VectorBuilder,
 };
-use store_api::storage::{SequenceNumber, ValueType};
+use store_api::storage::{OpType, SequenceNumber};
 
 use crate::error::Result;
 use crate::memtable::{
@@ -122,7 +122,7 @@ impl BTreeIterator {
             map.range(..)
         };
 
-        let (keys, sequences, value_types, values) = if self.ctx.for_flush {
+        let (keys, sequences, op_types, values) = if self.ctx.for_flush {
             collect_iter(iter, self.ctx.batch_size)
         } else {
             let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence);
@@ -150,7 +150,7 @@ impl BTreeIterator {
         Some(Batch {
             keys: rows_to_vectors(key_data_types, keys.as_slice()),
             sequences,
-            value_types,
+            op_types,
             values: rows_to_vectors(value_data_types, values.as_slice()),
         })
     }
@@ -167,16 +167,16 @@ fn collect_iter<'a, I: Iterator<Item = (&'a InnerKey, &'a RowValue)>>(
 ) {
     let mut keys = Vec::with_capacity(batch_size);
     let mut sequences = UInt64VectorBuilder::with_capacity(batch_size);
-    let mut value_types = UInt8VectorBuilder::with_capacity(batch_size);
+    let mut op_types = UInt8VectorBuilder::with_capacity(batch_size);
     let mut values = Vec::with_capacity(batch_size);
     for (inner_key, row_value) in iter.take(batch_size) {
         keys.push(inner_key);
         sequences.push(Some(inner_key.sequence));
-        value_types.push(Some(inner_key.value_type.as_u8()));
+        op_types.push(Some(inner_key.op_type.as_u8()));
         values.push(row_value);
     }
 
-    (keys, sequences.finish(), value_types.finish(), values)
+    (keys, sequences.finish(), op_types.finish(), values)
 }
 
 /// `MapIterWrapper` removes same user key with invisible sequence.
@@ -260,7 +260,7 @@ impl<'a> IterRow<'a> {
             row_key,
             sequence: self.kvs.sequence,
             index_in_batch: self.kvs.start_index_in_batch + self.index,
-            value_type: self.kvs.value_type,
+            op_type: self.kvs.op_type,
         };
 
         let row_value = RowValue {
@@ -299,18 +299,18 @@ struct InnerKey {
     row_key: Vec<Value>,
     sequence: SequenceNumber,
     index_in_batch: usize,
-    value_type: ValueType,
+    op_type: OpType,
 }
 
 impl Ord for InnerKey {
     fn cmp(&self, other: &InnerKey) -> Ordering {
-        // Order by (row_key asc, sequence desc, index_in_batch desc, value type desc), though (key,
+        // Order by (row_key asc, sequence desc, index_in_batch desc, op_type desc), though (key,
         // sequence, index_in_batch) should be enough to disambiguate.
         self.row_key
             .cmp(&other.row_key)
             .then_with(|| other.sequence.cmp(&self.sequence))
             .then_with(|| other.index_in_batch.cmp(&self.index_in_batch))
-            .then_with(|| other.value_type.cmp(&self.value_type))
+            .then_with(|| other.op_type.cmp(&self.op_type))
     }
 }
 
@@ -334,12 +334,12 @@ impl InnerKey {
     /// Reset the `InnerKey` so that we can use it to seek next key that
     /// has different row key.
     fn reset_for_seek(&mut self) {
-        // sequence, index_in_batch, value_type are ordered in desc order, so
+        // sequence, index_in_batch, op_type are ordered in desc order, so
         // we can represent the last inner key with same row key by setting them
         // to zero (Minimum value).
         self.sequence = 0;
         self.index_in_batch = 0;
-        self.value_type = ValueType::min_type();
+        self.op_type = OpType::min_type();
     }
 }
 

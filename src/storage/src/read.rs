@@ -5,13 +5,13 @@ use datatypes::vectors::{UInt64Vector, UInt8Vector, VectorRef};
 
 use crate::error::Result;
 
-// TODO(yingwen): Maybe pack value_type with sequence (reserve 8bits in u64 for value type) like RocksDB.
+// TODO(yingwen): Maybe pack op_type with sequence (reserve 8bits in u64 for op_type) like RocksDB.
 /// Storage internal representation of a batch of rows.
 pub struct Batch {
     // Now the structure of `Batch` is still unstable, all pub fields may be changed.
     pub keys: Vec<VectorRef>,
     pub sequences: UInt64Vector,
-    pub value_types: UInt8Vector,
+    pub op_types: UInt8Vector,
     pub values: Vec<VectorRef>,
 }
 

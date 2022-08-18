@@ -26,7 +26,7 @@ pub fn schema_for_test() -> RegionSchemaRef {
 
 fn kvs_for_test_with_index(
     sequence: SequenceNumber,
-    value_type: ValueType,
+    op_type: OpType,
     start_index_in_batch: usize,
     keys: &[(i64, u64)],
     values: &[Option<u64>],
@@ -54,7 +54,7 @@ fn kvs_for_test_with_index(
 
     let kvs = KeyValues {
         sequence,
-        value_type,
+        op_type,
         start_index_in_batch,
         keys: row_keys,
         values: row_values,
@@ -68,21 +68,21 @@ fn kvs_for_test_with_index(
 
 fn kvs_for_test(
     sequence: SequenceNumber,
-    value_type: ValueType,
+    op_type: OpType,
     keys: &[(i64, u64)],
     values: &[Option<u64>],
 ) -> KeyValues {
-    kvs_for_test_with_index(sequence, value_type, 0, keys, values)
+    kvs_for_test_with_index(sequence, op_type, 0, keys, values)
 }
 
 pub fn write_kvs(
     memtable: &dyn Memtable,
     sequence: SequenceNumber,
-    value_type: ValueType,
+    op_type: OpType,
     keys: &[(i64, u64)],
     values: &[Option<u64>],
 ) {
-    let kvs = kvs_for_test(sequence, value_type, keys, values);
+    let kvs = kvs_for_test(sequence, op_type, keys, values);
 
     memtable.write(&kvs).unwrap();
 }
@@ -93,7 +93,7 @@ fn check_batch_valid(batch: &Batch) {
     let row_num = batch.keys[0].len();
     assert_eq!(row_num, batch.keys[1].len());
     assert_eq!(row_num, batch.sequences.len());
-    assert_eq!(row_num, batch.value_types.len());
+    assert_eq!(row_num, batch.op_types.len());
     assert_eq!(row_num, batch.values[0].len());
 }
 
@@ -101,7 +101,7 @@ fn check_iter_content(
     iter: &mut dyn BatchIterator,
     keys: &[(i64, u64)],
     sequences: &[u64],
-    value_types: &[ValueType],
+    op_types: &[OpType],
     values: &[Option<u64>],
 ) {
     let mut index = 0;
@@ -113,13 +113,13 @@ fn check_iter_content(
         for i in 0..row_num {
             let (k0, k1) = (batch.keys[0].get(i), batch.keys[1].get(i));
             let sequence = batch.sequences.get_data(i).unwrap();
-            let value_type = batch.value_types.get_data(i).unwrap();
+            let op_type = batch.op_types.get_data(i).unwrap();
             let v = batch.values[0].get(i);
 
             assert_eq!(Value::from(keys[index].0), k0);
             assert_eq!(Value::from(keys[index].1), k1);
             assert_eq!(sequences[index], sequence);
-            assert_eq!(value_types[index].as_u8(), value_type);
+            assert_eq!(op_types[index].as_u8(), op_type);
             assert_eq!(Value::from(values[index]), v);
 
             index += 1;
@@ -187,7 +187,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
     write_kvs(
         &*ctx.memtable,
         10, // sequence
-        ValueType::Put,
+        OpType::Put,
         &[
             (1000, 1),
             (1000, 2),
@@ -201,7 +201,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
     write_kvs(
         &*ctx.memtable,
         11, // sequence
-        ValueType::Put,
+        OpType::Put,
         &[(1002, 1), (1003, 1), (1004, 1)], // keys
         &[None, Some(5), None],             // values
     );
@@ -233,16 +233,16 @@ fn write_iter_memtable_case(ctx: &TestContext) {
             ], // keys
             &[10, 10, 10, 11, 11, 11, 10, 10, 10], // sequences
             &[
-                ValueType::Put,
-                ValueType::Put,
-                ValueType::Put,
-                ValueType::Put,
-                ValueType::Put,
-                ValueType::Put,
-                ValueType::Put,
-                ValueType::Put,
-                ValueType::Put,
-            ], // value types
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+            ], // op_types
             &[
                 Some(1),
                 Some(2),
@@ -292,7 +292,7 @@ fn test_iter_batch_size() {
         write_kvs(
             &*ctx.memtable,
             10, // sequence
-            ValueType::Put,
+            OpType::Put,
             &[
                 (1000, 1),
                 (1000, 2),
@@ -326,7 +326,7 @@ fn test_duplicate_key_across_batch() {
         write_kvs(
             &*ctx.memtable,
             10, // sequence
-            ValueType::Put,
+            OpType::Put,
             &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
             &[Some(1), None, None, None],                  // values
         );
@@ -334,7 +334,7 @@ fn test_duplicate_key_across_batch() {
         write_kvs(
             &*ctx.memtable,
             11, // sequence
-            ValueType::Put,
+            OpType::Put,
             &[(1000, 1), (2001, 2)],   // keys
             &[Some(1231), Some(1232)], // values
         );
@@ -351,12 +351,7 @@ fn test_duplicate_key_across_batch() {
                 &mut *iter,
                 &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
                 &[11, 10, 10, 11],                             // sequences
-                &[
-                    ValueType::Put,
-                    ValueType::Put,
-                    ValueType::Put,
-                    ValueType::Put,
-                ], // value types
+                &[OpType::Put, OpType::Put, OpType::Put, OpType::Put], // op_types
                 &[Some(1231), None, None, Some(1232)],         // values
             );
         }
@@ -370,7 +365,7 @@ fn test_duplicate_key_in_batch() {
         write_kvs(
             &*ctx.memtable,
             10, // sequence
-            ValueType::Put,
+            OpType::Put,
             &[(1000, 1), (1000, 2), (1000, 1), (2001, 2)], // keys
             &[None, None, Some(1234), None],               // values
         );
@@ -385,10 +380,10 @@ fn test_duplicate_key_in_batch() {
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
-                &[(1000, 1), (1000, 2), (2001, 2)], // keys
-                &[10, 10, 10],                      // sequences
-                &[ValueType::Put, ValueType::Put, ValueType::Put], // value types
-                &[Some(1234), None, None, None],    // values
+                &[(1000, 1), (1000, 2), (2001, 2)],       // keys
+                &[10, 10, 10],                            // sequences
+                &[OpType::Put, OpType::Put, OpType::Put], // op_types
+                &[Some(1234), None, None, None],          // values
             );
         }
     });
@@ -401,7 +396,7 @@ fn test_sequence_visibility() {
         write_kvs(
             &*ctx.memtable,
             10, // sequence
-            ValueType::Put,
+            OpType::Put,
             &[(1000, 1), (1000, 2)], // keys
             &[Some(1), Some(2)],     // values
         );
@@ -409,7 +404,7 @@ fn test_sequence_visibility() {
         write_kvs(
             &*ctx.memtable,
             11, // sequence
-            ValueType::Put,
+            OpType::Put,
             &[(1000, 1), (1000, 2)], // keys
             &[Some(11), Some(12)],   // values
         );
@@ -417,7 +412,7 @@ fn test_sequence_visibility() {
         write_kvs(
             &*ctx.memtable,
             12, // sequence
-            ValueType::Put,
+            OpType::Put,
             &[(1000, 1), (1000, 2)], // keys
             &[Some(21), Some(22)],   // values
         );
@@ -434,7 +429,7 @@ fn test_sequence_visibility() {
                 &mut *iter,
                 &[], // keys
                 &[], // sequences
-                &[], // value types
+                &[], // op_types
                 &[], // values
             );
         }
@@ -449,10 +444,10 @@ fn test_sequence_visibility() {
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
-                &[(1000, 1), (1000, 2)],           // keys
-                &[10, 10],                         // sequences
-                &[ValueType::Put, ValueType::Put], // value types
-                &[Some(1), Some(2)],               // values
+                &[(1000, 1), (1000, 2)],     // keys
+                &[10, 10],                   // sequences
+                &[OpType::Put, OpType::Put], // op_types
+                &[Some(1), Some(2)],         // values
             );
         }
 
@@ -466,10 +461,10 @@ fn test_sequence_visibility() {
             let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
-                &[(1000, 1), (1000, 2)],           // keys
-                &[11, 11],                         // sequences
-                &[ValueType::Put, ValueType::Put], // value types
-                &[Some(11), Some(12)],             // values
+                &[(1000, 1), (1000, 2)],     // keys
+                &[11, 11],                   // sequences
+                &[OpType::Put, OpType::Put], // op_types
+                &[Some(11), Some(12)],       // values
             );
         }
     });
@@ -482,7 +477,7 @@ fn test_iter_after_none() {
         write_kvs(
             &*ctx.memtable,
             10, // sequence
-            ValueType::Put,
+            OpType::Put,
             &[(1000, 0), (1001, 1), (1002, 2)], // keys
             &[Some(0), Some(1), Some(2)],       // values
         );

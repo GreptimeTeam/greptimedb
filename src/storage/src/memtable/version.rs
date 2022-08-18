@@ -227,7 +227,7 @@ impl MemtableSet {
 
 #[cfg(test)]
 mod tests {
-    use store_api::storage::ValueType;
+    use store_api::storage::OpType;
 
     use super::*;
     use crate::memtable::tests;
@@ -258,7 +258,7 @@ mod tests {
         tests::write_kvs(
             &*memtable,
             10, // sequence
-            ValueType::Put,
+            OpType::Put,
             &[
                 (1000, 1),
                 (1000, 2),

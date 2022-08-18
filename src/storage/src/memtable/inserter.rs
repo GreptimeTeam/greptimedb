@@ -7,7 +7,7 @@ use datatypes::prelude::ScalarVector;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::{Int64Vector, NullVector, VectorRef};
 use snafu::{ensure, OptionExt};
-use store_api::storage::{ColumnDescriptor, SequenceNumber, ValueType};
+use store_api::storage::{ColumnDescriptor, OpType, SequenceNumber};
 
 use crate::error::{self, Result};
 use crate::memtable::{KeyValues, Memtable, MemtableSet};
@@ -65,7 +65,7 @@ impl Inserter {
         // Reusable KeyValues buffer.
         let mut kvs = KeyValues {
             sequence: self.sequence,
-            value_type: ValueType::Put,
+            op_type: OpType::Put,
             start_index_in_batch: self.index_in_batch,
             keys: Vec::with_capacity(total_column_num),
             values: Vec::with_capacity(total_column_num),
@@ -108,7 +108,7 @@ impl Inserter {
         let schema = memtable.schema();
         let num_rows = put_data.num_rows();
 
-        kvs.reset(ValueType::Put, self.index_in_batch);
+        kvs.reset(OpType::Put, self.index_in_batch);
 
         for key_col in schema.row_key_columns() {
             clone_put_data_column_to(put_data, &key_col.desc, &mut kvs.keys)?;

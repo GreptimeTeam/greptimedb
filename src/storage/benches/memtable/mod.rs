@@ -14,7 +14,7 @@ use datatypes::{
 };
 use rand::{distributions::Alphanumeric, prelude::ThreadRng, Rng};
 use storage::memtable::KeyValues;
-use store_api::storage::{SequenceNumber, ValueType};
+use store_api::storage::{OpType, SequenceNumber};
 
 static NEXT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -50,7 +50,7 @@ fn random_kvs(len: usize, value_size: usize) -> (Vec<KeyTuple>, Vec<ValueTuple>)
 
 fn kvs_with_index(
     sequence: SequenceNumber,
-    value_type: ValueType,
+    op_type: OpType,
     start_index_in_batch: usize,
     keys: &[(i64, u64)],
     values: &[(Option<u64>, String)],
@@ -81,7 +81,7 @@ fn kvs_with_index(
     ];
     KeyValues {
         sequence,
-        value_type,
+        op_type,
         start_index_in_batch,
         keys: row_keys,
         values: row_values,
@@ -92,7 +92,7 @@ fn generate_kv(kv_size: usize, start_index_in_batch: usize, value_size: usize) -
     let (keys, values) = random_kvs(kv_size, value_size);
     kvs_with_index(
         get_sequence(),
-        ValueType::Put,
+        OpType::Put,
         start_index_in_batch,
         &keys,
         &values,
