@@ -200,7 +200,7 @@ impl PyVector {
 
         let left_type = left.data_type();
         let right_type = &right_type;
-        // TODO: found better way to cast between signed and unsigned type
+        // TODO(discord9): found better way to cast between signed and unsigned type
         let target_type = target_type.unwrap_or_else(|| {
             if is_signed(left_type) && is_signed(right_type) {
                 DataType::Int64
@@ -501,7 +501,7 @@ impl PyVector {
     }
 
     /// Unsupport
-    /// TODO: make it work
+    /// TODO(discord9): make it work
     #[allow(unused)]
     fn setitem_by_index(
         zelf: PyRef<Self>,
@@ -740,7 +740,7 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
 impl Constructor for PyVector {
     type Args = FuncArgs;
 
-    /// TODO: found out how to make it work in python
+    /// TODO(discord9): found out how to make it work in python
     #[allow(unused)]
     fn py_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         todo!()
@@ -750,7 +750,7 @@ impl Constructor for PyVector {
 impl Initializer for PyVector {
     type Args = OptionalArg<PyObjectRef>;
 
-    /// TODO: found out how to test it in python
+    /// TODO(discord9): found out how to test it in python
     #[allow(unused)]
     fn init(zelf: PyRef<Self>, iterable: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
         todo!()
@@ -822,7 +822,7 @@ pub mod tests {
                     Value::Float32(OrderedFloat(2.0)),
                     Value::Float64(OrderedFloat(2.0)),
                     Value::String("123".into()),
-                    // TODO: test Bytes and Date/DateTime
+                    // TODO(discord9): test Bytes and Date/DateTime
                 ]
             };
             for val in typed_lst {

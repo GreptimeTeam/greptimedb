@@ -32,7 +32,7 @@ impl GrpcServer {
         info!("The gRPC server is running at {}", addr);
 
         let svc = Server::new(self.handler.clone()).into_service();
-        let _ = tonic::transport::Server::builder()
+        tonic::transport::Server::builder()
             .add_service(svc)
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await

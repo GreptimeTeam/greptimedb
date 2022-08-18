@@ -131,7 +131,7 @@ impl ColumnsRowKeyMetadata {
 
 pub type ColumnsRowKeyMetadataRef = Arc<ColumnsRowKeyMetadata>;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnFamiliesMetadata {
     /// Map column family id to column family metadata.
     id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
@@ -143,7 +143,7 @@ impl ColumnFamiliesMetadata {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnFamilyMetadata {
     /// Column family name.
     pub name: String,
