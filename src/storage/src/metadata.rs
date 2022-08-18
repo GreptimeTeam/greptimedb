@@ -500,8 +500,8 @@ fn internal_column_descs() -> [ColumnDescriptor; 2] {
         .build()
         .unwrap(),
         ColumnDescriptorBuilder::new(
-            ReservedColumnId::value_type(),
-            consts::VALUE_TYPE_COLUMN_NAME.to_string(),
+            ReservedColumnId::op_type(),
+            consts::OP_TYPE_COLUMN_NAME.to_string(),
             ConcreteDataType::uint8_datatype(),
         )
         .is_nullable(false)
@@ -515,7 +515,7 @@ fn internal_column_descs() -> [ColumnDescriptor; 2] {
 fn is_internal_value_column(column_name: &str) -> bool {
     matches!(
         column_name,
-        consts::SEQUENCE_COLUMN_NAME | consts::VALUE_TYPE_COLUMN_NAME
+        consts::SEQUENCE_COLUMN_NAME | consts::OP_TYPE_COLUMN_NAME
     )
 }
 
@@ -589,7 +589,7 @@ mod tests {
 
     #[test]
     fn test_build_metadata_internal_name() {
-        let names = [consts::SEQUENCE_COLUMN_NAME, consts::VALUE_TYPE_COLUMN_NAME];
+        let names = [consts::SEQUENCE_COLUMN_NAME, consts::OP_TYPE_COLUMN_NAME];
         for name in names {
             let cf = ColumnFamilyDescriptorBuilder::default()
                 .push_column(

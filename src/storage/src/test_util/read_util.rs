@@ -7,17 +7,17 @@ use datatypes::vectors::{Int64Vector, UInt64Vector, UInt8Vector};
 use crate::error::Result;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
 
-/// Build a new batch, with 0 sequence and value type.
+/// Build a new batch, with 0 sequence and op_type.
 fn new_kv_batch(key_values: &[(i64, Option<i64>)]) -> Batch {
     let key = Arc::new(Int64Vector::from_values(key_values.iter().map(|v| v.0)));
     let value = Arc::new(Int64Vector::from_iter(key_values.iter().map(|v| v.1)));
     let sequences = UInt64Vector::from_vec(vec![0; key_values.len()]);
-    let value_types = UInt8Vector::from_vec(vec![0; key_values.len()]);
+    let op_types = UInt8Vector::from_vec(vec![0; key_values.len()]);
 
     Batch {
         keys: vec![key],
         sequences,
-        value_types,
+        op_types,
         values: vec![value],
     }
 }

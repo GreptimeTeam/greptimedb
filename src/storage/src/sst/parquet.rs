@@ -260,7 +260,7 @@ mod tests {
     use datatypes::arrow::array::{Array, Int64Array, UInt64Array, UInt8Array};
     use datatypes::arrow::io::parquet::read::FileReader;
     use object_store::backend::fs::Backend;
-    use store_api::storage::ValueType;
+    use store_api::storage::OpType;
     use tempdir::TempDir;
 
     use super::*;
@@ -275,7 +275,7 @@ mod tests {
         memtable_tests::write_kvs(
             &*memtable,
             10, // sequence
-            ValueType::Put,
+            OpType::Put,
             &[
                 (1000, 1),
                 (1000, 2),
@@ -305,7 +305,7 @@ mod tests {
         let reader = std::fs::File::open(dir.path().join(sst_file_name)).unwrap();
         let mut file_reader = FileReader::try_new(reader, None, Some(128), None, None).unwrap();
 
-        // chunk schema: timestamp, __version, v1, __sequence, __value_type
+        // chunk schema: timestamp, __version, v1, __sequence, __op_type
         let chunk = file_reader.next().unwrap().unwrap();
         assert_eq!(5, chunk.arrays().len());
 
@@ -335,7 +335,7 @@ mod tests {
             chunk.arrays()[3]
         );
 
-        // value type
+        // op_type
         assert_eq!(
             Arc::new(UInt8Array::from_slice(&[0, 0, 0, 0, 0, 0])) as Arc<dyn Array>,
             chunk.arrays()[4]

@@ -22,7 +22,7 @@ pub const DEFAULT_CF_ID: ColumnFamilyId = 1;
 enum ReservedColumnType {
     Version = 0,
     Sequence,
-    ValueType,
+    OpType,
 }
 
 /// Column id reserved by the engine.
@@ -48,9 +48,9 @@ impl ReservedColumnId {
         Self::BASE | ReservedColumnType::Sequence as ColumnId
     }
 
-    /// Id for `__value_type` column.
-    pub const fn value_type() -> ColumnId {
-        Self::BASE | ReservedColumnType::ValueType as ColumnId
+    /// Id for `__op_type` column.
+    pub const fn op_type() -> ColumnId {
+        Self::BASE | ReservedColumnType::OpType as ColumnId
     }
 }
 
@@ -70,9 +70,8 @@ pub const SEQUENCE_COLUMN_NAME: &str = "__sequence";
 /// Name for time index constraint name.
 pub const TIME_INDEX_NAME: &str = "__time_index";
 
-// TODO(yingwen): `__op_type` might be proper than `__value_type`.
-/// Name for reserved column: value_type
-pub const VALUE_TYPE_COLUMN_NAME: &str = "__value_type";
+/// Name for reserved column: op_type
+pub const OP_TYPE_COLUMN_NAME: &str = "__op_type";
 
 // -----------------------------------------------------------------------------
 
@@ -90,6 +89,6 @@ mod tests {
     fn test_reserved_id() {
         assert_eq!(0x80000000, ReservedColumnId::version());
         assert_eq!(0x80000001, ReservedColumnId::sequence());
-        assert_eq!(0x80000002, ReservedColumnId::value_type());
+        assert_eq!(0x80000002, ReservedColumnId::op_type());
     }
 }
