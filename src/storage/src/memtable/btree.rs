@@ -114,6 +114,7 @@ impl BTreeIterator {
         }
     }
 
+    // FIXME(yingwen): Support projection.
     fn next_batch(&mut self) -> Option<Batch> {
         let map = self.map.read().unwrap();
         let iter = if let Some(last_key) = &self.last_key {

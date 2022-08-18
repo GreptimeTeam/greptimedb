@@ -1,7 +1,7 @@
 //! Common structs and utilities for read.
 
 use async_trait::async_trait;
-use datatypes::vectors::{UInt64Vector, UInt8Vector, VectorRef};
+use datatypes::vectors::VectorRef;
 
 use crate::error::Result;
 
@@ -13,7 +13,7 @@ pub struct Batch {
     ///
     /// Columns follow the same order convention of region schema:
     /// key, value, internal columns.
-    pub columns: Vec<VectorRef>,
+    columns: Vec<VectorRef>,
 }
 
 impl Batch {
@@ -24,6 +24,11 @@ impl Batch {
     #[inline]
     pub fn num_columns(&self) -> usize {
         self.columns.len()
+    }
+
+    #[inline]
+    pub fn columns(&self) -> &[VectorRef] {
+        &self.columns
     }
 
     #[inline]

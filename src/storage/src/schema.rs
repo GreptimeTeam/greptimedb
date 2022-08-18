@@ -5,9 +5,8 @@ use common_error::prelude::*;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk as ArrowChunk;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
-use datatypes::prelude::Vector;
 use datatypes::schema::Metadata;
-use datatypes::vectors::{Helper, UInt64Vector, UInt8Vector};
+use datatypes::vectors::Helper;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use store_api::storage::{consts, Chunk, ColumnSchema, Schema, SchemaBuilder, SchemaRef};
@@ -215,7 +214,7 @@ impl SstSchema {
     pub fn batch_to_arrow_chunk(&self, batch: &Batch) -> ArrowChunk<Arc<dyn Array>> {
         assert_eq!(self.schema.num_columns(), batch.num_columns());
 
-        ArrowChunk::new(batch.columns.iter().map(|v| v.to_arrow_array()).collect())
+        ArrowChunk::new(batch.columns().iter().map(|v| v.to_arrow_array()).collect())
     }
 
     pub fn arrow_chunk_to_batch(&self, chunk: &ArrowChunk<Arc<dyn Array>>) -> Result<Batch> {
@@ -293,11 +292,6 @@ impl SstSchema {
     #[inline]
     fn row_key_indices(&self) -> impl Iterator<Item = usize> {
         0..self.row_key_end
-    }
-
-    #[inline]
-    fn value_indices(&self) -> impl Iterator<Item = usize> {
-        self.row_key_end..self.user_column_end
     }
 
     #[inline]
@@ -404,7 +398,6 @@ impl Projection {
 /// Schema with projection info.
 #[derive(Debug)]
 pub struct ProjectedSchema {
-    region_schema: RegionSchemaRef,
     projection: Projection,
     /// Schema used to read from data sources.
     schema_to_read: SstSchema,
@@ -419,9 +412,6 @@ impl ProjectedSchema {
         region_schema: RegionSchemaRef,
         projected_columns: Option<Vec<usize>>,
     ) -> Result<ProjectedSchema> {
-        if let Some(indices) = &projected_columns {
-            Self::validate_projection(&region_schema, &indices)?;
-        }
         let indices = match projected_columns {
             Some(indices) => {
                 Self::validate_projection(&region_schema, &indices)?;
@@ -441,7 +431,6 @@ impl ProjectedSchema {
         let projected_user_schema = Self::build_projected_user_schema(&region_schema, &projection)?;
 
         Ok(ProjectedSchema {
-            region_schema,
             projection,
             schema_to_read,
             projected_user_schema,
@@ -456,6 +445,18 @@ impl ProjectedSchema {
     #[inline]
     pub fn schema_to_read(&self) -> &SstSchema {
         &self.schema_to_read
+    }
+
+    pub fn batch_to_chunk(&self, batch: &Batch) -> Chunk {
+        let columns = self
+            .projection
+            .projected_idx_to_read_idx
+            .iter()
+            .map(|col_idx| batch.column(*col_idx))
+            .cloned()
+            .collect();
+
+        Chunk::new(columns)
     }
 
     fn build_schema_to_read(
@@ -647,8 +648,6 @@ mod tests {
         assert_eq!(4, sst_schema.op_type_index());
         let row_key_indices: Vec<_> = sst_schema.row_key_indices().collect();
         assert_eq!([0, 1], &row_key_indices[..]);
-        let value_indices: Vec<_> = sst_schema.value_indices().collect();
-        assert_eq!([2], &value_indices[..]);
 
         // Test batch and chunk conversion.
         let batch = new_batch();

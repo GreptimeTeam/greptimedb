@@ -36,8 +36,7 @@ impl ChunkReader for ChunkReaderImpl {
             None => return Ok(None),
         };
 
-        // TODO(yingwen): [projection] Use schema to convert batch into chunk.
-        let chunk = batch_to_chunk(batch);
+        let chunk = self.schema.batch_to_chunk(&batch);
 
         Ok(Some(chunk))
     }
@@ -66,12 +65,6 @@ impl ChunkReaderImpl {
 
         self.sst_reader.next_batch().await
     }
-}
-
-// Assumes the schema is the same as key columns combine with value columns.
-fn batch_to_chunk(mut batch: Batch) -> Chunk {
-    // FIXME(yingwen): [projection] Convert into chunk using projected schema.
-    Chunk::new(batch.columns)
 }
 
 /// Builder to create a new [ChunkReaderImpl] from scan request.

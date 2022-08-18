@@ -21,8 +21,10 @@ pub type MemtableId = u32;
 
 /// In memory storage.
 pub trait Memtable: Send + Sync + std::fmt::Debug {
+    /// Returns id of this memtable.
     fn id(&self) -> MemtableId;
 
+    /// Returns schema of the memtable.
     fn schema(&self) -> RegionSchemaRef;
 
     /// Write key/values to the memtable.
