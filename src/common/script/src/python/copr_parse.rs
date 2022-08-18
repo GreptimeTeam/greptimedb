@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use arrow::datatypes::DataType;
 use rustpython_parser::{
@@ -6,11 +6,24 @@ use rustpython_parser::{
     ast::{Arguments, Location},
     parser,
 };
-use snafu::{OptionExt, ResultExt};
+#[cfg(test)]
+use serde::Deserialize;
+use snafu::ResultExt;
 
-use crate::scalars::python::coprocessor::Coprocessor;
-use crate::scalars::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
-use crate::scalars::python::AnnotationInfo;
+use crate::python::coprocessor::Coprocessor;
+use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
+use crate::python::AnnotationInfo;
+
+#[cfg_attr(test, derive(Deserialize))]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct DecoratorArgs {
+    pub arg_names: Vec<String>,
+    pub ret_names: Vec<String>,
+    pub sql: Option<String>,
+    // maybe add a URL for connecting or what?
+    // also predicate for timed triggered or conditional triggered?
+}
+
 /// Return a CoprParseSnafu for you to chain fail() to return correct err Result type
 pub(crate) fn ret_parse_error(
     reason: String,
@@ -27,27 +40,28 @@ macro_rules! fail_parse_error {
     };
 }
 
+fn py_str_to_string(s: &ast::Expr<()>) -> Result<String> {
+    if let ast::ExprKind::Constant {
+        value: ast::Constant::Str(v),
+        kind: _,
+    } = &s.node
+    {
+        Ok(v.to_owned())
+    } else {
+        fail_parse_error!(
+            format!(
+                "Expect a list of String, found one element to be: \n{:#?}",
+                &s.node
+            ),
+            Some(s.location)
+        )
+    }
+}
+
 /// turn a python list of string in ast form(a `ast::Expr`) of string into a `Vec<String>`
 fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
     if let ast::ExprKind::List { elts, ctx: _ } = &lst.node {
-        let mut ret = Vec::with_capacity(elts.len());
-        for s in elts {
-            if let ast::ExprKind::Constant {
-                value: ast::Constant::Str(v),
-                kind: _,
-            } = &s.node
-            {
-                ret.push(v.to_owned())
-            } else {
-                return fail_parse_error!(
-                    format!(
-                        "Expect a list of String, found one element to be: \n{:#?}",
-                        &s.node
-                    ),
-                    Some(s.location)
-                );
-            }
-        }
+        let ret = elts.iter().map(py_str_to_string).collect::<Result<_>>()?;
         Ok(ret)
     } else {
         fail_parse_error!(
@@ -236,38 +250,48 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 }
 
 /// parse a list of keyword and return args and returns list from keywords
-fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<String>)> {
+fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
     // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
-    let avail_key = HashSet::from(["args", "returns"]);
+    let avail_key = HashSet::from(["args", "returns", "sql"]);
+    let opt_keys = HashSet::from(["sql"]);
+    let mut visited_key = HashSet::new();
+    let len_min = avail_key.len() - opt_keys.len();
+    let len_max = avail_key.len();
     ensure!(
-        keywords.len() == avail_key.len(),
+        // "sql" is optional(for now)
+        keywords.len() >= len_min && keywords.len() <= len_max,
         CoprParseSnafu {
             reason: format!(
-                "Expect {} keyword argument, found {}.",
-                avail_key.len(),
+                "Expect between {len_min} and {len_max} keyword argument, found {}.",
                 keywords.len()
             ),
             loc: keywords.get(0).map(|s| s.location)
         }
     );
-    let mut kw_map = HashMap::new();
+    let mut ret_args = DecoratorArgs::default();
     for kw in keywords {
         match &kw.node.arg {
             Some(s) => {
                 let s = s.as_str();
-                if !kw_map.contains_key(s) {
-                    if !avail_key.contains(s) {
-                        return fail_parse_error!(
-                            format!("Expect one of {:?}, found `{}`", &avail_key, s),
-                            Some(kw.location),
-                        );
-                    }
-                    kw_map.insert(s, pylist_to_vec(&kw.node.value)?);
-                } else {
+                if visited_key.contains(s) {
                     return fail_parse_error!(
                         format!("`{s}` occur multiple times in decorator's arguements' list."),
                         Some(kw.location),
                     );
+                }
+                if !avail_key.contains(s) {
+                    return fail_parse_error!(
+                        format!("Expect one of {:?}, found `{}`", &avail_key, s),
+                        Some(kw.location),
+                    );
+                } else {
+                    visited_key.insert(s);
+                }
+                match s {
+                    "args" => ret_args.arg_names = pylist_to_vec(&kw.node.value)?,
+                    "returns" => ret_args.ret_names = pylist_to_vec(&kw.node.value)?,
+                    "sql" => ret_args.sql = Some(py_str_to_string(&kw.node.value)?),
+                    _ => unreachable!(),
                 }
             }
             None => {
@@ -282,17 +306,16 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<(Vec<String>, Vec<
         }
     }
     let loc = keywords[0].location;
-    let arg_names = kw_map
-        .remove("args")
-        .context(ret_parse_error("Expect `args` keyword".into(), Some(loc)))?;
-    let ret_names = kw_map
-        .remove("returns")
-        .context(ret_parse_error("Expect `rets` keyword".into(), Some(loc)))?;
-    Ok((arg_names, ret_names))
+    for key in avail_key {
+        if !visited_key.contains(key) && !opt_keys.contains(key) {
+            return fail_parse_error!(format!("Expect `{key}` keyword"), Some(loc));
+        }
+    }
+    Ok(ret_args)
 }
 
 /// returns args and returns in Vec of String
-fn parse_decorator(decorator: &ast::Expr<()>) -> Result<(Vec<String>, Vec<String>)> {
+fn parse_decorator(decorator: &ast::Expr<()>) -> Result<DecoratorArgs> {
     //check_decorator(decorator)?;
     if let ast::ExprKind::Call {
         func,
@@ -445,7 +468,7 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
     } = &python_ast[0].node
     {
         let decorator = &decorator_list[0];
-        let (arg_names, ret_names) = parse_decorator(decorator)?;
+        let deco_args = parse_decorator(decorator)?;
 
         // get arg types from type annotation
         let arg_types = get_arg_annotations(fn_args)?;
@@ -455,28 +478,30 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
             get_return_annotations(rets)?
         } else {
             // if no anntation at all, set it to all None
-            std::iter::repeat(None).take(ret_names.len()).collect()
+            std::iter::repeat(None)
+                .take(deco_args.ret_names.len())
+                .collect()
         };
 
         // make sure both arguments&returns in fucntion
         // and in decorator have same length
         ensure!(
-            arg_names.len() == arg_types.len(),
+            deco_args.arg_names.len() == arg_types.len(),
             CoprParseSnafu {
                 reason: format!(
                     "args number in decorator({}) and function({}) doesn't match",
-                    arg_names.len(),
+                    deco_args.arg_names.len(),
                     arg_types.len()
                 ),
                 loc: None
             }
         );
         ensure!(
-            ret_names.len() == return_types.len(),
+            deco_args.ret_names.len() == return_types.len(),
             CoprParseSnafu {
                 reason: format!(
                     "returns number in decorator( {} ) and function annotation( {} ) doesn't match",
-                    ret_names.len(),
+                    deco_args.ret_names.len(),
                     return_types.len()
                 ),
                 loc: None
@@ -484,8 +509,7 @@ pub fn parse_copr(script: &str) -> Result<Coprocessor> {
         );
         Ok(Coprocessor {
             name: name.to_string(),
-            args: arg_names,
-            returns: ret_names,
+            deco_args,
             arg_types,
             return_types,
             script: script.to_owned(),

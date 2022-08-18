@@ -17,8 +17,8 @@ use rustpython_vm::{
 use serde::{Deserialize, Serialize};
 
 use super::builtins::*;
-use crate::scalars::python::is_instance;
-use crate::scalars::python::PyVector;
+use crate::python::is_instance;
+use crate::python::PyVector;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TestCase {
@@ -227,7 +227,7 @@ impl PyValue {
 
 #[test]
 fn run_testcases() {
-    let loc = Path::new("src/scalars/py_udf_module/testcases.ron");
+    let loc = Path::new("src/py_udf_module/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
     let mut buf = String::new();

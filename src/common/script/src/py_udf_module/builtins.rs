@@ -13,8 +13,8 @@ use rustpython_vm::{
 };
 #[cfg(test)]
 mod unit_tests;
-use crate::scalars::python::is_instance;
-use crate::scalars::python::PyVector;
+use crate::python::is_instance;
+use crate::python::PyVector;
 
 /// "Can't cast operand of type `{name}` into `{ty}`."
 fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseExceptionRef {
@@ -248,22 +248,23 @@ fn eval_aggr_fn<T: AggregateExpr>(
 /// allow Python Coprocessor Function to use already implmented udf functions from datafusion and GrepTime DB itself
 ///
 #[pymodule]
-pub(in crate::scalars::py_udf_module) mod greptime_builtin {
+pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
     use arrow::array::NullArray;
+    use common_function::scalars::math::PowFunction;
+    use common_function::scalars::{function::FunctionContext, Function};
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
     use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
 
-    use crate::scalars::math::PowFunction;
-    use crate::scalars::py_udf_module::builtins::{
+    use crate::py_udf_module::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
-    use crate::scalars::{function::FunctionContext, python::PyVector, Function};
+    use crate::python::PyVector;
     type PyVectorRef = PyRef<PyVector>;
 
     // the main binding code, due to proc macro things, can't directly use a simpler macro

@@ -795,12 +795,7 @@ dependencies = [
  "chrono-tz",
  "common-error",
  "common-query",
- "common-recordbatch",
- "console",
- "datafusion",
  "datafusion-common",
- "datafusion-expr",
- "datafusion-physical-expr",
  "datatypes",
  "libc",
  "num",
@@ -808,12 +803,6 @@ dependencies = [
  "once_cell",
  "paste",
  "ron",
- "rustpython-ast",
- "rustpython-bytecode",
- "rustpython-compiler",
- "rustpython-compiler-core",
- "rustpython-parser",
- "rustpython-vm",
  "serde",
  "snafu",
 ]
@@ -861,6 +850,35 @@ dependencies = [
  "snafu",
  "tokio",
  "tokio-test",
+]
+
+[[package]]
+name = "common-script"
+version = "0.1.0"
+dependencies = [
+ "arrow2",
+ "common-error",
+ "common-function",
+ "common-query",
+ "common-recordbatch",
+ "console",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
+ "datafusion-physical-expr",
+ "datatypes",
+ "futures",
+ "futures-util",
+ "query",
+ "ron",
+ "rustpython-ast",
+ "rustpython-bytecode",
+ "rustpython-compiler",
+ "rustpython-compiler-core",
+ "rustpython-parser",
+ "rustpython-vm",
+ "serde",
+ "snafu",
 ]
 
 [[package]]
