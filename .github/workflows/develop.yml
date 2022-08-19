@@ -1,4 +1,6 @@
-on: [pull_request]
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 name: Continuous integration for developing
 
@@ -8,6 +10,7 @@ env:
 jobs:
   check:
     name: Check
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -24,6 +27,7 @@ jobs:
 
   test:
     name: Test Suite
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -45,6 +49,7 @@ jobs:
 
   fmt:
     name: Rustfmt
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -62,6 +67,7 @@ jobs:
 
   clippy:
     name: Clippy
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
