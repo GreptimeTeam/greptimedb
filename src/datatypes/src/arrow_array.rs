@@ -23,7 +23,7 @@ macro_rules! cast_array {
     };
 }
 
-pub fn arrow_array_access<'a>(array: &'a dyn Array, idx: usize) -> Result<BorrowedValue<'a>> {
+pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<BorrowedValue<'_>> {
     if array.is_null(idx) {
         return Ok(BorrowedValue::Null);
     }
@@ -87,65 +87,62 @@ mod test {
         let array1 = BooleanArray::from_slice(vec![true, true, false, false]);
         assert_eq!(
             BorrowedValue::Boolean(true),
-            arrow_array_access(&array1, 1).unwrap()
+            arrow_array_get(&array1, 1).unwrap()
         );
         let array1 = Int8Array::from_vec(vec![1, 2, 3, 4]);
-        assert_eq!(
-            BorrowedValue::Int8(2),
-            arrow_array_access(&array1, 1).unwrap()
-        );
+        assert_eq!(BorrowedValue::Int8(2), arrow_array_get(&array1, 1).unwrap());
         let array1 = UInt8Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(
             BorrowedValue::UInt8(2),
-            arrow_array_access(&array1, 1).unwrap()
+            arrow_array_get(&array1, 1).unwrap()
         );
         let array1 = Int16Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(
             BorrowedValue::Int16(2),
-            arrow_array_access(&array1, 1).unwrap()
+            arrow_array_get(&array1, 1).unwrap()
         );
         let array1 = UInt16Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(
             BorrowedValue::UInt16(2),
-            arrow_array_access(&array1, 1).unwrap()
+            arrow_array_get(&array1, 1).unwrap()
         );
         let array1 = Int32Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(
             BorrowedValue::Int32(2),
-            arrow_array_access(&array1, 1).unwrap()
+            arrow_array_get(&array1, 1).unwrap()
         );
         let array1 = UInt32Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(
             BorrowedValue::UInt32(2),
-            arrow_array_access(&array1, 1).unwrap()
+            arrow_array_get(&array1, 1).unwrap()
         );
         let array1 = Int64Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(
             BorrowedValue::Int64(2),
-            arrow_array_access(&array1, 1).unwrap()
+            arrow_array_get(&array1, 1).unwrap()
         );
         let array1 = UInt64Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(
             BorrowedValue::UInt64(2),
-            arrow_array_access(&array1, 1).unwrap()
+            arrow_array_get(&array1, 1).unwrap()
         );
         let array1 = Float32Array::from_vec(vec![1f32, 2f32, 3f32, 4f32]);
         assert_eq!(
             BorrowedValue::Float32(2f32.into()),
-            arrow_array_access(&array1, 1).unwrap()
+            arrow_array_get(&array1, 1).unwrap()
         );
         let array1 = Float64Array::from_vec(vec![1f64, 2f64, 3f64, 4f64]);
         assert_eq!(
             BorrowedValue::Float64(2f64.into()),
-            arrow_array_access(&array1, 1).unwrap()
+            arrow_array_get(&array1, 1).unwrap()
         );
 
         let array2 = StringArray::from(vec![Some("hello"), None, Some("world")]);
         assert_eq!(
             BorrowedValue::String("hello"),
-            arrow_array_access(&array2, 0).unwrap()
+            arrow_array_get(&array2, 0).unwrap()
         );
-        assert_eq!(BorrowedValue::Null, arrow_array_access(&array2, 1).unwrap());
+        assert_eq!(BorrowedValue::Null, arrow_array_get(&array2, 1).unwrap());
 
         let array3 = super::BinaryArray::from(vec![
             Some("hello".as_bytes()),
@@ -154,8 +151,8 @@ mod test {
         ]);
         assert_eq!(
             BorrowedValue::Binary("hello".as_bytes()),
-            arrow_array_access(&array3, 0).unwrap()
+            arrow_array_get(&array3, 0).unwrap()
         );
-        assert_eq!(BorrowedValue::Null, arrow_array_access(&array3, 1).unwrap());
+        assert_eq!(BorrowedValue::Null, arrow_array_get(&array3, 1).unwrap());
     }
 }

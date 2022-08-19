@@ -1,7 +1,7 @@
 use std::io;
 
 use common_recordbatch::{util, RecordBatch};
-use datatypes::arrow_array::arrow_array_access;
+use datatypes::arrow_array::arrow_array_get;
 use datatypes::prelude::{BorrowedValue, ConcreteDataType};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use opensrv_mysql::{
@@ -201,7 +201,7 @@ impl<'a> Iterator for RecordBatchIterator<'a> {
 
             for col in 0..self.columns {
                 let column_array = self.record_batch.df_recordbatch.column(col);
-                let field = arrow_array_access(column_array.as_ref(), self.row_cursor)
+                let field = arrow_array_get(column_array.as_ref(), self.row_cursor)
                     .context(error::DataTypesSnafu);
                 row.push(field);
             }
