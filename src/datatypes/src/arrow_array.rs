@@ -24,6 +24,10 @@ macro_rules! cast_array {
 }
 
 pub fn arrow_array_access<'a>(array: &'a dyn Array, idx: usize) -> Result<BorrowedValue<'a>> {
+    if array.is_null(idx) {
+        return Ok(BorrowedValue::Null);
+    }
+
     let result = match array.data_type() {
         ArrowDataType::Null => BorrowedValue::Null,
         ArrowDataType::Boolean => {
@@ -131,10 +135,7 @@ mod test {
             BorrowedValue::String("hello"),
             arrow_array_access(&array2, 0).unwrap()
         );
-        assert_eq!(
-            BorrowedValue::String(""),
-            arrow_array_access(&array2, 1).unwrap()
-        );
+        assert_eq!(BorrowedValue::Null, arrow_array_access(&array2, 1).unwrap());
 
         let array3 = super::BinaryArray::from(vec![
             Some("hello".as_bytes()),
@@ -145,9 +146,6 @@ mod test {
             BorrowedValue::Binary("hello".as_bytes()),
             arrow_array_access(&array3, 0).unwrap()
         );
-        assert_eq!(
-            BorrowedValue::Binary("".as_bytes()),
-            arrow_array_access(&array3, 1).unwrap()
-        );
+        assert_eq!(BorrowedValue::Null, arrow_array_access(&array3, 1).unwrap());
     }
 }

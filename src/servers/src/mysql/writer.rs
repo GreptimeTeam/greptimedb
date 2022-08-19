@@ -83,10 +83,10 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
     }
 
     fn write_recordbatch(row_writer: &mut RowWriter<W>, recordbatch: &RecordBatch) -> Result<()> {
-        let visitor = RecordBatchIterator::new(recordbatch);
-        for row in visitor {
-            for v in row.into_iter() {
-                let value = v?;
+        let row_iter = RecordBatchIterator::new(recordbatch);
+        for row in row_iter {
+            for field in row.into_iter() {
+                let value = field?;
                 match value {
                     BorrowedValue::Null => row_writer.write_col(None::<u8>)?,
                     BorrowedValue::Boolean(v) => row_writer.write_col(v as i8)?,
@@ -242,7 +242,7 @@ mod tests {
 
         let mut record_batch_iter = RecordBatchIterator::new(&recordbatch);
         assert_eq!(
-            vec![BorrowedValue::UInt32(1), BorrowedValue::String("")],
+            vec![BorrowedValue::UInt32(1), BorrowedValue::Null],
             record_batch_iter
                 .next()
                 .unwrap()
@@ -272,7 +272,7 @@ mod tests {
         );
 
         assert_eq!(
-            vec![BorrowedValue::UInt32(4), BorrowedValue::String("")],
+            vec![BorrowedValue::UInt32(4), BorrowedValue::Null],
             record_batch_iter
                 .next()
                 .unwrap()
@@ -280,5 +280,7 @@ mod tests {
                 .map(|v| v.unwrap())
                 .collect::<Vec<BorrowedValue>>()
         );
+
+        assert!(record_batch_iter.next().is_none());
     }
 }
