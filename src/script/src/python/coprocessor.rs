@@ -28,7 +28,7 @@ use vm::{Interpreter, PyObjectRef, VirtualMachine};
 
 use crate::fail_parse_error;
 use crate::python::builtins::greptime_builtin;
-use crate::python::coprocessor::parse::{parse_copr, ret_parse_error, DecoratorArgs};
+use crate::python::coprocessor::parse::{ret_parse_error, DecoratorArgs};
 use crate::python::error::{
     ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
     PyRuntimeSnafu, Result, TypeCastSnafu,
@@ -41,8 +41,6 @@ fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 
 #[cfg(test)]
 use serde::Deserialize;
-
-use crate::python::error::pretty_print_error_in_src;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -529,11 +527,12 @@ fn set_items_in_scope(
 /// # Return Constant columns
 /// You can return constant in python code like `return 1, 1.0, True`
 /// which create a constant array(with same value)(currently support int, float and bool) as column on return
+#[cfg(test)]
 pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
-    let copr = parse_copr(script)?;
+    let copr = parse::parse_copr(script)?;
     exec_parsed(&copr, rb)
 }
 
@@ -607,6 +606,8 @@ pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<Reco
 /// return a friendly String format of error
 ///
 /// use `ln_offset` and `filename` to offset line number and mark file name in error prompt
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn exec_copr_print(
     script: &str,
     rb: &DfRecordBatch,
@@ -614,7 +615,9 @@ pub fn exec_copr_print(
     filename: &str,
 ) -> StdResult<RecordBatch, String> {
     let res = exec_coprocessor(script, rb);
-    res.map_err(|e| pretty_print_error_in_src(script, &e, ln_offset, filename))
+    res.map_err(|e| {
+        crate::python::error::pretty_print_error_in_src(script, &e, ln_offset, filename)
+    })
 }
 
 /// transfer a Python Exception into a python call stack in `String` format
