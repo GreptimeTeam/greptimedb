@@ -52,7 +52,7 @@ pub enum Error {
         source: ArrowError,
     },
     /// errors in coprocessors' parse check for types and etc.
-    #[snafu(display("Coprocessor error: {} {}.", reason, 
+    #[snafu(display("Coprocessor error: {} {}.", reason,
     if let Some(loc) = loc{
         format!("at {loc}")
     }else{
@@ -69,6 +69,18 @@ pub enum Error {
     Other {
         backtrace: Backtrace,
         reason: String,
+    },
+
+    #[snafu(display("Unsupported sql in coprocessor: {}", sql))]
+    UnsupportedSql { sql: String, backtrace: Backtrace },
+
+    #[snafu(display("Missing sql in coprocessor"))]
+    MissingSql { backtrace: Backtrace },
+
+    #[snafu(display("Failed to retrieve record batches, source: {}", source))]
+    RecordBatch {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
     },
 }
 

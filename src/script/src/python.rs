@@ -2,15 +2,13 @@
 
 mod builtins;
 mod coprocessor;
+mod engine;
 mod error;
-pub(crate) mod py_utils;
 #[cfg(test)]
 mod test;
+pub(crate) mod utils;
 mod vector;
 
-pub(crate) use py_utils::is_instance;
-
 use self::coprocessor::AnnotationInfo;
-pub use self::coprocessor::CoprEngine;
 pub use self::coprocessor::{exec_copr_print, exec_coprocessor};
 pub use self::vector::PyVector;

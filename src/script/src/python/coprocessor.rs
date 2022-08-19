@@ -1,4 +1,3 @@
-mod engine;
 pub mod parse;
 
 use std::collections::HashMap;
@@ -7,8 +6,10 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
 use arrow::compute::cast::CastOptions;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use common_recordbatch::RecordBatch;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use datatypes::schema::Schema;
 use datatypes::vectors::Helper;
 use datatypes::vectors::{BooleanVector, Vector, VectorRef};
 use rustpython_bytecode::CodeObject;
@@ -25,7 +26,6 @@ use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
 use vm::{Interpreter, PyObjectRef, VirtualMachine};
 
-pub use self::engine::CoprEngine;
 use crate::fail_parse_error;
 use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::{parse_copr, ret_parse_error, DecoratorArgs};
@@ -33,7 +33,7 @@ use crate::python::error::{
     ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
     PyRuntimeSnafu, Result, TypeCastSnafu,
 };
-use crate::python::{is_instance, PyVector};
+use crate::python::{utils::is_instance, PyVector};
 
 fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
     OtherSnafu { reason }
@@ -51,6 +51,8 @@ pub struct AnnotationInfo {
     pub datatype: Option<DataType>,
     pub is_nullable: bool,
 }
+
+pub type CoprocessorRef = Arc<Coprocessor>;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -202,7 +204,7 @@ impl Coprocessor {
     /// generate [`Schema`] according to return names, types,
     /// if no annotation
     /// the datatypes of the actual columns is used directly
-    fn gen_schema(&self, cols: &[ArrayRef]) -> Result<Arc<Schema>> {
+    fn gen_schema(&self, cols: &[ArrayRef]) -> Result<Arc<ArrowSchema>> {
         let names = &self.deco_args.ret_names;
         let anno = &self.return_types;
         ensure!(
@@ -216,7 +218,7 @@ impl Coprocessor {
                 )
             }
         );
-        Ok(Arc::new(Schema::from(
+        Ok(Arc::new(ArrowSchema::from(
             names
                 .iter()
                 .enumerate()
@@ -527,7 +529,7 @@ fn set_items_in_scope(
 /// # Return Constant columns
 /// You can return constant in python code like `return 1, 1.0, True`
 /// which create a constant array(with same value)(currently support int, float and bool) as column on return
-pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
+pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
@@ -540,8 +542,8 @@ pub(crate) fn exec_with_cached_vm(
     rb: &DfRecordBatch,
     args: Vec<PyVector>,
     vm: &Interpreter,
-) -> Result<DfRecordBatch> {
-    vm.enter(|vm| -> Result<DfRecordBatch> {
+) -> Result<RecordBatch> {
+    vm.enter(|vm| -> Result<RecordBatch> {
         PyVector::make_class(&vm.ctx);
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
@@ -574,8 +576,11 @@ pub(crate) fn exec_with_cached_vm(
         copr.check_and_cast_type(&mut cols)?;
         // 6. return a assembled DfRecordBatch
         let schema = copr.gen_schema(&cols)?;
-        let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
-        Ok(res_rb)
+        let res_rb = DfRecordBatch::try_new(schema.clone(), cols).context(ArrowSnafu)?;
+        Ok(RecordBatch {
+            schema: Arc::new(Schema::try_from(schema).context(TypeCastSnafu)?),
+            df_recordbatch: res_rb,
+        })
     })
 }
 
@@ -588,7 +593,7 @@ pub(crate) fn init_interpreter() -> Interpreter {
 }
 
 /// using a parsed `Coprocessor` struct as input to execute python code
-pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
+pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<RecordBatch> {
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
     check_args_anno_real_type(&args, copr, rb)?;
@@ -607,7 +612,7 @@ pub fn exec_copr_print(
     rb: &DfRecordBatch,
     ln_offset: usize,
     filename: &str,
-) -> StdResult<DfRecordBatch, String> {
+) -> StdResult<RecordBatch, String> {
     let res = exec_coprocessor(script, rb);
     res.map_err(|e| pretty_print_error_in_src(script, &e, ln_offset, filename))
 }

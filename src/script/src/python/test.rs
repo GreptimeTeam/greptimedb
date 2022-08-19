@@ -112,7 +112,7 @@ fn run_ron_testcases() {
                 let res = res.unwrap();
                 fields
                     .iter()
-                    .zip(&res.schema().fields)
+                    .zip(&res.schema.arrow_schema().fields)
                     .map(|(anno, real)| {
                         if !(anno.datatype.clone().unwrap() == real.data_type
                             && anno.is_nullable == real.is_nullable)
@@ -124,7 +124,7 @@ fn run_ron_testcases() {
                     .count();
                 columns
                     .iter()
-                    .zip(res.columns())
+                    .zip(res.df_recordbatch.columns())
                     .map(|(anno, real)| {
                         if !(&anno.ty == real.data_type() && anno.len == real.len()) {
                             eprintln!(

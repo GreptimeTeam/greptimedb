@@ -4231,6 +4231,7 @@ name = "script"
 version = "0.1.0"
 dependencies = [
  "arrow2",
+ "async-trait",
  "common-error",
  "common-function",
  "common-query",
@@ -4253,6 +4254,7 @@ dependencies = [
  "rustpython-vm",
  "serde",
  "snafu",
+ "sql",
 ]
 
 [[package]]

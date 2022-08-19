@@ -27,7 +27,7 @@ use rustpython_vm::{
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
-use crate::python::is_instance;
+use crate::python::utils::is_instance;
 
 #[pyclass(module = false, name = "vector")]
 #[derive(PyPayload, Clone)]

@@ -1,5 +1,4 @@
-//! Python udf module, that is udf function that you can use in
-//! python script(in Python Coprocessor more precisely)
+//!  Builtin module contains GreptimeDB builtin udf/udaf
 #[cfg(test)]
 #[allow(clippy::print_stdout)]
 mod test;
@@ -18,7 +17,7 @@ use rustpython_vm::{
     AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
 
-use crate::python::is_instance;
+use crate::python::utils::is_instance;
 use crate::python::PyVector;
 
 /// "Can't cast operand of type `{name}` into `{ty}`."
@@ -283,36 +282,43 @@ pub(crate) mod greptime_builtin {
     fn sqrt(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(sqrt, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `sin` math function
     #[pyfunction]
     fn sin(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(sin, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `cos` math function
     #[pyfunction]
     fn cos(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(cos, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `tan` math function
     #[pyfunction]
     fn tan(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(tan, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `asin` math function
     #[pyfunction]
     fn asin(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(asin, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `acos` math function
     #[pyfunction]
     fn acos(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(acos, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `atan` math function
     #[pyfunction]
     fn atan(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(atan, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `floor` math function
     #[pyfunction]
     fn floor(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
@@ -323,41 +329,49 @@ pub(crate) mod greptime_builtin {
     fn ceil(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(ceil, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `round` math function
     #[pyfunction]
     fn round(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(round, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `trunc` math function
     #[pyfunction]
     fn trunc(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(trunc, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `abs` math function
     #[pyfunction]
     fn abs(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(abs, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `signum` math function
     #[pyfunction]
     fn signum(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(signum, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `exp` math function
     #[pyfunction]
     fn exp(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(exp, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `ln` math function
     #[pyfunction]
     fn ln(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(ln, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `log2` math function
     #[pyfunction]
     fn log2(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(log2, vm, val);
     }
+
     /// simple math function, the backing implement is datafusion's `log10` math function
     #[pyfunction]
     fn log10(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
