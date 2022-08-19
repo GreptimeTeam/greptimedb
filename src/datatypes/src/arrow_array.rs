@@ -46,7 +46,7 @@ pub fn arrow_array_access<'a>(array: &'a dyn Array, idx: usize) -> Result<Borrow
             BorrowedValue::Int32(cast_array!(array, PrimitiveArray::<i32>).value(idx))
         }
         ArrowDataType::Int64 => {
-            BorrowedValue::Int32(cast_array!(array, PrimitiveArray::<i32>).value(idx))
+            BorrowedValue::Int64(cast_array!(array, PrimitiveArray::<i64>).value(idx))
         }
         ArrowDataType::UInt8 => {
             BorrowedValue::UInt8(cast_array!(array, PrimitiveArray::<u8>).value(idx))
@@ -117,6 +117,16 @@ mod test {
         let array1 = UInt32Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(
             BorrowedValue::UInt32(2),
+            arrow_array_access(&array1, 1).unwrap()
+        );
+        let array1 = Int64Array::from_vec(vec![1, 2, 3, 4]);
+        assert_eq!(
+            BorrowedValue::Int64(2),
+            arrow_array_access(&array1, 1).unwrap()
+        );
+        let array1 = UInt64Array::from_vec(vec![1, 2, 3, 4]);
+        assert_eq!(
+            BorrowedValue::UInt64(2),
             arrow_array_access(&array1, 1).unwrap()
         );
         let array1 = Float32Array::from_vec(vec![1f32, 2f32, 3f32, 4f32]);
