@@ -17,3 +17,4 @@ snafu = { version = "0.7", features = ["backtraces"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
+common-base = {path = "../base"}
