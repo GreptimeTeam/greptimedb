@@ -49,6 +49,7 @@ pub fn create_aggregate_function(
         return_type,
         accumulator,
         state_type,
+        creator,
     )
 }
 

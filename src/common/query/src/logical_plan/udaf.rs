@@ -15,6 +15,7 @@ use crate::function::{
     to_df_return_type, AccumulatorFunctionImpl, ReturnTypeFunction, StateTypeFunction,
 };
 use crate::logical_plan::accumulator::DfAccumulatorAdaptor;
+use crate::logical_plan::AggregateFunctionCreatorRef;
 use crate::signature::Signature;
 
 /// Logical representation of a user-defined aggregate function (UDAF)
@@ -31,6 +32,8 @@ pub struct AggregateFunction {
     pub accumulator: AccumulatorFunctionImpl,
     /// the accumulator's state's description as a function of the return type
     pub state_type: StateTypeFunction,
+    /// the creator that creates aggregate functions
+    creator: AggregateFunctionCreatorRef,
 }
 
 impl Debug for AggregateFunction {
@@ -57,6 +60,7 @@ impl AggregateFunction {
         return_type: ReturnTypeFunction,
         accumulator: AccumulatorFunctionImpl,
         state_type: StateTypeFunction,
+        creator: AggregateFunctionCreatorRef,
     ) -> Self {
         Self {
             name,
@@ -64,6 +68,7 @@ impl AggregateFunction {
             return_type,
             accumulator,
             state_type,
+            creator,
         }
     }
 }
@@ -74,16 +79,20 @@ impl From<AggregateFunction> for DfAggregateUdf {
             &udaf.name,
             &udaf.signature.into(),
             &to_df_return_type(udaf.return_type),
-            &to_df_accumulator_func(udaf.accumulator),
+            &to_df_accumulator_func(udaf.accumulator, udaf.creator.clone()),
             &to_df_state_type(udaf.state_type),
         )
     }
 }
 
-fn to_df_accumulator_func(func: AccumulatorFunctionImpl) -> DfAccumulatorFunctionImplementation {
+fn to_df_accumulator_func(
+    accumulator: AccumulatorFunctionImpl,
+    creator: AggregateFunctionCreatorRef,
+) -> DfAccumulatorFunctionImplementation {
     Arc::new(move || {
-        let acc = func()?;
-        Ok(Box::new(DfAccumulatorAdaptor(acc)))
+        let accumulator = accumulator()?;
+        let creator = creator.clone();
+        Ok(Box::new(DfAccumulatorAdaptor::new(accumulator, creator)))
     })
 }
 
