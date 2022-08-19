@@ -213,7 +213,10 @@ fn write_iter_memtable_case(ctx: &TestContext) {
             ..Default::default()
         };
         let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
-        assert_eq!(ctx.schema, iter.schema());
+        assert_eq!(
+            ctx.schema.user_schema(),
+            iter.schema().projected_user_schema()
+        );
         assert_eq!(RowOrdering::Key, iter.ordering());
 
         check_iter_content(
@@ -420,6 +423,7 @@ fn test_sequence_visibility() {
                 batch_size: 1,
                 visible_sequence: 9,
                 for_flush: false,
+                projected_schema: None,
             };
 
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
@@ -437,6 +441,7 @@ fn test_sequence_visibility() {
                 batch_size: 1,
                 visible_sequence: 10,
                 for_flush: false,
+                projected_schema: None,
             };
 
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
@@ -454,6 +459,7 @@ fn test_sequence_visibility() {
                 batch_size: 1,
                 visible_sequence: 11,
                 for_flush: false,
+                projected_schema: None,
             };
 
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();

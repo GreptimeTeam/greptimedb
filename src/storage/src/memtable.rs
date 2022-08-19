@@ -14,7 +14,7 @@ use crate::memtable::btree::BTreeMemtable;
 pub use crate::memtable::inserter::Inserter;
 pub use crate::memtable::version::{MemtableSet, MemtableVersion};
 use crate::read::Batch;
-use crate::schema::RegionSchemaRef;
+use crate::schema::{ProjectedSchemaRef, RegionSchemaRef};
 
 /// Unique id for memtables under same region.
 pub type MemtableId = u32;
@@ -43,6 +43,8 @@ pub trait Memtable: Send + Sync + std::fmt::Debug {
 pub type MemtableRef = Arc<dyn Memtable>;
 
 /// Context for iterating memtable.
+///
+/// Should be cheap to clone.
 #[derive(Debug, Clone)]
 pub struct IterContext {
     /// The suggested batch size of the iterator.
@@ -54,6 +56,11 @@ pub struct IterContext {
     // in memtable.
     /// Returns all rows, ignores sequence visibility and key duplication.
     pub for_flush: bool,
+
+    /// Schema the reader expect to read.
+    ///
+    /// Set to `None` to read all columns.
+    pub projected_schema: Option<ProjectedSchemaRef>,
 }
 
 impl Default for IterContext {
@@ -63,6 +70,7 @@ impl Default for IterContext {
             // All data in memory is visible by default.
             visible_sequence: SequenceNumber::MAX,
             for_flush: false,
+            projected_schema: None,
         }
     }
 }
@@ -83,7 +91,7 @@ pub enum RowOrdering {
 /// as an async trait.
 pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
     /// Returns the schema of this iterator.
-    fn schema(&self) -> RegionSchemaRef;
+    fn schema(&self) -> ProjectedSchemaRef;
 
     /// Returns the ordering of the output rows from this iterator.
     fn ordering(&self) -> RowOrdering;

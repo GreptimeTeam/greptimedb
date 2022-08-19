@@ -6,10 +6,10 @@ use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk as ArrowChunk;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::schema::Metadata;
-use datatypes::vectors::Helper;
+use datatypes::vectors::{Helper, VectorRef};
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
-use store_api::storage::{consts, Chunk, ColumnSchema, Schema, SchemaBuilder, SchemaRef};
+use store_api::storage::{consts, Chunk, ColumnId, ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 
 use crate::metadata::{ColumnMetadata, ColumnsMetadata, ColumnsMetadataRef};
 use crate::read::Batch;
@@ -293,6 +293,11 @@ impl SstSchema {
     fn column_name(&self, idx: usize) -> &str {
         &self.schema.column_schemas()[idx].name
     }
+
+    #[inline]
+    fn num_columns(&self) -> usize {
+        self.schema.num_columns()
+    }
 }
 
 impl TryFrom<ArrowSchema> for SstSchema {
@@ -332,6 +337,10 @@ struct Projection {
     ///
     /// We use these indices to read from data sources.
     columns_to_read: Vec<usize>,
+    /// Maps column id to its index in `columns_to_read`.
+    ///
+    /// Used to ask whether the column with given column id is needed in projection.
+    id_to_read_idx: HashMap<ColumnId, usize>,
     /// Maps index of `projected_columns` to index of the column in `columns_to_read`.
     ///
     /// Invariant:
@@ -384,6 +393,7 @@ impl Projection {
         Projection {
             projected_columns,
             columns_to_read,
+            id_to_read_idx,
             projected_idx_to_read_idx,
             num_user_columns,
         }
@@ -447,6 +457,9 @@ impl ProjectedSchema {
         &self.schema_to_read
     }
 
+    /// Convert [Batch] into [Chunk].
+    ///
+    /// This will remove all internal columns.
     pub fn batch_to_chunk(&self, batch: &Batch) -> Chunk {
         let columns = match &self.projection {
             Some(projection) => projection
@@ -455,10 +468,56 @@ impl ProjectedSchema {
                 .map(|col_idx| batch.column(*col_idx))
                 .cloned()
                 .collect(),
-            None => batch.columns().iter().cloned().collect(),
+            None => {
+                let num_user_columns = self.projected_user_schema.num_columns();
+                batch
+                    .columns()
+                    .iter()
+                    .take(num_user_columns)
+                    .cloned()
+                    .collect()
+            }
         };
 
         Chunk::new(columns)
+    }
+
+    /// Returns true if column with given `column_id` is needed (in projection).
+    pub fn is_needed(&self, column_id: ColumnId) -> bool {
+        self.projection
+            .as_ref()
+            .map(|p| p.id_to_read_idx.contains_key(&column_id))
+            .unwrap_or(true)
+    }
+
+    /// Construct a new [Batch] from row key, value, sequence and op_type.
+    ///
+    /// # Panics
+    /// Panics if number of columns are not the same as this schema.
+    pub fn batch_from_parts(
+        &self,
+        row_key_columns: Vec<VectorRef>,
+        mut value_columns: Vec<VectorRef>,
+        sequences: VectorRef,
+        op_types: VectorRef,
+    ) -> Batch {
+        // sequence and op_type
+        let num_internal_columns = 2;
+
+        assert_eq!(
+            self.schema_to_read.num_columns(),
+            row_key_columns.len() + value_columns.len() + num_internal_columns
+        );
+
+        let mut columns = row_key_columns;
+        // Reserve space for value, sequence and op_type
+        columns.reserve(value_columns.len() + num_internal_columns);
+        columns.append(&mut value_columns);
+        // Internal columns are push in sequence, op_type order.
+        columns.push(sequences);
+        columns.push(op_types);
+
+        Batch::new(columns)
     }
 
     fn build_schema_to_read(

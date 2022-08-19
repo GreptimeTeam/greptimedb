@@ -54,8 +54,8 @@ impl<'a> ParquetWriter<'a> {
     /// A chunk of records yielded from each iteration with a size given
     /// in config will be written to a single row group.
     async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
-        let region_schema = self.iter.schema();
-        let sst_schema = region_schema.sst_schema();
+        let projected_schema = self.iter.schema();
+        let sst_schema = projected_schema.schema_to_read();
         let schema = sst_schema.arrow_schema();
         let object = self.object_store.object(self.file_path);
 
