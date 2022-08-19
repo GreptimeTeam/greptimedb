@@ -37,7 +37,7 @@ pub enum Value {
 
     // Date & Time types:
     Date(common_time::date::Date),
-    DateTime(i64),
+    DateTime(common_time::datetime::DateTime),
 
     List(ListValue),
 }
@@ -65,9 +65,7 @@ impl Value {
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
             Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
             Value::Date(_) => ConcreteDataType::date_datatype(),
-            Value::DateTime(_) => {
-                unimplemented!("Unsupported data type of value {:?}", self)
-            }
+            Value::DateTime(_) => ConcreteDataType::date_datatype(),
         }
     }
 
@@ -153,7 +151,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::String(bytes) => serde_json::Value::String(bytes.as_utf8().to_string()),
             Value::Binary(bytes) => serde_json::to_value(bytes)?,
             Value::Date(v) => serde_json::Value::Number(v.val().into()),
-            Value::DateTime(v) => serde_json::Value::Number(v.into()),
+            Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
         };
 
@@ -205,6 +203,8 @@ impl Ord for ListValue {
 
 #[cfg(test)]
 mod tests {
+    use common_time::datetime::DateTime;
+
     use super::*;
 
     #[test]
@@ -410,7 +410,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::Value::Number(5000i64.into()),
-            to_json(Value::DateTime(5000))
+            to_json(Value::DateTime(DateTime::try_new(5000).unwrap()))
         );
 
         let json_value: serde_json::Value =

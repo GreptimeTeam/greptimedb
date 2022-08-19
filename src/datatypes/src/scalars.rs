@@ -2,6 +2,7 @@ use std::any::Any;
 
 use crate::prelude::*;
 use crate::vectors::date::DateVector;
+use crate::vectors::datetime::DateTimeVector;
 use crate::vectors::*;
 
 pub mod common;
@@ -257,6 +258,28 @@ impl Scalar for common_time::date::Date {
 impl<'a> ScalarRef<'a> for common_time::date::Date {
     type VectorType = DateVector;
     type ScalarType = common_time::date::Date;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        *self
+    }
+}
+
+impl Scalar for common_time::datetime::DateTime {
+    type VectorType = DateTimeVector;
+    type RefType<'a> = common_time::datetime::DateTime;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        *self
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
+
+impl<'a> ScalarRef<'a> for common_time::datetime::DateTime {
+    type VectorType = DateTimeVector;
+    type ScalarType = common_time::datetime::DateTime;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
         *self

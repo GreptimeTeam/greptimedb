@@ -1,6 +1,7 @@
 mod binary_type;
 mod boolean_type;
 mod date;
+mod datetime;
 mod list_type;
 mod null_type;
 mod primitive_traits;
@@ -10,6 +11,7 @@ mod string_type;
 pub use binary_type::BinaryType;
 pub use boolean_type::BooleanType;
 pub use date::DateType;
+pub use datetime::DateTimeType;
 pub use list_type::ListType;
 pub use null_type::NullType;
 pub use primitive_traits::Primitive;

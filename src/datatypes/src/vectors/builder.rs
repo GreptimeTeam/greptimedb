@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use common_time::date::Date;
+use common_time::datetime::DateTime;
 
 use crate::data_type::ConcreteDataType;
 use crate::scalars::ScalarVectorBuilder;
 use crate::value::Value;
 use crate::vectors::date::DateVectorBuilder;
+use crate::vectors::datetime::DateTimeVectorBuilder;
 use crate::vectors::{
     BinaryVectorBuilder, BooleanVectorBuilder, Float32VectorBuilder, Float64VectorBuilder,
     Int16VectorBuilder, Int32VectorBuilder, Int64VectorBuilder, Int8VectorBuilder, MutableVector,
@@ -34,6 +36,7 @@ pub enum VectorBuilder {
     Binary(BinaryVectorBuilder),
 
     Date(DateVectorBuilder),
+    DateTime(DateTimeVectorBuilder),
 }
 
 impl VectorBuilder {
@@ -86,6 +89,9 @@ impl VectorBuilder {
             ConcreteDataType::Date(_) => {
                 VectorBuilder::Date(DateVectorBuilder::with_capacity(capacity))
             }
+            ConcreteDataType::DateTime(_) => {
+                VectorBuilder::DateTime(DateTimeVectorBuilder::with_capacity(capacity))
+            }
             _ => unimplemented!(),
         }
     }
@@ -107,6 +113,7 @@ impl VectorBuilder {
             VectorBuilder::String(b) => b.data_type(),
             VectorBuilder::Binary(b) => b.data_type(),
             VectorBuilder::Date(b) => b.data_type(),
+            VectorBuilder::DateTime(b) => b.data_type(),
         }
     }
 
@@ -132,6 +139,10 @@ impl VectorBuilder {
             (VectorBuilder::Binary(b), Value::Binary(v)) => b.push(Some(v)),
             (VectorBuilder::Date(b), Value::Date(v)) => b.push(Some(*v)),
             (VectorBuilder::Date(b), Value::Int32(v)) => b.push(Some(Date::try_new(*v).unwrap())),
+            (VectorBuilder::DateTime(b), Value::DateTime(v)) => b.push(Some(*v)),
+            (VectorBuilder::DateTime(b), Value::Int64(v)) => {
+                b.push(Some(DateTime::try_new(*v).unwrap()))
+            }
             _ => panic!(
                 "Value {:?} does not match builder type {:?}",
                 value,
@@ -157,6 +168,7 @@ impl VectorBuilder {
             VectorBuilder::String(b) => b.push(None),
             VectorBuilder::Binary(b) => b.push(None),
             VectorBuilder::Date(b) => b.push(None),
+            VectorBuilder::DateTime(b) => b.push(None),
         }
     }
 
@@ -177,6 +189,7 @@ impl VectorBuilder {
             VectorBuilder::String(b) => Arc::new(b.finish()),
             VectorBuilder::Binary(b) => Arc::new(b.finish()),
             VectorBuilder::Date(b) => Arc::new(b.finish()),
+            VectorBuilder::DateTime(b) => Arc::new(b.finish()),
         }
     }
 }

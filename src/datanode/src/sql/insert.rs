@@ -175,6 +175,16 @@ fn parse_string_to_value(s: String, data_type: &ConcreteDataType) -> Result<Valu
                 .fail()
             }
         }
+        ConcreteDataType::DateTime(_) => {
+            if let Ok(datetime) = common_time::datetime::DateTime::from_str(&s) {
+                Ok(Value::DateTime(datetime))
+            } else {
+                ParseSqlValueSnafu {
+                    msg: format!("Failed to parse {} to DateTime value", s),
+                }
+                .fail()
+            }
+        }
         _ => {
             unreachable!()
         }

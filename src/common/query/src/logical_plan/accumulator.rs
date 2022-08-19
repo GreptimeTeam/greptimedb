@@ -181,7 +181,7 @@ fn try_into_scalar_value(value: Value, datatype: &ConcreteDataType) -> Result<Sc
         Value::String(v) => ScalarValue::LargeUtf8(Some(v.as_utf8().to_string())),
         Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
         Value::Date(v) => ScalarValue::Date32(Some(v.val())),
-        Value::DateTime(v) => ScalarValue::Date64(Some(v)),
+        Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
         Value::Null => try_convert_null_value(datatype)?,
         Value::List(list) => try_convert_list_value(list)?,
     })

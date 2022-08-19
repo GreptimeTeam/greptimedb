@@ -5,6 +5,7 @@ use catalog::RegisterTableRequest;
 use common_telemetry::tracing::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use datatypes::types::DateTimeType;
 use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, DataType as SqlDataType, ObjectName, TableConstraint};
@@ -201,7 +202,16 @@ fn sql_data_type_to_concrete_data_type(t: &SqlDataType) -> Result<ConcreteDataTy
         SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
-        // TODO(hl): DateTime not supported
+        SqlDataType::Custom(obj_name) => match &obj_name.0[..] {
+            [type_name] => {
+                if type_name.value.eq_ignore_ascii_case(DateTimeType::name()) {
+                    Ok(ConcreteDataType::datetime_datatype())
+                } else {
+                    SqlTypeNotSupportedSnafu { t: t.clone() }.fail()
+                }
+            }
+            _ => SqlTypeNotSupportedSnafu { t: t.clone() }.fail(),
+        },
         _ => SqlTypeNotSupportedSnafu { t: t.clone() }.fail(),
     }
 }
