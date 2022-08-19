@@ -18,8 +18,8 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to convert vector, source: {}", source))]
-    VectorConversion {
+    #[snafu(display("Data types error, source: {}", source))]
+    DataTypes {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
@@ -57,7 +57,7 @@ impl ErrorExt for Error {
             Error::Internal { .. }
             | Error::InternalIo { .. }
             | Error::TokioIo { .. }
-            | Error::VectorConversion { .. }
+            | Error::DataTypes { .. }
             | Error::CollectRecordbatch { .. }
             | Error::StartHttp { .. }
             | Error::StartGrpc { .. }

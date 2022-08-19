@@ -1,7 +1,8 @@
 use std::io;
 
 use common_recordbatch::{util, RecordBatch};
-use datatypes::prelude::{ConcreteDataType, Value, VectorHelper};
+use datatypes::arrow_array::arrow_array_access;
+use datatypes::prelude::{BorrowedValue, ConcreteDataType};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
@@ -82,31 +83,32 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
     }
 
     fn write_recordbatch(row_writer: &mut RowWriter<W>, recordbatch: &RecordBatch) -> Result<()> {
-        let matrix = transpose(recordbatch)?;
-        for row in matrix.iter() {
-            for v in row.iter() {
-                match v {
-                    Value::Null => row_writer.write_col(None::<u8>)?,
-                    Value::Boolean(v) => row_writer.write_col(*v as i8)?,
-                    Value::UInt8(v) => row_writer.write_col(v)?,
-                    Value::UInt16(v) => row_writer.write_col(v)?,
-                    Value::UInt32(v) => row_writer.write_col(v)?,
-                    Value::UInt64(v) => row_writer.write_col(v)?,
-                    Value::Int8(v) => row_writer.write_col(v)?,
-                    Value::Int16(v) => row_writer.write_col(v)?,
-                    Value::Int32(v) => row_writer.write_col(v)?,
-                    Value::Int64(v) => row_writer.write_col(v)?,
-                    Value::Float32(v) => row_writer.write_col(v.0)?,
-                    Value::Float64(v) => row_writer.write_col(v.0)?,
-                    Value::String(v) => row_writer.write_col(v.as_utf8())?,
-                    Value::Binary(v) => row_writer.write_col(v.to_vec())?,
-                    Value::Date(v) => row_writer.write_col(v)?,
-                    Value::DateTime(v) => row_writer.write_col(v)?,
-                    _ => {
+        let visitor = RecordBatchIterator::new(recordbatch);
+        for row in visitor {
+            for v in row.into_iter() {
+                let value = v?;
+                match value {
+                    BorrowedValue::Null => row_writer.write_col(None::<u8>)?,
+                    BorrowedValue::Boolean(v) => row_writer.write_col(v as i8)?,
+                    BorrowedValue::UInt8(v) => row_writer.write_col(v)?,
+                    BorrowedValue::UInt16(v) => row_writer.write_col(v)?,
+                    BorrowedValue::UInt32(v) => row_writer.write_col(v)?,
+                    BorrowedValue::UInt64(v) => row_writer.write_col(v)?,
+                    BorrowedValue::Int8(v) => row_writer.write_col(v)?,
+                    BorrowedValue::Int16(v) => row_writer.write_col(v)?,
+                    BorrowedValue::Int32(v) => row_writer.write_col(v)?,
+                    BorrowedValue::Int64(v) => row_writer.write_col(v)?,
+                    BorrowedValue::Float32(v) => row_writer.write_col(v.0)?,
+                    BorrowedValue::Float64(v) => row_writer.write_col(v.0)?,
+                    BorrowedValue::String(v) => row_writer.write_col(v)?,
+                    BorrowedValue::Binary(v) => row_writer.write_col(v)?,
+                    BorrowedValue::Date(v) => row_writer.write_col(v)?,
+                    BorrowedValue::DateTime(v) => row_writer.write_col(v)?,
+                    BorrowedValue::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
                                 "cannot write value {:?} in mysql protocol: unimplemented",
-                                v
+                                &value
                             ),
                         })
                     }
@@ -170,31 +172,50 @@ pub fn create_mysql_column_def(schema: &SchemaRef) -> Result<Vec<Column>> {
         .collect()
 }
 
-/// RecordBatch organizes its values in columns while MySQL needs to write row by row.
-/// This function creates a view of [Value]s organized in rows from RecordBatch (just like matrix
-/// transpose, hence the function name), helping us write RecordBatch to MySQL.
-fn transpose(recordbatch: &RecordBatch) -> Result<Vec<Vec<Value>>> {
-    let recordbatch = &recordbatch.df_recordbatch;
-    let rows = recordbatch.num_rows();
-    let columns = recordbatch.num_columns();
-    let mut matrix = vec![vec![Value::Null; columns]; rows];
-    for column in 0..columns {
-        let array = recordbatch.column(column);
-        let vector = VectorHelper::try_into_vector(array).context(error::VectorConversionSnafu)?;
-        // Clippy suggests us to use "matrix.iter_mut().enumerate().take(rows)", which is not wanted.
-        #[allow(clippy::needless_range_loop)]
-        for row in 0..rows {
-            matrix[row][column] = vector.get(row);
+struct RecordBatchIterator<'a> {
+    record_batch: &'a RecordBatch,
+    rows: usize,
+    columns: usize,
+    row_cursor: usize,
+}
+
+impl<'a> RecordBatchIterator<'a> {
+    fn new(record_batch: &'a RecordBatch) -> RecordBatchIterator {
+        RecordBatchIterator {
+            record_batch,
+            rows: record_batch.df_recordbatch.num_rows(),
+            columns: record_batch.df_recordbatch.num_columns(),
+            row_cursor: 0,
         }
     }
-    Ok(matrix)
+}
+
+impl<'a> Iterator for RecordBatchIterator<'a> {
+    type Item = Vec<Result<BorrowedValue<'a>>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.row_cursor == self.rows {
+            None
+        } else {
+            let mut row = Vec::with_capacity(self.columns);
+
+            for col in 0..self.columns {
+                let column_array = self.record_batch.df_recordbatch.column(col);
+                let field = arrow_array_access(column_array.as_ref(), self.row_cursor)
+                    .context(error::DataTypesSnafu);
+                row.push(field);
+            }
+
+            self.row_cursor += 1;
+            Some(row)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use common_base::bytes::StringBytes;
     use datatypes::prelude::*;
     use datatypes::schema::Schema;
     use datatypes::vectors::{StringVector, UInt32Vector};
@@ -202,7 +223,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_transpose() {
+    fn test_record_batch_visitor() {
         let column_schemas = vec![
             ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
@@ -218,20 +239,46 @@ mod tests {
             ])),
         ];
         let recordbatch = RecordBatch::new(schema, columns).unwrap();
-        let matrix = transpose(&recordbatch).unwrap();
-        assert_eq!(4, matrix.len());
-        assert_eq!(vec![Value::UInt32(1), Value::Null], matrix[0]);
+
+        let mut record_batch_iter = RecordBatchIterator::new(&recordbatch);
         assert_eq!(
-            vec![Value::UInt32(2), Value::String(StringBytes::from("hello"))],
-            matrix[1]
+            vec![BorrowedValue::UInt32(1), BorrowedValue::String("")],
+            record_batch_iter
+                .next()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<BorrowedValue>>()
         );
+
         assert_eq!(
-            vec![
-                Value::UInt32(3),
-                Value::String(StringBytes::from("greptime"))
-            ],
-            matrix[2]
+            vec![BorrowedValue::UInt32(2), BorrowedValue::String("hello")],
+            record_batch_iter
+                .next()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<BorrowedValue>>()
         );
-        assert_eq!(vec![Value::UInt32(4), Value::Null], matrix[3]);
+
+        assert_eq!(
+            vec![BorrowedValue::UInt32(3), BorrowedValue::String("greptime")],
+            record_batch_iter
+                .next()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<BorrowedValue>>()
+        );
+
+        assert_eq!(
+            vec![BorrowedValue::UInt32(4), BorrowedValue::String("")],
+            record_batch_iter
+                .next()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<BorrowedValue>>()
+        );
     }
 }
