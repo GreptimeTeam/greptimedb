@@ -31,18 +31,18 @@ pub struct PyScript {
     copr: CoprocessorRef,
 }
 
-pub struct CoprcessorStream {
+pub struct CoprStream {
     stream: SendableRecordBatchStream,
     copr: CoprocessorRef,
 }
 
-impl RecordBatchStream for CoprcessorStream {
+impl RecordBatchStream for CoprStream {
     fn schema(&self) -> SchemaRef {
         self.stream.schema()
     }
 }
 
-impl Stream for CoprcessorStream {
+impl Stream for CoprStream {
     type Item = RecordBatchResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -91,10 +91,7 @@ impl Script for PyScript {
             let copr = self.copr.clone();
             match res {
                 query::Output::RecordBatch(stream) => {
-                    Ok(Output::RecordBatch(Box::pin(CoprcessorStream {
-                        copr,
-                        stream,
-                    })))
+                    Ok(Output::RecordBatch(Box::pin(CoprStream { copr, stream })))
                 }
                 _ => unreachable!(),
             }

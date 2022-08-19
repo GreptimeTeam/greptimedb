@@ -1,5 +1,5 @@
 use arrow::error::ArrowError;
-use common_error::prelude::{ErrorExt, StatusCode};
+use common_error::prelude::{ErrorCompat, ErrorExt, StatusCode};
 use console::{style, Style};
 use datatypes::error::Error as DataTypeError;
 use query::error::Error as QueryError;
@@ -8,15 +8,7 @@ use rustpython_parser::{ast::Location, error::ParseError};
 pub use snafu::ensure;
 use snafu::{prelude::Snafu, Backtrace};
 pub type Result<T> = std::result::Result<T, Error>;
-/// for now it's just a String containing Exception info print by `write_exceptions`
-///
-/// TODO: maybe use [`rustpython_vm::exceptions::SerializeException`] instead of print out exception chain
-#[derive(Debug, Snafu)]
-pub struct PyExceptionSerde {
-    pub output: String,
-}
 
-// TODO: rewrite Error
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
@@ -25,32 +17,35 @@ pub enum Error {
         #[snafu(backtrace)]
         source: DataTypeError,
     },
-    #[snafu(display("Database query error: {}", source))]
+
+    #[snafu(display("Failed to query, source: {}", source))]
     DatabaseQuery {
         #[snafu(backtrace)]
         source: QueryError,
     },
-    #[snafu(display("Python Parsing error: {}", source))]
+
+    #[snafu(display("Failed to parse script, source: {}", source))]
     PyParse {
         backtrace: Backtrace,
         source: ParseError,
     },
-    #[snafu(display("Python Compile error: {}", source))]
+
+    #[snafu(display("Failed to compile script, source: {}", source))]
     PyCompile {
         backtrace: Backtrace,
         source: CoreCompileError,
     },
+
     /// rustpython problem, using python virtual machines' backtrace instead
-    #[snafu(display("Python Runtime error: {}", source.output))]
-    PyRuntime {
-        backtrace: Backtrace,
-        source: PyExceptionSerde,
-    },
+    #[snafu(display("Python Runtime error, error: {}", msg))]
+    PyRuntime { msg: String, backtrace: Backtrace },
+
     #[snafu(display("Arrow error: {}", source))]
     Arrow {
         backtrace: Backtrace,
         source: ArrowError,
     },
+
     /// errors in coprocessors' parse check for types and etc.
     #[snafu(display("Coprocessor error: {} {}.", reason,
     if let Some(loc) = loc{
@@ -64,6 +59,7 @@ pub enum Error {
         // location is option because maybe errors can't give a clear location?
         loc: Option<Location>,
     },
+
     /// Other types of error that isn't any of above
     #[snafu(display("Coprocessor's Internal error: {}", reason))]
     Other {
@@ -91,11 +87,24 @@ impl From<QueryError> for Error {
 }
 
 impl ErrorExt for Error {
-    fn status_code(&self) -> common_error::prelude::StatusCode {
-        StatusCode::Unknown
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Error::Arrow { .. }
+            | Error::TypeCast { .. }
+            | Error::DatabaseQuery { .. }
+            | Error::PyRuntime { .. }
+            | Error::RecordBatch { .. }
+            | Error::Other { .. } => StatusCode::Internal,
+
+            Error::PyParse { .. }
+            | Error::PyCompile { .. }
+            | Error::CoprParse { .. }
+            | Error::UnsupportedSql { .. }
+            | Error::MissingSql { .. } => StatusCode::InvalidArguments,
+        }
     }
     fn backtrace_opt(&self) -> Option<&common_error::snafu::Backtrace> {
-        None
+        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -170,27 +179,11 @@ pub fn visualize_loc(
 /// extract a reason for [`Error`] in string format, also return a location if possible
 pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
     match err {
-        Error::CoprParse {
-            backtrace: _,
-            reason,
-            loc,
-        } => (reason.clone(), loc.to_owned()),
-        Error::Other {
-            backtrace: _,
-            reason,
-        } => (reason.clone(), None),
-        Error::PyRuntime {
-            backtrace: _,
-            source,
-        } => (source.output.clone(), None),
-        Error::PyParse {
-            backtrace: _,
-            source,
-        } => (source.error.to_string(), Some(source.location)),
-        Error::PyCompile {
-            backtrace: _,
-            source,
-        } => (source.error.to_string(), Some(source.location)),
+        Error::CoprParse { reason, loc, .. } => (reason.clone(), loc.to_owned()),
+        Error::Other { reason, .. } => (reason.clone(), None),
+        Error::PyRuntime { msg, .. } => (msg.clone(), None),
+        Error::PyParse { source, .. } => (source.error.to_string(), Some(source.location)),
+        Error::PyCompile { source, .. } => (source.error.to_string(), Some(source.location)),
         _ => (format!("Unknown error: {:?}", err), None),
     }
 }

@@ -21,7 +21,7 @@ use rustpython_parser::{
 };
 use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
-use snafu::{OptionExt, ResultExt};
+use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
 use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
 use vm::{Interpreter, PyObjectRef, VirtualMachine};
@@ -30,8 +30,8 @@ use crate::fail_parse_error;
 use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::{ret_parse_error, DecoratorArgs};
 use crate::python::error::{
-    ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
-    PyRuntimeSnafu, Result, TypeCastSnafu,
+    self, ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyParseSnafu, Result,
+    TypeCastSnafu,
 };
 use crate::python::{utils::is_instance, PyVector};
 
@@ -346,27 +346,26 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
             )))?;
         Ok(pyv.to_arrow_array())
     } else if is_instance::<PyInt>(obj, vm) {
-        let val = obj.to_owned().try_into_value::<i64>(vm);
-        let val = match val {
-            Ok(val) => val,
-            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
-        };
+        let val = obj
+            .to_owned()
+            .try_into_value::<i64>(vm)
+            .map_err(|e| format_py_error(e, vm))?;
+
         let ret = PrimitiveArray::from_vec(vec![val; col_len]);
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyFloat>(obj, vm) {
-        let val = obj.to_owned().try_into_value::<f64>(vm);
-        let val = match val {
-            Ok(val) => val,
-            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
-        };
+        let val = obj
+            .to_owned()
+            .try_into_value::<f64>(vm)
+            .map_err(|e| format_py_error(e, vm))?;
         let ret = PrimitiveArray::from_vec(vec![val; col_len]);
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyBool>(obj, vm) {
-        let val = obj.to_owned().try_into_value::<bool>(vm);
-        let val = match val {
-            Ok(val) => val,
-            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
-        };
+        let val = obj
+            .to_owned()
+            .try_into_value::<bool>(vm)
+            .map_err(|e| format_py_error(e, vm))?;
+
         let ret = BooleanArray::from_iter(std::iter::repeat(Some(val)).take(5));
         Ok(Arc::new(ret) as _)
     } else {
@@ -459,7 +458,7 @@ fn set_items_in_scope(
     arg_names: &[String],
     args: Vec<PyVector>,
 ) -> Result<()> {
-    let res = arg_names
+    let _ = arg_names
         .iter()
         .zip(args)
         .map(|(name, vector)| {
@@ -468,12 +467,9 @@ fn set_items_in_scope(
                 .as_object()
                 .set_item(name, vm.new_pyobj(vector), vm)
         })
-        .collect::<StdResult<Vec<()>, PyBaseExceptionRef>>();
-    if let Err(res) = res {
-        Err(to_serde_excep(res, vm)?).context(PyRuntimeSnafu)
-    } else {
-        Ok(())
-    }
+        .collect::<StdResult<Vec<()>, PyBaseExceptionRef>>()
+        .map_err(|e| format_py_error(e, vm))?;
+    Ok(())
 }
 
 /// The coprocessor function accept a python script and a Record Batch:
@@ -550,12 +546,9 @@ pub(crate) fn exec_with_cached_vm(
 
         let code_obj = copr.strip_append_and_compile()?;
         let code_obj = vm.ctx.new_code(code_obj);
-        let run_res = vm.run_code_obj(code_obj, scope);
-        // FIXME: better error handling, perhaps with chain calls
-        let ret = match run_res {
-            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
-            Ok(ret) => ret,
-        };
+        let ret = vm
+            .run_code_obj(code_obj, scope)
+            .map_err(|e| format_py_error(e, vm))?;
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
         let col_len = rb.num_rows();
@@ -620,13 +613,17 @@ pub fn exec_copr_print(
     })
 }
 
-/// transfer a Python Exception into a python call stack in `String` format
-pub fn to_serde_excep(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> Result<PyExceptionSerde> {
-    let mut chain = String::new();
-    let r = vm.write_exception(&mut chain, &excep);
-    // FIXME: better error handling, perhaps with chain calls?
-    if let Err(r) = r {
-        return ret_other_error_with(format!("Fail to write to string, error: {:#?}", r)).fail();
+pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error::Error {
+    let mut msg = String::new();
+    if let Err(e) = vm.write_exception(&mut msg, &excep) {
+        return error::Error::PyRuntime {
+            msg: format!("Failed to write exception msg, err: {}", e),
+            backtrace: Backtrace::generate(),
+        };
     }
-    Ok(PyExceptionSerde { output: chain })
+
+    error::Error::PyRuntime {
+        msg,
+        backtrace: Backtrace::generate(),
+    }
 }
