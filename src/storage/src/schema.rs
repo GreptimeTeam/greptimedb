@@ -173,11 +173,6 @@ impl RegionSchema {
     }
 
     #[inline]
-    fn user_column_indices(&self) -> impl Iterator<Item = usize> {
-        self.columns.user_column_indices()
-    }
-
-    #[inline]
     fn timestamp_key_index(&self) -> usize {
         self.columns.timestamp_key_index()
     }
@@ -398,7 +393,8 @@ impl Projection {
 /// Schema with projection info.
 #[derive(Debug)]
 pub struct ProjectedSchema {
-    projection: Projection,
+    /// Projection info, `None` means don't need to do projection.
+    projection: Option<Projection>,
     /// Schema used to read from data sources.
     schema_to_read: SstSchema,
     /// User schema after projection.
@@ -412,29 +408,33 @@ impl ProjectedSchema {
         region_schema: RegionSchemaRef,
         projected_columns: Option<Vec<usize>>,
     ) -> Result<ProjectedSchema> {
-        let indices = match projected_columns {
+        match projected_columns {
             Some(indices) => {
                 Self::validate_projection(&region_schema, &indices)?;
-                indices
+
+                let projection = Projection::new(&region_schema, indices);
+
+                let schema_to_read = Self::build_schema_to_read(&region_schema, &projection)?;
+                let projected_user_schema =
+                    Self::build_projected_user_schema(&region_schema, &projection)?;
+
+                Ok(ProjectedSchema {
+                    projection: Some(projection),
+                    schema_to_read,
+                    projected_user_schema,
+                })
             }
-            None => {
-                // If all user columns are needed, we convert `None` to full
-                // list of column indices, so we don't need to handle this case
-                // specially.
-                region_schema.user_column_indices().collect()
-            }
-        };
+            None => Ok(ProjectedSchema::no_projection(region_schema)),
+        }
+    }
 
-        let projection = Projection::new(&region_schema, indices);
-
-        let schema_to_read = Self::build_schema_to_read(&region_schema, &projection)?;
-        let projected_user_schema = Self::build_projected_user_schema(&region_schema, &projection)?;
-
-        Ok(ProjectedSchema {
-            projection,
-            schema_to_read,
-            projected_user_schema,
-        })
+    pub fn no_projection(region_schema: RegionSchemaRef) -> ProjectedSchema {
+        // We could just reuse the SstSchema and user schema.
+        ProjectedSchema {
+            projection: None,
+            schema_to_read: region_schema.sst_schema().clone(),
+            projected_user_schema: region_schema.user_schema().clone(),
+        }
     }
 
     #[inline]
@@ -448,13 +448,15 @@ impl ProjectedSchema {
     }
 
     pub fn batch_to_chunk(&self, batch: &Batch) -> Chunk {
-        let columns = self
-            .projection
-            .projected_idx_to_read_idx
-            .iter()
-            .map(|col_idx| batch.column(*col_idx))
-            .cloned()
-            .collect();
+        let columns = match &self.projection {
+            Some(projection) => projection
+                .projected_idx_to_read_idx
+                .iter()
+                .map(|col_idx| batch.column(*col_idx))
+                .cloned()
+                .collect(),
+            None => batch.columns().iter().cloned().collect(),
+        };
 
         Chunk::new(columns)
     }
