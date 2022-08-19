@@ -201,6 +201,7 @@ mod tests {
     use super::*;
     use crate::prelude::Vector;
     use crate::vectors::date::DateVector;
+    use crate::vectors::datetime::DateTimeVector;
 
     macro_rules! impl_integer_builder_test {
         ($Type: ident, $datatype: ident) => {
@@ -298,6 +299,22 @@ mod tests {
         assert_eq!(Value::Date(Date::try_new(123).unwrap()), v.get(1));
         assert_eq!(
             &arrow::datatypes::DataType::Date32,
+            v.to_arrow_array().data_type()
+        );
+    }
+
+    #[test]
+    pub fn test_datetime_vector_builder() {
+        let mut builder = VectorBuilder::with_capacity(ConcreteDataType::datetime_datatype(), 3);
+        assert_eq!(ConcreteDataType::datetime_datatype(), builder.data_type());
+        builder.push_null();
+        builder.push(&Value::DateTime(DateTime::try_new(123).unwrap()));
+        let v = builder.finish();
+        let v = v.as_any().downcast_ref::<DateTimeVector>().unwrap();
+        assert_eq!(Value::Null, v.get(0));
+        assert_eq!(Value::DateTime(DateTime::try_new(123).unwrap()), v.get(1));
+        assert_eq!(
+            &arrow::datatypes::DataType::Date64,
             v.to_arrow_array().data_type()
         );
     }

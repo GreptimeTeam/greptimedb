@@ -220,6 +220,7 @@ fn sql_data_type_to_concrete_data_type(t: &SqlDataType) -> Result<ConcreteDataTy
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use sql::ast::Ident;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
@@ -397,5 +398,9 @@ mod tests {
         check_type(SqlDataType::Double, ConcreteDataType::float64_datatype());
         check_type(SqlDataType::Boolean, ConcreteDataType::boolean_datatype());
         check_type(SqlDataType::Date, ConcreteDataType::date_datatype());
+        check_type(
+            SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")])),
+            ConcreteDataType::datetime_datatype(),
+        );
     }
 }

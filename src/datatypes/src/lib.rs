@@ -1,4 +1,5 @@
 #![feature(generic_associated_types)]
+#![feature(assert_matches)]
 
 pub mod arrow_array;
 pub mod data_type;

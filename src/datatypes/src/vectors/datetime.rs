@@ -45,7 +45,7 @@ impl Vector for DateTimeVector {
     }
 
     fn vector_type_name(&self) -> String {
-        "DateVector".to_string()
+        "DateTimeVector".to_string()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -189,5 +189,55 @@ impl ScalarVector for DateTimeVector {
         DateTimeIter {
             iter: self.array.iter_data(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use super::*;
+
+    #[test]
+    pub fn test_datetime_vector() {
+        let v = DateTimeVector::new(PrimitiveArray::from_vec(vec![1, 2, 3]));
+        assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
+        assert_eq!(3, v.len());
+        assert_eq!("DateTimeVector", v.vector_type_name());
+        assert_eq!(
+            &arrow::datatypes::DataType::Date64,
+            v.to_arrow_array().data_type()
+        );
+        let mut iter = v.iter_data();
+        assert_eq!(Some(DateTime::try_new(1).unwrap()), iter.next().unwrap());
+        assert_eq!(Some(DateTime::try_new(2).unwrap()), iter.next().unwrap());
+        assert_eq!(Some(DateTime::try_new(3).unwrap()), iter.next().unwrap());
+        assert!(!v.is_null(0));
+        assert_eq!(24, v.memory_size()); // size of i64 * 3
+
+        assert_matches!(v.validity(), Validity::AllValid);
+        if let Value::DateTime(d) = v.get(0) {
+            assert_eq!(1, d.val());
+        } else {
+            unreachable!()
+        }
+        assert_eq!(
+            "[\"1970-01-01 00:00:01\",\"1970-01-01 00:00:02\",\"1970-01-01 00:00:03\"]",
+            serde_json::to_string(&v.serialize_to_json().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    pub fn test_datetime_vector_builder() {
+        let mut builder = DateTimeVectorBuilder::with_capacity(3);
+        builder.push(Some(DateTime::try_new(1).unwrap()));
+        builder.push(None);
+        builder.push(Some(DateTime::try_new(-1).unwrap()));
+
+        let v = builder.finish();
+        assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
+        assert_eq!(Value::DateTime(DateTime::try_new(1).unwrap()), v.get(0));
+        assert_eq!(Value::Null, v.get(1));
+        assert_eq!(Value::DateTime(DateTime::try_new(-1).unwrap()), v.get(2));
     }
 }
