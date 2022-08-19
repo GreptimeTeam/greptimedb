@@ -1,3 +1,4 @@
+pub mod date;
 pub mod range;
 pub mod timestamp;
 pub mod util;

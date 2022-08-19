@@ -1272,6 +1272,7 @@ dependencies = [
  "arrow2",
  "common-base",
  "common-error",
+ "common-time",
  "datafusion-common",
  "enum_dispatch",
  "num",

@@ -1,8 +1,10 @@
 use std::any::Any;
 
-pub mod common;
 use crate::prelude::*;
+use crate::vectors::date::DateVector;
 use crate::vectors::*;
+
+pub mod common;
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
     match iter.size_hint() {
@@ -236,6 +238,28 @@ impl<'a> ScalarRef<'a> for &'a [u8] {
     #[inline]
     fn to_owned_scalar(&self) -> Vec<u8> {
         self.to_vec()
+    }
+}
+
+impl Scalar for common_time::date::Date {
+    type VectorType = DateVector;
+    type RefType<'a> = common_time::date::Date;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        self.clone()
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
+
+impl<'a> ScalarRef<'a> for common_time::date::Date {
+    type VectorType = DateVector;
+    type ScalarType = common_time::date::Date;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        self.clone()
     }
 }
 

@@ -219,13 +219,23 @@ impl TryFrom<&Field> for ColumnSchema {
     }
 }
 
+/// [ColumnsSchema] is converted to arrow [Field] with some metadata that indicates the original
+/// logical data type of this field.
 impl From<&ColumnSchema> for Field {
     fn from(column_schema: &ColumnSchema) -> Field {
+        let mut metadata = Metadata::new();
+        match column_schema.data_type {
+            ConcreteDataType::Date(_) => {
+                metadata.insert("LOGICAL_DATA_TYPE".to_string(), "DATE".to_string());
+            }
+            _ => {}
+        }
         Field::new(
             column_schema.name.clone(),
             column_schema.data_type.as_arrow_type(),
             column_schema.is_nullable,
         )
+        .with_metadata(metadata)
     }
 }
 
