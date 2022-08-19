@@ -180,6 +180,8 @@ impl RegionSchema {
 
 pub type RegionSchemaRef = Arc<RegionSchema>;
 
+// TODO(yingwen): Now this schema in not only used by SST, maybe rename it to InternalSchema
+// or something else.
 /// Schema of SST.
 ///
 /// Only contains a reference to schema and some indices, so it should be cheap to clone.
@@ -562,7 +564,7 @@ impl ProjectedSchema {
             .map(|col_idx| ColumnSchema::from(&region_schema.column_metadata(*col_idx).desc))
             .collect();
 
-        let mut builder = SchemaBuilder::from(column_schemas);
+        let mut builder = SchemaBuilder::from(column_schemas).version(region_schema.version());
         if let Some(timestamp_index) = timestamp_index {
             builder = builder.timestamp_index(timestamp_index);
         }
@@ -621,16 +623,16 @@ mod tests {
     use crate::test_util::{descriptor_util::RegionDescBuilder, schema_util};
 
     fn new_batch() -> Batch {
-        let k1 = Int64Vector::from_slice(&[1, 2, 3]);
+        let k0 = Int64Vector::from_slice(&[1, 2, 3]);
         let timestamp = Int64Vector::from_slice(&[4, 5, 6]);
-        let v1 = Int64Vector::from_slice(&[7, 8, 9]);
+        let v0 = Int64Vector::from_slice(&[7, 8, 9]);
         let sequences = UInt64Vector::from_slice(&[100, 100, 100]);
         let op_types = UInt8Vector::from_slice(&[0, 0, 0]);
 
         Batch::new(vec![
-            Arc::new(k1),
+            Arc::new(k0),
             Arc::new(timestamp),
-            Arc::new(v1),
+            Arc::new(v0),
             Arc::new(sequences),
             Arc::new(op_types),
         ])
@@ -645,61 +647,70 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_region_schema() {
-        let desc = RegionDescBuilder::new("test")
-            .push_key_column(("k1", LogicalTypeId::Int64, false))
-            .push_value_column(("v1", LogicalTypeId::Int64, true))
-            .build();
+    fn new_region_schema(version: u32, num_value_columns: usize) -> RegionSchema {
+        let mut builder =
+            RegionDescBuilder::new("test").push_key_column(("k0", LogicalTypeId::Int64, false));
+        for i in 0..num_value_columns {
+            let name = format!("v{}", i);
+            builder = builder.push_value_column((&name, LogicalTypeId::Int64, true));
+        }
+        let desc = builder.build();
         let metadata: RegionMetadata = desc.try_into().unwrap();
 
         let columns = metadata.columns;
-        let region_schema = RegionSchema::new(columns.clone(), 0).unwrap();
+        RegionSchema::new(columns.clone(), version).unwrap()
+    }
 
-        let expect_schema = schema_util::new_schema(
+    #[test]
+    fn test_region_schema() {
+        let region_schema = Arc::new(new_region_schema(123, 1));
+
+        let expect_schema = schema_util::new_schema_with_version(
             &[
-                ("k1", LogicalTypeId::Int64, false),
+                ("k0", LogicalTypeId::Int64, false),
                 ("timestamp", LogicalTypeId::Int64, false),
-                ("v1", LogicalTypeId::Int64, true),
+                ("v0", LogicalTypeId::Int64, true),
             ],
             Some(1),
+            123,
         );
 
         assert_eq!(expect_schema, **region_schema.user_schema());
 
+        // Checks row key column.
         let mut row_keys = region_schema.row_key_columns();
-        assert_eq!("k1", row_keys.next().unwrap().desc.name);
+        assert_eq!("k0", row_keys.next().unwrap().desc.name);
         assert_eq!("timestamp", row_keys.next().unwrap().desc.name);
         assert_eq!(None, row_keys.next());
         assert_eq!(2, region_schema.num_row_key_columns());
 
+        // Checks value column.
         let mut values = region_schema.value_columns();
-        assert_eq!("v1", values.next().unwrap().desc.name);
+        assert_eq!("v0", values.next().unwrap().desc.name);
         assert_eq!(None, values.next());
         assert_eq!(1, region_schema.num_value_columns());
 
-        assert_eq!(0, region_schema.version());
-        {
-            let region_schema = RegionSchema::new(columns, 1234).unwrap();
-            assert_eq!(1234, region_schema.version());
-            assert_eq!(1234, region_schema.sst_schema().version());
-        }
+        // Checks version.
+        assert_eq!(123, region_schema.version());
+        assert_eq!(123, region_schema.sst_schema().version());
 
+        // Checks SstSchema.
         let sst_schema = region_schema.sst_schema();
         let sst_arrow_schema = sst_schema.arrow_schema();
         let converted_sst_schema = SstSchema::try_from((**sst_arrow_schema).clone()).unwrap();
 
         assert_eq!(*sst_schema, converted_sst_schema);
 
-        let expect_schema = schema_util::new_schema(
+        let expect_schema = schema_util::new_schema_with_version(
             &[
-                ("k1", LogicalTypeId::Int64, false),
+                ("k0", LogicalTypeId::Int64, false),
                 ("timestamp", LogicalTypeId::Int64, false),
-                ("v1", LogicalTypeId::Int64, true),
+                ("v0", LogicalTypeId::Int64, true),
                 (consts::SEQUENCE_COLUMN_NAME, LogicalTypeId::UInt64, false),
                 (consts::OP_TYPE_COLUMN_NAME, LogicalTypeId::UInt8, false),
             ],
             Some(1),
+            123,
         );
         assert_eq!(
             expect_schema.column_schemas(),
@@ -719,5 +730,127 @@ mod tests {
         // Convert chunk to batch.
         let converted_batch = sst_schema.arrow_chunk_to_batch(&chunk).unwrap();
         check_chunk_batch(&chunk, &converted_batch);
+    }
+
+    #[test]
+    fn test_projection() {
+        // Build a region schema with 2 value columns. So the final user schema is
+        // (k0, timestamp, v0, v1)
+        let region_schema = new_region_schema(0, 2);
+
+        // Projection, but still keep column order.
+        // After projection: (timestamp, v0)
+        let projected_columns = vec![1, 2];
+        let projection = Projection::new(&region_schema, projected_columns.clone());
+        assert_eq!(projected_columns, projection.projected_columns);
+        // Need to read (k0, timestamp, v0, sequence, op_type)
+        assert_eq!(&[0, 1, 2, 4, 5], &projection.columns_to_read[..]);
+        assert_eq!(5, projection.id_to_read_idx.len());
+        // Index of timestamp, v0 in `columns_to_read`
+        assert_eq!(&[1, 2], &projection.projected_idx_to_read_idx[..]);
+        // 3 columns: k0, timestamp, v0
+        assert_eq!(3, projection.num_user_columns);
+
+        // Projection, unordered.
+        // After projection: (timestamp, v1, k0)
+        let projected_columns = vec![1, 3, 0];
+        let projection = Projection::new(&region_schema, projected_columns.clone());
+        assert_eq!(projected_columns, projection.projected_columns);
+        // Need to read (k0, timestamp, v1, sequence, op_type)
+        assert_eq!(&[0, 1, 3, 4, 5], &projection.columns_to_read[..]);
+        assert_eq!(5, projection.id_to_read_idx.len());
+        // Index of timestamp, v1, k0 in `columns_to_read`
+        assert_eq!(&[1, 2, 0], &projection.projected_idx_to_read_idx[..]);
+        // 3 columns: k0, timestamp, v1
+        assert_eq!(3, projection.num_user_columns);
+
+        // Empty projection.
+        let projection = Projection::new(&region_schema, Vec::new());
+        assert!(projection.projected_columns.is_empty());
+        // Still need to read row keys.
+        assert_eq!(&[0, 1, 4, 5], &projection.columns_to_read[..]);
+        assert_eq!(4, projection.id_to_read_idx.len());
+        assert!(projection.projected_idx_to_read_idx.is_empty());
+        assert_eq!(2, projection.num_user_columns);
+    }
+
+    #[test]
+    fn test_projected_schema() {
+        // (k0, timestamp, v0, v1, v2)
+        let region_schema = Arc::new(new_region_schema(123, 3));
+
+        // After projection: (v1, timestamp)
+        let projected_schema =
+            ProjectedSchema::new(region_schema.clone(), Some(vec![3, 1])).unwrap();
+        let expect_user = schema_util::new_schema_with_version(
+            &[
+                ("v1", LogicalTypeId::Int64, true),
+                ("timestamp", LogicalTypeId::Int64, false),
+            ],
+            Some(1),
+            123,
+        );
+        assert_eq!(expect_user, **projected_schema.projected_user_schema());
+
+        // Test is_needed
+        let needed: Vec<_> = region_schema
+            .columns
+            .iter_all_columns()
+            .enumerate()
+            .filter_map(|(idx, column_meta)| {
+                if projected_schema.is_needed(column_meta.id()) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // (k0, timestamp, v1, sequence, op_type)
+        assert_eq!(&[0, 1, 3, 5, 6], &needed[..]);
+
+        // Use another projection.
+        // After projection: (v0, timestamp)
+        let projected_schema = ProjectedSchema::new(region_schema, Some(vec![2, 1])).unwrap();
+
+        // The schema to read should be same as region schema with (k0, timestamp, v0).
+        // We can't use `new_schema_with_version()` because the SstSchema also store other
+        // metadata that `new_schema_with_version()` can't store.
+        let expect_schema = new_region_schema(123, 1);
+        assert_eq!(
+            expect_schema.sst_schema(),
+            projected_schema.schema_to_read()
+        );
+
+        // (k0, timestamp, v0, sequence, op_type)
+        let batch = new_batch();
+        // Test Batch to our Chunk.
+        // (v0, timestamp)
+        let chunk = projected_schema.batch_to_chunk(&batch);
+        assert_eq!(2, chunk.columns.len());
+        assert_eq!(
+            chunk.columns[0].to_arrow_array(),
+            batch.column(2).to_arrow_array()
+        );
+        assert_eq!(
+            chunk.columns[1].to_arrow_array(),
+            batch.column(1).to_arrow_array()
+        );
+
+        // Test batch_from_parts
+        let keys = batch.columns()[0..2].to_vec();
+        let values = batch.columns()[2..3].to_vec();
+        let created = projected_schema.batch_from_parts(
+            keys,
+            values,
+            batch.column(3).clone(),
+            batch.column(4).clone(),
+        );
+        assert_eq!(5, created.num_columns());
+        for i in 0..5 {
+            assert_eq!(
+                batch.column(i).to_arrow_array(),
+                created.column(i).to_arrow_array()
+            );
+        }
     }
 }
