@@ -826,6 +826,8 @@ name = "common-time"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "common-error",
+ "snafu",
 ]
 
 [[package]]

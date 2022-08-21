@@ -69,7 +69,9 @@ impl<'a> Iterator for DateIter<'a> {
     type Item = Option<Date>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|v| v.map(Date::new))
+        self.iter
+            .next()
+            .map(|v| v.map(|v| Date::try_new(v).unwrap()))
     }
 }
 
@@ -81,7 +83,7 @@ impl ScalarVector for DateVector {
     type Builder = DateVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        self.array.get_data(idx).map(Date::new)
+        self.array.get_data(idx).map(|v| Date::try_new(v).unwrap())
     }
 
     fn iter_data(&self) -> Self::Iter<'_> {
@@ -133,12 +135,43 @@ impl ScalarVectorBuilder for DateVectorBuilder {
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        self.buffer.push(value.map(|v| v.0))
+        self.buffer.push(value.map(Date::into))
     }
 
     fn finish(&mut self) -> Self::VectorType {
         Self::VectorType {
             array: PrimitiveVector::new(std::mem::take(&mut self.buffer).into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    pub fn test_build_date_vector() {
+        let mut builder = DateVectorBuilder::with_capacity(4);
+        builder.push(Some(Date::try_new(1).unwrap()));
+        builder.push(None);
+        builder.push(Some(Date::try_new(-1).unwrap()));
+        let vector = builder.finish();
+        assert_eq!(3, vector.len());
+        assert_eq!(Some(Date::try_new(1).unwrap()), vector.get_data(0));
+        assert_eq!(None, vector.get_data(1));
+        assert_eq!(Some(Date::try_new(-1).unwrap()), vector.get_data(2));
+        let mut iter = vector.iter_data();
+        assert_eq!(Some(Date::try_new(1).unwrap()), iter.next().unwrap());
+        assert_eq!(None, iter.next().unwrap());
+        assert_eq!(Some(Date::try_new(-1).unwrap()), iter.next().unwrap());
+    }
+
+    #[test]
+    pub fn test_date_scalar() {
+        let vector =
+            DateVector::from_slice(&[Date::try_new(1).unwrap(), Date::try_new(2).unwrap()]);
+        assert_eq!(2, vector.len());
+        assert_eq!(Some(Date::try_new(1).unwrap()), vector.get_data(0));
+        assert_eq!(Some(Date::try_new(2).unwrap()), vector.get_data(1));
     }
 }

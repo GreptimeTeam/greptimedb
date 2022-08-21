@@ -265,6 +265,8 @@ impl<'a> ScalarRef<'a> for common_time::date::Date {
 
 #[cfg(test)]
 mod tests {
+    use common_time::date::Date;
+
     use super::*;
     use crate::vectors::binary::BinaryVector;
     use crate::vectors::primitive::Int32Vector;
@@ -304,6 +306,20 @@ mod tests {
             Some(b""),
         ];
         let vector: BinaryVector = build_vector_from_slice(&expect);
+        assert_vector_eq(&expect, &vector);
+    }
+
+    #[test]
+    pub fn test_build_date_vector() {
+        let expect: Vec<Option<Date>> = vec![
+            Some(Date::try_new(0).unwrap()),
+            Some(Date::try_new(-1).unwrap()),
+            Some(Date::try_new(1).unwrap()),
+            None,
+            Some(Date::MAX),
+            Some(Date::MIN),
+        ];
+        let vector: DateVector = build_vector_from_slice(&expect);
         assert_vector_eq(&expect, &vector);
     }
 }
