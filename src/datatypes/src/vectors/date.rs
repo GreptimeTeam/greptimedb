@@ -1,19 +1,18 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, MutableArray, MutablePrimitiveArray};
+use arrow::array::{ArrayRef, MutableArray, MutablePrimitiveArray};
 use common_time::date::Date;
 
 use crate::data_type::ConcreteDataType;
 use crate::prelude::{ScalarVectorBuilder, Validity, Value, Vector, VectorRef};
-use crate::scalars::{common, ScalarVector};
+use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
-use crate::vectors;
 use crate::vectors::{MutableVector, PrimitiveIter, PrimitiveVector};
 
 #[derive(Debug, Clone)]
 pub struct DateVector {
-    pub array: PrimitiveVector<i32>,
+    array: PrimitiveVector<i32>,
 }
 
 impl Vector for DateVector {
@@ -34,7 +33,7 @@ impl Vector for DateVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        Arc::new(self.array.array.clone())
+        self.array.to_arrow_array()
     }
 
     fn validity(&self) -> Validity {
@@ -42,7 +41,7 @@ impl Vector for DateVector {
     }
 
     fn memory_size(&self) -> usize {
-        self.len() * std::mem::size_of::<i32>() + self.array.array.values().len()
+        self.array.len()
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -54,11 +53,11 @@ impl Vector for DateVector {
     }
 
     fn get(&self, index: usize) -> Value {
-        vectors::impl_get_for_vector!(self.array.array, index)
+        self.array.get(index)
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        common::replicate_scalar_vector(self, offsets)
+        self.array.replicate(offsets)
     }
 }
 
