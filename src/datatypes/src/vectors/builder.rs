@@ -186,6 +186,8 @@ mod tests {
     use ordered_float::OrderedFloat;
 
     use super::*;
+    use crate::prelude::Vector;
+    use crate::vectors::date::DateVector;
 
     macro_rules! impl_integer_builder_test {
         ($Type: ident, $datatype: ident) => {
@@ -269,5 +271,21 @@ mod tests {
         builder.push(&Value::String(hello.into()));
         let vector = builder.finish();
         assert_eq!(Value::String(hello.into()), vector.get(0));
+    }
+
+    #[test]
+    pub fn test_date_vector_builder() {
+        let mut builder = VectorBuilder::with_capacity(ConcreteDataType::date_datatype(), 3);
+        assert_eq!(ConcreteDataType::date_datatype(), builder.data_type());
+        builder.push_null();
+        builder.push(&Value::Date(Date::try_new(123).unwrap()));
+        let v = builder.finish();
+        let v = v.as_any().downcast_ref::<DateVector>().unwrap();
+        assert_eq!(Value::Null, v.get(0));
+        assert_eq!(Value::Date(Date::try_new(123).unwrap()), v.get(1));
+        assert_eq!(
+            &arrow::datatypes::DataType::Date32,
+            v.to_arrow_array().data_type()
+        );
     }
 }

@@ -82,11 +82,27 @@ impl Vector for DateVector {
     }
 
     fn get(&self, index: usize) -> Value {
-        self.array.get(index)
+        match self.array.get(index) {
+            Value::Int32(v) => {
+                Value::Date(Date::try_new(v).expect("Not expected to overflow here"))
+            }
+            Value::Null => Value::Null,
+            _ => {
+                unreachable!()
+            }
+        }
     }
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         self.array.replicate(offsets)
+    }
+}
+
+impl From<Vec<Option<i32>>> for DateVector {
+    fn from(data: Vec<Option<i32>>) -> Self {
+        Self {
+            array: PrimitiveVector::<i32>::from(data),
+        }
     }
 }
 
