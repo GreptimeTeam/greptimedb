@@ -4,7 +4,7 @@ use arrow::array::PrimitiveArray;
 use rustpython_vm::class::PyClassImpl;
 
 use super::*;
-use crate::python::coprocessor::format_py_error;
+use crate::python::utils::format_py_error;
 #[test]
 fn convert_scalar_to_py_obj_and_back() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {

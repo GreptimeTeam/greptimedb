@@ -21,7 +21,7 @@ use rustpython_parser::{
 };
 use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
-use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
 use vm::{Interpreter, PyObjectRef, VirtualMachine};
@@ -30,9 +30,10 @@ use crate::fail_parse_error;
 use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::{ret_parse_error, DecoratorArgs};
 use crate::python::error::{
-    self, ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyParseSnafu, Result,
+    ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyParseSnafu, Result,
     TypeCastSnafu,
 };
+use crate::python::utils::format_py_error;
 use crate::python::{utils::is_instance, PyVector};
 
 fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
@@ -611,19 +612,4 @@ pub fn exec_copr_print(
     res.map_err(|e| {
         crate::python::error::pretty_print_error_in_src(script, &e, ln_offset, filename)
     })
-}
-
-pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error::Error {
-    let mut msg = String::new();
-    if let Err(e) = vm.write_exception(&mut msg, &excep) {
-        return error::Error::PyRuntime {
-            msg: format!("Failed to write exception msg, err: {}", e),
-            backtrace: Backtrace::generate(),
-        };
-    }
-
-    error::Error::PyRuntime {
-        msg,
-        backtrace: Backtrace::generate(),
-    }
 }
