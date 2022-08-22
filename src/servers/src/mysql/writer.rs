@@ -86,8 +86,7 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
     fn write_recordbatch(row_writer: &mut RowWriter<W>, recordbatch: &RecordBatch) -> Result<()> {
         let row_iter = RecordBatchIterator::new(recordbatch);
         for row in row_iter {
-            for field in row.into_iter() {
-                let value = field?;
+            for value in row?.into_iter() {
                 match value {
                     Value::Null => row_writer.write_col(None::<u8>)?,
                     Value::Boolean(v) => row_writer.write_col(v as i8)?,
@@ -192,7 +191,7 @@ impl<'a> RecordBatchIterator<'a> {
 }
 
 impl<'a> Iterator for RecordBatchIterator<'a> {
-    type Item = Vec<Result<Value>>;
+    type Item = Result<Vec<Value>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.row_cursor == self.rows {
@@ -202,13 +201,16 @@ impl<'a> Iterator for RecordBatchIterator<'a> {
 
             for col in 0..self.columns {
                 let column_array = self.record_batch.df_recordbatch.column(col);
-                let field = arrow_array_get(column_array.as_ref(), self.row_cursor)
-                    .context(error::DataTypesSnafu);
-                row.push(field);
+                match arrow_array_get(column_array.as_ref(), self.row_cursor)
+                    .context(error::DataTypesSnafu)
+                {
+                    Ok(field) => row.push(field),
+                    Err(e) => return Some(Err(e)),
+                }
             }
 
             self.row_cursor += 1;
-            Some(row)
+            Some(Ok(row))
         }
     }
 }
@@ -247,8 +249,8 @@ mod tests {
             record_batch_iter
                 .next()
                 .unwrap()
+                .unwrap()
                 .into_iter()
-                .map(|v| v.unwrap())
                 .collect::<Vec<Value>>()
         );
 
@@ -257,8 +259,8 @@ mod tests {
             record_batch_iter
                 .next()
                 .unwrap()
+                .unwrap()
                 .into_iter()
-                .map(|v| v.unwrap())
                 .collect::<Vec<Value>>()
         );
 
@@ -267,8 +269,8 @@ mod tests {
             record_batch_iter
                 .next()
                 .unwrap()
+                .unwrap()
                 .into_iter()
-                .map(|v| v.unwrap())
                 .collect::<Vec<Value>>()
         );
 
@@ -277,8 +279,8 @@ mod tests {
             record_batch_iter
                 .next()
                 .unwrap()
+                .unwrap()
                 .into_iter()
-                .map(|v| v.unwrap())
                 .collect::<Vec<Value>>()
         );
 
