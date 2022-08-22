@@ -10,6 +10,7 @@ use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result, UnknownVectorSnafu};
 use crate::scalars::*;
+use crate::vectors::date::DateVector;
 use crate::vectors::*;
 
 pub struct Helper;
@@ -172,6 +173,7 @@ impl Helper {
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
                 Arc::new(StringVector::try_from_arrow_array(array)?)
             }
+            ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
         })

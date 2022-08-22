@@ -827,6 +827,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "common-error",
+ "serde",
  "snafu",
 ]
 
@@ -1243,6 +1244,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
+ "common-time",
  "datafusion",
  "datatypes",
  "hyper",

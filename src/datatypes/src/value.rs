@@ -36,7 +36,7 @@ pub enum Value {
     Binary(Bytes),
 
     // Date & Time types:
-    Date(i32),
+    Date(common_time::date::Date),
     DateTime(i64),
 
     List(ListValue),
@@ -151,7 +151,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Float64(v) => serde_json::Value::from(v.0),
             Value::String(bytes) => serde_json::Value::String(bytes.as_utf8().to_string()),
             Value::Binary(bytes) => serde_json::to_value(bytes)?,
-            Value::Date(v) => serde_json::Value::Number(v.into()),
+            Value::Date(v) => serde_json::Value::Number(v.val().into()),
             Value::DateTime(v) => serde_json::Value::Number(v.into()),
             Value::List(v) => serde_json::to_value(v)?,
         };
@@ -405,7 +405,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::Value::Number(5000i32.into()),
-            to_json(Value::Date(5000))
+            to_json(Value::Date(common_time::date::Date::try_new(5000).unwrap()))
         );
         assert_eq!(
             serde_json::Value::Number(5000i64.into()),

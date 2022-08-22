@@ -246,7 +246,7 @@ impl Scalar for common_time::date::Date {
     type RefType<'a> = common_time::date::Date;
 
     fn as_scalar_ref(&self) -> Self::RefType<'_> {
-        self.clone()
+        *self
     }
 
     fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
@@ -259,7 +259,7 @@ impl<'a> ScalarRef<'a> for common_time::date::Date {
     type ScalarType = common_time::date::Date;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
-        self.clone()
+        *self
     }
 }
 

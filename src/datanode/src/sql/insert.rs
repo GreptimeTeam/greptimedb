@@ -155,11 +155,30 @@ fn parse_sql_value(
                 }
             );
 
-            s.to_owned().into()
+            parse_string_to_value(s.to_owned(), data_type)?
         }
 
         _ => todo!("Other sql value"),
     })
+}
+
+fn parse_string_to_value(s: String, data_type: &ConcreteDataType) -> Result<Value> {
+    match data_type {
+        ConcreteDataType::String(_) => Ok(Value::String(s.into())),
+        ConcreteDataType::Date(_) => {
+            if let Ok(date) = common_time::date::Date::from_str(&s) {
+                Ok(Value::Date(date))
+            } else {
+                ParseSqlValueSnafu {
+                    msg: format!("Failed to parse {} to Date value", s),
+                }
+                .fail()
+            }
+        }
+        _ => {
+            panic!("Not supposed to reach here")
+        }
+    }
 }
 
 macro_rules! parse_number_to_value {

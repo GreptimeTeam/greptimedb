@@ -7,7 +7,7 @@ pub enum Error {
     #[snafu(display("Failed to parse string to date, raw: {}, source: {}", raw, source))]
     ParseDateStr { raw: String, source: ParseError },
 
-    #[snafu(display("Failed to parse string to date"))]
+    #[snafu(display("Failed to parse i32 value to date: {}", value))]
     DateOverflow { value: i32 },
 }
 

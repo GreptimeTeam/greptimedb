@@ -200,7 +200,8 @@ fn sql_data_type_to_concrete_data_type(t: &SqlDataType) -> Result<ConcreteDataTy
         SqlDataType::Float(_) => Ok(ConcreteDataType::float32_datatype()),
         SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
-        // TODO(hl): Date/DateTime/Timestamp not supported
+        SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
+        // TODO(hl): DateTime not supported
         _ => SqlTypeNotSupportedSnafu { t: t.clone() }.fail(),
     }
 }

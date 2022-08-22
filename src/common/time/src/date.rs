@@ -2,6 +2,7 @@ use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 use chrono::{Duration, NaiveDate};
+use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 
 use crate::error::Result;
@@ -11,7 +12,9 @@ use crate::error::{DateOverflowSnafu, Error, ParseDateStrSnafu};
 /// **days since "1970-01-01 00:00:00 UTC" (UNIX Epoch)**.
 ///
 /// [Date] value ranges between "0000-01-01" to "9999-12-31".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct Date(i32);
 
 impl FromStr for Date {
@@ -19,7 +22,7 @@ impl FromStr for Date {
 
     fn from_str(s: &str) -> Result<Self> {
         let date = NaiveDate::parse_from_str(s, "%F").context(ParseDateStrSnafu { raw: s })?;
-        let x = (date - NaiveDate::from_ymd(1970, 01, 01))
+        let x = (date - NaiveDate::from_ymd(1970, 1, 1))
             .num_days()
             .try_into()
             .unwrap();
@@ -31,7 +34,7 @@ impl FromStr for Date {
 impl Display for Date {
     /// [Date] is formatted according to ISO-8601 standard.
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let abs_date = NaiveDate::from_ymd(1970, 01, 01)
+        let abs_date = NaiveDate::from_ymd(1970, 1, 1)
             .checked_add_signed(Duration::days(self.0 as i64))
             .ok_or(core::fmt::Error)?;
         f.write_str(&abs_date.format("%F").to_string())
@@ -45,19 +48,17 @@ impl Date {
             DateOverflowSnafu { value: val }
         );
 
-        Ok(Self { 0: val })
+        Ok(Self(val))
+    }
+
+    pub fn val(&self) -> i32 {
+        self.0
     }
 
     /// Max valid Date value: "0000-01-01"
     pub const MAX: Date = Date(2932896);
     /// Min valid Date value: "9999-12-31"
     pub const MIN: Date = Date(-719528);
-}
-
-impl Into<i32> for Date {
-    fn into(self) -> i32 {
-        self.0
-    }
 }
 
 #[cfg(test)]

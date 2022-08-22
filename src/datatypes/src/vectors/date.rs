@@ -1,10 +1,12 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, MutableArray, MutablePrimitiveArray};
+use arrow::array::{Array, ArrayRef, MutableArray, MutablePrimitiveArray, PrimitiveArray};
 use common_time::date::Date;
+use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
+use crate::error::ConversionSnafu;
 use crate::prelude::{ScalarVectorBuilder, Validity, Value, Vector, VectorRef};
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
@@ -13,6 +15,27 @@ use crate::vectors::{MutableVector, PrimitiveIter, PrimitiveVector};
 #[derive(Debug, Clone)]
 pub struct DateVector {
     array: PrimitiveVector<i32>,
+}
+
+impl DateVector {
+    pub fn new(array: PrimitiveArray<i32>) -> Self {
+        Self {
+            array: PrimitiveVector { array },
+        }
+    }
+
+    pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> crate::error::Result<Self> {
+        Ok(Self::new(
+            array
+                .as_ref()
+                .as_any()
+                .downcast_ref::<PrimitiveArray<i32>>()
+                .with_context(|| ConversionSnafu {
+                    from: format!("{:?}", array.as_ref().data_type()),
+                })?
+                .clone(),
+        ))
+    }
 }
 
 impl Vector for DateVector {
@@ -33,7 +56,13 @@ impl Vector for DateVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        self.array.to_arrow_array()
+        let validity = self.array.array.validity().cloned();
+        let buffer = self.array.array.values().clone();
+        Arc::new(PrimitiveArray::new(
+            arrow::datatypes::DataType::Date32,
+            buffer,
+            validity,
+        ))
     }
 
     fn validity(&self) -> Validity {
@@ -135,7 +164,7 @@ impl ScalarVectorBuilder for DateVectorBuilder {
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        self.buffer.push(value.map(Date::into))
+        self.buffer.push(value.map(|d| d.val()))
     }
 
     fn finish(&mut self) -> Self::VectorType {

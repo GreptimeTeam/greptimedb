@@ -101,7 +101,7 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                     Value::Float64(v) => row_writer.write_col(v.0)?,
                     Value::String(v) => row_writer.write_col(v.as_utf8())?,
                     Value::Binary(v) => row_writer.write_col(v.deref())?,
-                    Value::Date(v) => row_writer.write_col(v)?,
+                    Value::Date(v) => row_writer.write_col(v.val())?,
                     Value::DateTime(v) => row_writer.write_col(v)?,
                     Value::List(_) => {
                         return Err(Error::Internal {

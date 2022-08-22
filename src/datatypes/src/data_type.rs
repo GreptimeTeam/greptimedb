@@ -52,7 +52,10 @@ impl ConcreteDataType {
     }
 
     pub fn is_string(&self) -> bool {
-        matches!(self, ConcreteDataType::String(_))
+        matches!(
+            self,
+            ConcreteDataType::String(_) | ConcreteDataType::Date(_)
+        )
     }
 
     pub fn is_signed(&self) -> bool {
@@ -62,6 +65,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Int16(_)
                 | ConcreteDataType::Int32(_)
                 | ConcreteDataType::Int64(_)
+                | ConcreteDataType::Date(_)
         )
     }
 
@@ -267,9 +271,13 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::List(Box::new(Field::new(
                 "item",
                 ArrowDataType::Int32,
-                true
+                true,
             )))),
             ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype()))
         );
+        assert!(matches!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Date32),
+            ConcreteDataType::Date(_)
+        ));
     }
 }
