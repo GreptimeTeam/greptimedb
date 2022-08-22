@@ -290,7 +290,14 @@ mod tests {
                 (2003, 5),
                 (1001, 1),
             ], // keys
-            &[Some(1), Some(2), Some(7), Some(8), Some(9), Some(3)], // values
+            &[
+                (Some(1), Some(1234)),
+                (Some(2), Some(1234)),
+                (Some(7), Some(1234)),
+                (Some(8), Some(1234)),
+                (Some(9), Some(1234)),
+                (Some(3), Some(1234)),
+            ], // values
         );
 
         let dir = TempDir::new("write_parquet").unwrap();
@@ -313,7 +320,7 @@ mod tests {
 
         // chunk schema: timestamp, __version, v1, __sequence, __op_type
         let chunk = file_reader.next().unwrap().unwrap();
-        assert_eq!(5, chunk.arrays().len());
+        assert_eq!(6, chunk.arrays().len());
 
         // timestamp
         assert_eq!(
@@ -329,22 +336,30 @@ mod tests {
             chunk.arrays()[1]
         );
 
-        // v1
+        // v0
         assert_eq!(
             Arc::new(UInt64Array::from_slice(&[1, 2, 3, 7, 8, 9])) as Arc<dyn Array>,
             chunk.arrays()[2]
         );
 
+        // v1
+        assert_eq!(
+            Arc::new(UInt64Array::from_slice(&[
+                1234, 1234, 1234, 1234, 1234, 1234
+            ])) as Arc<dyn Array>,
+            chunk.arrays()[3]
+        );
+
         // sequence
         assert_eq!(
             Arc::new(UInt64Array::from_slice(&[10, 10, 10, 10, 10, 10])) as Arc<dyn Array>,
-            chunk.arrays()[3]
+            chunk.arrays()[4]
         );
 
         // op_type
         assert_eq!(
             Arc::new(UInt8Array::from_slice(&[0, 0, 0, 0, 0, 0])) as Arc<dyn Array>,
-            chunk.arrays()[4]
+            chunk.arrays()[5]
         );
     }
 }

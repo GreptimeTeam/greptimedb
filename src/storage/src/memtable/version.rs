@@ -267,7 +267,14 @@ mod tests {
                 (2003, 5),
                 (1001, 1),
             ], // keys
-            &[Some(1), Some(2), Some(7), Some(8), Some(9), Some(3)], // values
+            &[
+                (Some(1), None),
+                (Some(2), None),
+                (Some(7), None),
+                (Some(8), None),
+                (Some(9), None),
+                (Some(3), None),
+            ], // values
         );
 
         set.insert(RangeMillis::new(20, 30).unwrap(), memtable.clone());
