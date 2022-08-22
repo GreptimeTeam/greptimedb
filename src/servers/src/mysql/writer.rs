@@ -84,7 +84,8 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
 
     fn write_recordbatch(row_writer: &mut RowWriter<W>, recordbatch: &RecordBatch) -> Result<()> {
         for row in recordbatch.rows() {
-            for value in row?.into_iter() {
+            let row = row.context(error::CollectRecordbatchSnafu)?;
+            for value in row.into_iter() {
                 match value {
                     Value::Null => row_writer.write_col(None::<u8>)?,
                     Value::Boolean(v) => row_writer.write_col(v as i8)?,
@@ -168,15 +169,4 @@ pub fn create_mysql_column_def(schema: &SchemaRef) -> Result<Vec<Column>> {
         .iter()
         .map(create_mysql_column)
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use datatypes::prelude::*;
-    use datatypes::schema::Schema;
-    use datatypes::vectors::{StringVector, UInt32Vector};
-
-    use super::*;
 }

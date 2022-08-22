@@ -31,8 +31,9 @@ impl RecordBatch {
         })
     }
 
+    /// Create an iterator to traverse the data by row
     pub fn rows(&self) -> RecordBatchRowIterator<'_> {
-        RecordBatchRowIterator::new(&self)
+        RecordBatchRowIterator::new(self)
     }
 }
 
