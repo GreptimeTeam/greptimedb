@@ -202,35 +202,6 @@ impl Ord for ListValue {
     }
 }
 
-/// A `Value` variant holds borrowed data
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub enum BorrowedValue<'a> {
-    Null,
-
-    // Numeric types:
-    Boolean(bool),
-    UInt8(u8),
-    UInt16(u16),
-    UInt32(u32),
-    UInt64(u64),
-    Int8(i8),
-    Int16(i16),
-    Int32(i32),
-    Int64(i64),
-    Float32(OrderedF32),
-    Float64(OrderedF64),
-
-    // String types:
-    String(&'a str),
-    Binary(&'a [u8]),
-
-    // Date & Time types:
-    Date(i32),
-    DateTime(i64),
-
-    List(&'a ListValue),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

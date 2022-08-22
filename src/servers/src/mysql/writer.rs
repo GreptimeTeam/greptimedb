@@ -1,8 +1,9 @@
 use std::io;
+use std::ops::Deref;
 
 use common_recordbatch::{util, RecordBatch};
 use datatypes::arrow_array::arrow_array_get;
-use datatypes::prelude::{BorrowedValue, ConcreteDataType};
+use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
@@ -88,23 +89,23 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
             for field in row.into_iter() {
                 let value = field?;
                 match value {
-                    BorrowedValue::Null => row_writer.write_col(None::<u8>)?,
-                    BorrowedValue::Boolean(v) => row_writer.write_col(v as i8)?,
-                    BorrowedValue::UInt8(v) => row_writer.write_col(v)?,
-                    BorrowedValue::UInt16(v) => row_writer.write_col(v)?,
-                    BorrowedValue::UInt32(v) => row_writer.write_col(v)?,
-                    BorrowedValue::UInt64(v) => row_writer.write_col(v)?,
-                    BorrowedValue::Int8(v) => row_writer.write_col(v)?,
-                    BorrowedValue::Int16(v) => row_writer.write_col(v)?,
-                    BorrowedValue::Int32(v) => row_writer.write_col(v)?,
-                    BorrowedValue::Int64(v) => row_writer.write_col(v)?,
-                    BorrowedValue::Float32(v) => row_writer.write_col(v.0)?,
-                    BorrowedValue::Float64(v) => row_writer.write_col(v.0)?,
-                    BorrowedValue::String(v) => row_writer.write_col(v)?,
-                    BorrowedValue::Binary(v) => row_writer.write_col(v)?,
-                    BorrowedValue::Date(v) => row_writer.write_col(v)?,
-                    BorrowedValue::DateTime(v) => row_writer.write_col(v)?,
-                    BorrowedValue::List(_) => {
+                    Value::Null => row_writer.write_col(None::<u8>)?,
+                    Value::Boolean(v) => row_writer.write_col(v as i8)?,
+                    Value::UInt8(v) => row_writer.write_col(v)?,
+                    Value::UInt16(v) => row_writer.write_col(v)?,
+                    Value::UInt32(v) => row_writer.write_col(v)?,
+                    Value::UInt64(v) => row_writer.write_col(v)?,
+                    Value::Int8(v) => row_writer.write_col(v)?,
+                    Value::Int16(v) => row_writer.write_col(v)?,
+                    Value::Int32(v) => row_writer.write_col(v)?,
+                    Value::Int64(v) => row_writer.write_col(v)?,
+                    Value::Float32(v) => row_writer.write_col(v.0)?,
+                    Value::Float64(v) => row_writer.write_col(v.0)?,
+                    Value::String(v) => row_writer.write_col(v.as_utf8())?,
+                    Value::Binary(v) => row_writer.write_col(v.deref())?,
+                    Value::Date(v) => row_writer.write_col(v)?,
+                    Value::DateTime(v) => row_writer.write_col(v)?,
+                    Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
                                 "cannot write value {:?} in mysql protocol: unimplemented",
@@ -191,7 +192,7 @@ impl<'a> RecordBatchIterator<'a> {
 }
 
 impl<'a> Iterator for RecordBatchIterator<'a> {
-    type Item = Vec<Result<BorrowedValue<'a>>>;
+    type Item = Vec<Result<Value>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.row_cursor == self.rows {
@@ -242,43 +243,43 @@ mod tests {
 
         let mut record_batch_iter = RecordBatchIterator::new(&recordbatch);
         assert_eq!(
-            vec![BorrowedValue::UInt32(1), BorrowedValue::Null],
+            vec![Value::UInt32(1), Value::Null],
             record_batch_iter
                 .next()
                 .unwrap()
                 .into_iter()
                 .map(|v| v.unwrap())
-                .collect::<Vec<BorrowedValue>>()
+                .collect::<Vec<Value>>()
         );
 
         assert_eq!(
-            vec![BorrowedValue::UInt32(2), BorrowedValue::String("hello")],
+            vec![Value::UInt32(2), Value::String("hello".into())],
             record_batch_iter
                 .next()
                 .unwrap()
                 .into_iter()
                 .map(|v| v.unwrap())
-                .collect::<Vec<BorrowedValue>>()
+                .collect::<Vec<Value>>()
         );
 
         assert_eq!(
-            vec![BorrowedValue::UInt32(3), BorrowedValue::String("greptime")],
+            vec![Value::UInt32(3), Value::String("greptime".into())],
             record_batch_iter
                 .next()
                 .unwrap()
                 .into_iter()
                 .map(|v| v.unwrap())
-                .collect::<Vec<BorrowedValue>>()
+                .collect::<Vec<Value>>()
         );
 
         assert_eq!(
-            vec![BorrowedValue::UInt32(4), BorrowedValue::Null],
+            vec![Value::UInt32(4), Value::Null],
             record_batch_iter
                 .next()
                 .unwrap()
                 .into_iter()
                 .map(|v| v.unwrap())
-                .collect::<Vec<BorrowedValue>>()
+                .collect::<Vec<Value>>()
         );
 
         assert!(record_batch_iter.next().is_none());
