@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, MutableArray, MutablePrimitiveArray, PrimitiveArray};
 use common_time::date::Date;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::ConcreteDataType;
-use crate::error::ConversionSnafu;
+use crate::error::{ConversionSnafu, SerializeSnafu};
 use crate::prelude::{ScalarVectorBuilder, Validity, Value, Vector, VectorRef};
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
@@ -124,7 +124,12 @@ impl ScalarVector for DateVector {
 
 impl Serializable for DateVector {
     fn serialize_to_json(&self) -> crate::error::Result<Vec<serde_json::Value>> {
-        self.array.serialize_to_json()
+        self.array
+            .iter_data()
+            .map(|v| v.map(|d| Date::try_new(d).unwrap()))
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<_>>()
+            .context(SerializeSnafu)
     }
 }
 

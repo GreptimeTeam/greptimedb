@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 use chrono::{Duration, NaiveDate};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, ResultExt};
 
 use crate::error::Result;
@@ -12,10 +12,17 @@ use crate::error::{DateOverflowSnafu, Error, ParseDateStrSnafu};
 /// **days since "1970-01-01 00:00:00 UTC" (UNIX Epoch)**.
 ///
 /// [Date] value ranges between "0000-01-01" to "9999-12-31".
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Deserialize)]
 pub struct Date(i32);
+
+impl Serialize for Date {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
 
 impl FromStr for Date {
     type Err = Error;
