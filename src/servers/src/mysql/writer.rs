@@ -2,7 +2,6 @@ use std::io;
 use std::ops::Deref;
 
 use common_recordbatch::{util, RecordBatch};
-use datatypes::arrow_array::arrow_array_get;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use opensrv_mysql::{
@@ -84,8 +83,7 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
     }
 
     fn write_recordbatch(row_writer: &mut RowWriter<W>, recordbatch: &RecordBatch) -> Result<()> {
-        let row_iter = RecordBatchIterator::new(recordbatch);
-        for row in row_iter {
+        for row in recordbatch.rows() {
             for value in row?.into_iter() {
                 match value {
                     Value::Null => row_writer.write_col(None::<u8>)?,
@@ -172,49 +170,6 @@ pub fn create_mysql_column_def(schema: &SchemaRef) -> Result<Vec<Column>> {
         .collect()
 }
 
-struct RecordBatchIterator<'a> {
-    record_batch: &'a RecordBatch,
-    rows: usize,
-    columns: usize,
-    row_cursor: usize,
-}
-
-impl<'a> RecordBatchIterator<'a> {
-    fn new(record_batch: &'a RecordBatch) -> RecordBatchIterator {
-        RecordBatchIterator {
-            record_batch,
-            rows: record_batch.df_recordbatch.num_rows(),
-            columns: record_batch.df_recordbatch.num_columns(),
-            row_cursor: 0,
-        }
-    }
-}
-
-impl<'a> Iterator for RecordBatchIterator<'a> {
-    type Item = Result<Vec<Value>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.row_cursor == self.rows {
-            None
-        } else {
-            let mut row = Vec::with_capacity(self.columns);
-
-            for col in 0..self.columns {
-                let column_array = self.record_batch.df_recordbatch.column(col);
-                match arrow_array_get(column_array.as_ref(), self.row_cursor)
-                    .context(error::DataTypesSnafu)
-                {
-                    Ok(field) => row.push(field),
-                    Err(e) => return Some(Err(e)),
-                }
-            }
-
-            self.row_cursor += 1;
-            Some(Ok(row))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -224,66 +179,4 @@ mod tests {
     use datatypes::vectors::{StringVector, UInt32Vector};
 
     use super::*;
-
-    #[test]
-    fn test_record_batch_visitor() {
-        let column_schemas = vec![
-            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
-            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
-        ];
-        let schema = Arc::new(Schema::new(column_schemas));
-        let columns: Vec<VectorRef> = vec![
-            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
-            Arc::new(StringVector::from(vec![
-                None,
-                Some("hello"),
-                Some("greptime"),
-                None,
-            ])),
-        ];
-        let recordbatch = RecordBatch::new(schema, columns).unwrap();
-
-        let mut record_batch_iter = RecordBatchIterator::new(&recordbatch);
-        assert_eq!(
-            vec![Value::UInt32(1), Value::Null],
-            record_batch_iter
-                .next()
-                .unwrap()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Value>>()
-        );
-
-        assert_eq!(
-            vec![Value::UInt32(2), Value::String("hello".into())],
-            record_batch_iter
-                .next()
-                .unwrap()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Value>>()
-        );
-
-        assert_eq!(
-            vec![Value::UInt32(3), Value::String("greptime".into())],
-            record_batch_iter
-                .next()
-                .unwrap()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Value>>()
-        );
-
-        assert_eq!(
-            vec![Value::UInt32(4), Value::Null],
-            record_batch_iter
-                .next()
-                .unwrap()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Value>>()
-        );
-
-        assert!(record_batch_iter.next().is_none());
-    }
 }
