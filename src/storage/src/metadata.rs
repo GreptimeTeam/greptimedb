@@ -154,6 +154,11 @@ impl ColumnMetadata {
     pub fn id(&self) -> ColumnId {
         self.desc.id
     }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.desc.name
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

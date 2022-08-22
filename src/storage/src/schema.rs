@@ -330,7 +330,7 @@ impl TryFrom<ArrowSchema> for SstSchema {
 }
 
 /// Metadata about projection.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Projection {
     /// Column indices of projection.
     projected_columns: Vec<usize>,
@@ -416,6 +416,12 @@ pub struct ProjectedSchema {
 pub type ProjectedSchemaRef = Arc<ProjectedSchema>;
 
 impl ProjectedSchema {
+    /// Create a new `ProjectedSchema` with given `projected_columns`.
+    ///
+    /// If `projected_columns` is None, then all columns would be read. If `projected_columns` is
+    /// `Some`, then the `Vec` in it contains the indices of columns need to be read.
+    ///
+    /// If the `Vec` is empty or contains invalid index, `Err` would be returned.
     pub fn new(
         region_schema: RegionSchemaRef,
         projected_columns: Option<Vec<usize>>,
@@ -440,6 +446,7 @@ impl ProjectedSchema {
         }
     }
 
+    /// Create a `ProjectedSchema` that read all columns.
     pub fn no_projection(region_schema: RegionSchemaRef) -> ProjectedSchema {
         // We could just reuse the SstSchema and user schema.
         ProjectedSchema {
@@ -461,7 +468,8 @@ impl ProjectedSchema {
 
     /// Convert [Batch] into [Chunk].
     ///
-    /// This will remove all internal columns.
+    /// This will remove all internal columns. The input `batch` should has the
+    /// same schema as `self.schema_to_read()`.
     pub fn batch_to_chunk(&self, batch: &Batch) -> Chunk {
         let columns = match &self.projection {
             Some(projection) => projection
@@ -575,6 +583,15 @@ impl ProjectedSchema {
     }
 
     fn validate_projection(region_schema: &RegionSchema, indices: &[usize]) -> Result<()> {
+        // The projection indices should not be empty, at least the timestamp column
+        // should be always read, and the `SstSchema` also requires the timestamp column.
+        ensure!(
+            !indices.is_empty(),
+            InvalidProjectionSnafu {
+                msg: "at least one column should be read",
+            }
+        );
+
         // Now only allowed to read user columns.
         let user_schema = region_schema.user_schema();
         for i in indices {
@@ -775,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn test_projected_schema() {
+    fn test_projected_schema_with_projection() {
         // (k0, timestamp, v0, v1, v2)
         let region_schema = Arc::new(new_region_schema(123, 3));
 
@@ -852,5 +869,44 @@ mod tests {
                 created.column(i).to_arrow_array()
             );
         }
+    }
+
+    #[test]
+    fn test_projected_schema_no_projection() {
+        // (k0, timestamp, v0)
+        let region_schema = Arc::new(new_region_schema(123, 1));
+
+        let projected_schema = ProjectedSchema::no_projection(region_schema.clone());
+
+        assert_eq!(
+            region_schema.user_schema(),
+            projected_schema.projected_user_schema()
+        );
+        assert_eq!(
+            region_schema.sst_schema(),
+            projected_schema.schema_to_read()
+        );
+
+        for column in region_schema.columns.iter_all_columns() {
+            assert!(projected_schema.is_needed(column.id()));
+        }
+
+        // (k0, timestamp, v0, sequence, op_type)
+        let batch = new_batch();
+        // Test Batch to our Chunk.
+        // (k0, timestamp, v0)
+        let chunk = projected_schema.batch_to_chunk(&batch);
+        assert_eq!(3, chunk.columns.len());
+    }
+
+    #[test]
+    fn test_projected_schema_empty_projection() {
+        // (k0, timestamp, v0)
+        let region_schema = Arc::new(new_region_schema(123, 1));
+
+        let err = ProjectedSchema::new(region_schema.clone(), Some(Vec::new()))
+            .err()
+            .unwrap();
+        assert!(matches!(err, Error::InvalidProjection { .. }));
     }
 }

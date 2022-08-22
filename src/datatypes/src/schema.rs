@@ -80,6 +80,11 @@ impl Schema {
         self.column_schemas.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.column_schemas.is_empty()
+    }
+
     /// Returns index of the timestamp key column.
     #[inline]
     pub fn timestamp_index(&self) -> Option<usize> {
@@ -313,6 +318,7 @@ mod tests {
     fn test_build_empty_schema() {
         let schema = SchemaBuilder::default().build().unwrap();
         assert_eq!(0, schema.num_columns());
+        assert!(schema.is_empty());
 
         assert!(SchemaBuilder::default().timestamp_index(0).build().is_err());
     }
@@ -326,6 +332,7 @@ mod tests {
         let schema = Schema::new(column_schemas.clone());
 
         assert_eq!(2, schema.num_columns());
+        assert!(!schema.is_empty());
         assert!(schema.timestamp_index().is_none());
         assert!(schema.timestamp_column().is_none());
         assert_eq!(Schema::INITIAL_VERSION, schema.version());
