@@ -7,15 +7,18 @@ GreptimeDB: the next-generation hybrid timeseries/analytics processing database 
 ## Getting Started
 
 ### Prerequisites
+
 To compile GreptimeDB from source, you'll need the following:
 - Rust
 - Protobuf
 - OpenSSL
 
 #### Rust
+
 The easiest way to install Rust is to use [`rustup`](https://rustup.rs/), which will check our `rust-toolchain` file and install correct Rust version for you.
 
 #### Protobuf
+
 `protoc` is required for compiling `.proto` files. `protobuf` is available from
 major package manager on macos and linux distributions. You can find an
 installation instructions [here](https://grpc.io/docs/protoc-installation/).
@@ -35,6 +38,12 @@ sudo dnf install openssl-devel
 For macOS:
 ```bash
 brew install openssl
+```
+
+### Build the Docker Image
+
+```
+docker build --network host -f docker/Dockerfile -t greptimedb .
 ```
 
 ## Usage
@@ -60,6 +69,15 @@ Start datanode with config file:
 
 ```
 cargo run -- --log-dir=logs --log-level=debug datanode start -c ./config/datanode.example.toml
+```
+
+Start datanode by runing docker container:
+
+```
+docker run -p 3000:3000 \
+-p 3001:3001 \
+-p 3306:3306 \
+greptimedb
 ```
 
 ### SQL Operations
