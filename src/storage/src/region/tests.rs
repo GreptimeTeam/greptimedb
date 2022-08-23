@@ -1,5 +1,6 @@
 //! Region tests.
 
+// TODO(yingwen): Add projection test.
 mod basic;
 mod flush;
 
