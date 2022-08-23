@@ -37,7 +37,7 @@ impl Default for DatanodeOptions {
             rpc_addr: "0.0.0.0:3001".to_string(),
             mysql_addr: "0.0.0.0:3306".to_string(),
             mysql_runtime_size: 2,
-            wal_dir: "/tmp/wal".to_string(),
+            wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
         }
     }
