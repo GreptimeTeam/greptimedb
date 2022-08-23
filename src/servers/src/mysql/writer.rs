@@ -1,7 +1,8 @@
 use std::io;
+use std::ops::Deref;
 
 use common_recordbatch::{util, RecordBatch};
-use datatypes::prelude::{ConcreteDataType, Value, VectorHelper};
+use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
@@ -82,12 +83,12 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
     }
 
     fn write_recordbatch(row_writer: &mut RowWriter<W>, recordbatch: &RecordBatch) -> Result<()> {
-        let matrix = transpose(recordbatch)?;
-        for row in matrix.iter() {
-            for v in row.iter() {
-                match v {
+        for row in recordbatch.rows() {
+            let row = row.context(error::CollectRecordbatchSnafu)?;
+            for value in row.into_iter() {
+                match value {
                     Value::Null => row_writer.write_col(None::<u8>)?,
-                    Value::Boolean(v) => row_writer.write_col(*v as i8)?,
+                    Value::Boolean(v) => row_writer.write_col(v as i8)?,
                     Value::UInt8(v) => row_writer.write_col(v)?,
                     Value::UInt16(v) => row_writer.write_col(v)?,
                     Value::UInt32(v) => row_writer.write_col(v)?,
@@ -99,14 +100,14 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                     Value::Float32(v) => row_writer.write_col(v.0)?,
                     Value::Float64(v) => row_writer.write_col(v.0)?,
                     Value::String(v) => row_writer.write_col(v.as_utf8())?,
-                    Value::Binary(v) => row_writer.write_col(v.to_vec())?,
+                    Value::Binary(v) => row_writer.write_col(v.deref())?,
                     Value::Date(v) => row_writer.write_col(v)?,
                     Value::DateTime(v) => row_writer.write_col(v)?,
-                    _ => {
+                    Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
                                 "cannot write value {:?} in mysql protocol: unimplemented",
-                                v
+                                &value
                             ),
                         })
                     }
@@ -168,70 +169,4 @@ pub fn create_mysql_column_def(schema: &SchemaRef) -> Result<Vec<Column>> {
         .iter()
         .map(create_mysql_column)
         .collect()
-}
-
-/// RecordBatch organizes its values in columns while MySQL needs to write row by row.
-/// This function creates a view of [Value]s organized in rows from RecordBatch (just like matrix
-/// transpose, hence the function name), helping us write RecordBatch to MySQL.
-fn transpose(recordbatch: &RecordBatch) -> Result<Vec<Vec<Value>>> {
-    let recordbatch = &recordbatch.df_recordbatch;
-    let rows = recordbatch.num_rows();
-    let columns = recordbatch.num_columns();
-    let mut matrix = vec![vec![Value::Null; columns]; rows];
-    for column in 0..columns {
-        let array = recordbatch.column(column);
-        let vector = VectorHelper::try_into_vector(array).context(error::VectorConversionSnafu)?;
-        // Clippy suggests us to use "matrix.iter_mut().enumerate().take(rows)", which is not wanted.
-        #[allow(clippy::needless_range_loop)]
-        for row in 0..rows {
-            matrix[row][column] = vector.get(row);
-        }
-    }
-    Ok(matrix)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use common_base::bytes::StringBytes;
-    use datatypes::prelude::*;
-    use datatypes::schema::Schema;
-    use datatypes::vectors::{StringVector, UInt32Vector};
-
-    use super::*;
-
-    #[test]
-    fn test_transpose() {
-        let column_schemas = vec![
-            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
-            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
-        ];
-        let schema = Arc::new(Schema::new(column_schemas));
-        let columns: Vec<VectorRef> = vec![
-            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
-            Arc::new(StringVector::from(vec![
-                None,
-                Some("hello"),
-                Some("greptime"),
-                None,
-            ])),
-        ];
-        let recordbatch = RecordBatch::new(schema, columns).unwrap();
-        let matrix = transpose(&recordbatch).unwrap();
-        assert_eq!(4, matrix.len());
-        assert_eq!(vec![Value::UInt32(1), Value::Null], matrix[0]);
-        assert_eq!(
-            vec![Value::UInt32(2), Value::String(StringBytes::from("hello"))],
-            matrix[1]
-        );
-        assert_eq!(
-            vec![
-                Value::UInt32(3),
-                Value::String(StringBytes::from("greptime"))
-            ],
-            matrix[2]
-        );
-        assert_eq!(vec![Value::UInt32(4), Value::Null], matrix[3]);
-    }
 }

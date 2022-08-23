@@ -15,12 +15,19 @@ pub enum InnerError {
         source: datatypes::arrow::error::ArrowError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Data types error, source: {}", source))]
+    DataTypes {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for InnerError {
     fn status_code(&self) -> StatusCode {
         match self {
             InnerError::NewDfRecordBatch { .. } => StatusCode::InvalidArguments,
+            InnerError::DataTypes { .. } => StatusCode::Internal,
         }
     }
 
