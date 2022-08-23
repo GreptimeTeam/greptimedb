@@ -64,7 +64,8 @@ impl Value {
             Value::String(_) => ConcreteDataType::string_datatype(),
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
             Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
-            Value::Date(_) | Value::DateTime(_) => {
+            Value::Date(_) => ConcreteDataType::date_datatype(),
+            Value::DateTime(_) => {
                 unimplemented!("Unsupported data type of value {:?}", self)
             }
         }

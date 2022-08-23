@@ -322,4 +322,11 @@ mod tests {
         let vector: DateVector = build_vector_from_slice(&expect);
         assert_vector_eq(&expect, &vector);
     }
+
+    #[test]
+    pub fn test_date_scalar() {
+        let date = Date::try_new(1).unwrap();
+        assert_eq!(date, date.as_scalar_ref());
+        assert_eq!(date, date.to_owned_scalar());
+    }
 }

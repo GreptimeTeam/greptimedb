@@ -279,4 +279,20 @@ mod tests {
             "column_name: \"a\", expect: Float64(Float64), actual: Boolean(BooleanType)"
         ));
     }
+
+    #[test]
+    pub fn test_parse_date_literal() {
+        let value = parse_sql_value(
+            "date",
+            &ConcreteDataType::date_datatype(),
+            &SqlValue::DoubleQuotedString("2022-02-22".to_string()),
+        )
+        .unwrap();
+        assert_eq!(ConcreteDataType::date_datatype(), value.data_type());
+        if let Value::Date(d) = value {
+            assert_eq!("2022-02-22", d.to_string());
+        } else {
+            unreachable!()
+        }
+    }
 }
