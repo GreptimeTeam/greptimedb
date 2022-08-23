@@ -1,26 +1,28 @@
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use chrono::{Duration, NaiveDate};
-use serde::{Deserialize, Serialize, Serializer};
+use chrono::{Datelike, NaiveDate};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use snafu::{ensure, ResultExt};
 
 use crate::error::Result;
 use crate::error::{DateOverflowSnafu, Error, ParseDateStrSnafu};
 
+const UNIX_EPOCH_FROM_CE: i32 = 719_163;
+
 /// ISO 8601 [Date] values. The inner representation is a signed 32 bit integer that represents the
 /// **days since "1970-01-01 00:00:00 UTC" (UNIX Epoch)**.
 ///
 /// [Date] value ranges between "0000-01-01" to "9999-12-31".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Deserialize, Serialize,
+)]
 pub struct Date(i32);
 
-impl Serialize for Date {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
+impl From<Date> for Value {
+    fn from(d: Date) -> Self {
+        Value::String(d.to_string())
     }
 }
 
@@ -29,21 +31,14 @@ impl FromStr for Date {
 
     fn from_str(s: &str) -> Result<Self> {
         let date = NaiveDate::parse_from_str(s, "%F").context(ParseDateStrSnafu { raw: s })?;
-        let x = (date - NaiveDate::from_ymd(1970, 1, 1))
-            .num_days()
-            .try_into()
-            .unwrap();
-
-        Ok(Self(x))
+        Ok(Self(date.num_days_from_ce() - UNIX_EPOCH_FROM_CE))
     }
 }
 
 impl Display for Date {
     /// [Date] is formatted according to ISO-8601 standard.
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let abs_date = NaiveDate::from_ymd(1970, 1, 1)
-            .checked_add_signed(Duration::days(self.0 as i64))
-            .ok_or(core::fmt::Error)?;
+        let abs_date = NaiveDate::from_num_days_from_ce(UNIX_EPOCH_FROM_CE + self.0);
         f.write_str(&abs_date.format("%F").to_string())
     }
 }
@@ -62,10 +57,10 @@ impl Date {
         self.0
     }
 
-    /// Max valid Date value: "0000-01-01"
+    /// Max valid Date value: "9999-12-31"
     pub const MAX: Date = Date(2932896);
-    /// Min valid Date value: "9999-12-31"
-    pub const MIN: Date = Date(-719528);
+    /// Min valid Date value: "1000-01-01"
+    pub const MIN: Date = Date(-354285);
 }
 
 #[cfg(test)]
@@ -109,7 +104,7 @@ mod tests {
         assert_eq!(Date::MAX.0, date.0);
         assert_eq!(date, Date::try_new(date.0).unwrap());
 
-        let date = Date::from_str("0000-01-01").unwrap();
+        let date = Date::from_str("1000-01-01").unwrap();
         assert_eq!(Date::MIN.0, date.0);
         assert_eq!(date, Date::try_new(date.0).unwrap());
     }

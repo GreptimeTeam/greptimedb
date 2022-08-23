@@ -176,7 +176,7 @@ fn parse_string_to_value(s: String, data_type: &ConcreteDataType) -> Result<Valu
             }
         }
         _ => {
-            panic!("Not supposed to reach here")
+            unreachable!()
         }
     }
 }

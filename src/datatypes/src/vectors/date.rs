@@ -1,16 +1,16 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, MutableArray, MutablePrimitiveArray, PrimitiveArray};
+use arrow::array::{Array, ArrayRef, PrimitiveArray};
 use common_time::date::Date;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{ConversionSnafu, SerializeSnafu};
+use crate::error::ConversionSnafu;
 use crate::prelude::{ScalarVectorBuilder, Validity, Value, Vector, VectorRef};
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
-use crate::vectors::{MutableVector, PrimitiveIter, PrimitiveVector};
+use crate::vectors::{MutableVector, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
 
 #[derive(Debug, Clone)]
 pub struct DateVector {
@@ -70,7 +70,7 @@ impl Vector for DateVector {
     }
 
     fn memory_size(&self) -> usize {
-        self.array.len()
+        self.array.memory_size()
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -140,17 +140,20 @@ impl ScalarVector for DateVector {
 
 impl Serializable for DateVector {
     fn serialize_to_json(&self) -> crate::error::Result<Vec<serde_json::Value>> {
-        self.array
+        Ok(self
+            .array
             .iter_data()
             .map(|v| v.map(|d| Date::try_new(d).unwrap()))
-            .map(serde_json::to_value)
-            .collect::<serde_json::Result<_>>()
-            .context(SerializeSnafu)
+            .map(|v| match v {
+                None => serde_json::Value::Null,
+                Some(v) => v.into(),
+            })
+            .collect::<Vec<_>>())
     }
 }
 
 pub struct DateVectorBuilder {
-    buffer: MutablePrimitiveArray<i32>,
+    buffer: PrimitiveVectorBuilder<i32>,
 }
 
 impl MutableVector for DateVectorBuilder {
@@ -180,7 +183,7 @@ impl ScalarVectorBuilder for DateVectorBuilder {
 
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            buffer: MutablePrimitiveArray::with_capacity(capacity),
+            buffer: PrimitiveVectorBuilder::with_capacity(capacity),
         }
     }
 
@@ -190,7 +193,7 @@ impl ScalarVectorBuilder for DateVectorBuilder {
 
     fn finish(&mut self) -> Self::VectorType {
         Self::VectorType {
-            array: PrimitiveVector::new(std::mem::take(&mut self.buffer).into()),
+            array: self.buffer.finish(),
         }
     }
 }

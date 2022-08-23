@@ -204,7 +204,7 @@ impl<'a, T: Copy> Iterator for PrimitiveIter<'a, T> {
 }
 
 pub struct PrimitiveVectorBuilder<T: Primitive + DataTypeBuilder> {
-    pub mutable_array: MutablePrimitiveArray<T>,
+    pub(crate) mutable_array: MutablePrimitiveArray<T>,
 }
 
 impl<T: Primitive + DataTypeBuilder> PrimitiveVectorBuilder<T> {
