@@ -78,6 +78,8 @@ impl FlushStrategy for FlushSwitch {
     }
 }
 
+// TODO(yingwen): Test replay after flush.
+
 #[tokio::test]
 async fn test_flush_and_stall() {
     common_telemetry::init_default_ut_logging();
