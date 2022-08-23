@@ -359,11 +359,7 @@ impl WriterInner {
             // TODO(yingwen): We should release the write lock during waiting flush done, which
             // needs something like async condvar.
             flush_handle.join().await.map_err(|e| {
-                logging::error!(
-                    "Previous flush job failed, region: {}, err: {}",
-                    shared.name,
-                    e
-                );
+                logging::error!(e; "Previous flush job failed, region: {}", shared.name);
                 e
             })?;
         }

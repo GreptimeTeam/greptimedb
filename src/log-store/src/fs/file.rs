@@ -257,7 +257,7 @@ impl LogFile {
                     batch.into_iter().for_each(AppendRequest::complete);
                 }
                 Err(e) => {
-                    error!("Failed to flush log file: {}", e);
+                    error!(e; "Failed to flush log file");
                     batch.into_iter().for_each(|r| r.fail());
                     state
                         .write_offset
@@ -265,7 +265,7 @@ impl LogFile {
                 }
             },
             Err(e) => {
-                error!("Failed to write append requests, error: {}", e);
+                error!(e; "Failed to write append requests");
                 batch.into_iter().for_each(|r| r.fail());
                 state
                     .write_offset
@@ -333,7 +333,7 @@ impl LogFile {
                     }
                 }
                 Err(e) => {
-                    error!("Error while replay log {} {:?}", log_name, e);
+                    error!(e; "Error while replay log {}", log_name);
                     break;
                 }
             }
@@ -568,7 +568,7 @@ fn file_chunk_stream(
                 continue;
             }
             Err(e) => {
-                error!("Failed to read file chunk, error: {}", &e);
+                error!(e; "Failed to read file chunk");
                 // we're going to break any way so just forget the join result.
                 let _ = tx.blocking_send(Err(e));
                 break;
@@ -600,7 +600,7 @@ fn file_chunk_stream_sync(
                     continue;
                 }
                 Err(e) => {
-                    error!("Failed to read file chunk, error: {}", &e);
+                    error!(e; "Failed to read file chunk");
                     yield Err(e);
                     break;
                 }

@@ -42,8 +42,12 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to execute query: {}, error: {}", query, err_msg))]
-    ExecuteQuery { query: String, err_msg: String },
+    #[snafu(display("Failed to execute query: {}, source: {}", query, source))]
+    ExecuteQuery {
+        query: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
@@ -61,8 +65,8 @@ impl ErrorExt for Error {
             | Error::CollectRecordbatch { .. }
             | Error::StartHttp { .. }
             | Error::StartGrpc { .. }
-            | Error::TcpBind { .. }
-            | Error::ExecuteQuery { .. } => StatusCode::Internal,
+            | Error::TcpBind { .. } => StatusCode::Internal,
+            Error::ExecuteQuery { source, .. } => source.status_code(),
             Error::NotSupported { .. } => StatusCode::InvalidArguments,
         }
     }

@@ -199,7 +199,7 @@ impl LogStore for LocalFileLogStore {
                         continue;
                     }
                     _ => {
-                        error!("Failed to roll to next log file, error:{}", e);
+                        error!(e; "Failed to roll to next log file");
                         return Err(e);
                     }
                 },

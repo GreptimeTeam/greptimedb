@@ -3,8 +3,9 @@ use std::{fs, path, sync::Arc};
 use api::v1::{object_expr, select_expr, InsertExpr, ObjectExpr, ObjectResult, SelectExpr};
 use async_trait::async_trait;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
-use common_telemetry::logging::info;
+use common_telemetry::logging::{error, info};
 use common_telemetry::timer;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
@@ -229,18 +230,11 @@ impl SqlQueryHandler for Instance {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
         self.execute_sql(query)
             .await
-            // TODO(LFC): use snafu's `context` to include source error and backtrace.
-            // Ideally we should define a snafu in servers::error to wrap the error thrown
-            // by `execute_sql`. However, we cannot do that because that would introduce a circular
-            // dependency.
             .map_err(|e| {
-                servers::error::ExecuteQuerySnafu {
-                    query,
-                    err_msg: format!("{}", e),
-                }
-                .fail::<servers::error::Error>()
-                .unwrap_err()
+                error!(e; "Instance failed to execute sql");
+                BoxedError::new(e)
             })
+            .context(servers::error::ExecuteQuerySnafu { query })
     }
 }
 

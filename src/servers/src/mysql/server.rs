@@ -72,10 +72,10 @@ impl MysqlServer {
             let query_handler = query_handler.clone();
             async move {
                 match tcp_stream {
-                    Err(error) => error!("Broken pipe: {}", error),
+                    Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
                         if let Err(error) = Self::handle(io_stream, io_runtime, query_handler) {
-                            error!("Unexpected error when handling TcpStream: {:?}", error);
+                            error!(error; "Unexpected error when handling TcpStream");
                         };
                     }
                 };
@@ -104,7 +104,11 @@ impl Server for MysqlServer {
                 self.abort_handle.abort();
 
                 if let Err(error) = join_handle.await {
-                    error!("Unexpected error during shutdown MySQL server: {}", error);
+                    // Couldn't use `error!(e; xxx)` as JoinError doesn't implement ErrorExt.
+                    error!(
+                        "Unexpected error during shutdown MySQL server, error: {}",
+                        error
+                    );
                 } else {
                     info!("MySQL server is shutdown.")
                 }
