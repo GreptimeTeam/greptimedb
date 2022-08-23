@@ -155,11 +155,30 @@ fn parse_sql_value(
                 }
             );
 
-            s.to_owned().into()
+            parse_string_to_value(s.to_owned(), data_type)?
         }
 
         _ => todo!("Other sql value"),
     })
+}
+
+fn parse_string_to_value(s: String, data_type: &ConcreteDataType) -> Result<Value> {
+    match data_type {
+        ConcreteDataType::String(_) => Ok(Value::String(s.into())),
+        ConcreteDataType::Date(_) => {
+            if let Ok(date) = common_time::date::Date::from_str(&s) {
+                Ok(Value::Date(date))
+            } else {
+                ParseSqlValueSnafu {
+                    msg: format!("Failed to parse {} to Date value", s),
+                }
+                .fail()
+            }
+        }
+        _ => {
+            unreachable!()
+        }
+    }
 }
 
 macro_rules! parse_number_to_value {
@@ -259,5 +278,21 @@ mod tests {
         assert!(format!("{:?}", v).contains(
             "column_name: \"a\", expect: Float64(Float64), actual: Boolean(BooleanType)"
         ));
+    }
+
+    #[test]
+    pub fn test_parse_date_literal() {
+        let value = parse_sql_value(
+            "date",
+            &ConcreteDataType::date_datatype(),
+            &SqlValue::DoubleQuotedString("2022-02-22".to_string()),
+        )
+        .unwrap();
+        assert_eq!(ConcreteDataType::date_datatype(), value.data_type());
+        if let Value::Date(d) = value {
+            assert_eq!("2022-02-22", d.to_string());
+        } else {
+            unreachable!()
+        }
     }
 }

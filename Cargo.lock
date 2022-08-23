@@ -826,6 +826,10 @@ name = "common-time"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "common-error",
+ "serde",
+ "serde_json",
+ "snafu",
 ]
 
 [[package]]
@@ -1241,6 +1245,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
+ "common-time",
  "datafusion",
  "datatypes",
  "hyper",
@@ -1272,6 +1277,7 @@ dependencies = [
  "arrow2",
  "common-base",
  "common-error",
+ "common-time",
  "datafusion-common",
  "enum_dispatch",
  "num",

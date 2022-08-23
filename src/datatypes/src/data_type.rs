@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
-    BinaryType, BooleanType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
-    ListType, NullType, StringType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    BinaryType, BooleanType, DateType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
+    Int8Type, ListType, NullType, StringType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 
@@ -34,6 +34,8 @@ pub enum ConcreteDataType {
     Binary(BinaryType),
     String(StringType),
 
+    Date(DateType),
+
     List(ListType),
 }
 
@@ -50,7 +52,10 @@ impl ConcreteDataType {
     }
 
     pub fn is_string(&self) -> bool {
-        matches!(self, ConcreteDataType::String(_))
+        matches!(
+            self,
+            ConcreteDataType::String(_) | ConcreteDataType::Date(_)
+        )
     }
 
     pub fn is_signed(&self) -> bool {
@@ -60,6 +65,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Int16(_)
                 | ConcreteDataType::Int32(_)
                 | ConcreteDataType::Int64(_)
+                | ConcreteDataType::Date(_)
         )
     }
 
@@ -118,6 +124,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Int64 => Self::int64_datatype(),
             ArrowDataType::Float32 => Self::float32_datatype(),
             ArrowDataType::Float64 => Self::float64_datatype(),
+            ArrowDataType::Date32 => Self::date_datatype(),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             ArrowDataType::List(field) => Self::List(ListType::new(
@@ -151,7 +158,7 @@ macro_rules! impl_new_concrete_type_functions {
 
 impl_new_concrete_type_functions!(
     Null, Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64,
-    Binary, String
+    Binary, String, Date
 );
 
 impl ConcreteDataType {
@@ -264,9 +271,13 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::List(Box::new(Field::new(
                 "item",
                 ArrowDataType::Int32,
-                true
+                true,
             )))),
             ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype()))
         );
+        assert!(matches!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Date32),
+            ConcreteDataType::Date(_)
+        ));
     }
 }

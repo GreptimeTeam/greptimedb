@@ -10,6 +10,7 @@ use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result, UnknownVectorSnafu};
 use crate::scalars::*;
+use crate::vectors::date::DateVector;
 use crate::vectors::*;
 
 pub struct Helper;
@@ -137,6 +138,9 @@ impl Helper {
             ScalarValue::LargeBinary(v) => {
                 ConstantVector::new(Arc::new(BinaryVector::from(vec![v])), length)
             }
+            ScalarValue::Date32(v) => {
+                ConstantVector::new(Arc::new(DateVector::from(vec![v])), length)
+            }
             _ => {
                 return ConversionSnafu {
                     from: format!("Unsupported scalar value: {}", value),
@@ -172,6 +176,7 @@ impl Helper {
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
                 Arc::new(StringVector::try_from_arrow_array(array)?)
             }
+            ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
         })
@@ -185,6 +190,7 @@ impl Helper {
 #[cfg(test)]
 mod tests {
     use arrow::array::Int32Array;
+    use common_time::date::Date;
 
     use super::*;
 
@@ -202,5 +208,27 @@ mod tests {
         assert_eq!(Value::Int32(1), vectors[0].get(0));
         assert_eq!(Value::Int32(2), vectors[1].get(0));
         assert_eq!(Value::Int32(3), vectors[2].get(0));
+    }
+
+    #[test]
+    pub fn test_try_into_date_vector() {
+        let vector = DateVector::from(vec![Some(1), Some(2), None]);
+        let arrow_array = vector.to_arrow_array();
+        assert_eq!(&arrow::datatypes::DataType::Date32, arrow_array.data_type());
+        let vector_converted = Helper::try_into_vector(arrow_array).unwrap();
+        assert_eq!(vector.len(), vector_converted.len());
+        for i in 0..vector_converted.len() {
+            assert_eq!(vector.get(i), vector_converted.get(i));
+        }
+    }
+
+    #[test]
+    pub fn test_try_from_scalar_date_value() {
+        let vector = Helper::try_from_scalar_value(ScalarValue::Date32(Some(42)), 3).unwrap();
+        assert_eq!(ConcreteDataType::date_datatype(), vector.data_type());
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(Value::Date(Date::try_new(42).unwrap()), vector.get(i));
+        }
     }
 }

@@ -1,8 +1,10 @@
 use std::any::Any;
 
-pub mod common;
 use crate::prelude::*;
+use crate::vectors::date::DateVector;
 use crate::vectors::*;
+
+pub mod common;
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
     match iter.size_hint() {
@@ -239,8 +241,32 @@ impl<'a> ScalarRef<'a> for &'a [u8] {
     }
 }
 
+impl Scalar for common_time::date::Date {
+    type VectorType = DateVector;
+    type RefType<'a> = common_time::date::Date;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        *self
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
+
+impl<'a> ScalarRef<'a> for common_time::date::Date {
+    type VectorType = DateVector;
+    type ScalarType = common_time::date::Date;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        *self
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use common_time::date::Date;
+
     use super::*;
     use crate::vectors::binary::BinaryVector;
     use crate::vectors::primitive::Int32Vector;
@@ -281,5 +307,26 @@ mod tests {
         ];
         let vector: BinaryVector = build_vector_from_slice(&expect);
         assert_vector_eq(&expect, &vector);
+    }
+
+    #[test]
+    pub fn test_build_date_vector() {
+        let expect: Vec<Option<Date>> = vec![
+            Some(Date::try_new(0).unwrap()),
+            Some(Date::try_new(-1).unwrap()),
+            Some(Date::try_new(1).unwrap()),
+            None,
+            Some(Date::MAX),
+            Some(Date::MIN),
+        ];
+        let vector: DateVector = build_vector_from_slice(&expect);
+        assert_vector_eq(&expect, &vector);
+    }
+
+    #[test]
+    pub fn test_date_scalar() {
+        let date = Date::try_new(1).unwrap();
+        assert_eq!(date, date.as_scalar_ref());
+        assert_eq!(date, date.to_owned_scalar());
     }
 }

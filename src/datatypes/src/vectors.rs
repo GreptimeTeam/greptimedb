@@ -2,6 +2,7 @@ pub mod binary;
 pub mod boolean;
 mod builder;
 pub mod constant;
+pub mod date;
 mod helper;
 mod list;
 pub mod mutable;

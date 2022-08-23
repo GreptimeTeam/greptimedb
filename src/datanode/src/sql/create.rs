@@ -200,7 +200,8 @@ fn sql_data_type_to_concrete_data_type(t: &SqlDataType) -> Result<ConcreteDataTy
         SqlDataType::Float(_) => Ok(ConcreteDataType::float32_datatype()),
         SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
-        // TODO(hl): Date/DateTime/Timestamp not supported
+        SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
+        // TODO(hl): DateTime not supported
         _ => SqlTypeNotSupportedSnafu { t: t.clone() }.fail(),
     }
 }
@@ -352,5 +353,39 @@ mod tests {
                 .unwrap()
                 .data_type
         );
+    }
+
+    fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
+        assert_eq!(
+            data_type,
+            sql_data_type_to_concrete_data_type(&sql_type).unwrap()
+        );
+    }
+
+    #[test]
+    pub fn test_sql_data_type_to_concrete_data_type() {
+        check_type(
+            SqlDataType::BigInt(None),
+            ConcreteDataType::int64_datatype(),
+        );
+        check_type(SqlDataType::Int(None), ConcreteDataType::int32_datatype());
+        check_type(
+            SqlDataType::SmallInt(None),
+            ConcreteDataType::int16_datatype(),
+        );
+        check_type(SqlDataType::Char(None), ConcreteDataType::string_datatype());
+        check_type(
+            SqlDataType::Varchar(None),
+            ConcreteDataType::string_datatype(),
+        );
+        check_type(SqlDataType::Text, ConcreteDataType::string_datatype());
+        check_type(SqlDataType::String, ConcreteDataType::string_datatype());
+        check_type(
+            SqlDataType::Float(None),
+            ConcreteDataType::float32_datatype(),
+        );
+        check_type(SqlDataType::Double, ConcreteDataType::float64_datatype());
+        check_type(SqlDataType::Boolean, ConcreteDataType::boolean_datatype());
+        check_type(SqlDataType::Date, ConcreteDataType::date_datatype());
     }
 }
