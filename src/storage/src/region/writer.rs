@@ -210,7 +210,9 @@ impl WriterInner {
             // Data after flushed sequence need to be recovered.
             flushed_sequence = version_control.current().flushed_sequence();
             last_sequence = flushed_sequence;
-            let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence).await?;
+            // Read starts from the first entry after last flushed entry, so the start sequence
+            // should be flushed_sequence + 1.
+            let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence + 1).await?;
             while let Some((req_sequence, _header, request)) = stream.try_next().await? {
                 if let Some(request) = request {
                     num_requests += 1;
@@ -222,11 +224,14 @@ impl WriterInner {
                         last_sequence = req_sequence;
                     } else {
                         logging::error!(
-                            "Sequence should not decrease during replay, found {} < {}, region_id: {}, region_name: {}",
+                            "Sequence should not decrease during replay, found {} <= {}, \
+                            region_id: {}, region_name: {}, flushed_sequence: {}, num_requests: {}",
                             req_sequence,
                             last_sequence,
                             writer_ctx.shared.id,
                             writer_ctx.shared.name,
+                            flushed_sequence,
+                            num_requests,
                         );
 
                         error::SequenceNotMonotonicSnafu {

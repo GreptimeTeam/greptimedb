@@ -103,7 +103,7 @@ mod tests {
         let options: DatanodeOptions = cmd.try_into().unwrap();
         assert_eq!("0.0.0.0:3000".to_string(), options.http_addr);
         assert_eq!("0.0.0.0:3001".to_string(), options.rpc_addr);
-        assert_eq!("/tmp/wal".to_string(), options.wal_dir);
+        assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal_dir);
         assert_eq!("0.0.0.0:3306".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
         match options.storage {
