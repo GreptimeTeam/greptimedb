@@ -66,8 +66,7 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<Vec<i64>>) {
     }
     let num_rows = chunk.columns[0].len();
     dst.resize(num_rows, Vec::new());
-    for i in 0..num_rows {
-        let row = &mut dst[i];
+    for (i, row) in dst.iter_mut().enumerate() {
         for col in &chunk.columns {
             let val = col
                 .as_any()

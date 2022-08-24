@@ -671,7 +671,7 @@ mod tests {
                 .unwrap();
 
         let columns = metadata.columns;
-        RegionSchema::new(columns.clone(), version).unwrap()
+        RegionSchema::new(columns, version).unwrap()
     }
 
     #[test]
@@ -900,7 +900,7 @@ mod tests {
         // (k0, timestamp, v0)
         let region_schema = Arc::new(new_region_schema(123, 1));
 
-        let err = ProjectedSchema::new(region_schema.clone(), Some(Vec::new()))
+        let err = ProjectedSchema::new(region_schema, Some(Vec::new()))
             .err()
             .unwrap();
         assert!(matches!(err, Error::InvalidProjection { .. }));
