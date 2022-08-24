@@ -20,7 +20,7 @@ pub struct DateTime(i64);
 impl Display for DateTime {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let abs_time = NaiveDateTime::from_timestamp(self.0, 0);
-        f.write_str(&abs_time.format(DATETIME_FORMAT).to_string())
+        write!(f, "{}", abs_time.format(DATETIME_FORMAT))
     }
 }
 
