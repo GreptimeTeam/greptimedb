@@ -1,4 +1,5 @@
 use datatypes::prelude::ConcreteDataType;
+use datatypes::type_id::LogicalTypeId;
 use store_api::storage::{
     ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder, ColumnId,
     RegionDescriptor, RegionId, RowKeyDescriptorBuilder,
@@ -98,4 +99,15 @@ impl RegionDescBuilder {
             .build()
             .unwrap()
     }
+}
+
+/// Create desc with schema (k0, timestamp, v0, ... vn-1)
+pub fn desc_with_value_columns(region_name: &str, num_value_columns: usize) -> RegionDescriptor {
+    let mut builder =
+        RegionDescBuilder::new(region_name).push_key_column(("k0", LogicalTypeId::Int64, false));
+    for i in 0..num_value_columns {
+        let name = format!("v{}", i);
+        builder = builder.push_value_column((&name, LogicalTypeId::Int64, true));
+    }
+    builder.build()
 }

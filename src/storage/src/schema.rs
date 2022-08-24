@@ -637,7 +637,7 @@ mod tests {
 
     use super::*;
     use crate::metadata::RegionMetadata;
-    use crate::test_util::{descriptor_util::RegionDescBuilder, schema_util};
+    use crate::test_util::{descriptor_util, schema_util};
 
     fn new_batch() -> Batch {
         let k0 = Int64Vector::from_slice(&[1, 2, 3]);
@@ -665,14 +665,10 @@ mod tests {
     }
 
     fn new_region_schema(version: u32, num_value_columns: usize) -> RegionSchema {
-        let mut builder =
-            RegionDescBuilder::new("test").push_key_column(("k0", LogicalTypeId::Int64, false));
-        for i in 0..num_value_columns {
-            let name = format!("v{}", i);
-            builder = builder.push_value_column((&name, LogicalTypeId::Int64, true));
-        }
-        let desc = builder.build();
-        let metadata: RegionMetadata = desc.try_into().unwrap();
+        let metadata: RegionMetadata =
+            descriptor_util::desc_with_value_columns("test", num_value_columns)
+                .try_into()
+                .unwrap();
 
         let columns = metadata.columns;
         RegionSchema::new(columns.clone(), version).unwrap()

@@ -1,8 +1,8 @@
 //! Region tests.
 
-// TODO(yingwen): Add projection test.
 mod basic;
 mod flush;
+mod projection;
 
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
