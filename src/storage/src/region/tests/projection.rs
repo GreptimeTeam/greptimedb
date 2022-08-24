@@ -133,8 +133,8 @@ async fn new_tester(store_dir: &str) -> ProjectionTester<LocalFileLogStore> {
 }
 
 #[tokio::test]
-async fn test_projection_with_order() {
-    let dir = TempDir::new("projection-with-order").unwrap();
+async fn test_projection_ordered() {
+    let dir = TempDir::new("projection-ordered").unwrap();
     let store_dir = dir.path().to_str().unwrap();
 
     let tester = new_tester(store_dir).await;
@@ -143,5 +143,19 @@ async fn test_projection_with_order() {
     // timestamp, v1
     let output = tester.scan(Some(vec![1, 3])).await;
     let expect = vec![vec![10, 100], vec![11, 101], vec![12, 102], vec![13, 103]];
+    assert_eq!(expect, output);
+}
+
+#[tokio::test]
+async fn test_projection_unordered() {
+    let dir = TempDir::new("projection-unordered").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+
+    let tester = new_tester(store_dir).await;
+    tester.put(4, 1, 10, 100).await;
+
+    // v1, k0
+    let output = tester.scan(Some(vec![3, 0])).await;
+    let expect = vec![vec![100, 1], vec![101, 2], vec![102, 3], vec![103, 4]];
     assert_eq!(expect, output);
 }
