@@ -11,6 +11,7 @@ use snafu::OptionExt;
 use crate::error::{ConversionSnafu, Result, UnknownVectorSnafu};
 use crate::scalars::*;
 use crate::vectors::date::DateVector;
+use crate::vectors::datetime::DateTimeVector;
 use crate::vectors::*;
 
 pub struct Helper;
@@ -177,6 +178,7 @@ impl Helper {
                 Arc::new(StringVector::try_from_arrow_array(array)?)
             }
             ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
+            ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
         })

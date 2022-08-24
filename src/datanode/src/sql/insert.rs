@@ -175,6 +175,16 @@ fn parse_string_to_value(s: String, data_type: &ConcreteDataType) -> Result<Valu
                 .fail()
             }
         }
+        ConcreteDataType::DateTime(_) => {
+            if let Ok(datetime) = common_time::datetime::DateTime::from_str(&s) {
+                Ok(Value::DateTime(datetime))
+            } else {
+                ParseSqlValueSnafu {
+                    msg: format!("Failed to parse {} to DateTime value", s),
+                }
+                .fail()
+            }
+        }
         _ => {
             unreachable!()
         }
@@ -294,5 +304,31 @@ mod tests {
         } else {
             unreachable!()
         }
+    }
+
+    #[test]
+    pub fn test_parse_datetime_literal() {
+        let value = parse_sql_value(
+            "datetime_col",
+            &ConcreteDataType::datetime_datatype(),
+            &SqlValue::DoubleQuotedString("2022-02-22 00:01:03".to_string()),
+        )
+        .unwrap();
+        assert_eq!(ConcreteDataType::date_datatype(), value.data_type());
+        if let Value::DateTime(d) = value {
+            assert_eq!("2022-02-22 00:01:03", d.to_string());
+        } else {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    pub fn test_parse_illegal_datetime_literal() {
+        assert!(parse_sql_value(
+            "datetime_col",
+            &ConcreteDataType::datetime_datatype(),
+            &SqlValue::DoubleQuotedString("2022-02-22 00:01:61".to_string()),
+        )
+        .is_err());
     }
 }
