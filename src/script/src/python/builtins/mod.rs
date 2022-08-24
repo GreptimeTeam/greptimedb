@@ -70,6 +70,14 @@ fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DF
             })
             .collect::<Result<_, _>>()?;
 
+        if ret.is_empty() {
+            //TODO(dennis): empty list, we set type as f64.
+            return Ok(DFColValue::Scalar(ScalarValue::List(
+                None,
+                Box::new(DataType::Float64),
+            )));
+        }
+
         let ty = ret[0].get_datatype();
         if ret.iter().any(|i| i.get_datatype() != ty) {
             let diff = ret
@@ -262,6 +270,7 @@ pub(crate) mod greptime_builtin {
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
+    use rustpython_vm::function::OptionalArg;
     use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
 
     use crate::python::builtins::{
@@ -270,6 +279,11 @@ pub(crate) mod greptime_builtin {
     };
     use crate::python::PyVector;
     type PyVectorRef = PyRef<PyVector>;
+
+    #[pyfunction]
+    fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {
+        PyVector::new(args, vm)
+    }
 
     // the main binding code, due to proc macro things, can't directly use a simpler macro
     // because pyfunction is not a attr?

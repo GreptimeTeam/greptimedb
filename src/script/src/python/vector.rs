@@ -1,4 +1,5 @@
 use std::ops::Deref;
+use std::sync::Arc;
 
 use arrow::datatypes::DataType;
 use arrow::scalar::{PrimitiveScalar, Scalar};
@@ -14,23 +15,23 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::OrderedFloat;
 use datatypes::{
     value,
-    vectors::{Helper, VectorBuilder, VectorRef},
+    vectors::{Helper, NullVector, VectorBuilder, VectorRef},
 };
 use rustpython_vm::types::PyComparisonOp;
 use rustpython_vm::{
-    builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr, PyTypeRef},
-    function::{FuncArgs, OptionalArg},
+    builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
+    function::OptionalArg,
     protocol::{PyMappingMethods, PySequenceMethods},
     pyclass, pyimpl,
     sliceable::{SaturatedSlice, SequenceIndex, SequenceIndexOp},
-    types::{AsMapping, AsSequence, Constructor, Initializer},
+    types::{AsMapping, AsSequence},
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
 use crate::python::utils::is_instance;
 
 #[pyclass(module = false, name = "vector")]
-#[derive(PyPayload, Clone, Debug)]
+#[derive(PyPayload, Debug)]
 pub struct PyVector {
     vector: VectorRef,
 }
@@ -165,8 +166,44 @@ impl AsRef<PyVector> for PyVector {
 }
 
 /// PyVector type wraps a greptime vector, impl multiply/div/add/sub opeerators etc.
-#[pyimpl(with(AsMapping, AsSequence, Constructor, Initializer))]
+#[pyimpl(with(AsMapping, AsSequence))]
 impl PyVector {
+    pub(crate) fn new(
+        iterable: OptionalArg<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyVector> {
+        if let OptionalArg::Present(iterable) = iterable {
+            let mut elements: Vec<PyObjectRef> = iterable.try_to_value(vm)?;
+
+            if elements.is_empty() {
+                return Ok(PyVector::default());
+            }
+
+            let datatype = get_concrete_type(&elements[0], vm)?;
+            let mut buf = VectorBuilder::with_capacity(datatype.clone(), elements.len());
+
+            for obj in elements.drain(..) {
+                let val = if let Some(v) =
+                    pyobj_try_to_typed_val(obj.clone(), vm, Some(datatype.clone()))
+                {
+                    v
+                } else {
+                    return Err(vm.new_type_error(format!(
+                        "Can't cast pyobject {:?} into concrete type {:?}",
+                        obj, datatype
+                    )));
+                };
+                buf.push(&val);
+            }
+
+            Ok(PyVector {
+                vector: buf.finish(),
+            })
+        } else {
+            Ok(PyVector::default())
+        }
+    }
+
     /// create a ref to inner vector
     #[inline]
     pub fn as_vector_ref(&self) -> VectorRef {
@@ -207,7 +244,7 @@ impl PyVector {
             }
         };
         // assuming they are all 64 bit type if possible
-        let left = self.vector.to_arrow_array();
+        let left = self.to_arrow_array();
 
         let left_type = left.data_type();
         let right_type = &right_type;
@@ -261,14 +298,14 @@ impl PyVector {
 
         let result = op(left.as_ref(), right.as_ref(), vm)?;
 
-        Ok(PyVector {
-            vector: Helper::try_into_vector(&*result).map_err(|e| {
+        Ok(Helper::try_into_vector(&*result)
+            .map_err(|e| {
                 vm.new_type_error(format!(
                     "Can't cast result into vector, result: {:?}, err: {:?}",
                     result, e
                 ))
-            })?,
-        })
+            })?
+            .into())
     }
 
     #[inline]
@@ -288,8 +325,8 @@ impl PyVector {
                 other.class().name()
             ))
         })?;
-        let left = self.vector.to_arrow_array();
-        let right = right.vector.to_arrow_array();
+        let left = self.to_arrow_array();
+        let right = right.to_arrow_array();
 
         let left_type = &left.data_type();
         let right_type = &right.data_type();
@@ -309,14 +346,14 @@ impl PyVector {
 
         let result = op(left.as_ref(), right.as_ref());
 
-        Ok(PyVector {
-            vector: Helper::try_into_vector(&*result).map_err(|e| {
+        Ok(Helper::try_into_vector(&*result)
+            .map_err(|e| {
                 vm.new_type_error(format!(
                     "Can't cast result into vector, result: {:?}, err: {:?}",
                     result, e
                 ))
-            })?,
-        })
+            })?
+            .into())
     }
 
     #[pymethod(name = "__radd__")]
@@ -468,7 +505,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn len(&self) -> usize {
-        self.vector.len()
+        self.as_vector_ref().len()
     }
 
     #[pymethod(magic)]
@@ -490,7 +527,7 @@ impl PyVector {
         let i = i
             .wrapped_at(self.len())
             .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_owned()))?;
-        Ok(val_to_pyobj(self.vector.get(i), vm))
+        Ok(val_to_pyobj(self.as_vector_ref().get(i), vm))
     }
 
     /// Return a `PyVector` in `PyObjectRef`
@@ -501,26 +538,25 @@ impl PyVector {
     ) -> PyResult<PyObjectRef> {
         // adjust_indices so negative number is transform to usize
         let (mut range, step, slice_len) = slice.adjust_indices(self.len());
-        let mut buf = VectorBuilder::with_capacity(self.vector.data_type(), slice_len);
+        let vector = self.as_vector_ref();
+
+        let mut buf = VectorBuilder::with_capacity(vector.data_type(), slice_len);
         if slice_len == 0 {
             let v: PyVector = buf.finish().into();
             Ok(v.into_pyobject(vm))
         } else if step == 1 {
-            let v: PyVector = self
-                .vector
-                .slice(range.next().unwrap_or(0), slice_len)
-                .into();
+            let v: PyVector = vector.slice(range.next().unwrap_or(0), slice_len).into();
             Ok(v.into_pyobject(vm))
         } else if step.is_negative() {
             // Negative step require special treatment
             for i in range.rev().step_by(step.unsigned_abs()) {
-                buf.push(&self.vector.get(i))
+                buf.push(&vector.get(i))
             }
             let v: PyVector = buf.finish().into();
             Ok(v.into_pyobject(vm))
         } else {
             for i in range.step_by(step.unsigned_abs()) {
-                buf.push(&self.vector.get(i))
+                buf.push(&vector.get(i))
             }
             let v: PyVector = buf.finish().into();
             Ok(v.into_pyobject(vm))
@@ -766,23 +802,27 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
     }
 }
 
-impl Constructor for PyVector {
-    type Args = FuncArgs;
-
-    /// TODO(discord9): found out how to make it work in python
-    #[allow(unused)]
-    fn py_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        todo!()
+impl Default for PyVector {
+    fn default() -> PyVector {
+        PyVector {
+            vector: Arc::new(NullVector::new(0)),
+        }
     }
 }
 
-impl Initializer for PyVector {
-    type Args = OptionalArg<PyObjectRef>;
-
-    /// TODO(discord9): found out how to test it in python
-    #[allow(unused)]
-    fn init(zelf: PyRef<Self>, iterable: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
-        todo!()
+fn get_concrete_type(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<ConcreteDataType> {
+    if is_instance::<PyNone>(obj, vm) {
+        Ok(ConcreteDataType::null_datatype())
+    } else if is_instance::<PyBool>(obj, vm) {
+        Ok(ConcreteDataType::boolean_datatype())
+    } else if is_instance::<PyInt>(obj, vm) {
+        Ok(ConcreteDataType::int64_datatype())
+    } else if is_instance::<PyFloat>(obj, vm) {
+        Ok(ConcreteDataType::float64_datatype())
+    } else if is_instance::<PyStr>(obj, vm) {
+        Ok(ConcreteDataType::string_datatype())
+    } else {
+        Err(vm.new_type_error(format!("Unsupported pyobject type: {:?}", obj)))
     }
 }
 
