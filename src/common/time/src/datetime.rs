@@ -11,7 +11,7 @@ const DATETIME_FORMAT: &str = "%F %T";
 
 /// [DateTime] represents the **seconds elapsed since "1970-01-01 00:00:00 UTC" (UNIX Epoch)**.  
 ///
-/// Valid [DateTime] value ranges from "0000-01-01 00:00:00" to "9999-12-31 23:59:59".
+/// Valid [DateTime] value ranges from "1000-01-01 00:00:00" to "9999-12-31 23:59:59".
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
