@@ -22,6 +22,8 @@ use crate::error::{Result, StartHttpSnafu};
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::Server;
 
+const HTTP_API_VERSION: &str = "v1";
+
 pub struct HttpServer {
     query_handler: SqlQueryHandlerRef,
 }
@@ -115,10 +117,14 @@ impl HttpServer {
 
     pub fn make_app(&self) -> Router {
         Router::new()
-            // handlers
-            .route("/sql", routing::get(handler::sql))
+            .nest(
+                &format!("/{}", HTTP_API_VERSION),
+                Router::new()
+                    // handlers
+                    .route("/sql", routing::get(handler::sql))
+                    .route("/scripts", routing::post(handler::scripts)),
+            )
             .route("/metrics", routing::get(handler::metrics))
-            .route("/scripts", routing::post(handler::scripts))
             // middlewares
             .layer(
                 ServiceBuilder::new()
