@@ -1,3 +1,5 @@
+#![allow(clippy::needless_borrow)]
+
 //! Region manifest impl
 use crate::manifest::action::*;
 use crate::manifest::ManifestImpl;

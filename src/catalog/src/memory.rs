@@ -1,3 +1,5 @@
+#![allow(clippy::significant_drop_in_scrutinee)]
+
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;

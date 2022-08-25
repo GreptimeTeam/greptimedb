@@ -1,6 +1,6 @@
 [package]
 edition = "2021"
-name = "common-script"
+name = "script"
 version = "0.1.0"
 
 [dependencies.arrow]
@@ -9,14 +9,11 @@ package = "arrow2"
 version = "0.10"
 
 [features]
-default = ["python-udf", "py-builtins"]
-py-builtins = [
+default = ["python"]
+python = [
   "dep:datafusion",
   "dep:datafusion-expr",
   "dep:datafusion-physical-expr",
-  "python-udf",
-]
-python-udf = [
   "dep:rustpython-vm",
   "dep:rustpython-parser",
   "dep:rustpython-compiler",
@@ -26,20 +23,20 @@ python-udf = [
 ]
 
 [dependencies]
-common-error = {path = "../error"}
-common-query = {path = "../query"}
-common-recordbatch = {path = "../recordbatch" }
-common-function = { path = "../function" }
-futures-util = "0.3"
-futures = "0.3"
-query = { path = "../../query" }
+async-trait = "0.1"
+common-error = {path = "../common/error"}
+common-query = {path = "../common/query"}
+common-recordbatch = {path = "../common/recordbatch" }
+common-function = { path = "../common/function" }
 console = "0.15.1"
 datafusion = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}
 datafusion-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-physical-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
-datatypes = {path = "../../datatypes"}
-# TODO: update RustPython Version Periodically(Per Month maybe?)
+datatypes = {path = "../datatypes"}
+futures-util = "0.3"
+futures = "0.3"
+query = { path = "../query" }
 rustpython-ast = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 rustpython-bytecode = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 rustpython-compiler = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
@@ -47,7 +44,12 @@ rustpython-compiler-core = {git = "https://github.com/RustPython/RustPython", op
 rustpython-parser = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 rustpython-vm = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 snafu = {version = "0.7", features = ["backtraces"]}
+sql = { path = "../sql" }
 
 [dev-dependencies]
+catalog = { path = "../catalog" }
 ron = "0.7.1"
 serde = {version = "1.0", features = ["derive"]}
+table = { path = "../table" }
+tokio = { version = "1.18", features = ["full"] }
+tokio-test = "0.4"
