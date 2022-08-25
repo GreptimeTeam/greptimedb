@@ -264,7 +264,7 @@ pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
-    use arrow::array::{NullArray, ArrayRef, BooleanArray};
+    use arrow::array::{ArrayRef, BooleanArray, NullArray};
     use arrow::compute;
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{function::FunctionContext, Function};
@@ -272,6 +272,7 @@ pub(crate) mod greptime_builtin {
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
     use datatypes::vectors::Helper;
+    use rustpython_vm::builtins::PyStr;
     use rustpython_vm::function::OptionalArg;
     use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
 
@@ -640,10 +641,11 @@ pub(crate) mod greptime_builtin {
     #[pyfunction]
     fn prev(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let cur: ArrayRef = cur.to_arrow_array();
-        cur.slice(0, cur.len()-1);
+        cur.slice(0, cur.len() - 1);
         let fill = cur.slice(0, 1);
-        let ret = compute::concatenate::concatenate(&[&*fill, &*cur])
-        .map_err(|err|vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}")))?;
+        let ret = compute::concatenate::concatenate(&[&*fill, &*cur]).map_err(|err| {
+            vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
+        })?;
         let ret = Helper::try_into_vector(&*ret).map_err(|e| {
             vm.new_type_error(format!(
                 "Can't cast result into vector, result: {:?}, err: {:?}",
@@ -651,5 +653,67 @@ pub(crate) mod greptime_builtin {
             ))
         })?;
         Ok(ret.into())
+    }
+
+    #[pyfunction]
+    fn datetime(input: &PyStr, vm: &VirtualMachine) -> PyResult<usize> {
+        let mut parsed = Vec::new();
+        let mut prev = 0;
+        #[derive(Debug)]
+        enum State {
+            Num(isize),
+            Separator(String),
+        }
+        let mut state = State::Num(Default::default());
+        let input = input.as_str();
+        for (idx, ch) in input.chars().enumerate() {
+            match (ch.is_ascii_digit(), &state) {
+                (true, State::Separator(_)) => {
+                    let res = &input[prev..idx];
+                    let res = State::Separator(res.to_owned());
+                    parsed.push(res);
+                    prev = idx;
+                    state = State::Num(Default::default());
+                }
+                (false, State::Num(_)) => {
+                    let res = str::parse(&input[prev..idx]).map_err(|err|{
+                        vm.new_runtime_error(format!("Fail to parse num: {err:#?}"))
+                    })?;
+                    let res = State::Num(res);
+                    parsed.push(res);
+                    prev = idx;
+                    state = State::Separator(Default::default());
+                }
+                _ => {}
+            };
+        }
+
+        let mut cur_idx = 0;
+        let mut tot_time = 0;
+        fn factor(unit: &str, vm: &VirtualMachine) -> PyResult<isize>{
+            let ret = match unit{
+                "d" => 24 * 60 * 60,
+                "h" => 60 * 60,
+                "m" => 60,
+                "s" => 1,
+                _ => return Err(vm.new_type_error(format!("Unknown time unit: {unit}")))
+            };
+            Ok(ret)
+        }
+        while cur_idx < parsed.len(){
+            match &parsed[cur_idx]{
+                State::Num(v) => {
+                    let nxt = &parsed[cur_idx+1];
+                    if let State::Separator(sep) = nxt{
+                        tot_time += v * factor(&sep, vm)?;
+                    }else{
+                        return Err(vm.new_runtime_error(format!("Expect a spearator after number, found {nxt:#?}")))
+                    }
+                    cur_idx += 2;
+                },
+                State::Separator(sep) => return Err(vm.new_runtime_error(format!("Expect a number, found {sep}"))),
+            }
+        }
+        todo!()
     }
 }
