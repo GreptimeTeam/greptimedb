@@ -63,7 +63,7 @@ impl Chunk {
     pub fn read(&self, dst: &mut [u8]) -> usize {
         let size = self.len().min(dst.len());
         let range = self.read_offset..(self.read_offset + size);
-        (&mut dst[0..size]).copy_from_slice(&self.data[range]);
+        dst[0..size].copy_from_slice(&self.data[range]);
         size
     }
 

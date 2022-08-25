@@ -1,3 +1,5 @@
+#![allow(clippy::needless_borrow, clippy::derive_partial_eq_without_eq)]
+
 use std::io::{BufRead, BufReader};
 
 use serde::{Deserialize, Serialize};
@@ -38,7 +40,7 @@ pub struct RawColumnsMetadata {
 }
 
 /// Minimal data that could be used to persist and recover [ColumnFamiliesMetadata](crate::metadata::ColumnFamiliesMetadata).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq)]
 pub struct RawColumnFamiliesMetadata {
     pub column_families: Vec<ColumnFamilyMetadata>,
 }
