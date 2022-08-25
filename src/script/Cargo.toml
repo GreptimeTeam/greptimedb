@@ -25,9 +25,9 @@ python = [
 [dependencies]
 async-trait = "0.1"
 common-error = {path = "../common/error"}
+common-function = { path = "../common/function" }
 common-query = {path = "../common/query"}
 common-recordbatch = {path = "../common/recordbatch" }
-common-function = { path = "../common/function" }
 console = "0.15.1"
 datafusion = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}

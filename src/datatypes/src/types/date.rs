@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::data_type::DataType;
 use crate::prelude::{DataTypeRef, LogicalTypeId, Value};
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize, Eq)]
 pub struct DateType;
 
 impl DataType for DateType {
