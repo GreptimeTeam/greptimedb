@@ -244,10 +244,7 @@ mod tests {
         assert_eq!(ConcreteDataType::datetime_datatype(), vector.data_type());
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
-            assert_eq!(
-                Value::DateTime(DateTime::try_new(42).unwrap()),
-                vector.get(i)
-            );
+            assert_eq!(Value::DateTime(DateTime::new(42)), vector.get(i));
         }
     }
 }

@@ -124,7 +124,7 @@ impl ScalarVector for DateVector {
     type Builder = DateVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        self.array.get_data(idx).map(|v| Date::new(v))
+        self.array.get_data(idx).map(Date::new)
     }
 
     fn iter_data(&self) -> Self::Iter<'_> {

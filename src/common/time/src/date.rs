@@ -13,7 +13,6 @@ const UNIX_EPOCH_FROM_CE: i32 = 719_163;
 
 /// ISO 8601 [Date] values. The inner representation is a signed 32 bit integer that represents the
 /// **days since "1970-01-01 00:00:00 UTC" (UNIX Epoch)**.
-///
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Deserialize, Serialize,
 )]
