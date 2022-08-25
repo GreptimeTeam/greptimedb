@@ -80,9 +80,11 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
-        self.state
-            .aggregate_function(name)
-            .map(|func| Arc::new(create_aggregate_function(func.name(), func.create()).into()))
+        self.state.aggregate_function(name).map(|func| {
+            Arc::new(
+                create_aggregate_function(func.name(), func.args_count(), func.create()).into(),
+            )
+        })
     }
 
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {

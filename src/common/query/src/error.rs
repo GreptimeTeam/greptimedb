@@ -4,6 +4,7 @@ use arrow::datatypes::DataType as ArrowDatatype;
 use common_error::prelude::*;
 use datafusion_common::DataFusionError;
 use datatypes::error::Error as DataTypeError;
+use statrs::StatsError;
 
 common_error::define_opaque_error!(Error);
 
@@ -13,6 +14,12 @@ pub enum InnerError {
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Fail to generate function, source: {}", source))]
+    GenerateFunction {
+        source: StatsError,
         backtrace: Backtrace,
     },
 
@@ -40,6 +47,21 @@ pub enum InnerError {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Invalid inputs: {}", err_msg))]
+    InvalidInputs {
+        #[snafu(backtrace)]
+        source: DataTypeError,
+        err_msg: String,
+    },
+
+    #[snafu(display(
+        "Illegal input_types status, check if DataFusion has changed its UDAF execution logic"
+    ))]
+    InvalidInputState { backtrace: Backtrace },
+
+    #[snafu(display("unexpected: not constant column"))]
+    InvalidInputCol { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -48,9 +70,13 @@ impl ErrorExt for InnerError {
     fn status_code(&self) -> StatusCode {
         match self {
             InnerError::ExecuteFunction { .. }
+            | InnerError::GenerateFunction { .. }
             | InnerError::CreateAccumulator { .. }
             | InnerError::DowncastVector { .. }
+            | InnerError::InvalidInputState { .. }
+            | InnerError::InvalidInputCol { .. }
             | InnerError::BadAccumulatorImpl { .. } => StatusCode::EngineExecuteQuery,
+            InnerError::InvalidInputs { source, .. } => source.status_code(),
             InnerError::IntoVector { source, .. } => source.status_code(),
             InnerError::FromScalarValue { source } => source.status_code(),
         }
