@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use api::convert::DecodeError;
+use api::serde::DecodeError;
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;

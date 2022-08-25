@@ -1,4 +1,4 @@
-use api::convert::DecodeError;
+use api::serde::DecodeError;
 use common_error::prelude::*;
 
 #[derive(Debug, Snafu)]
