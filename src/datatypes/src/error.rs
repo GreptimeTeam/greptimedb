@@ -31,16 +31,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display(
-        "Failed to parse index in schema meta, value: {}, source: {}",
-        value,
-        source
-    ))]
-    ParseSchemaIndex {
-        value: String,
-        source: std::num::ParseIntError,
-        backtrace: Backtrace,
-    },
+    #[snafu(display("Timestamp column {} not found", name,))]
+    TimestampNotFound { name: String, backtrace: Backtrace },
 
     #[snafu(display(
         "Failed to parse version in schema meta, value: {}, source: {}",

@@ -41,6 +41,8 @@ pub struct ScanRequest {
     /// Default is None. Only returns data whose sequence number is less than or
     /// equal to the `sequence`.
     pub sequence: Option<SequenceNumber>,
+    /// Indices of columns to read, `None` to read all columns.
+    pub projection: Option<Vec<usize>>,
 }
 
 #[derive(Debug)]

@@ -1,9 +1,13 @@
-use async_trait::async_trait;
-use store_api::storage::{Chunk, ChunkReader, SchemaRef};
+use std::sync::Arc;
 
-use crate::error::{Error, Result};
-use crate::memtable::{BoxedBatchIterator, IterContext, MemtableSet};
+use async_trait::async_trait;
+use snafu::ResultExt;
+use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
+
+use crate::error::{self, Error, Result};
+use crate::memtable::{IterContext, MemtableRef, MemtableSet};
 use crate::read::{Batch, BatchReader, ConcatReader};
+use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions, Visitor};
 
 type BoxedIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
@@ -13,7 +17,7 @@ type BoxedIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
 // using `Stream`, maybe change to `Stream` if we find out it is more efficient and have
 // necessary to do so.
 pub struct ChunkReaderImpl {
-    schema: SchemaRef,
+    schema: ProjectedSchemaRef,
     iter: Option<BoxedIterator>,
     sst_reader: ConcatReader,
 }
@@ -23,7 +27,7 @@ impl ChunkReader for ChunkReaderImpl {
     type Error = Error;
 
     fn schema(&self) -> &SchemaRef {
-        &self.schema
+        self.schema.projected_user_schema()
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
@@ -32,8 +36,7 @@ impl ChunkReader for ChunkReaderImpl {
             None => return Ok(None),
         };
 
-        // TODO(yingwen): Check schema.
-        let chunk = batch_to_chunk(batch);
+        let chunk = self.schema.batch_to_chunk(&batch);
 
         Ok(Some(chunk))
     }
@@ -41,7 +44,7 @@ impl ChunkReader for ChunkReaderImpl {
 
 impl ChunkReaderImpl {
     pub fn new(
-        schema: SchemaRef,
+        schema: ProjectedSchemaRef,
         iter: BoxedIterator,
         sst_reader: ConcatReader,
     ) -> ChunkReaderImpl {
@@ -64,54 +67,55 @@ impl ChunkReaderImpl {
     }
 }
 
-// Assumes the schema is the same as key columns combine with value columns.
-fn batch_to_chunk(mut batch: Batch) -> Chunk {
-    let mut columns = Vec::with_capacity(batch.keys.len() + batch.values.len());
-    columns.append(&mut batch.keys);
-    columns.append(&mut batch.values);
-
-    Chunk::new(columns)
-}
-
 /// Builder to create a new [ChunkReaderImpl] from scan request.
 pub struct ChunkReaderBuilder {
-    schema: SchemaRef,
+    schema: RegionSchemaRef,
+    projection: Option<Vec<usize>>,
     sst_layer: AccessLayerRef,
     iter_ctx: IterContext,
-    iters: Vec<BoxedBatchIterator>,
+    memtables: Vec<MemtableRef>,
     files_to_read: Vec<FileHandle>,
 }
 
 impl ChunkReaderBuilder {
-    pub fn new(schema: SchemaRef, sst_layer: AccessLayerRef) -> Self {
+    pub fn new(schema: RegionSchemaRef, sst_layer: AccessLayerRef) -> Self {
         ChunkReaderBuilder {
             schema,
-            iter_ctx: IterContext::default(),
-            iters: Vec::new(),
+            projection: None,
             sst_layer,
+            iter_ctx: IterContext::default(),
+            memtables: Vec::new(),
             files_to_read: Vec::new(),
         }
     }
 
     /// Reserve space for iterating `num` memtables.
     pub fn reserve_num_memtables(mut self, num: usize) -> Self {
-        self.iters.reserve(num);
+        self.memtables.reserve(num);
         self
     }
 
-    pub fn iter_ctx(mut self, iter_ctx: IterContext) -> Self {
-        self.iter_ctx = iter_ctx;
+    pub fn projection(mut self, projection: Option<Vec<usize>>) -> Self {
+        self.projection = projection;
         self
     }
 
-    pub fn pick_memtables(mut self, memtables: &MemtableSet) -> Result<Self> {
+    pub fn batch_size(mut self, batch_size: usize) -> Self {
+        self.iter_ctx.batch_size = batch_size;
+        self
+    }
+
+    pub fn visible_sequence(mut self, sequence: SequenceNumber) -> Self {
+        self.iter_ctx.visible_sequence = sequence;
+        self
+    }
+
+    pub fn pick_memtables(mut self, memtables: &MemtableSet) -> Self {
         for (_range, mem) in memtables.iter() {
-            let iter = mem.iter(self.iter_ctx.clone())?;
-
-            self.iters.push(iter);
+            self.memtables.push(mem.clone());
         }
 
-        Ok(self)
+        self
     }
 
     pub fn pick_ssts(mut self, ssts: &LevelMetas) -> Result<Self> {
@@ -120,12 +124,24 @@ impl ChunkReaderBuilder {
         Ok(self)
     }
 
-    pub async fn build(self) -> Result<ChunkReaderImpl> {
+    pub async fn build(mut self) -> Result<ChunkReaderImpl> {
+        let schema = Arc::new(
+            ProjectedSchema::new(self.schema, self.projection)
+                .context(error::InvalidProjectionSnafu)?,
+        );
+
+        self.iter_ctx.projected_schema = Some(schema.clone());
+        let mut iters = Vec::with_capacity(self.memtables.len());
+        for mem in self.memtables {
+            let iter = mem.iter(&self.iter_ctx)?;
+            iters.push(iter);
+        }
         // Now we just simply chain all iterators together, ignore duplications/ordering.
-        let iter = Box::new(self.iters.into_iter().flatten());
+        let iter = Box::new(iters.into_iter().flatten());
 
         let read_opts = ReadOptions {
             batch_size: self.iter_ctx.batch_size,
+            projected_schema: schema.clone(),
         };
         let mut sst_readers = Vec::with_capacity(self.files_to_read.len());
         for file in &self.files_to_read {
@@ -138,7 +154,7 @@ impl ChunkReaderBuilder {
         }
         let reader = ConcatReader::new(sst_readers);
 
-        Ok(ChunkReaderImpl::new(self.schema, iter, reader))
+        Ok(ChunkReaderImpl::new(schema, iter, reader))
     }
 }
 

@@ -1,5 +1,4 @@
 use storage::memtable::{IterContext, KeyValues, MemtableRef};
-use store_api::storage::SequenceNumber;
 
 use crate::memtable::util::new_memtable;
 
@@ -26,10 +25,9 @@ impl BenchContext {
         let mut read_count = 0;
         let iter_ctx = IterContext {
             batch_size,
-            visible_sequence: SequenceNumber::MAX,
-            for_flush: false,
+            ..Default::default()
         };
-        let iter = self.memtable.iter(iter_ctx).unwrap();
+        let iter = self.memtable.iter(&iter_ctx).unwrap();
         for batch in iter {
             batch.unwrap();
             read_count += batch_size;

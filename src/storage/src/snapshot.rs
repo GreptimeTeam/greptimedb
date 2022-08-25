@@ -8,7 +8,6 @@ use store_api::storage::{
 
 use crate::chunk::{ChunkReaderBuilder, ChunkReaderImpl};
 use crate::error::{Error, Result};
-use crate::memtable::IterContext;
 use crate::sst::AccessLayerRef;
 use crate::version::VersionRef;
 
@@ -41,17 +40,15 @@ impl Snapshot for SnapshotImpl {
         let immutables = memtable_version.immutable_memtables();
 
         let mut builder =
-            ChunkReaderBuilder::new(self.version.user_schema().clone(), self.sst_layer.clone())
+            ChunkReaderBuilder::new(self.version.schema().clone(), self.sst_layer.clone())
                 .reserve_num_memtables(memtable_version.num_memtables())
-                .iter_ctx(IterContext {
-                    batch_size: ctx.batch_size,
-                    visible_sequence,
-                    ..Default::default()
-                })
-                .pick_memtables(mutables)?;
+                .projection(request.projection)
+                .batch_size(ctx.batch_size)
+                .visible_sequence(visible_sequence)
+                .pick_memtables(mutables);
 
         for mem_set in immutables {
-            builder = builder.pick_memtables(mem_set)?;
+            builder = builder.pick_memtables(mem_set);
         }
 
         let reader = builder.pick_ssts(&**self.version.ssts())?.build().await?;

@@ -2,6 +2,7 @@
 
 mod basic;
 mod flush;
+mod projection;
 
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;

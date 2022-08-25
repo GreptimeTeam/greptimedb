@@ -1,18 +1,40 @@
 //! Common structs and utilities for read.
 
 use async_trait::async_trait;
-use datatypes::vectors::{UInt64Vector, UInt8Vector, VectorRef};
+use datatypes::vectors::VectorRef;
 
 use crate::error::Result;
 
-// TODO(yingwen): Maybe pack op_type with sequence (reserve 8bits in u64 for op_type) like RocksDB.
 /// Storage internal representation of a batch of rows.
+// Now the structure of `Batch` is still unstable, all pub fields may be changed.
+#[derive(Debug, Default)]
 pub struct Batch {
-    // Now the structure of `Batch` is still unstable, all pub fields may be changed.
-    pub keys: Vec<VectorRef>,
-    pub sequences: UInt64Vector,
-    pub op_types: UInt8Vector,
-    pub values: Vec<VectorRef>,
+    /// Rows organized in columnar format.
+    ///
+    /// Columns follow the same order convention of region schema:
+    /// key, value, internal columns.
+    columns: Vec<VectorRef>,
+}
+
+impl Batch {
+    pub fn new(columns: Vec<VectorRef>) -> Batch {
+        Batch { columns }
+    }
+
+    #[inline]
+    pub fn num_columns(&self) -> usize {
+        self.columns.len()
+    }
+
+    #[inline]
+    pub fn columns(&self) -> &[VectorRef] {
+        &self.columns
+    }
+
+    #[inline]
+    pub fn column(&self, idx: usize) -> &VectorRef {
+        &self.columns[idx]
+    }
 }
 
 /// Async batch reader.

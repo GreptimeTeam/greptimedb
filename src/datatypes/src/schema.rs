@@ -4,12 +4,19 @@ use std::sync::Arc;
 pub use arrow::datatypes::Metadata;
 use arrow::datatypes::{Field, Schema as ArrowSchema};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, Result};
 
-const TIMESTAMP_INDEX_KEY: &str = "greptime:timestamp_index";
+/// Key used to store column name of the timestamp column in metadata.
+///
+/// Instead of storing the column index, we store the column name as the
+/// query engine may modify the column order of the arrow schema, then
+/// we would fail to recover the correct timestamp column when converting
+/// the arrow schema back to our schema.
+const TIMESTAMP_COLUMN_KEY: &str = "greptime:timestamp_column";
+/// Key used to store version number of the schema in metadata.
 const VERSION_KEY: &str = "greptime:version";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +85,11 @@ impl Schema {
     #[inline]
     pub fn num_columns(&self) -> usize {
         self.column_schemas.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.column_schemas.is_empty()
     }
 
     /// Returns index of the timestamp key column.
@@ -154,8 +166,9 @@ impl SchemaBuilder {
     pub fn build(mut self) -> Result<Schema> {
         if let Some(timestamp_index) = self.timestamp_index {
             validate_timestamp_index(&self.column_schemas, timestamp_index)?;
+            let timestamp_name = self.column_schemas[timestamp_index].name.clone();
             self.metadata
-                .insert(TIMESTAMP_INDEX_KEY.to_string(), timestamp_index.to_string());
+                .insert(TIMESTAMP_COLUMN_KEY.to_string(), timestamp_name);
         }
         self.metadata
             .insert(VERSION_KEY.to_string(), self.version.to_string());
@@ -241,9 +254,14 @@ impl TryFrom<Arc<ArrowSchema>> for Schema {
             column_schemas.push(column_schema);
         }
 
-        let timestamp_index = try_parse_index(&arrow_schema.metadata, TIMESTAMP_INDEX_KEY)?;
-        if let Some(index) = timestamp_index {
-            validate_timestamp_index(&column_schemas, index)?;
+        let timestamp_name = arrow_schema.metadata.get(TIMESTAMP_COLUMN_KEY);
+        let mut timestamp_index = None;
+        if let Some(name) = timestamp_name {
+            let index = name_to_index
+                .get(name)
+                .context(error::TimestampNotFoundSnafu { name })?;
+            validate_timestamp_index(&column_schemas, *index)?;
+            timestamp_index = Some(*index);
         }
         let version = try_parse_version(&arrow_schema.metadata, VERSION_KEY)?;
 
@@ -264,18 +282,6 @@ impl TryFrom<ArrowSchema> for Schema {
         let arrow_schema = Arc::new(arrow_schema);
 
         Schema::try_from(arrow_schema)
-    }
-}
-
-fn try_parse_index(metadata: &Metadata, key: &str) -> Result<Option<usize>> {
-    if let Some(value) = metadata.get(key) {
-        let index = value
-            .parse()
-            .context(error::ParseSchemaIndexSnafu { value })?;
-
-        Ok(Some(index))
-    } else {
-        Ok(None)
     }
 }
 
@@ -313,6 +319,7 @@ mod tests {
     fn test_build_empty_schema() {
         let schema = SchemaBuilder::default().build().unwrap();
         assert_eq!(0, schema.num_columns());
+        assert!(schema.is_empty());
 
         assert!(SchemaBuilder::default().timestamp_index(0).build().is_err());
     }
@@ -326,6 +333,7 @@ mod tests {
         let schema = Schema::new(column_schemas.clone());
 
         assert_eq!(2, schema.num_columns());
+        assert!(!schema.is_empty());
         assert!(schema.timestamp_index().is_none());
         assert!(schema.timestamp_column().is_none());
         assert_eq!(Schema::INITIAL_VERSION, schema.version());

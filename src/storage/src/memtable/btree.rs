@@ -18,7 +18,7 @@ use crate::memtable::{
     BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId, RowOrdering,
 };
 use crate::read::Batch;
-use crate::schema::RegionSchemaRef;
+use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 
 type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
 
@@ -66,10 +66,10 @@ impl Memtable for BTreeMemtable {
         Ok(())
     }
 
-    fn iter(&self, ctx: IterContext) -> Result<BoxedBatchIterator> {
+    fn iter(&self, ctx: &IterContext) -> Result<BoxedBatchIterator> {
         assert!(ctx.batch_size > 0);
 
-        let iter = BTreeIterator::new(ctx, self.schema.clone(), self.map.clone());
+        let iter = BTreeIterator::new(ctx.clone(), self.schema.clone(), self.map.clone());
 
         Ok(Box::new(iter))
     }
@@ -81,14 +81,17 @@ impl Memtable for BTreeMemtable {
 
 struct BTreeIterator {
     ctx: IterContext,
+    /// Schema of this memtable.
     schema: RegionSchemaRef,
+    /// Projected schema that user expect to read.
+    projected_schema: ProjectedSchemaRef,
     map: Arc<RwLockMap>,
     last_key: Option<InnerKey>,
 }
 
 impl BatchIterator for BTreeIterator {
-    fn schema(&self) -> RegionSchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> ProjectedSchemaRef {
+        self.projected_schema.clone()
     }
 
     fn ordering(&self) -> RowOrdering {
@@ -106,9 +109,15 @@ impl Iterator for BTreeIterator {
 
 impl BTreeIterator {
     fn new(ctx: IterContext, schema: RegionSchemaRef, map: Arc<RwLockMap>) -> BTreeIterator {
+        let projected_schema = ctx
+            .projected_schema
+            .clone()
+            .unwrap_or_else(|| Arc::new(ProjectedSchema::no_projection(schema.clone())));
+
         BTreeIterator {
             ctx,
             schema,
+            projected_schema,
             map,
             last_key: None,
         }
@@ -142,17 +151,27 @@ impl BTreeIterator {
             .schema
             .row_key_columns()
             .map(|column_meta| column_meta.desc.data_type.clone());
+        let key_needed = vec![true; self.schema.num_row_key_columns()];
         let value_data_types = self
             .schema
             .value_columns()
             .map(|column_meta| column_meta.desc.data_type.clone());
+        let value_needed: Vec<_> = self
+            .schema
+            .value_columns()
+            .map(|column_meta| self.projected_schema.is_needed(column_meta.id()))
+            .collect();
 
-        Some(Batch {
-            keys: rows_to_vectors(key_data_types, keys.as_slice()),
-            sequences,
-            op_types,
-            values: rows_to_vectors(value_data_types, values.as_slice()),
-        })
+        let key_columns = rows_to_vectors(key_data_types, &key_needed, keys.as_slice());
+        let value_columns = rows_to_vectors(value_data_types, &value_needed, values.as_slice());
+        let batch = self.projected_schema.batch_from_parts(
+            key_columns,
+            value_columns,
+            Arc::new(sequences),
+            Arc::new(op_types),
+        );
+
+        Some(batch)
     }
 }
 
@@ -384,6 +403,7 @@ impl<'a> RowsProvider for &'a [&RowValue] {
 
 fn rows_to_vectors<I: Iterator<Item = ConcreteDataType>, T: RowsProvider>(
     data_types: I,
+    column_needed: &[bool],
     provider: T,
 ) -> Vec<VectorRef> {
     if provider.is_empty() {
@@ -399,6 +419,10 @@ fn rows_to_vectors<I: Iterator<Item = ConcreteDataType>, T: RowsProvider>(
 
     let mut vectors = Vec::with_capacity(column_num);
     for (col_idx, builder) in builders.iter_mut().enumerate() {
+        if !column_needed[col_idx] {
+            continue;
+        }
+
         for row_idx in 0..row_num {
             let row = provider.row_by_index(row_idx);
             let value = &row[col_idx];

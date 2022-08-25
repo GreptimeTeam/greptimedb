@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use crate::error::{self, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
-use crate::schema::SstSchema;
+use crate::schema::{ProjectedSchemaRef, SstSchema};
 use crate::sst;
 
 /// Parquet sst writer.
@@ -54,8 +54,8 @@ impl<'a> ParquetWriter<'a> {
     /// A chunk of records yielded from each iteration with a size given
     /// in config will be written to a single row group.
     async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
-        let region_schema = self.iter.schema();
-        let sst_schema = region_schema.sst_schema();
+        let projected_schema = self.iter.schema();
+        let sst_schema = projected_schema.schema_to_read();
         let schema = sst_schema.arrow_schema();
         let object = self.object_store.object(self.file_path);
 
@@ -156,28 +156,26 @@ fn transverse_recursive<T, F: Fn(&DataType) -> T + Clone>(
 pub struct ParquetReader<'a> {
     file_path: &'a str,
     object_store: ObjectStore,
+    projected_schema: ProjectedSchemaRef,
 }
 
 type ReaderFactoryFuture<'a, R> =
     Pin<Box<dyn futures_util::Future<Output = std::io::Result<R>> + Send + 'a>>;
 
-pub type FieldProjection = Box<dyn Fn(&Schema) -> Vec<Field> + Send + Sync>;
-
 impl<'a> ParquetReader<'a> {
-    pub fn new(file_path: &str, object_store: ObjectStore) -> ParquetReader {
+    pub fn new(
+        file_path: &str,
+        object_store: ObjectStore,
+        projected_schema: ProjectedSchemaRef,
+    ) -> ParquetReader {
         ParquetReader {
             file_path,
             object_store,
+            projected_schema,
         }
     }
 
-    // TODO(yingwen): Projection is not supported now, since field index would change after projection.
-    // To support projection, we may need to implement some helper methods in schema.
-    pub async fn chunk_stream(
-        &self,
-        _projection: Option<FieldProjection>,
-        chunk_size: usize,
-    ) -> Result<ChunkStream> {
+    pub async fn chunk_stream(&self, chunk_size: usize) -> Result<ChunkStream> {
         let file_path = self.file_path.to_string();
         let operator = self.object_store.clone();
         let reader_factory = move || -> ReaderFactoryFuture<SeekableReader> {
@@ -195,12 +193,12 @@ impl<'a> ParquetReader<'a> {
             .context(error::ReadParquetSnafu { file: &file_path })?;
         let arrow_schema =
             infer_schema(&metadata).context(error::ReadParquetSnafu { file: &file_path })?;
-        // Just read all fields.
-        let projected_fields = arrow_schema.fields.clone();
-
-        let sst_schema = SstSchema::try_from(arrow_schema)
+        // Now the SstSchema is only used to validate metadata of the parquet file, but this schema
+        // would be useful once we support altering schema, as this is the actual schema of the SST.
+        let _sst_schema = SstSchema::try_from(arrow_schema)
             .context(error::ConvertSstSchemaSnafu { file: &file_path })?;
 
+        let projected_fields = self.projected_fields().to_vec();
         let chunk_stream = try_stream!({
             for rg in metadata.row_groups {
                 let column_chunks = read_columns_many_async(
@@ -221,20 +219,27 @@ impl<'a> ParquetReader<'a> {
             }
         });
 
-        ChunkStream::new(sst_schema, Box::pin(chunk_stream))
+        ChunkStream::new(self.projected_schema.clone(), Box::pin(chunk_stream))
+    }
+
+    fn projected_fields(&self) -> &[Field] {
+        &self.projected_schema.schema_to_read().arrow_schema().fields
     }
 }
 
 pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk<Arc<dyn Array>>>> + Send>>;
 
 pub struct ChunkStream {
-    schema: SstSchema,
+    projected_schema: ProjectedSchemaRef,
     stream: SendableChunkStream,
 }
 
 impl ChunkStream {
-    pub fn new(schema: SstSchema, stream: SendableChunkStream) -> Result<Self> {
-        Ok(Self { schema, stream })
+    pub fn new(projected_schema: ProjectedSchemaRef, stream: SendableChunkStream) -> Result<Self> {
+        Ok(Self {
+            projected_schema,
+            stream,
+        })
     }
 }
 
@@ -245,7 +250,8 @@ impl BatchReader for ChunkStream {
             .try_next()
             .await?
             .map(|chunk| {
-                self.schema
+                self.projected_schema
+                    .schema_to_read()
                     .arrow_chunk_to_batch(&chunk)
                     .context(error::InvalidParquetSchemaSnafu)
             })
@@ -284,7 +290,14 @@ mod tests {
                 (2003, 5),
                 (1001, 1),
             ], // keys
-            &[Some(1), Some(2), Some(7), Some(8), Some(9), Some(3)], // values
+            &[
+                (Some(1), Some(1234)),
+                (Some(2), Some(1234)),
+                (Some(7), Some(1234)),
+                (Some(8), Some(1234)),
+                (Some(9), Some(1234)),
+                (Some(3), Some(1234)),
+            ], // values
         );
 
         let dir = TempDir::new("write_parquet").unwrap();
@@ -292,7 +305,7 @@ mod tests {
         let backend = Backend::build().root(path).finish().await.unwrap();
         let object_store = ObjectStore::new(backend);
         let sst_file_name = "test-flush.parquet";
-        let iter = memtable.iter(IterContext::default()).unwrap();
+        let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, iter, object_store);
 
         writer
@@ -307,7 +320,7 @@ mod tests {
 
         // chunk schema: timestamp, __version, v1, __sequence, __op_type
         let chunk = file_reader.next().unwrap().unwrap();
-        assert_eq!(5, chunk.arrays().len());
+        assert_eq!(6, chunk.arrays().len());
 
         // timestamp
         assert_eq!(
@@ -323,22 +336,30 @@ mod tests {
             chunk.arrays()[1]
         );
 
-        // v1
+        // v0
         assert_eq!(
             Arc::new(UInt64Array::from_slice(&[1, 2, 3, 7, 8, 9])) as Arc<dyn Array>,
             chunk.arrays()[2]
         );
 
+        // v1
+        assert_eq!(
+            Arc::new(UInt64Array::from_slice(&[
+                1234, 1234, 1234, 1234, 1234, 1234
+            ])) as Arc<dyn Array>,
+            chunk.arrays()[3]
+        );
+
         // sequence
         assert_eq!(
             Arc::new(UInt64Array::from_slice(&[10, 10, 10, 10, 10, 10])) as Arc<dyn Array>,
-            chunk.arrays()[3]
+            chunk.arrays()[4]
         );
 
         // op_type
         assert_eq!(
             Arc::new(UInt8Array::from_slice(&[0, 0, 0, 0, 0, 0])) as Arc<dyn Array>,
-            chunk.arrays()[4]
+            chunk.arrays()[5]
         );
     }
 }

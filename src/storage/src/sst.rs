@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
 use crate::read::BoxedBatchReader;
+use crate::schema::ProjectedSchemaRef;
 use crate::sst::parquet::{ParquetReader, ParquetWriter};
 
 /// Maximum level of SSTs.
@@ -173,6 +174,9 @@ pub struct WriteOptions {
 pub struct ReadOptions {
     /// Suggested size of each batch.
     pub batch_size: usize,
+    /// The schema that user expected to read, might not the same as the
+    /// schema of the SST file.
+    pub projected_schema: ProjectedSchemaRef,
 }
 
 /// SST access layer.
@@ -186,8 +190,7 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
         opts: &WriteOptions,
     ) -> Result<()>;
 
-    /// Read SST file with given `file_name`.
-    // TODO(yingwen): Read SST according to scan request and returns a chunk stream.
+    /// Read SST file with given `file_name` and schema.
     async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
 }
 
@@ -233,9 +236,13 @@ impl AccessLayer for FsAccessLayer {
 
     async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader> {
         let file_path = self.sst_file_path(file_name);
-        let reader = ParquetReader::new(&file_path, self.object_store.clone());
+        let reader = ParquetReader::new(
+            &file_path,
+            self.object_store.clone(),
+            opts.projected_schema.clone(),
+        );
 
-        let stream = reader.chunk_stream(None, opts.batch_size).await?;
+        let stream = reader.chunk_stream(opts.batch_size).await?;
         Ok(Box::new(stream))
     }
 }

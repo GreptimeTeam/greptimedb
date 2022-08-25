@@ -149,6 +149,18 @@ pub struct ColumnMetadata {
     pub desc: ColumnDescriptor,
 }
 
+impl ColumnMetadata {
+    #[inline]
+    pub fn id(&self) -> ColumnId {
+        self.desc.id
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.desc.name
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColumnsMetadata {
     /// All columns.
@@ -220,6 +232,11 @@ impl ColumnsMetadata {
     #[inline]
     pub fn user_column_end(&self) -> usize {
         self.user_column_end
+    }
+
+    #[inline]
+    pub fn column_metadata(&self, idx: usize) -> &ColumnMetadata {
+        &self.columns[idx]
     }
 }
 

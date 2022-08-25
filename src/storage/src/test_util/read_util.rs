@@ -11,24 +11,21 @@ use crate::read::{Batch, BatchReader, BoxedBatchReader};
 fn new_kv_batch(key_values: &[(i64, Option<i64>)]) -> Batch {
     let key = Arc::new(Int64Vector::from_values(key_values.iter().map(|v| v.0)));
     let value = Arc::new(Int64Vector::from_iter(key_values.iter().map(|v| v.1)));
-    let sequences = UInt64Vector::from_vec(vec![0; key_values.len()]);
-    let op_types = UInt8Vector::from_vec(vec![0; key_values.len()]);
+    let sequences = Arc::new(UInt64Vector::from_vec(vec![0; key_values.len()]));
+    let op_types = Arc::new(UInt8Vector::from_vec(vec![0; key_values.len()]));
 
-    Batch {
-        keys: vec![key],
-        sequences,
-        op_types,
-        values: vec![value],
-    }
+    Batch::new(vec![key, value, sequences, op_types])
 }
 
 fn check_kv_batch(batches: &[Batch], expect: &[&[(i64, Option<i64>)]]) {
     for (batch, key_values) in batches.iter().zip(expect.iter()) {
-        let key = batch.keys[0]
+        let key = batch
+            .column(0)
             .as_any()
             .downcast_ref::<Int64Vector>()
             .unwrap();
-        let value = batch.values[0]
+        let value = batch
+            .column(1)
             .as_any()
             .downcast_ref::<Int64Vector>()
             .unwrap();
