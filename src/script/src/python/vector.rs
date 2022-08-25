@@ -512,22 +512,25 @@ impl PyVector {
 
     /// take a boolean array and filters the Array, returning elements matching the filter (i.e. where the values are true).
     #[pymethod(name = "filter")]
-    fn filter(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+    fn filter(&self, other: PyRef<PyVector>, vm: &VirtualMachine) -> PyResult<PyVector> {
         let left = self.to_arrow_array();
+        /* 
         let right = other.downcast_ref::<PyVector>().ok_or_else(|| {
             vm.new_type_error(format!(
                 "Can't cast operand of filter() into PyVector, which is: {}",
                 other.class().name()
             ))
         })?;
-        let right: ArrayRef = right.to_arrow_array();
+        */
+        let right: ArrayRef = other.to_arrow_array();
         let filter = right.as_any().downcast_ref::<BooleanArray>();
-        match filter{
+        match filter {
             Some(filter) => {
                 let res = compute::filter::filter(left.as_ref(), filter);
-                let res = res
-                .map_err(|err|vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
-                let ret = Helper::try_into_vector(&*res).map_err(|e|{
+
+                let res =
+                    res.map_err(|err| vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
+                let ret = Helper::try_into_vector(&*res).map_err(|e| {
                     vm.new_type_error(format!(
                         "Can't cast result into vector, result: {:?}, err: {:?}",
                         res, e
@@ -535,7 +538,9 @@ impl PyVector {
                 })?;
                 Ok(ret.into())
             }
-            None => Err(vm.new_runtime_error(format!("Can't cast operand into a Boolean Array, which is {right:#?}"))),
+            None => Err(vm.new_runtime_error(format!(
+                "Can't cast operand into a Boolean Array, which is {right:#?}"
+            ))),
         }
     }
 

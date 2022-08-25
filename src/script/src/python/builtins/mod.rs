@@ -264,12 +264,14 @@ pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
-    use arrow::array::NullArray;
+    use arrow::array::{NullArray, ArrayRef, BooleanArray};
+    use arrow::compute;
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{function::FunctionContext, Function};
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
+    use datatypes::vectors::Helper;
     use rustpython_vm::function::OptionalArg;
     use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
 
@@ -634,8 +636,20 @@ pub(crate) mod greptime_builtin {
 
     // TODO: prev, sum, pow, sqrt, datetime, slice, and filter(through boolean array)
 
+    /// TODO: for now prev(arr)[0] == arr[0], need better fill method
     #[pyfunction]
-    fn prev(cur: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        todo!()
+    fn prev(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let cur: ArrayRef = cur.to_arrow_array();
+        cur.slice(0, cur.len()-1);
+        let fill = cur.slice(0, 1);
+        let ret = compute::concatenate::concatenate(&[&*fill, &*cur])
+        .map_err(|err|vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}")))?;
+        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+            vm.new_type_error(format!(
+                "Can't cast result into vector, result: {:?}, err: {:?}",
+                ret, e
+            ))
+        })?;
+        Ok(ret.into())
     }
 }
