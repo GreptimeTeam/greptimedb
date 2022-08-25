@@ -138,7 +138,7 @@ impl VectorBuilder {
             (VectorBuilder::String(b), Value::String(v)) => b.push(Some(v.as_utf8())),
             (VectorBuilder::Binary(b), Value::Binary(v)) => b.push(Some(v)),
             (VectorBuilder::Date(b), Value::Date(v)) => b.push(Some(*v)),
-            (VectorBuilder::Date(b), Value::Int32(v)) => b.push(Some(Date::try_new(*v).unwrap())),
+            (VectorBuilder::Date(b), Value::Int32(v)) => b.push(Some(Date::new(*v))),
             (VectorBuilder::DateTime(b), Value::DateTime(v)) => b.push(Some(*v)),
             (VectorBuilder::DateTime(b), Value::Int64(v)) => {
                 b.push(Some(DateTime::try_new(*v).unwrap()))
@@ -292,11 +292,11 @@ mod tests {
         let mut builder = VectorBuilder::with_capacity(ConcreteDataType::date_datatype(), 3);
         assert_eq!(ConcreteDataType::date_datatype(), builder.data_type());
         builder.push_null();
-        builder.push(&Value::Date(Date::try_new(123).unwrap()));
+        builder.push(&Value::Date(Date::new(123)));
         let v = builder.finish();
         let v = v.as_any().downcast_ref::<DateVector>().unwrap();
         assert_eq!(Value::Null, v.get(0));
-        assert_eq!(Value::Date(Date::try_new(123).unwrap()), v.get(1));
+        assert_eq!(Value::Date(Date::new(123)), v.get(1));
         assert_eq!(
             &arrow::datatypes::DataType::Date32,
             v.to_arrow_array().data_type()

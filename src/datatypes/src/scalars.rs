@@ -335,12 +335,10 @@ mod tests {
     #[test]
     pub fn test_build_date_vector() {
         let expect: Vec<Option<Date>> = vec![
-            Some(Date::try_new(0).unwrap()),
-            Some(Date::try_new(-1).unwrap()),
-            Some(Date::try_new(1).unwrap()),
+            Some(Date::new(0)),
+            Some(Date::new(-1)),
             None,
-            Some(Date::MAX),
-            Some(Date::MIN),
+            Some(Date::new(1)),
         ];
         let vector: DateVector = build_vector_from_slice(&expect);
         assert_vector_eq(&expect, &vector);
@@ -348,7 +346,7 @@ mod tests {
 
     #[test]
     pub fn test_date_scalar() {
-        let date = Date::try_new(1).unwrap();
+        let date = Date::new(1);
         assert_eq!(date, date.as_scalar_ref());
         assert_eq!(date, date.to_owned_scalar());
     }

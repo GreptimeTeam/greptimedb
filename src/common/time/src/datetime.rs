@@ -56,7 +56,7 @@ impl DateTime {
 
     /// Max valid DateTime value: 9999-12-31 23:59:59
     pub const MAX: DateTime = DateTime(253402300799);
-    /// Min valid DateTime value: 0000-01-01 00:00:00
+    /// Min valid DateTime value: 1000-01-01 00:00:00
     pub const MIN: DateTime = DateTime(-30610224000);
 }
 

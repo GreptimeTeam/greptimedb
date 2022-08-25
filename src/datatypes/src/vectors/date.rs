@@ -83,9 +83,7 @@ impl Vector for DateVector {
 
     fn get(&self, index: usize) -> Value {
         match self.array.get(index) {
-            Value::Int32(v) => {
-                Value::Date(Date::try_new(v).expect("Not expected to overflow here"))
-            }
+            Value::Int32(v) => Value::Date(Date::new(v)),
             Value::Null => Value::Null,
             _ => {
                 unreachable!()
@@ -114,9 +112,7 @@ impl<'a> Iterator for DateIter<'a> {
     type Item = Option<Date>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next()
-            .map(|v| v.map(|v| Date::try_new(v).unwrap()))
+        self.iter.next().map(|v| v.map(Date::new))
     }
 }
 
@@ -128,7 +124,7 @@ impl ScalarVector for DateVector {
     type Builder = DateVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        self.array.get_data(idx).map(|v| Date::try_new(v).unwrap())
+        self.array.get_data(idx).map(|v| Date::new(v))
     }
 
     fn iter_data(&self) -> Self::Iter<'_> {
@@ -143,7 +139,7 @@ impl Serializable for DateVector {
         Ok(self
             .array
             .iter_data()
-            .map(|v| v.map(|d| Date::try_new(d).unwrap()))
+            .map(|v| v.map(Date::new))
             .map(|v| match v {
                 None => serde_json::Value::Null,
                 Some(v) => v.into(),
@@ -205,26 +201,25 @@ mod tests {
     #[test]
     pub fn test_build_date_vector() {
         let mut builder = DateVectorBuilder::with_capacity(4);
-        builder.push(Some(Date::try_new(1).unwrap()));
+        builder.push(Some(Date::new(1)));
         builder.push(None);
-        builder.push(Some(Date::try_new(-1).unwrap()));
+        builder.push(Some(Date::new(-1)));
         let vector = builder.finish();
         assert_eq!(3, vector.len());
-        assert_eq!(Some(Date::try_new(1).unwrap()), vector.get_data(0));
+        assert_eq!(Some(Date::new(1)), vector.get_data(0));
         assert_eq!(None, vector.get_data(1));
-        assert_eq!(Some(Date::try_new(-1).unwrap()), vector.get_data(2));
+        assert_eq!(Some(Date::new(-1)), vector.get_data(2));
         let mut iter = vector.iter_data();
-        assert_eq!(Some(Date::try_new(1).unwrap()), iter.next().unwrap());
+        assert_eq!(Some(Date::new(1)), iter.next().unwrap());
         assert_eq!(None, iter.next().unwrap());
-        assert_eq!(Some(Date::try_new(-1).unwrap()), iter.next().unwrap());
+        assert_eq!(Some(Date::new(-1)), iter.next().unwrap());
     }
 
     #[test]
     pub fn test_date_scalar() {
-        let vector =
-            DateVector::from_slice(&[Date::try_new(1).unwrap(), Date::try_new(2).unwrap()]);
+        let vector = DateVector::from_slice(&[Date::new(1), Date::new(2)]);
         assert_eq!(2, vector.len());
-        assert_eq!(Some(Date::try_new(1).unwrap()), vector.get_data(0));
-        assert_eq!(Some(Date::try_new(2).unwrap()), vector.get_data(1));
+        assert_eq!(Some(Date::new(1)), vector.get_data(0));
+        assert_eq!(Some(Date::new(2)), vector.get_data(1));
     }
 }
