@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use crate::error::{self, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
-use crate::schema::{ProjectedSchemaRef, SstSchema};
+use crate::schema::{ProjectedSchemaRef, StoreSchema};
 use crate::sst;
 
 /// Parquet sst writer.
@@ -55,8 +55,8 @@ impl<'a> ParquetWriter<'a> {
     /// in config will be written to a single row group.
     async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
         let projected_schema = self.iter.schema();
-        let sst_schema = projected_schema.schema_to_read();
-        let schema = sst_schema.arrow_schema();
+        let store_schema = projected_schema.schema_to_read();
+        let schema = store_schema.arrow_schema();
         let object = self.object_store.object(self.file_path);
 
         // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
@@ -82,7 +82,7 @@ impl<'a> ParquetWriter<'a> {
 
         for batch in self.iter {
             let batch = batch?;
-            sink.send(sst_schema.batch_to_arrow_chunk(&batch))
+            sink.send(store_schema.batch_to_arrow_chunk(&batch))
                 .await
                 .context(error::WriteParquetSnafu)?;
         }
@@ -193,10 +193,10 @@ impl<'a> ParquetReader<'a> {
             .context(error::ReadParquetSnafu { file: &file_path })?;
         let arrow_schema =
             infer_schema(&metadata).context(error::ReadParquetSnafu { file: &file_path })?;
-        // Now the SstSchema is only used to validate metadata of the parquet file, but this schema
+        // Now the StoreSchema is only used to validate metadata of the parquet file, but this schema
         // would be useful once we support altering schema, as this is the actual schema of the SST.
-        let _sst_schema = SstSchema::try_from(arrow_schema)
-            .context(error::ConvertSstSchemaSnafu { file: &file_path })?;
+        let _store_schema = StoreSchema::try_from(arrow_schema)
+            .context(error::ConvertStoreSchemaSnafu { file: &file_path })?;
 
         let projected_fields = self.projected_fields().to_vec();
         let chunk_stream = try_stream!({
