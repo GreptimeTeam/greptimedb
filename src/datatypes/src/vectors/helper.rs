@@ -142,6 +142,9 @@ impl Helper {
             ScalarValue::Date32(v) => {
                 ConstantVector::new(Arc::new(DateVector::from(vec![v])), length)
             }
+            ScalarValue::Date64(v) => {
+                ConstantVector::new(Arc::new(DateTimeVector::from(vec![v])), length)
+            }
             _ => {
                 return ConversionSnafu {
                     from: format!("Unsupported scalar value: {}", value),
@@ -193,6 +196,7 @@ impl Helper {
 mod tests {
     use arrow::array::Int32Array;
     use common_time::date::Date;
+    use common_time::datetime::DateTime;
 
     use super::*;
 
@@ -231,6 +235,19 @@ mod tests {
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
             assert_eq!(Value::Date(Date::try_new(42).unwrap()), vector.get(i));
+        }
+    }
+
+    #[test]
+    pub fn test_try_from_scalar_datetime_value() {
+        let vector = Helper::try_from_scalar_value(ScalarValue::Date64(Some(42)), 3).unwrap();
+        assert_eq!(ConcreteDataType::datetime_datatype(), vector.data_type());
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(
+                Value::DateTime(DateTime::try_new(42).unwrap()),
+                vector.get(i)
+            );
         }
     }
 }

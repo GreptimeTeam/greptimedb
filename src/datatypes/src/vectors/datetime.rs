@@ -113,6 +113,14 @@ impl Serializable for DateTimeVector {
     }
 }
 
+impl From<Vec<Option<i64>>> for DateTimeVector {
+    fn from(data: Vec<Option<i64>>) -> Self {
+        Self {
+            array: PrimitiveVector::<i64>::from(data),
+        }
+    }
+}
+
 pub struct DateTimeVectorBuilder {
     buffer: PrimitiveVectorBuilder<i64>,
 }
