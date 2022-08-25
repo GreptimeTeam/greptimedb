@@ -631,4 +631,11 @@ pub(crate) mod greptime_builtin {
             .unwrap();
         Ok(res.into())
     }
+
+    // TODO: prev, sum, pow, sqrt, datetime, slice, and filter(through boolean array)
+
+    #[pyfunction]
+    fn prev(cur: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        todo!()
+    }
 }

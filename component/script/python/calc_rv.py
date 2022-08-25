@@ -43,17 +43,21 @@ def as_table(kline: list):
     "rv_90d",
     "rv_180d"
 ])
-def calc_rvs(open_time, close):
+def calc_rvs(open_time, close: vector):
+    from greptime import vector, log, prev, sqrt, datetime
     def calc_rv(close, open_time, time, interval):
         # close = table["close"]
         # open_time = table["open_time"]
-        slice_idx = (open_time<time) & (open_time>time-interval)
-        close = close[slice_idx]
-        time_interval = (open_time[-1] - open_time[0])/(len(open_time)-1)
+        filtered = vector([
+            True if i < time and i> time-interval else False 
+            for i in open_time
+        ])
+        close = close.filter(filtered)
 
+        avg_time_interval = (open_time[-1] - open_time[0])/(len(open_time)-1)
         ref = log(close/prev(close))
         var = sum(pow(ref, 2)/(len(ref)-1))
-        return sqrt(var/time_interval)
+        return sqrt(var/avg_time_interval)
 
     # how to get env var, maybe through closure?
     timepoint = open_time[-1]

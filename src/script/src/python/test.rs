@@ -192,7 +192,7 @@ fn test_coprocessor() {
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu, mem):
     import greptime as gt
-    abc = cpu
+    abc = cpu < mem
     abc *= 2
     return abc, gt.sqrt(cpu)
 "#;

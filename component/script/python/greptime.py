@@ -72,6 +72,9 @@ class vector(np.ndarray):
     
     def datatype(self):
         return self._datatype
+    
+    def filter(self, lst_bool):
+        return self[lst_bool]
 
 def prev(lst):
     ret = np.zeros(len(lst))

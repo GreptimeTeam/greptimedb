@@ -1,6 +1,8 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
+use arrow::array::BooleanArray;
+use arrow::compute;
 use arrow::datatypes::DataType;
 use arrow::scalar::{PrimitiveScalar, Scalar};
 use arrow::{
@@ -508,6 +510,35 @@ impl PyVector {
         self.as_vector_ref().len()
     }
 
+    /// take a boolean array and filters the Array, returning elements matching the filter (i.e. where the values are true).
+    #[pymethod(name = "filter")]
+    fn filter(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let left = self.to_arrow_array();
+        let right = other.downcast_ref::<PyVector>().ok_or_else(|| {
+            vm.new_type_error(format!(
+                "Can't cast operand of filter() into PyVector, which is: {}",
+                other.class().name()
+            ))
+        })?;
+        let right: ArrayRef = right.to_arrow_array();
+        let filter = right.as_any().downcast_ref::<BooleanArray>();
+        match filter{
+            Some(filter) => {
+                let res = compute::filter::filter(left.as_ref(), filter);
+                let res = res
+                .map_err(|err|vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
+                let ret = Helper::try_into_vector(&*res).map_err(|e|{
+                    vm.new_type_error(format!(
+                        "Can't cast result into vector, result: {:?}, err: {:?}",
+                        res, e
+                    ))
+                })?;
+                Ok(ret.into())
+            }
+            None => Err(vm.new_runtime_error(format!("Can't cast operand into a Boolean Array, which is {right:#?}"))),
+        }
+    }
+
     #[pymethod(magic)]
     fn doc(&self) -> PyResult<PyStr> {
         Ok(PyStr::from(
@@ -515,6 +546,7 @@ impl PyVector {
         ))
     }
 
+    /// TODO: add support for filter
     fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         match SequenceIndex::try_from_borrowed_object(vm, needle, "mmap")? {
             SequenceIndex::Int(i) => self.getitem_by_index(i, vm),
