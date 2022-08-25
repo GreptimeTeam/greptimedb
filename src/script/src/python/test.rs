@@ -15,9 +15,11 @@ use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
 
 use super::error::{get_error_reason_loc, visualize_loc};
-use super::*;
+use crate::python::coprocessor::AnnotationInfo;
 use crate::python::error::pretty_print_error_in_src;
-use crate::python::{copr_parse::parse_copr, coprocessor::Coprocessor, error::Error};
+use crate::python::{
+    coprocessor, coprocessor::parse::parse_copr, coprocessor::Coprocessor, error::Error,
+};
 
 #[derive(Deserialize, Debug)]
 struct TestCase {
@@ -67,7 +69,7 @@ fn create_sample_recordbatch() -> DfRecordBatch {
 /// and exec/parse (depending on the type of predicate) then decide if result is as expected
 #[test]
 fn run_ron_testcases() {
-    let loc = Path::new("src/python/copr_testcases/testcases.ron");
+    let loc = Path::new("src/python/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
     let mut buf = String::new();
@@ -104,7 +106,7 @@ fn run_ron_testcases() {
             }
             Predicate::ExecIsOk { fields, columns } => {
                 let rb = create_sample_recordbatch();
-                let res = exec_coprocessor(&testcase.code, &rb);
+                let res = coprocessor::exec_coprocessor(&testcase.code, &rb);
                 if res.is_err() {
                     dbg!(&res);
                 }
@@ -112,7 +114,7 @@ fn run_ron_testcases() {
                 let res = res.unwrap();
                 fields
                     .iter()
-                    .zip(&res.schema().fields)
+                    .zip(&res.schema.arrow_schema().fields)
                     .map(|(anno, real)| {
                         if !(anno.datatype.clone().unwrap() == real.data_type
                             && anno.is_nullable == real.is_nullable)
@@ -124,7 +126,7 @@ fn run_ron_testcases() {
                     .count();
                 columns
                     .iter()
-                    .zip(res.columns())
+                    .zip(res.df_recordbatch.columns())
                     .map(|(anno, real)| {
                         if !(&anno.ty == real.data_type() && anno.len == real.len()) {
                             eprintln!(
@@ -143,7 +145,7 @@ fn run_ron_testcases() {
                 reason: part_reason,
             } => {
                 let rb = create_sample_recordbatch();
-                let res = exec_coprocessor(&testcase.code, &rb);
+                let res = coprocessor::exec_coprocessor(&testcase.code, &rb);
                 if let Err(res) = res {
                     println!(
                         "{}",
@@ -202,7 +204,7 @@ def a(cpu, mem):
     ]));
     let rb =
         DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
-    let ret = exec_coprocessor(python_source, &rb);
+    let ret = coprocessor::exec_coprocessor(python_source, &rb);
     if let Err(Error::PyParse {
         backtrace: _,
         source,

@@ -1,11 +1,15 @@
+pub mod parse;
+
 use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
 use arrow::compute::cast::CastOptions;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use common_recordbatch::RecordBatch;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use datatypes::schema::Schema;
 use datatypes::vectors::Helper;
 use datatypes::vectors::{BooleanVector, Vector, VectorRef};
 use rustpython_bytecode::CodeObject;
@@ -23,12 +27,14 @@ use vm::scope::Scope;
 use vm::{Interpreter, PyObjectRef, VirtualMachine};
 
 use crate::fail_parse_error;
-use crate::python::copr_parse::{parse_copr, ret_parse_error};
+use crate::python::builtins::greptime_builtin;
+use crate::python::coprocessor::parse::{ret_parse_error, DecoratorArgs};
 use crate::python::error::{
-    ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyExceptionSerde, PyParseSnafu,
-    PyRuntimeSnafu, Result, TypeCastSnafu,
+    ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyParseSnafu, Result,
+    TypeCastSnafu,
 };
-use crate::python::{is_instance, PyVector};
+use crate::python::utils::format_py_error;
+use crate::python::{utils::is_instance, PyVector};
 
 fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
     OtherSnafu { reason }
@@ -37,9 +43,6 @@ fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 #[cfg(test)]
 use serde::Deserialize;
 
-use crate::python::copr_parse::DecoratorArgs;
-use crate::python::error::pretty_print_error_in_src;
-
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnotationInfo {
@@ -47,6 +50,8 @@ pub struct AnnotationInfo {
     pub datatype: Option<DataType>,
     pub is_nullable: bool,
 }
+
+pub type CoprocessorRef = Arc<Coprocessor>;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -198,7 +203,7 @@ impl Coprocessor {
     /// generate [`Schema`] according to return names, types,
     /// if no annotation
     /// the datatypes of the actual columns is used directly
-    fn gen_schema(&self, cols: &[ArrayRef]) -> Result<Arc<Schema>> {
+    fn gen_schema(&self, cols: &[ArrayRef]) -> Result<Arc<ArrowSchema>> {
         let names = &self.deco_args.ret_names;
         let anno = &self.return_types;
         ensure!(
@@ -212,7 +217,7 @@ impl Coprocessor {
                 )
             }
         );
-        Ok(Arc::new(Schema::from(
+        Ok(Arc::new(ArrowSchema::from(
             names
                 .iter()
                 .enumerate()
@@ -342,27 +347,26 @@ fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -
             )))?;
         Ok(pyv.to_arrow_array())
     } else if is_instance::<PyInt>(obj, vm) {
-        let val = obj.to_owned().try_into_value::<i64>(vm);
-        let val = match val {
-            Ok(val) => val,
-            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
-        };
+        let val = obj
+            .to_owned()
+            .try_into_value::<i64>(vm)
+            .map_err(|e| format_py_error(e, vm))?;
+
         let ret = PrimitiveArray::from_vec(vec![val; col_len]);
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyFloat>(obj, vm) {
-        let val = obj.to_owned().try_into_value::<f64>(vm);
-        let val = match val {
-            Ok(val) => val,
-            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
-        };
+        let val = obj
+            .to_owned()
+            .try_into_value::<f64>(vm)
+            .map_err(|e| format_py_error(e, vm))?;
         let ret = PrimitiveArray::from_vec(vec![val; col_len]);
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyBool>(obj, vm) {
-        let val = obj.to_owned().try_into_value::<bool>(vm);
-        let val = match val {
-            Ok(val) => val,
-            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
-        };
+        let val = obj
+            .to_owned()
+            .try_into_value::<bool>(vm)
+            .map_err(|e| format_py_error(e, vm))?;
+
         let ret = BooleanArray::from_iter(std::iter::repeat(Some(val)).take(5));
         Ok(Arc::new(ret) as _)
     } else {
@@ -455,7 +459,7 @@ fn set_items_in_scope(
     arg_names: &[String],
     args: Vec<PyVector>,
 ) -> Result<()> {
-    let res = arg_names
+    let _ = arg_names
         .iter()
         .zip(args)
         .map(|(name, vector)| {
@@ -464,12 +468,9 @@ fn set_items_in_scope(
                 .as_object()
                 .set_item(name, vm.new_pyobj(vector), vm)
         })
-        .collect::<StdResult<Vec<()>, PyBaseExceptionRef>>();
-    if let Err(res) = res {
-        Err(to_serde_excep(res, vm)?).context(PyRuntimeSnafu)
-    } else {
-        Ok(())
-    }
+        .collect::<StdResult<Vec<()>, PyBaseExceptionRef>>()
+        .map_err(|e| format_py_error(e, vm))?;
+    Ok(())
 }
 
 /// The coprocessor function accept a python script and a Record Batch:
@@ -523,11 +524,12 @@ fn set_items_in_scope(
 /// # Return Constant columns
 /// You can return constant in python code like `return 1, 1.0, True`
 /// which create a constant array(with same value)(currently support int, float and bool) as column on return
-pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
+#[cfg(test)]
+pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
-    let copr = parse_copr(script)?;
+    let copr = parse::parse_copr(script)?;
     exec_parsed(&copr, rb)
 }
 
@@ -536,8 +538,8 @@ pub(crate) fn exec_with_cached_vm(
     rb: &DfRecordBatch,
     args: Vec<PyVector>,
     vm: &Interpreter,
-) -> Result<DfRecordBatch> {
-    vm.enter(|vm| -> Result<DfRecordBatch> {
+) -> Result<RecordBatch> {
+    vm.enter(|vm| -> Result<RecordBatch> {
         PyVector::make_class(&vm.ctx);
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
@@ -545,12 +547,9 @@ pub(crate) fn exec_with_cached_vm(
 
         let code_obj = copr.strip_append_and_compile()?;
         let code_obj = vm.ctx.new_code(code_obj);
-        let run_res = vm.run_code_obj(code_obj, scope);
-        // FIXME: better error handling, perhaps with chain calls
-        let ret = match run_res {
-            Err(excep) => return Err(to_serde_excep(excep, vm)?).context(PyRuntimeSnafu)?,
-            Ok(ret) => ret,
-        };
+        let ret = vm
+            .run_code_obj(code_obj, scope)
+            .map_err(|e| format_py_error(e, vm))?;
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
         let col_len = rb.num_rows();
@@ -570,11 +569,13 @@ pub(crate) fn exec_with_cached_vm(
         copr.check_and_cast_type(&mut cols)?;
         // 6. return a assembled DfRecordBatch
         let schema = copr.gen_schema(&cols)?;
-        let res_rb = DfRecordBatch::try_new(schema, cols).context(ArrowSnafu)?;
-        Ok(res_rb)
+        let res_rb = DfRecordBatch::try_new(schema.clone(), cols).context(ArrowSnafu)?;
+        Ok(RecordBatch {
+            schema: Arc::new(Schema::try_from(schema).context(TypeCastSnafu)?),
+            df_recordbatch: res_rb,
+        })
     })
 }
-use crate::py_udf_module::greptime_builtin;
 
 /// init interpreter with type PyVector and Module: greptime
 pub(crate) fn init_interpreter() -> Interpreter {
@@ -585,7 +586,7 @@ pub(crate) fn init_interpreter() -> Interpreter {
 }
 
 /// using a parsed `Coprocessor` struct as input to execute python code
-pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRecordBatch> {
+pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<RecordBatch> {
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
     check_args_anno_real_type(&args, copr, rb)?;
@@ -599,23 +600,16 @@ pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<DfRe
 /// return a friendly String format of error
 ///
 /// use `ln_offset` and `filename` to offset line number and mark file name in error prompt
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn exec_copr_print(
     script: &str,
     rb: &DfRecordBatch,
     ln_offset: usize,
     filename: &str,
-) -> StdResult<DfRecordBatch, String> {
+) -> StdResult<RecordBatch, String> {
     let res = exec_coprocessor(script, rb);
-    res.map_err(|e| pretty_print_error_in_src(script, &e, ln_offset, filename))
-}
-
-/// transfer a Python Exception into a python call stack in `String` format
-fn to_serde_excep(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> Result<PyExceptionSerde> {
-    let mut chain = String::new();
-    let r = vm.write_exception(&mut chain, &excep);
-    // FIXME: better error handling, perhaps with chain calls?
-    if let Err(r) = r {
-        return ret_other_error_with(format!("Fail to write to string, error: {:#?}", r)).fail();
-    }
-    Ok(PyExceptionSerde { output: chain })
+    res.map_err(|e| {
+        crate::python::error::pretty_print_error_in_src(script, &e, ln_offset, filename)
+    })
 }

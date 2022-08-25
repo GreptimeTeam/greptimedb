@@ -10,9 +10,9 @@ use rustpython_parser::{
 use serde::Deserialize;
 use snafu::ResultExt;
 
+use crate::python::coprocessor::AnnotationInfo;
 use crate::python::coprocessor::Coprocessor;
 use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
-use crate::python::AnnotationInfo;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Default, Debug, Clone, PartialEq, Eq)]

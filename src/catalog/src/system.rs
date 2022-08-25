@@ -257,7 +257,7 @@ pub fn decode_system_catalog(
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum EntryType {
     Catalog = 1,
     Schema = 2,
@@ -280,25 +280,25 @@ impl TryFrom<u8> for EntryType {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Entry {
     Catalog(CatalogEntry),
     Schema(SchemaEntry),
     Table(TableEntry),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct CatalogEntry {
     pub catalog_name: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SchemaEntry {
     pub catalog_name: String,
     pub schema_name: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct TableEntry {
     pub catalog_name: String,
     pub schema_name: String,
@@ -306,7 +306,7 @@ pub struct TableEntry {
     pub table_id: TableId,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TableEntryValue {
     pub table_id: TableId,
 }

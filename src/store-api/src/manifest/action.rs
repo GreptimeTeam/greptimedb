@@ -25,7 +25,7 @@ pub struct ProtocolAction {
     pub min_writer_version: ProtocolVersion,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct VersionHeader {
     pub prev_version: ManifestVersion,
 }
