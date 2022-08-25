@@ -26,5 +26,5 @@ logs/
 .DS_store
 .gitignore
 
-# for component/script/python
+# cpython's generated python byte code
 component/script/python/__pycache__/*.pyc

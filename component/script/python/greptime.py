@@ -122,16 +122,10 @@ def factor(unit: str) -> int :
 
 def datetime(input_time: str) -> int:
     """
+    support `d`(day) `h`(hour) `m`(minute) `s`(second)
+
     support format:
-    12:31m
-    12:31:12
-    12:31:12s
-    31:00s
-    31:00m
-    12s
-    7d
-    12d7m
-    12d2h7m
+    `12s` `7d` `12d2h7m`
     """
     
     prev = 0
@@ -169,6 +163,10 @@ def datetime(input_time: str) -> int:
     return res_time
 
 def coprocessor(args, returns, sql=None):
+    """
+    The actual coprocessor, which will connect to database and update 
+    whatever function decorated with `@coprocessor(args=[...], returns=[...], sql=...)`
+    """
     def decorator_copr(func):
         @functools.wraps(func)
         def wrapper_do_actual(*args, **kwargs):
