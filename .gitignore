@@ -25,3 +25,6 @@ logs/
 
 .DS_store
 .gitignore
+
+# for component/script/python
+component/script/python/__pycache__/*.pyc
