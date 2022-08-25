@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::data_type::{DataType, DataTypeRef};
 use crate::prelude::{LogicalTypeId, Value};
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize, Eq)]
 pub struct DateTimeType;
 
 const DATE_TIME_TYPE_NAME: &str = "DateTime";
