@@ -656,7 +656,7 @@ pub(crate) mod greptime_builtin {
     }
 
     #[pyfunction]
-    fn datetime(input: &PyStr, vm: &VirtualMachine) -> PyResult<usize> {
+    fn datetime(input: &PyStr, vm: &VirtualMachine) -> PyResult<isize> {
         let mut parsed = Vec::new();
         let mut prev = 0;
         #[derive(Debug)]
@@ -676,7 +676,7 @@ pub(crate) mod greptime_builtin {
                     state = State::Num(Default::default());
                 }
                 (false, State::Num(_)) => {
-                    let res = str::parse(&input[prev..idx]).map_err(|err|{
+                    let res = str::parse(&input[prev..idx]).map_err(|err| {
                         vm.new_runtime_error(format!("Fail to parse num: {err:#?}"))
                     })?;
                     let res = State::Num(res);
@@ -690,30 +690,34 @@ pub(crate) mod greptime_builtin {
 
         let mut cur_idx = 0;
         let mut tot_time = 0;
-        fn factor(unit: &str, vm: &VirtualMachine) -> PyResult<isize>{
-            let ret = match unit{
+        fn factor(unit: &str, vm: &VirtualMachine) -> PyResult<isize> {
+            let ret = match unit {
                 "d" => 24 * 60 * 60,
                 "h" => 60 * 60,
                 "m" => 60,
                 "s" => 1,
-                _ => return Err(vm.new_type_error(format!("Unknown time unit: {unit}")))
+                _ => return Err(vm.new_type_error(format!("Unknown time unit: {unit}"))),
             };
             Ok(ret)
         }
-        while cur_idx < parsed.len(){
-            match &parsed[cur_idx]{
+        while cur_idx < parsed.len() {
+            match &parsed[cur_idx] {
                 State::Num(v) => {
-                    let nxt = &parsed[cur_idx+1];
-                    if let State::Separator(sep) = nxt{
-                        tot_time += v * factor(&sep, vm)?;
-                    }else{
-                        return Err(vm.new_runtime_error(format!("Expect a spearator after number, found {nxt:#?}")))
+                    let nxt = &parsed[cur_idx + 1];
+                    if let State::Separator(sep) = nxt {
+                        tot_time += v * factor(sep, vm)?;
+                    } else {
+                        return Err(vm.new_runtime_error(format!(
+                            "Expect a spearator after number, found {nxt:#?}"
+                        )));
                     }
                     cur_idx += 2;
-                },
-                State::Separator(sep) => return Err(vm.new_runtime_error(format!("Expect a number, found {sep}"))),
+                }
+                State::Separator(sep) => {
+                    return Err(vm.new_runtime_error(format!("Expect a number, found {sep}")))
+                }
             }
         }
-        todo!()
+        Ok(tot_time)
     }
 }
