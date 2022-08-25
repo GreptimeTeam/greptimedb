@@ -218,8 +218,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to convert sst schema, file: {}, source: {}", file, source))]
-    ConvertSstSchema {
+    #[snafu(display("Failed to convert store schema, file: {}, source: {}", file, source))]
+    ConvertStoreSchema {
         file: String,
         #[snafu(backtrace)]
         source: crate::schema::Error,
@@ -265,7 +265,7 @@ impl ErrorExt for Error {
             | WalDataCorrupted { .. }
             | VersionNotFound { .. }
             | SequenceNotMonotonic { .. }
-            | ConvertSstSchema { .. }
+            | ConvertStoreSchema { .. }
             | InvalidRawRegion { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
