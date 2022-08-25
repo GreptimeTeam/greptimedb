@@ -39,7 +39,7 @@ fn new_write_batch_for_test() -> WriteBatch {
 /// ```text
 /// k0: [key_start, key_start + 1, ... key_start + len - 1]
 /// timestamp: [ts_start, ts_start + 1, ... ts_start + len - 1]
-/// v0: [initial_value, ...., inital_value]
+/// v0: [initial_value, ...., initial_value]
 /// v1: [initial_value, ..., initial_value + len - 1]
 /// ```
 fn new_put_data(len: usize, key_start: i64, ts_start: i64, initial_value: i64) -> PutData {

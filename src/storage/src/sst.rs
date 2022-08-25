@@ -174,6 +174,9 @@ pub struct WriteOptions {
 pub struct ReadOptions {
     /// Suggested size of each batch.
     pub batch_size: usize,
+    /// The schema that user expected to read, might not the same as the
+    /// schema of the SST file.
+    pub projected_schema: ProjectedSchemaRef,
 }
 
 /// SST access layer.
@@ -188,15 +191,7 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     ) -> Result<()>;
 
     /// Read SST file with given `file_name` and schema.
-    ///
-    /// `projected_schema` is the schema that user expected to read, might not the as the
-    /// schema of the SST file.
-    async fn read_sst(
-        &self,
-        file_name: &str,
-        projected_schema: ProjectedSchemaRef,
-        opts: &ReadOptions,
-    ) -> Result<BoxedBatchReader>;
+    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
@@ -239,14 +234,13 @@ impl AccessLayer for FsAccessLayer {
         Ok(())
     }
 
-    async fn read_sst(
-        &self,
-        file_name: &str,
-        projected_schema: ProjectedSchemaRef,
-        opts: &ReadOptions,
-    ) -> Result<BoxedBatchReader> {
+    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader> {
         let file_path = self.sst_file_path(file_name);
-        let reader = ParquetReader::new(&file_path, self.object_store.clone(), projected_schema);
+        let reader = ParquetReader::new(
+            &file_path,
+            self.object_store.clone(),
+            opts.projected_schema.clone(),
+        );
 
         let stream = reader.chunk_stream(opts.batch_size).await?;
         Ok(Box::new(stream))

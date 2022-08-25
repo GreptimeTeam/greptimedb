@@ -141,12 +141,13 @@ impl ChunkReaderBuilder {
 
         let read_opts = ReadOptions {
             batch_size: self.iter_ctx.batch_size,
+            projected_schema: schema.clone(),
         };
         let mut sst_readers = Vec::with_capacity(self.files_to_read.len());
         for file in &self.files_to_read {
             let reader = self
                 .sst_layer
-                .read_sst(file.file_name(), schema.clone(), &read_opts)
+                .read_sst(file.file_name(), &read_opts)
                 .await?;
 
             sst_readers.push(reader);
