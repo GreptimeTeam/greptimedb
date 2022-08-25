@@ -13,6 +13,7 @@ pub mod primitive;
 mod string;
 
 use std::any::Any;
+use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -110,6 +111,10 @@ pub trait Vector: Send + Sync + Serializable + Debug {
         self.null_count() == self.len()
     }
 
+    /// Slices the `Vector`, returning a new `VectorRef`.
+    ///
+    /// # Panics
+    /// This function panics if `offset + length > self.len()`.
     fn slice(&self, offset: usize, length: usize) -> VectorRef;
 
     /// Returns the clone of value at `index`.
@@ -134,6 +139,14 @@ pub trait Vector: Send + Sync + Serializable + Debug {
     // Copies each element according offsets parameter.
     // (i-th element should be copied offsets[i] - offsets[i - 1] times.)
     fn replicate(&self, offsets: &[usize]) -> VectorRef;
+
+    /// Compare `i-th` element of `self` to `j-th` element of `other`.
+    ///
+    /// # Panics
+    /// Panics if
+    /// - the data type of `self` is different from data type of `other`.
+    /// - `i` or `j` is out of bound.
+    fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering;
 }
 
 pub type VectorRef = Arc<dyn Vector>;

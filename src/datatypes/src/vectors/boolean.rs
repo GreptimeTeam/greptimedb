@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::borrow::Borrow;
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, BooleanArray, MutableArray, MutableBooleanArray};
@@ -94,6 +95,11 @@ impl Vector for BooleanVector {
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         replicate_scalar_vector(self, offsets)
+    }
+
+    fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering {
+        let right = other.as_any().downcast_ref::<BooleanVector>().unwrap();
+        self.get(i).cmp(&right.get(j))
     }
 }
 

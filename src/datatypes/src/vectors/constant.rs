@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
@@ -97,6 +98,11 @@ impl Vector for ConstantVector {
         );
 
         Arc::new(Self::new(self.vector.clone(), *offsets.last().unwrap()))
+    }
+
+    fn cmp_element(&self, _i: usize, other: &dyn Vector, _j: usize) -> Ordering {
+        let right = other.as_any().downcast_ref::<ConstantVector>().unwrap();
+        self.vector.cmp_element(0, &*right.vector, 0)
     }
 }
 

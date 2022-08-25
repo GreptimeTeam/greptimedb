@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::cmp::Ordering;
 use std::iter::FromIterator;
 use std::slice::Iter;
 use std::sync::Arc;
@@ -127,6 +128,13 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
             previous_offset = *offset;
         }
         builder.to_vector()
+    }
+
+    fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering {
+        // Ensure they have same vector type.
+        let right = other.as_any().downcast_ref::<PrimitiveVector<T>>().unwrap();
+        // `get()` returns `Value`, which implements `Ord`.
+        self.get(i).cmp(&right.get(j))
     }
 }
 
