@@ -8,8 +8,7 @@ use axum::{
     error_handling::HandleErrorLayer,
     response::IntoResponse,
     response::{Json, Response},
-    routing::get,
-    BoxError, Extension, Router,
+    routing, BoxError, Extension, Router,
 };
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
@@ -117,8 +116,9 @@ impl HttpServer {
     pub fn make_app(&self) -> Router {
         Router::new()
             // handlers
-            .route("/sql", get(handler::sql))
-            .route("/metrics", get(handler::metrics))
+            .route("/sql", routing::get(handler::sql))
+            .route("/metrics", routing::get(handler::metrics))
+            .route("/scripts", routing::post(handler::scripts))
             // middlewares
             .layer(
                 ServiceBuilder::new()

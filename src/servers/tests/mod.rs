@@ -23,6 +23,9 @@ impl SqlQueryHandler for DummyInstance {
         let plan = self.query_engine.sql_to_plan(query).unwrap();
         Ok(self.query_engine.execute(&plan).await.unwrap())
     }
+    async fn do_execute(&self, _script: &str, _engine: Option<String>) -> Result<Output> {
+        unimplemented!()
+    }
 }
 
 fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
