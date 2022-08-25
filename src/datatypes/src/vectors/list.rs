@@ -68,6 +68,10 @@ impl Vector for ListVector {
     }
 
     fn get(&self, index: usize) -> Value {
+        if !self.array.is_valid(index) {
+            return Value::Null;
+        }
+
         let array = &self.array.value(index);
         let vector = VectorHelper::try_into_vector(array).unwrap_or_else(|_| {
             panic!(
@@ -190,13 +194,7 @@ mod tests {
             )),
             list_vector.get(0)
         );
-        assert_eq!(
-            Value::List(ListValue::new(
-                Some(Box::new(vec![])),
-                ConcreteDataType::int32_datatype()
-            )),
-            list_vector.get(1)
-        );
+        assert_eq!(Value::Null, list_vector.get(1));
         assert_eq!(
             Value::List(ListValue::new(
                 Some(Box::new(vec![
