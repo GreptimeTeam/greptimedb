@@ -1,8 +1,8 @@
-from greptime import interval, vector, log, prev, sqrt, datetime
+from greptime import interval, vector, log, prev, sqrt, datetime, coprocessor
 import json
 import numpy as np
 
-from mock import coprocessor, mock_tester
+from mock import mock_tester
 
 
 def data_sample(k_lines, symbol, density=5 * 30 * 86400):
@@ -54,8 +54,9 @@ def calc_rvs(open_time, close):
         ref = log(close/prev(close))
         var = sum(pow(ref, 2)/(len(ref)-1))
         return sqrt(var/time_interval)
+
     # how to get env var, maybe through closure?
-    timepoint = open_time[-1]#1661225351
+    timepoint = open_time[-1]
     rv_7d = calc_rv(close, open_time, timepoint, datetime("7d"))
     rv_15d = calc_rv(close, open_time, timepoint, datetime("15d"))
     rv_30d = calc_rv(close, open_time, timepoint, datetime("30d"))

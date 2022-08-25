@@ -4,27 +4,14 @@ it can only run on mock data and support by numpy
 """
 from typing import Any
 import numpy as np
-from greptime import i32,i64,f32,f64, vector, interval, query, prev, datetime, log, sum, sqrt, pow, nan
+from greptime import i32,i64,f32,f64, vector, interval, query, prev, datetime, log, sum, sqrt, pow, nan, copr, coprocessor
 
 # TODO: write a python side coprocessor to passs all info to db
 import inspect
 import functools
 import ast
 
-def coprocessor(args, returns, sql=None):
-    def decorator_copr(func):
-        @functools.wraps(func)
-        def wrapper_do_actual(*args, **kwargs):
-            # print("Mock Python Coprocessor post:")
-            # print("args=", args,"kwargs=", kwargs)
-            # print(inspect.getsource(func))
-            # print(func(*args, **kwargs))
-            # insert actual communciation code here for real thing
-            raise Exception("Connnect to databse is unimplement yet.")
-        return wrapper_do_actual
-    return decorator_copr
-# make a alias for short
-copr = coprocessor
+
 
 def mock_tester(
     func,

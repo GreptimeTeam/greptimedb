@@ -4,11 +4,14 @@ it can only run on mock data and mock function which is support by numpy
 """
 
 import numpy as np
+import functools
+
 log = np.log
 sum = np.nansum
 sqrt = np.sqrt
 pow = np.power
 nan = np.nan
+
 class TimeStamp(str):
     """
     TODO: impl date time
@@ -164,3 +167,18 @@ def datetime(input_time: str) -> int:
             raise Exception("Two symbol in a row is impossible")
     
     return res_time
+
+def coprocessor(args, returns, sql=None):
+    def decorator_copr(func):
+        @functools.wraps(func)
+        def wrapper_do_actual(*args, **kwargs):
+            # print("Mock Python Coprocessor post:")
+            # print("args=", args,"kwargs=", kwargs)
+            # print(inspect.getsource(func))
+            # print(func(*args, **kwargs))
+            # insert actual communciation code here for real thing
+            raise Exception("Connnect to databse is unimplement yet.")
+        return wrapper_do_actual
+    return decorator_copr
+# make a alias for short
+copr = coprocessor
