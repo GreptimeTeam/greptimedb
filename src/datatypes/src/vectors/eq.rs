@@ -1,0 +1,211 @@
+use std::sync::Arc;
+
+use crate::data_type::DataType;
+use crate::vectors::{
+    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, ListVector,
+    PrimitiveVector, StringVector, Vector,
+};
+use crate::with_match_primitive_type_id;
+
+impl Eq for dyn Vector + '_ {}
+
+impl PartialEq for dyn Vector + '_ {
+    fn eq(&self, other: &dyn Vector) -> bool {
+        equal(self, other)
+    }
+}
+
+impl PartialEq<dyn Vector> for Arc<dyn Vector + '_> {
+    fn eq(&self, other: &dyn Vector) -> bool {
+        equal(&**self, other)
+    }
+}
+
+fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
+    if lhs.data_type() != rhs.data_type() || lhs.len() != rhs.len() {
+        return false;
+    }
+
+    if lhs.is_const() || rhs.is_const() {
+        // Length has been checked before, so we only need to compare inner
+        // vector here.
+        return equal(
+            &**lhs
+                .as_any()
+                .downcast_ref::<ConstantVector>()
+                .unwrap()
+                .inner(),
+            &**lhs
+                .as_any()
+                .downcast_ref::<ConstantVector>()
+                .unwrap()
+                .inner(),
+        );
+    }
+
+    use crate::data_type::ConcreteDataType::*;
+
+    match lhs.data_type() {
+        Null(_) => true,
+        Boolean(_) => {
+            let lhs = lhs.as_any().downcast_ref::<BooleanVector>().unwrap();
+            let rhs = rhs.as_any().downcast_ref::<BooleanVector>().unwrap();
+
+            lhs == rhs
+        }
+        Binary(_) => {
+            let lhs = lhs.as_any().downcast_ref::<BinaryVector>().unwrap();
+            let rhs = rhs.as_any().downcast_ref::<BinaryVector>().unwrap();
+
+            lhs == rhs
+        }
+        String(_) => {
+            let lhs = lhs.as_any().downcast_ref::<StringVector>().unwrap();
+            let rhs = rhs.as_any().downcast_ref::<StringVector>().unwrap();
+
+            lhs == rhs
+        }
+        Date(_) => {
+            let lhs = lhs.as_any().downcast_ref::<DateVector>().unwrap();
+            let rhs = rhs.as_any().downcast_ref::<DateVector>().unwrap();
+
+            lhs == rhs
+        }
+        DateTime(_) => {
+            let lhs = lhs.as_any().downcast_ref::<DateTimeVector>().unwrap();
+            let rhs = rhs.as_any().downcast_ref::<DateTimeVector>().unwrap();
+
+            lhs == rhs
+        }
+        List(_) => {
+            let lhs = lhs.as_any().downcast_ref::<ListVector>().unwrap();
+            let rhs = rhs.as_any().downcast_ref::<ListVector>().unwrap();
+
+            lhs == rhs
+        }
+        other => with_match_primitive_type_id!(other.logical_type_id(), |$T| {
+            let lhs = lhs.as_any().downcast_ref::<PrimitiveVector<$T>>().unwrap();
+            let rhs = rhs.as_any().downcast_ref::<PrimitiveVector<$T>>().unwrap();
+
+            lhs == rhs
+        },
+        {
+            unreachable!()
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::{Int64Array, ListArray, MutableListArray, MutablePrimitiveArray, TryExtend};
+
+    use super::*;
+    use crate::vectors::{
+        Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector,
+        NullVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
+    };
+
+    fn assert_vector_ref_eq(vector: VectorRef) {
+        let rhs = vector.clone();
+        assert_eq!(vector, rhs);
+        assert_dyn_vector_eq(&*vector, &*rhs);
+    }
+
+    fn assert_dyn_vector_eq(lhs: &dyn Vector, rhs: &dyn Vector) {
+        assert_eq!(lhs, rhs);
+    }
+
+    fn assert_vector_ref_ne(lhs: VectorRef, rhs: VectorRef) {
+        assert_ne!(lhs, rhs);
+    }
+
+    #[test]
+    fn test_vector_eq() {
+        assert_vector_ref_eq(Arc::new(BinaryVector::from(vec![
+            Some(b"hello".to_vec()),
+            Some(b"world".to_vec()),
+        ])));
+        assert_vector_ref_eq(Arc::new(BooleanVector::from(vec![true, false])));
+        assert_vector_ref_eq(Arc::new(ConstantVector::new(
+            Arc::new(BooleanVector::from(vec![true])),
+            5,
+        )));
+        assert_vector_ref_eq(Arc::new(BooleanVector::from(vec![true, false])));
+        assert_vector_ref_eq(Arc::new(DateVector::from(vec![Some(100), Some(120)])));
+        assert_vector_ref_eq(Arc::new(DateTimeVector::new(Int64Array::from(vec![
+            Some(100),
+            Some(120),
+        ]))));
+
+        let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i64>>::new();
+        arrow_array
+            .try_extend(vec![Some(vec![Some(1), Some(2), Some(3)])])
+            .unwrap();
+        let arrow_array: ListArray<i32> = arrow_array.into();
+        assert_vector_ref_eq(Arc::new(ListVector::from(arrow_array)));
+
+        assert_vector_ref_eq(Arc::new(NullVector::new(4)));
+        assert_vector_ref_eq(Arc::new(StringVector::from(vec![
+            Some("hello"),
+            Some("world"),
+        ])));
+
+        assert_vector_ref_eq(Arc::new(Int8Vector::from_slice(&[1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(UInt8Vector::from_slice(&[1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(Int16Vector::from_slice(&[1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(UInt16Vector::from_slice(&[1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(UInt32Vector::from_slice(&[1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(Int64Vector::from_slice(&[1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(UInt64Vector::from_slice(&[1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(Float32Vector::from_slice(&[1.0, 2.0, 3.0, 4.0])));
+        assert_vector_ref_eq(Arc::new(Float64Vector::from_slice(&[1.0, 2.0, 3.0, 4.0])));
+    }
+
+    #[test]
+    fn test_vector_ne() {
+        assert_vector_ref_ne(
+            Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4])),
+            Arc::new(Int32Vector::from_slice(&[1, 2])),
+        );
+        assert_vector_ref_ne(
+            Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4])),
+            Arc::new(Int8Vector::from_slice(&[1, 2, 3, 4])),
+        );
+        assert_vector_ref_ne(
+            Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4])),
+            Arc::new(BooleanVector::from(vec![true, true])),
+        );
+        assert_vector_ref_ne(
+            Arc::new(ConstantVector::new(
+                Arc::new(BooleanVector::from(vec![true])),
+                5,
+            )),
+            Arc::new(ConstantVector::new(
+                Arc::new(BooleanVector::from(vec![true])),
+                4,
+            )),
+        );
+        assert_vector_ref_ne(
+            Arc::new(ConstantVector::new(
+                Arc::new(BooleanVector::from(vec![true])),
+                5,
+            )),
+            Arc::new(ConstantVector::new(
+                Arc::new(BooleanVector::from(vec![true, false])),
+                4,
+            )),
+        );
+        assert_vector_ref_ne(
+            Arc::new(ConstantVector::new(
+                Arc::new(BooleanVector::from(vec![true])),
+                5,
+            )),
+            Arc::new(ConstantVector::new(
+                Arc::new(Int32Vector::from_slice(vec![1, 2])),
+                4,
+            )),
+        );
+        assert_vector_ref_ne(Arc::new(NullVector::new(5)), Arc::new(NullVector::new(8)));
+    }
+}

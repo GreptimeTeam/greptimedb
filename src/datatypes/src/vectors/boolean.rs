@@ -16,7 +16,7 @@ use crate::value::Value;
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of boolean.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct BooleanVector {
     array: BooleanArray,
 }

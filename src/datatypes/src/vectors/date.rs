@@ -12,7 +12,7 @@ use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
 use crate::vectors::{MutableVector, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DateVector {
     array: PrimitiveVector<i32>,
 }

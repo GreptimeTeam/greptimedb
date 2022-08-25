@@ -4,7 +4,6 @@ use std::sync::Arc;
 use common_query::prelude::{Signature, Volatility};
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::VectorRef;
 use datatypes::with_match_primitive_type_id;
 use num::traits::Pow;

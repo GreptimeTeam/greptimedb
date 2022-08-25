@@ -64,6 +64,7 @@ macro_rules! with_match_primitive_type_id {
             };
         }
 
+        use $crate::type_id::LogicalTypeId;
         match $key_type {
             LogicalTypeId::Int8 => __with_ty__! { i8 },
             LogicalTypeId::Int16 => __with_ty__! { i16 },

@@ -13,7 +13,7 @@ use crate::prelude::{
 use crate::serialize::Serializable;
 use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DateTimeVector {
     array: PrimitiveVector<i64>,
 }

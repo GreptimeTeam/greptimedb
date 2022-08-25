@@ -27,6 +27,7 @@ impl ConstantVector {
         }
         Self { vector, length }
     }
+
     pub fn inner(&self) -> &VectorRef {
         &self.vector
     }

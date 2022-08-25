@@ -16,7 +16,7 @@ use crate::vectors::{impl_try_from_arrow_array_for_vector, impl_validity_for_vec
 type ArrowListArray = ListArray<i32>;
 
 /// Vector of Lists, basically backed by Arrow's `ListArray`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ListVector {
     array: ArrowListArray,
     inner_data_type: ConcreteDataType,

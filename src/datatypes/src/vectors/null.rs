@@ -15,6 +15,7 @@ use crate::value::Value;
 use crate::vectors::impl_try_from_arrow_array_for_vector;
 use crate::vectors::{Validity, Vector, VectorRef};
 
+#[derive(PartialEq)]
 pub struct NullVector {
     array: NullArray,
 }

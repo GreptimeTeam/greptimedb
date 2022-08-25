@@ -17,7 +17,7 @@ use crate::value::Value;
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// String array wrapper
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StringVector {
     array: StringArray,
 }
