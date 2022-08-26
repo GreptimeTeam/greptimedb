@@ -406,11 +406,11 @@ mod tests {
         );
         assert_eq!(
             serde_json::Value::Number(5000i32.into()),
-            to_json(Value::Date(common_time::date::Date::try_new(5000).unwrap()))
+            to_json(Value::Date(common_time::date::Date::new(5000)))
         );
         assert_eq!(
             serde_json::Value::Number(5000i64.into()),
-            to_json(Value::DateTime(DateTime::try_new(5000).unwrap()))
+            to_json(Value::DateTime(DateTime::new(5000)))
         );
 
         let json_value: serde_json::Value =

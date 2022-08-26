@@ -84,9 +84,7 @@ impl Vector for DateTimeVector {
 
     fn get(&self, index: usize) -> Value {
         match self.array.get(index) {
-            Value::Int64(v) => {
-                Value::DateTime(DateTime::try_new(v).expect("Not expected to overflow here"))
-            }
+            Value::Int64(v) => Value::DateTime(DateTime::new(v)),
             Value::Null => Value::Null,
             _ => {
                 unreachable!()
@@ -104,12 +102,20 @@ impl Serializable for DateTimeVector {
         Ok(self
             .array
             .iter_data()
-            .map(|v| v.map(|d| DateTime::try_new(d).unwrap()))
+            .map(|v| v.map(DateTime::new))
             .map(|v| match v {
                 None => serde_json::Value::Null,
                 Some(v) => v.into(),
             })
             .collect::<Vec<_>>())
+    }
+}
+
+impl From<Vec<Option<i64>>> for DateTimeVector {
+    fn from(data: Vec<Option<i64>>) -> Self {
+        Self {
+            array: PrimitiveVector::<i64>::from(data),
+        }
     }
 }
 
@@ -167,9 +173,7 @@ impl<'a> Iterator for DateTimeIter<'a> {
     type Item = Option<DateTime>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next()
-            .map(|v| v.map(|v| DateTime::try_new(v).unwrap()))
+        self.iter.next().map(|v| v.map(DateTime::new))
     }
 }
 
@@ -180,9 +184,7 @@ impl ScalarVector for DateTimeVector {
     type Builder = DateTimeVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        self.array
-            .get_data(idx)
-            .map(|v| DateTime::try_new(v).unwrap())
+        self.array.get_data(idx).map(DateTime::new)
     }
 
     fn iter_data(&self) -> Self::Iter<'_> {
@@ -209,9 +211,9 @@ mod tests {
             v.to_arrow_array().data_type()
         );
         let mut iter = v.iter_data();
-        assert_eq!(Some(DateTime::try_new(1).unwrap()), iter.next().unwrap());
-        assert_eq!(Some(DateTime::try_new(2).unwrap()), iter.next().unwrap());
-        assert_eq!(Some(DateTime::try_new(3).unwrap()), iter.next().unwrap());
+        assert_eq!(Some(DateTime::new(1)), iter.next().unwrap());
+        assert_eq!(Some(DateTime::new(2)), iter.next().unwrap());
+        assert_eq!(Some(DateTime::new(3)), iter.next().unwrap());
         assert!(!v.is_null(0));
         assert_eq!(24, v.memory_size()); // size of i64 * 3
 
@@ -230,14 +232,14 @@ mod tests {
     #[test]
     pub fn test_datetime_vector_builder() {
         let mut builder = DateTimeVectorBuilder::with_capacity(3);
-        builder.push(Some(DateTime::try_new(1).unwrap()));
+        builder.push(Some(DateTime::new(1)));
         builder.push(None);
-        builder.push(Some(DateTime::try_new(-1).unwrap()));
+        builder.push(Some(DateTime::new(-1)));
 
         let v = builder.finish();
         assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
-        assert_eq!(Value::DateTime(DateTime::try_new(1).unwrap()), v.get(0));
+        assert_eq!(Value::DateTime(DateTime::new(1)), v.get(0));
         assert_eq!(Value::Null, v.get(1));
-        assert_eq!(Value::DateTime(DateTime::try_new(-1).unwrap()), v.get(2));
+        assert_eq!(Value::DateTime(DateTime::new(-1)), v.get(2));
     }
 }
