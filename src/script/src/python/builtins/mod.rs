@@ -265,7 +265,7 @@ pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, BooleanArray, NullArray};
+    use arrow::array::{ArrayRef, NullArray, PrimitiveArray};
     use arrow::compute;
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{function::FunctionContext, Function};
@@ -273,7 +273,7 @@ pub(crate) mod greptime_builtin {
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
     use datatypes::vectors::Helper;
-    use rustpython_vm::builtins::PyStr;
+    use rustpython_vm::builtins::{PyFloat, PyStr, PyInt};
     use rustpython_vm::function::OptionalArg;
     use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
 
@@ -281,6 +281,7 @@ pub(crate) mod greptime_builtin {
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
+    use crate::python::utils::is_instance;
     use crate::python::PyVector;
     type PyVectorRef = PyRef<PyVector>;
 
@@ -624,12 +625,38 @@ pub(crate) mod greptime_builtin {
         let base = base
             .payload::<PyVector>()
             .ok_or_else(|| type_cast_error(&base.class().name(), "vector", vm))?;
-        let pow = pow
-            .payload::<PyVector>()
-            .ok_or_else(|| type_cast_error(&pow.class().name(), "vector", vm))?;
+        let arg_pow = if is_instance::<PyVector>(&pow, vm) {
+            let pow = pow
+                .payload::<PyVector>()
+                .ok_or_else(|| type_cast_error(&pow.class().name(), "vector", vm))?;
+            pow.as_vector_ref()
+        } else if is_instance::<PyFloat>(&pow, vm) {
+            let pow = pow.try_into_value::<f64>(vm)?;
+            let arr = PrimitiveArray::from_vec(vec![pow; base.as_vector_ref().len()]);
+            let arr: ArrayRef = Arc::new(arr) as _;
+            Helper::try_into_vector(&arr).map_err(|e| {
+                vm.new_type_error(format!(
+                    "Can't cast result into vector, result: {:?}, error message: {:?}",
+                    &arr, e
+                ))
+            })?
+        } 
+        else if is_instance::<PyInt>(&pow, vm) {
+            let pow = pow.try_into_value::<i64>(vm)?;
+            let arr = PrimitiveArray::from_vec(vec![pow; base.as_vector_ref().len()]);
+            let arr: ArrayRef = Arc::new(arr) as _;
+            Helper::try_into_vector(&arr).map_err(|e| {
+                vm.new_type_error(format!(
+                    "Can't cast result into vector, result: {:?}, error message: {:?}",
+                    &arr, e
+                ))
+            })?
+        } else {
+            return Err(vm.new_type_error(format!("Unsupported type({:#?}) for pow()", pow)));
+        };
         // pyfunction can return PyResult<...>, args can be like PyObjectRef or anything
         // impl IntoPyNativeFunc, see rustpython-vm function for more details
-        let args = vec![base.as_vector_ref(), pow.as_vector_ref()];
+        let args = vec![base.as_vector_ref(), arg_pow];
         let res = PowFunction::default()
             .eval(FunctionContext::default(), &args)
             .unwrap();
@@ -715,7 +742,7 @@ pub(crate) mod greptime_builtin {
         while cur_idx < parsed.len() {
             match &parsed[cur_idx] {
                 State::Num(v) => {
-                    if cur_idx + 1 >parsed.len(){
+                    if cur_idx + 1 > parsed.len() {
                         return Err(vm.new_runtime_error(format!(
                             "Expect a spearator after number, found nothing!"
                         )));

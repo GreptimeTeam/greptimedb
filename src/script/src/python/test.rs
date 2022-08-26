@@ -187,16 +187,86 @@ def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[
 #[test]
 #[allow(clippy::print_stdout, unused_must_use)]
 // allow print in test function for debug purpose(like for quick testing a syntax&ideas)
+fn test_calc_rvs() {
+    let python_source = r#"
+@coprocessor(args=["open_time", "close"], returns=[
+    "rv_7d",
+    "rv_15d",
+    "rv_30d",
+    "rv_60d",
+    "rv_90d",
+    "rv_180d"
+])
+def calc_rvs(open_time, close):
+    from greptime import vector, log2, prev, sqrt, datetime, pow, sum
+    def calc_rv(close, open_time, time, interval):
+        filtered = vector([
+            i < time and i > time-interval  
+            for i in open_time
+        ])
+        close = close.filter(filtered)
+
+        avg_time_interval = (open_time[-1] - open_time[0])/(len(open_time)-1)
+        ref = log2(close/prev(close))
+        var = sum(pow(ref, 2)/(len(ref)-1))
+        return sqrt(var/avg_time_interval)
+
+    # how to get env var, maybe through closure?
+    timepoint = open_time[-1]
+    rv_7d = calc_rv(close, open_time, timepoint, datetime("7d"))
+    rv_15d = calc_rv(close, open_time, timepoint, datetime("15d"))
+    rv_30d = calc_rv(close, open_time, timepoint, datetime("30d"))
+    rv_60d = calc_rv(close, open_time, timepoint, datetime("60d"))
+    rv_90d = calc_rv(close, open_time, timepoint, datetime("90d"))
+    rv_180d = calc_rv(close, open_time, timepoint, datetime("180d"))
+    return rv_7d, rv_15d, rv_30d, rv_60d, rv_90d, rv_180d
+"#;
+    let close_array = PrimitiveArray::from_slice([10106.79f32, 10106.09, 10108.73, 10106.38, 10106.95, 10107.55,
+        10104.68, 10108.8 , 10115.96, 10117.08, 10120.43]);
+    let open_time_array = PrimitiveArray::from_slice([1581231300i64, 1581231360, 1581231420, 1581231480, 1581231540,
+        1581231600, 1581231660, 1581231720, 1581231780, 1581231840,
+        1581231900]);
+    let schema = Arc::new(Schema::from(vec![
+        Field::new("close", DataType::Float32, false),
+        Field::new("open_time", DataType::Int64, false),
+    ]));
+    let rb =
+        DfRecordBatch::try_new(schema, vec![Arc::new(close_array), Arc::new(open_time_array)]).unwrap();
+    let ret = coprocessor::exec_coprocessor(python_source, &rb);
+    if let Err(Error::PyParse {
+        backtrace: _,
+        source,
+    }) = ret
+    {
+        let res = visualize_loc(
+            python_source,
+            &source.location,
+            "unknown tokens",
+            source.error.to_string().as_str(),
+            0,
+            "copr.py",
+        );
+        println!("{res}");
+    } else if let Ok(res) = ret {
+        dbg!(&res);
+    } else {
+        dbg!(ret);
+    }
+}
+
+#[test]
+#[allow(clippy::print_stdout, unused_must_use)]
+// allow print in test function for debug purpose(like for quick testing a syntax&ideas)
 fn test_coprocessor() {
     let python_source = r#"
 @copr(args=["cpu", "mem"], returns=["ref"])
 def a(cpu, mem):
     import greptime as gt
-    from greptime import vector, log2, prev, sum
+    from greptime import vector, log2, prev, sum, pow, sqrt, datetime
     abc = vector([v[0] > v[1] for v in zip(cpu, mem)])
     fed = cpu.filter(abc)
     ref = log2(fed/prev(fed))
-    return sum(fed)
+    return pow(fed, 2)
 "#;
     let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
     let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
