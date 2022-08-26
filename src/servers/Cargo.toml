@@ -34,3 +34,4 @@ catalog = { path = "../catalog" }
 mysql_async = "0.30"
 rand = "0.8"
 test-util = { path = "../../test-util" }
+script = { path = "../script", features = ["python"] }

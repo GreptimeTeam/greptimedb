@@ -49,6 +49,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to execute script: {}, source: {}", script, source))]
+    ExecuteScript {
+        script: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
 }
@@ -66,7 +73,11 @@ impl ErrorExt for Error {
             | Error::StartHttp { .. }
             | Error::StartGrpc { .. }
             | Error::TcpBind { .. } => StatusCode::Internal,
-            Error::ExecuteQuery { source, .. } => source.status_code(),
+
+            Error::ExecuteScript { source, .. } | Error::ExecuteQuery { source, .. } => {
+                source.status_code()
+            }
+
             Error::NotSupported { .. } => StatusCode::InvalidArguments,
         }
     }
