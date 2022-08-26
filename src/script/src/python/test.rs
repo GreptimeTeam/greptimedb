@@ -207,7 +207,7 @@ def calc_rvs(open_time, close):
         close = close.filter(filtered)
 
         avg_time_interval = (open_time[-1] - open_time[0])/(len(open_time)-1)
-        ref = log2(close/prev(close))
+        ref = log2(close/prev(close))/log2(2.7)
         var = sum(pow(ref, 2)/(len(ref)-1))
         return sqrt(var/avg_time_interval)
 
@@ -266,7 +266,7 @@ def a(cpu, mem):
     abc = vector([v[0] > v[1] for v in zip(cpu, mem)])
     fed = cpu.filter(abc)
     ref = log2(fed/prev(fed))
-    return pow(fed, 2)
+    return cpu > mem
 "#;
     let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
     let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);

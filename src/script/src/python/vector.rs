@@ -19,7 +19,8 @@ use datatypes::{
     value,
     vectors::{Helper, NullVector, VectorBuilder, VectorRef},
 };
-use rustpython_vm::types::PyComparisonOp;
+use rustpython_vm::function::{Either, PyComparisonValue};
+use rustpython_vm::types::{Comparable, PyComparisonOp};
 use rustpython_vm::{
     builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
     function::OptionalArg,
@@ -168,7 +169,7 @@ impl AsRef<PyVector> for PyVector {
 }
 
 /// PyVector type wraps a greptime vector, impl multiply/div/add/sub opeerators etc.
-#[pyimpl(with(AsMapping, AsSequence))]
+#[pyimpl(with(AsMapping, AsSequence, Comparable))]
 impl PyVector {
     pub(crate) fn new(
         iterable: OptionalArg<PyObjectRef>,
@@ -476,31 +477,37 @@ impl PyVector {
     // TODO(discord9): test those funciton
 
     #[pymethod(name = "eq")]
+    #[pymethod(magic)]
     fn eq(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Eq, vm)
     }
 
     #[pymethod(name = "ne")]
+    #[pymethod(magic)]
     fn ne(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Ne, vm)
     }
 
     #[pymethod(name = "gt")]
+    #[pymethod(magic)]
     fn gt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Gt, vm)
     }
 
     #[pymethod(name = "lt")]
+    #[pymethod(magic)]
     fn lt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Lt, vm)
     }
 
     #[pymethod(name = "ge")]
+    #[pymethod(magic)]
     fn ge(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Ge, vm)
     }
 
     #[pymethod(name = "le")]
+    #[pymethod(magic)]
     fn le(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Le, vm)
     }
@@ -514,7 +521,7 @@ impl PyVector {
     #[pymethod(name = "filter")]
     fn filter(&self, other: PyRef<PyVector>, vm: &VirtualMachine) -> PyResult<PyVector> {
         let left = self.to_arrow_array();
-        /* 
+        /*
         let right = other.downcast_ref::<PyVector>().ok_or_else(|| {
             vm.new_type_error(format!(
                 "Can't cast operand of filter() into PyVector, which is: {}",
@@ -884,6 +891,36 @@ impl AsSequence for PyVector {
         }),
         ..PySequenceMethods::NOT_IMPLEMENTED
     };
+}
+
+impl Comparable for PyVector {
+    fn slot_richcompare(
+        zelf: &PyObject,
+        other: &PyObject,
+        op: PyComparisonOp,
+        vm: &VirtualMachine,
+    ) -> PyResult<Either<PyObjectRef, PyComparisonValue>> {
+        // TODO(discord9): return a boolean array of compare result
+        if let Some(zelf) = zelf.downcast_ref::<Self>() {
+            let ret: PyVector = zelf.richcompare(other.to_owned(), op, vm)?;
+            let ret = ret.into_pyobject(vm);
+            Ok(Either::A(ret))
+        } else {
+            Err(vm.new_type_error(format!(
+                "unexpected payload {} for {}",
+                zelf,
+                op.method_name(&vm.ctx).as_str()
+            )))
+        }
+    }
+    fn cmp(
+        zelf: &rustpython_vm::Py<Self>,
+        other: &PyObject,
+        op: PyComparisonOp,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyComparisonValue> {
+        Ok(PyComparisonValue::NotImplemented)
+    }
 }
 #[cfg(test)]
 pub mod tests {
