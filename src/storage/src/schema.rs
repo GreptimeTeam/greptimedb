@@ -840,14 +840,8 @@ mod tests {
         // (v0, timestamp)
         let chunk = projected_schema.batch_to_chunk(&batch);
         assert_eq!(2, chunk.columns.len());
-        assert_eq!(
-            chunk.columns[0].to_arrow_array(),
-            batch.column(2).to_arrow_array()
-        );
-        assert_eq!(
-            chunk.columns[1].to_arrow_array(),
-            batch.column(1).to_arrow_array()
-        );
+        assert_eq!(&chunk.columns[0], batch.column(2));
+        assert_eq!(&chunk.columns[1], batch.column(1));
 
         // Test batch_from_parts
         let keys = batch.columns()[0..2].to_vec();
@@ -858,13 +852,7 @@ mod tests {
             batch.column(3).clone(),
             batch.column(4).clone(),
         );
-        assert_eq!(5, created.num_columns());
-        for i in 0..5 {
-            assert_eq!(
-                batch.column(i).to_arrow_array(),
-                created.column(i).to_arrow_array()
-            );
-        }
+        assert_eq!(batch, created);
     }
 
     #[test]

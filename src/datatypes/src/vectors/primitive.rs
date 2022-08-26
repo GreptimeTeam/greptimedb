@@ -19,7 +19,7 @@ use crate::value::Value;
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector for primitive data types.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PrimitiveVector<T: Primitive> {
     pub(crate) array: PrimitiveArray<T>,
 }
