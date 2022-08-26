@@ -48,11 +48,8 @@ def calc_rvs(open_time, close: vector):
     def calc_rv(close, open_time, time, interval):
         # close = table["close"]
         # open_time = table["open_time"]
-        filtered = vector([
-            i < time and i> time-interval  
-            for i in open_time
-        ])
-        close = close.filter(filtered)
+        mask = (open_time < time) & (open_time > time - interval)
+        close = close.filter(mask)
 
         avg_time_interval = (open_time[-1] - open_time[0])/(len(open_time)-1)
         ref = log(close/prev(close))

@@ -582,9 +582,27 @@ impl PyVector {
 
     /// TODO: add support for filter
     fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        match SequenceIndex::try_from_borrowed_object(vm, needle, "mmap")? {
-            SequenceIndex::Int(i) => self.getitem_by_index(i, vm),
-            SequenceIndex::Slice(slice) => self.getitem_by_slice(&slice, vm),
+        if let Some(seq) = needle.payload::<PyVector>(){
+            let mask = seq.to_arrow_array();
+            let mask = mask
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {seq:#?} as a Boolean Array")))?;
+            // let left = self.to_arrow_array();
+            let res = compute::filter::filter(self.to_arrow_array().as_ref(), mask)
+            .map_err(|err| vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
+            let ret = Helper::try_into_vector(&*res).map_err(|e| {
+                vm.new_type_error(format!(
+                    "Can't cast result into vector, result: {:?}, err: {:?}",
+                    res, e
+                ))
+            })?;
+            Ok(Self::from(ret).into_pyobject(vm))
+        }else{
+            match SequenceIndex::try_from_borrowed_object(vm, needle, "mmap")? {
+                SequenceIndex::Int(i) => self.getitem_by_index(i, vm),
+                SequenceIndex::Slice(slice) => self.getitem_by_slice(&slice, vm),
+            }
         }
     }
 

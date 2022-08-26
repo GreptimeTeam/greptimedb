@@ -201,7 +201,7 @@ def calc_rvs(open_time, close):
     from greptime import vector, log2, prev, sqrt, datetime, pow, sum
     def calc_rv(close, open_time, time, interval):
         mask = (open_time < time) & (open_time > time - interval)
-        close = close.filter(mask)
+        close = close[mask]
 
         avg_time_interval = (open_time[-1] - open_time[0])/(len(open_time)-1)
         ref = log2(close/prev(close))/log2(2.7)
