@@ -7,7 +7,7 @@ use crate::error::Result;
 
 /// Storage internal representation of a batch of rows.
 // Now the structure of `Batch` is still unstable, all pub fields may be changed.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Batch {
     /// Rows organized in columnar format.
     ///
