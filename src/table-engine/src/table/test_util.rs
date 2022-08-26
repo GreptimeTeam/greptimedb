@@ -25,14 +25,14 @@ pub const TABLE_NAME: &str = "demo";
 
 pub fn schema_for_test() -> Schema {
     let column_schemas = vec![
-        ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
+        ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
     ];
 
     SchemaBuilder::from(column_schemas)
-        .timestamp_index(0)
+        .timestamp_index(3)
         .build()
         .expect("ts must be timestamp column")
 }

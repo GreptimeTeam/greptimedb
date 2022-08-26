@@ -20,7 +20,6 @@
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
-use datatypes::schema::SchemaRef;
 
 use crate::storage::engine::OpenOptions;
 use crate::storage::metadata::RegionMeta;
@@ -53,7 +52,7 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
     fn snapshot(&self, ctx: &ReadContext) -> Result<Self::Snapshot, Self::Error>;
 
     /// Create write request
-    fn write_request(&self, schema: SchemaRef) -> Self::WriteRequest;
+    fn write_request(&self) -> Self::WriteRequest;
 }
 
 /// Context for write operations.

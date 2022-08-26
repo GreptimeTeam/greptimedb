@@ -129,6 +129,15 @@ pub enum Error {
         backtrace: Backtrace,
         table_name: String,
     },
+
+    #[snafu(display(
+        "Projected columnd not found in region, column: {}",
+        column_qualified_name
+    ))]
+    ProjectedColumnNotFound {
+        backtrace: Backtrace,
+        column_qualified_name: String,
+    },
 }
 
 impl From<Error> for table::error::Error {
@@ -153,6 +162,7 @@ impl ErrorExt for Error {
             | BuildTableInfo { .. }
             | BuildRegionDescriptor { .. }
             | TableExists { .. }
+            | ProjectedColumnNotFound { .. }
             | MissingTimestampIndex { .. } => StatusCode::InvalidArguments,
 
             TableInfoNotFound { .. } => StatusCode::Unexpected,

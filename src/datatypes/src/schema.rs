@@ -82,6 +82,19 @@ impl Schema {
             .map(|index| &self.column_schemas[*index])
     }
 
+    /// Retrieve the column's name by index
+    /// # Panics
+    /// This method **may** panic if the index is out of range of column schemas.
+    #[inline]
+    pub fn column_name_by_index(&self, idx: usize) -> &str {
+        &self.column_schemas[idx].name
+    }
+
+    #[inline]
+    pub fn column_index_by_name(&self, name: &str) -> Option<usize> {
+        self.name_to_index.get(name).copied()
+    }
+
     #[inline]
     pub fn num_columns(&self) -> usize {
         self.column_schemas.len()

@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
-use datatypes::schema::SchemaRef;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::manifest::{
@@ -69,8 +68,8 @@ impl<S: LogStore> Region for RegionImpl<S> {
         Ok(self.inner.create_snapshot())
     }
 
-    fn write_request(&self, schema: SchemaRef) -> Self::WriteRequest {
-        WriteBatch::new(schema)
+    fn write_request(&self) -> Self::WriteRequest {
+        WriteBatch::new(self.in_memory_metadata().schema().clone())
     }
 }
 

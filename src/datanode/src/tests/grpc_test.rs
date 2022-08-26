@@ -97,11 +97,12 @@ async fn test_insert_and_select() {
             let actual_columns = select_result.columns;
             assert_eq!(4, actual_columns.len());
 
+            // Respect the order in create table schema
             let expected_columns = vec![
-                expected_ts_col,
                 expected_host_col,
                 expected_cpu_col,
                 expected_mem_col,
+                expected_ts_col,
             ];
             expected_columns
                 .iter()

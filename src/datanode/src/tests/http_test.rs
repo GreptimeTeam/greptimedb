@@ -13,6 +13,7 @@ async fn make_test_app() -> (Router, TestGuard) {
     let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts();
     let instance = Arc::new(Instance::new(&opts).await.unwrap());
     instance.start().await.unwrap();
+    test_util::create_test_table(&instance).await.unwrap();
     let http_server = HttpServer::new(instance);
     (http_server.make_app(), guard)
 }
@@ -41,6 +42,39 @@ async fn test_sql_api() {
     assert_eq!(
         body,
         r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"number","data_type":"UInt32","is_nullable":false,"metadata":{}}],"metadata":{"greptime:version":"0"}},"columns":[[0,1,2,3,4,5,6,7,8,9]]}]}}"#
+    );
+
+    // test insert and select
+    let res = client
+        .get("/sql?sql=insert into demo values('host', 66.6, 1024, 0)")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // select *
+    let res = client
+        .get("/sql?sql=select * from demo limit 10")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = res.text().await;
+    assert_eq!(
+        body,
+        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"host","data_type":"LargeUtf8","is_nullable":false,"metadata":{}},{"name":"cpu","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"memory","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"ts","data_type":"Int64","is_nullable":true,"metadata":{}}],"metadata":{"greptime:timestamp_column":"ts","greptime:version":"0"}},"columns":[["host"],[66.6],[1024.0],[0]]}]}}"#
+    );
+
+    // select with projections
+    let res = client
+        .get("/sql?sql=select cpu, ts from demo limit 10")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = res.text().await;
+    assert_eq!(
+        body,
+        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"cpu","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"ts","data_type":"Int64","is_nullable":true,"metadata":{}}],"metadata":{"greptime:timestamp_column":"ts","greptime:version":"0"}},"columns":[[66.6],[0]]}]}}"#
     );
 }
 
