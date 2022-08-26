@@ -688,7 +688,18 @@ pub(crate) mod greptime_builtin {
                 _ => {}
             };
         }
-
+        let last = match state {
+            State::Num(_) => {
+                let res = str::parse(&input[prev..])
+                    .map_err(|err| vm.new_runtime_error(format!("Fail to parse num: {err:#?}")))?;
+                State::Num(res)
+            }
+            State::Separator(_) => {
+                let res = &input[prev..];
+                State::Separator(res.to_owned())
+            }
+        };
+        parsed.push(last);
         let mut cur_idx = 0;
         let mut tot_time = 0;
         fn factor(unit: &str, vm: &VirtualMachine) -> PyResult<isize> {
@@ -704,6 +715,11 @@ pub(crate) mod greptime_builtin {
         while cur_idx < parsed.len() {
             match &parsed[cur_idx] {
                 State::Num(v) => {
+                    if cur_idx + 1 >parsed.len(){
+                        return Err(vm.new_runtime_error(format!(
+                            "Expect a spearator after number, found nothing!"
+                        )));
+                    }
                     let nxt = &parsed[cur_idx + 1];
                     if let State::Separator(sep) = nxt {
                         tot_time += v * factor(sep, vm)?;
