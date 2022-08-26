@@ -21,6 +21,15 @@ impl PartialEq<dyn Vector> for Arc<dyn Vector + '_> {
     }
 }
 
+macro_rules! is_vector_eq {
+    ($VectorType: ident, $lhs: ident, $rhs: ident) => {{
+        let lhs = $lhs.as_any().downcast_ref::<$VectorType>().unwrap();
+        let rhs = $rhs.as_any().downcast_ref::<$VectorType>().unwrap();
+
+        lhs == rhs
+    }};
+}
+
 fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
     if lhs.data_type() != rhs.data_type() || lhs.len() != rhs.len() {
         return false;
@@ -47,42 +56,12 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
 
     match lhs.data_type() {
         Null(_) => true,
-        Boolean(_) => {
-            let lhs = lhs.as_any().downcast_ref::<BooleanVector>().unwrap();
-            let rhs = rhs.as_any().downcast_ref::<BooleanVector>().unwrap();
-
-            lhs == rhs
-        }
-        Binary(_) => {
-            let lhs = lhs.as_any().downcast_ref::<BinaryVector>().unwrap();
-            let rhs = rhs.as_any().downcast_ref::<BinaryVector>().unwrap();
-
-            lhs == rhs
-        }
-        String(_) => {
-            let lhs = lhs.as_any().downcast_ref::<StringVector>().unwrap();
-            let rhs = rhs.as_any().downcast_ref::<StringVector>().unwrap();
-
-            lhs == rhs
-        }
-        Date(_) => {
-            let lhs = lhs.as_any().downcast_ref::<DateVector>().unwrap();
-            let rhs = rhs.as_any().downcast_ref::<DateVector>().unwrap();
-
-            lhs == rhs
-        }
-        DateTime(_) => {
-            let lhs = lhs.as_any().downcast_ref::<DateTimeVector>().unwrap();
-            let rhs = rhs.as_any().downcast_ref::<DateTimeVector>().unwrap();
-
-            lhs == rhs
-        }
-        List(_) => {
-            let lhs = lhs.as_any().downcast_ref::<ListVector>().unwrap();
-            let rhs = rhs.as_any().downcast_ref::<ListVector>().unwrap();
-
-            lhs == rhs
-        }
+        Boolean(_) => is_vector_eq!(BooleanVector, lhs, rhs),
+        Binary(_) => is_vector_eq!(BinaryVector, lhs, rhs),
+        String(_) => is_vector_eq!(StringVector, lhs, rhs),
+        Date(_) => is_vector_eq!(DateVector, lhs, rhs),
+        DateTime(_) => is_vector_eq!(DateTimeVector, lhs, rhs),
+        List(_) => is_vector_eq!(ListVector, lhs, rhs),
         other => with_match_primitive_type_id!(other.logical_type_id(), |$T| {
             let lhs = lhs.as_any().downcast_ref::<PrimitiveVector<$T>>().unwrap();
             let rhs = rhs.as_any().downcast_ref::<PrimitiveVector<$T>>().unwrap();
