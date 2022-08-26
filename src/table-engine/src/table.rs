@@ -195,15 +195,15 @@ impl<R: Region> MitoTable<R> {
                 .iter()
                 .map(|column_schema| &column_schema.name)
                 .map(|name| {
-                    region_schema
-                        .column_index_by_name(name)
-                        .context(ProjectedColumnNotFoundSnafu {
+                    region_schema.column_index_by_name(name).with_context(|| {
+                        ProjectedColumnNotFoundSnafu {
                             column_qualified_name: column_qualified_name(
                                 &self.table_info.name,
                                 region.name(),
                                 name,
                             ),
-                        })
+                        }
+                    })
                 })
                 .collect();
             return Some(projection).transpose();
@@ -214,15 +214,15 @@ impl<R: Region> MitoTable<R> {
                 p.iter()
                     .map(|idx| table_schema.column_name_by_index(*idx))
                     .map(|name| {
-                        region_schema.column_index_by_name(name).context(
+                        region_schema.column_index_by_name(name).with_context(|| {
                             ProjectedColumnNotFoundSnafu {
                                 column_qualified_name: column_qualified_name(
                                     &self.table_info.name,
                                     region.name(),
                                     name,
                                 ),
-                            },
-                        )
+                            }
+                        })
                     })
                     .collect()
             })
