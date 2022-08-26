@@ -49,7 +49,7 @@ def calc_rvs(open_time, close: vector):
         # close = table["close"]
         # open_time = table["open_time"]
         filtered = vector([
-            True if i < time and i> time-interval else False 
+            i < time and i> time-interval  
             for i in open_time
         ])
         close = close.filter(filtered)
@@ -79,6 +79,7 @@ if __name__ == "__main__":
         # print(table)
         close = table["close"]
         open_time = table["open_time"]
+        print(close, open_time)
         # print("calc_rv:", calc_rv(close, open_time, open_time[-1]+datetime("10m"), datetime("7d")))
         env = {"close":close, "open_time": open_time}
         # print("env:", env)

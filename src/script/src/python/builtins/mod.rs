@@ -142,6 +142,7 @@ fn try_into_py_obj(col: DFColValue, vm: &VirtualMachine) -> PyResult<PyObjectRef
 /// - List -> PyList(of inner ScalarValue)
 fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
     match val {
+        ScalarValue::Float32(Some(v)) => Ok(vm.ctx.new_float(v.into()).into()),
         ScalarValue::Float64(Some(v)) => Ok(PyFloat::from(v).into_pyobject(vm)),
         ScalarValue::Int64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
         ScalarValue::UInt64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
@@ -154,7 +155,7 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
             Ok(list.into())
         }
         _ => Err(vm.new_type_error(format!(
-            "Can't cast type {:#?} to a Python Object",
+            "Can't cast a Scalar Value `{val:#?}` of type {:#?} to a Python Object",
             val.get_datatype()
         ))),
     }
@@ -641,7 +642,7 @@ pub(crate) mod greptime_builtin {
     #[pyfunction]
     fn prev(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let cur: ArrayRef = cur.to_arrow_array();
-        cur.slice(0, cur.len() - 1);
+        let cur = cur.slice(0, cur.len() - 1); // except the last one that is
         let fill = cur.slice(0, 1);
         let ret = compute::concatenate::concatenate(&[&*fill, &*cur]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
@@ -708,13 +709,13 @@ pub(crate) mod greptime_builtin {
                         tot_time += v * factor(sep, vm)?;
                     } else {
                         return Err(vm.new_runtime_error(format!(
-                            "Expect a spearator after number, found {nxt:#?}"
+                            "Expect a spearator after number, found `{nxt:#?}`"
                         )));
                     }
                     cur_idx += 2;
                 }
                 State::Separator(sep) => {
-                    return Err(vm.new_runtime_error(format!("Expect a number, found {sep}")))
+                    return Err(vm.new_runtime_error(format!("Expect a number, found `{sep}`")))
                 }
             }
         }

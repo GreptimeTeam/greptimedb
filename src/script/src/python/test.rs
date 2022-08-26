@@ -189,12 +189,14 @@ def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[
 // allow print in test function for debug purpose(like for quick testing a syntax&ideas)
 fn test_coprocessor() {
     let python_source = r#"
-@copr(args=["cpu", "mem"], returns=["perf", "what"])
+@copr(args=["cpu", "mem"], returns=["ref"])
 def a(cpu, mem):
     import greptime as gt
-    abc = cpu < mem
-    abc *= 2
-    return abc, gt.sqrt(cpu)
+    from greptime import vector, log2, prev, sum
+    abc = vector([v[0] > v[1] for v in zip(cpu, mem)])
+    fed = cpu.filter(abc)
+    ref = log2(fed/prev(fed))
+    return sum(fed)
 "#;
     let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
     let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
