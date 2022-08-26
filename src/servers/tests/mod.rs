@@ -12,9 +12,23 @@ use test_util::MemTable;
 
 mod http;
 mod mysql;
+use script::{
+    engine::{CompileContext, EvalContext, Script, ScriptEngine},
+    python::PyEngine,
+};
 
 struct DummyInstance {
     query_engine: QueryEngineRef,
+    py_engine: Arc<PyEngine>,
+}
+
+impl DummyInstance {
+    fn new(query_engine: QueryEngineRef) -> Self {
+        Self {
+            py_engine: Arc::new(PyEngine::new(query_engine.clone())),
+            query_engine,
+        }
+    }
 }
 
 #[async_trait]
@@ -23,8 +37,14 @@ impl SqlQueryHandler for DummyInstance {
         let plan = self.query_engine.sql_to_plan(query).unwrap();
         Ok(self.query_engine.execute(&plan).await.unwrap())
     }
-    async fn do_execute(&self, _script: &str, _engine: Option<String>) -> Result<Output> {
-        unimplemented!()
+    async fn do_execute(&self, script: &str, _engine: Option<String>) -> Result<Output> {
+        let py_script = self
+            .py_engine
+            .compile(script, CompileContext::default())
+            .await
+            .unwrap();
+
+        Ok(py_script.evaluate(EvalContext::default()).await.unwrap())
     }
 }
 
@@ -41,5 +61,5 @@ fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
 
     let factory = QueryEngineFactory::new(catalog_list);
     let query_engine = factory.query_engine().clone();
-    Arc::new(DummyInstance { query_engine })
+    Arc::new(DummyInstance::new(query_engine))
 }

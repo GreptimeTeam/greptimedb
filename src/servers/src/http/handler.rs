@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use axum::extract::{Extension, Json, Query};
 use common_telemetry::metric;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::http::{HttpResponse, JsonResponse};
 use crate::query_handler::SqlQueryHandlerRef;
@@ -35,10 +35,10 @@ pub async fn metrics(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ScriptExecution {
-    script: String,
-    engine: Option<String>,
+    pub script: String,
+    pub engine: Option<String>,
 }
 
 /// Handler to execute scripts

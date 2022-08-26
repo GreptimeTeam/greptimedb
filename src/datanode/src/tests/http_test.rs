@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
+use servers::http::handler::ScriptExecution;
 use servers::http::HttpServer;
 use test_util::TestGuard;
 
@@ -63,4 +64,31 @@ async fn test_metrics_api() {
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.text().await;
     assert!(body.contains("datanode_handle_sql_elapsed"));
+}
+
+#[tokio::test]
+async fn test_scripts_api() {
+    common_telemetry::init_default_ut_logging();
+    let (app, _guard) = make_test_app().await;
+    let client = TestClient::new(app);
+    let res = client
+        .post("/v1/scripts")
+        .json(&ScriptExecution {
+            script: r#"
+@copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
+def test(n):
+    return n;
+"#
+            .to_string(),
+            engine: None,
+        })
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = res.text().await;
+    assert_eq!(
+        body,
+        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"n","data_type":"UInt32","is_nullable":false,"metadata":{}}],"metadata":{}},"columns":[[0,1,2,3,4,5,6,7,8,9]]}]}}"#
+    );
 }
