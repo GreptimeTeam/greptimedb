@@ -6,6 +6,8 @@ use datatypes::vectors::VectorRef;
 use crate::error::Result;
 
 /// Storage internal representation of a batch of rows.
+///
+/// `Batch` should contains at least one column.
 // Now the structure of `Batch` is still unstable, all pub fields may be changed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Batch {
@@ -17,7 +19,15 @@ pub struct Batch {
 }
 
 impl Batch {
+    /// Create a new `Batch` from `columns`.
+    ///
+    /// # Panics
+    /// Panics if
+    /// - `columns` is empty.
+    /// - vectors in `columns` have different length.
     pub fn new(columns: Vec<VectorRef>) -> Batch {
+        Self::assert_columns(&columns);
+
         Batch { columns }
     }
 
@@ -34,6 +44,12 @@ impl Batch {
     #[inline]
     pub fn column(&self, idx: usize) -> &VectorRef {
         &self.columns[idx]
+    }
+
+    fn assert_columns(columns: &[VectorRef]) {
+        assert!(columns.is_empty());
+        let length = columns[0].len();
+        assert!(columns.iter().all(|col| col.len() == length));
     }
 }
 
