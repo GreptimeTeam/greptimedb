@@ -273,7 +273,7 @@ pub(crate) mod greptime_builtin {
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
     use datatypes::vectors::Helper;
-    use rustpython_vm::builtins::{PyFloat, PyStr, PyInt};
+    use rustpython_vm::builtins::{PyFloat, PyInt, PyStr};
     use rustpython_vm::function::OptionalArg;
     use rustpython_vm::{AsObject, PyObjectRef, PyResult, VirtualMachine};
 
@@ -282,8 +282,8 @@ pub(crate) mod greptime_builtin {
         type_cast_error,
     };
     use crate::python::utils::is_instance;
-    use crate::python::PyVector;
     use crate::python::utils::PyVectorRef;
+    use crate::python::PyVector;
 
     #[pyfunction]
     fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {
@@ -640,8 +640,7 @@ pub(crate) mod greptime_builtin {
                     &arr, e
                 ))
             })?
-        } 
-        else if is_instance::<PyInt>(&pow, vm) {
+        } else if is_instance::<PyInt>(&pow, vm) {
             let pow = pow.try_into_value::<i64>(vm)?;
             let arr = PrimitiveArray::from_vec(vec![pow; base.as_vector_ref().len()]);
             let arr: ArrayRef = Arc::new(arr) as _;

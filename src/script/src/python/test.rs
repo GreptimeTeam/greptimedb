@@ -208,7 +208,8 @@ def calc_rvs(open_time, close):
         var = sum(pow(ref, 2)/(len(ref)-1))
         return sqrt(var/avg_time_interval)
 
-    # how to get env var, maybe through closure?
+    # how to get env var, 
+    # maybe through accessing scope and serde then send to remote?
     timepoint = open_time[-1]
     rv_7d = calc_rv(close, open_time, timepoint, datetime("7d"))
     rv_15d = calc_rv(close, open_time, timepoint, datetime("15d"))
@@ -218,17 +219,41 @@ def calc_rvs(open_time, close):
     rv_180d = calc_rv(close, open_time, timepoint, datetime("180d"))
     return rv_7d, rv_15d, rv_30d, rv_60d, rv_90d, rv_180d
 "#;
-    let close_array = PrimitiveArray::from_slice([10106.79f32, 10106.09, 10108.73, 10106.38, 10106.95, 10107.55,
-        10104.68, 10108.8 , 10115.96, 10117.08, 10120.43]);
-    let open_time_array = PrimitiveArray::from_slice([1581231300i64, 1581231360, 1581231420, 1581231480, 1581231540,
-        1581231600, 1581231660, 1581231720, 1581231780, 1581231840,
-        1581231900]);
+    let close_array = PrimitiveArray::from_slice([
+        10106.79f32,
+        10106.09,
+        10108.73,
+        10106.38,
+        10106.95,
+        10107.55,
+        10104.68,
+        10108.8,
+        10115.96,
+        10117.08,
+        10120.43,
+    ]);
+    let open_time_array = PrimitiveArray::from_slice([
+        1581231300i64,
+        1581231360,
+        1581231420,
+        1581231480,
+        1581231540,
+        1581231600,
+        1581231660,
+        1581231720,
+        1581231780,
+        1581231840,
+        1581231900,
+    ]);
     let schema = Arc::new(Schema::from(vec![
         Field::new("close", DataType::Float32, false),
         Field::new("open_time", DataType::Int64, false),
     ]));
-    let rb =
-        DfRecordBatch::try_new(schema, vec![Arc::new(close_array), Arc::new(open_time_array)]).unwrap();
+    let rb = DfRecordBatch::try_new(
+        schema,
+        vec![Arc::new(close_array), Arc::new(open_time_array)],
+    )
+    .unwrap();
     let ret = coprocessor::exec_coprocessor(python_source, &rb);
     if let Err(Error::PyParse {
         backtrace: _,

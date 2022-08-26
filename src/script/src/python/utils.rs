@@ -1,4 +1,4 @@
-use rustpython_vm::{builtins::PyBaseExceptionRef, PyObjectRef, PyPayload, VirtualMachine, PyRef};
+use rustpython_vm::{builtins::PyBaseExceptionRef, PyObjectRef, PyPayload, PyRef, VirtualMachine};
 use snafu::{Backtrace, GenerateImplicitData};
 
 use crate::python::error;
