@@ -380,6 +380,7 @@ pub(crate) mod greptime_builtin {
     }
 
     /// simple math function, the backing implement is datafusion's `ln` math function
+    #[pyfunction(name = "log")]
     #[pyfunction]
     fn ln(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(ln, vm, val);

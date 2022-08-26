@@ -46,10 +46,8 @@ def as_table(kline: list):
 def calc_rvs(open_time, close: vector):
     from greptime import vector, log, prev, sqrt, datetime
     def calc_rv(close, open_time, time, interval):
-        # close = table["close"]
-        # open_time = table["open_time"]
         mask = (open_time < time) & (open_time > time - interval)
-        close = close.filter(mask)
+        close = close[mask] # or `close.filter(mask)`
 
         avg_time_interval = (open_time[-1] - open_time[0])/(len(open_time)-1)
         ref = log(close/prev(close))
