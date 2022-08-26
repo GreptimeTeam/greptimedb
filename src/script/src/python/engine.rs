@@ -79,7 +79,7 @@ impl Script for PyScript {
         self
     }
 
-    async fn evalute(&self, _ctx: EvalContext) -> Result<Output> {
+    async fn evaluate(&self, _ctx: EvalContext) -> Result<Output> {
         if let Some(sql) = &self.copr.deco_args.sql {
             let stmt = self.query_engine.sql_to_statement(sql)?;
             ensure!(
@@ -152,7 +152,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_compile_evalute() {
+    async fn test_compile_evaluate() {
         let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
@@ -178,7 +178,7 @@ def test(a, b, c):
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let output = script.evalute(EvalContext::default()).await.unwrap();
+        let output = script.evaluate(EvalContext::default()).await.unwrap();
         match output {
             Output::RecordBatch(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
@@ -209,7 +209,7 @@ def test(a):
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let output = script.evalute(EvalContext::default()).await.unwrap();
+        let output = script.evaluate(EvalContext::default()).await.unwrap();
         match output {
             Output::RecordBatch(stream) => {
                 let numbers = util::collect(stream).await.unwrap();

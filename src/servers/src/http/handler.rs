@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use axum::extract::{Extension, Query};
+use axum::extract::{Extension, Json, Query};
 use common_telemetry::metric;
+use serde::{Deserialize, Serialize};
 
 use crate::http::{HttpResponse, JsonResponse};
 use crate::query_handler::SqlQueryHandlerRef;
@@ -32,4 +33,30 @@ pub async fn metrics(
     } else {
         HttpResponse::Text("Prometheus handle not initialized.".to_string())
     }
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ScriptExecution {
+    pub script: String,
+    pub engine: Option<String>,
+}
+
+/// Handler to execute scripts
+#[axum_macros::debug_handler]
+pub async fn scripts(
+    Extension(query_handler): Extension<SqlQueryHandlerRef>,
+    Json(payload): Json<ScriptExecution>,
+) -> HttpResponse {
+    if payload.script.is_empty() {
+        return HttpResponse::Json(JsonResponse::with_error(Some("Invalid script".to_string())));
+    }
+
+    HttpResponse::Json(
+        JsonResponse::from_output(
+            query_handler
+                .do_execute(&payload.script, payload.engine)
+                .await,
+        )
+        .await,
+    )
 }
