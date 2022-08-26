@@ -161,6 +161,11 @@ impl Stream for ChunkStream {
     }
 }
 
+#[inline]
+fn column_qualified_name(table_name: &str, region_name: &str, column_name: &str) -> String {
+    format!("{}.{}.{}", table_name, region_name, column_name)
+}
+
 impl<R: Region> MitoTable<R> {
     fn new(table_info: TableInfo, region: R, manifest: TableManifest) -> Self {
         Self {
@@ -193,9 +198,11 @@ impl<R: Region> MitoTable<R> {
                     region_schema
                         .column_index_by_name(name)
                         .context(ProjectedColumnNotFoundSnafu {
-                            table_name: &self.table_info.name,
-                            region_name: region.name(),
-                            column_name: name,
+                            column_qualified_name: column_qualified_name(
+                                &self.table_info.name,
+                                region.name(),
+                                name,
+                            ),
                         })
                 })
                 .collect();
@@ -209,9 +216,11 @@ impl<R: Region> MitoTable<R> {
                     .map(|name| {
                         region_schema.column_index_by_name(name).context(
                             ProjectedColumnNotFoundSnafu {
-                                table_name: &self.table_info.name,
-                                region_name: region.name(),
-                                column_name: name,
+                                column_qualified_name: column_qualified_name(
+                                    &self.table_info.name,
+                                    region.name(),
+                                    name,
+                                ),
                             },
                         )
                     })

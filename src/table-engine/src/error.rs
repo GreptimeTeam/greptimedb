@@ -131,16 +131,12 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Projected columnd not found in region, column: {}, region: {}, table: {}",
-        column_name,
-        region_name,
-        table_name
+        "Projected columnd not found in region, column: {}",
+        column_qualified_name
     ))]
     ProjectedColumnNotFound {
         backtrace: Backtrace,
-        column_name: String,
-        region_name: String,
-        table_name: String,
+        column_qualified_name: String,
     },
 }
 

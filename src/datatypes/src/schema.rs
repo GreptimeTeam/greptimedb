@@ -87,7 +87,6 @@ impl Schema {
     /// This method **may** panic if the index is out of range of column schemas.
     #[inline]
     pub fn column_name_by_index(&self, idx: usize) -> &str {
-        assert!(idx < self.column_schemas.len());
         &self.column_schemas[idx].name
     }
 
