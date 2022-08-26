@@ -200,11 +200,8 @@ fn test_calc_rvs() {
 def calc_rvs(open_time, close):
     from greptime import vector, log2, prev, sqrt, datetime, pow, sum
     def calc_rv(close, open_time, time, interval):
-        filtered = vector([
-            i < time and i > time-interval  
-            for i in open_time
-        ])
-        close = close.filter(filtered)
+        mask = (open_time < time) & (open_time > time - interval)
+        close = close.filter(mask)
 
         avg_time_interval = (open_time[-1] - open_time[0])/(len(open_time)-1)
         ref = log2(close/prev(close))/log2(2.7)
@@ -266,7 +263,7 @@ def a(cpu, mem):
     abc = vector([v[0] > v[1] for v in zip(cpu, mem)])
     fed = cpu.filter(abc)
     ref = log2(fed/prev(fed))
-    return cpu > mem
+    return (0.5 < cpu) & (cpu < 0.75)
 "#;
     let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
     let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);

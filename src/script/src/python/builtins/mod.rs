@@ -275,7 +275,7 @@ pub(crate) mod greptime_builtin {
     use datatypes::vectors::Helper;
     use rustpython_vm::builtins::{PyFloat, PyStr, PyInt};
     use rustpython_vm::function::OptionalArg;
-    use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
+    use rustpython_vm::{AsObject, PyObjectRef, PyResult, VirtualMachine};
 
     use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
@@ -283,7 +283,7 @@ pub(crate) mod greptime_builtin {
     };
     use crate::python::utils::is_instance;
     use crate::python::PyVector;
-    type PyVectorRef = PyRef<PyVector>;
+    use crate::python::utils::PyVectorRef;
 
     #[pyfunction]
     fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {

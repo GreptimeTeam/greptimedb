@@ -32,6 +32,7 @@ use rustpython_vm::{
 };
 
 use crate::python::utils::is_instance;
+use crate::python::utils::PyVectorRef;
 
 #[pyclass(module = false, name = "vector")]
 #[derive(PyPayload, Debug)]
@@ -160,6 +161,9 @@ fn cast(array: ArrayRef, target_type: &DataType, vm: &VirtualMachine) -> PyResul
         },
     )
     .map_err(|e| vm.new_type_error(e.to_string()))
+}
+fn from_debug_error(err: impl std::fmt::Debug, vm: &VirtualMachine) -> PyBaseExceptionRef {
+    vm.new_runtime_error(format!("Runtime Error: {err:#?}"))
 }
 
 impl AsRef<PyVector> for PyVector {
@@ -513,13 +517,31 @@ impl PyVector {
     }
 
     #[pymethod(magic)]
+    fn and(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let left = self.to_arrow_array();
+        let left = left
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
+        let right = other.to_arrow_array();
+        let right = right
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
+        let res = compute::boolean::and(left, right).map_err(|err| from_debug_error(err, vm))?;
+        let res = Arc::new(res) as ArrayRef;
+        let ret = Helper::try_into_vector(&*res).map_err(|err| from_debug_error(err, vm))?;
+        Ok(ret.into())
+    }
+
+    #[pymethod(magic)]
     fn len(&self) -> usize {
         self.as_vector_ref().len()
     }
 
     /// take a boolean array and filters the Array, returning elements matching the filter (i.e. where the values are true).
     #[pymethod(name = "filter")]
-    fn filter(&self, other: PyRef<PyVector>, vm: &VirtualMachine) -> PyResult<PyVector> {
+    fn filter(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let left = self.to_arrow_array();
         /*
         let right = other.downcast_ref::<PyVector>().ok_or_else(|| {
@@ -914,10 +936,10 @@ impl Comparable for PyVector {
         }
     }
     fn cmp(
-        zelf: &rustpython_vm::Py<Self>,
-        other: &PyObject,
-        op: PyComparisonOp,
-        vm: &VirtualMachine,
+        _zelf: &rustpython_vm::Py<Self>,
+        _other: &PyObject,
+        _op: PyComparisonOp,
+        _vm: &VirtualMachine,
     ) -> PyResult<PyComparisonValue> {
         Ok(PyComparisonValue::NotImplemented)
     }
