@@ -10,8 +10,8 @@ use storage::metadata::{RegionMetaImpl, RegionMetadataRef};
 use storage::write_batch::WriteBatch;
 use store_api::storage::{
     Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse, OpenOptions,
-    ReadContext, Region, RegionDescriptor, ScanRequest, ScanResponse, SchemaRef, Snapshot,
-    StorageEngine, WriteContext, WriteResponse,
+    ReadContext, Region, RegionDescriptor, RegionMeta, ScanRequest, ScanResponse, SchemaRef,
+    Snapshot, StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
@@ -98,8 +98,8 @@ impl Region for MockRegion {
         })
     }
 
-    fn write_request(&self, schema: SchemaRef) -> WriteBatch {
-        WriteBatch::new(schema)
+    fn write_request(&self) -> WriteBatch {
+        WriteBatch::new(self.in_memory_metadata().schema().clone())
     }
 }
 

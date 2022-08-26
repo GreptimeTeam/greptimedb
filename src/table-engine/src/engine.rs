@@ -9,8 +9,8 @@ use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{
     self, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
-    CreateOptions, OpenOptions, Region, RegionDescriptorBuilder, RegionId, RegionMeta,
-    RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
+    CreateOptions, OpenOptions, RegionDescriptorBuilder, RegionId, RowKeyDescriptor,
+    RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
@@ -290,9 +290,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .map_err(BoxedError::new)
             .context(error::CreateRegionSnafu)?;
 
-        // Use region meta schema instead of request schema
         let table_meta = TableMetaBuilder::default()
-            .schema(region.in_memory_metadata().schema().clone())
+            .schema(request.schema)
             .engine(MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(request.primary_key_indices.clone())
@@ -457,17 +456,50 @@ mod tests {
 
         let arrow_schema = batches[0].schema.arrow_schema();
         assert_eq!(arrow_schema.fields().len(), 4);
-        assert_eq!(arrow_schema.field(0).name(), "ts");
-        assert_eq!(arrow_schema.field(1).name(), "host");
-        assert_eq!(arrow_schema.field(2).name(), "cpu");
-        assert_eq!(arrow_schema.field(3).name(), "memory");
+
+        assert_eq!(arrow_schema.field(0).name(), "host");
+        assert_eq!(arrow_schema.field(1).name(), "cpu");
+        assert_eq!(arrow_schema.field(2).name(), "memory");
+        assert_eq!(arrow_schema.field(3).name(), "ts");
 
         let columns = batches[0].df_recordbatch.columns();
         assert_eq!(4, columns.len());
+        assert_eq!(hosts.to_arrow_array(), columns[0]);
+        assert_eq!(cpus.to_arrow_array(), columns[1]);
+        assert_eq!(memories.to_arrow_array(), columns[2]);
+        assert_eq!(tss.to_arrow_array(), columns[3]);
+
+        // Scan with projections: cpu and memory
+        let stream = table.scan(&Some(vec![1, 2]), &[], None).await.unwrap();
+        let batches = util::collect(stream).await.unwrap();
+        assert_eq!(1, batches.len());
+        assert_eq!(batches[0].df_recordbatch.num_columns(), 2);
+
+        let arrow_schema = batches[0].schema.arrow_schema();
+        assert_eq!(arrow_schema.fields().len(), 2);
+
+        assert_eq!(arrow_schema.field(0).name(), "cpu");
+        assert_eq!(arrow_schema.field(1).name(), "memory");
+
+        let columns = batches[0].df_recordbatch.columns();
+        assert_eq!(2, columns.len());
+        assert_eq!(cpus.to_arrow_array(), columns[0]);
+        assert_eq!(memories.to_arrow_array(), columns[1]);
+
+        // Scan with projections: only ts
+        let stream = table.scan(&Some(vec![3]), &[], None).await.unwrap();
+        let batches = util::collect(stream).await.unwrap();
+        assert_eq!(1, batches.len());
+        assert_eq!(batches[0].df_recordbatch.num_columns(), 1);
+
+        let arrow_schema = batches[0].schema.arrow_schema();
+        assert_eq!(arrow_schema.fields().len(), 1);
+
+        assert_eq!(arrow_schema.field(0).name(), "ts");
+
+        let columns = batches[0].df_recordbatch.columns();
+        assert_eq!(1, columns.len());
         assert_eq!(tss.to_arrow_array(), columns[0]);
-        assert_eq!(hosts.to_arrow_array(), columns[1]);
-        assert_eq!(cpus.to_arrow_array(), columns[2]);
-        assert_eq!(memories.to_arrow_array(), columns[3]);
     }
 
     #[tokio::test]

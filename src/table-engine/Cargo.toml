@@ -33,3 +33,4 @@ tokio = { version = "1.0", features = ["full"] }
 [dev-dependencies]
 datatypes = { path = "../datatypes" }
 tokio = { version = "1.18", features = ["full"] }
+tempdir = { version = "0.3" }
