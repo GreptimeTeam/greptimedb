@@ -130,6 +130,7 @@ dependencies = [
  "indexmap",
  "itertools",
  "lexical-core",
+ "lz4",
  "multiversion",
  "num-traits",
  "parquet2",
@@ -140,6 +141,7 @@ dependencies = [
  "simdutf8",
  "streaming-iterator",
  "strength_reduce",
+ "zstd",
 ]
 
 [[package]]
@@ -3970,6 +3972,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "arrow-format",
+ "arrow2",
  "async-stream",
  "async-trait",
  "atomic_float",

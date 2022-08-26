@@ -438,7 +438,7 @@ pub mod codec {
             io::ipc::{
                 self,
                 read::{self, StreamState},
-                write::{StreamWriter, WriteOptions},
+                write::{Compression, StreamWriter, WriteOptions},
             },
         },
         error::Result as DataTypesResult,
@@ -510,7 +510,9 @@ pub mod codec {
                     }
                 });
 
-            let opts = WriteOptions { compression: None };
+            let opts = WriteOptions {
+                compression: Some(Compression::ZSTD),
+            };
             let mut writer = StreamWriter::new(dst, opts);
             let ipc_fields = ipc::write::default_ipc_fields(&schema.fields);
             writer
@@ -739,7 +741,7 @@ pub mod codec {
                 message: "schema required",
             })?;
 
-            let schema: SchemaRef = SchemaRef::try_from(schema).context(FromProtobufSnafu {})?;
+            let schema = SchemaRef::try_from(schema).context(FromProtobufSnafu {})?;
 
             ensure!(
                 write_batch.mutations.len() == self.mutation_extras.len(),
