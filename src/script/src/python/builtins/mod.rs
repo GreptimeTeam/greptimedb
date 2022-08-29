@@ -743,9 +743,9 @@ pub(crate) mod greptime_builtin {
             match &parsed[cur_idx] {
                 State::Num(v) => {
                     if cur_idx + 1 > parsed.len() {
-                        return Err(vm.new_runtime_error(format!(
-                            "Expect a spearator after number, found nothing!"
-                        )));
+                        return Err(vm.new_runtime_error(
+                            "Expect a spearator after number, found nothing!".to_string(),
+                        ));
                     }
                     let nxt = &parsed[cur_idx + 1];
                     if let State::Separator(sep) = nxt {

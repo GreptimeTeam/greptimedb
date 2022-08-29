@@ -535,6 +535,38 @@ impl PyVector {
     }
 
     #[pymethod(magic)]
+    fn or(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let left = self.to_arrow_array();
+        let left = left
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
+        let right = other.to_arrow_array();
+        let right = right
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
+        let res = compute::boolean::or(left, right).map_err(|err| from_debug_error(err, vm))?;
+        let res = Arc::new(res) as ArrayRef;
+        let ret = Helper::try_into_vector(&*res).map_err(|err| from_debug_error(err, vm))?;
+        Ok(ret.into())
+    }
+
+    #[pymethod(magic)]
+    fn invert(&self, vm: &VirtualMachine) -> PyResult<PyVector> {
+        dbg!();
+        let left = self.to_arrow_array();
+        let left = left
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
+        let res = compute::boolean::not(left);
+        let res = Arc::new(res) as ArrayRef;
+        let ret = Helper::try_into_vector(&*res).map_err(|err| from_debug_error(err, vm))?;
+        Ok(ret.into())
+    }
+
+    #[pymethod(magic)]
     fn len(&self) -> usize {
         self.as_vector_ref().len()
     }

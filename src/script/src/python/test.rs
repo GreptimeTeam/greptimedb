@@ -288,7 +288,7 @@ def a(cpu, mem):
     abc = vector([v[0] > v[1] for v in zip(cpu, mem)])
     fed = cpu.filter(abc)
     ref = log2(fed/prev(fed))
-    return (0.5 < cpu) & (cpu < 0.75)
+    return (0.5 < cpu) & ~( cpu >= 0.75)
 "#;
     let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
     let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
