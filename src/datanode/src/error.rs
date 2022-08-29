@@ -7,12 +7,20 @@ use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
 
+use crate::server::grpc::physical_plan;
+
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Fail to execute sql, source: {}", source))]
     ExecuteSql {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to execute physical plan, source: {}", source))]
+    ExecutePhysicalPlan {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
@@ -138,6 +146,12 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Failed to convert datafusion schema: {}", source))]
+    ConvertSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("SQL data type not supported yet: {:?}", t))]
     SqlTypeNotSupported {
         t: sql::ast::DataType,
@@ -161,6 +175,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: catalog::error::Error,
     },
+
+    #[snafu(display("Physical Plan occur error: {}", source))]
+    PhysicalPlan {
+        #[snafu(backtrace)]
+        source: physical_plan::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -169,10 +189,12 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::ExecuteSql { source } => source.status_code(),
+            Error::ExecutePhysicalPlan { source } => source.status_code(),
             Error::NewCatalog { source } => source.status_code(),
             Error::CreateTable { source, .. } => source.status_code(),
             Error::GetTable { source, .. } => source.status_code(),
             Error::Insert { source, .. } => source.status_code(),
+            Error::ConvertSchema { source, .. } => source.status_code(),
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
             Error::ColumnValuesNumberMismatch { .. }
@@ -193,6 +215,7 @@ impl ErrorExt for Error {
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
             | Error::Conversion { .. }
+            | Error::PhysicalPlan { .. }
             | Error::UnsupportedExpr { .. } => StatusCode::Internal,
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),

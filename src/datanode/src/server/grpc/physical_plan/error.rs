@@ -1,3 +1,4 @@
+use api::DecodeError;
 use datafusion::error::DataFusionError;
 use snafu::Snafu;
 
@@ -21,4 +22,7 @@ pub enum Error {
 
     #[snafu(display("Unsupported df execution plan: {}", name))]
     UnsupportedDf { name: String },
+
+    #[snafu(display("Failed to decode physical plan node: {}", source))]
+    DecodePhysicalPlanNode { source: DecodeError },
 }

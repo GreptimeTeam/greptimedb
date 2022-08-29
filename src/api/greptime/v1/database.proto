@@ -25,12 +25,14 @@ message ExprHeader {
   uint32 version = 1;
 }
 
-// TODO(fys): Only support sql now, and 
-// will support promql etc in the future
+// TODO(fys): Only support sql now, and will support promql etc in the future
+// 
+// Note: when expr and physcial plan are both not empty, execute physical plan, not expr.
 message SelectExpr {
   oneof expr {
-    string sql = 1;
+    string sql = 1;  
   }
+  bytes physical_plan = 10;
 }
 
 message InsertExpr {

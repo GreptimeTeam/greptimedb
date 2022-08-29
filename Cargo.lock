@@ -676,6 +676,8 @@ version = "0.1.0"
 dependencies = [
  "api",
  "common-error",
+ "datafusion",
+ "datanode",
  "snafu",
  "tokio",
  "tonic 0.8.0",

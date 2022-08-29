@@ -1,38 +1,34 @@
 pub use prost::DecodeError;
 use prost::Message;
 
-use crate::v1::codec::{InsertBatch, SelectResult};
+use crate::v1::codec::{InsertBatch, PhysicalPlanNode, SelectResult};
 
-impl From<InsertBatch> for Vec<u8> {
-    fn from(insert: InsertBatch) -> Self {
-        insert.encode_to_vec()
-    }
+macro_rules! impl_convert_with_bytes {
+    ($data_type: ty) => {
+        impl From<$data_type> for Vec<u8> {
+            fn from(entity: $data_type) -> Self {
+                entity.encode_to_vec()
+            }
+        }
+
+        impl TryFrom<&[u8]> for $data_type {
+            type Error = DecodeError;
+
+            fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+                <$data_type>::decode(value.as_ref())
+            }
+        }
+    };
 }
 
-impl TryFrom<Vec<u8>> for InsertBatch {
-    type Error = DecodeError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        InsertBatch::decode(value.as_ref())
-    }
-}
-
-impl From<SelectResult> for Vec<u8> {
-    fn from(result: SelectResult) -> Self {
-        result.encode_to_vec()
-    }
-}
-
-impl TryFrom<Vec<u8>> for SelectResult {
-    type Error = DecodeError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        SelectResult::decode(value.as_ref())
-    }
-}
+impl_convert_with_bytes!(InsertBatch);
+impl_convert_with_bytes!(SelectResult);
+impl_convert_with_bytes!(PhysicalPlanNode);
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Deref;
+
     use crate::v1::codec::*;
     use crate::v1::column;
     use crate::v1::Column;
@@ -44,7 +40,7 @@ mod tests {
         let insert_batch = mock_insert_batch();
 
         let bytes: Vec<u8> = insert_batch.into();
-        let insert: InsertBatch = bytes.try_into().unwrap();
+        let insert: InsertBatch = bytes.deref().try_into().unwrap();
 
         assert_eq!(8, insert.row_count);
         assert_eq!(1, insert.columns.len());
@@ -70,7 +66,7 @@ mod tests {
         bytes[0] = 0b1;
         bytes[1] = 0b1;
 
-        let insert: InsertBatch = bytes.try_into().unwrap();
+        let insert: InsertBatch = bytes.deref().try_into().unwrap();
 
         assert_eq!(8, insert.row_count);
         assert_eq!(1, insert.columns.len());
@@ -90,7 +86,7 @@ mod tests {
         let select_result = mock_select_result();
 
         let bytes: Vec<u8> = select_result.into();
-        let result: SelectResult = bytes.try_into().unwrap();
+        let result: SelectResult = bytes.deref().try_into().unwrap();
 
         assert_eq!(8, result.row_count);
         assert_eq!(1, result.columns.len());
@@ -116,7 +112,7 @@ mod tests {
         bytes[0] = 0b1;
         bytes[1] = 0b1;
 
-        let result: SelectResult = bytes.try_into().unwrap();
+        let result: SelectResult = bytes.deref().try_into().unwrap();
 
         assert_eq!(8, result.row_count);
         assert_eq!(1, result.columns.len());

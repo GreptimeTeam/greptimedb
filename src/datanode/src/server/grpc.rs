@@ -1,4 +1,4 @@
 pub(crate) mod handler;
-pub mod insert;
-mod physical_plan;
-pub mod select;
+pub(crate) mod insert;
+pub mod physical_plan;
+pub(crate) mod select;

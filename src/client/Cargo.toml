@@ -8,6 +8,8 @@ edition = "2021"
 [dependencies]
 api = { path = "../api" }
 common-error = { path = "../common/error" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datanode = { path = "../datanode" }
 snafu = { version = "0.7", features = ["backtraces"] }
 tonic = "0.8"
 

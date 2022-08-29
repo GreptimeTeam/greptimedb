@@ -7,9 +7,12 @@ use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
 use common_telemetry::logging::{error, info};
 use common_telemetry::timer;
+use datatypes::schema::Schema;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
+use query::plan::PhysicalPlan;
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
+use query::PhysicalPlanAdapter;
 use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
@@ -19,11 +22,14 @@ use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
-    self, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result, TableNotFoundSnafu,
+    self, ConvertSchemaSnafu, ExecutePhysicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu,
+    NewCatalogSnafu, PhysicalPlanSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::metric;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::insertion_expr_to_request;
+use crate::server::grpc::physical_plan::plan::DefaultAsPlanImpl;
+use crate::server::grpc::physical_plan::AsExcutionPlan;
 use crate::server::grpc::select::to_object_result;
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -90,6 +96,13 @@ impl Instance {
             .context(InsertSnafu { table_name })?;
 
         Ok(Output::AffectedRows(affected_rows))
+    }
+
+    pub async fn execute_physical_plan(&self, plan: Arc<dyn PhysicalPlan>) -> Result<Output> {
+        self.query_engine
+            .execute_physical(&plan)
+            .await
+            .context(ExecutePhysicalPlanSnafu)
     }
 
     pub async fn execute_sql(&self, sql: &str) -> Result<Output> {
@@ -167,12 +180,32 @@ impl Instance {
     }
 
     async fn handle_select(&self, select_expr: SelectExpr) -> ObjectResult {
+        let result = self.do_handle_select(select_expr).await;
+        to_object_result(result).await
+    }
+
+    async fn do_handle_select(&self, select_expr: SelectExpr) -> Result<Output> {
+        let bytes = select_expr.physical_plan;
+        if !bytes.is_empty() {
+            let physical_plan = DefaultAsPlanImpl { bytes }
+                .try_into_physical_plan()
+                .context(PhysicalPlanSnafu)?;
+
+            let schema: Arc<Schema> = Arc::new(
+                physical_plan
+                    .schema()
+                    .try_into()
+                    .context(ConvertSchemaSnafu)?,
+            );
+            let physical_plan = Arc::new(PhysicalPlanAdapter::new(schema, physical_plan));
+            return self.execute_physical_plan(physical_plan).await;
+        }
         match select_expr.expr {
-            Some(select_expr::Expr::Sql(sql)) => {
-                let result = self.execute_sql(&sql).await;
-                to_object_result(result).await
+            Some(select_expr::Expr::Sql(sql)) => self.execute_sql(&sql).await,
+            None => UnsupportedExprSnafu {
+                name: format!("{:?}", select_expr.expr),
             }
-            None => ObjectResult::default(),
+            .fail(),
         }
     }
 

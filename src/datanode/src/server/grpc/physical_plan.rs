@@ -1,6 +1,6 @@
-mod error;
+pub mod error;
 mod expr;
-mod plan;
+pub mod plan;
 
 use std::sync::Arc;
 
