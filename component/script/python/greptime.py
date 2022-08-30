@@ -7,9 +7,9 @@ import numpy as np
 from urllib import request
 import inspect
 import requests
+import cfg
 
-GREPTIME_DB_CONN_ADDRESS = "localhost:443"
-"""The Global Variable for address for conntect to database"""
+
 
 log = np.log
 sum = np.nansum
@@ -185,7 +185,7 @@ def datetime(input_time: str) -> int:
     return res_time
 
 
-def coprocessor(args, returns, sql=None):
+def coprocessor(args=None, returns=None, sql=None):
     """
     The actual coprocessor, which will connect to database and update 
     whatever function decorated with `@coprocessor(args=[...], returns=[...], sql=...)`
@@ -195,15 +195,16 @@ def coprocessor(args, returns, sql=None):
         def wrapper_do_actual(*args, **kwargs):
             # print("Mock Python Coprocessor post:")
             # print("args=", args,"kwargs=", kwargs)
-            print(inspect.getsource(func))
+            # print(inspect.getsource(func))
             # print(func(*args, **kwargs))
             # insert actual communciation code here for real thing
             if len(args)!=0 or len(kwargs)!=0:
                 raise Exception("Expect call with no arguements(for all args are given by coprocessor itself)")
             source = inspect.getsource(func)
-            global GREPTIME_DB_CONN_ADDRESS
+            url = "http://{}/v1/scripts".format(cfg.GREPTIME_DB_CONN_ADDRESS)
+            print(url)
             res = requests.post(
-                "{}/v1/scripts".format(GREPTIME_DB_CONN_ADDRESS),
+                url,
                 json={
                     "script": source
                 })
