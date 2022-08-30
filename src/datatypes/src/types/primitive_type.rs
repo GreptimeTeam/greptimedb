@@ -6,9 +6,11 @@ use paste::paste;
 use serde::{Deserialize, Serialize};
 
 use crate::data_type::{ConcreteDataType, DataType};
+use crate::scalars::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
 use crate::types::primitive_traits::Primitive;
 use crate::value::Value;
+use crate::vectors::{MutableVector, PrimitiveVectorBuilder};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PrimitiveType<T: Primitive> {
@@ -62,6 +64,10 @@ macro_rules! impl_numeric {
 
             fn as_arrow_type(&self) -> ArrowDataType {
                 ArrowDataType::$TypeId
+            }
+
+            fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector> {
+                Box::new(PrimitiveVectorBuilder::<$Type>::with_capacity(capacity))
             }
         }
 

@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, ListArray};
+use arrow::bitmap::MutableBitmap;
 use arrow::datatypes::DataType as ArrowDataType;
 use serde_json::Value as JsonValue;
 use snafu::prelude::*;
@@ -48,6 +49,10 @@ impl Vector for ListVector {
 
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
+    }
+
+    fn to_box_arrow_array(&self) -> Box<dyn Array> {
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
@@ -131,6 +136,64 @@ impl From<ArrowListArray> for ListVector {
 }
 
 impl_try_from_arrow_array_for_vector!(ArrowListArray, ListVector);
+
+pub struct ListVectorBuilder {
+    inner_type: ConcreteDataType,
+    offsets: Vec<i32>,
+    values: Box<dyn MutableVector>,
+    validity: Option<MutableBitmap>,
+}
+
+impl ListVectorBuilder {
+    pub fn with_capacity(inner_type: ConcreteDataType, capacity: usize) -> ListVectorBuilder {
+        let mut offsets = Vec::with_capacity(capacity + 1);
+        offsets.push(0);
+        // The actual required capacity might greater than the capacity of the `ListVector`
+        // if there exists child vector that has more than one element.
+        let values = inner_type.create_mutable(capacity);
+
+        ListVectorBuilder {
+            inner_type,
+            offsets,
+            values,
+            validity: None,
+        }
+    }
+}
+
+impl MutableVector for ListVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::list_datatype(self.inner_type.clone())
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.len() - 1
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn to_vector(&mut self) -> VectorRef {
+        let array = ArrowListArray::try_new(
+            self.inner_type.as_arrow_type(),
+            std::mem::take(&mut self.offsets).into(),
+            self.values.to_vector().to_arrow_array(),
+            std::mem::take(&mut self.validity).map(|x| x.into()),
+        )
+        .unwrap(); // The `ListVectorBuilder` itself should ensure it always builds a valid array.
+
+        let vector = ListVector {
+            array,
+            inner_data_type: self.inner_type.clone(),
+        };
+        Arc::new(vector)
+    }
+}
 
 #[cfg(test)]
 mod tests {

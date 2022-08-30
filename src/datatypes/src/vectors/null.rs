@@ -13,8 +13,7 @@ use crate::error::Result;
 use crate::serialize::Serializable;
 use crate::types::NullType;
 use crate::value::Value;
-use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{Validity, Vector, VectorRef};
+use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 #[derive(PartialEq)]
 pub struct NullVector {
@@ -54,6 +53,10 @@ impl Vector for NullVector {
 
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
+    }
+
+    fn to_box_arrow_array(&self) -> Box<dyn Array> {
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
@@ -112,7 +115,36 @@ impl Serializable for NullVector {
     }
 }
 
-impl_try_from_arrow_array_for_vector!(NullArray, NullVector);
+vectors::impl_try_from_arrow_array_for_vector!(NullArray, NullVector);
+
+#[derive(Default)]
+pub struct NullVectorBuilder {
+    length: usize,
+}
+
+impl MutableVector for NullVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::null_datatype()
+    }
+
+    fn len(&self) -> usize {
+        self.length
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn to_vector(&mut self) -> VectorRef {
+        let vector = Arc::new(NullVector::new(self.length));
+        self.length = 0;
+        vector
+    }
+}
 
 #[cfg(test)]
 mod tests {

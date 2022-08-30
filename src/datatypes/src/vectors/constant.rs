@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
+use arrow::array::{Array, ArrayRef};
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
@@ -54,6 +54,11 @@ impl Vector for ConstantVector {
     fn to_arrow_array(&self) -> ArrayRef {
         let v = self.vector.replicate(&[self.length]);
         v.to_arrow_array()
+    }
+
+    fn to_box_arrow_array(&self) -> Box<dyn Array> {
+        let v = self.vector.replicate(&[self.length]);
+        v.to_box_arrow_array()
     }
 
     fn is_const(&self) -> bool {

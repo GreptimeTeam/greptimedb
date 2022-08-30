@@ -73,6 +73,10 @@ impl Vector for BooleanVector {
         Arc::new(self.array.clone())
     }
 
+    fn to_box_arrow_array(&self) -> Box<dyn Array> {
+        Box::new(self.array.clone())
+    }
+
     fn validity(&self) -> Validity {
         vectors::impl_validity_for_vector!(self.array)
     }

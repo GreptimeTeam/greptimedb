@@ -12,6 +12,7 @@ use crate::types::{
     Int8Type, ListType, NullType, StringType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
+use crate::vectors::MutableVector;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[enum_dispatch::enum_dispatch(DataType)]
@@ -185,6 +186,9 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
 
     /// Convert this type as [arrow2::datatypes::DataType].
     fn as_arrow_type(&self) -> ArrowDataType;
+
+    /// Create a mutable vector with given `capacity` of this type.
+    fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector>;
 }
 
 pub type DataTypeRef = Arc<dyn DataType>;

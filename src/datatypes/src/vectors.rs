@@ -17,7 +17,7 @@ use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
+use arrow::array::{Array, ArrayRef};
 use arrow::bitmap::Bitmap;
 pub use binary::*;
 pub use boolean::*;
@@ -80,6 +80,9 @@ pub trait Vector: Send + Sync + Serializable + Debug {
 
     /// Convert this vector to a new arrow [ArrayRef].
     fn to_arrow_array(&self) -> ArrayRef;
+
+    /// Convert this vector to a new boxed arrow [Array].
+    fn to_box_arrow_array(&self) -> Box<dyn Array>;
 
     /// Returns the validity of the Array.
     fn validity(&self) -> Validity;

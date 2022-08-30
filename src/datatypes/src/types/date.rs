@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::data_type::DataType;
 use crate::prelude::{DataTypeRef, LogicalTypeId, Value};
+use crate::scalars::ScalarVectorBuilder;
+use crate::vectors::{DateVectorBuilder, MutableVector};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DateType;
@@ -24,6 +26,10 @@ impl DataType for DateType {
 
     fn as_arrow_type(&self) -> ArrowDataType {
         ArrowDataType::Date32
+    }
+
+    fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector> {
+        Box::new(DateVectorBuilder::with_capacity(capacity))
     }
 }
 
