@@ -206,7 +206,8 @@ def coprocessor(args=None, returns=None, sql=None):
             res = requests.post(
                 url,
                 json={
-                    "script": source
+                    "script": source,
+                    "engine": None,
                 })
             return res
         return wrapper_do_actual
