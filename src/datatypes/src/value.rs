@@ -1,10 +1,13 @@
 use std::cmp::Ordering;
 
 use common_base::bytes::{Bytes, StringBytes};
+use common_time::date::Date;
+use common_time::datetime::DateTime;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
+use crate::vectors::ListVector;
 
 pub type OrderedF32 = OrderedFloat<f32>;
 pub type OrderedF64 = OrderedFloat<f64>;
@@ -36,8 +39,8 @@ pub enum Value {
     Binary(Bytes),
 
     // Date & Time types:
-    Date(common_time::date::Date),
-    DateTime(common_time::datetime::DateTime),
+    Date(Date),
+    DateTime(DateTime),
 
     List(ListValue),
 }
@@ -74,7 +77,7 @@ impl Value {
     }
 }
 
-macro_rules! impl_from {
+macro_rules! impl_value_from {
     ($Variant:ident, $Type:ident) => {
         impl From<$Type> for Value {
             fn from(value: $Type) -> Self {
@@ -93,19 +96,19 @@ macro_rules! impl_from {
     };
 }
 
-impl_from!(Boolean, bool);
-impl_from!(UInt8, u8);
-impl_from!(UInt16, u16);
-impl_from!(UInt32, u32);
-impl_from!(UInt64, u64);
-impl_from!(Int8, i8);
-impl_from!(Int16, i16);
-impl_from!(Int32, i32);
-impl_from!(Int64, i64);
-impl_from!(Float32, f32);
-impl_from!(Float64, f64);
-impl_from!(String, StringBytes);
-impl_from!(Binary, Bytes);
+impl_value_from!(Boolean, bool);
+impl_value_from!(UInt8, u8);
+impl_value_from!(UInt16, u16);
+impl_value_from!(UInt32, u32);
+impl_value_from!(UInt64, u64);
+impl_value_from!(Int8, i8);
+impl_value_from!(Int16, i16);
+impl_value_from!(Int32, i32);
+impl_value_from!(Int64, i64);
+impl_value_from!(Float32, f32);
+impl_value_from!(Float64, f64);
+impl_value_from!(String, StringBytes);
+impl_value_from!(Binary, Bytes);
 
 impl From<String> for Value {
     fn from(string: String) -> Value {
@@ -201,10 +204,118 @@ impl Ord for ListValue {
     }
 }
 
+/// Reference to [Value].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ValueRef<'a> {
+    Null,
+
+    // Numeric types:
+    Boolean(bool),
+    UInt8(u8),
+    UInt16(u16),
+    UInt32(u32),
+    UInt64(u64),
+    Int8(i8),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Float32(OrderedF32),
+    Float64(OrderedF64),
+
+    // String types:
+    String(&'a str),
+    Binary(&'a [u8]),
+
+    // Date & Time types:
+    Date(Date),
+    DateTime(DateTime),
+
+    List(ListValueRef<'a>),
+}
+
+macro_rules! impl_value_ref_from {
+    ($Variant:ident, $Type:ident) => {
+        impl From<$Type> for ValueRef<'_> {
+            fn from(value: $Type) -> Self {
+                ValueRef::$Variant(value.into())
+            }
+        }
+
+        impl From<Option<$Type>> for ValueRef<'_> {
+            fn from(value: Option<$Type>) -> Self {
+                match value {
+                    Some(v) => ValueRef::$Variant(v.into()),
+                    None => ValueRef::Null,
+                }
+            }
+        }
+    };
+}
+
+impl_value_ref_from!(Boolean, bool);
+impl_value_ref_from!(UInt8, u8);
+impl_value_ref_from!(UInt16, u16);
+impl_value_ref_from!(UInt32, u32);
+impl_value_ref_from!(UInt64, u64);
+impl_value_ref_from!(Int8, i8);
+impl_value_ref_from!(Int16, i16);
+impl_value_ref_from!(Int32, i32);
+impl_value_ref_from!(Int64, i64);
+impl_value_ref_from!(Float32, f32);
+impl_value_ref_from!(Float64, f64);
+
+impl<'a> From<&'a str> for ValueRef<'a> {
+    fn from(string: &'a str) -> ValueRef<'a> {
+        ValueRef::String(string)
+    }
+}
+
+impl<'a> From<&'a [u8]> for ValueRef<'a> {
+    fn from(bytes: &'a [u8]) -> ValueRef<'a> {
+        ValueRef::Binary(bytes)
+    }
+}
+
+/// Reference to a [ListValue].
+// Comparision still requires some allocation (call of `to_value()`) and might be avoidable.
+#[derive(Debug, Clone, Copy)]
+pub enum ListValueRef<'a> {
+    Indexed { vector: &'a ListVector, idx: usize },
+    Ref(&'a ListValue),
+}
+
+impl<'a> ListValueRef<'a> {
+    fn to_value(&self) -> Value {
+        match self {
+            ListValueRef::Indexed { vector, idx } => vector.get(*idx),
+            ListValueRef::Ref(v) => Value::List((*v).clone()),
+        }
+    }
+}
+
+impl<'a> PartialEq for ListValueRef<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_value().eq(&other.to_value())
+    }
+}
+
+impl<'a> Eq for ListValueRef<'a> {}
+
+impl<'a> Ord for ListValueRef<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Respect the order of `Value` by converting into value before comparision.
+        self.to_value().cmp(&other.to_value())
+    }
+}
+
+impl<'a> PartialOrd for ListValueRef<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(&other))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use common_time::datetime::DateTime;
-
     use super::*;
 
     #[test]
