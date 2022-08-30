@@ -684,12 +684,12 @@ pub(crate) mod greptime_builtin {
     }
 
     #[pyfunction]
-    fn datetime(input: &PyStr, vm: &VirtualMachine) -> PyResult<isize> {
+    fn datetime(input: &PyStr, vm: &VirtualMachine) -> PyResult<i64> {
         let mut parsed = Vec::new();
         let mut prev = 0;
         #[derive(Debug)]
         enum State {
-            Num(isize),
+            Num(i64),
             Separator(String),
         }
         let mut state = State::Num(Default::default());
@@ -729,7 +729,7 @@ pub(crate) mod greptime_builtin {
         parsed.push(last);
         let mut cur_idx = 0;
         let mut tot_time = 0;
-        fn factor(unit: &str, vm: &VirtualMachine) -> PyResult<isize> {
+        fn factor(unit: &str, vm: &VirtualMachine) -> PyResult<i64> {
             let ret = match unit {
                 "d" => 24 * 60 * 60,
                 "h" => 60 * 60,
