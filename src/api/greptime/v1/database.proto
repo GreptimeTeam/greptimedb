@@ -26,13 +26,16 @@ message ExprHeader {
 }
 
 // TODO(fys): Only support sql now, and will support promql etc in the future
-// 
-// Note: when expr and physcial plan are both not empty, execute physical plan, not expr.
 message SelectExpr {
   oneof expr {
-    string sql = 1;  
+    string sql = 1;
+    PhysicalPlan physical_plan = 2;
   }
-  bytes physical_plan = 10;
+}
+
+message PhysicalPlan {
+  bytes original_ql = 1;
+  bytes plan = 2;
 }
 
 message InsertExpr {

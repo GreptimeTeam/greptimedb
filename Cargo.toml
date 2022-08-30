@@ -4,6 +4,7 @@ members = [
     "src/catalog",
     "src/client",
     "src/common/base",
+    "src/common/grpc",
     "src/common/error",
     "src/common/function",
     "src/common/query",

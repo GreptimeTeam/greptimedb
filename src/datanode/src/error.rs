@@ -7,8 +7,6 @@ use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
 
-use crate::server::grpc::physical_plan;
-
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -179,7 +177,7 @@ pub enum Error {
     #[snafu(display("Physical Plan occur error: {}", source))]
     PhysicalPlan {
         #[snafu(backtrace)]
-        source: physical_plan::error::Error,
+        source: common_grpc::Error,
     },
 }
 

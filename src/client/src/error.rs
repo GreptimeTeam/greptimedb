@@ -3,7 +3,6 @@ use std::sync::Arc;
 use api::serde::DecodeError;
 use common_error::prelude::*;
 use datafusion::physical_plan::ExecutionPlan;
-use datanode::server::grpc::physical_plan;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -41,7 +40,7 @@ pub enum Error {
     EncodePhysical {
         physical: Arc<dyn ExecutionPlan>,
         #[snafu(backtrace)]
-        source: physical_plan::error::Error,
+        source: common_grpc::Error,
     },
 }
 

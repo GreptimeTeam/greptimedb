@@ -1,4 +1,3 @@
-pub mod error;
 mod expr;
 pub mod plan;
 

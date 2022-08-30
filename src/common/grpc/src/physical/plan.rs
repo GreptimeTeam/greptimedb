@@ -4,7 +4,7 @@ use api::v1::codec::{
     physical_plan_node::PhysicalPlanType, MockInputExecNode, PhysicalPlanNode, ProjectionExecNode,
 };
 use arrow::{
-    array::PrimitiveArray,
+    array::{PrimitiveArray, Utf8Array},
     datatypes::{DataType, Field, Schema},
 };
 use async_trait::async_trait;
@@ -17,16 +17,13 @@ use datafusion::{
     },
     record_batch::RecordBatch,
 };
-use datatypes::arrow_array::StringArray;
 use snafu::{OptionExt, ResultExt};
 
-use crate::server::grpc::physical_plan::{
-    error::{
-        DecodePhysicalPlanNodeSnafu, EmptyGrpcPhysicalPlanSnafu, Error, MissingFieldSnafu,
-        NewProjectionSnafu, UnsupportedDfSnafu,
-    },
-    expr, AsExcutionPlan,
+use crate::error::{
+    DecodePhysicalPlanNodeSnafu, EmptyGrpcPhysicalPlanSnafu, Error, MissingFieldSnafu,
+    NewProjectionSnafu, UnsupportedDfSnafu,
 };
+use crate::physical::{expr, AsExcutionPlan};
 
 pub struct DefaultAsPlanImpl {
     pub bytes: Vec<u8>,
@@ -186,7 +183,7 @@ impl ExecutionPlan for MockExecution {
         _runtime: Arc<RuntimeEnv>,
     ) -> datafusion::error::Result<SendableRecordBatchStream> {
         let id_array = Arc::new(PrimitiveArray::from_slice([1u32, 2, 3, 4, 5]));
-        let name_array = Arc::new(StringArray::from_slice([
+        let name_array = Arc::new(Utf8Array::<i64>::from_slice([
             "zhangsan", "lisi", "wangwu", "Tony", "Mike",
         ]));
         let age_array = Arc::new(PrimitiveArray::from_slice([25u32, 28, 27, 35, 25]));
@@ -218,7 +215,7 @@ mod tests {
     };
 
     use super::{DefaultAsPlanImpl, MockExecution};
-    use crate::server::grpc::physical_plan::AsExcutionPlan;
+    use crate::physical::AsExcutionPlan;
 
     #[test]
     fn test_convert_df_projection_with_bytes() {

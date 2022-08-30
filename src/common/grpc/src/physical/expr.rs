@@ -4,9 +4,7 @@ use api::v1::codec;
 use datafusion::physical_plan::{expressions::Column as DfColumn, PhysicalExpr as DfPhysicalExpr};
 use snafu::OptionExt;
 
-use crate::server::grpc::physical_plan::error::{
-    EmptyGrpcExprSnafu, Error, UnsupportedDfExprSnafu,
-};
+use crate::error::{EmptyGrpcExprSnafu, Error, UnsupportedDfExprSnafu};
 
 // grpc -> datafusion (physical expr)
 pub(crate) fn parse_grpc_physical_expr(
@@ -57,9 +55,7 @@ mod tests {
     use api::v1::codec::{physical_expr_node::ExprType::Column, PhysicalColumn, PhysicalExprNode};
     use datafusion::physical_plan::{expressions::Column as DfColumn, PhysicalExpr};
 
-    use crate::server::grpc::physical_plan::expr::{
-        parse_df_physical_expr, parse_grpc_physical_expr,
-    };
+    use crate::physical::expr::{parse_df_physical_expr, parse_grpc_physical_expr};
 
     #[test]
     fn test_column_convert() {

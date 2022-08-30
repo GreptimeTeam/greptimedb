@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
+use common_grpc::AsExcutionPlan;
+use common_grpc::DefaultAsPlanImpl;
 use common_telemetry::logging::{error, info};
 use common_telemetry::timer;
 use datatypes::schema::Schema;
@@ -28,8 +30,6 @@ use crate::error::{
 use crate::metric;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::insertion_expr_to_request;
-use crate::server::grpc::physical_plan::plan::DefaultAsPlanImpl;
-use crate::server::grpc::physical_plan::AsExcutionPlan;
 use crate::server::grpc::select::to_object_result;
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -185,25 +185,28 @@ impl Instance {
     }
 
     async fn do_handle_select(&self, select_expr: SelectExpr) -> Result<Output> {
-        let bytes = select_expr.physical_plan;
-        if !bytes.is_empty() {
-            let physical_plan = DefaultAsPlanImpl { bytes }
-                .try_into_physical_plan()
-                .context(PhysicalPlanSnafu)?;
-
-            let schema: Arc<Schema> = Arc::new(
-                physical_plan
-                    .schema()
-                    .try_into()
-                    .context(ConvertSchemaSnafu)?,
-            );
-            let physical_plan = Arc::new(PhysicalPlanAdapter::new(schema, physical_plan));
-            return self.execute_physical_plan(physical_plan).await;
-        }
-        match select_expr.expr {
+        let expr = select_expr.expr;
+        match expr {
             Some(select_expr::Expr::Sql(sql)) => self.execute_sql(&sql).await,
-            None => UnsupportedExprSnafu {
-                name: format!("{:?}", select_expr.expr),
+            Some(select_expr::Expr::PhysicalPlan(api::v1::PhysicalPlan {
+                original_ql: _,
+                plan,
+            })) => {
+                let physical_plan = DefaultAsPlanImpl { bytes: plan }
+                    .try_into_physical_plan()
+                    .context(PhysicalPlanSnafu)?;
+
+                let schema: Arc<Schema> = Arc::new(
+                    physical_plan
+                        .schema()
+                        .try_into()
+                        .context(ConvertSchemaSnafu)?,
+                );
+                let physical_plan = Arc::new(PhysicalPlanAdapter::new(schema, physical_plan));
+                self.execute_physical_plan(physical_plan).await
+            }
+            _ => UnsupportedExprSnafu {
+                name: format!("{:?}", expr),
             }
             .fail(),
         }

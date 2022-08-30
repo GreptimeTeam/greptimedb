@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use client::{Client, Database};
+use common_grpc::MockExecution;
 use datafusion::physical_plan::{
     expressions::Column, projection::ProjectionExec, ExecutionPlan, PhysicalExpr,
 };
-use datanode::server::grpc::physical_plan::plan::MockExecution;
 use tracing::{event, Level};
 
 fn main() {
@@ -20,7 +20,7 @@ async fn run() {
     let db = Database::new("greptime", client);
 
     let physical = mock_physical_plan();
-    let result = db.physical_plan(physical).await;
+    let result = db.physical_plan(physical, None).await;
 
     event!(Level::INFO, "result: {:#?}", result);
 }

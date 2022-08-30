@@ -4,12 +4,13 @@ use std::sync::Arc;
 use api::v1::codec::SelectResult as GrpcSelectResult;
 use api::v1::{
     object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr,
-    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, SelectExpr,
+    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, PhysicalPlan,
+    SelectExpr,
 };
 use common_error::status_code::StatusCode;
+use common_grpc::AsExcutionPlan;
+use common_grpc::DefaultAsPlanImpl;
 use datafusion::physical_plan::ExecutionPlan;
-use datanode::server::grpc::physical_plan::plan::DefaultAsPlanImpl;
-use datanode::server::grpc::physical_plan::AsExcutionPlan;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{self, MissingResultSnafu};
@@ -62,19 +63,25 @@ impl Database {
         let select_expr = match expr {
             Select::Sql(sql) => SelectExpr {
                 expr: Some(select_expr::Expr::Sql(sql)),
-                ..Default::default()
             },
         };
         self.do_select(select_expr).await
     }
 
-    pub async fn physical_plan(&self, physical: Arc<dyn ExecutionPlan>) -> Result<ObjectResult> {
-        let physical_plan = DefaultAsPlanImpl::try_from_physical_plan(physical.clone())
+    pub async fn physical_plan(
+        &self,
+        physical: Arc<dyn ExecutionPlan>,
+        original_ql: Option<Vec<u8>>,
+    ) -> Result<ObjectResult> {
+        let plan = DefaultAsPlanImpl::try_from_physical_plan(physical.clone())
             .context(EncodePhysicalSnafu { physical })?
             .bytes;
+        let original_ql = original_ql.unwrap_or_default();
         let select_expr = SelectExpr {
-            physical_plan,
-            ..Default::default()
+            expr: Some(select_expr::Expr::PhysicalPlan(PhysicalPlan {
+                original_ql,
+                plan,
+            })),
         };
         self.do_select(select_expr).await
     }
