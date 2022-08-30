@@ -14,7 +14,7 @@ use crate::error::SerializeSnafu;
 use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::StringType;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// String array wrapper
@@ -122,6 +122,10 @@ impl Vector for StringVector {
         let right = other.as_any().downcast_ref::<StringVector>().unwrap();
         // Use `get_data()` to avoid cloning the value.
         self.get_data(i).cmp(&right.get_data(j))
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        vectors::impl_get_ref_for_vector!(self.array, index)
     }
 }
 

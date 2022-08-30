@@ -8,7 +8,7 @@ use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::ConversionSnafu;
-use crate::prelude::{ScalarVectorBuilder, Validity, Value, Vector, VectorRef};
+use crate::prelude::*;
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
 use crate::vectors::{MutableVector, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
@@ -109,6 +109,16 @@ impl Vector for DateVector {
     fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering {
         let right = other.as_any().downcast_ref::<DateVector>().unwrap();
         self.get(i).cmp(&right.get(j))
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        match self.array.get(index) {
+            Value::Int32(v) => ValueRef::Date(Date::new(v)),
+            Value::Null => ValueRef::Null,
+            _ => {
+                unreachable!()
+            }
+        }
     }
 }
 

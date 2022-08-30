@@ -9,7 +9,7 @@ use snafu::OptionExt;
 use crate::data_type::ConcreteDataType;
 use crate::error::ConversionSnafu;
 use crate::prelude::{
-    MutableVector, ScalarVector, ScalarVectorBuilder, Validity, Value, Vector, VectorRef,
+    MutableVector, ScalarVector, ScalarVectorBuilder, Validity, Value, ValueRef, Vector, VectorRef,
 };
 use crate::serialize::Serializable;
 use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
@@ -110,6 +110,16 @@ impl Vector for DateTimeVector {
     fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering {
         let right = other.as_any().downcast_ref::<DateTimeVector>().unwrap();
         self.get(i).cmp(&right.get(j))
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        match self.array.get(index) {
+            Value::Int64(v) => ValueRef::DateTime(DateTime::new(v)),
+            Value::Null => ValueRef::Null,
+            _ => {
+                unreachable!()
+            }
+        }
     }
 }
 

@@ -12,7 +12,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::Result;
 use crate::serialize::Serializable;
 use crate::types::NullType;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 #[derive(PartialEq)]
@@ -98,6 +98,11 @@ impl Vector for NullVector {
     fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering {
         let right = other.as_any().downcast_ref::<NullVector>().unwrap();
         self.get(i).cmp(&right.get(j))
+    }
+
+    fn get_ref(&self, _index: usize) -> ValueRef {
+        // Skips bound check for null array.
+        ValueRef::Null
     }
 }
 

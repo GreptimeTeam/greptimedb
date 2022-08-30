@@ -12,7 +12,7 @@ use crate::error::Result;
 use crate::prelude::*;
 use crate::serialize::Serializable;
 use crate::types::ListType;
-use crate::value::ListValue;
+use crate::value::{ListValue, ListValueRef};
 use crate::vectors::{impl_try_from_arrow_array_for_vector, impl_validity_for_vector};
 
 type ArrowListArray = ListArray<i32>;
@@ -105,6 +105,13 @@ impl Vector for ListVector {
         let right = other.as_any().downcast_ref::<ListVector>().unwrap();
         // TODO(yingwen): Use more efficient way to compare elements if necessary.
         self.get(i).cmp(&right.get(j))
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        ValueRef::List(ListValueRef::Indexed {
+            vector: self,
+            idx: index,
+        })
     }
 }
 

@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::scalars::common::replicate_scalar_vector;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of boolean.
@@ -104,6 +104,10 @@ impl Vector for BooleanVector {
     fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering {
         let right = other.as_any().downcast_ref::<BooleanVector>().unwrap();
         self.get(i).cmp(&right.get(j))
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        vectors::impl_get_ref_for_vector!(self.array, index)
     }
 }
 

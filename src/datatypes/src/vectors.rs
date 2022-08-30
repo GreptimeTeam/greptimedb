@@ -36,7 +36,7 @@ pub use string::*;
 use crate::data_type::ConcreteDataType;
 use crate::error::{BadArrayAccessSnafu, Result};
 use crate::serialize::Serializable;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 
 #[derive(Debug, PartialEq)]
 pub enum Validity<'a> {
@@ -150,6 +150,12 @@ pub trait Vector: Send + Sync + Serializable + Debug {
     /// - the data type of `self` is different from data type of `other`.
     /// - `i` or `j` is out of bound.
     fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering;
+
+    /// Returns the reference of value at `index`.
+    ///
+    /// # Panics
+    /// Panic if `index` is out of bound.
+    fn get_ref(&self, index: usize) -> ValueRef;
 }
 
 pub type VectorRef = Arc<dyn Vector>;
@@ -196,8 +202,20 @@ macro_rules! impl_get_for_vector {
     };
 }
 
+macro_rules! impl_get_ref_for_vector {
+    ($array: expr, $index: ident) => {
+        if $array.is_valid($index) {
+            // Safety: The index have been checked by `is_valid()`.
+            unsafe { $array.value_unchecked($index).into() }
+        } else {
+            ValueRef::Null
+        }
+    };
+}
+
 pub(crate) use {
-    impl_get_for_vector, impl_try_from_arrow_array_for_vector, impl_validity_for_vector,
+    impl_get_for_vector, impl_get_ref_for_vector, impl_try_from_arrow_array_for_vector,
+    impl_validity_for_vector,
 };
 
 #[cfg(test)]

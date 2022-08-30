@@ -9,7 +9,7 @@ use snafu::ResultExt;
 use crate::data_type::ConcreteDataType;
 use crate::error::{Result, SerializeSnafu};
 use crate::serialize::Serializable;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vectors::Helper;
 use crate::vectors::{Validity, Vector, VectorRef};
 
@@ -108,6 +108,10 @@ impl Vector for ConstantVector {
     fn cmp_element(&self, _i: usize, other: &dyn Vector, _j: usize) -> Ordering {
         let right = other.as_any().downcast_ref::<ConstantVector>().unwrap();
         self.vector.cmp_element(0, &*right.vector, 0)
+    }
+
+    fn get_ref(&self, _index: usize) -> ValueRef {
+        self.vector.get_ref(0)
     }
 }
 

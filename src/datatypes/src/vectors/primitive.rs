@@ -16,7 +16,7 @@ use crate::scalars::{Scalar, ScalarRef};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{DataTypeBuilder, Primitive};
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector for primitive data types.
@@ -139,6 +139,15 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
         let right = other.as_any().downcast_ref::<PrimitiveVector<T>>().unwrap();
         // `get()` returns `Value`, which implements `Ord`.
         self.get(i).cmp(&right.get(j))
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        if self.array.is_valid(index) {
+            // Safety: The index have been checked by `is_valid()`.
+            unsafe { self.array.value_unchecked(index).into_value_ref() }
+        } else {
+            ValueRef::Null
+        }
     }
 }
 

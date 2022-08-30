@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::error::SerializeSnafu;
 use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of binary strings.
@@ -90,6 +90,10 @@ impl Vector for BinaryVector {
         let right = other.as_any().downcast_ref::<BinaryVector>().unwrap();
         // Use `get_data()` to avoid cloning the value.
         self.get_data(i).cmp(&right.get_data(j))
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        vectors::impl_get_ref_for_vector!(self.array, index)
     }
 }
 

@@ -233,6 +233,15 @@ pub enum ValueRef<'a> {
     List(ListValueRef<'a>),
 }
 
+/// A helper trait to convert copyable types to `ValueRef`.
+///
+/// It removes the lifetime parameter from the trait and also avoid confusion
+/// with `Into<ValueRef>` in generic codes.
+pub trait IntoValueRef {
+    /// Convert itself to [ValueRef].
+    fn into_value_ref(self) -> ValueRef<'static>;
+}
+
 macro_rules! impl_value_ref_from {
     ($Variant:ident, $Type:ident) => {
         impl From<$Type> for ValueRef<'_> {
@@ -241,9 +250,24 @@ macro_rules! impl_value_ref_from {
             }
         }
 
+        impl IntoValueRef for $Type {
+            fn into_value_ref(self) -> ValueRef<'static> {
+                ValueRef::$Variant(self.into())
+            }
+        }
+
         impl From<Option<$Type>> for ValueRef<'_> {
             fn from(value: Option<$Type>) -> Self {
                 match value {
+                    Some(v) => ValueRef::$Variant(v.into()),
+                    None => ValueRef::Null,
+                }
+            }
+        }
+
+        impl IntoValueRef for Option<$Type> {
+            fn into_value_ref(self) -> ValueRef<'static> {
+                match self {
                     Some(v) => ValueRef::$Variant(v.into()),
                     None => ValueRef::Null,
                 }
