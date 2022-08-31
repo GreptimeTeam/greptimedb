@@ -272,7 +272,7 @@ pub(crate) mod greptime_builtin {
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
-    use datatypes::vectors::Helper;
+    use datatypes::vectors::{Helper, ConstantVector, Float64Vector, Int64Vector};
     use rustpython_vm::builtins::{PyFloat, PyInt, PyStr};
     use rustpython_vm::function::OptionalArg;
     use rustpython_vm::{AsObject, PyObjectRef, PyResult, VirtualMachine};
@@ -626,6 +626,7 @@ pub(crate) mod greptime_builtin {
         let base = base
             .payload::<PyVector>()
             .ok_or_else(|| type_cast_error(&base.class().name(), "vector", vm))?;
+        let len_base = base.as_vector_ref().len();
         let arg_pow = if is_instance::<PyVector>(&pow, vm) {
             let pow = pow
                 .payload::<PyVector>()
@@ -633,24 +634,12 @@ pub(crate) mod greptime_builtin {
             pow.as_vector_ref()
         } else if is_instance::<PyFloat>(&pow, vm) {
             let pow = pow.try_into_value::<f64>(vm)?;
-            let arr = PrimitiveArray::from_vec(vec![pow; base.as_vector_ref().len()]);
-            let arr: ArrayRef = Arc::new(arr) as _;
-            Helper::try_into_vector(&arr).map_err(|e| {
-                vm.new_type_error(format!(
-                    "Can't cast result into vector, result: {:?}, error message: {:?}",
-                    &arr, e
-                ))
-            })?
+            let ret = ConstantVector::new(Arc::new(Float64Vector::from_vec(vec![pow])) as _, len_base);
+            Arc::new(ret) as _
         } else if is_instance::<PyInt>(&pow, vm) {
             let pow = pow.try_into_value::<i64>(vm)?;
-            let arr = PrimitiveArray::from_vec(vec![pow; base.as_vector_ref().len()]);
-            let arr: ArrayRef = Arc::new(arr) as _;
-            Helper::try_into_vector(&arr).map_err(|e| {
-                vm.new_type_error(format!(
-                    "Can't cast result into vector, result: {:?}, error message: {:?}",
-                    &arr, e
-                ))
-            })?
+            let ret = ConstantVector::new(Arc::new(Int64Vector::from_vec(vec![pow])) as _, len_base);
+            Arc::new(ret) as _
         } else {
             return Err(vm.new_type_error(format!("Unsupported type({:#?}) for pow()", pow)));
         };
