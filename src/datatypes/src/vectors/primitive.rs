@@ -264,20 +264,16 @@ impl<T: PrimitiveElement> MutableVector for PrimitiveVectorBuilder<T> {
         })
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        let primitive = T::cast_value_ref(value)?;
+    fn push_value_ref(&mut self, value: ValueRef) {
+        let primitive = T::cast_value_ref(value);
         self.mutable_array.push(primitive);
-
-        Ok(())
     }
 
-    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
-        let primitive = T::cast_vector(vector)?;
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
+        let primitive = T::cast_vector(vector);
         // Slice the underlying array to avoid creating a new Arc.
         let slice = primitive.slice(offset, length);
         self.mutable_array.extend_trusted_len(slice.iter());
-
-        Ok(())
     }
 }
 

@@ -116,7 +116,7 @@ pub trait Vector: Send + Sync + Serializable + Debug {
     /// Slices the `Vector`, returning a new `VectorRef`.
     ///
     /// # Panics
-    /// This function panics if `offset + length > self.len()`.
+    /// This function panics if `offset + length >= self.len()`.
     fn slice(&self, offset: usize, length: usize) -> VectorRef;
 
     /// Returns the clone of value at `index`.
@@ -204,9 +204,17 @@ macro_rules! impl_get_ref_for_vector {
     };
 }
 
+macro_rules! impl_extend_for_builder {
+    ($mutable_array: expr, $vector: ident, $VectorType: ident, $offset: ident, $length: ident) => {
+        let concrete_vector = $vector.as_any().downcast_ref::<$VectorType>().unwrap();
+        let slice = concrete_vector.array.slice($offset, $length);
+        $mutable_array.extend_trusted_len(slice.iter());
+    };
+}
+
 pub(crate) use {
-    impl_get_for_vector, impl_get_ref_for_vector, impl_try_from_arrow_array_for_vector,
-    impl_validity_for_vector,
+    impl_extend_for_builder, impl_get_for_vector, impl_get_ref_for_vector,
+    impl_try_from_arrow_array_for_vector, impl_validity_for_vector,
 };
 
 #[cfg(test)]

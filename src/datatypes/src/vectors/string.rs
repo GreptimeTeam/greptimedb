@@ -165,6 +165,14 @@ impl MutableVector for StringVectorBuilder {
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(self.finish())
     }
+
+    fn push_value_ref(&mut self, value: ValueRef) {
+        self.buffer.push(value.as_string());
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
+        vectors::impl_extend_for_builder!(self.buffer, vector, StringVector, offset, length);
+    }
 }
 
 impl ScalarVectorBuilder for StringVectorBuilder {

@@ -75,6 +75,39 @@ impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
+
+    /// Cast itself to [ListValue].
+    /// # Panics
+    /// Panics if unable to cast.
+    pub fn as_list(&self) -> Option<&ListValue> {
+        match self {
+            Value::Null => None,
+            Value::List(v) => Some(v),
+            other => panic!("Failed to cast {:?} to list value", other),
+        }
+    }
+
+    pub fn as_value_ref(&self) -> ValueRef {
+        match self {
+            Value::Null => ValueRef::Null,
+            Value::Boolean(v) => ValueRef::Boolean(*v),
+            Value::UInt8(v) => ValueRef::UInt8(*v),
+            Value::UInt16(v) => ValueRef::UInt16(*v),
+            Value::UInt32(v) => ValueRef::UInt32(*v),
+            Value::UInt64(v) => ValueRef::UInt64(*v),
+            Value::Int8(v) => ValueRef::Int8(*v),
+            Value::Int16(v) => ValueRef::Int16(*v),
+            Value::Int32(v) => ValueRef::Int32(*v),
+            Value::Int64(v) => ValueRef::Int64(*v),
+            Value::Float32(v) => ValueRef::Float32(*v),
+            Value::Float64(v) => ValueRef::Float64(*v),
+            Value::String(v) => ValueRef::String(v.as_utf8()),
+            Value::Binary(v) => ValueRef::Binary(v),
+            Value::Date(v) => ValueRef::Date(*v),
+            Value::DateTime(v) => ValueRef::DateTime(*v),
+            Value::List(v) => ValueRef::List(ListValueRef::Ref(v)),
+        }
+    }
 }
 
 macro_rules! impl_value_from {
@@ -231,6 +264,78 @@ pub enum ValueRef<'a> {
     DateTime(DateTime),
 
     List(ListValueRef<'a>),
+}
+
+impl<'a> ValueRef<'a> {
+    pub fn is_null(&self) -> bool {
+        matches!(self, ValueRef::Null)
+    }
+
+    /// Cast itself to binary slice.
+    /// # Panics
+    /// Panics if unable to cast.
+    pub fn as_binary(&self) -> Option<&[u8]> {
+        match self {
+            ValueRef::Null => None,
+            ValueRef::Binary(v) => Some(v),
+            other => panic!("Failed to cast value ref {:?} to binary", other),
+        }
+    }
+
+    /// Cast itself to string slice.
+    /// # Panics
+    /// Panics if unable to cast.
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            ValueRef::Null => None,
+            ValueRef::String(v) => Some(v),
+            other => panic!("Failed to cast value ref {:?} to string", other),
+        }
+    }
+
+    /// Cast itself to boolean.
+    /// # Panics
+    /// Panics if unable to cast.
+    pub fn as_boolean(&self) -> Option<bool> {
+        match self {
+            ValueRef::Null => None,
+            ValueRef::Boolean(v) => Some(*v),
+            other => panic!("Failed to cast value ref {:?} to boolean", other),
+        }
+    }
+
+    /// Cast itself to [Date].
+    /// # Panics
+    /// Panics if unable to cast.
+    pub fn as_date(&self) -> Option<Date> {
+        match self {
+            ValueRef::Null => None,
+            ValueRef::Date(v) => Some(*v),
+            other => panic!("Failed to cast value ref {:?} to date", other),
+        }
+    }
+
+    /// Cast itself to [DateTime].
+    /// # Panics
+    /// Panics if unable to cast.
+    pub fn as_datetime(&self) -> Option<DateTime> {
+        match self {
+            ValueRef::Null => None,
+            ValueRef::DateTime(v) => Some(*v),
+            other => panic!("Failed to cast value ref {:?} to datetime", other),
+        }
+    }
+
+    /// Cast itself to [ListValueRef].
+    /// # Panics
+    /// Panics if unable to cast.
+    pub fn as_list(&self) -> Option<ListValueRef> {
+        match self {
+            ValueRef::Null => None,
+            ValueRef::List(v) => Some(*v),
+            other => panic!("Failed to cast value ref {:?} to list", other),
+        }
+    }
 }
 
 /// A helper trait to convert copyable types to `ValueRef`.

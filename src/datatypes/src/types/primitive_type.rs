@@ -5,10 +5,8 @@ use arrow::array::PrimitiveArray;
 use arrow::datatypes::DataType as ArrowDataType;
 use paste::paste;
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error::{self, Result};
 use crate::scalars::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
 use crate::types::primitive_traits::Primitive;
@@ -37,11 +35,15 @@ pub trait PrimitiveElement: Primitive {
     /// Returns the name of the type id.
     fn type_name() -> String;
 
-    /// Try to dynamic cast the vector to the concrete vector type.
-    fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveArray<Self>>;
+    /// Dynamic cast the vector to the concrete vector type.
+    /// # Panics
+    /// Panics if unable to cast.
+    fn cast_vector(vector: &dyn Vector) -> &PrimitiveArray<Self>;
 
-    /// Try to cast value ref to the primitive type.
-    fn cast_value_ref(value: ValueRef) -> Result<Option<Self>>;
+    /// Cast value ref to the primitive type.
+    /// # Panics
+    /// Panics if unable to cast.
+    fn cast_value_ref(value: ValueRef) -> Option<Self>;
 }
 
 macro_rules! impl_primitive_element {
@@ -56,31 +58,27 @@ macro_rules! impl_primitive_element {
                     stringify!($TypeId).to_string()
                 }
 
-                fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveArray<$Type>> {
+                fn cast_vector(vector: &dyn Vector) -> &PrimitiveArray<$Type> {
                     let primitive_vector = vector
                         .as_any()
                         .downcast_ref::<PrimitiveVector<$Type>>()
-                        .with_context(|| error::CastPrimitiveSnafu {
-                            msg: format!(
-                                "Failed to cast {} to vector of primitive type {}",
-                                vector.vector_type_name(),
-                                stringify!($TypeId)
-                            ),
-                        })?;
-                    Ok(&primitive_vector.array)
+                        .unwrap_or_else(|| panic!(
+                            "Failed to cast {} to vector of primitive type {}",
+                            vector.vector_type_name(),
+                            stringify!($TypeId)
+                        ));
+                    &primitive_vector.array
                 }
 
-                fn cast_value_ref(value: ValueRef) -> Result<Option<Self>> {
+                fn cast_value_ref(value: ValueRef) -> Option<Self> {
                     match value {
-                        ValueRef::Null => Ok(None),
-                        ValueRef::$TypeId(v) => Ok(Some(v.into())),
-                        other => error::CastPrimitiveSnafu {
-                            msg: format!(
-                                "Failed to cast value {:?} to primitive type {}",
-                                other,
-                                stringify!($TypeId),
-                            ),
-                        }.fail()
+                        ValueRef::Null => None,
+                        ValueRef::$TypeId(v) => Some(v.into()),
+                        other => panic!(
+                            "Failed to cast value {:?} to primitive type {}",
+                            other,
+                            stringify!($TypeId),
+                        ),
                     }
                 }
             }

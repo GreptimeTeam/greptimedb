@@ -148,6 +148,20 @@ impl MutableVector for BooleanVectorBuilder {
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(self.finish())
     }
+
+    fn push_value_ref(&mut self, value: ValueRef) {
+        self.mutable_array.push(value.as_boolean());
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
+        vectors::impl_extend_for_builder!(
+            self.mutable_array,
+            vector,
+            BooleanVector,
+            offset,
+            length
+        );
+    }
 }
 
 impl ScalarVectorBuilder for BooleanVectorBuilder {

@@ -137,6 +137,7 @@ impl From<ArrowListArray> for ListVector {
 
 impl_try_from_arrow_array_for_vector!(ArrowListArray, ListVector);
 
+// Some codes are ported from arrow2's MutableListArray.
 pub struct ListVectorBuilder {
     inner_type: ConcreteDataType,
     offsets: Vec<i32>,
@@ -157,6 +158,49 @@ impl ListVectorBuilder {
             offsets,
             values,
             validity: None,
+        }
+    }
+
+    #[inline]
+    fn last_offset(&self) -> i32 {
+        *self.offsets.last().unwrap()
+    }
+
+    fn push_null(&mut self) {
+        self.offsets.push(self.last_offset());
+        match &mut self.validity {
+            Some(validity) => validity.push(false),
+            None => self.init_validity(),
+        }
+    }
+
+    fn init_validity(&mut self) {
+        let len = self.offsets.len() - 1;
+
+        let mut validity = MutableBitmap::with_capacity(self.offsets.capacity());
+        validity.extend_constant(len, true);
+        validity.set(len - 1, false);
+        self.validity = Some(validity)
+    }
+
+    fn push_list_value(&mut self, list_value: &ListValue) {
+        if let Some(items) = list_value.items() {
+            for item in &**items {
+                self.values.push_value_ref(item.as_value_ref());
+            }
+        }
+        self.push_valid();
+    }
+
+    /// Needs to be called when a valid value was extended to this builder.
+    fn push_valid(&mut self) {
+        let size = self.values.len();
+        let size = i32::try_from(size).unwrap();
+        assert!(size >= *self.offsets.last().unwrap());
+
+        self.offsets.push(size);
+        if let Some(validity) = &mut self.validity {
+            validity.push(true)
         }
     }
 }
@@ -192,6 +236,27 @@ impl MutableVector for ListVectorBuilder {
             inner_data_type: self.inner_type.clone(),
         };
         Arc::new(vector)
+    }
+
+    fn push_value_ref(&mut self, value: ValueRef) {
+        if let Some(list_ref) = value.as_list() {
+            match list_ref {
+                ListValueRef::Indexed { vector, idx } => match vector.get(idx).as_list() {
+                    Some(list_value) => self.push_list_value(list_value),
+                    None => self.push_null(),
+                },
+                ListValueRef::Ref(list_value) => self.push_list_value(list_value),
+            }
+        } else {
+            self.push_null();
+        }
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
+        for idx in offset..offset + length {
+            let value = vector.get_ref(idx);
+            self.push_value_ref(value);
+        }
     }
 }
 

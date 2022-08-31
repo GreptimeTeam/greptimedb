@@ -1,6 +1,5 @@
 use std::any::Any;
 
-use crate::error::Result;
 use crate::prelude::*;
 
 /// Mutable vector that could be used to build an immutable vector.
@@ -28,21 +27,14 @@ pub trait MutableVector: Send + Sync {
     /// Push value ref to this mutable vector.
     ///
     /// # Panics
-    /// Panics if
-    /// - The data type of `vector` is different from this mutable vector's.
-    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        // FIXME(yingwen): Remove this.
-        unimplemented!()
-    }
+    /// Panics if the data type of value is different from the mutable vector's.
+    fn push_value_ref(&mut self, value: ValueRef);
 
     /// Extend this mutable vector by slice of `vector`.
     ///
     /// # Panics
     /// Panics if
-    /// - `offset + length > vector.len()`.
+    /// - `offset + length >= vector.len()`.
     /// - The data type of `vector` is different from this mutable vector's.
-    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
-        // FIXME(yingwen): Remove this.
-        unimplemented!()
-    }
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize);
 }

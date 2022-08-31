@@ -183,6 +183,16 @@ impl MutableVector for DateTimeVectorBuilder {
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(self.finish())
     }
+
+    fn push_value_ref(&mut self, value: ValueRef) {
+        self.buffer.push(value.as_datetime().map(|d| d.val()));
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
+        let concrete_vector = vector.as_any().downcast_ref::<DateTimeVector>().unwrap();
+        self.buffer
+            .extend_slice_of(&concrete_vector.array, offset, length);
+    }
 }
 
 pub struct DateTimeIter<'a> {
