@@ -5,10 +5,10 @@ use snafu::{Backtrace, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Unexpected empty grpc physical plan type: {}", name))]
+    #[snafu(display("Unexpected empty physical plan type: {}", name))]
     EmptyPhysicalPlan { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Unexpected empty grpc physical expr: {}", name))]
+    #[snafu(display("Unexpected empty physical expr: {}", name))]
     EmptyPhysicalExpr { name: String, backtrace: Backtrace },
 
     #[snafu(display("Unsupported datafusion execution plan: {}", name))]

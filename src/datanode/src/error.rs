@@ -11,7 +11,7 @@ use table::error::Error as TableError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Fail to execute sql, source: {}", source))]
+    #[snafu(display("Failed to execute sql, source: {}", source))]
     ExecuteSql {
         #[snafu(backtrace)]
         source: query::error::Error,
@@ -23,20 +23,20 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Fail to create catalog list, source: {}", source))]
+    #[snafu(display("Failed to create catalog list, source: {}", source))]
     NewCatalog {
         #[snafu(backtrace)]
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Fail to create table: {}, source: {}", table_name, source))]
+    #[snafu(display("Failed to create table: {}, source: {}", table_name, source))]
     CreateTable {
         table_name: String,
         #[snafu(backtrace)]
         source: TableError,
     },
 
-    #[snafu(display("Fail to get table: {}, source: {}", table_name, source))]
+    #[snafu(display("Failed to get table: {}, source: {}", table_name, source))]
     GetTable {
         table_name: String,
         #[snafu(backtrace)]
@@ -59,7 +59,7 @@ pub enum Error {
     ))]
     ColumnValuesNumberMismatch { columns: usize, values: usize },
 
-    #[snafu(display("Fail to parse value: {}, {}", msg, backtrace))]
+    #[snafu(display("Failed to parse value: {}, {}", msg, backtrace))]
     ParseSqlValue { msg: String, backtrace: Backtrace },
 
     #[snafu(display(
@@ -74,7 +74,7 @@ pub enum Error {
         actual: ConcreteDataType,
     },
 
-    #[snafu(display("Fail to insert value to table: {}, source: {}", table_name, source))]
+    #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
     Insert {
         table_name: String,
         source: TableError,
@@ -83,7 +83,7 @@ pub enum Error {
     #[snafu(display("Illegal insert data"))]
     IllegalInsertData,
 
-    #[snafu(display("Fail to convert bytes to insert batch, source: {}", source))]
+    #[snafu(display("Failed to convert bytes to insert batch, source: {}", source))]
     DecodeInsert { source: DecodeError },
 
     #[snafu(display("Failed to start server, source: {}", source))]
@@ -92,19 +92,19 @@ pub enum Error {
         source: servers::error::Error,
     },
 
-    #[snafu(display("Fail to parse address {}, source: {}", addr, source))]
+    #[snafu(display("Failed to parse address {}, source: {}", addr, source))]
     ParseAddr {
         addr: String,
         source: std::net::AddrParseError,
     },
 
-    #[snafu(display("Fail to bind address {}, source: {}", addr, source))]
+    #[snafu(display("Failed to bind address {}, source: {}", addr, source))]
     TcpBind {
         addr: String,
         source: std::io::Error,
     },
 
-    #[snafu(display("Fail to start gRPC server, source: {}", source))]
+    #[snafu(display("Failed to start gRPC server, source: {}", source))]
     StartGrpc { source: tonic::transport::Error },
 
     #[snafu(display("Failed to create directory {}, source: {}", dir, source))]
