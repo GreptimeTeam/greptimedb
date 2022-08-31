@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, ListArray};
@@ -99,12 +98,6 @@ impl Vector for ListVector {
         // that requires a lot of efforts, starting from not using Arrow's ListArray.
         // Refer to Databend's `ArrayColumn` for more details.
         unimplemented!()
-    }
-
-    fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering {
-        let right = other.as_any().downcast_ref::<ListVector>().unwrap();
-        // TODO(yingwen): Use more efficient way to compare elements if necessary.
-        self.get(i).cmp(&right.get(j))
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {

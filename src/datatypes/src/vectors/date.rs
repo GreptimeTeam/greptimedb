@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, PrimitiveArray};
@@ -104,11 +103,6 @@ impl Vector for DateVector {
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         self.array.replicate(offsets)
-    }
-
-    fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering {
-        let right = other.as_any().downcast_ref::<DateVector>().unwrap();
-        self.get(i).cmp(&right.get(j))
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {

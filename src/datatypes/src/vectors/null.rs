@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
@@ -93,11 +92,6 @@ impl Vector for NullVector {
         Arc::new(Self {
             array: NullArray::new(ArrowDataType::Null, *offsets.last().unwrap() as usize),
         })
-    }
-
-    fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering {
-        let right = other.as_any().downcast_ref::<NullVector>().unwrap();
-        self.get(i).cmp(&right.get(j))
     }
 
     fn get_ref(&self, _index: usize) -> ValueRef {

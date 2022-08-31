@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, MutableArray, Utf8ValuesIter};
@@ -116,12 +115,6 @@ impl Vector for StringVector {
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         common::replicate_scalar_vector(self, offsets)
-    }
-
-    fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering {
-        let right = other.as_any().downcast_ref::<StringVector>().unwrap();
-        // Use `get_data()` to avoid cloning the value.
-        self.get_data(i).cmp(&right.get_data(j))
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {

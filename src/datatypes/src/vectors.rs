@@ -13,7 +13,6 @@ pub mod primitive;
 mod string;
 
 use std::any::Any;
-use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -142,14 +141,6 @@ pub trait Vector: Send + Sync + Serializable + Debug {
     // Copies each element according offsets parameter.
     // (i-th element should be copied offsets[i] - offsets[i - 1] times.)
     fn replicate(&self, offsets: &[usize]) -> VectorRef;
-
-    /// Compare `i-th` element of `self` to `j-th` element of `other`.
-    ///
-    /// # Panics
-    /// Panics if
-    /// - the data type of `self` is different from data type of `other`.
-    /// - `i` or `j` is out of bound.
-    fn cmp_element(&self, i: usize, other: &dyn Vector, j: usize) -> Ordering;
 
     /// Returns the reference of value at `index`.
     ///
