@@ -6,7 +6,7 @@ use common_time::datetime::DateTime;
 use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::ConversionSnafu;
+use crate::error::{self, Result};
 use crate::prelude::{
     MutableVector, ScalarVector, ScalarVectorBuilder, Validity, Value, ValueRef, Vector, VectorRef,
 };
@@ -25,13 +25,13 @@ impl DateTimeVector {
         }
     }
 
-    pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> crate::error::Result<Self> {
+    pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> Result<Self> {
         Ok(Self::new(
             array
                 .as_ref()
                 .as_any()
                 .downcast_ref::<PrimitiveArray<i64>>()
-                .with_context(|| ConversionSnafu {
+                .with_context(|| error::ConversionSnafu {
                     from: format!("{:?}", array.as_ref().data_type()),
                 })?
                 .clone(),
@@ -184,14 +184,24 @@ impl MutableVector for DateTimeVectorBuilder {
         Arc::new(self.finish())
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) {
-        self.buffer.push(value.as_datetime().map(|d| d.val()));
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        self.buffer.push(value.as_datetime()?.map(|d| d.val()));
+        Ok(())
     }
 
-    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
-        let concrete_vector = vector.as_any().downcast_ref::<DateTimeVector>().unwrap();
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        let concrete_vector = vector
+            .as_any()
+            .downcast_ref::<DateTimeVector>()
+            .with_context(|| error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to convert vector from {} to DateVector",
+                    vector.vector_type_name()
+                ),
+            })?;
         self.buffer
-            .extend_slice_of(&concrete_vector.array, offset, length);
+            .extend_slice_of(&concrete_vector.array, offset, length)?;
+        Ok(())
     }
 }
 

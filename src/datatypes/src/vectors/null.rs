@@ -144,12 +144,14 @@ impl MutableVector for NullVectorBuilder {
         vector
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) {
-        assert!(value.is_null());
+    fn push_value_ref(&mut self, _value: ValueRef) -> Result<()> {
+        // For null vector builder, we just ignore input type now.
         self.length += 1;
+        Ok(())
     }
 
-    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        // For null vector builder, we just ignore input type now.
         assert!(
             offset + length < vector.len(),
             "offset {} + length {} must less than {}",
@@ -158,6 +160,7 @@ impl MutableVector for NullVectorBuilder {
             vector.len()
         );
         self.length += length;
+        Ok(())
     }
 }
 

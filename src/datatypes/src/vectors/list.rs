@@ -183,13 +183,14 @@ impl ListVectorBuilder {
         self.validity = Some(validity)
     }
 
-    fn push_list_value(&mut self, list_value: &ListValue) {
+    fn push_list_value(&mut self, list_value: &ListValue) -> Result<()> {
         if let Some(items) = list_value.items() {
             for item in &**items {
-                self.values.push_value_ref(item.as_value_ref());
+                self.values.push_value_ref(item.as_value_ref())?;
             }
         }
         self.push_valid();
+        Ok(())
     }
 
     /// Needs to be called when a valid value was extended to this builder.
@@ -238,25 +239,29 @@ impl MutableVector for ListVectorBuilder {
         Arc::new(vector)
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) {
-        if let Some(list_ref) = value.as_list() {
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        if let Some(list_ref) = value.as_list()? {
             match list_ref {
-                ListValueRef::Indexed { vector, idx } => match vector.get(idx).as_list() {
-                    Some(list_value) => self.push_list_value(list_value),
+                ListValueRef::Indexed { vector, idx } => match vector.get(idx).as_list()? {
+                    Some(list_value) => self.push_list_value(list_value)?,
                     None => self.push_null(),
                 },
-                ListValueRef::Ref(list_value) => self.push_list_value(list_value),
+                ListValueRef::Ref(list_value) => self.push_list_value(list_value)?,
             }
         } else {
             self.push_null();
         }
+
+        Ok(())
     }
 
-    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
         for idx in offset..offset + length {
             let value = vector.get_ref(idx);
-            self.push_value_ref(value);
+            self.push_value_ref(value)?;
         }
+
+        Ok(())
     }
 }
 

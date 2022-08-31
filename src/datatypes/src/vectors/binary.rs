@@ -4,13 +4,11 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef};
 use arrow::array::{BinaryValueIter, MutableArray};
 use arrow::bitmap::utils::ZipValidity;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};
 use crate::data_type::ConcreteDataType;
-use crate::error::Result;
-use crate::error::SerializeSnafu;
+use crate::error::{self, Result};
 use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
@@ -134,12 +132,13 @@ impl MutableVector for BinaryVectorBuilder {
         Arc::new(self.finish())
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) {
-        self.mutable_array.push(value.as_binary());
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        self.mutable_array.push(value.as_binary()?);
+        Ok(())
     }
 
-    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
-        vectors::impl_extend_for_builder!(self.mutable_array, vector, BinaryVector, offset, length);
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        vectors::impl_extend_for_builder!(self.mutable_array, vector, BinaryVector, offset, length)
     }
 }
 
@@ -171,7 +170,7 @@ impl Serializable for BinaryVector {
                 Some(vec) => serde_json::to_value(vec),
             })
             .collect::<serde_json::Result<_>>()
-            .context(SerializeSnafu)
+            .context(error::SerializeSnafu)
     }
 }
 

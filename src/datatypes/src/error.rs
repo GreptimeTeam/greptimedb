@@ -47,6 +47,9 @@ pub enum Error {
 
     #[snafu(display("Invalid timestamp index: {}", index))]
     InvalidTimestampIndex { index: usize, backtrace: Backtrace },
+
+    #[snafu(display("{}", msg))]
+    CastType { msg: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {

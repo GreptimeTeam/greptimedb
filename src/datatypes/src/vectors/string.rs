@@ -4,12 +4,11 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, MutableArray, Utf8ValuesIter};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
-use crate::error::SerializeSnafu;
+use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::StringType;
@@ -166,12 +165,13 @@ impl MutableVector for StringVectorBuilder {
         Arc::new(self.finish())
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) {
-        self.buffer.push(value.as_string());
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        self.buffer.push(value.as_string()?);
+        Ok(())
     }
 
-    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
-        vectors::impl_extend_for_builder!(self.buffer, vector, StringVector, offset, length);
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        vectors::impl_extend_for_builder!(self.buffer, vector, StringVector, offset, length)
     }
 }
 

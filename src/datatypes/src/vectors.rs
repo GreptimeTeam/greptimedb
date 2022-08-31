@@ -33,7 +33,7 @@ use snafu::ensure;
 pub use string::*;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{BadArrayAccessSnafu, Result};
+use crate::error::{self, Result};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
 
@@ -130,7 +130,7 @@ pub trait Vector: Send + Sync + Serializable + Debug {
     fn try_get(&self, index: usize) -> Result<Value> {
         ensure!(
             index < self.len(),
-            BadArrayAccessSnafu {
+            error::BadArrayAccessSnafu {
                 index,
                 size: self.len()
             }
@@ -205,11 +205,23 @@ macro_rules! impl_get_ref_for_vector {
 }
 
 macro_rules! impl_extend_for_builder {
-    ($mutable_array: expr, $vector: ident, $VectorType: ident, $offset: ident, $length: ident) => {
-        let concrete_vector = $vector.as_any().downcast_ref::<$VectorType>().unwrap();
+    ($mutable_array: expr, $vector: ident, $VectorType: ident, $offset: ident, $length: ident) => {{
+        use snafu::OptionExt;
+
+        let concrete_vector = $vector
+            .as_any()
+            .downcast_ref::<$VectorType>()
+            .with_context(|| crate::error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to cast vector from {} to {}",
+                    $vector.vector_type_name(),
+                    stringify!($VectorType)
+                ),
+            })?;
         let slice = concrete_vector.array.slice($offset, $length);
         $mutable_array.extend_trusted_len(slice.iter());
-    };
+        Ok(())
+    }};
 }
 
 pub(crate) use {

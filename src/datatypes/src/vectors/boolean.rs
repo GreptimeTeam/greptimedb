@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, BooleanArray, MutableArray, MutableBooleanArray};
 use arrow::bitmap::utils::{BitmapIter, ZipValidity};
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
@@ -149,18 +148,13 @@ impl MutableVector for BooleanVectorBuilder {
         Arc::new(self.finish())
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) {
-        self.mutable_array.push(value.as_boolean());
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        self.mutable_array.push(value.as_boolean()?);
+        Ok(())
     }
 
-    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
-        vectors::impl_extend_for_builder!(
-            self.mutable_array,
-            vector,
-            BooleanVector,
-            offset,
-            length
-        );
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        vectors::impl_extend_for_builder!(self.mutable_array, vector, BooleanVector, offset, length)
     }
 }
 

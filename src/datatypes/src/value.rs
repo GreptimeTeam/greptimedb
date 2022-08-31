@@ -6,6 +6,7 @@ use common_time::datetime::DateTime;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
+use crate::error::{self, Result};
 use crate::prelude::*;
 use crate::vectors::ListVector;
 
@@ -77,13 +78,14 @@ impl Value {
     }
 
     /// Cast itself to [ListValue].
-    /// # Panics
-    /// Panics if unable to cast.
-    pub fn as_list(&self) -> Option<&ListValue> {
+    pub fn as_list(&self) -> Result<Option<&ListValue>> {
         match self {
-            Value::Null => None,
-            Value::List(v) => Some(v),
-            other => panic!("Failed to cast {:?} to list value", other),
+            Value::Null => Ok(None),
+            Value::List(v) => Ok(Some(v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast {:?} to list value", other),
+            }
+            .fail(),
         }
     }
 
@@ -272,68 +274,74 @@ impl<'a> ValueRef<'a> {
     }
 
     /// Cast itself to binary slice.
-    /// # Panics
-    /// Panics if unable to cast.
-    pub fn as_binary(&self) -> Option<&[u8]> {
+    pub fn as_binary(&self) -> Result<Option<&[u8]>> {
         match self {
-            ValueRef::Null => None,
-            ValueRef::Binary(v) => Some(v),
-            other => panic!("Failed to cast value ref {:?} to binary", other),
+            ValueRef::Null => Ok(None),
+            ValueRef::Binary(v) => Ok(Some(v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to binary", other),
+            }
+            .fail(),
         }
     }
 
     /// Cast itself to string slice.
-    /// # Panics
-    /// Panics if unable to cast.
-    pub fn as_string(&self) -> Option<&str> {
+    pub fn as_string(&self) -> Result<Option<&str>> {
         match self {
-            ValueRef::Null => None,
-            ValueRef::String(v) => Some(v),
-            other => panic!("Failed to cast value ref {:?} to string", other),
+            ValueRef::Null => Ok(None),
+            ValueRef::String(v) => Ok(Some(v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to string", other),
+            }
+            .fail(),
         }
     }
 
     /// Cast itself to boolean.
-    /// # Panics
-    /// Panics if unable to cast.
-    pub fn as_boolean(&self) -> Option<bool> {
+    pub fn as_boolean(&self) -> Result<Option<bool>> {
         match self {
-            ValueRef::Null => None,
-            ValueRef::Boolean(v) => Some(*v),
-            other => panic!("Failed to cast value ref {:?} to boolean", other),
+            ValueRef::Null => Ok(None),
+            ValueRef::Boolean(v) => Ok(Some(*v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to boolean", other),
+            }
+            .fail(),
         }
     }
 
     /// Cast itself to [Date].
-    /// # Panics
-    /// Panics if unable to cast.
-    pub fn as_date(&self) -> Option<Date> {
+    pub fn as_date(&self) -> Result<Option<Date>> {
         match self {
-            ValueRef::Null => None,
-            ValueRef::Date(v) => Some(*v),
-            other => panic!("Failed to cast value ref {:?} to date", other),
+            ValueRef::Null => Ok(None),
+            ValueRef::Date(v) => Ok(Some(*v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to date", other),
+            }
+            .fail(),
         }
     }
 
     /// Cast itself to [DateTime].
-    /// # Panics
-    /// Panics if unable to cast.
-    pub fn as_datetime(&self) -> Option<DateTime> {
+    pub fn as_datetime(&self) -> Result<Option<DateTime>> {
         match self {
-            ValueRef::Null => None,
-            ValueRef::DateTime(v) => Some(*v),
-            other => panic!("Failed to cast value ref {:?} to datetime", other),
+            ValueRef::Null => Ok(None),
+            ValueRef::DateTime(v) => Ok(Some(*v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to datetime", other),
+            }
+            .fail(),
         }
     }
 
     /// Cast itself to [ListValueRef].
-    /// # Panics
-    /// Panics if unable to cast.
-    pub fn as_list(&self) -> Option<ListValueRef> {
+    pub fn as_list(&self) -> Result<Option<ListValueRef>> {
         match self {
-            ValueRef::Null => None,
-            ValueRef::List(v) => Some(*v),
-            other => panic!("Failed to cast value ref {:?} to list", other),
+            ValueRef::Null => Ok(None),
+            ValueRef::List(v) => Ok(Some(*v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to list", other),
+            }
+            .fail(),
         }
     }
 }

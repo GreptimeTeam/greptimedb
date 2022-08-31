@@ -6,7 +6,7 @@ use common_time::date::Date;
 use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::ConversionSnafu;
+use crate::error::{self, Result};
 use crate::prelude::*;
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
@@ -24,13 +24,13 @@ impl DateVector {
         }
     }
 
-    pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> crate::error::Result<Self> {
+    pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> Result<Self> {
         Ok(Self::new(
             array
                 .as_ref()
                 .as_any()
                 .downcast_ref::<PrimitiveArray<i32>>()
-                .with_context(|| ConversionSnafu {
+                .with_context(|| error::ConversionSnafu {
                     from: format!("{:?}", array.as_ref().data_type()),
                 })?
                 .clone(),
@@ -155,7 +155,7 @@ impl ScalarVector for DateVector {
 }
 
 impl Serializable for DateVector {
-    fn serialize_to_json(&self) -> crate::error::Result<Vec<serde_json::Value>> {
+    fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
         Ok(self
             .array
             .iter_data()
@@ -193,14 +193,24 @@ impl MutableVector for DateVectorBuilder {
         Arc::new(self.finish())
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) {
-        self.buffer.push(value.as_date().map(|d| d.val()))
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        self.buffer.push(value.as_date()?.map(|d| d.val()));
+        Ok(())
     }
 
-    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) {
-        let concrete_vector = vector.as_any().downcast_ref::<DateVector>().unwrap();
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        let concrete_vector = vector
+            .as_any()
+            .downcast_ref::<DateVector>()
+            .with_context(|| error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to convert vector from {} to DateVector",
+                    vector.vector_type_name()
+                ),
+            })?;
         self.buffer
-            .extend_slice_of(&concrete_vector.array, offset, length);
+            .extend_slice_of(&concrete_vector.array, offset, length)?;
+        Ok(())
     }
 }
 
