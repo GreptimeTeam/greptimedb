@@ -575,14 +575,6 @@ impl PyVector {
     #[pymethod(name = "filter")]
     fn filter(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let left = self.to_arrow_array();
-        /*
-        let right = other.downcast_ref::<PyVector>().ok_or_else(|| {
-            vm.new_type_error(format!(
-                "Can't cast operand of filter() into PyVector, which is: {}",
-                other.class().name()
-            ))
-        })?;
-        */
         let right: ArrayRef = other.to_arrow_array();
         let filter = right.as_any().downcast_ref::<BooleanArray>();
         match filter {
@@ -612,7 +604,6 @@ impl PyVector {
         ))
     }
 
-    /// TODO: add support for filter
     fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         if let Some(seq) = needle.payload::<PyVector>() {
             let mask = seq.to_arrow_array();
@@ -633,7 +624,7 @@ impl PyVector {
             })?;
             Ok(Self::from(ret).into_pyobject(vm))
         } else {
-            match SequenceIndex::try_from_borrowed_object(vm, needle, "mmap")? {
+            match SequenceIndex::try_from_borrowed_object(vm, needle, "vector")? {
                 SequenceIndex::Int(i) => self.getitem_by_index(i, vm),
                 SequenceIndex::Slice(slice) => self.getitem_by_slice(&slice, vm),
             }
