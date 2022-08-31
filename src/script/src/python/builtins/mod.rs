@@ -265,14 +265,14 @@ pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, NullArray, PrimitiveArray};
+    use arrow::array::{ArrayRef, NullArray};
     use arrow::compute;
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{function::FunctionContext, Function};
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
-    use datatypes::vectors::{Helper, ConstantVector, Float64Vector, Int64Vector};
+    use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector};
     use rustpython_vm::builtins::{PyFloat, PyInt, PyStr};
     use rustpython_vm::function::OptionalArg;
     use rustpython_vm::{AsObject, PyObjectRef, PyResult, VirtualMachine};
@@ -634,11 +634,13 @@ pub(crate) mod greptime_builtin {
             pow.as_vector_ref()
         } else if is_instance::<PyFloat>(&pow, vm) {
             let pow = pow.try_into_value::<f64>(vm)?;
-            let ret = ConstantVector::new(Arc::new(Float64Vector::from_vec(vec![pow])) as _, len_base);
+            let ret =
+                ConstantVector::new(Arc::new(Float64Vector::from_vec(vec![pow])) as _, len_base);
             Arc::new(ret) as _
         } else if is_instance::<PyInt>(&pow, vm) {
             let pow = pow.try_into_value::<i64>(vm)?;
-            let ret = ConstantVector::new(Arc::new(Int64Vector::from_vec(vec![pow])) as _, len_base);
+            let ret =
+                ConstantVector::new(Arc::new(Int64Vector::from_vec(vec![pow])) as _, len_base);
             Arc::new(ret) as _
         } else {
             return Err(vm.new_type_error(format!("Unsupported type({:#?}) for pow()", pow)));
@@ -659,7 +661,9 @@ pub(crate) mod greptime_builtin {
     fn prev(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let cur: ArrayRef = cur.to_arrow_array();
         if cur.len() == 0 {
-            return Err(vm.new_runtime_error("Can't give prev for a zero length array!".to_string()));
+            return Err(
+                vm.new_runtime_error("Can't give prev for a zero length array!".to_string())
+            );
         }
         let cur = cur.slice(0, cur.len() - 1); // except the last one that is
         let fill = cur.slice(0, 1);
@@ -704,7 +708,7 @@ pub(crate) mod greptime_builtin {
                     prev = idx;
                     state = State::Separator(Default::default());
                 }
-                _ => continue
+                _ => continue,
             };
         }
         let last = match state {
