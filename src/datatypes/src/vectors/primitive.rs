@@ -14,7 +14,7 @@ use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{Scalar, ScalarRef};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::types::{DataTypeBuilder, Primitive};
+use crate::types::{Primitive, PrimitiveElement};
 use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
@@ -61,7 +61,7 @@ impl<T: Primitive> PrimitiveVector<T> {
     }
 }
 
-impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
+impl<T: PrimitiveElement> Vector for PrimitiveVector<T> {
     fn data_type(&self) -> ConcreteDataType {
         T::build_data_type()
     }
@@ -167,7 +167,7 @@ impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for Pr
 
 impl<T> ScalarVector for PrimitiveVector<T>
 where
-    T: Scalar<VectorType = Self> + Primitive + DataTypeBuilder,
+    T: Scalar<VectorType = Self> + PrimitiveElement,
     for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = Self>,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
@@ -216,11 +216,11 @@ impl<'a, T: Copy> Iterator for PrimitiveIter<'a, T> {
     }
 }
 
-pub struct PrimitiveVectorBuilder<T: Primitive + DataTypeBuilder> {
+pub struct PrimitiveVectorBuilder<T: PrimitiveElement> {
     pub(crate) mutable_array: MutablePrimitiveArray<T>,
 }
 
-impl<T: Primitive + DataTypeBuilder> PrimitiveVectorBuilder<T> {
+impl<T: PrimitiveElement> PrimitiveVectorBuilder<T> {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             mutable_array: MutablePrimitiveArray::with_capacity(capacity),
@@ -241,7 +241,7 @@ pub type Int64VectorBuilder = PrimitiveVectorBuilder<i64>;
 pub type Float32VectorBuilder = PrimitiveVectorBuilder<f32>;
 pub type Float64VectorBuilder = PrimitiveVectorBuilder<f64>;
 
-impl<T: Primitive + DataTypeBuilder> MutableVector for PrimitiveVectorBuilder<T> {
+impl<T: PrimitiveElement> MutableVector for PrimitiveVectorBuilder<T> {
     fn data_type(&self) -> ConcreteDataType {
         T::build_data_type()
     }
@@ -263,11 +263,27 @@ impl<T: Primitive + DataTypeBuilder> MutableVector for PrimitiveVectorBuilder<T>
             array: std::mem::take(&mut self.mutable_array).into(),
         })
     }
+
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        let primitive = T::cast_value_ref(value)?;
+        self.mutable_array.push(primitive);
+
+        Ok(())
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        let primitive = T::cast_vector(vector)?;
+        // Slice the underlying array to avoid creating a new Arc.
+        let slice = primitive.slice(offset, length);
+        self.mutable_array.extend_trusted_len(slice.iter());
+
+        Ok(())
+    }
 }
 
 impl<T> ScalarVectorBuilder for PrimitiveVectorBuilder<T>
 where
-    T: Scalar<VectorType = PrimitiveVector<T>> + Primitive + DataTypeBuilder,
+    T: Scalar<VectorType = PrimitiveVector<T>> + PrimitiveElement,
     for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = PrimitiveVector<T>>,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
@@ -290,7 +306,7 @@ where
     }
 }
 
-impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
+impl<T: PrimitiveElement> Serializable for PrimitiveVector<T> {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
         self.array
             .iter()

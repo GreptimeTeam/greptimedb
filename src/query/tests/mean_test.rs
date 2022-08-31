@@ -7,7 +7,7 @@ use datafusion::field_util::FieldExt;
 use datafusion::field_util::SchemaExt;
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
-use datatypes::types::DataTypeBuilder;
+use datatypes::types::PrimitiveElement;
 use datatypes::value::OrderedFloat;
 use format_num::NumberFormat;
 use function::{create_query_engine, get_numbers_from_table};
@@ -39,7 +39,7 @@ async fn test_mean_success<T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Result<()>
 where
-    T: Primitive + AsPrimitive<f64> + DataTypeBuilder,
+    T: PrimitiveElement + AsPrimitive<f64>,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     let result = execute_mean(column_name, table_name, engine.clone())

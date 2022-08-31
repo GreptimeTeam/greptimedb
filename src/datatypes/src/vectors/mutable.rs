@@ -1,5 +1,6 @@
 use std::any::Any;
 
+use crate::error::Result;
 use crate::prelude::*;
 
 /// Mutable vector that could be used to build an immutable vector.
@@ -24,19 +25,24 @@ pub trait MutableVector: Send + Sync {
     /// Convert `self` to an (immutable) [VectorRef] and reset `self`.
     fn to_vector(&mut self) -> VectorRef;
 
-    // /// Push `i-th` value of `vector` to this mutable vector.
-    // ///
-    // /// # Panics
-    // /// Panics if
-    // /// - `i` is out of bound.
-    // /// - The data type of `vector` is different from this mutable vector's.
-    // fn push_value_of(&mut self, vector: &dyn Vector, i: usize);
+    /// Push value ref to this mutable vector.
+    ///
+    /// # Panics
+    /// Panics if
+    /// - The data type of `vector` is different from this mutable vector's.
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        // FIXME(yingwen): Remove this.
+        unimplemented!()
+    }
 
-    // /// Extend this mutable vector by slice of `vector`.
-    // ///
-    // /// # Panics
-    // /// Panics if
-    // /// - `offset + length > vector.len()`.
-    // /// - The data type of `vector` is different from this mutable vector's.
-    // fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize);
+    /// Extend this mutable vector by slice of `vector`.
+    ///
+    /// # Panics
+    /// Panics if
+    /// - `offset + length > vector.len()`.
+    /// - The data type of `vector` is different from this mutable vector's.
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        // FIXME(yingwen): Remove this.
+        unimplemented!()
+    }
 }

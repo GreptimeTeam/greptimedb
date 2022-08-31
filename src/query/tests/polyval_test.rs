@@ -7,7 +7,7 @@ use datafusion::field_util::FieldExt;
 use datafusion::field_util::SchemaExt;
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
-use datatypes::types::DataTypeBuilder;
+use datatypes::types::PrimitiveElement;
 use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
 use query::error::Result;
@@ -37,7 +37,7 @@ async fn test_polyval_success<T, PolyT>(
     engine: Arc<dyn QueryEngine>,
 ) -> Result<()>
 where
-    T: Primitive + AsPrimitive<PolyT> + DataTypeBuilder,
+    T: Primitive + AsPrimitive<PolyT> + PrimitiveElement,
     PolyT: Primitive + std::ops::Mul<Output = PolyT> + std::iter::Sum,
     for<'a> T: Scalar<RefType<'a> = T>,
     for<'a> PolyT: Scalar<RefType<'a> = PolyT>,

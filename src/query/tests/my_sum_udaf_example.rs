@@ -18,7 +18,7 @@ use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::DataTypeBuilder;
+use datatypes::types::PrimitiveElement;
 use datatypes::types::PrimitiveType;
 use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
@@ -211,7 +211,7 @@ async fn test_my_sum() -> Result<()> {
 
 async fn test_my_sum_with<T>(numbers: Vec<T>, expected: Vec<&str>) -> Result<()>
 where
-    T: Primitive + DataTypeBuilder,
+    T: PrimitiveElement,
 {
     let table_name = format!("{}_numbers", std::any::type_name::<T>());
     let column_name = format!("{}_number", std::any::type_name::<T>());

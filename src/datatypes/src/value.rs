@@ -205,7 +205,7 @@ impl Ord for ListValue {
 }
 
 /// Reference to [Value].
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ValueRef<'a> {
     Null,
 

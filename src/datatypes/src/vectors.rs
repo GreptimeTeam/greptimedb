@@ -217,7 +217,7 @@ pub mod tests {
     use super::helper::Helper;
     use super::*;
     use crate::data_type::DataType;
-    use crate::types::DataTypeBuilder;
+    use crate::types::PrimitiveElement;
 
     #[test]
     fn test_df_columns_to_vector() {
