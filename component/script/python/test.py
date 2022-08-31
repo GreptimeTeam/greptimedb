@@ -3,7 +3,13 @@ from greptime import coprocessor, set_conn_addr, get_conn_addr, mock_tester
 import sys
 import json
 import requests
+'''
+To run this script, you need to first start a http server of greptime, and 
+`
+python3 component/script/python/test.py 地址:端口
+`
 
+'''
 @coprocessor(sql='select number from numbers limit 10', args=['number'], returns=['n'])
 def test(n):
     return n+2
@@ -34,7 +40,7 @@ if __name__ == "__main__":
         # print(table)
         close = table["close"]
         open_time = table["open_time"]
-        # init_table(close, open_time)
+        init_table(close, open_time)
 
         # print(repr(close), repr(open_time))
         # print("calc_rv:", calc_rv(close, open_time, open_time[-1]+datetime("10m"), datetime("7d")))
