@@ -27,4 +27,4 @@ logs/
 .gitignore
 
 # cpython's generated python byte code
-component/script/python/__pycache__/*.pyc
+**/__pyache__/
