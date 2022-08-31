@@ -10,8 +10,8 @@ arc-swap = "1.0"
 arrow-format = { version = "0.4", features = ["ipc"] }
 async-stream = "0.3"
 async-trait = "0.1"
-bitvec = "1.0"
 bytes = "1.1"
+common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }

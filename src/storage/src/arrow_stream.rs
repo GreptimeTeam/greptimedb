@@ -5,6 +5,7 @@
 use std::io::Read;
 
 use arrow_format::{self, ipc::planus::ReadAsRoot};
+use common_base::BitVec;
 use datatypes::arrow::{
     datatypes::Schema,
     error::{ArrowError, Result},
@@ -13,8 +14,6 @@ use datatypes::arrow::{
         IpcSchema,
     },
 };
-
-use crate::bit_vec;
 
 const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
 
@@ -92,7 +91,7 @@ impl<R: Read> ArrowStreamReader<R> {
 }
 
 fn valid_metadata(metadata: &StreamMetadata, column_null_mask: &[u8]) -> StreamMetadata {
-    let column_null_mask = bit_vec::BitVec::from_slice(column_null_mask);
+    let column_null_mask = BitVec::from_slice(column_null_mask);
 
     let schema = Schema::from(
         metadata

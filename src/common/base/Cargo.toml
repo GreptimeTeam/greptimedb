@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bitvec = "1.0"
 bytes = { version = "1.1", features = ["serde"] }
 common-error = { path = "../error" }
 paste = "1.0"

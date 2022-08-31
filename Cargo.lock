@@ -741,6 +741,7 @@ dependencies = [
 name = "common-base"
 version = "0.1.0"
 dependencies = [
+ "bitvec",
  "bytes",
  "common-error",
  "paste",
@@ -1258,7 +1259,6 @@ dependencies = [
  "axum",
  "axum-macros",
  "axum-test-helper",
- "bitvec",
  "catalog",
  "client",
  "common-base",
@@ -4112,8 +4112,8 @@ dependencies = [
  "async-stream",
  "async-trait",
  "atomic_float",
- "bitvec",
  "bytes",
+ "common-base",
  "common-error",
  "common-runtime",
  "common-telemetry",

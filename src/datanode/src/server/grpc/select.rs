@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use api::v1::{codec::SelectResult, column::Values, Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
+use common_base::BitVec;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::{util, RecordBatch, SendableRecordBatchStream};
@@ -11,7 +12,6 @@ use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result};
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
-use crate::server::grpc::BitVec;
 
 pub async fn to_object_result(result: Result<Output>) -> ObjectResult {
     match result {
