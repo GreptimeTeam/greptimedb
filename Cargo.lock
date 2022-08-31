@@ -741,6 +741,7 @@ dependencies = [
 name = "common-base"
 version = "0.1.0"
 dependencies = [
+ "bitvec",
  "bytes",
  "common-error",
  "paste",
@@ -4111,8 +4112,8 @@ dependencies = [
  "async-stream",
  "async-trait",
  "atomic_float",
- "bitvec",
  "bytes",
+ "common-base",
  "common-error",
  "common-runtime",
  "common-telemetry",

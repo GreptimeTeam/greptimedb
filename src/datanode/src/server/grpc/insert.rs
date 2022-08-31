@@ -4,7 +4,7 @@ use std::{
 };
 
 use api::v1::{codec::InsertBatch, column::Values, Column, InsertExpr};
-use common_base::bitset::BitSet;
+use common_base::BitVec;
 use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::{requests::InsertRequest, Table};
@@ -50,7 +50,6 @@ pub fn insertion_expr_to_request(
                     ))
                 }
             };
-
             add_values_to_builder(vector_builder, values, row_count as usize, null_mask)?;
         }
     }
@@ -78,10 +77,9 @@ fn add_values_to_builder(
     builder: &mut VectorBuilder,
     values: Values,
     row_count: usize,
-    null_mask: impl Into<BitSet>,
+    null_mask: Vec<u8>,
 ) -> Result<()> {
     let data_type = builder.data_type();
-    let null_mask: BitSet = null_mask.into();
     let values = convert_values(&data_type, values);
 
     if null_mask.is_empty() {
@@ -91,8 +89,9 @@ fn add_values_to_builder(
             builder.push(value);
         });
     } else {
+        let null_mask = BitVec::from_vec(null_mask);
         ensure!(
-            null_mask.ones_count() + values.len() == row_count,
+            null_mask.count_ones() + values.len() == row_count,
             IllegalInsertDataSnafu
         );
 
@@ -107,7 +106,6 @@ fn add_values_to_builder(
             }
         }
     }
-
     Ok(())
 }
 
@@ -175,8 +173,8 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
     }
 }
 
-fn is_null(null_mask: &BitSet, idx: usize) -> Option<bool> {
-    null_mask.get(idx)
+fn is_null(null_mask: &BitVec, idx: usize) -> Option<bool> {
+    null_mask.get(idx).as_deref().copied()
 }
 
 #[cfg(test)]
@@ -188,7 +186,7 @@ mod tests {
         column::{self, Values},
         Column, InsertExpr,
     };
-    use common_base::bitset::BitSet;
+    use common_base::BitVec;
     use common_query::prelude::Expr;
     use common_recordbatch::SendableRecordBatchStream;
     use datatypes::{
@@ -252,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_is_null() {
-        let null_mask: BitSet = vec![0b0000_0001, 0b0000_1000].into();
+        let null_mask = BitVec::from_slice(&[0b0000_0001, 0b0000_1000]);
 
         assert_eq!(Some(true), is_null(&null_mask, 0));
         assert_eq!(Some(false), is_null(&null_mask, 1));

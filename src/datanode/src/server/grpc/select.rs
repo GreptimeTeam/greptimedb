@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use api::v1::{codec::SelectResult, column::Values, Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
-use common_base::bitset::BitSet;
+use common_base::BitVec;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::{util, RecordBatch, SendableRecordBatchStream};
@@ -87,19 +87,16 @@ fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
         return Vec::default();
     }
 
-    let mut nulls_set = BitSet::with_capacity(row_count);
+    let mut null_mask = BitVec::with_capacity(row_count);
     for array in arrays {
         let validity = array.validity();
-        // TODO(fys): Improve in the future, better way: repeat(false, len).
         if let Some(v) = validity {
-            let nulls: Vec<bool> = v.iter().map(|x| !x).collect();
-            nulls_set.append(&nulls);
+            v.iter().for_each(|x| null_mask.push(!x));
         } else {
-            nulls_set.append(&vec![false; array.len()]);
+            null_mask.extend_from_bitslice(&BitVec::repeat(false, array.len()));
         }
     }
-
-    nulls_set.buffer()
+    null_mask.into_vec()
 }
 
 macro_rules! convert_arrow_array_to_grpc_vals {

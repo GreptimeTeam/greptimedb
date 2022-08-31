@@ -432,6 +432,7 @@ pub mod codec {
 
     use std::{io::Cursor, sync::Arc};
 
+    use common_base::BitVec;
     use datatypes::{
         arrow::{
             chunk::Chunk as ArrowChunk,
@@ -454,17 +455,14 @@ pub mod codec {
         Error as WriteBatchError, FromProtobufSnafu, Mutation, ParseSchemaSnafu, Result,
         ToProtobufSnafu, WriteBatch,
     };
+    use crate::proto::{
+        wal::{MutationExtra, MutationType},
+        write_batch::{self, gen_columns, gen_put_data_vector},
+    };
     use crate::write_batch::{DecodeProtobufSnafu, EncodeProtobufSnafu, PutData};
     use crate::{
         arrow_stream::ArrowStreamReader,
         codec::{Decoder, Encoder},
-    };
-    use crate::{
-        bit_vec,
-        proto::{
-            wal::{MutationExtra, MutationType},
-            write_batch::{self, gen_columns, gen_put_data_vector},
-        },
     };
 
     // TODO(jiachun): The codec logic is too complex, maybe we should use protobuf to
@@ -523,7 +521,7 @@ pub mod codec {
                 } else {
                     let valid_ipc_fields = ipc_fields
                         .iter()
-                        .zip(bit_vec::BitVec::from_slice(column_null_mask))
+                        .zip(BitVec::from_slice(column_null_mask))
                         .filter(|(_, is_null)| !*is_null)
                         .map(|(ipc_field, _)| ipc_field.clone())
                         .collect::<Vec<_>>();
@@ -644,13 +642,12 @@ pub mod codec {
                             if ext.column_null_mask.is_empty() {
                                 gen_mutation_put(&column_names)
                             } else {
-                                let valid_columns =
-                                    bit_vec::BitVec::from_slice(&ext.column_null_mask)
-                                        .into_iter()
-                                        .zip(column_names.iter())
-                                        .filter(|(is_null, _)| !*is_null)
-                                        .map(|(_, column_name)| column_name.clone())
-                                        .collect::<Vec<_>>();
+                                let valid_columns = BitVec::from_slice(&ext.column_null_mask)
+                                    .into_iter()
+                                    .zip(column_names.iter())
+                                    .filter(|(is_null, _)| !*is_null)
+                                    .map(|(_, column_name)| column_name.clone())
+                                    .collect::<Vec<_>>();
 
                                 gen_mutation_put(&valid_columns)
                             }
@@ -765,7 +762,7 @@ pub mod codec {
                                 .map(|column| (column.name.clone(), column.data_type.clone()))
                                 .collect::<Vec<_>>()
                         } else {
-                            bit_vec::BitVec::from_slice(&ext.column_null_mask)
+                            BitVec::from_slice(&ext.column_null_mask)
                                 .into_iter()
                                 .zip(column_schemas.iter())
                                 .filter(|(is_null, _)| !*is_null)

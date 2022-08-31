@@ -3,6 +3,7 @@ tonic::include_proto!("greptime.storage.write_batch.v1");
 
 use std::sync::Arc;
 
+use common_base::BitVec;
 use common_error::prelude::*;
 use datatypes::schema;
 use datatypes::{
@@ -19,8 +20,6 @@ use datatypes::{
 };
 use paste::paste;
 use snafu::OptionExt;
-
-use crate::bit_vec;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -178,7 +177,7 @@ macro_rules! gen_columns {
                         .with_context(|| ConversionSnafu {
                             from: std::format!("{:?}", vector.as_ref().data_type()),
                         })?;
-                let mut bits: Option<bit_vec::BitVec> = None;
+                let mut bits: Option<BitVec> = None;
 
                 vector_ref
                     .iter_data()
@@ -187,7 +186,7 @@ macro_rules! gen_columns {
                         Some($vari) => values.[<$key _values>].push($cast),
                         None => {
                             if (bits.is_none()) {
-                                bits = Some(bit_vec::BitVec::repeat(false, vector_ref.len()));
+                                bits = Some(BitVec::repeat(false, vector_ref.len()));
                             }
                             bits.as_mut().map(|x| x.set(i, true));
                         }
@@ -237,7 +236,7 @@ macro_rules! gen_put_data {
                     (0..num_rows)
                         .for_each(|_| builder.push(vector_iter.next().map(|$vari| $cast)));
                 } else {
-                    bit_vec::BitVec::from_vec(column.value_null_mask)
+                    BitVec::from_vec(column.value_null_mask)
                         .into_iter()
                         .take(num_rows)
                         .for_each(|is_null| {
