@@ -10,6 +10,8 @@ use snafu::ResultExt;
 use crate::error::Result;
 use crate::error::{ConvertSchemaSnafu, ExecutePhysicalPlanSnafu, IntoPhysicalPlanSnafu};
 
+pub type PhysicalPlanRef = Arc<dyn PhysicalPlan>;
+
 pub struct PhysicalPlanner {
     query_engine: QueryEngineRef,
 }
@@ -19,7 +21,7 @@ impl PhysicalPlanner {
         Self { query_engine }
     }
 
-    pub fn parse(bytes: Vec<u8>) -> Result<Arc<dyn PhysicalPlan>> {
+    pub fn parse(bytes: Vec<u8>) -> Result<PhysicalPlanRef> {
         let physical_plan = DefaultAsPlanImpl { bytes }
             .try_into_physical_plan()
             .context(IntoPhysicalPlanSnafu)?;
@@ -33,11 +35,7 @@ impl PhysicalPlanner {
         Ok(Arc::new(PhysicalPlanAdapter::new(schema, physical_plan)))
     }
 
-    pub async fn execute(
-        &self,
-        plan: Arc<dyn PhysicalPlan>,
-        _original_ql: Vec<u8>,
-    ) -> Result<Output> {
+    pub async fn execute(&self, plan: PhysicalPlanRef, _original_ql: Vec<u8>) -> Result<Output> {
         self.query_engine
             .execute_physical(&plan)
             .await
