@@ -37,7 +37,6 @@ def as_table(kline: list):
     }
     return ret
 
-
 @coprocessor(args=["open_time", "close"], returns=[
     "rv_7d",
     "rv_15d",
@@ -45,19 +44,21 @@ def as_table(kline: list):
     "rv_60d",
     "rv_90d",
     "rv_180d"
-], sql="select open_time, close from k_line")
+],
+sql="select open_time, close from k_line")
 def calc_rvs(open_time, close):
-    from greptime import vector, log, prev, sqrt, datetime
+    from greptime import vector, log, prev, sqrt, datetime, pow, sum
     def calc_rv(close, open_time, time, interval):
         mask = (open_time < time) & (open_time > time - interval)
-        close = close[mask] # or `close.filter(mask)`
+        close = close[mask]
 
         avg_time_interval = (open_time[-1] - open_time[0])/(len(open_time)-1)
         ref = log(close/prev(close))
         var = sum(pow(ref, 2)/(len(ref)-1))
         return sqrt(var/avg_time_interval)
 
-    # how to get env var, maybe through closure?
+    # how to get env var, 
+    # maybe through accessing scope and serde then send to remote?
     timepoint = open_time[-1]
     rv_7d = calc_rv(close, open_time, timepoint, datetime("7d"))
     rv_15d = calc_rv(close, open_time, timepoint, datetime("15d"))

@@ -34,8 +34,8 @@ if __name__ == "__main__":
         # print(table)
         close = table["close"]
         open_time = table["open_time"]
-        init_table(close, open_time)
-        exit()
+        # init_table(close, open_time)
+
         # print(repr(close), repr(open_time))
         # print("calc_rv:", calc_rv(close, open_time, open_time[-1]+datetime("10m"), datetime("7d")))
         env = {"close":close, "open_time": open_time}
