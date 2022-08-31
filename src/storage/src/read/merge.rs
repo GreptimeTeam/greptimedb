@@ -42,6 +42,7 @@ impl Source {
 }
 
 /// Reference to a row in [BatchCursor].
+#[derive(Debug)]
 struct RowCursor<'a> {
     batch: &'a Batch,
     pos: usize,
@@ -81,11 +82,6 @@ impl BatchCursor {
     #[inline]
     fn is_valid(&self) -> bool {
         !self.is_empty()
-    }
-
-    #[inline]
-    fn first_row_index(&self) -> usize {
-        self.pos
     }
 
     /// Returns first row of current batch.
@@ -288,7 +284,9 @@ impl PartialOrd for Node {
 
 impl Ord for Node {
     fn cmp(&self, other: &Node) -> Ordering {
-        self.compare_first_row(other)
+        // The std binary heap is a max heap, but we want the nodes are ordered in
+        // ascend order, so we compare the nodes in reverse order.
+        other.compare_first_row(self)
     }
 }
 
@@ -361,6 +359,11 @@ impl MergeReaderBuilder {
 
     fn build(self) -> MergeReader {
         let num_sources = self.sources.len();
+        let column_schemas = self.schema.schema_to_read().schema().column_schemas();
+        let batch_builder = BatchBuilder::with_capacity(
+            column_schemas.iter().map(|c| &c.data_type),
+            self.batch_size,
+        );
 
         MergeReader {
             initialized: false,
@@ -369,8 +372,7 @@ impl MergeReaderBuilder {
             hot: BinaryHeap::with_capacity(num_sources),
             cold: BinaryHeap::with_capacity(num_sources),
             batch_size: self.batch_size,
-            // FIXME(yingwen): create BatchBuilder.
-            batch_builder: BatchBuilder::new(),
+            batch_builder,
         }
     }
 }
@@ -455,7 +457,6 @@ impl MergeReader {
         let batch = if self.batch_builder.is_empty() {
             Some(hottest.take_batch_slice(fetch_row_num))
         } else {
-            // TODO(yingwen): append rows to builder.
             hottest.push_rows_to(&mut self.batch_builder, fetch_row_num)?;
 
             None
@@ -539,36 +540,32 @@ mod tests {
             }
         }
 
-        // let mut expect: Vec<_> = sources
-        //     .iter()
-        //     .flat_map(|v| v.iter())
-        //     .flat_map(|v| v.iter().copied())
-        //     .collect();
-        // expect.sort_by_key(|k| k.0);
-
         builder.build()
+    }
+
+    async fn check_merge_reader_result(mut reader: MergeReader, input: &[Batches<'_>]) {
+        let mut expect: Vec<_> = input
+            .iter()
+            .flat_map(|v| v.iter())
+            .flat_map(|v| v.iter().copied())
+            .collect();
+        expect.sort_by_key(|k| k.0);
+
+        let result = read_util::collect_kv_batch(&mut reader).await;
+        assert_eq!(expect, result);
     }
 
     #[tokio::test]
     async fn test_merge_multiple_interleave() {
-        let mut reader = build_merge_reader(
-            &[
-                &[&[(1, Some(1)), (5, Some(5)), (9, Some(9))]],
-                &[&[(2, Some(2)), (3, Some(3)), (8, Some(8))]],
-                &[&[(7, Some(7)), (12, Some(12))]],
-            ],
-            1,
-            3,
-        );
+        common_telemetry::init_default_ut_logging();
 
-        read_util::check_reader_with_kv_batch(
-            &mut reader,
-            &[
-                &[(1, Some(1)), (2, Some(2)), (3, Some(3))],
-                &[(5, Some(5)), (7, Some(7)), (8, Some(8))],
-                &[(9, Some(9)), (12, Some(12))],
-            ],
-        )
-        .await;
+        let input: &[Batches] = &[
+            &[&[(1, Some(1)), (5, Some(5)), (9, Some(9))]],
+            &[&[(2, Some(2)), (3, Some(3)), (8, Some(8))]],
+            &[&[(7, Some(7)), (12, Some(12))]],
+        ];
+        let reader = build_merge_reader(input, 1, 3);
+
+        check_merge_reader_result(reader, input).await;
     }
 }

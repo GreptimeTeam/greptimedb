@@ -237,6 +237,15 @@ pub enum Error {
         #[snafu(backtrace)]
         source: crate::schema::Error,
     },
+
+    #[snafu(display("Failed to push data to batch builder, source: {}", source))]
+    PushBatch {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to build batch, {}", msg))]
+    BuildBatch { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -252,7 +261,9 @@ impl ErrorExt for Error {
             | BatchMissingColumn { .. }
             | BatchMissingTimestamp { .. }
             | InvalidTimestamp { .. }
-            | InvalidProjection { .. } => StatusCode::InvalidArguments,
+            | InvalidProjection { .. }
+            | PushBatch { .. }
+            | BuildBatch { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. }
             | EncodeJson { .. }

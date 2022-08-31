@@ -3,9 +3,12 @@
 mod merge;
 
 use async_trait::async_trait;
+use datatypes::data_type::DataType;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{MutableVector, VectorRef};
+use snafu::{ensure, ResultExt};
 
-use crate::error::Result;
+use crate::error::{self, Result};
 
 /// Storage internal representation of a batch of rows.
 ///
@@ -73,53 +76,96 @@ impl Batch {
     }
 
     fn assert_columns(columns: &[VectorRef]) {
-        assert!(columns.is_empty());
+        assert!(!columns.is_empty());
         let length = columns[0].len();
         assert!(columns.iter().all(|col| col.len() == length));
     }
 }
 
-struct BatchBuilder {
+pub struct BatchBuilder {
     builders: Vec<Box<dyn MutableVector>>,
 }
 
 impl BatchBuilder {
-    // FIXME(yingwen): create BatchBuilder from data types.
-    fn new() -> BatchBuilder {
-        BatchBuilder {
-            builders: Vec::new(),
-        }
+    /// Create a new `BatchBuilder` from data types with given `capacity`.
+    ///
+    /// # Panics
+    /// Panics if `types` is empty.
+    pub fn with_capacity<'a, I>(types: I, capacity: usize) -> BatchBuilder
+    where
+        I: IntoIterator<Item = &'a ConcreteDataType>,
+    {
+        let builders: Vec<_> = types
+            .into_iter()
+            .map(|t| t.create_mutable_vector(capacity))
+            .collect();
+        assert!(!builders.is_empty());
+
+        BatchBuilder { builders }
     }
 
     /// Returns number of rows already in this builder.
-    fn num_rows(&self) -> usize {
-        unimplemented!()
+    #[inline]
+    pub fn num_rows(&self) -> usize {
+        self.builders[0].len()
     }
 
     /// Returns true if no rows in this builder.
-    fn is_empty(&self) -> bool {
-        unimplemented!()
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.num_rows() == 0
     }
 
-    /// Push slice of batch into the builder.
+    /// Extend the builder by slice of batch.
     ///
     /// # Panics
     /// Panics if `offset + length > batch.num_rows()`.
-    fn extend_slice_of(&mut self, batch: &Batch, offset: usize, length: usize) -> Result<()> {
-        unimplemented!()
+    pub fn extend_slice_of(&mut self, batch: &Batch, offset: usize, length: usize) -> Result<()> {
+        for (builder, column) in self.builders.iter_mut().zip(batch.columns()) {
+            builder
+                .extend_slice_of(&**column, offset, length)
+                .context(error::PushBatchSnafu)?;
+        }
+
+        Ok(())
     }
 
     /// Push `i-th` row of batch into the builder.
     ///
     /// # Panics
     /// Panics if `i` is out of bound.
-    fn push_row_of(&mut self, batch: &Batch, i: usize) -> Result<()> {
-        unimplemented!()
+    pub fn push_row_of(&mut self, batch: &Batch, i: usize) -> Result<()> {
+        for (builder, column) in self.builders.iter_mut().zip(batch.columns()) {
+            let value = column.get_ref(i);
+            builder
+                .push_value_ref(value)
+                .context(error::PushBatchSnafu)?;
+        }
+
+        Ok(())
     }
 
     /// Create a new [Batch] and reset this builder.
-    fn build(&mut self) -> Result<Batch> {
-        unimplemented!()
+    pub fn build(&mut self) -> Result<Batch> {
+        // Checks length of each builder.
+        let rows = self.num_rows();
+        for (i, builder) in self.builders.iter().enumerate() {
+            ensure!(
+                rows == builder.len(),
+                error::BuildBatchSnafu {
+                    msg: format!(
+                        "expect row num {} but builder {} has {}",
+                        rows,
+                        i,
+                        builder.len()
+                    ),
+                }
+            );
+        }
+
+        let columns = self.builders.iter_mut().map(|b| b.to_vector()).collect();
+
+        Ok(Batch { columns })
     }
 }
 

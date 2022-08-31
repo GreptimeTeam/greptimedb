@@ -59,6 +59,28 @@ fn check_kv_batch(batches: &[Batch], expect: &[&[(i64, Option<i64>)]]) {
     assert_eq!(batches.len(), expect.len());
 }
 
+pub async fn collect_kv_batch(reader: &mut dyn BatchReader) -> Vec<(i64, Option<i64>)> {
+    let mut result = Vec::new();
+    while let Some(batch) = reader.next_batch().await.unwrap() {
+        let key = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Vector>()
+            .unwrap();
+        let value = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Vector>()
+            .unwrap();
+
+        for (k, v) in key.iter_data().zip(value.iter_data()) {
+            result.push((k.unwrap(), v));
+        }
+    }
+
+    result
+}
+
 pub async fn check_reader_with_kv_batch(
     reader: &mut dyn BatchReader,
     expect: &[&[(i64, Option<i64>)]],
@@ -117,7 +139,6 @@ impl BatchIterator for VecBatchReader {
 pub fn build_vec_reader(batches: &[&[(i64, Option<i64>)]]) -> VecBatchReader {
     let batches: Vec<_> = batches
         .iter()
-        .filter(|key_values| !key_values.is_empty())
         .map(|key_values| new_kv_batch(key_values))
         .collect();
 
