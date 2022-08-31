@@ -1,28 +1,34 @@
 use api::DecodeError;
 use datafusion::error::DataFusionError;
-use snafu::Snafu;
+use snafu::{Backtrace, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Unexpected empty grpc physical plan type: {}", name))]
-    EmptyGrpcPhysicalPlan { name: String },
+    EmptyPhysicalPlan { name: String, backtrace: Backtrace },
 
     #[snafu(display("Unexpected empty grpc physical expr: {}", name))]
-    EmptyGrpcExpr { name: String },
+    EmptyPhysicalExpr { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Unsupported datafusion execution plan: {}", name))]
+    UnsupportedDfPlan { name: String, backtrace: Backtrace },
 
     #[snafu(display("Unsupported datafusion physical expr: {}", name))]
-    UnsupportedDfExpr { name: String },
+    UnsupportedDfExpr { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Missing required field in protobuf: {}", field))]
-    MissingField { field: String },
+    #[snafu(display("Missing required field in protobuf, field: {}", field))]
+    MissingField { field: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to new datafusion projection exec: {}", source))]
-    NewProjection { source: DataFusionError },
+    #[snafu(display("Failed to new datafusion projection exec, source: {}", source))]
+    NewProjection {
+        source: DataFusionError,
+        backtrace: Backtrace,
+    },
 
-    #[snafu(display("Unsupported df execution plan: {}", name))]
-    UnsupportedDf { name: String },
-
-    #[snafu(display("Failed to decode physical plan node: {}", source))]
-    DecodePhysicalPlanNode { source: DecodeError },
+    #[snafu(display("Failed to decode physical plan node, source: {}", source))]
+    DecodePhysicalPlanNode {
+        source: DecodeError,
+        backtrace: Backtrace,
+    },
 }

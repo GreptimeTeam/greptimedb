@@ -5,7 +5,7 @@ package greptime.v1.codec;
 message PhysicalPlanNode {
   oneof PhysicalPlanType {
     ProjectionExecNode projection = 1;
-    MockInputExecNode mock = 9999;
+    MockInputExecNode mock = 99;
     // TODO(fys): impl other physical plan node
   }
 }
@@ -25,7 +25,7 @@ message PhysicalExprNode {
 
 message PhysicalColumn {
   string name = 1;
-  uint32 index = 2;
+  uint64 index = 2;
 }
 
 message MockInputExecNode {

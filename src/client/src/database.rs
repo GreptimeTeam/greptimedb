@@ -71,7 +71,7 @@ impl Database {
     pub async fn physical_plan(
         &self,
         physical: Arc<dyn ExecutionPlan>,
-        original_ql: Option<Vec<u8>>,
+        original_ql: Option<String>,
     ) -> Result<ObjectResult> {
         let plan = DefaultAsPlanImpl::try_from_physical_plan(physical.clone())
             .context(EncodePhysicalSnafu { physical })?
@@ -79,7 +79,7 @@ impl Database {
         let original_ql = original_ql.unwrap_or_default();
         let select_expr = SelectExpr {
             expr: Some(select_expr::Expr::PhysicalPlan(PhysicalPlan {
-                original_ql,
+                original_ql: original_ql.into_bytes(),
                 plan,
             })),
         };

@@ -1,18 +1,18 @@
 mod expr;
 pub mod plan;
 
-use std::sync::Arc;
+use std::{result::Result, sync::Arc};
 
 use datafusion::physical_plan::ExecutionPlan;
+
+pub type ExecutionPlanRef = Arc<dyn ExecutionPlan>;
 
 pub trait AsExcutionPlan {
     type Error: std::error::Error;
 
-    fn try_into_physical_plan(&self) -> std::result::Result<Arc<dyn ExecutionPlan>, Self::Error>;
+    fn try_into_physical_plan(&self) -> Result<ExecutionPlanRef, Self::Error>;
 
-    fn try_from_physical_plan(
-        plan: Arc<dyn ExecutionPlan>,
-    ) -> std::result::Result<Self, Self::Error>
+    fn try_from_physical_plan(plan: ExecutionPlanRef) -> Result<Self, Self::Error>
     where
         Self: Sized;
 }

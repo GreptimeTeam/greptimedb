@@ -20,10 +20,10 @@ use datafusion::{
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    DecodePhysicalPlanNodeSnafu, EmptyGrpcPhysicalPlanSnafu, Error, MissingFieldSnafu,
-    NewProjectionSnafu, UnsupportedDfSnafu,
+    DecodePhysicalPlanNodeSnafu, EmptyPhysicalPlanSnafu, Error, MissingFieldSnafu,
+    NewProjectionSnafu, UnsupportedDfPlanSnafu,
 };
-use crate::physical::{expr, AsExcutionPlan};
+use crate::physical::{expr, AsExcutionPlan, ExecutionPlanRef};
 
 pub struct DefaultAsPlanImpl {
     pub bytes: Vec<u8>,
@@ -32,8 +32,8 @@ pub struct DefaultAsPlanImpl {
 impl AsExcutionPlan for DefaultAsPlanImpl {
     type Error = Error;
 
-    // Vec<u8> -> PhysicalPlanNode -> Arc<dyn ExecutionPlan>
-    fn try_into_physical_plan(&self) -> Result<Arc<dyn ExecutionPlan>, Self::Error> {
+    // Vec<u8> -> PhysicalPlanNode -> ExecutionPlanRef
+    fn try_into_physical_plan(&self) -> Result<ExecutionPlanRef, Self::Error> {
         let physicalplan_node: PhysicalPlanNode = self
             .bytes
             .deref()
@@ -42,8 +42,8 @@ impl AsExcutionPlan for DefaultAsPlanImpl {
         physicalplan_node.try_into_physical_plan()
     }
 
-    // Arc<dyn ExecutionPlan> -> PhysicalPlanNode -> Vec<u8>
-    fn try_from_physical_plan(plan: Arc<dyn ExecutionPlan>) -> Result<Self, Self::Error>
+    // ExecutionPlanRef -> PhysicalPlanNode -> Vec<u8>
+    fn try_from_physical_plan(plan: ExecutionPlanRef) -> Result<Self, Self::Error>
     where
         Self: Sized,
     {
@@ -55,11 +55,11 @@ impl AsExcutionPlan for DefaultAsPlanImpl {
 impl AsExcutionPlan for PhysicalPlanNode {
     type Error = Error;
 
-    fn try_into_physical_plan(&self) -> Result<Arc<dyn ExecutionPlan>, Self::Error> {
+    fn try_into_physical_plan(&self) -> Result<ExecutionPlanRef, Self::Error> {
         let plan = self
             .physical_plan_type
             .as_ref()
-            .context(EmptyGrpcPhysicalPlanSnafu {
+            .context(EmptyPhysicalPlanSnafu {
                 name: format!("{:?}", self),
             })?;
 
@@ -91,7 +91,7 @@ impl AsExcutionPlan for PhysicalPlanNode {
         }
     }
 
-    fn try_from_physical_plan(plan: Arc<dyn ExecutionPlan>) -> Result<Self, Self::Error>
+    fn try_from_physical_plan(plan: ExecutionPlanRef) -> Result<Self, Self::Error>
     where
         Self: Sized,
     {
@@ -124,7 +124,7 @@ impl AsExcutionPlan for PhysicalPlanNode {
                 })),
             })
         } else {
-            UnsupportedDfSnafu {
+            UnsupportedDfPlanSnafu {
                 name: format!("{:?}", plan),
             }
             .fail()?
@@ -132,6 +132,7 @@ impl AsExcutionPlan for PhysicalPlanNode {
     }
 }
 
+// TODO(fys): use "test" feature to enable it
 #[derive(Debug)]
 pub struct MockExecution {
     name: String,
@@ -166,14 +167,14 @@ impl ExecutionPlan for MockExecution {
         unimplemented!()
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+    fn children(&self) -> Vec<ExecutionPlanRef> {
         unimplemented!()
     }
 
     fn with_new_children(
         &self,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        _children: Vec<ExecutionPlanRef>,
+    ) -> datafusion::error::Result<ExecutionPlanRef> {
         unimplemented!()
     }
 
@@ -210,12 +211,12 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::codec::PhysicalPlanNode;
-    use datafusion::physical_plan::{
-        expressions::Column, projection::ProjectionExec, ExecutionPlan,
-    };
+    use datafusion::physical_plan::{expressions::Column, projection::ProjectionExec};
 
-    use super::{DefaultAsPlanImpl, MockExecution};
-    use crate::physical::AsExcutionPlan;
+    use crate::physical::{
+        plan::{DefaultAsPlanImpl, MockExecution},
+        {AsExcutionPlan, ExecutionPlanRef},
+    };
 
     #[test]
     fn test_convert_df_projection_with_bytes() {
@@ -252,7 +253,7 @@ mod tests {
         )
     }
 
-    fn verify_df_porjection(exec: Arc<dyn ExecutionPlan>) {
+    fn verify_df_porjection(exec: ExecutionPlanRef) {
         let projection_exec = exec.as_any().downcast_ref::<ProjectionExec>().unwrap();
         let mock_input = projection_exec
             .input()

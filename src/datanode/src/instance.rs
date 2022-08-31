@@ -5,16 +5,11 @@ use async_trait::async_trait;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
-use common_grpc::AsExcutionPlan;
-use common_grpc::DefaultAsPlanImpl;
 use common_telemetry::logging::{error, info};
 use common_telemetry::timer;
-use datatypes::schema::Schema;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
-use query::plan::PhysicalPlan;
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
-use query::PhysicalPlanAdapter;
 use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
@@ -24,12 +19,13 @@ use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
-    self, ConvertSchemaSnafu, ExecutePhysicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu,
-    NewCatalogSnafu, PhysicalPlanSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu,
+    self, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result, TableNotFoundSnafu,
+    UnsupportedExprSnafu,
 };
 use crate::metric;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::insertion_expr_to_request;
+use crate::server::grpc::plan::PhysicalPlanner;
 use crate::server::grpc::select::to_object_result;
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -42,6 +38,7 @@ pub struct Instance {
     sql_handler: SqlHandler<DefaultEngine>,
     // Catalog list
     catalog_manager: CatalogManagerRef,
+    physical_planner: PhysicalPlanner,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -69,9 +66,10 @@ impl Instance {
         let query_engine = factory.query_engine().clone();
 
         Ok(Self {
-            query_engine,
+            query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
             catalog_manager,
+            physical_planner: PhysicalPlanner::new(query_engine),
         })
     }
 
@@ -96,13 +94,6 @@ impl Instance {
             .context(InsertSnafu { table_name })?;
 
         Ok(Output::AffectedRows(affected_rows))
-    }
-
-    pub async fn execute_physical_plan(&self, plan: Arc<dyn PhysicalPlan>) -> Result<Output> {
-        self.query_engine
-            .execute_physical(&plan)
-            .await
-            .context(ExecutePhysicalPlanSnafu)
     }
 
     pub async fn execute_sql(&self, sql: &str) -> Result<Output> {
@@ -188,22 +179,10 @@ impl Instance {
         let expr = select_expr.expr;
         match expr {
             Some(select_expr::Expr::Sql(sql)) => self.execute_sql(&sql).await,
-            Some(select_expr::Expr::PhysicalPlan(api::v1::PhysicalPlan {
-                original_ql: _,
-                plan,
-            })) => {
-                let physical_plan = DefaultAsPlanImpl { bytes: plan }
-                    .try_into_physical_plan()
-                    .context(PhysicalPlanSnafu)?;
-
-                let schema: Arc<Schema> = Arc::new(
-                    physical_plan
-                        .schema()
-                        .try_into()
-                        .context(ConvertSchemaSnafu)?,
-                );
-                let physical_plan = Arc::new(PhysicalPlanAdapter::new(schema, physical_plan));
-                self.execute_physical_plan(physical_plan).await
+            Some(select_expr::Expr::PhysicalPlan(api::v1::PhysicalPlan { original_ql, plan })) => {
+                self.physical_planner
+                    .execute(PhysicalPlanner::parse(plan)?, original_ql)
+                    .await
             }
             _ => UnsupportedExprSnafu {
                 name: format!("{:?}", expr),

@@ -4,13 +4,13 @@ use api::v1::codec;
 use datafusion::physical_plan::{expressions::Column as DfColumn, PhysicalExpr as DfPhysicalExpr};
 use snafu::OptionExt;
 
-use crate::error::{EmptyGrpcExprSnafu, Error, UnsupportedDfExprSnafu};
+use crate::error::{EmptyPhysicalExprSnafu, Error, UnsupportedDfExprSnafu};
 
 // grpc -> datafusion (physical expr)
 pub(crate) fn parse_grpc_physical_expr(
     proto: &codec::PhysicalExprNode,
 ) -> Result<Arc<dyn DfPhysicalExpr>, Error> {
-    let expr_type = proto.expr_type.as_ref().context(EmptyGrpcExprSnafu {
+    let expr_type = proto.expr_type.as_ref().context(EmptyPhysicalExprSnafu {
         name: format!("{:?}", proto),
     })?;
 
@@ -36,7 +36,7 @@ pub(crate) fn parse_df_physical_expr(
             expr_type: Some(codec::physical_expr_node::ExprType::Column(
                 codec::PhysicalColumn {
                     name: expr.name().to_string(),
-                    index: expr.index() as u32,
+                    index: expr.index() as u64,
                 },
             )),
         })
