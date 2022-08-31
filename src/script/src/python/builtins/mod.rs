@@ -658,6 +658,9 @@ pub(crate) mod greptime_builtin {
     #[pyfunction]
     fn prev(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let cur: ArrayRef = cur.to_arrow_array();
+        if cur.len() == 0 {
+            return Err(vm.new_runtime_error("Can't give prev for a zero length array!".to_string()));
+        }
         let cur = cur.slice(0, cur.len() - 1); // except the last one that is
         let fill = cur.slice(0, 1);
         let ret = compute::concatenate::concatenate(&[&*fill, &*cur]).map_err(|err| {
@@ -701,7 +704,7 @@ pub(crate) mod greptime_builtin {
                     prev = idx;
                     state = State::Separator(Default::default());
                 }
-                _ => {}
+                _ => continue
             };
         }
         let last = match state {
