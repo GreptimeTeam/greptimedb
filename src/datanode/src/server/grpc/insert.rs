@@ -50,7 +50,7 @@ pub fn insertion_expr_to_request(
                     ))
                 }
             };
-            add_values_to_builder(vector_builder, values, row_count as usize, &*null_mask)?;
+            add_values_to_builder(vector_builder, values, row_count as usize, null_mask)?;
         }
     }
     let columns_values = columns_builders
@@ -77,7 +77,7 @@ fn add_values_to_builder(
     builder: &mut VectorBuilder,
     values: Values,
     row_count: usize,
-    null_mask: &[u8],
+    null_mask: Vec<u8>,
 ) -> Result<()> {
     let data_type = builder.data_type();
     let values = convert_values(&data_type, values);
@@ -89,7 +89,7 @@ fn add_values_to_builder(
             builder.push(value);
         });
     } else {
-        let null_mask = BitVec::from_slice(null_mask);
+        let null_mask = BitVec::from_vec(null_mask);
         ensure!(
             null_mask.count_ones() + values.len() == row_count,
             IllegalInsertDataSnafu
