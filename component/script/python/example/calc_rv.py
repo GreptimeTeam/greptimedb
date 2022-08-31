@@ -45,8 +45,8 @@ def as_table(kline: list):
     "rv_60d",
     "rv_90d",
     "rv_180d"
-])
-def calc_rvs(open_time, close: vector):
+], sql="select open_time, close from k_line")
+def calc_rvs(open_time, close):
     from greptime import vector, log, prev, sqrt, datetime
     def calc_rv(close, open_time, time, interval):
         mask = (open_time < time) & (open_time > time - interval)
