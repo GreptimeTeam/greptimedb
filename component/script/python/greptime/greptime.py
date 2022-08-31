@@ -1,15 +1,15 @@
 """
 Be note that this is a mock library, if not connected to database, 
-it can only run on mock data and mock function which is support by numpy
+it can only run on mock data and mock function which is supported by numpy
 """
 import functools
 import numpy as np
+import json
 from urllib import request
 import inspect
 import requests
-import cfg
 
-
+from .cfg import set_conn_addr, get_conn_addr
 
 log = np.log
 sum = np.nansum
@@ -78,11 +78,9 @@ class vector(np.ndarray):
     ) -> ...:
         self = np.asarray(lst).view(cls)
         self._datatype = dtype
-        #print("In vector's __new__",lst, ty)
         return self
 
     def __str__(self) -> str:
-        #print("In vector's __str__")
         return "vector({}, \"{}\")".format(super().__str__(), self.datatype())
 
     def datatype(self):
@@ -110,7 +108,7 @@ def interval(arr: list, duration: int, fill, step: None | int = None, explicitOf
 
     `duration` is the length of sliding window
 
-    `stpe` being the length when sliding window take a step
+    `step` being the length when sliding window take a step
 
     `fill` indicate how to fill missing value:
     - "prev": use previous 
@@ -193,22 +191,21 @@ def coprocessor(args=None, returns=None, sql=None):
     def decorator_copr(func):
         @functools.wraps(func)
         def wrapper_do_actual(*args, **kwargs):
-            # print("Mock Python Coprocessor post:")
-            # print("args=", args,"kwargs=", kwargs)
-            # print(inspect.getsource(func))
-            # print(func(*args, **kwargs))
-            # insert actual communciation code here for real thing
             if len(args)!=0 or len(kwargs)!=0:
                 raise Exception("Expect call with no arguements(for all args are given by coprocessor itself)")
             source = inspect.getsource(func)
-            url = "http://{}/v1/scripts".format(cfg.GREPTIME_DB_CONN_ADDRESS)
-            print(url)
-            res = requests.post(
-                url,
-                json={
+            url = "http://{}/v1/scripts".format(get_conn_addr())
+            print("Posting to {}".format(url))
+            data = {
                     "script": source,
                     "engine": None,
-                })
+                }
+
+            res = requests.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json=data
+            )
             return res
         return wrapper_do_actual
     return decorator_copr

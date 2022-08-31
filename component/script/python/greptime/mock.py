@@ -4,9 +4,8 @@ it can only run on mock data and support by numpy
 """
 from typing import Any
 import numpy as np
-from greptime import i32,i64,f32,f64, vector, interval, query, prev, datetime, log, sum, sqrt, pow, nan, copr, coprocessor
+from .greptime import i32,i64,f32,f64, vector, interval, query, prev, datetime, log, sum, sqrt, pow, nan, copr, coprocessor
 
-# TODO: write a python side coprocessor to passs all info to db
 import inspect
 import functools
 import ast
@@ -23,20 +22,16 @@ def mock_tester(
     What it does is replace `@coprocessor` with `@mock_cpor` and add a keyword `env=env`
     like `@mock_copr(args=...,returns=...,env=env)`
     """
-    # print("Mock Helper:")
     code = inspect.getsource(func)
-    # print(code)
     tree = ast.parse(code)
     tree = HackyReplaceDecorator("env").visit(tree)
     new_func = tree.body[0]
     fn_name = new_func.name
 
-    # print(ast.dump(tree, indent=4))
     code_obj = compile(tree, "<embedded>", "exec")
     exec(code_obj)
 
     ret = eval("{}()".format(fn_name))
-    # print(ret)
     return ret
 
 def mock_copr(args, returns, sql=None, env:None|dict=None):
@@ -49,7 +44,6 @@ def mock_copr(args, returns, sql=None, env:None|dict=None):
 
             real_args = [env[name] for name in args]
             ret = func(*real_args)
-            # print(ret)
             return ret
         
         return wrapper_do_actual

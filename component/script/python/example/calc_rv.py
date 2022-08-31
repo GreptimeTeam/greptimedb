@@ -1,13 +1,16 @@
-from greptime import interval, vector, log, prev, sqrt, datetime, coprocessor
+import sys
+# for annoying releative import beyond top-level package
+sys.path.insert(0, "../")
+from greptime import mock_tester, coprocessor, greptime as gt_builtin
+from greptime.greptime import interval, vector, log, prev, sqrt, datetime
+import greptime.greptime as greptime
 import json
 import numpy as np
-
-from mock import mock_tester
 
 
 def data_sample(k_lines, symbol, density=5 * 30 * 86400):
     """
-    Only return close data for simpllicty for now
+    Only return close data for simplicty for now
     """
     k_lines = k_lines["result"] if k_lines["ret_msg"] == "OK" else None
     if k_lines == None:
@@ -63,19 +66,3 @@ def calc_rvs(open_time, close: vector):
     rv_90d = calc_rv(close, open_time, timepoint, datetime("90d"))
     rv_180d = calc_rv(close, open_time, timepoint, datetime("180d"))
     return rv_7d, rv_15d, rv_30d, rv_60d, rv_90d, rv_180d
-
-
-if __name__ == "__main__":
-    with open("component/script/python/example/kline.json", "r") as kline_file:
-        kline = json.load(kline_file)
-        # vec = vector([1,2,3], int)
-        # print(vec, vec.datatype())
-        table = as_table(kline["result"])
-        # print(table)
-        close = table["close"]
-        open_time = table["open_time"]
-        # print(repr(close), repr(open_time))
-        # print("calc_rv:", calc_rv(close, open_time, open_time[-1]+datetime("10m"), datetime("7d")))
-        env = {"close":close, "open_time": open_time}
-        # print("env:", env)
-        print(mock_tester(calc_rvs, env=env))

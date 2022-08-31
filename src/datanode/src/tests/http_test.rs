@@ -106,11 +106,12 @@ async fn start_test_app(addr: &str) -> (SocketAddr, TestGuard) {
     )
 }
 
+#[allow(unused)]
 #[tokio::test]
 async fn test_py_side_scripts_api() {
     // TODO(discord9): make a working test case, it will require python3 with numpy installed, complex environment setup expected....
     common_telemetry::init_default_ut_logging();
-    let _server = start_test_app("127.0.0.1:21830");
-    // let (app, _guard) = server.await;
+    let server = start_test_app("127.0.0.1:21830");
+    let (app, _guard) = server.await;
     // dbg!(app);
 }
