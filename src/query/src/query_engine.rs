@@ -12,7 +12,7 @@ use sql::statements::statement::Statement;
 
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
-use crate::plan::LogicalPlan;
+use crate::plan::{LogicalPlan, PhysicalPlan};
 pub use crate::query_engine::context::QueryContext;
 pub use crate::query_engine::state::QueryEngineState;
 
@@ -33,6 +33,8 @@ pub trait QueryEngine: Send + Sync {
     fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan>;
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
+
+    async fn execute_physical(&self, plan: &Arc<dyn PhysicalPlan>) -> Result<Output>;
 
     fn register_udf(&self, udf: ScalarUdf);
 

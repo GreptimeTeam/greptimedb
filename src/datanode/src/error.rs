@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use api::convert::DecodeError;
+use api::serde::DecodeError;
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
@@ -11,26 +11,32 @@ use table::error::Error as TableError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Fail to execute sql, source: {}", source))]
+    #[snafu(display("Failed to execute sql, source: {}", source))]
     ExecuteSql {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display("Fail to create catalog list, source: {}", source))]
+    #[snafu(display("Failed to execute physical plan, source: {}", source))]
+    ExecutePhysicalPlan {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to create catalog list, source: {}", source))]
     NewCatalog {
         #[snafu(backtrace)]
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Fail to create table: {}, {}", table_name, source))]
+    #[snafu(display("Failed to create table: {}, source: {}", table_name, source))]
     CreateTable {
         table_name: String,
         #[snafu(backtrace)]
         source: TableError,
     },
 
-    #[snafu(display("Fail to get table: {}, {}", table_name, source))]
+    #[snafu(display("Failed to get table: {}, source: {}", table_name, source))]
     GetTable {
         table_name: String,
         #[snafu(backtrace)]
@@ -53,7 +59,7 @@ pub enum Error {
     ))]
     ColumnValuesNumberMismatch { columns: usize, values: usize },
 
-    #[snafu(display("Fail to parse value: {}, {}", msg, backtrace))]
+    #[snafu(display("Failed to parse value: {}, {}", msg, backtrace))]
     ParseSqlValue { msg: String, backtrace: Backtrace },
 
     #[snafu(display(
@@ -68,7 +74,7 @@ pub enum Error {
         actual: ConcreteDataType,
     },
 
-    #[snafu(display("Fail to insert value to table: {}, {}", table_name, source))]
+    #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
     Insert {
         table_name: String,
         source: TableError,
@@ -77,7 +83,7 @@ pub enum Error {
     #[snafu(display("Illegal insert data"))]
     IllegalInsertData,
 
-    #[snafu(display("Fail to convert bytes to insert batch, {}", source))]
+    #[snafu(display("Failed to convert bytes to insert batch, source: {}", source))]
     DecodeInsert { source: DecodeError },
 
     #[snafu(display("Failed to start server, source: {}", source))]
@@ -86,19 +92,19 @@ pub enum Error {
         source: servers::error::Error,
     },
 
-    #[snafu(display("Fail to parse address {}, source: {}", addr, source))]
+    #[snafu(display("Failed to parse address {}, source: {}", addr, source))]
     ParseAddr {
         addr: String,
         source: std::net::AddrParseError,
     },
 
-    #[snafu(display("Fail to bind address {}, source: {}", addr, source))]
+    #[snafu(display("Failed to bind address {}, source: {}", addr, source))]
     TcpBind {
         addr: String,
         source: std::io::Error,
     },
 
-    #[snafu(display("Fail to start gRPC server, source: {}", source))]
+    #[snafu(display("Failed to start gRPC server, source: {}", source))]
     StartGrpc { source: tonic::transport::Error },
 
     #[snafu(display("Failed to create directory {}, source: {}", dir, source))]
@@ -132,8 +138,14 @@ pub enum Error {
     #[snafu(display("Invalid CREATE TABLE sql statement, cause: {}", msg))]
     InvalidCreateTableSql { msg: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to create schema when creating table: {}", source))]
+    #[snafu(display("Failed to create schema when creating table, source: {}", source))]
     CreateSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to convert datafusion schema, source: {}", source))]
+    ConvertSchema {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
@@ -156,10 +168,16 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to insert into system catalog table: {}", source))]
+    #[snafu(display("Failed to insert into system catalog table, source: {}", source))]
     InsertSystemCatalog {
         #[snafu(backtrace)]
         source: catalog::error::Error,
+    },
+
+    #[snafu(display("Failed to decode as physical plan, source: {}", source))]
+    IntoPhysicalPlan {
+        #[snafu(backtrace)]
+        source: common_grpc::Error,
     },
 }
 
@@ -169,10 +187,12 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::ExecuteSql { source } => source.status_code(),
+            Error::ExecutePhysicalPlan { source } => source.status_code(),
             Error::NewCatalog { source } => source.status_code(),
             Error::CreateTable { source, .. } => source.status_code(),
             Error::GetTable { source, .. } => source.status_code(),
             Error::Insert { source, .. } => source.status_code(),
+            Error::ConvertSchema { source, .. } => source.status_code(),
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
             Error::ColumnValuesNumberMismatch { .. }
@@ -193,6 +213,7 @@ impl ErrorExt for Error {
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
             | Error::Conversion { .. }
+            | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. } => StatusCode::Internal,
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),

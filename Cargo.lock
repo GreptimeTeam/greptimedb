@@ -695,6 +695,8 @@ version = "0.1.0"
 dependencies = [
  "api",
  "common-error",
+ "common-grpc",
+ "datafusion",
  "snafu",
  "tokio",
  "tonic 0.8.0",
@@ -773,6 +775,17 @@ dependencies = [
  "paste",
  "snafu",
  "statrs",
+]
+
+[[package]]
+name = "common-grpc"
+version = "0.1.0"
+dependencies = [
+ "api",
+ "arrow2",
+ "async-trait",
+ "datafusion",
+ "snafu",
 ]
 
 [[package]]
@@ -1263,6 +1276,7 @@ dependencies = [
  "client",
  "common-base",
  "common-error",
+ "common-grpc",
  "common-query",
  "common-recordbatch",
  "common-runtime",

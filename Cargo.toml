@@ -6,6 +6,7 @@ members = [
     "src/common/base",
     "src/common/error",
     "src/common/function",
+    "src/common/grpc",
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",

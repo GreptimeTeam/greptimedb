@@ -1,14 +1,22 @@
+use std::ops::Deref;
+use std::sync::Arc;
+
 use api::v1::codec::SelectResult as GrpcSelectResult;
 use api::v1::{
-    object_expr, object_result, DatabaseRequest, ExprHeader, InsertExpr,
-    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, SelectExpr,
+    object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr,
+    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, PhysicalPlan,
+    SelectExpr,
 };
 use common_error::status_code::StatusCode;
+use common_grpc::AsExcutionPlan;
+use common_grpc::DefaultAsPlanImpl;
+use datafusion::physical_plan::ExecutionPlan;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{self, MissingResultSnafu};
 use crate::{
-    error::DatanodeSnafu, error::DecodeSelectSnafu, error::MissingHeaderSnafu, Client, Result,
+    error::DatanodeSnafu, error::DecodeSelectSnafu, error::EncodePhysicalSnafu,
+    error::MissingHeaderSnafu, Client, Result,
 };
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -51,7 +59,34 @@ impl Database {
         Ok(())
     }
 
-    pub async fn select(&self, select_expr: SelectExpr) -> Result<ObjectResult> {
+    pub async fn select(&self, expr: Select) -> Result<ObjectResult> {
+        let select_expr = match expr {
+            Select::Sql(sql) => SelectExpr {
+                expr: Some(select_expr::Expr::Sql(sql)),
+            },
+        };
+        self.do_select(select_expr).await
+    }
+
+    pub async fn physical_plan(
+        &self,
+        physical: Arc<dyn ExecutionPlan>,
+        original_ql: Option<String>,
+    ) -> Result<ObjectResult> {
+        let plan = DefaultAsPlanImpl::try_from_physical_plan(physical.clone())
+            .context(EncodePhysicalSnafu { physical })?
+            .bytes;
+        let original_ql = original_ql.unwrap_or_default();
+        let select_expr = SelectExpr {
+            expr: Some(select_expr::Expr::PhysicalPlan(PhysicalPlan {
+                original_ql: original_ql.into_bytes(),
+                plan,
+            })),
+        };
+        self.do_select(select_expr).await
+    }
+
+    async fn do_select(&self, select_expr: SelectExpr) -> Result<ObjectResult> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
         };
@@ -81,7 +116,11 @@ impl Database {
 
         let result = match obj_result {
             object_result::Result::Select(select) => {
-                let result = select.raw_data.try_into().context(DecodeSelectSnafu)?;
+                let result = select
+                    .raw_data
+                    .deref()
+                    .try_into()
+                    .context(DecodeSelectSnafu)?;
                 ObjectResult::Select(result)
             }
             object_result::Result::Mutate(mutate) => ObjectResult::Mutate(mutate),
@@ -124,4 +163,8 @@ impl Database {
 pub enum ObjectResult {
     Select(GrpcSelectResult),
     Mutate(GrpcMutateResult),
+}
+
+pub enum Select {
+    Sql(String),
 }

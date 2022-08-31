@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::{codec::InsertBatch, column, select_expr, Column, SelectExpr};
+use api::v1::{codec::InsertBatch, column, Column};
 use client::{Client, Database, ObjectResult};
 use servers::grpc::GrpcServer;
 use servers::server::Server;
@@ -86,10 +86,10 @@ async fn test_insert_and_select() {
     assert!(result.is_ok());
 
     // select
-    let select_expr = SelectExpr {
-        expr: Some(select_expr::Expr::Sql("select * from demo".to_string())),
-    };
-    let result = db.select(select_expr).await.unwrap();
+    let result = db
+        .select(client::Select::Sql("select * from demo".to_string()))
+        .await
+        .unwrap();
     assert!(matches!(result, ObjectResult::Select(_)));
     match result {
         ObjectResult::Select(select_result) => {

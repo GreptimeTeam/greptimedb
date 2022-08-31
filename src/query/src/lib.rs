@@ -11,6 +11,7 @@ pub mod plan;
 pub mod planner;
 pub mod query_engine;
 
+pub use crate::datafusion::plan_adapter::PhysicalPlanAdapter;
 pub use crate::query_engine::{
     Output, QueryContext, QueryEngine, QueryEngineFactory, QueryEngineRef,
 };

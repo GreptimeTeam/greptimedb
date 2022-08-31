@@ -2,7 +2,7 @@
 
 mod catalog_adapter;
 mod error;
-mod plan_adapter;
+pub mod plan_adapter;
 mod planner;
 
 use std::sync::Arc;
@@ -82,6 +82,11 @@ impl QueryEngine for DatafusionQueryEngine {
         Ok(Output::RecordBatch(
             self.execute_stream(&ctx, &physical_plan).await?,
         ))
+    }
+
+    async fn execute_physical(&self, plan: &Arc<dyn PhysicalPlan>) -> Result<Output> {
+        let ctx = QueryContext::new(self.state.clone());
+        Ok(Output::RecordBatch(self.execute_stream(&ctx, plan).await?))
     }
 
     fn register_udf(&self, udf: ScalarUdf) {

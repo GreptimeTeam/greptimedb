@@ -20,10 +20,12 @@ use table_engine::engine::MitoEngine;
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
     self, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result, TableNotFoundSnafu,
+    UnsupportedExprSnafu,
 };
 use crate::metric;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::insertion_expr_to_request;
+use crate::server::grpc::plan::PhysicalPlanner;
 use crate::server::grpc::select::to_object_result;
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -36,6 +38,7 @@ pub struct Instance {
     sql_handler: SqlHandler<DefaultEngine>,
     // Catalog list
     catalog_manager: CatalogManagerRef,
+    physical_planner: PhysicalPlanner,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -63,9 +66,10 @@ impl Instance {
         let query_engine = factory.query_engine().clone();
 
         Ok(Self {
-            query_engine,
+            query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
             catalog_manager,
+            physical_planner: PhysicalPlanner::new(query_engine),
         })
     }
 
@@ -167,12 +171,23 @@ impl Instance {
     }
 
     async fn handle_select(&self, select_expr: SelectExpr) -> ObjectResult {
-        match select_expr.expr {
-            Some(select_expr::Expr::Sql(sql)) => {
-                let result = self.execute_sql(&sql).await;
-                to_object_result(result).await
+        let result = self.do_handle_select(select_expr).await;
+        to_object_result(result).await
+    }
+
+    async fn do_handle_select(&self, select_expr: SelectExpr) -> Result<Output> {
+        let expr = select_expr.expr;
+        match expr {
+            Some(select_expr::Expr::Sql(sql)) => self.execute_sql(&sql).await,
+            Some(select_expr::Expr::PhysicalPlan(api::v1::PhysicalPlan { original_ql, plan })) => {
+                self.physical_planner
+                    .execute(PhysicalPlanner::parse(plan)?, original_ql)
+                    .await
             }
-            None => ObjectResult::default(),
+            _ => UnsupportedExprSnafu {
+                name: format!("{:?}", expr),
+            }
+            .fail(),
         }
     }
 

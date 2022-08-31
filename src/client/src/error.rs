@@ -1,5 +1,8 @@
-use api::convert::DecodeError;
+use std::sync::Arc;
+
+use api::serde::DecodeError;
 use common_error::prelude::*;
+use datafusion::physical_plan::ExecutionPlan;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -32,6 +35,13 @@ pub enum Error {
 
     #[snafu(display("Error occurred on the data node, code: {}, msg: {}", code, msg))]
     Datanode { code: u32, msg: String },
+
+    #[snafu(display("Failed to encode physical plan: {:?}, source: {}", physical, source))]
+    EncodePhysical {
+        physical: Arc<dyn ExecutionPlan>,
+        #[snafu(backtrace)]
+        source: common_grpc::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

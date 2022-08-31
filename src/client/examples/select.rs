@@ -1,5 +1,4 @@
-use api::v1::{select_expr, SelectExpr};
-use client::{Client, Database};
+use client::{Client, Database, Select};
 use tracing::{event, Level};
 
 fn main() {
@@ -14,10 +13,8 @@ async fn run() {
     let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
     let db = Database::new("greptime", client);
 
-    let select_expr = SelectExpr {
-        expr: Some(select_expr::Expr::Sql("select * from demo".to_string())),
-    };
-    let result = db.select(select_expr).await.unwrap();
+    let sql = Select::Sql("select * from demo".to_string());
+    let result = db.select(sql).await.unwrap();
 
     event!(Level::INFO, "result: {:#?}", result);
 }
