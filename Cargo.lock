@@ -1346,7 +1346,6 @@ dependencies = [
  "axum-macros",
  "axum-test-helper",
  "catalog",
- "cfg-if",
  "client",
  "common-base",
  "common-error",

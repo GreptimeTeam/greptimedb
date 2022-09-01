@@ -22,7 +22,6 @@ async-trait = "0.1"
 axum = "0.5"
 axum-macros = "0.2"
 catalog = { path = "../catalog" }
-cfg-if = "1.0"
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }

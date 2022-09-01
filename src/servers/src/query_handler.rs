@@ -22,7 +22,7 @@ pub type GrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler + Send + Sync>;
 #[async_trait]
 pub trait SqlQueryHandler {
     async fn do_query(&self, query: &str) -> Result<Output>;
-    async fn do_execute(&self, script: &str, engine: Option<String>) -> Result<Output>;
+    async fn execute_script(&self, script: &str, engine: Option<String>) -> Result<Output>;
 }
 
 #[async_trait]

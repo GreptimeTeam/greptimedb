@@ -10,11 +10,6 @@ use common_telemetry::timer;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
-#[cfg(feature = "python")]
-use script::{
-    engine::{CompileContext, EvalContext, Script, ScriptEngine},
-    python::PyEngine,
-};
 use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
@@ -28,6 +23,7 @@ use crate::error::{
     UnsupportedExprSnafu,
 };
 use crate::metric;
+use crate::script::ScriptExecutor;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::insertion_expr_to_request;
 use crate::server::grpc::plan::PhysicalPlanner;
@@ -44,8 +40,7 @@ pub struct Instance {
     // Catalog list
     catalog_manager: CatalogManagerRef,
     physical_planner: PhysicalPlanner,
-    #[cfg(feature = "python")]
-    py_engine: Arc<PyEngine>,
+    script_executor: ScriptExecutor,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -71,16 +66,14 @@ impl Instance {
         );
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine().clone();
-        #[cfg(feature = "python")]
-        let py_engine = Arc::new(PyEngine::new(query_engine.clone()));
+        let script_executor = ScriptExecutor::new(query_engine.clone());
 
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
             catalog_manager,
             physical_planner: PhysicalPlanner::new(query_engine),
-            #[cfg(feature = "python")]
-            py_engine,
+            script_executor,
         })
     }
 
@@ -263,34 +256,12 @@ impl SqlQueryHandler for Instance {
             .context(servers::error::ExecuteQuerySnafu { query })
     }
 
-    #[allow(unused)]
-    async fn do_execute(
+    async fn execute_script(
         &self,
         script: &str,
-        _engine: Option<String>,
+        engine: Option<String>,
     ) -> servers::error::Result<Output> {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "python")] {
-                let py_script =
-                    self.py_engine.compile(script,CompileContext::default())
-                    .await
-                    .map_err(|e| {
-                        error!(e; "Instance failed to execute script");
-                        BoxedError::new(e)
-                    })
-                    .context(servers::error::ExecuteScriptSnafu { script })?;
-
-                py_script.evaluate(EvalContext::default())
-                    .await
-                    .map_err(|e| {
-                        error!(e; "Instance failed to execute script");
-                        BoxedError::new(e)
-                    })
-                    .context(servers::error::ExecuteScriptSnafu { script })
-            } else {
-                servers::error::NotSupportedSnafu { feat: "script"}.fail()
-            }
-        }
+        self.script_executor.execute_script(script, engine).await
     }
 }
 
