@@ -37,7 +37,7 @@ impl SqlQueryHandler for DummyInstance {
         let plan = self.query_engine.sql_to_plan(query).unwrap();
         Ok(self.query_engine.execute(&plan).await.unwrap())
     }
-    async fn do_execute(&self, script: &str, _engine: Option<String>) -> Result<Output> {
+    async fn execute_script(&self, script: &str, _engine: Option<String>) -> Result<Output> {
         let py_script = self
             .py_engine
             .compile(script, CompileContext::default())

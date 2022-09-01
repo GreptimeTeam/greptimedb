@@ -54,7 +54,7 @@ pub async fn scripts(
     HttpResponse::Json(
         JsonResponse::from_output(
             query_handler
-                .do_execute(&payload.script, payload.engine)
+                .execute_script(&payload.script, payload.engine)
                 .await,
         )
         .await,
