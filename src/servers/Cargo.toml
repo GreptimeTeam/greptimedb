@@ -42,3 +42,4 @@ mysql_async = "0.30"
 rand = "0.8"
 script = { path = "../script", features = ["python"] }
 test-util = { path = "../../test-util" }
+tokio-postgres = "0.7"

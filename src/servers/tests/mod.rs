@@ -18,6 +18,7 @@ use script::{
     engine::{CompileContext, EvalContext, Script, ScriptEngine},
     python::{PyEngine, PyScript},
 };
+mod postgres;
 
 struct DummyInstance {
     query_engine: QueryEngineRef,
