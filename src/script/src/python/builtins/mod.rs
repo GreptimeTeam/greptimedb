@@ -142,6 +142,7 @@ fn try_into_py_obj(col: DFColValue, vm: &VirtualMachine) -> PyResult<PyObjectRef
 /// - List -> PyList(of inner ScalarValue)
 fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
     match val {
+        ScalarValue::Float32(Some(v)) => Ok(vm.ctx.new_float(v.into()).into()),
         ScalarValue::Float64(Some(v)) => Ok(PyFloat::from(v).into_pyobject(vm)),
         ScalarValue::Int64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
         ScalarValue::UInt64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
@@ -154,7 +155,7 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
             Ok(list.into())
         }
         _ => Err(vm.new_type_error(format!(
-            "Can't cast type {:#?} to a Python Object",
+            "Can't cast a Scalar Value `{val:#?}` of type {:#?} to a Python Object",
             val.get_datatype()
         ))),
     }
@@ -264,21 +265,25 @@ pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
-    use arrow::array::NullArray;
+    use arrow::array::{ArrayRef, NullArray};
+    use arrow::compute;
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{function::FunctionContext, Function};
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
+    use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector};
+    use rustpython_vm::builtins::{PyFloat, PyInt, PyStr};
     use rustpython_vm::function::OptionalArg;
-    use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
+    use rustpython_vm::{AsObject, PyObjectRef, PyResult, VirtualMachine};
 
     use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
+    use crate::python::utils::is_instance;
+    use crate::python::utils::PyVectorRef;
     use crate::python::PyVector;
-    type PyVectorRef = PyRef<PyVector>;
 
     #[pyfunction]
     fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {
@@ -375,6 +380,7 @@ pub(crate) mod greptime_builtin {
     }
 
     /// simple math function, the backing implement is datafusion's `ln` math function
+    #[pyfunction(name = "log")]
     #[pyfunction]
     fn ln(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_call_unary_math_function!(ln, vm, val);
@@ -620,15 +626,138 @@ pub(crate) mod greptime_builtin {
         let base = base
             .payload::<PyVector>()
             .ok_or_else(|| type_cast_error(&base.class().name(), "vector", vm))?;
-        let pow = pow
-            .payload::<PyVector>()
-            .ok_or_else(|| type_cast_error(&pow.class().name(), "vector", vm))?;
+        let len_base = base.as_vector_ref().len();
+        let arg_pow = if is_instance::<PyVector>(&pow, vm) {
+            let pow = pow
+                .payload::<PyVector>()
+                .ok_or_else(|| type_cast_error(&pow.class().name(), "vector", vm))?;
+            pow.as_vector_ref()
+        } else if is_instance::<PyFloat>(&pow, vm) {
+            let pow = pow.try_into_value::<f64>(vm)?;
+            let ret =
+                ConstantVector::new(Arc::new(Float64Vector::from_vec(vec![pow])) as _, len_base);
+            Arc::new(ret) as _
+        } else if is_instance::<PyInt>(&pow, vm) {
+            let pow = pow.try_into_value::<i64>(vm)?;
+            let ret =
+                ConstantVector::new(Arc::new(Int64Vector::from_vec(vec![pow])) as _, len_base);
+            Arc::new(ret) as _
+        } else {
+            return Err(vm.new_type_error(format!("Unsupported type({:#?}) for pow()", pow)));
+        };
         // pyfunction can return PyResult<...>, args can be like PyObjectRef or anything
         // impl IntoPyNativeFunc, see rustpython-vm function for more details
-        let args = vec![base.as_vector_ref(), pow.as_vector_ref()];
+        let args = vec![base.as_vector_ref(), arg_pow];
         let res = PowFunction::default()
             .eval(FunctionContext::default(), &args)
             .unwrap();
         Ok(res.into())
+    }
+
+    // TODO: prev, sum, pow, sqrt, datetime, slice, and filter(through boolean array)
+
+    /// TODO: for now prev(arr)[0] == arr[0], need better fill method
+    #[pyfunction]
+    fn prev(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let cur: ArrayRef = cur.to_arrow_array();
+        if cur.len() == 0 {
+            return Err(
+                vm.new_runtime_error("Can't give prev for a zero length array!".to_string())
+            );
+        }
+        let cur = cur.slice(0, cur.len() - 1); // except the last one that is
+        let fill = cur.slice(0, 1);
+        let ret = compute::concatenate::concatenate(&[&*fill, &*cur]).map_err(|err| {
+            vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
+        })?;
+        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+            vm.new_type_error(format!(
+                "Can't cast result into vector, result: {:?}, err: {:?}",
+                ret, e
+            ))
+        })?;
+        Ok(ret.into())
+    }
+
+    #[pyfunction]
+    fn datetime(input: &PyStr, vm: &VirtualMachine) -> PyResult<i64> {
+        let mut parsed = Vec::new();
+        let mut prev = 0;
+        #[derive(Debug)]
+        enum State {
+            Num(i64),
+            Separator(String),
+        }
+        let mut state = State::Num(Default::default());
+        let input = input.as_str();
+        for (idx, ch) in input.chars().enumerate() {
+            match (ch.is_ascii_digit(), &state) {
+                (true, State::Separator(_)) => {
+                    let res = &input[prev..idx];
+                    let res = State::Separator(res.to_owned());
+                    parsed.push(res);
+                    prev = idx;
+                    state = State::Num(Default::default());
+                }
+                (false, State::Num(_)) => {
+                    let res = str::parse(&input[prev..idx]).map_err(|err| {
+                        vm.new_runtime_error(format!("Fail to parse num: {err:#?}"))
+                    })?;
+                    let res = State::Num(res);
+                    parsed.push(res);
+                    prev = idx;
+                    state = State::Separator(Default::default());
+                }
+                _ => continue,
+            };
+        }
+        let last = match state {
+            State::Num(_) => {
+                let res = str::parse(&input[prev..])
+                    .map_err(|err| vm.new_runtime_error(format!("Fail to parse num: {err:#?}")))?;
+                State::Num(res)
+            }
+            State::Separator(_) => {
+                let res = &input[prev..];
+                State::Separator(res.to_owned())
+            }
+        };
+        parsed.push(last);
+        let mut cur_idx = 0;
+        let mut tot_time = 0;
+        fn factor(unit: &str, vm: &VirtualMachine) -> PyResult<i64> {
+            let ret = match unit {
+                "d" => 24 * 60 * 60,
+                "h" => 60 * 60,
+                "m" => 60,
+                "s" => 1,
+                _ => return Err(vm.new_type_error(format!("Unknown time unit: {unit}"))),
+            };
+            Ok(ret)
+        }
+        while cur_idx < parsed.len() {
+            match &parsed[cur_idx] {
+                State::Num(v) => {
+                    if cur_idx + 1 > parsed.len() {
+                        return Err(vm.new_runtime_error(
+                            "Expect a spearator after number, found nothing!".to_string(),
+                        ));
+                    }
+                    let nxt = &parsed[cur_idx + 1];
+                    if let State::Separator(sep) = nxt {
+                        tot_time += v * factor(sep, vm)?;
+                    } else {
+                        return Err(vm.new_runtime_error(format!(
+                            "Expect a spearator after number, found `{nxt:#?}`"
+                        )));
+                    }
+                    cur_idx += 2;
+                }
+                State::Separator(sep) => {
+                    return Err(vm.new_runtime_error(format!("Expect a number, found `{sep}`")))
+                }
+            }
+        }
+        Ok(tot_time)
     }
 }
