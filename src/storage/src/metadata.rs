@@ -1,4 +1,5 @@
 #![allow(clippy::needless_borrow)]
+#![allow(clippy::derive_partial_eq_without_eq)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -145,7 +146,7 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Eq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColumnMetadata {
     pub cf_id: ColumnFamilyId,
     pub desc: ColumnDescriptor,
@@ -163,7 +164,7 @@ impl ColumnMetadata {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ColumnsMetadata {
     /// All columns.
     ///
