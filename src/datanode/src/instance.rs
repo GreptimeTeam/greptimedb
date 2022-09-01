@@ -256,12 +256,8 @@ impl SqlQueryHandler for Instance {
             .context(servers::error::ExecuteQuerySnafu { query })
     }
 
-    async fn execute_script(
-        &self,
-        script: &str,
-        engine: Option<String>,
-    ) -> servers::error::Result<Output> {
-        self.script_executor.execute_script(script, engine).await
+    async fn execute_script(&self, script: &str) -> servers::error::Result<Output> {
+        self.script_executor.execute_script(script).await
     }
 }
 

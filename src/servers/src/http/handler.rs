@@ -38,7 +38,6 @@ pub async fn metrics(
 #[derive(Deserialize, Serialize)]
 pub struct ScriptExecution {
     pub script: String,
-    pub engine: Option<String>,
 }
 
 /// Handler to execute scripts
@@ -52,11 +51,6 @@ pub async fn scripts(
     }
 
     HttpResponse::Json(
-        JsonResponse::from_output(
-            query_handler
-                .execute_script(&payload.script, payload.engine)
-                .await,
-        )
-        .await,
+        JsonResponse::from_output(query_handler.execute_script(&payload.script).await).await,
     )
 }
