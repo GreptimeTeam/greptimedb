@@ -5,15 +5,19 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_telemetry::logging;
+use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{
-    self, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
-    CreateOptions, OpenOptions, RegionDescriptorBuilder, RegionId, RowKeyDescriptor,
-    RowKeyDescriptorBuilder, StorageEngine,
+    ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
+    CreateOptions, EngineContext as StorageEngineContext, OpenOptions, Region,
+    RegionDescriptorBuilder, RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine};
-use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::metadata::{TableInfo, TableMeta};
+use table::requests::{
+    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+};
 use table::Result as TableResult;
 use table::{
     metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion},
@@ -89,18 +93,18 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
 
     async fn alter_table(
         &self,
-        _ctx: &EngineContext,
-        _request: AlterTableRequest,
+        ctx: &EngineContext,
+        req: AlterTableRequest,
     ) -> TableResult<TableRef> {
-        unimplemented!();
+        Ok(self.inner.alter_table(ctx, req).await?)
     }
 
     fn get_table(&self, _ctx: &EngineContext, name: &str) -> TableResult<Option<TableRef>> {
         Ok(self.inner.get_table(name))
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, _name: &str) -> bool {
-        unimplemented!();
+    fn table_exists(&self, _ctx: &EngineContext, name: &str) -> bool {
+        self.inner.get_table(name).is_some()
     }
 
     async fn drop_table(
@@ -125,18 +129,16 @@ struct MitoEngineInner<S: StorageEngine> {
     table_mutex: Mutex<()>,
 }
 
-fn build_row_key_desc_from_schema(
+fn build_row_key_desc(
     mut column_id: ColumnId,
-    request: &CreateTableRequest,
+    table_name: &str,
+    table_schema: &SchemaRef,
+    primary_key_indices: &Vec<usize>,
 ) -> Result<(ColumnId, RowKeyDescriptor)> {
-    let ts_column_schema =
-        request
-            .schema
-            .timestamp_column()
-            .context(MissingTimestampIndexSnafu {
-                table_name: &request.table_name,
-            })?;
-    let timestamp_index = request.schema.timestamp_index().unwrap();
+    let ts_column_schema = table_schema
+        .timestamp_column()
+        .context(MissingTimestampIndexSnafu { table_name })?;
+    let timestamp_index = table_schema.timestamp_index().unwrap();
 
     let ts_column = ColumnDescriptorBuilder::new(
         column_id,
@@ -147,16 +149,16 @@ fn build_row_key_desc_from_schema(
     .build()
     .context(BuildColumnDescriptorSnafu {
         column_name: &ts_column_schema.name,
-        table_name: &request.table_name,
+        table_name,
     })?;
     column_id += 1;
 
-    let column_schemas = &request.schema.column_schemas();
+    let column_schemas = &table_schema.column_schemas();
 
     //TODO(boyan): enable version column by table option?
     let mut builder = RowKeyDescriptorBuilder::new(ts_column);
 
-    for index in &request.primary_key_indices {
+    for index in primary_key_indices {
         if *index == timestamp_index {
             continue;
         }
@@ -172,7 +174,7 @@ fn build_row_key_desc_from_schema(
         .build()
         .context(BuildColumnDescriptorSnafu {
             column_name: &column_schema.name,
-            table_name: &request.table_name,
+            table_name,
         })?;
 
         builder = builder.push_column(column);
@@ -181,27 +183,24 @@ fn build_row_key_desc_from_schema(
 
     Ok((
         column_id,
-        builder.build().context(BuildRowKeyDescriptorSnafu {
-            table_name: &request.table_name,
-        })?,
+        builder
+            .build()
+            .context(BuildRowKeyDescriptorSnafu { table_name })?,
     ))
 }
 
-fn build_column_family_from_request(
+fn build_column_family(
     mut column_id: ColumnId,
-    request: &CreateTableRequest,
+    table_name: &str,
+    table_schema: &SchemaRef,
+    primary_key_indices: &[usize],
 ) -> Result<(ColumnId, ColumnFamilyDescriptor)> {
     let mut builder = ColumnFamilyDescriptorBuilder::default();
 
-    let primary_key_indices = &request.primary_key_indices;
-    let ts_index = request
-        .schema
+    let ts_index = table_schema
         .timestamp_index()
-        .context(MissingTimestampIndexSnafu {
-            table_name: &request.table_name,
-        })?;
-    let column_schemas = request
-        .schema
+        .context(MissingTimestampIndexSnafu { table_name })?;
+    let column_schemas = table_schema
         .column_schemas()
         .iter()
         .enumerate()
@@ -217,7 +216,7 @@ fn build_column_family_from_request(
         .build()
         .context(BuildColumnDescriptorSnafu {
             column_name: &column_schema.name,
-            table_name: &request.table_name,
+            table_name,
         })?;
 
         builder = builder.push_column(column);
@@ -226,9 +225,9 @@ fn build_column_family_from_request(
 
     Ok((
         column_id,
-        builder.build().context(BuildColumnFamilyDescriptorSnafu {
-            table_name: &request.table_name,
-        })?,
+        builder
+            .build()
+            .context(BuildColumnFamilyDescriptorSnafu { table_name })?,
     ))
 }
 
@@ -248,9 +247,20 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             }
         }
 
-        let (next_column_id, default_cf) =
-            build_column_family_from_request(INIT_COLUMN_ID, &request)?;
-        let (next_column_id, row_key) = build_row_key_desc_from_schema(next_column_id, &request)?;
+        let table_schema = &request.schema;
+        let primary_key_indices = &request.primary_key_indices;
+        let (next_column_id, default_cf) = build_column_family(
+            INIT_COLUMN_ID,
+            table_name,
+            table_schema,
+            primary_key_indices,
+        )?;
+        let (next_column_id, row_key) = build_row_key_desc(
+            next_column_id,
+            table_name,
+            table_schema,
+            primary_key_indices,
+        )?;
 
         let table_id = request.id;
         // TODO(dennis): supports multi regions;
@@ -285,7 +295,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let region = self
             .storage_engine
-            .create_region(&storage::EngineContext::default(), region_descriptor, &opts)
+            .create_region(&StorageEngineContext::default(), region_descriptor, &opts)
             .await
             .map_err(BoxedError::new)
             .context(error::CreateRegionSnafu)?;
@@ -340,7 +350,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 return Ok(Some(table));
             }
 
-            let engine_ctx = storage::EngineContext::default();
+            let engine_ctx = StorageEngineContext::default();
             let opts = OpenOptions {
                 parent_dir: table_dir(table_name),
             };
@@ -379,6 +389,182 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     fn get_table(&self, name: &str) -> Option<TableRef> {
         self.tables.read().unwrap().get(name).cloned()
     }
+
+    // Alter table changes the schemas of the table. The altering happens as cloning a new schema,
+    // change the new one, and swap the old. Though we can change the schema in place, considering
+    // the complex interwinding of inner data representation of schema, I think it's safer to
+    // change it like this to avoid partial inconsistent during the altering. For example, schema's
+    // `name_to_index` field must changed with `column_schemas` synchronously. If we add or remove
+    // columns from `column_schemas` *and then* update the `name_to_index`, there's a slightly time
+    // window of an inconsistency of the two field, which might bring some hard to trace down
+    // concurrency related bugs or failures. (Of course we could introduce some guards like readwrite
+    // lock to protect the consistency of schema altering, but that would hurt the performance of
+    // schema reads, and the reads are the dominant operation of schema. At last, altering is
+    // performed far lesser frequent.)
+    async fn alter_table(&self, _ctx: &EngineContext, req: AlterTableRequest) -> Result<TableRef> {
+        let _lock = self.table_mutex.lock().await;
+
+        let table_name = &req.table_name;
+        let table = self
+            .get_table(table_name)
+            .context(error::TableNotFoundSnafu { table_name })?;
+        let mito_table = table
+            .as_any()
+            .downcast_ref::<MitoTable<S::Region>>()
+            .context(error::TableDowncastSnafu {
+                table_name,
+                table_engine: MITO_ENGINE,
+            })?;
+
+        let table_info = mito_table.table_info();
+        let table_meta = &table_info.meta;
+        let table_schema = match &req.alter_kind {
+            AlterKind::AddColumn { new_column } => {
+                build_table_schema_with_new_column(table_name, &table_meta.schema, new_column)?
+            }
+            _ => table_meta.schema.clone(),
+        };
+
+        let primary_key_indices = match req.alter_kind {
+            AlterKind::AddColumn { .. } => table_meta.primary_key_indices.clone(),
+            AlterKind::AddPrimaryKey { new_primary_keys } => {
+                build_primary_key_indices(table_name, table_meta, new_primary_keys)?
+            }
+            AlterKind::DropPrimaryKey => vec![],
+        };
+
+        let (next_column_id, default_cf) = build_column_family(
+            INIT_COLUMN_ID,
+            table_name,
+            &table_schema,
+            &primary_key_indices,
+        )?;
+        let (next_column_id, row_key) = build_row_key_desc(
+            next_column_id,
+            table_name,
+            &table_schema,
+            &primary_key_indices,
+        )?;
+
+        let new_meta = TableMetaBuilder::default()
+            .schema(table_schema.clone())
+            .engine(&table_meta.engine)
+            .next_column_id(next_column_id)
+            .primary_key_indices(primary_key_indices)
+            .build()
+            .context(error::BuildTableMetaSnafu { table_name })?;
+
+        let mut new_info = TableInfo::clone(&*table_info);
+        new_info.ident.version = table_info.ident.version + 1;
+        new_info.meta = new_meta;
+
+        // first alter region
+        let region = mito_table.region();
+        self.alter_region(table_name, region, row_key, default_cf)
+            .await?;
+
+        // then alter table info
+        let _manifest_version = mito_table.alter(new_info.clone()).await?;
+        mito_table.set_table_info(new_info);
+
+        // TODO(LFC): Think of a way to properly handle the metadata integrity between region and table.
+        // Currently there are no "transactions" to alter the metadata of region and table together,
+        // they are altered in sequence. That means there might be cases where the metadata of region
+        // is altered while the table's is not. Then the metadata integrity between region and
+        // table cannot be hold.
+        Ok(table)
+    }
+
+    async fn alter_region(
+        &self,
+        table_name: &str,
+        region: &S::Region,
+        row_key: RowKeyDescriptor,
+        default_cf: ColumnFamilyDescriptor,
+    ) -> Result<()> {
+        let region_id = region.id();
+        let region_name = region.name();
+        let region_descriptor = RegionDescriptorBuilder::default()
+            .id(region_id)
+            .name(region_name)
+            .row_key(row_key)
+            .default_cf(default_cf)
+            .build()
+            .context(error::BuildRegionDescriptorSnafu {
+                table_name,
+                region_name,
+            })?;
+        self.storage_engine
+            .alter_region(&StorageEngineContext::default(), region_descriptor)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::AlterRegionSnafu { region_name })?;
+        Ok(())
+    }
+}
+
+fn build_table_schema_with_new_column(
+    table_name: &str,
+    table_schema: &SchemaRef,
+    new_column: &ColumnSchema,
+) -> Result<SchemaRef> {
+    if table_schema
+        .column_schema_by_name(&new_column.name)
+        .is_some()
+    {
+        return error::ColumnExistsSnafu {
+            column_name: &new_column.name,
+            table_name,
+        }
+        .fail()?;
+    }
+
+    let mut columns = table_schema.column_schemas().to_vec();
+    columns.push(new_column.clone());
+
+    // Right now we are not support adding a timestamp index column or adding the column
+    // before or after some column, so just clone a new schema like this.
+    // TODO(LFC): support adding timestamp index column
+    //   maybe a custom statement syntax like "ALTER TABLE ADD TIME INDEX ts BIGINT"?
+    // TODO(LFC): support adding column before or after some column
+    let mut builder = SchemaBuilder::from_columns(columns).version(table_schema.version() + 1);
+
+    if let Some(index) = table_schema.timestamp_index() {
+        builder = builder.timestamp_index(index);
+    }
+    for (k, v) in table_schema.arrow_schema().metadata.iter() {
+        builder = builder.add_metadata(k, v);
+    }
+    let new_schema = Arc::new(builder.build().context(error::SchemaBuildSnafu {
+        msg: format!("cannot add new column {:?}", new_column),
+    })?);
+    Ok(new_schema)
+}
+
+fn build_primary_key_indices(
+    table_name: &str,
+    table_meta: &TableMeta,
+    new_primary_keys: Vec<String>,
+) -> Result<Vec<usize>> {
+    let table_schema = &table_meta.schema;
+    let primary_key_indices = &table_meta.primary_key_indices;
+    let mut indices = Vec::with_capacity(new_primary_keys.len());
+    for column_name in new_primary_keys.iter() {
+        let (i, _) = table_schema
+            .column_schemas()
+            .iter()
+            .enumerate()
+            .find(|(_, c)| &c.name == column_name)
+            .context(error::ColumnNotFoundSnafu {
+                column_name,
+                table_name,
+            })?;
+        if primary_key_indices.contains(&i) {
+            return error::PrimaryKeyExistsSnafu { key: column_name }.fail();
+        }
+        indices.push(i);
+    }
+    Ok(indices)
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
@@ -397,13 +583,14 @@ mod tests {
     use common_recordbatch::util;
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;
+    use datatypes::prelude::ConcreteDataType;
     use datatypes::vectors::*;
     use store_api::manifest::Manifest;
     use table::requests::InsertRequest;
 
     use super::*;
     use crate::table::test_util;
-    use crate::table::test_util::MockRegion;
+    use crate::table::test_util::{MockRegion, TABLE_NAME};
 
     #[test]
     fn test_region_name() {
@@ -616,5 +803,258 @@ mod tests {
         assert_eq!(4294967396, region_id(1, 100));
         assert_eq!(8589934602, region_id(2, 10));
         assert_eq!(18446744069414584330, region_id(u32::MAX, 10));
+    }
+
+    #[tokio::test]
+    async fn test_alter_table_add_column() {
+        let (_engine, table_engine, table, _object_store, _dir) =
+            test_util::setup_mock_engine_and_table().await;
+
+        let table = table
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+        let table_info = table.table_info();
+        let old_info = (&*table_info).clone();
+        let old_meta = &old_info.meta;
+        let old_schema = &old_meta.schema;
+
+        let new_column = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let req = AlterTableRequest {
+            catalog_name: None,
+            schema_name: None,
+            table_name: TABLE_NAME.to_string(),
+            alter_kind: AlterKind::AddColumn {
+                new_column: new_column.clone(),
+            },
+        };
+        let table = table_engine
+            .alter_table(&EngineContext::default(), req)
+            .await
+            .unwrap();
+
+        let table = table
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+        let new_info = table.table_info();
+        let new_meta = &new_info.meta;
+        let new_schema = &new_meta.schema;
+
+        assert_eq!(new_schema.num_columns(), old_schema.num_columns() + 1);
+        assert_eq!(
+            new_schema.column_schemas().split_last().unwrap(),
+            (&new_column, old_schema.column_schemas())
+        );
+        assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
+        assert_eq!(new_schema.version(), old_schema.version() + 1);
+        assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 1);
+    }
+
+    #[tokio::test]
+    async fn test_alter_table_change_primary_keys() {
+        // columns = (host, cpu, memory, ts), primary keys = []
+        let (_engine, table_engine, table, _object_store, _dir) =
+            test_util::setup_mock_engine_and_table().await;
+
+        let table = table
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+        let table_info = table.table_info();
+        let old_info = (&*table_info).clone();
+        let old_meta = &old_info.meta;
+        let old_schema = &old_meta.schema;
+
+        let metadata = table.region().inner.metadata.load();
+        let old_region_row_key_columns = metadata
+            .schema()
+            .row_key_columns()
+            .map(|x| x.name())
+            .collect::<Vec<&str>>();
+        // assert in case the testing data are changed
+        assert_eq!(vec!["ts"], old_region_row_key_columns);
+
+        // test adding primary keys
+        let req = AlterTableRequest {
+            catalog_name: None,
+            schema_name: None,
+            table_name: TABLE_NAME.to_string(),
+            alter_kind: AlterKind::AddPrimaryKey {
+                new_primary_keys: vec!["host".to_string(), "ts".to_string()],
+            },
+        };
+        let table = table_engine
+            .alter_table(&EngineContext::default(), req)
+            .await
+            .unwrap();
+
+        let table = table
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+        let new_info = table.table_info();
+        let new_meta = &new_info.meta;
+        let new_schema = &new_meta.schema;
+
+        // table schema is not changed if we only alter primary keys,
+        assert_eq!(new_schema, old_schema);
+
+        // instead, the region schema will be changed
+        let metadata = table.region().inner.metadata.load();
+        let new_region_row_key_columns = metadata
+            .schema()
+            .row_key_columns()
+            .map(|x| x.name())
+            .collect::<Vec<&str>>();
+        assert_eq!(vec!["host", "ts"], new_region_row_key_columns);
+
+        // test dropping primary keys
+        let req = AlterTableRequest {
+            catalog_name: None,
+            schema_name: None,
+            table_name: TABLE_NAME.to_string(),
+            alter_kind: AlterKind::DropPrimaryKey {},
+        };
+        let table = table_engine
+            .alter_table(&EngineContext::default(), req)
+            .await
+            .unwrap();
+
+        let table = table
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+        let new_info = table.table_info();
+        let new_meta = &new_info.meta;
+        let new_schema = &new_meta.schema;
+
+        assert_eq!(new_schema, old_schema);
+
+        let metadata = table.region().inner.metadata.load();
+        let new_region_row_key_columns = metadata
+            .schema()
+            .row_key_columns()
+            .map(|x| x.name())
+            .collect::<Vec<&str>>();
+        assert_eq!(vec!["ts"], new_region_row_key_columns);
+    }
+
+    #[tokio::test]
+    async fn test_alter_region() {
+        let (_engine, table_engine, table, _object_store, _dir) =
+            test_util::setup_mock_engine_and_table().await;
+
+        let table = table
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+        let table_info = table.table_info();
+        let table_name = &table_info.name;
+        let table_meta = &table_info.meta;
+        let table_schema = &table_meta.schema;
+
+        // columns = (host, cpu, memory, ts)
+        let (next_column_id, default_cf) =
+            build_column_family(INIT_COLUMN_ID, table_name, table_schema, &[0, 3]).unwrap();
+        let (_next_column_id, row_key) =
+            build_row_key_desc(next_column_id, table_name, table_schema, &vec![0, 3]).unwrap();
+
+        let inner = table_engine.inner;
+        let region = table.region();
+        let metadata = region.inner.metadata.load();
+        // assert in case the testing data are changed
+        assert_eq!(
+            vec!["ts"],
+            metadata
+                .schema()
+                .row_key_columns()
+                .map(|x| x.name())
+                .collect::<Vec<&str>>(),
+        );
+        let expect_region_id = region.id();
+        let expect_region_name = region.name().to_string();
+
+        inner
+            .alter_region(table_name, region, row_key, default_cf)
+            .await
+            .unwrap();
+
+        let new_region = inner
+            .storage_engine
+            .get_region(&StorageEngineContext::default(), region.name())
+            .unwrap()
+            .unwrap();
+        assert_eq!(new_region.id(), expect_region_id);
+        assert_eq!(new_region.name(), expect_region_name);
+
+        let new_metadata = new_region.inner.metadata.load();
+        assert_eq!(
+            vec!["host", "ts"],
+            new_metadata
+                .schema()
+                .row_key_columns()
+                .map(|x| x.name())
+                .collect::<Vec<&str>>()
+        );
+    }
+
+    #[test]
+    fn test_build_table_schema_with_new_column() {
+        let table_info = test_util::build_test_table_info();
+        let table_name = &table_info.name;
+        let table_meta = &table_info.meta;
+        let table_schema = &table_meta.schema;
+
+        let new_column = ColumnSchema::new("host", ConcreteDataType::string_datatype(), true);
+        let result = build_table_schema_with_new_column(table_name, table_schema, &new_column);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Column host already exists in table demo"));
+
+        let new_column = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_schema =
+            build_table_schema_with_new_column(table_name, table_schema, &new_column).unwrap();
+
+        assert_eq!(new_schema.num_columns(), table_schema.num_columns() + 1);
+        assert_eq!(
+            new_schema.column_schemas().split_last().unwrap(),
+            (&new_column, table_schema.column_schemas())
+        );
+
+        assert_eq!(
+            new_schema.timestamp_column(),
+            table_schema.timestamp_column()
+        );
+        assert_eq!(new_schema.version(), table_schema.version() + 1);
+    }
+
+    #[test]
+    fn test_build_primary_key_indices() {
+        // "host" and "cpu" are primary keys
+        let table_info = test_util::build_test_table_info();
+        let table_name = &table_info.name;
+        let table_meta = &table_info.meta;
+
+        let result = build_primary_key_indices(
+            table_name,
+            table_meta,
+            vec!["ts".to_string(), "host".to_string(), "cpu".to_string()],
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Primary key host already exists"));
+
+        let indices = build_primary_key_indices(
+            table_name,
+            table_meta,
+            vec!["memory".to_string(), "ts".to_string()],
+        )
+        .unwrap();
+        assert_eq!(vec![2, 3], indices);
     }
 }

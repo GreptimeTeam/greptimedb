@@ -1,6 +1,7 @@
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser::parser::ParserError;
 
+use crate::statements::alter::AlterTable;
 use crate::statements::create_table::CreateTable;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
@@ -20,6 +21,9 @@ pub enum Statement {
 
     /// CREATE TABLE
     Create(CreateTable),
+
+    /// ALTER TABLE
+    Alter(AlterTable),
 }
 
 /// Converts Statement to sqlparser statement
@@ -33,7 +37,7 @@ impl TryFrom<Statement> for SpStatement {
             )),
             Statement::Query(s) => Ok(SpStatement::Query(Box::new(s.inner))),
             Statement::Insert(i) => Ok(i.inner),
-            Statement::Create(_) => unimplemented!(),
+            Statement::Create(_) | Statement::Alter(_) => unimplemented!(),
         }
     }
 }

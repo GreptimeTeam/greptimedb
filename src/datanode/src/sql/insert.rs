@@ -10,7 +10,6 @@ use snafu::OptionExt;
 use snafu::ResultExt;
 use sql::ast::Value as SqlValue;
 use sql::statements::insert::Insert;
-use table::engine::TableEngine;
 use table::requests::*;
 
 use crate::error::{
@@ -19,7 +18,7 @@ use crate::error::{
 };
 use crate::sql::{SqlHandler, SqlRequest};
 
-impl<Engine: TableEngine> SqlHandler<Engine> {
+impl SqlHandler {
     pub(crate) async fn insert(&self, req: InsertRequest) -> Result<Output> {
         let table_name = &req.table_name.to_string();
         let table = self.get_table(table_name)?;

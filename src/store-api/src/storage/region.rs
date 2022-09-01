@@ -26,6 +26,7 @@ use crate::storage::metadata::RegionMeta;
 use crate::storage::requests::WriteRequest;
 use crate::storage::responses::WriteResponse;
 use crate::storage::snapshot::{ReadContext, Snapshot};
+use crate::storage::RegionId;
 
 /// Chunks of rows in storage engine.
 #[async_trait]
@@ -34,6 +35,8 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
     type Meta: RegionMeta;
     type WriteRequest: WriteRequest;
     type Snapshot: Snapshot;
+
+    fn id(&self) -> RegionId;
 
     /// Returns name of the region.
     fn name(&self) -> &str;

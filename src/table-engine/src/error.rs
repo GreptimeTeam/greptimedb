@@ -20,6 +20,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to alter region, region: {}, source: {}", region_name, source))]
+    AlterRegion {
+        region_name: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display(
         "Failed to build table meta for table: {}, source: {}",
         table_name,
@@ -130,6 +137,47 @@ pub enum Error {
         table_name: String,
     },
 
+    #[snafu(display("Table not found: {}", table_name))]
+    TableNotFound {
+        backtrace: Backtrace,
+        table_name: String,
+    },
+
+    #[snafu(display(
+        "Failed to downcast table {} to engine type of {}",
+        table_name,
+        table_engine
+    ))]
+    TableDowncast {
+        backtrace: Backtrace,
+        table_name: String,
+        table_engine: String,
+    },
+
+    #[snafu(display("Column {} already exists in table {}", column_name, table_name))]
+    ColumnExists {
+        backtrace: Backtrace,
+        column_name: String,
+        table_name: String,
+    },
+
+    #[snafu(display("Column {} not found in table {}", column_name, table_name))]
+    ColumnNotFound {
+        backtrace: Backtrace,
+        column_name: String,
+        table_name: String,
+    },
+
+    #[snafu(display("Failed to build schema, msg: {}, source: {}", msg, source))]
+    SchemaBuild {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+        msg: String,
+    },
+
+    #[snafu(display("Primary key {} already exists", key))]
+    PrimaryKeyExists { key: String, backtrace: Backtrace },
+
     #[snafu(display(
         "Projected columnd not found in region, column: {}",
         column_qualified_name
@@ -153,7 +201,11 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateRegion { source, .. } | OpenRegion { source, .. } => source.status_code(),
+            CreateRegion { source, .. }
+            | OpenRegion { source, .. }
+            | AlterRegion { source, .. } => source.status_code(),
+
+            SchemaBuild { source, .. } => source.status_code(),
 
             BuildRowKeyDescriptor { .. }
             | BuildColumnDescriptor { .. }
@@ -162,8 +214,14 @@ impl ErrorExt for Error {
             | BuildTableInfo { .. }
             | BuildRegionDescriptor { .. }
             | TableExists { .. }
+            | ColumnExists { .. }
+            | ColumnNotFound { .. }
             | ProjectedColumnNotFound { .. }
-            | MissingTimestampIndex { .. } => StatusCode::InvalidArguments,
+            | MissingTimestampIndex { .. }
+            | TableNotFound { .. }
+            | PrimaryKeyExists { .. } => StatusCode::InvalidArguments,
+
+            TableDowncast { .. } => StatusCode::Internal,
 
             TableInfoNotFound { .. } => StatusCode::Unexpected,
 

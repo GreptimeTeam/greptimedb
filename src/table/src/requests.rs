@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 
 use datatypes::prelude::VectorRef;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::{ColumnSchema, SchemaRef};
 
 use crate::metadata::TableId;
 
@@ -38,7 +38,19 @@ pub struct OpenTableRequest {
 
 /// Alter table request
 #[derive(Debug)]
-pub struct AlterTableRequest {}
+pub struct AlterTableRequest {
+    pub catalog_name: Option<String>,
+    pub schema_name: Option<String>,
+    pub table_name: String,
+    pub alter_kind: AlterKind,
+}
+
+#[derive(Debug)]
+pub enum AlterKind {
+    AddColumn { new_column: ColumnSchema },
+    AddPrimaryKey { new_primary_keys: Vec<String> },
+    DropPrimaryKey,
+}
 
 /// Drop table request
 #[derive(Debug)]

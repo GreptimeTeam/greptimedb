@@ -3,7 +3,9 @@ pub mod test_util;
 
 use std::any::Any;
 use std::pin::Pin;
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
@@ -20,6 +22,7 @@ use store_api::storage::{
     WriteContext, WriteRequest,
 };
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
+use table::metadata::TableInfoRef;
 use table::requests::InsertRequest;
 use table::{
     metadata::{TableInfo, TableType},
@@ -41,7 +44,7 @@ fn table_manifest_dir(table_name: &str) -> String {
 /// [Table] implementation.
 pub struct MitoTable<R: Region> {
     manifest: TableManifest,
-    table_info: TableInfo,
+    table_info: ArcSwap<TableInfo>,
     // TODO(dennis): a table contains multi regions
     region: R,
 }
@@ -53,7 +56,7 @@ impl<R: Region> Table for MitoTable<R> {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.table_info.meta.schema.clone()
+        self.table_info().meta.schema.clone()
     }
 
     async fn insert(&self, request: InsertRequest) -> TableResult<usize> {
@@ -65,8 +68,10 @@ impl<R: Region> Table for MitoTable<R> {
 
         let mut put_op = write_request.put_op();
         let mut columns_values = request.columns_values;
-        let key_columns = self.table_info.meta.row_key_column_names();
-        let value_columns = self.table_info.meta.value_column_names();
+
+        let table_info = self.table_info();
+        let key_columns = table_info.meta.row_key_column_names();
+        let value_columns = table_info.meta.value_column_names();
 
         //Add row key and columns
         for name in key_columns {
@@ -101,7 +106,7 @@ impl<R: Region> Table for MitoTable<R> {
     }
 
     fn table_type(&self) -> TableType {
-        self.table_info.table_type
+        self.table_info().table_type
     }
 
     async fn scan(
@@ -169,7 +174,7 @@ fn column_qualified_name(table_name: &str, region_name: &str, column_name: &str)
 impl<R: Region> MitoTable<R> {
     fn new(table_info: TableInfo, region: R, manifest: TableManifest) -> Self {
         Self {
-            table_info,
+            table_info: ArcSwap::new(Arc::new(table_info)),
             region,
             manifest,
         }
@@ -182,7 +187,9 @@ impl<R: Region> MitoTable<R> {
         region: &R,
         projection: Option<Vec<usize>>,
     ) -> Result<Option<Vec<usize>>> {
-        let table_schema = &self.table_info.meta.schema;
+        let table_info = self.table_info();
+        let table_schema = &table_info.meta.schema;
+
         let region_meta = region.in_memory_metadata();
         let region_schema = region_meta.schema();
 
@@ -198,7 +205,7 @@ impl<R: Region> MitoTable<R> {
                     region_schema.column_index_by_name(name).with_context(|| {
                         ProjectedColumnNotFoundSnafu {
                             column_qualified_name: column_qualified_name(
-                                &self.table_info.name,
+                                &table_info.name,
                                 region.name(),
                                 name,
                             ),
@@ -217,7 +224,7 @@ impl<R: Region> MitoTable<R> {
                         region_schema.column_index_by_name(name).with_context(|| {
                             ProjectedColumnNotFoundSnafu {
                                 column_qualified_name: column_qualified_name(
-                                    &self.table_info.name,
+                                    &table_info.name,
                                     region.name(),
                                     name,
                                 ),
@@ -310,9 +317,32 @@ impl<R: Region> MitoTable<R> {
         Ok(table_info)
     }
 
+    pub(crate) async fn alter(&self, new_table_info: TableInfo) -> Result<ManifestVersion> {
+        self.manifest
+            .update(TableMetaActionList::new(vec![
+                TableMetaAction::Protocol(ProtocolAction::new()),
+                TableMetaAction::Change(Box::new(TableChange {
+                    table_info: new_table_info,
+                })),
+            ]))
+            .await
+            .context(UpdateTableManifestSnafu {
+                table_name: &self.table_info().name,
+            })
+    }
+
     #[inline]
-    pub fn table_info(&self) -> &TableInfo {
-        &self.table_info
+    pub fn region(&self) -> &R {
+        &self.region
+    }
+
+    #[inline]
+    pub fn table_info(&self) -> TableInfoRef {
+        Arc::clone(&self.table_info.load())
+    }
+
+    pub fn set_table_info(&self, table_info: TableInfo) {
+        self.table_info.swap(Arc::new(table_info));
     }
 
     #[inline]
