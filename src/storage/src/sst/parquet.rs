@@ -215,7 +215,7 @@ impl<'a> ParquetReader<'a> {
                     continue;
                 }
 
-                let rg = metadata.row_groups[idx];
+                let rg = &metadata.row_groups[idx];
                 let column_chunks = read_columns_many_async(
                     &reader_factory,
                     &rg,
