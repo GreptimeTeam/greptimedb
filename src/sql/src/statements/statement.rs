@@ -7,7 +7,7 @@ use crate::statements::query::Query;
 use crate::statements::show_database::SqlShowDatabase;
 
 /// Tokens parsed by `DFParser` are converted into these values.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     // Databases.
     ShowDatabases(SqlShowDatabase),
@@ -41,7 +41,7 @@ impl TryFrom<Statement> for SpStatement {
 /// Comment hints from SQL.
 /// It'll be enabled when using `--comment` in mysql client.
 /// Eg: `SELECT * FROM system.number LIMIT 1; -- { ErrorCode 25 }`
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hint {
     pub error_code: Option<u16>,
     pub comment: String,

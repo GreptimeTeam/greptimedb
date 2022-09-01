@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::marker::PhantomData;
 
 use arrow::datatypes::DataType as ArrowDataType;
@@ -9,11 +10,19 @@ use crate::type_id::LogicalTypeId;
 use crate::types::primitive_traits::Primitive;
 use crate::value::Value;
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PrimitiveType<T: Primitive> {
     #[serde(skip)]
     _phantom: PhantomData<T>,
 }
+
+impl<T: Primitive, U: Primitive> PartialEq<PrimitiveType<U>> for PrimitiveType<T> {
+    fn eq(&self, _other: &PrimitiveType<U>) -> bool {
+        TypeId::of::<T>() == TypeId::of::<U>()
+    }
+}
+
+impl<T: Primitive> Eq for PrimitiveType<T> {}
 
 /// Create a new [ConcreteDataType] from a primitive type.
 pub trait DataTypeBuilder {
@@ -88,3 +97,25 @@ impl_numeric!(i32, Int32);
 impl_numeric!(i64, Int64);
 impl_numeric!(f32, Float32);
 impl_numeric!(f64, Float64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_eq() {
+        assert_eq!(UInt8Type::default(), UInt8Type::default());
+        assert_eq!(UInt16Type::default(), UInt16Type::default());
+        assert_eq!(UInt32Type::default(), UInt32Type::default());
+        assert_eq!(UInt64Type::default(), UInt64Type::default());
+        assert_eq!(Int8Type::default(), Int8Type::default());
+        assert_eq!(Int16Type::default(), Int16Type::default());
+        assert_eq!(Int32Type::default(), Int32Type::default());
+        assert_eq!(Int64Type::default(), Int64Type::default());
+        assert_eq!(Float32Type::default(), Float32Type::default());
+        assert_eq!(Float64Type::default(), Float64Type::default());
+
+        assert_ne!(Float32Type::default(), Float64Type::default());
+        assert_ne!(Float32Type::default(), Int32Type::default());
+    }
+}

@@ -18,7 +18,7 @@ use crate::metadata::{ColumnFamilyMetadata, ColumnMetadata, VersionNumber};
 use crate::sst::FileMeta;
 
 /// Minimal data that could be used to persist and recover [RegionMetadata](crate::metadata::RegionMetadata).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RawRegionMetadata {
     pub id: RegionId,
     pub name: String,
@@ -38,7 +38,7 @@ pub struct RawColumnsMetadata {
 }
 
 /// Minimal data that could be used to persist and recover [ColumnFamiliesMetadata](crate::metadata::ColumnFamiliesMetadata).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawColumnFamiliesMetadata {
     pub column_families: Vec<ColumnFamilyMetadata>,
 }
@@ -48,12 +48,12 @@ pub struct RegionChange {
     pub metadata: RawRegionMetadata,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionRemove {
     pub region_id: RegionId,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionEdit {
     pub region_version: VersionNumber,
     pub flushed_sequence: SequenceNumber,

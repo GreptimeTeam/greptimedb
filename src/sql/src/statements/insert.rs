@@ -3,7 +3,7 @@ use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Insert {
     // Can only be sqlparser::ast::Statement::Insert variant
     pub inner: Statement,

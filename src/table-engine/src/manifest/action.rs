@@ -18,7 +18,7 @@ pub struct TableChange {
     pub table_info: TableInfo,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TableRemove {
     pub table_ident: TableIdent,
     pub table_name: String,

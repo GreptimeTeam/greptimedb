@@ -26,7 +26,8 @@ impl MemoryCatalogList {
         catalog: Arc<dyn CatalogProvider>,
     ) -> Option<CatalogProviderRef> {
         let mut catalogs = self.catalogs.write().unwrap();
-        match catalogs.entry(name) {
+        let entry = catalogs.entry(name);
+        match entry {
             Entry::Occupied(v) => Some(v.get().clone()),
             Entry::Vacant(v) => {
                 v.insert(catalog);

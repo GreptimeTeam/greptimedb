@@ -11,7 +11,7 @@ pub type TableVersion = u64;
 
 /// Indicates whether and how a filter expression can be handled by a
 /// Table for table scans.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum FilterPushDownType {
     /// The expression cannot be used by the provider.
     Unsupported,
@@ -27,7 +27,7 @@ pub enum FilterPushDownType {
 }
 
 /// Indicates the type of this table for metadata/catalog purposes.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableType {
     /// An ordinary physical table.
     Base,
