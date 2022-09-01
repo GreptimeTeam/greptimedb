@@ -1,6 +1,7 @@
 pub mod engine;
 pub mod error;
 pub mod metadata;
+pub mod predicate;
 pub mod requests;
 pub mod table;
 

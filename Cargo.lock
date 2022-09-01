@@ -4916,6 +4916,7 @@ dependencies = [
  "serde_json",
  "snafu",
  "store-api",
+ "table",
  "tempdir",
  "tokio",
  "tonic",

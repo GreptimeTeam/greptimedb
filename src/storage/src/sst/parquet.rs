@@ -19,6 +19,7 @@ use futures_util::sink::SinkExt;
 use futures_util::{Stream, TryStreamExt};
 use object_store::{ObjectStore, SeekableReader};
 use snafu::ResultExt;
+use table::predicate::Predicate;
 
 use crate::error::{self, Result};
 use crate::memtable::BoxedBatchIterator;
@@ -157,6 +158,7 @@ pub struct ParquetReader<'a> {
     file_path: &'a str,
     object_store: ObjectStore,
     projected_schema: ProjectedSchemaRef,
+    predicate: Predicate,
 }
 
 type ReaderFactoryFuture<'a, R> =
@@ -167,11 +169,13 @@ impl<'a> ParquetReader<'a> {
         file_path: &str,
         object_store: ObjectStore,
         projected_schema: ProjectedSchemaRef,
+        predicate: Predicate,
     ) -> ParquetReader {
         ParquetReader {
             file_path,
             object_store,
             projected_schema,
+            predicate,
         }
     }
 
@@ -191,8 +195,14 @@ impl<'a> ParquetReader<'a> {
         let metadata = read_metadata_async(&mut reader)
             .await
             .context(error::ReadParquetSnafu { file: &file_path })?;
+
         let arrow_schema =
             infer_schema(&metadata).context(error::ReadParquetSnafu { file: &file_path })?;
+
+        let filter_res = self
+            .predicate
+            .prune_row_groups(Arc::new(arrow_schema.clone()), &metadata.row_groups);
+
         // Now the StoreSchema is only used to validate metadata of the parquet file, but this schema
         // would be useful once we support altering schema, as this is the actual schema of the SST.
         let _store_schema = StoreSchema::try_from(arrow_schema)
@@ -200,7 +210,12 @@ impl<'a> ParquetReader<'a> {
 
         let projected_fields = self.projected_fields().to_vec();
         let chunk_stream = try_stream!({
-            for rg in metadata.row_groups {
+            for (idx, valid) in filter_res.iter().enumerate() {
+                if !valid {
+                    continue;
+                }
+
+                let rg = metadata.row_groups[idx];
                 let column_chunks = read_columns_many_async(
                     &reader_factory,
                     &rg,

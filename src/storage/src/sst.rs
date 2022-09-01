@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use object_store::{util, ObjectStore};
 use serde::{Deserialize, Serialize};
+use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
@@ -240,6 +241,7 @@ impl AccessLayer for FsAccessLayer {
             &file_path,
             self.object_store.clone(),
             opts.projected_schema.clone(),
+            Predicate::empty(),
         );
 
         let stream = reader.chunk_stream(opts.batch_size).await?;
