@@ -1,6 +1,3 @@
-#![allow(clippy::needless_borrow)]
-#![allow(clippy::derive_partial_eq_without_eq)]
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

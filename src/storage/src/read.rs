@@ -1,5 +1,4 @@
 //! Common structs and utilities for read.
-#![allow(clippy::derive_partial_eq_without_eq)]
 
 use async_trait::async_trait;
 use datatypes::vectors::VectorRef;

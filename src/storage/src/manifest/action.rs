@@ -1,5 +1,3 @@
-#![allow(clippy::needless_borrow, clippy::derive_partial_eq_without_eq)]
-
 use std::io::{BufRead, BufReader};
 
 use serde::{Deserialize, Serialize};

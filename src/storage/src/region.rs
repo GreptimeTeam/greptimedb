@@ -1,4 +1,3 @@
-#![allow(clippy::needless_borrow)]
 #[cfg(test)]
 mod tests;
 mod writer;
