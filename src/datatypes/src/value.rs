@@ -20,6 +20,8 @@ pub type OrderedF64 = OrderedFloat<f64>;
 /// behaves as what you expect.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Value {
+    // Null is a little special, we'd like to keep it as the first variant, so a `Null`
+    // should less than all other variants.
     Null,
 
     // Numeric types:
@@ -73,6 +75,7 @@ impl Value {
         }
     }
 
+    /// Returns true if this is a null value.
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
@@ -89,6 +92,7 @@ impl Value {
         }
     }
 
+    /// Cast itself to [ValueRef].
     pub fn as_value_ref(&self) -> ValueRef {
         match self {
             Value::Null => ValueRef::Null,
@@ -197,6 +201,7 @@ impl TryFrom<Value> for serde_json::Value {
     }
 }
 
+/// List value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListValue {
     /// List of nested Values (boxed to reduce size_of(Value))
@@ -269,6 +274,7 @@ pub enum ValueRef<'a> {
 }
 
 impl<'a> ValueRef<'a> {
+    /// Returns true if this is null.
     pub fn is_null(&self) -> bool {
         matches!(self, ValueRef::Null)
     }
@@ -670,5 +676,161 @@ mod tests {
                 datatype: ConcreteDataType::int32_datatype(),
             }))
         );
+    }
+
+    #[test]
+    fn test_null_value() {
+        assert!(Value::Null.is_null());
+        assert!(!Value::Boolean(true).is_null());
+        assert!(Value::Null < Value::Boolean(false));
+        assert!(Value::Null < Value::Int32(10));
+    }
+
+    #[test]
+    fn test_null_value_ref() {
+        assert!(ValueRef::Null.is_null());
+        assert!(!ValueRef::Boolean(true).is_null());
+        assert!(ValueRef::Null < ValueRef::Boolean(false));
+        assert!(ValueRef::Null < ValueRef::Int32(10));
+    }
+
+    #[test]
+    fn test_as_value_ref() {
+        macro_rules! check_as_value_ref {
+            ($Variant: ident, $data: expr) => {
+                let value = Value::$Variant($data);
+                let value_ref = value.as_value_ref();
+                let expect_ref = ValueRef::$Variant($data);
+
+                assert_eq!(expect_ref, value_ref);
+            };
+        }
+
+        assert_eq!(ValueRef::Null, Value::Null.as_value_ref());
+        check_as_value_ref!(Boolean, true);
+        check_as_value_ref!(UInt8, 123);
+        check_as_value_ref!(UInt16, 123);
+        check_as_value_ref!(UInt32, 123);
+        check_as_value_ref!(UInt64, 123);
+        check_as_value_ref!(Int8, -12);
+        check_as_value_ref!(Int16, -12);
+        check_as_value_ref!(Int32, -12);
+        check_as_value_ref!(Int64, -12);
+        check_as_value_ref!(Float32, OrderedF32::from(16.0));
+        check_as_value_ref!(Float64, OrderedF64::from(16.0));
+
+        assert_eq!(
+            ValueRef::String("hello"),
+            Value::String("hello".into()).as_value_ref()
+        );
+        assert_eq!(
+            ValueRef::Binary(b"hello"),
+            Value::Binary("hello".as_bytes().into()).as_value_ref()
+        );
+
+        check_as_value_ref!(Date, Date::new(103));
+        check_as_value_ref!(DateTime, DateTime::new(1034));
+
+        let list = ListValue {
+            items: None,
+            datatype: ConcreteDataType::int32_datatype(),
+        };
+        assert_eq!(
+            ValueRef::List(ListValueRef::Ref(&list)),
+            Value::List(list.clone()).as_value_ref()
+        );
+    }
+
+    #[test]
+    fn test_value_ref_as() {
+        macro_rules! check_as_null {
+            ($method: ident) => {
+                assert_eq!(None, ValueRef::Null.$method().unwrap());
+            };
+        }
+
+        check_as_null!(as_binary);
+        check_as_null!(as_string);
+        check_as_null!(as_boolean);
+        check_as_null!(as_date);
+        check_as_null!(as_datetime);
+        check_as_null!(as_list);
+
+        macro_rules! check_as_correct {
+            ($data: expr, $Variant: ident, $method: ident) => {
+                assert_eq!(Some($data), ValueRef::$Variant($data).$method().unwrap());
+            };
+        }
+
+        check_as_correct!("hello", String, as_string);
+        check_as_correct!("hello".as_bytes(), Binary, as_binary);
+        check_as_correct!(true, Boolean, as_boolean);
+        check_as_correct!(Date::new(123), Date, as_date);
+        check_as_correct!(DateTime::new(12), DateTime, as_datetime);
+        let list = ListValue {
+            items: None,
+            datatype: ConcreteDataType::int32_datatype(),
+        };
+        check_as_correct!(ListValueRef::Ref(&list), List, as_list);
+
+        let wrong_value = ValueRef::Int32(12345);
+        assert!(wrong_value.as_binary().is_err());
+        assert!(wrong_value.as_string().is_err());
+        assert!(wrong_value.as_boolean().is_err());
+        assert!(wrong_value.as_date().is_err());
+        assert!(wrong_value.as_datetime().is_err());
+        assert!(wrong_value.as_list().is_err());
+    }
+
+    #[test]
+    fn test_into_value_ref() {
+        macro_rules! check_into_value_ref {
+            ($Variant: ident, $data: expr, $PrimitiveType: ident, $Wrapper: ident) => {
+                assert_eq!(
+                    ValueRef::$Variant($Wrapper::from($data)),
+                    $data.into_value_ref()
+                );
+                assert_eq!(
+                    ValueRef::$Variant($Wrapper::from($data)),
+                    ValueRef::from($data)
+                );
+                assert_eq!(
+                    ValueRef::$Variant($Wrapper::from($data)),
+                    Some($data).into_value_ref()
+                );
+                assert_eq!(
+                    ValueRef::$Variant($Wrapper::from($data)),
+                    ValueRef::from(Some($data))
+                );
+                let x: Option<$PrimitiveType> = None;
+                assert_eq!(ValueRef::Null, x.into_value_ref());
+                assert_eq!(ValueRef::Null, x.into());
+            };
+        }
+
+        macro_rules! check_primitive_into_value_ref {
+            ($Variant: ident, $data: expr, $PrimitiveType: ident) => {
+                check_into_value_ref!($Variant, $data, $PrimitiveType, $PrimitiveType)
+            };
+        }
+
+        check_primitive_into_value_ref!(Boolean, true, bool);
+        check_primitive_into_value_ref!(UInt8, 10u8, u8);
+        check_primitive_into_value_ref!(UInt16, 20u16, u16);
+        check_primitive_into_value_ref!(UInt32, 30u32, u32);
+        check_primitive_into_value_ref!(UInt64, 40u64, u64);
+        check_primitive_into_value_ref!(Int8, -10i8, i8);
+        check_primitive_into_value_ref!(Int16, -20i16, i16);
+        check_primitive_into_value_ref!(Int32, -30i32, i32);
+        check_primitive_into_value_ref!(Int64, -40i64, i64);
+        check_into_value_ref!(Float32, 10.0, f32, OrderedF32);
+        check_into_value_ref!(Float64, 10.0, f64, OrderedF64);
+
+        let hello = "hello";
+        assert_eq!(
+            ValueRef::Binary(hello.as_bytes()),
+            ValueRef::from(hello.as_bytes())
+        );
+        assert_eq!(ValueRef::String(hello), ValueRef::from(hello));
     }
 }
