@@ -191,6 +191,7 @@ mod tests {
         for i in 0..32 {
             assert!(v.is_null(i));
             assert_eq!(Value::Null, v.get(i));
+            assert_eq!(ValueRef::Null, v.get_ref(i));
         }
     }
 

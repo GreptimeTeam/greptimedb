@@ -211,6 +211,7 @@ mod tests {
         for (i, b) in bools.iter().enumerate() {
             assert!(!v.is_null(i));
             assert_eq!(Value::Boolean(*b), v.get(i));
+            assert_eq!(ValueRef::Boolean(*b), v.get_ref(i));
         }
 
         let arrow_arr = v.to_arrow_array();

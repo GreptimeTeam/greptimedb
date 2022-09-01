@@ -229,6 +229,7 @@ mod tests {
 
         for (i, s) in strs.iter().enumerate() {
             assert_eq!(Value::from(*s), v.get(i));
+            assert_eq!(ValueRef::from(*s), v.get_ref(i));
             assert_eq!(Value::from(*s), v.try_get(i).unwrap());
         }
 

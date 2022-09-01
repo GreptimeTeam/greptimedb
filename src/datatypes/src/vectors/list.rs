@@ -334,6 +334,17 @@ mod tests {
             )),
             list_vector.get(0)
         );
+        let value_ref = list_vector.get_ref(0);
+        assert!(matches!(
+            value_ref,
+            ValueRef::List(ListValueRef::Indexed { .. })
+        ));
+        let value_ref = list_vector.get_ref(1);
+        if let ValueRef::List(ListValueRef::Indexed { idx, .. }) = value_ref {
+            assert_eq!(1, idx);
+        } else {
+            unreachable!()
+        }
         assert_eq!(Value::Null, list_vector.get(1));
         assert_eq!(
             Value::List(ListValue::new(

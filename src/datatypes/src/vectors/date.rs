@@ -246,8 +246,12 @@ mod tests {
         builder.push(Some(Date::new(-1)));
         let vector = builder.finish();
         assert_eq!(3, vector.len());
+        assert_eq!(Value::Date(Date::new(1)), vector.get(0));
+        assert_eq!(ValueRef::Date(Date::new(1)), vector.get_ref(0));
         assert_eq!(Some(Date::new(1)), vector.get_data(0));
         assert_eq!(None, vector.get_data(1));
+        assert_eq!(Value::Null, vector.get(1));
+        assert_eq!(ValueRef::Null, vector.get_ref(1));
         assert_eq!(Some(Date::new(-1)), vector.get_data(2));
         let mut iter = vector.iter_data();
         assert_eq!(Some(Date::new(1)), iter.next().unwrap());

@@ -200,6 +200,7 @@ mod tests {
         for i in 0..2 {
             assert!(!v.is_null(i));
             assert_eq!(Value::Binary(Bytes::from(vec![1, 2, 3])), v.get(i));
+            assert_eq!(ValueRef::Binary(&[1, 2, 3]), v.get_ref(i));
         }
 
         let arrow_arr = v.to_arrow_array();

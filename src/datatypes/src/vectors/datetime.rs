@@ -250,6 +250,11 @@ mod tests {
             &arrow::datatypes::DataType::Date64,
             v.to_arrow_array().data_type()
         );
+
+        assert_eq!(Some(DateTime::new(1)), v.get_data(0));
+        assert_eq!(Value::DateTime(DateTime::new(1)), v.get(0));
+        assert_eq!(ValueRef::DateTime(DateTime::new(1)), v.get_ref(0));
+
         let mut iter = v.iter_data();
         assert_eq!(Some(DateTime::new(1)), iter.next().unwrap());
         assert_eq!(Some(DateTime::new(2)), iter.next().unwrap());

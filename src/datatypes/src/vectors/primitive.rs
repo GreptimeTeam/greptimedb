@@ -332,6 +332,7 @@ mod tests {
         for i in 0..4 {
             assert!(!v.is_null(i));
             assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
+            assert_eq!(ValueRef::Int32(i as i32 + 1), v.get_ref(i));
         }
 
         let json_value = v.serialize_to_json().unwrap();
