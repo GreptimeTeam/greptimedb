@@ -49,14 +49,14 @@ async fn test_sql_api() {
 
     // test insert and select
     let res = client
-        .get("/sql?sql=insert into demo values('host', 66.6, 1024, 0)")
+        .get("/v1/sql?sql=insert into demo values('host', 66.6, 1024, 0)")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // select *
     let res = client
-        .get("/sql?sql=select * from demo limit 10")
+        .get("/v1/sql?sql=select * from demo limit 10")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -69,7 +69,7 @@ async fn test_sql_api() {
 
     // select with projections
     let res = client
-        .get("/sql?sql=select cpu, ts from demo limit 10")
+        .get("/v1/sql?sql=select cpu, ts from demo limit 10")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
