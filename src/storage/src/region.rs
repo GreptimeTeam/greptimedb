@@ -322,7 +322,7 @@ struct RegionInner<S: LogStore> {
 impl<S: LogStore> RegionInner<S> {
     #[inline]
     fn version_control(&self) -> &VersionControl {
-        self.shared.version_control.as_ref()
+        &self.shared.version_control
     }
 
     fn in_memory_metadata(&self) -> RegionMetaImpl {

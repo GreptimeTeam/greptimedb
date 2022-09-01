@@ -1,8 +1,8 @@
 //! Error of record batch.
 use std::any::Any;
 
+use common_error::ext::BoxedError;
 use common_error::prelude::*;
-
 common_error::define_opaque_error!(Error);
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -21,6 +21,12 @@ pub enum InnerError {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("External error, source: {}", source))]
+    External {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 impl ErrorExt for InnerError {
@@ -28,6 +34,7 @@ impl ErrorExt for InnerError {
         match self {
             InnerError::NewDfRecordBatch { .. } => StatusCode::InvalidArguments,
             InnerError::DataTypes { .. } => StatusCode::Internal,
+            InnerError::External { source } => source.status_code(),
         }
     }
 

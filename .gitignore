@@ -22,3 +22,9 @@ debug/
 # Logs
 **/__unittest_logs
 logs/
+
+.DS_store
+.gitignore
+
+# cpython's generated python byte code
+**/__pycache__/

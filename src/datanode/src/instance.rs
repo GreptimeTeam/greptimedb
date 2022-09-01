@@ -23,6 +23,7 @@ use crate::error::{
     UnsupportedExprSnafu,
 };
 use crate::metric;
+use crate::script::ScriptExecutor;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::insertion_expr_to_request;
 use crate::server::grpc::plan::PhysicalPlanner;
@@ -39,6 +40,7 @@ pub struct Instance {
     // Catalog list
     catalog_manager: CatalogManagerRef,
     physical_planner: PhysicalPlanner,
+    script_executor: ScriptExecutor,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -64,12 +66,14 @@ impl Instance {
         );
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine().clone();
+        let script_executor = ScriptExecutor::new(query_engine.clone());
 
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
             catalog_manager,
             physical_planner: PhysicalPlanner::new(query_engine),
+            script_executor,
         })
     }
 
@@ -250,6 +254,10 @@ impl SqlQueryHandler for Instance {
                 BoxedError::new(e)
             })
             .context(servers::error::ExecuteQuerySnafu { query })
+    }
+
+    async fn execute_script(&self, script: &str) -> servers::error::Result<Output> {
+        self.script_executor.execute_script(script).await
     }
 }
 

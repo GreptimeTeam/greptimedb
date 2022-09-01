@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
-use axum::extract::Query;
+use axum::extract::{Json, Query};
 use axum::Extension;
 use common_telemetry::metric;
 use metrics::counter;
 use servers::http::handler as http_handler;
+use servers::http::handler::ScriptExecution;
 use servers::http::{HttpResponse, JsonOutput};
 use test_util::MemTable;
 
@@ -68,6 +69,41 @@ async fn test_metrics() {
         HttpResponse::Text(s) => assert!(s.contains("test_metrics counter")),
         _ => unreachable!(),
     }
+}
+
+#[tokio::test]
+async fn test_scripts() {
+    common_telemetry::init_default_ut_logging();
+
+    let exec = create_script_payload();
+    let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
+    let extension = Extension(query_handler);
+
+    let json = http_handler::scripts(extension, exec).await;
+    match json {
+        HttpResponse::Json(json) => {
+            assert!(json.success(), "{:?}", json);
+            assert!(json.error().is_none());
+            match json.output().expect("assertion failed") {
+                JsonOutput::Rows(rows) => {
+                    assert_eq!(1, rows.len());
+                }
+                _ => unreachable!(),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn create_script_payload() -> Json<ScriptExecution> {
+    Json(ScriptExecution {
+        script: r#"
+@copr(sql='select uint32s as number from numbers', args=['number'], returns=['n'])
+def test(n):
+    return n;
+"#
+        .to_string(),
+    })
 }
 
 fn create_query() -> Query<HashMap<String, String>> {

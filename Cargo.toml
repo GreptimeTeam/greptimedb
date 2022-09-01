@@ -19,6 +19,7 @@ members = [
     "src/logical-plans",
     "src/object-store",
     "src/query",
+    "src/script",
     "src/servers",
     "src/sql",
     "src/storage",
