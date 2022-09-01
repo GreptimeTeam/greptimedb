@@ -1,11 +1,12 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
-use arrow::array::BooleanArray;
-use arrow::compute;
-use arrow::datatypes::DataType;
-use arrow::scalar::{PrimitiveScalar, Scalar};
-use arrow::{
+use datatypes::arrow;
+use datatypes::arrow::array::BooleanArray;
+use datatypes::arrow::compute;
+use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::scalar::{PrimitiveScalar, Scalar};
+use datatypes::arrow::{
     array::{Array, ArrayRef, PrimitiveArray},
     compute::{
         arithmetics,

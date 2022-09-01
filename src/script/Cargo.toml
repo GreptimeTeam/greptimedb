@@ -3,11 +3,6 @@ edition = "2021"
 name = "script"
 version = "0.1.0"
 
-[dependencies.arrow]
-features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
-package = "arrow2"
-version = "0.10"
-
 [features]
 default = ["python"]
 python = [
@@ -28,7 +23,7 @@ common-error = {path = "../common/error"}
 common-function = { path = "../common/function" }
 common-query = {path = "../common/query"}
 common-recordbatch = {path = "../common/recordbatch" }
-console = "0.15.1"
+console = "0.15"
 datafusion = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}
 datafusion-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
@@ -48,7 +43,7 @@ sql = { path = "../sql" }
 
 [dev-dependencies]
 catalog = { path = "../catalog" }
-ron = "0.7.1"
+ron = "0.7"
 serde = {version = "1.0", features = ["derive"]}
 table = { path = "../table" }
 tokio = { version = "1.18", features = ["full"] }

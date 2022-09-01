@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use arrow::datatypes::DataType;
+use datatypes::arrow::datatypes::DataType;
 use rustpython_parser::{
     ast,
     ast::{Arguments, Location},

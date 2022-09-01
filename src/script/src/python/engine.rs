@@ -7,14 +7,14 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_recordbatch::{
-    error::InnerError as RecordBatchError, error::Result as RecordBatchResult, RecordBatch,
-    RecordBatchStream, SendableRecordBatchStream,
+    error::ExternalSnafu, error::Result as RecordBatchResult, RecordBatch, RecordBatchStream,
+    SendableRecordBatchStream,
 };
 use datatypes::schema::SchemaRef;
 use futures::Stream;
 use query::Output;
 use query::QueryEngineRef;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
@@ -49,11 +49,9 @@ impl Stream for CoprStream {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(recordbatch))) => {
-                let batch = exec_parsed(&self.copr, &recordbatch.df_recordbatch).map_err(|e| {
-                    common_recordbatch::error::Error::from(RecordBatchError::External {
-                        source: BoxedError::new(e),
-                    })
-                })?;
+                let batch = exec_parsed(&self.copr, &recordbatch.df_recordbatch)
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
 
                 Poll::Ready(Some(Ok(batch)))
             }
@@ -137,8 +135,6 @@ impl ScriptEngine for PyEngine {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::Float64Array;
-    use arrow::array::Int64Array;
     use catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
     use catalog::{
         CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
@@ -146,6 +142,8 @@ mod tests {
     use common_recordbatch::util;
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;
+    use datatypes::arrow::array::Float64Array;
+    use datatypes::arrow::array::Int64Array;
     use query::QueryEngineFactory;
     use table::table::numbers::NumbersTable;
 

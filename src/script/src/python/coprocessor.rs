@@ -4,11 +4,12 @@ use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
-use arrow::compute::cast::CastOptions;
-use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use common_recordbatch::RecordBatch;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use datatypes::arrow;
+use datatypes::arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
+use datatypes::arrow::compute::cast::CastOptions;
+use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::schema::Schema;
 use datatypes::vectors::Helper;
 use datatypes::vectors::{BooleanVector, Vector, VectorRef};
@@ -339,12 +340,9 @@ fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
 /// convert a single PyVector or a number(a constant) into a Array(or a constant array)
 fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<ArrayRef> {
     if is_instance::<PyVector>(obj, vm) {
-        let pyv = obj
-            .payload::<PyVector>()
-            .context(ret_other_error_with(format!(
-                "can't cast obj {:?} to PyVector",
-                obj
-            )))?;
+        let pyv = obj.payload::<PyVector>().with_context(|| {
+            ret_other_error_with(format!("can't cast obj {:?} to PyVector", obj))
+        })?;
         Ok(pyv.to_arrow_array())
     } else if is_instance::<PyInt>(obj, vm) {
         let val = obj
@@ -382,12 +380,9 @@ fn try_into_columns(
     col_len: usize,
 ) -> Result<Vec<ArrayRef>> {
     if is_instance::<PyTuple>(obj, vm) {
-        let tuple = obj
-            .payload::<PyTuple>()
-            .context(ret_other_error_with(format!(
-                "can't cast obj {:?} to PyTuple)",
-                obj
-            )))?;
+        let tuple = obj.payload::<PyTuple>().with_context(|| {
+            ret_other_error_with(format!("can't cast obj {:?} to PyTuple)", obj))
+        })?;
         let cols = tuple
             .iter()
             .map(|obj| py_vec_to_array_ref(obj, vm, col_len))

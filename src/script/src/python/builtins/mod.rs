@@ -3,12 +3,13 @@
 #[allow(clippy::print_stdout)]
 mod test;
 
-use arrow::array::ArrayRef;
-use arrow::compute::cast::CastOptions;
-use arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::ColumnarValue as DFColValue;
 use datafusion_physical_expr::AggregateExpr;
+use datatypes::arrow;
+use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::compute::cast::CastOptions;
+use datatypes::arrow::datatypes::DataType;
 use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::builtins::PyList;
 use rustpython_vm::pymodule;
@@ -23,6 +24,25 @@ use crate::python::PyVector;
 /// "Can't cast operand of type `{name}` into `{ty}`."
 fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseExceptionRef {
     vm.new_type_error(format!("Can't cast operand of type `{name}` into `{ty}`."))
+}
+
+fn collect_diff_types_string(values: &[ScalarValue], ty: &DataType) -> String {
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, val)| {
+            if val.get_datatype() != *ty {
+                Some((idx, val.get_datatype()))
+            } else {
+                None
+            }
+        })
+        .map(|(idx, ty)| format!(" {:?} at {}th location\n", ty, idx + 1))
+        .reduce(|mut acc, item| {
+            acc.push_str(&item);
+            acc
+        })
+        .unwrap_or_else(|| "Nothing".to_string())
 }
 
 /// try to turn a Python Object into a PyVector or a scalar that can be use for calculate
@@ -80,25 +100,9 @@ fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DF
 
         let ty = ret[0].get_datatype();
         if ret.iter().any(|i| i.get_datatype() != ty) {
-            let diff = ret
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, val)| {
-                    if val.get_datatype() != ty {
-                        Some((idx, val.get_datatype()))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
             return Err(vm.new_type_error(format!(
                 "All elements in a list should be same type to cast to Datafusion list!\nExpect {ty:?}, found {}",
-                diff.iter().map(|(idx, ty)|{
-                    format!(" {:?} at {}th location\n", ty, idx+1)
-                }).reduce(|mut acc, item|{
-                    acc.push_str(&item);
-                    acc
-                }).unwrap_or_else(||"Nothing".to_string())
+                collect_diff_types_string(&ret, &ty)
             )));
         }
         Ok(DFColValue::Scalar(ScalarValue::List(
@@ -147,7 +151,7 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
         ScalarValue::Int64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
         ScalarValue::UInt64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
         ScalarValue::List(Some(col), _) => {
-            let list: Vec<PyObjectRef> = col
+            let list = col
                 .into_iter()
                 .map(|v| scalar_val_try_into_py_obj(v, vm))
                 .collect::<Result<_, _>>()?;
@@ -161,7 +165,7 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
     }
 }
 
-/// Becuase most of the datafusion's UDF only support f32/64, so cast all to f64 to use datafusion's UDF
+/// Because most of the datafusion's UDF only support f32/64, so cast all to f64 to use datafusion's UDF
 fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
     match col {
         DFColValue::Array(arr) => {
@@ -230,7 +234,7 @@ macro_rules! bind_aggr_fn {
                 $(
                     Arc::new(expressions::Column::new(stringify!($EXPR_ARGS), 0)) as _,
                 )*
-                stringify!($AGGR_FUNC), $DATA_TYPE.to_owned()),
+                    stringify!($AGGR_FUNC), $DATA_TYPE.to_owned()),
             $ARGS, $VM)
     };
 }
@@ -258,20 +262,21 @@ fn eval_aggr_fn<T: AggregateExpr>(
 
 /// GrepTime User Define Function module
 ///
-/// allow Python Coprocessor Function to use already implmented udf functions from datafusion and GrepTime DB itself
+/// allow Python Coprocessor Function to use already implemented udf functions from datafusion and GrepTime DB itself
 ///
 #[pymodule]
 pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, NullArray};
-    use arrow::compute;
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{function::FunctionContext, Function};
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
+    use datatypes::arrow;
+    use datatypes::arrow::array::{ArrayRef, NullArray};
+    use datatypes::arrow::compute;
     use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector};
     use rustpython_vm::builtins::{PyFloat, PyInt, PyStr};
     use rustpython_vm::function::OptionalArg;
@@ -425,17 +430,17 @@ pub(crate) mod greptime_builtin {
     /// Not implement in datafusion
     /// TODO(discord9): use greptime's own impl instead
     /*
-    #[pyfunction]
-    fn approx_median(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        #[pyfunction]
+        fn approx_median(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_aggr_fn!(
-            ApproxMedian,
-            vm,
-            &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
-            expr0
-        );
+        ApproxMedian,
+        vm,
+        &[values.to_arrow_array()],
+        values.to_arrow_array().data_type(),
+        expr0
+    );
     }
-    */
+         */
 
     #[pyfunction]
     fn approx_percentile_cont(
