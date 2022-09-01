@@ -18,8 +18,7 @@ use crate::metadata::{ColumnFamilyMetadata, ColumnMetadata, VersionNumber};
 use crate::sst::FileMeta;
 
 /// Minimal data that could be used to persist and recover [RegionMetadata](crate::metadata::RegionMetadata).
-#[cfg_attr(test, derive(PartialEq))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RawRegionMetadata {
     pub id: RegionId,
     pub name: String,
@@ -44,8 +43,7 @@ pub struct RawColumnFamiliesMetadata {
     pub column_families: Vec<ColumnFamilyMetadata>,
 }
 
-#[cfg_attr(test, derive(PartialEq))]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RegionChange {
     pub metadata: RawRegionMetadata,
 }
@@ -63,8 +61,7 @@ pub struct RegionEdit {
     pub files_to_remove: Vec<FileMeta>,
 }
 
-#[cfg_attr(test, derive(PartialEq))]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum RegionMetaAction {
     Protocol(ProtocolAction),
     Change(RegionChange),
@@ -72,8 +69,7 @@ pub enum RegionMetaAction {
     Edit(RegionEdit),
 }
 
-#[cfg_attr(test, derive(PartialEq))]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RegionMetaActionList {
     pub actions: Vec<RegionMetaAction>,
     pub prev_version: ManifestVersion,
