@@ -6,10 +6,10 @@ use std::io::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::PrimitiveArray;
-use arrow::datatypes::{DataType, Field, Schema};
 use console::style;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use datatypes::arrow::array::PrimitiveArray;
+use datatypes::arrow::datatypes::{DataType, Field, Schema};
 use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
@@ -208,7 +208,7 @@ def calc_rvs(open_time, close):
         var = sum(pow(ref, 2)/(len(ref)-1))
         return sqrt(var/avg_time_interval)
 
-    # how to get env var, 
+    # how to get env var,
     # maybe through accessing scope and serde then send to remote?
     timepoint = open_time[-1]
     rv_7d = calc_rv(close, open_time, timepoint, datetime("7d"))

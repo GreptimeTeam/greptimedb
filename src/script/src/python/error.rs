@@ -1,6 +1,6 @@
-use arrow::error::ArrowError;
 use common_error::prelude::{ErrorCompat, ErrorExt, StatusCode};
 use console::{style, Style};
+use datatypes::arrow::error::ArrowError;
 use datatypes::error::Error as DataTypeError;
 use query::error::Error as QueryError;
 use rustpython_compiler_core::error::CompileError as CoreCompileError;

@@ -15,11 +15,13 @@ pub enum InnerError {
         source: datatypes::arrow::error::ArrowError,
         backtrace: Backtrace,
     },
+
     #[snafu(display("Data types error, source: {}", source))]
     DataTypes {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
     #[snafu(display("External error, source: {}", source))]
     External {
         #[snafu(backtrace)]
