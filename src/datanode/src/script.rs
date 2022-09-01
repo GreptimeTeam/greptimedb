@@ -1,7 +1,7 @@
 use query::Output;
 use query::QueryEngineRef;
 
-#[allow(unused)]
+#[cfg(not(feature = "python"))]
 mod dummy {
     use super::*;
 
@@ -12,11 +12,7 @@ mod dummy {
             Self {}
         }
 
-        pub async fn execute_script(
-            &self,
-            _script: &str,
-            _engine: Option<String>,
-        ) -> servers::error::Result<Output> {
+        pub async fn execute_script(&self, _script: &str) -> servers::error::Result<Output> {
             servers::error::NotSupportedSnafu { feat: "script" }.fail()
         }
     }
@@ -45,11 +41,7 @@ mod python {
             }
         }
 
-        pub async fn execute_script(
-            &self,
-            script: &str,
-            _engine: Option<String>,
-        ) -> servers::error::Result<Output> {
+        pub async fn execute_script(&self, script: &str) -> servers::error::Result<Output> {
             let py_script = self
                 .py_engine
                 .compile(script, CompileContext::default())

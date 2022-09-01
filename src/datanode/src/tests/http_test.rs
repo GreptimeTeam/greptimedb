@@ -116,7 +116,6 @@ def test(n):
     return n;
 "#
             .to_string(),
-            engine: None,
         })
         .send()
         .await;
