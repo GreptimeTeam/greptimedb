@@ -188,6 +188,7 @@ fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
 
 /// check for the grammar correctness of annotation, also return the slice of subscript for further parsing
 fn check_annotation_ret_slice(sub: &ast::Expr<()>) -> Result<&ast::Expr<()>> {
+    // TODO(discord9): allow a single annotation like `vector`
     if let ast::ExprKind::Subscript {
         value,
         slice,

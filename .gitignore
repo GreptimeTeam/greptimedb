@@ -25,3 +25,6 @@ logs/
 
 .DS_store
 .gitignore
+
+# cpython's generated python byte code
+**/__pycache__/

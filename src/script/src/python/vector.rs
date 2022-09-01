@@ -1,6 +1,8 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
+use arrow::array::BooleanArray;
+use arrow::compute;
 use arrow::datatypes::DataType;
 use arrow::scalar::{PrimitiveScalar, Scalar};
 use arrow::{
@@ -17,7 +19,8 @@ use datatypes::{
     value,
     vectors::{Helper, NullVector, VectorBuilder, VectorRef},
 };
-use rustpython_vm::types::PyComparisonOp;
+use rustpython_vm::function::{Either, PyComparisonValue};
+use rustpython_vm::types::{Comparable, PyComparisonOp};
 use rustpython_vm::{
     builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
     function::OptionalArg,
@@ -29,6 +32,7 @@ use rustpython_vm::{
 };
 
 use crate::python::utils::is_instance;
+use crate::python::utils::PyVectorRef;
 
 #[pyclass(module = false, name = "vector")]
 #[derive(PyPayload, Debug)]
@@ -158,6 +162,9 @@ fn cast(array: ArrayRef, target_type: &DataType, vm: &VirtualMachine) -> PyResul
     )
     .map_err(|e| vm.new_type_error(e.to_string()))
 }
+fn from_debug_error(err: impl std::fmt::Debug, vm: &VirtualMachine) -> PyBaseExceptionRef {
+    vm.new_runtime_error(format!("Runtime Error: {err:#?}"))
+}
 
 impl AsRef<PyVector> for PyVector {
     fn as_ref(&self) -> &PyVector {
@@ -166,7 +173,7 @@ impl AsRef<PyVector> for PyVector {
 }
 
 /// PyVector type wraps a greptime vector, impl multiply/div/add/sub opeerators etc.
-#[pyimpl(with(AsMapping, AsSequence))]
+#[pyimpl(with(AsMapping, AsSequence, Comparable))]
 impl PyVector {
     pub(crate) fn new(
         iterable: OptionalArg<PyObjectRef>,
@@ -474,38 +481,120 @@ impl PyVector {
     // TODO(discord9): test those funciton
 
     #[pymethod(name = "eq")]
+    #[pymethod(magic)]
     fn eq(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Eq, vm)
     }
 
     #[pymethod(name = "ne")]
+    #[pymethod(magic)]
     fn ne(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Ne, vm)
     }
 
     #[pymethod(name = "gt")]
+    #[pymethod(magic)]
     fn gt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Gt, vm)
     }
 
     #[pymethod(name = "lt")]
+    #[pymethod(magic)]
     fn lt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Lt, vm)
     }
 
     #[pymethod(name = "ge")]
+    #[pymethod(magic)]
     fn ge(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Ge, vm)
     }
 
     #[pymethod(name = "le")]
+    #[pymethod(magic)]
     fn le(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         self.richcompare(other, PyComparisonOp::Le, vm)
     }
 
     #[pymethod(magic)]
+    fn and(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let left = self.to_arrow_array();
+        let left = left
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
+        let right = other.to_arrow_array();
+        let right = right
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
+        let res = compute::boolean::and(left, right).map_err(|err| from_debug_error(err, vm))?;
+        let res = Arc::new(res) as ArrayRef;
+        let ret = Helper::try_into_vector(&*res).map_err(|err| from_debug_error(err, vm))?;
+        Ok(ret.into())
+    }
+
+    #[pymethod(magic)]
+    fn or(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let left = self.to_arrow_array();
+        let left = left
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
+        let right = other.to_arrow_array();
+        let right = right
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
+        let res = compute::boolean::or(left, right).map_err(|err| from_debug_error(err, vm))?;
+        let res = Arc::new(res) as ArrayRef;
+        let ret = Helper::try_into_vector(&*res).map_err(|err| from_debug_error(err, vm))?;
+        Ok(ret.into())
+    }
+
+    #[pymethod(magic)]
+    fn invert(&self, vm: &VirtualMachine) -> PyResult<PyVector> {
+        dbg!();
+        let left = self.to_arrow_array();
+        let left = left
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
+        let res = compute::boolean::not(left);
+        let res = Arc::new(res) as ArrayRef;
+        let ret = Helper::try_into_vector(&*res).map_err(|err| from_debug_error(err, vm))?;
+        Ok(ret.into())
+    }
+
+    #[pymethod(magic)]
     fn len(&self) -> usize {
         self.as_vector_ref().len()
+    }
+
+    /// take a boolean array and filters the Array, returning elements matching the filter (i.e. where the values are true).
+    #[pymethod(name = "filter")]
+    fn filter(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let left = self.to_arrow_array();
+        let right: ArrayRef = other.to_arrow_array();
+        let filter = right.as_any().downcast_ref::<BooleanArray>();
+        match filter {
+            Some(filter) => {
+                let res = compute::filter::filter(left.as_ref(), filter);
+
+                let res =
+                    res.map_err(|err| vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
+                let ret = Helper::try_into_vector(&*res).map_err(|e| {
+                    vm.new_type_error(format!(
+                        "Can't cast result into vector, result: {:?}, err: {:?}",
+                        res, e
+                    ))
+                })?;
+                Ok(ret.into())
+            }
+            None => Err(vm.new_runtime_error(format!(
+                "Can't cast operand into a Boolean Array, which is {right:#?}"
+            ))),
+        }
     }
 
     #[pymethod(magic)]
@@ -516,9 +605,29 @@ impl PyVector {
     }
 
     fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        match SequenceIndex::try_from_borrowed_object(vm, needle, "mmap")? {
-            SequenceIndex::Int(i) => self.getitem_by_index(i, vm),
-            SequenceIndex::Slice(slice) => self.getitem_by_slice(&slice, vm),
+        if let Some(seq) = needle.payload::<PyVector>() {
+            let mask = seq.to_arrow_array();
+            let mask = mask
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| {
+                    vm.new_type_error(format!("Can't cast {seq:#?} as a Boolean Array"))
+                })?;
+            // let left = self.to_arrow_array();
+            let res = compute::filter::filter(self.to_arrow_array().as_ref(), mask)
+                .map_err(|err| vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
+            let ret = Helper::try_into_vector(&*res).map_err(|e| {
+                vm.new_type_error(format!(
+                    "Can't cast result into vector, result: {:?}, err: {:?}",
+                    res, e
+                ))
+            })?;
+            Ok(Self::from(ret).into_pyobject(vm))
+        } else {
+            match SequenceIndex::try_from_borrowed_object(vm, needle, "vector")? {
+                SequenceIndex::Int(i) => self.getitem_by_index(i, vm),
+                SequenceIndex::Slice(slice) => self.getitem_by_slice(&slice, vm),
+            }
         }
     }
 
@@ -847,6 +956,36 @@ impl AsSequence for PyVector {
         }),
         ..PySequenceMethods::NOT_IMPLEMENTED
     };
+}
+
+impl Comparable for PyVector {
+    fn slot_richcompare(
+        zelf: &PyObject,
+        other: &PyObject,
+        op: PyComparisonOp,
+        vm: &VirtualMachine,
+    ) -> PyResult<Either<PyObjectRef, PyComparisonValue>> {
+        // TODO(discord9): return a boolean array of compare result
+        if let Some(zelf) = zelf.downcast_ref::<Self>() {
+            let ret: PyVector = zelf.richcompare(other.to_owned(), op, vm)?;
+            let ret = ret.into_pyobject(vm);
+            Ok(Either::A(ret))
+        } else {
+            Err(vm.new_type_error(format!(
+                "unexpected payload {} for {}",
+                zelf,
+                op.method_name(&vm.ctx).as_str()
+            )))
+        }
+    }
+    fn cmp(
+        _zelf: &rustpython_vm::Py<Self>,
+        _other: &PyObject,
+        _op: PyComparisonOp,
+        _vm: &VirtualMachine,
+    ) -> PyResult<PyComparisonValue> {
+        Ok(PyComparisonValue::NotImplemented)
+    }
 }
 #[cfg(test)]
 pub mod tests {

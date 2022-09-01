@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -5,6 +6,7 @@ use axum::Router;
 use axum_test_helper::TestClient;
 use servers::http::handler::ScriptExecution;
 use servers::http::HttpServer;
+use servers::server::Server;
 use test_util::TestGuard;
 
 use crate::instance::Instance;
@@ -125,4 +127,25 @@ def test(n):
         body,
         r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"n","data_type":"UInt32","is_nullable":false,"metadata":{}}],"metadata":{}},"columns":[[0,1,2,3,4,5,6,7,8,9]]}]}}"#
     );
+}
+
+async fn start_test_app(addr: &str) -> (SocketAddr, TestGuard) {
+    let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let instance = Arc::new(Instance::new(&opts).await.unwrap());
+    instance.start().await.unwrap();
+    let mut http_server = HttpServer::new(instance);
+    (
+        http_server.start(addr.parse().unwrap()).await.unwrap(),
+        guard,
+    )
+}
+
+#[allow(unused)]
+#[tokio::test]
+async fn test_py_side_scripts_api() {
+    // TODO(discord9): make a working test case, it will require python3 with numpy installed, complex environment setup expected....
+    common_telemetry::init_default_ut_logging();
+    let server = start_test_app("127.0.0.1:21830");
+    // let (app, _guard) = server.await;
+    // dbg!(app);
 }
