@@ -1,3 +1,5 @@
+#![allow(clippy::derive_partial_eq_without_eq)]
+
 use criterion::{criterion_group, criterion_main, Criterion};
 use storage::codec::Encoder;
 use storage::write_batch::{codec, WriteBatch};
