@@ -4,9 +4,6 @@ use storage::write_batch::{codec, WriteBatch};
 
 use super::util::gen_new_batch_and_extras;
 
-#![allow(clippy::all)]
-tonic::include_proto!("greptime.storage.wal.v1");
-
 /*
 -------------------------------------
                 encode               |

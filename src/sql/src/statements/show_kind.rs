@@ -2,7 +2,7 @@ use sqlparser::ast::Expr;
 use sqlparser::ast::Ident;
 
 /// Show kind for SQL expressions like `SHOW DATABASE` or `SHOW TABLE`
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShowKind {
     All,
     Like(Ident),
