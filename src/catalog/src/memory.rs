@@ -1,5 +1,3 @@
-#![allow(clippy::significant_drop_in_scrutinee)]
-
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -28,7 +26,8 @@ impl MemoryCatalogList {
         catalog: Arc<dyn CatalogProvider>,
     ) -> Option<CatalogProviderRef> {
         let mut catalogs = self.catalogs.write().unwrap();
-        match catalogs.entry(name) {
+        let entry = catalogs.entry(name);
+        match entry {
             Entry::Occupied(v) => Some(v.get().clone()),
             Entry::Vacant(v) => {
                 v.insert(catalog);

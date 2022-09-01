@@ -582,7 +582,7 @@ pub mod codec {
                         StreamState::Some(chunk) => chunks.push(chunk),
                         StreamState::Waiting => return Err(WriteBatchError::StreamWaiting),
                     }
-                };
+                }
                 Ok(())
             })?;
 

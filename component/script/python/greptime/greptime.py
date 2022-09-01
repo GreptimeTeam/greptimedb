@@ -1,5 +1,5 @@
 """
-Be note that this is a mock library, if not connected to database, 
+Be note that this is a mock library, if not connected to database,
 it can only run on mock data and mock function which is supported by numpy
 """
 import functools
@@ -111,13 +111,13 @@ def interval(arr: list, duration: int, fill, step: None | int = None, explicitOf
     `step` being the length when sliding window take a step
 
     `fill` indicate how to fill missing value:
-    - "prev": use previous 
+    - "prev": use previous
     - "post": next
     - "linear": linear interpolation, if not possible to interpolate certain types, fallback to prev
     - "null": use null
     - "none": do not interpolate
     """
-    if step == None:
+    if step is None:
         step = duration
 
     tot_len = int(np.ceil(len(arr) // step))
@@ -185,7 +185,7 @@ def datetime(input_time: str) -> int:
 
 def coprocessor(args=None, returns=None, sql=None):
     """
-    The actual coprocessor, which will connect to database and update 
+    The actual coprocessor, which will connect to database and update
     whatever function decorated with `@coprocessor(args=[...], returns=[...], sql=...)`
     """
     def decorator_copr(func):

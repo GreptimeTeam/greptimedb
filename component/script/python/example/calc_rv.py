@@ -13,7 +13,7 @@ def data_sample(k_lines, symbol, density=5 * 30 * 86400):
     Only return close data for simplicty for now
     """
     k_lines = k_lines["result"] if k_lines["ret_msg"] == "OK" else None
-    if k_lines == None:
+    if k_lines is None:
         raise Exception("Expect a `OK`ed message")
     close = [float(i["close"]) for i in k_lines]
 
@@ -57,7 +57,7 @@ def calc_rvs(open_time, close):
         var = sum(pow(ref, 2)/(len(ref)-1))
         return sqrt(var/avg_time_interval)
 
-    # how to get env var, 
+    # how to get env var,
     # maybe through accessing scope and serde then send to remote?
     timepoint = open_time[-1]
     rv_7d = calc_rv(close, open_time, timepoint, datetime("7d"))

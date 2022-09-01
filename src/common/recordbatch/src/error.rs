@@ -32,7 +32,7 @@ impl ErrorExt for InnerError {
         match self {
             InnerError::NewDfRecordBatch { .. } => StatusCode::InvalidArguments,
             InnerError::DataTypes { .. } => StatusCode::Internal,
-            InnerError::External { .. } => StatusCode::Unknown,
+            InnerError::External { source } => source.status_code(),
         }
     }
 
