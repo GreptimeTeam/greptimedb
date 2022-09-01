@@ -44,7 +44,7 @@ mod tests {
         manifest
             .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
                 RegionChange {
-                    metadata: (&*region_meta).into(),
+                    metadata: region_meta.as_ref().into(),
                 },
             )))
             .await

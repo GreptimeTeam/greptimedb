@@ -198,7 +198,7 @@ async fn test_recover_region_manifets() {
         manifest
             .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
                 RegionChange {
-                    metadata: (&*region_meta).into(),
+                    metadata: region_meta.as_ref().into(),
                 },
             )))
             .await

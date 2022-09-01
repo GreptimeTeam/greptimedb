@@ -102,7 +102,7 @@ impl<S: LogStore> RegionImpl<S> {
             .update(RegionMetaActionList::new(vec![
                 RegionMetaAction::Protocol(ProtocolAction::new()),
                 RegionMetaAction::Change(RegionChange {
-                    metadata: (&*metadata).into(),
+                    metadata: metadata.as_ref().into(),
                 }),
             ]))
             .await?;
@@ -322,7 +322,7 @@ struct RegionInner<S: LogStore> {
 impl<S: LogStore> RegionInner<S> {
     #[inline]
     fn version_control(&self) -> &VersionControl {
-        &*self.shared.version_control
+        self.shared.version_control.as_ref()
     }
 
     fn in_memory_metadata(&self) -> RegionMetaImpl {

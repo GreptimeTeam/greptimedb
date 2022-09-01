@@ -576,13 +576,10 @@ pub mod codec {
 
             let mut chunks = Vec::with_capacity(self.mutation_extras.len());
 
-            for state_opt in stream_states {
+            for state_opt in stream_states.into_iter().flatten() {
                 match state_opt {
-                    Some(s) => match s {
-                        StreamState::Some(chunk) => chunks.push(chunk),
-                        StreamState::Waiting => return Err(WriteBatchError::StreamWaiting),
-                    },
-                    None => (),
+                    StreamState::Some(chunk) => chunks.push(chunk),
+                    StreamState::Waiting => return Err(WriteBatchError::StreamWaiting),
                 }
             }
 

@@ -117,8 +117,8 @@ impl From<&RegionMetadata> for RawRegionMetadata {
         RawRegionMetadata {
             id: data.id,
             name: data.name.clone(),
-            columns: (&*data.columns).into(),
-            column_families: (&data.column_families).into(),
+            columns: RawColumnsMetadata::from(&*data.columns),
+            column_families: RawColumnFamiliesMetadata::from(&data.column_families),
             version: data.version,
         }
     }
@@ -274,7 +274,7 @@ impl From<RawColumnsMetadata> for ColumnsMetadata {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnFamiliesMetadata {
     /// Map column family id to column family metadata.
     id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
@@ -304,7 +304,7 @@ impl From<RawColumnFamiliesMetadata> for ColumnFamiliesMetadata {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnFamilyMetadata {
     /// Column family name.
     pub name: String,

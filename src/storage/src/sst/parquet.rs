@@ -65,7 +65,7 @@ impl<'a> ParquetWriter<'a> {
         let writer = object.writer(0).await.context(error::FlushIoSnafu)?;
 
         // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
-        let encodings = get_encoding_for_schema(&*schema, |_| Encoding::Plain);
+        let encodings = get_encoding_for_schema(schema, |_| Encoding::Plain);
 
         let mut sink = FileSink::try_new(
             writer,
