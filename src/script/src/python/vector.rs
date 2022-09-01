@@ -222,7 +222,6 @@ impl PyVector {
         self.vector.to_arrow_array()
     }
 
-    #[inline]
     fn scalar_arith_op<F>(
         &self,
         other: PyObjectRef,
@@ -315,7 +314,6 @@ impl PyVector {
             .into())
     }
 
-    #[inline]
     fn arith_op<F>(
         &self,
         other: PyObjectRef,
@@ -739,7 +737,6 @@ fn is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
 /// if `obj` can be convert to given ConcreteDataType then return inner `Value` else return None
 /// if dtype is None, return types with highest precision
 /// Not used for now but may be use in future
-#[allow(unused)]
 pub fn pyobj_try_to_typed_val(
     obj: PyObjectRef,
     vm: &VirtualMachine,
