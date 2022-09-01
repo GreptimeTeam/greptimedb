@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::data_type::DataType;
 use crate::prelude::{DataTypeRef, LogicalTypeId, Value};
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StringType;
 
 impl StringType {

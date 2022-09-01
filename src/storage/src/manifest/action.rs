@@ -18,7 +18,7 @@ use crate::metadata::{ColumnFamilyMetadata, ColumnMetadata, VersionNumber};
 use crate::sst::FileMeta;
 
 /// Minimal data that could be used to persist and recover [RegionMetadata](crate::metadata::RegionMetadata).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawRegionMetadata {
     pub id: RegionId,
     pub name: String,
