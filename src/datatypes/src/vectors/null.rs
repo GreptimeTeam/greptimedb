@@ -5,10 +5,10 @@ use std::sync::Arc;
 use arrow::array::ArrayRef;
 use arrow::array::{Array, NullArray};
 use arrow::datatypes::DataType as ArrowDataType;
-use snafu::OptionExt;
+use snafu::{ensure, OptionExt};
 
 use crate::data_type::ConcreteDataType;
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::serialize::Serializable;
 use crate::types::NullType;
 use crate::value::{Value, ValueRef};
@@ -144,14 +144,28 @@ impl MutableVector for NullVectorBuilder {
         vector
     }
 
-    fn push_value_ref(&mut self, _value: ValueRef) -> Result<()> {
-        // For null vector builder, we just ignore input type now.
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        ensure!(
+            value.is_null(),
+            error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to null", value),
+            }
+        );
+
         self.length += 1;
         Ok(())
     }
 
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
-        // For null vector builder, we just ignore input type now.
+        vector
+            .as_any()
+            .downcast_ref::<NullVector>()
+            .with_context(|| error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to convert vector from {} to NullVector",
+                    vector.vector_type_name()
+                ),
+            })?;
         assert!(
             offset + length < vector.len(),
             "offset {} + length {} must less than {}",
@@ -159,6 +173,7 @@ impl MutableVector for NullVectorBuilder {
             length,
             vector.len()
         );
+
         self.length += length;
         Ok(())
     }
