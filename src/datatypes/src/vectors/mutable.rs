@@ -35,6 +35,6 @@ pub trait MutableVector: Send + Sync {
     /// Returns error if data type unmatch.
     ///
     /// # Panics
-    /// Panics if `offset + length >= vector.len()`.
+    /// Panics if `offset + length > vector.len()`.
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()>;
 }

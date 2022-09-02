@@ -184,11 +184,13 @@ mod tests {
 
     use super::*;
     use crate::arrow_array::BinaryArray;
+    use crate::data_type::DataType;
     use crate::serialize::Serializable;
+    use crate::types::BinaryType;
 
     #[test]
     fn test_binary_vector_misc() {
-        let v = BinaryVector::from(BinaryArray::from_slice(&vec![vec![1, 2, 3], vec![1, 2, 3]]));
+        let v = BinaryVector::from(BinaryArray::from_slice(&[vec![1, 2, 3], vec![1, 2, 3]]));
 
         assert_eq!(2, v.len());
         assert_eq!("BinaryVector", v.vector_type_name());
@@ -210,8 +212,7 @@ mod tests {
 
     #[test]
     fn test_serialize_binary_vector_to_json() {
-        let vector =
-            BinaryVector::from(BinaryArray::from_slice(&vec![vec![1, 2, 3], vec![1, 2, 3]]));
+        let vector = BinaryVector::from(BinaryArray::from_slice(&[vec![1, 2, 3], vec![1, 2, 3]]));
 
         let json_value = vector.serialize_to_json().unwrap();
         assert_eq!(
@@ -237,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_from_arrow_array() {
-        let arrow_array = BinaryArray::from_slice(&vec![vec![1, 2, 3], vec![1, 2, 3]]);
+        let arrow_array = BinaryArray::from_slice(&[vec![1, 2, 3], vec![1, 2, 3]]);
         let original = arrow_array.clone();
         let vector = BinaryVector::from(arrow_array);
         assert_eq!(original, vector.array);
@@ -285,5 +286,24 @@ mod tests {
         let slots = validity.slots().unwrap();
         assert_eq!(1, slots.null_count());
         assert!(!slots.get_bit(1));
+    }
+
+    #[test]
+    fn test_binary_vector_builder() {
+        let input = BinaryVector::from_slice(&[b"world", b"one", b"two"]);
+
+        let mut builder = BinaryType::default().create_mutable(3);
+        builder
+            .push_value_ref(ValueRef::Binary("hello".as_bytes()))
+            .unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(BinaryVector::from_slice(&[b"hello", b"one", b"two"]));
+        assert_eq!(expect, vector);
     }
 }

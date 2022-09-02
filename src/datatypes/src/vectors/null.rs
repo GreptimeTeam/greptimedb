@@ -167,7 +167,7 @@ impl MutableVector for NullVectorBuilder {
                 ),
             })?;
         assert!(
-            offset + length < vector.len(),
+            offset + length <= vector.len(),
             "offset {} + length {} must less than {}",
             offset,
             length,
@@ -184,6 +184,7 @@ mod tests {
     use serde_json;
 
     use super::*;
+    use crate::data_type::DataType;
 
     #[test]
     fn test_null_vector_misc() {
@@ -231,5 +232,22 @@ mod tests {
         let vector = NullVector::new(5);
         assert_eq!(Validity::AllNull, vector.validity());
         assert_eq!(5, vector.null_count());
+    }
+
+    #[test]
+    fn test_null_vector_builder() {
+        let mut builder = NullType::default().create_mutable(3);
+        builder.push_value_ref(ValueRef::Null).unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+
+        let input = NullVector::new(3);
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(input);
+        assert_eq!(expect, vector);
     }
 }

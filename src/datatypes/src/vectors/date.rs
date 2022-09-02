@@ -237,9 +237,11 @@ impl ScalarVectorBuilder for DateVectorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_type::DataType;
+    use crate::types::DateType;
 
     #[test]
-    pub fn test_build_date_vector() {
+    fn test_build_date_vector() {
         let mut builder = DateVectorBuilder::with_capacity(4);
         builder.push(Some(Date::new(1)));
         builder.push(None);
@@ -260,10 +262,33 @@ mod tests {
     }
 
     #[test]
-    pub fn test_date_scalar() {
+    fn test_date_scalar() {
         let vector = DateVector::from_slice(&[Date::new(1), Date::new(2)]);
         assert_eq!(2, vector.len());
         assert_eq!(Some(Date::new(1)), vector.get_data(0));
         assert_eq!(Some(Date::new(2)), vector.get_data(1));
+    }
+
+    #[test]
+    fn test_date_vector_builder() {
+        let input = DateVector::from_slice(&[Date::new(1), Date::new(2), Date::new(3)]);
+
+        let mut builder = DateType::default().create_mutable(3);
+        builder
+            .push_value_ref(ValueRef::Date(Date::new(5)))
+            .unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(DateVector::from_slice(&[
+            Date::new(5),
+            Date::new(2),
+            Date::new(3),
+        ]));
+        assert_eq!(expect, vector);
     }
 }

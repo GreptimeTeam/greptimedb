@@ -239,9 +239,11 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use super::*;
+    use crate::data_type::DataType;
+    use crate::types::DateTimeType;
 
     #[test]
-    pub fn test_datetime_vector() {
+    fn test_datetime_vector() {
         let v = DateTimeVector::new(PrimitiveArray::from_vec(vec![1, 2, 3]));
         assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
         assert_eq!(3, v.len());
@@ -275,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_datetime_vector_builder() {
+    fn test_datetime_vector_builder() {
         let mut builder = DateTimeVectorBuilder::with_capacity(3);
         builder.push(Some(DateTime::new(1)));
         builder.push(None);
@@ -286,5 +288,26 @@ mod tests {
         assert_eq!(Value::DateTime(DateTime::new(1)), v.get(0));
         assert_eq!(Value::Null, v.get(1));
         assert_eq!(Value::DateTime(DateTime::new(-1)), v.get(2));
+
+        let input =
+            DateTimeVector::from_slice(&[DateTime::new(1), DateTime::new(2), DateTime::new(3)]);
+
+        let mut builder = DateTimeType::default().create_mutable(3);
+        builder
+            .push_value_ref(ValueRef::DateTime(DateTime::new(5)))
+            .unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(DateTimeVector::from_slice(&[
+            DateTime::new(5),
+            DateTime::new(2),
+            DateTime::new(3),
+        ]));
+        assert_eq!(expect, vector);
     }
 }

@@ -116,7 +116,7 @@ pub trait Vector: Send + Sync + Serializable + Debug {
     /// Slices the `Vector`, returning a new `VectorRef`.
     ///
     /// # Panics
-    /// This function panics if `offset + length >= self.len()`.
+    /// This function panics if `offset + length > self.len()`.
     fn slice(&self, offset: usize, length: usize) -> VectorRef;
 
     /// Returns the clone of value at `index`.

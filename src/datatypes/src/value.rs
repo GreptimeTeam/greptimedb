@@ -428,9 +428,9 @@ pub enum ListValueRef<'a> {
 }
 
 impl<'a> ListValueRef<'a> {
-    fn to_value(&self) -> Value {
+    fn to_value(self) -> Value {
         match self {
-            ListValueRef::Indexed { vector, idx } => vector.get(*idx),
+            ListValueRef::Indexed { vector, idx } => vector.get(idx),
             ListValueRef::Ref(v) => Value::List((*v).clone()),
         }
     }
@@ -453,7 +453,7 @@ impl<'a> Ord for ListValueRef<'a> {
 
 impl<'a> PartialOrd for ListValueRef<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(&other))
+        Some(self.cmp(other))
     }
 }
 
@@ -786,21 +786,22 @@ mod tests {
     fn test_into_value_ref() {
         macro_rules! check_into_value_ref {
             ($Variant: ident, $data: expr, $PrimitiveType: ident, $Wrapper: ident) => {
+                let data: $PrimitiveType = $data;
                 assert_eq!(
-                    ValueRef::$Variant($Wrapper::from($data)),
-                    $data.into_value_ref()
+                    ValueRef::$Variant($Wrapper::from(data)),
+                    data.into_value_ref()
                 );
                 assert_eq!(
-                    ValueRef::$Variant($Wrapper::from($data)),
-                    ValueRef::from($data)
+                    ValueRef::$Variant($Wrapper::from(data)),
+                    ValueRef::from(data)
                 );
                 assert_eq!(
-                    ValueRef::$Variant($Wrapper::from($data)),
-                    Some($data).into_value_ref()
+                    ValueRef::$Variant($Wrapper::from(data)),
+                    Some(data).into_value_ref()
                 );
                 assert_eq!(
-                    ValueRef::$Variant($Wrapper::from($data)),
-                    ValueRef::from(Some($data))
+                    ValueRef::$Variant($Wrapper::from(data)),
+                    ValueRef::from(Some(data))
                 );
                 let x: Option<$PrimitiveType> = None;
                 assert_eq!(ValueRef::Null, x.into_value_ref());
@@ -815,14 +816,14 @@ mod tests {
         }
 
         check_primitive_into_value_ref!(Boolean, true, bool);
-        check_primitive_into_value_ref!(UInt8, 10u8, u8);
-        check_primitive_into_value_ref!(UInt16, 20u16, u16);
-        check_primitive_into_value_ref!(UInt32, 30u32, u32);
-        check_primitive_into_value_ref!(UInt64, 40u64, u64);
-        check_primitive_into_value_ref!(Int8, -10i8, i8);
-        check_primitive_into_value_ref!(Int16, -20i16, i16);
-        check_primitive_into_value_ref!(Int32, -30i32, i32);
-        check_primitive_into_value_ref!(Int64, -40i64, i64);
+        check_primitive_into_value_ref!(UInt8, 10, u8);
+        check_primitive_into_value_ref!(UInt16, 20, u16);
+        check_primitive_into_value_ref!(UInt32, 30, u32);
+        check_primitive_into_value_ref!(UInt64, 40, u64);
+        check_primitive_into_value_ref!(Int8, -10, i8);
+        check_primitive_into_value_ref!(Int16, -20, i16);
+        check_primitive_into_value_ref!(Int32, -30, i32);
+        check_primitive_into_value_ref!(Int64, -40, i64);
         check_into_value_ref!(Float32, 10.0, f32, OrderedF32);
         check_into_value_ref!(Float64, 10.0, f64, OrderedF64);
 

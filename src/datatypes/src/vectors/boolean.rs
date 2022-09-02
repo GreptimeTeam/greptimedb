@@ -195,7 +195,9 @@ mod tests {
     use serde_json;
 
     use super::*;
+    use crate::data_type::DataType;
     use crate::serialize::Serializable;
+    use crate::types::BooleanType;
 
     #[test]
     fn test_boolean_vector_misc() {
@@ -302,5 +304,22 @@ mod tests {
         let vector = BooleanVector::from(vec![true, false, false]);
         assert_eq!(0, vector.null_count());
         assert_eq!(Validity::AllValid, vector.validity());
+    }
+
+    #[test]
+    fn test_boolean_vector_builder() {
+        let input = BooleanVector::from_slice(&[true, false, true]);
+
+        let mut builder = BooleanType::default().create_mutable(3);
+        builder.push_value_ref(ValueRef::Boolean(true)).unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(BooleanVector::from_slice(&[true, false, true]));
+        assert_eq!(expect, vector);
     }
 }

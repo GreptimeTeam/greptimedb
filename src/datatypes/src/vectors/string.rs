@@ -215,6 +215,7 @@ mod tests {
     use serde_json;
 
     use super::*;
+    use crate::data_type::DataType;
 
     #[test]
     fn test_string_vector_misc() {
@@ -289,5 +290,22 @@ mod tests {
         assert_eq!(None, iter.next().unwrap());
         assert_eq!("world", iter.next().unwrap().unwrap());
         assert_eq!(None, iter.next());
+    }
+
+    #[test]
+    fn test_string_vector_builder() {
+        let mut builder = StringType::default().create_mutable(3);
+        builder.push_value_ref(ValueRef::String("hello")).unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+
+        let input = StringVector::from_slice(&["world", "one", "two"]);
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(StringVector::from_slice(&["hello", "one", "two"]));
+        assert_eq!(expect, vector);
     }
 }

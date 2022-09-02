@@ -320,7 +320,9 @@ mod tests {
     use serde_json;
 
     use super::*;
+    use crate::data_type::DataType;
     use crate::serialize::Serializable;
+    use crate::types::Int64Type;
 
     fn check_vec(v: PrimitiveVector<i32>) {
         assert_eq!(4, v.len());
@@ -443,5 +445,22 @@ mod tests {
         assert_eq!(20, v.memory_size());
         let v = PrimitiveVector::<i64>::from(vec![Some(0i64), Some(1i64), Some(2i64), None, None]);
         assert_eq!(40, v.memory_size());
+    }
+
+    #[test]
+    fn test_primitive_vector_builder() {
+        let mut builder = Int64Type::default().create_mutable(3);
+        builder.push_value_ref(ValueRef::Int64(123)).unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+
+        let input = Int64Vector::from_slice(&[7, 8, 9]);
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(Int64Vector::from_slice(&[123, 8, 9]));
+        assert_eq!(expect, vector);
     }
 }
