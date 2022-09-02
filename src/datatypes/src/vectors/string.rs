@@ -117,7 +117,7 @@ impl Vector for StringVector {
 impl ScalarVector for StringVector {
     type OwnedItem = String;
     type RefItem<'a> = &'a str;
-    type Iter<'a> = ZipValidity<'a, &'a str, Utf8ValuesIter<'a, i64>>;
+    type Iter<'a> = ZipValidity<'a, &'a str, Utf8ValuesIter<'a, i32>>;
     type Builder = StringVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
@@ -218,7 +218,7 @@ mod tests {
 
         let arrow_arr = v.to_arrow_array();
         assert_eq!(3, arrow_arr.len());
-        assert_eq!(&ArrowDataType::LargeUtf8, arrow_arr.data_type());
+        assert_eq!(&ArrowDataType::Utf8, arrow_arr.data_type());
     }
 
     #[test]

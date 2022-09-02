@@ -268,7 +268,7 @@ mod tests {
             ConcreteDataType::String(_)
         ));
         assert!(matches!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::LargeUtf8),
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
             ConcreteDataType::String(_)
         ));
         assert_eq!(
