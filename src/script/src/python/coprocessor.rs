@@ -337,8 +337,8 @@ fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
     Ok(args)
 }
 
-/// convert a single PyVector or a number(a constant) into a Array(or a constant array)
-fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<ArrayRef> {
+/// convert a single PyVector or a number(a constant)(wrapping in PyObjectRef) into a Array(or a constant array)
+fn py_vec_obj_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<ArrayRef> {
     if is_instance::<PyVector>(obj, vm) {
         let pyv = obj.payload::<PyVector>().with_context(|| {
             ret_other_error_with(format!("can't cast obj {:?} to PyVector", obj))
@@ -385,11 +385,11 @@ fn try_into_columns(
         })?;
         let cols = tuple
             .iter()
-            .map(|obj| py_vec_to_array_ref(obj, vm, col_len))
+            .map(|obj| py_vec_obj_to_array_ref(obj, vm, col_len))
             .collect::<Result<Vec<ArrayRef>>>()?;
         Ok(cols)
     } else {
-        let col = py_vec_to_array_ref(obj, vm, col_len)?;
+        let col = py_vec_obj_to_array_ref(obj, vm, col_len)?;
         Ok(vec![col])
     }
 }

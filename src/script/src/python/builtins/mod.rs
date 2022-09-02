@@ -1,4 +1,5 @@
 //!  Builtin module contains GreptimeDB builtin udf/udaf
+
 #[cfg(test)]
 #[allow(clippy::print_stdout)]
 mod test;
@@ -272,6 +273,7 @@ pub(crate) mod greptime_builtin {
 
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{function::FunctionContext, Function};
+    use datafusion::arrow::compute::comparison::{gt_eq_scalar, lt_eq_scalar};
     use datafusion::arrow::error::ArrowError;
     use datafusion::arrow::scalar::{PrimitiveScalar, Scalar};
     use datafusion::physical_plan::expressions;
@@ -282,8 +284,9 @@ pub(crate) mod greptime_builtin {
     use datatypes::arrow::compute;
     use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector};
     use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
-    use rustpython_vm::function::{FuncArgs, OptionalArg};
-    use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
+    use rustpython_vm::function::{FuncArgs, OptionalArg, KwArgs};
+    use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine, PyPayload};
+    
 
     use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
@@ -658,7 +661,7 @@ pub(crate) mod greptime_builtin {
         let args = vec![base.as_vector_ref(), arg_pow];
         let res = PowFunction::default()
             .eval(FunctionContext::default(), &args)
-            .unwrap();
+            .map_err(|err|vm.new_runtime_error(format!("Fail to eval pow() withi given args: {args:?}.")))?;
         Ok(res.into())
     }
 
@@ -734,7 +737,7 @@ pub(crate) mod greptime_builtin {
         Ok(ret)
     }
 
-    /// `func`: exec on sliding window slice of given `arr`, expect it to return PyVector too
+    /// `func`: exec on sliding window slice of given `arr`, expect it to always return a PyVector of one element
     /// `ts`: a vector of time stamp
     /// `arr`: actual data vector
     /// `duration`: the size of sliding window, also is the default step of sliding window's per step
@@ -748,14 +751,15 @@ pub(crate) mod greptime_builtin {
     ) -> PyResult<PyVector> {
         // TODO: try to return a PyVector if possible, using concat array in arrow's compute module
         // 1. slice them according to duration
-        let ty_error = |err: ArrowError| vm.new_runtime_error(format!("Arrow Error: {err:#?}"));
+        let arrow_error = |err: ArrowError| vm.new_runtime_error(format!("Arrow Error: {err:#?}"));
+        let datatype_error = |err: datatypes::Error|vm.new_runtime_error(format!("DataType Errors!: {err:#?}"));
         let ts: ArrayRef = ts.to_arrow_array();
         let arr: ArrayRef = arr.to_arrow_array();
         let slices = {
             let oldest = compute::aggregate::min(&*ts)
-                .map_err(ty_error)?;
+                .map_err(arrow_error)?;
             let newest = compute::aggregate::max(&*ts)
-                .map_err(ty_error)?;
+                .map_err(arrow_error)?;
             gen_inteveral(&*oldest, &*newest, duration, vm)?
         };
         let windows = {
@@ -768,22 +772,57 @@ pub(crate) mod greptime_builtin {
                 })
                 .map(|(first, second)| {
                     compute::boolean::and(
-                        &compute::comparison::gt_eq_scalar(&*ts, first),
-                        &compute::comparison::lt_eq_scalar(&*ts, second),
+                        &gt_eq_scalar(&*ts, first),
+                        &lt_eq_scalar(&*ts, second),
                     )
-                    .unwrap()
+                    .map_err(arrow_error)
                 })
-                .map(|mask| compute::filter::filter(&*arr, &mask).unwrap())
-                .collect::<Vec<_>>()
+                .map(|mask| 
+                    match mask{
+                        Ok(mask) => compute::filter::filter(&*arr, &mask).map_err(arrow_error),
+                        Err(e) => Err(e),
+                    }
+                )
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         // 2. apply function on each slice
-
+        let fn_results = windows.into_iter().map(|window|{
+            Helper::try_into_vector(window)
+            .map(PyVector::from)
+            .map_err(datatype_error)
+        }).map(|v|{
+            match v{
+                Ok(v) => {
+                    let args = FuncArgs::new(vec![v.into_pyobject(vm)], KwArgs::default());
+                    let ret = func.invoke(args, vm);
+                    match ret{
+                        Ok(obj) => match obj.payload::<PyVector>(){
+                            Some(v) => Ok(v.to_arrow_array()),
+                            None => 
+                            Err(vm
+                                .new_runtime_error(
+                                    format!("expect interval()'s func return a PyVector(`vector`) at all time, found return to be {:?}.", obj)
+                                )
+                            ),
+                        },
+                        Err(e) => Err(e),
+                    }
+                },
+                Err(e) => Err(e),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
         // 3. get returen vector and concat them
+        let ret = fn_results.into_iter().try_reduce(|acc, x|{
+            compute::concatenate::concatenate(&[acc.as_ref(), x.as_ref()])
+            .map(
+                Arc::from
+            )
+        }).map_err(arrow_error)?.unwrap();
         // 4. return result vector
-        // compute::comparison::le
-        todo!()
+        Ok(Helper::try_into_vector(ret).map_err(datatype_error)?.into())
     }
 
     /// return first element in a `PyVector` in sliced new `PyVector`, if vector's length is zero, return a zero sized slice instead
