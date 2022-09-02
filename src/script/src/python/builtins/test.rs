@@ -1,6 +1,4 @@
-use rustpython_vm::class::PyClassImpl;
-
-use std::{sync::Arc, collections::HashMap, fs::File, io::Read, path::Path};
+use std::{collections::HashMap, fs::File, io::Read, path::Path, sync::Arc};
 
 use arrow::{
     array::{Float64Array, Int64Array, PrimitiveArray},
@@ -9,6 +7,7 @@ use arrow::{
 };
 use datatypes::vectors::VectorRef;
 use ron::from_str as from_ron_string;
+use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::{
     builtins::{PyFloat, PyInt, PyList},
     convert::ToPyObject,
@@ -16,11 +15,11 @@ use rustpython_vm::{
     AsObject, PyObjectRef, VirtualMachine,
 };
 use serde::{Deserialize, Serialize};
-use super::greptime_builtin;
-use crate::python::{PyVector, utils::is_instance};
 
+use super::greptime_builtin;
 use super::*;
 use crate::python::utils::format_py_error;
+use crate::python::{utils::is_instance, PyVector};
 #[test]
 fn convert_scalar_to_py_obj_and_back() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
@@ -335,12 +334,16 @@ fn run_builtin_fn_testcases() {
             match res {
                 Err(e) => {
                     let err_res = format_py_error(e, vm).to_string();
-                    if case.expect.is_ok(){
-                        println!("\nError:\n{err_res}");
-                        panic!("Expect Ok, found Error")
-                    }
-                    if !err_res.contains(&case.expect.unwrap_err()){
-                        panic!("Error message not containing")
+                    match case.expect{
+                        Ok(v) => {
+                            println!("\nError:\n{err_res}");
+                            panic!("Expect Ok: {v:?}, found Error");
+                        },
+                        Err(err) => {
+                            if !err_res.contains(&err){
+                                panic!("Error message not containing, expect {err_res}, found {}", err)
+                            }
+                        }
                     }
                 }
                 Ok(obj) => {
@@ -391,17 +394,17 @@ fn set_lst_of_vecs_in_scope(
     args: Vec<PyVector>,
 ) -> Result<(), String> {
     let res = arg_names.iter().zip(args).try_for_each(|(name, vector)| {
-            scope
-                .locals
-                .as_object()
-                .set_item(name.to_owned(), vm.new_pyobj(vector), vm)
-                .map_err(|err| {
-                    format!(
-                        "Error in setting var {name} in scope: \n{}",
-                        format_py_error(err, vm).to_string()
-                    )
-                })
-        });
+        scope
+            .locals
+            .as_object()
+            .set_item(name.to_owned(), vm.new_pyobj(vector), vm)
+            .map_err(|err| {
+                format!(
+                    "Error in setting var {name} in scope: \n{}",
+                    format_py_error(err, vm)
+                )
+            })
+    });
     res
 }
 
