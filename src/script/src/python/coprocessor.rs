@@ -22,6 +22,8 @@ use rustpython_parser::{
 };
 use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
+#[cfg(test)]
+use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
 use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
 use vm::scope::Scope;
@@ -31,14 +33,11 @@ use crate::fail_parse_error;
 use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::{ret_parse_error, DecoratorArgs};
 use crate::python::error::{
-    ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyParseSnafu, Result,
-    TypeCastSnafu, ret_other_error_with
+    ensure, ret_other_error_with, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu,
+    PyParseSnafu, Result, TypeCastSnafu,
 };
 use crate::python::utils::{format_py_error, py_vec_obj_to_array};
 use crate::python::{utils::is_instance, PyVector};
-
-#[cfg(test)]
-use serde::Deserialize;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
