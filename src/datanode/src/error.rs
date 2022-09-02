@@ -179,6 +179,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc::Error,
     },
+
+    #[snafu(display("Invalid ColumnDef in protobuf msg: {}", msg))]
+    InvalidColumnDef { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -204,7 +207,8 @@ impl ErrorExt for Error {
             | Error::SqlTypeNotSupported { .. }
             | Error::CreateSchema { .. }
             | Error::KeyColumnNotFound { .. }
-            | Error::ConstraintNotSupported { .. } => StatusCode::InvalidArguments,
+            | Error::ConstraintNotSupported { .. }
+            | Error::InvalidColumnDef { .. } => StatusCode::InvalidArguments,
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }
             | Error::ParseAddr { .. }

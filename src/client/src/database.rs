@@ -1,9 +1,8 @@
-use std::ops::Deref;
 use std::sync::Arc;
 
 use api::v1::codec::SelectResult as GrpcSelectResult;
 use api::v1::{
-    object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr,
+    object_expr, object_result, select_expr, CreateExpr, DatabaseRequest, ExprHeader, InsertExpr,
     MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, PhysicalPlan,
     SelectExpr,
 };
@@ -13,10 +12,9 @@ use common_grpc::DefaultAsPlanImpl;
 use datafusion::physical_plan::ExecutionPlan;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{self, MissingResultSnafu};
+use crate::error;
 use crate::{
-    error::DatanodeSnafu, error::DecodeSelectSnafu, error::EncodePhysicalSnafu,
-    error::MissingHeaderSnafu, Client, Result,
+    error::DatanodeSnafu, error::DecodeSelectSnafu, error::EncodePhysicalSnafu, Client, Result,
 };
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -97,36 +95,7 @@ impl Database {
         };
 
         let obj_result = self.object(expr).await?;
-
-        let header = obj_result.header.context(MissingHeaderSnafu)?;
-
-        if !StatusCode::is_success(header.code) {
-            return DatanodeSnafu {
-                code: header.code,
-                msg: header.err_msg,
-            }
-            .fail();
-        }
-
-        let obj_result = obj_result.result.context(MissingResultSnafu {
-            name: "select_result".to_string(),
-            expected: 1_usize,
-            actual: 0_usize,
-        })?;
-
-        let result = match obj_result {
-            object_result::Result::Select(select) => {
-                let result = select
-                    .raw_data
-                    .deref()
-                    .try_into()
-                    .context(DecodeSelectSnafu)?;
-                ObjectResult::Select(result)
-            }
-            object_result::Result::Mutate(mutate) => ObjectResult::Mutate(mutate),
-        };
-
-        Ok(result)
+        obj_result.try_into()
     }
 
     // TODO(jiachun) update/delete
@@ -157,12 +126,52 @@ impl Database {
 
         Ok(res)
     }
+
+    pub async fn create(&self, expr: CreateExpr) -> Result<ObjectResult> {
+        let header = ExprHeader {
+            version: PROTOCOL_VERSION,
+        };
+        let expr = ObjectExpr {
+            header: Some(header),
+            expr: Some(object_expr::Expr::Create(expr)),
+        };
+        let result = self.object(expr).await?;
+        result.try_into()
+    }
 }
 
 #[derive(Debug)]
 pub enum ObjectResult {
     Select(GrpcSelectResult),
     Mutate(GrpcMutateResult),
+}
+
+impl TryFrom<api::v1::ObjectResult> for ObjectResult {
+    type Error = error::Error;
+
+    fn try_from(object_result: api::v1::ObjectResult) -> std::result::Result<Self, Self::Error> {
+        let header = object_result.header.context(error::MissingHeaderSnafu)?;
+        if !StatusCode::is_success(header.code) {
+            return DatanodeSnafu {
+                code: header.code,
+                msg: header.err_msg,
+            }
+            .fail();
+        }
+
+        let obj_result = object_result.result.context(error::MissingResultSnafu {
+            name: "result".to_string(),
+            expected: 1_usize,
+            actual: 0_usize,
+        })?;
+        Ok(match obj_result {
+            object_result::Result::Select(select) => {
+                let result = (*select.raw_data).try_into().context(DecodeSelectSnafu)?;
+                ObjectResult::Select(result)
+            }
+            object_result::Result::Mutate(mutate) => ObjectResult::Mutate(mutate),
+        })
+    }
 }
 
 pub enum Select {

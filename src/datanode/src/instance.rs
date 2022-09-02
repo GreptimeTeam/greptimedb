@@ -267,6 +267,7 @@ impl GrpcQueryHandler for Instance {
         let object_resp = match query.expr {
             Some(object_expr::Expr::Insert(insert_expr)) => self.handle_insert(insert_expr).await,
             Some(object_expr::Expr::Select(select_expr)) => self.handle_select(select_expr).await,
+            Some(object_expr::Expr::Create(create_expr)) => self.handle_create(create_expr).await,
             other => {
                 return servers::error::NotSupportedSnafu {
                     feat: format!("{:?}", other),
