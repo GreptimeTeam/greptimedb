@@ -291,8 +291,8 @@ pub(crate) mod greptime_builtin {
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
-    use crate::python::utils::is_instance;
     use crate::python::utils::PyVectorRef;
+    use crate::python::utils::{is_instance, py_vec_obj_to_array};
     use crate::python::PyVector;
 
     #[pyfunction]
@@ -744,10 +744,10 @@ pub(crate) mod greptime_builtin {
     /// `duration`: the size of sliding window, also is the default step of sliding window's per step
     #[pyfunction]
     fn interval(
-        func: PyRef<PyFunction>,
         ts: PyVectorRef,
         arr: PyVectorRef,
         duration: i64,
+        func: PyRef<PyFunction>,
         vm: &VirtualMachine,
     ) -> PyResult<PyVector> {
         // TODO: try to return a PyVector if possible, using concat array in arrow's compute module
@@ -792,14 +792,18 @@ pub(crate) mod greptime_builtin {
                     let args = FuncArgs::new(vec![v.into_pyobject(vm)], KwArgs::default());
                     let ret = func.invoke(args, vm);
                     match ret{
-                        Ok(obj) => match obj.payload::<PyVector>(){
-                            Some(v) => Ok(v.to_arrow_array()),
-                            None => Err(vm
+                        Ok(obj) => match py_vec_obj_to_array(&obj, vm, 1){
+                            Ok(v) => if v.len()==1{
+                                Ok(v)
+                            }else{
+                                Err(vm.new_runtime_error(format!("Expect return's length to be at most one, found to be length of {}.", v.len())))
+                            },
+                            Err(err) => Err(vm
                                 .new_runtime_error(
-                                    format!("expect interval()'s func return a PyVector(`vector`) at all time, found return to be {:?}.", obj)
+                                    format!("expect `interval()`'s `func` return a PyVector(`vector`) or int/float/bool, found return to be {:?}, error msg: {err}", obj)
                                 )
-                            ),
-                        },
+                            )
+                        }
                         Err(e) => Err(e),
                     }
                 },
