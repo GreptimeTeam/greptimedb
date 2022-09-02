@@ -266,11 +266,14 @@ fn eval_aggr_fn<T: AggregateExpr>(
 ///
 #[pymodule]
 pub(crate) mod greptime_builtin {
+    use std::fmt::format;
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{function::FunctionContext, Function};
+    use datafusion::arrow::error::ArrowError;
+    use datafusion::arrow::scalar::{PrimitiveScalar, Scalar};
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
@@ -278,9 +281,9 @@ pub(crate) mod greptime_builtin {
     use datatypes::arrow::array::{ArrayRef, NullArray};
     use datatypes::arrow::compute;
     use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector};
-    use rustpython_vm::builtins::{PyFloat, PyInt, PyStr};
-    use rustpython_vm::function::OptionalArg;
-    use rustpython_vm::{AsObject, PyObjectRef, PyResult, VirtualMachine};
+    use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
+    use rustpython_vm::function::{FuncArgs, OptionalArg};
+    use rustpython_vm::{AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine};
 
     use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
@@ -675,6 +678,139 @@ pub(crate) mod greptime_builtin {
         let ret = compute::concatenate::concatenate(&[&*fill, &*cur]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
+        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+            vm.new_type_error(format!(
+                "Can't cast result into vector, result: {:?}, err: {:?}",
+                ret, e
+            ))
+        })?;
+        Ok(ret.into())
+    }
+
+    /// generate interval time point
+    fn gen_inteveral(
+        oldest: &dyn Scalar,
+        newest: &dyn Scalar,
+        duration: i64,
+        vm: &VirtualMachine,
+    ) -> PyResult<Vec<PrimitiveScalar<i64>>> {
+        use arrow::datatypes::DataType;
+        match (oldest.data_type(), newest.data_type()) {
+            (DataType::Int64, DataType::Int64) => (),
+            _ => {
+                return Err(vm.new_type_error(format!(
+                    "Expect int64, found {:?} and {:?}",
+                    oldest.data_type(),
+                    newest.data_type()
+                )));
+            }
+        }
+        let ret: Vec<PrimitiveScalar<i64>> = Vec::new();
+        // TODO(discord9): replace the unwrap()
+        let oldest = oldest
+            .as_any()
+            .downcast_ref::<PrimitiveScalar<i64>>()
+            .unwrap()
+            .value()
+            .unwrap();
+        let newest = newest
+            .as_any()
+            .downcast_ref::<PrimitiveScalar<i64>>()
+            .unwrap()
+            .value()
+            .unwrap();
+        if oldest > newest {
+            return Err(vm.new_value_error(format!("{oldest} is greater than {newest}")));
+        }
+        let ret = if duration > 0 {
+            (oldest..=newest)
+                .step_by(duration as usize)
+                .map(|v| PrimitiveScalar::new(DataType::Int64, Some(v)))
+                .collect::<Vec<_>>()
+        } else {
+            return Err(vm.new_value_error(format!("duration: {duration} is not positive number.")));
+        };
+
+        Ok(ret)
+    }
+
+    /// `func`: exec on sliding window slice of given `arr`, expect it to return PyVector too
+    /// `ts`: a vector of time stamp
+    /// `arr`: actual data vector
+    /// `duration`: the size of sliding window, also is the default step of sliding window's per step
+    #[pyfunction]
+    fn interval(
+        func: PyRef<PyFunction>,
+        ts: PyVectorRef,
+        arr: PyVectorRef,
+        duration: i64,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyVector> {
+        // TODO: try to return a PyVector if possible, using concat array in arrow's compute module
+        // 1. slice them according to duration
+        let ty_error = |err: ArrowError| vm.new_runtime_error(format!("Arrow Error: {err:#?}"));
+        let ts: ArrayRef = ts.to_arrow_array();
+        let arr: ArrayRef = arr.to_arrow_array();
+        let slices = {
+            let oldest = compute::aggregate::min(&*ts)
+                .map_err(ty_error)?;
+            let newest = compute::aggregate::max(&*ts)
+                .map_err(ty_error)?;
+            gen_inteveral(&*oldest, &*newest, duration, vm)?
+        };
+        let windows = {
+            slices
+                .iter()
+                .zip({
+                    let mut it = slices.iter();
+                    it.next();
+                    it
+                })
+                .map(|(first, second)| {
+                    compute::boolean::and(
+                        &compute::comparison::gt_eq_scalar(&*ts, first),
+                        &compute::comparison::lt_eq_scalar(&*ts, second),
+                    )
+                    .unwrap()
+                })
+                .map(|mask| compute::filter::filter(&*arr, &mask).unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        // 2. apply function on each slice
+
+
+        // 3. get returen vector and concat them
+        // 4. return result vector
+        // compute::comparison::le
+        todo!()
+    }
+
+    /// return first element in a `PyVector` in sliced new `PyVector`, if vector's length is zero, return a zero sized slice instead
+    #[pyfunction]
+    fn first(arr: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let arr: ArrayRef = arr.to_arrow_array();
+        let ret = match arr.len() {
+            0 => arr.slice(0, 0),
+            _ => arr.slice(0, 1),
+        };
+        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+            vm.new_type_error(format!(
+                "Can't cast result into vector, result: {:?}, err: {:?}",
+                ret, e
+            ))
+        })?;
+        Ok(ret.into())
+    }
+
+    /// return last element in a `PyVector` in sliced new `PyVector`, if vector's length is zero, return a zero sized slice instead
+    #[pyfunction]
+    fn last(arr: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let arr: ArrayRef = arr.to_arrow_array();
+        let ret = match arr.len() {
+            0 => arr.slice(0, 0),
+            _ => arr.slice(arr.len() - 1, 1),
+        };
         let ret = Helper::try_into_vector(&*ret).map_err(|e| {
             vm.new_type_error(format!(
                 "Can't cast result into vector, result: {:?}, err: {:?}",
