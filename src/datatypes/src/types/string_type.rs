@@ -30,6 +30,6 @@ impl DataType for StringType {
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::LargeUtf8
+        ArrowDataType::Utf8
     }
 }

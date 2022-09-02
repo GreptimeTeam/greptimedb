@@ -178,7 +178,7 @@ fn try_into_scalar_value(value: Value, datatype: &ConcreteDataType) -> Result<Sc
         Value::Int64(v) => ScalarValue::Int64(Some(v)),
         Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
         Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
-        Value::String(v) => ScalarValue::LargeUtf8(Some(v.as_utf8().to_string())),
+        Value::String(v) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
         Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
         Value::Date(v) => ScalarValue::Date32(Some(v.val())),
         Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
@@ -201,7 +201,7 @@ fn try_convert_null_value(datatype: &ConcreteDataType) -> Result<ScalarValue> {
         ConcreteDataType::Float32(_) => ScalarValue::Float32(None),
         ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
         ConcreteDataType::Binary(_) => ScalarValue::LargeBinary(None),
-        ConcreteDataType::String(_) => ScalarValue::LargeUtf8(None),
+        ConcreteDataType::String(_) => ScalarValue::Utf8(None),
         _ => {
             return error::BadAccumulatorImplSnafu {
                 err_msg: format!(
@@ -330,10 +330,10 @@ mod tests {
             .unwrap()
         );
         assert_eq!(
-            ScalarValue::LargeUtf8(Some("hello".to_string())),
+            ScalarValue::Utf8(Some("hello".to_string())),
             try_into_scalar_value(
                 Value::String(StringBytes::from("hello")),
-                &ConcreteDataType::string_datatype()
+                &ConcreteDataType::string_datatype(),
             )
             .unwrap()
         );
@@ -394,7 +394,7 @@ mod tests {
             try_into_scalar_value(Value::Null, &ConcreteDataType::float64_datatype()).unwrap()
         );
         assert_eq!(
-            ScalarValue::LargeUtf8(None),
+            ScalarValue::Utf8(None),
             try_into_scalar_value(Value::Null, &ConcreteDataType::string_datatype()).unwrap()
         );
         assert_eq!(

@@ -299,16 +299,16 @@ mod tests {
             let batch = t.unwrap().df_recordbatch;
             assert_eq!(1, batch.num_rows());
             assert_eq!(4, batch.num_columns());
-            assert_eq!(&DataType::LargeUtf8, batch.column(0).data_type());
-            assert_eq!(&DataType::LargeUtf8, batch.column(1).data_type());
-            assert_eq!(&DataType::LargeUtf8, batch.column(2).data_type());
-            assert_eq!(&DataType::LargeUtf8, batch.column(3).data_type());
+            assert_eq!(&DataType::Utf8, batch.column(0).data_type());
+            assert_eq!(&DataType::Utf8, batch.column(1).data_type());
+            assert_eq!(&DataType::Utf8, batch.column(2).data_type());
+            assert_eq!(&DataType::Utf8, batch.column(3).data_type());
             assert_eq!(
                 "test_catalog",
                 batch
                     .column(0)
                     .as_any()
-                    .downcast_ref::<Utf8Array<i64>>()
+                    .downcast_ref::<Utf8Array<i32>>()
                     .unwrap()
                     .value(0)
             );
@@ -318,7 +318,7 @@ mod tests {
                 batch
                     .column(1)
                     .as_any()
-                    .downcast_ref::<Utf8Array<i64>>()
+                    .downcast_ref::<Utf8Array<i32>>()
                     .unwrap()
                     .value(0)
             );
@@ -328,7 +328,7 @@ mod tests {
                 batch
                     .column(2)
                     .as_any()
-                    .downcast_ref::<Utf8Array<i64>>()
+                    .downcast_ref::<Utf8Array<i32>>()
                     .unwrap()
                     .value(0)
             );
@@ -338,7 +338,7 @@ mod tests {
                 batch
                     .column(3)
                     .as_any()
-                    .downcast_ref::<Utf8Array<i64>>()
+                    .downcast_ref::<Utf8Array<i32>>()
                     .unwrap()
                     .value(0)
             );
