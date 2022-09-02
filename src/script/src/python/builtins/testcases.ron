@@ -670,7 +670,10 @@ pow(values, pows)"#,
         script: r#"
 from greptime import *
 pow(values, 1)"#,
-        expect: Err("TypeError: Can't cast operand of type `int` into `vector`.")
+        expect: Ok((
+            value: FloatVec([ 1.0, 2.0, 3.0]),
+            ty: Float64
+        ))
     ),
     TestCase(
         input: {
@@ -780,5 +783,15 @@ sin(num)"#,
 from greptime import *
 sin(num)"#,
         expect: Err("Can't cast object of type str into vector or scalar")
+    ),
+    TestCase(
+        input: {},
+        script: r#"
+from greptime import *
+datetime("7d")"#,
+        expect: Ok((
+            ty: Int64,
+            value: Int(604800)
+        ))
     ),
 ]
