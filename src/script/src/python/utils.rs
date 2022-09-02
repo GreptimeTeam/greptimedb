@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use datafusion::arrow::array::{ArrayRef, PrimitiveArray, BooleanArray};
-use rustpython_vm::builtins::{PyFloat, PyBool, PyInt};
+use datafusion::arrow::array::{ArrayRef, BooleanArray, PrimitiveArray};
+use rustpython_vm::builtins::{PyBool, PyFloat, PyInt};
 use rustpython_vm::{builtins::PyBaseExceptionRef, PyObjectRef, PyPayload, PyRef, VirtualMachine};
 use snafu::OptionExt;
 use snafu::{Backtrace, GenerateImplicitData};
@@ -34,7 +34,11 @@ pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error:
 }
 
 /// convert a single PyVector or a number(a constant)(wrapping in PyObjectRef) into a Array(or a constant array)
-pub fn py_vec_obj_to_array(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<ArrayRef, error::Error> {
+pub fn py_vec_obj_to_array(
+    obj: &PyObjectRef,
+    vm: &VirtualMachine,
+    col_len: usize,
+) -> Result<ArrayRef, error::Error> {
     if is_instance::<PyVector>(obj, vm) {
         let pyv = obj.payload::<PyVector>().with_context(|| {
             ret_other_error_with(format!("can't cast obj {:?} to PyVector", obj))
@@ -67,4 +71,3 @@ pub fn py_vec_obj_to_array(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usiz
         ret_other_error_with(format!("Expect a vector or a constant, found {:?}", obj)).fail()
     }
 }
-
