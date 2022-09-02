@@ -794,4 +794,18 @@ datetime("7d")"#,
             value: Int(604800)
         ))
     ),
+    TestCase(
+        input: {},
+        script: r#"
+from greptime import *
+datetime("7dd")"#,
+        expect: Err("Unknown time unit")
+    ),
+    TestCase(
+        input: {},
+        script: r#"
+from greptime import *
+datetime("d7")"#,
+        expect: Err("Python Runtime error, error:")
+    ),
 ]
