@@ -9,6 +9,10 @@ pub use snafu::ensure;
 use snafu::{prelude::Snafu, Backtrace};
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub(crate) fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
+    OtherSnafu { reason }
+}
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
