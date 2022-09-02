@@ -73,18 +73,20 @@ impl PostgresServer {
             let io_runtime = io_runtime.clone();
             let auth_handler = auth_handler.clone();
             let query_handler = query_handler.clone();
+
             async move {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
-                        // TODO: use our runtime
-                        let addr = io_stream.peer_addr().unwrap();
-                        process_socket(
-                            (io_stream, addr),
-                            auth_handler.clone(),
-                            query_handler.clone(),
-                            query_handler.clone(),
-                        );
+                        io_runtime.spawn(async move {
+                            process_socket(
+                                io_stream,
+                                auth_handler.clone(),
+                                query_handler.clone(),
+                                query_handler.clone(),
+                            )
+                            .await;
+                        });
                     }
                 };
             }
