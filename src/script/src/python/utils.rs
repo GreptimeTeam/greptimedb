@@ -65,7 +65,7 @@ pub fn py_vec_obj_to_array(
             .try_into_value::<bool>(vm)
             .map_err(|e| format_py_error(e, vm))?;
 
-        let ret = BooleanArray::from_iter(std::iter::repeat(Some(val)).take(5));
+        let ret = BooleanArray::from_iter(std::iter::repeat(Some(val)).take(col_len));
         Ok(Arc::new(ret) as _)
     } else {
         ret_other_error_with(format!("Expect a vector or a constant, found {:?}", obj)).fail()

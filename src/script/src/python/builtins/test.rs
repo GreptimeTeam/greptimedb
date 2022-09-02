@@ -382,7 +382,7 @@ fn set_item_into_scope(
         .map_err(|err| {
             format!(
                 "Error in setting var {name} in scope: \n{}",
-                format_py_error(err, vm).to_string()
+                format_py_error(err, vm)
             )
         })
 }

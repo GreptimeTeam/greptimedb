@@ -808,4 +808,23 @@ from greptime import *
 datetime("d7")"#,
         expect: Err("Python Runtime error, error:")
     ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "ts": Var(
+                ty: Int64,
+                value: IntVec([0, 9, 20])
+            ),
+        },
+        script: r#"
+from greptime import *
+interval(ts, values, 10, lambda x:sum(x))"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVec([3.0, 3.0])
+        ))
+    ),
 ]
