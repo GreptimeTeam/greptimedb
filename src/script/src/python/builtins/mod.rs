@@ -739,7 +739,7 @@ pub(crate) mod greptime_builtin {
     }
 
     /// `func`: exec on sliding window slice of given `arr`, expect it to always return a PyVector of one element
-    /// `ts`: a vector of time stamp
+    /// `ts`: a vector of time stamp, expect to be Monotonous increase
     /// `arr`: actual data vector
     /// `duration`: the size of sliding window, also is the default step of sliding window's per step
     #[pyfunction]
