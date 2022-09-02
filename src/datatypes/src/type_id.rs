@@ -1,3 +1,5 @@
+use common_time::timestamp::TimeUnit;
+
 use crate::data_type::ConcreteDataType;
 
 /// Unique identifier for logical data type.
@@ -30,6 +32,8 @@ pub enum LogicalTypeId {
     /// seconds/milliseconds/microseconds/nanoseconds, determined by precision.
     DateTime,
 
+    Timestamp(TimeUnit),
+
     List,
 }
 
@@ -54,6 +58,7 @@ impl LogicalTypeId {
             LogicalTypeId::Binary => ConcreteDataType::binary_datatype(),
             LogicalTypeId::Date => ConcreteDataType::date_datatype(),
             LogicalTypeId::DateTime => ConcreteDataType::datetime_datatype(),
+            LogicalTypeId::Timestamp(u) => ConcreteDataType::timestamp_datatype(*u),
             LogicalTypeId::List => {
                 ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
             }

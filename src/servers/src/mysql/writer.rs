@@ -103,6 +103,8 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                     Value::Binary(v) => row_writer.write_col(v.deref())?,
                     Value::Date(v) => row_writer.write_col(v.val())?,
                     Value::DateTime(v) => row_writer.write_col(v.val())?,
+                    Value::Timestamp(v) => row_writer
+                        .write_col(v.unify_to(common_time::timestamp::TimeUnit::Second))?, // TODO(hl): Can we also write
                     Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(

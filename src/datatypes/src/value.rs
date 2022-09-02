@@ -40,6 +40,7 @@ pub enum Value {
     // Date & Time types:
     Date(Date),
     DateTime(DateTime),
+    Timestamp(common_time::timestamp::Timestamp),
 
     List(ListValue),
 }
@@ -68,6 +69,7 @@ impl Value {
             Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
             Value::Date(_) => ConcreteDataType::date_datatype(),
             Value::DateTime(_) => ConcreteDataType::date_datatype(),
+            Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
         }
     }
 
@@ -237,6 +239,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Date(v) => serde_json::Value::Number(v.val().into()),
             Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
+            Value::Timestamp(v) => serde_json::to_value(v)?,
         };
 
         Ok(json_value)

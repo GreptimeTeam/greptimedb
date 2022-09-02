@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use arrow::array::ArrayRef;
+use common_time::timestamp::TimeUnit;
 use datafusion_common::Result as DfResult;
 use datafusion_expr::Accumulator as DfAccumulator;
 use datatypes::prelude::*;
@@ -184,7 +185,17 @@ fn try_into_scalar_value(value: Value, datatype: &ConcreteDataType) -> Result<Sc
         Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
         Value::Null => try_convert_null_value(datatype)?,
         Value::List(list) => try_convert_list_value(list)?,
+        Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
     })
+}
+
+fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
+    match unit {
+        TimeUnit::Second => ScalarValue::TimestampSecond(val, None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(val, None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(val, None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(val, None),
+    }
 }
 
 fn try_convert_null_value(datatype: &ConcreteDataType) -> Result<ScalarValue> {
@@ -202,6 +213,7 @@ fn try_convert_null_value(datatype: &ConcreteDataType) -> Result<ScalarValue> {
         ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
         ConcreteDataType::Binary(_) => ScalarValue::LargeBinary(None),
         ConcreteDataType::String(_) => ScalarValue::Utf8(None),
+        ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit, None),
         _ => {
             return error::BadAccumulatorImplSnafu {
                 err_msg: format!(

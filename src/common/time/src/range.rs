@@ -1,4 +1,4 @@
-use crate::timestamp::TimestampMillis;
+use crate::timestamp_millis::TimestampMillis;
 
 /// A half-open time range.
 ///
