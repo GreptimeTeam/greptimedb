@@ -425,32 +425,25 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             _ => table_meta.schema.clone(),
         };
 
-        let primary_key_indices = match req.alter_kind {
-            AlterKind::AddColumn { .. } => table_meta.primary_key_indices.clone(),
-            AlterKind::AddPrimaryKey { new_primary_keys } => {
-                build_primary_key_indices(table_name, table_meta, new_primary_keys)?
-            }
-            AlterKind::DropPrimaryKey => vec![],
-        };
-
+        let primary_key_indices = &table_meta.primary_key_indices;
         let (next_column_id, default_cf) = build_column_family(
             INIT_COLUMN_ID,
             table_name,
             &table_schema,
-            &primary_key_indices,
+            primary_key_indices,
         )?;
         let (next_column_id, row_key) = build_row_key_desc(
             next_column_id,
             table_name,
             &table_schema,
-            &primary_key_indices,
+            primary_key_indices,
         )?;
 
         let new_meta = TableMetaBuilder::default()
             .schema(table_schema.clone())
             .engine(&table_meta.engine)
             .next_column_id(next_column_id)
-            .primary_key_indices(primary_key_indices)
+            .primary_key_indices(primary_key_indices.clone())
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
 
@@ -539,32 +532,6 @@ fn build_table_schema_with_new_column(
         msg: format!("cannot add new column {:?}", new_column),
     })?);
     Ok(new_schema)
-}
-
-fn build_primary_key_indices(
-    table_name: &str,
-    table_meta: &TableMeta,
-    new_primary_keys: Vec<String>,
-) -> Result<Vec<usize>> {
-    let table_schema = &table_meta.schema;
-    let primary_key_indices = &table_meta.primary_key_indices;
-    let mut indices = Vec::with_capacity(new_primary_keys.len());
-    for column_name in new_primary_keys.iter() {
-        let (i, _) = table_schema
-            .column_schemas()
-            .iter()
-            .enumerate()
-            .find(|(_, c)| &c.name == column_name)
-            .context(error::ColumnNotFoundSnafu {
-                column_name,
-                table_name,
-            })?;
-        if primary_key_indices.contains(&i) {
-            return error::PrimaryKeyExistsSnafu { key: column_name }.fail();
-        }
-        indices.push(i);
-    }
-    Ok(indices)
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
@@ -852,95 +819,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_alter_table_change_primary_keys() {
-        // columns = (host, cpu, memory, ts), primary keys = []
-        let (_engine, table_engine, table, _object_store, _dir) =
-            test_util::setup_mock_engine_and_table().await;
-
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
-        let table_info = table.table_info();
-        let old_info = (&*table_info).clone();
-        let old_meta = &old_info.meta;
-        let old_schema = &old_meta.schema;
-
-        let metadata = table.region().inner.metadata.load();
-        let old_region_row_key_columns = metadata
-            .schema()
-            .row_key_columns()
-            .map(|x| x.name())
-            .collect::<Vec<&str>>();
-        // assert in case the testing data are changed
-        assert_eq!(vec!["ts"], old_region_row_key_columns);
-
-        // test adding primary keys
-        let req = AlterTableRequest {
-            catalog_name: None,
-            schema_name: None,
-            table_name: TABLE_NAME.to_string(),
-            alter_kind: AlterKind::AddPrimaryKey {
-                new_primary_keys: vec!["host".to_string(), "ts".to_string()],
-            },
-        };
-        let table = table_engine
-            .alter_table(&EngineContext::default(), req)
-            .await
-            .unwrap();
-
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
-        let new_info = table.table_info();
-        let new_meta = &new_info.meta;
-        let new_schema = &new_meta.schema;
-
-        // table schema is not changed if we only alter primary keys,
-        assert_eq!(new_schema, old_schema);
-
-        // instead, the region schema will be changed
-        let metadata = table.region().inner.metadata.load();
-        let new_region_row_key_columns = metadata
-            .schema()
-            .row_key_columns()
-            .map(|x| x.name())
-            .collect::<Vec<&str>>();
-        assert_eq!(vec!["host", "ts"], new_region_row_key_columns);
-
-        // test dropping primary keys
-        let req = AlterTableRequest {
-            catalog_name: None,
-            schema_name: None,
-            table_name: TABLE_NAME.to_string(),
-            alter_kind: AlterKind::DropPrimaryKey {},
-        };
-        let table = table_engine
-            .alter_table(&EngineContext::default(), req)
-            .await
-            .unwrap();
-
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
-        let new_info = table.table_info();
-        let new_meta = &new_info.meta;
-        let new_schema = &new_meta.schema;
-
-        assert_eq!(new_schema, old_schema);
-
-        let metadata = table.region().inner.metadata.load();
-        let new_region_row_key_columns = metadata
-            .schema()
-            .row_key_columns()
-            .map(|x| x.name())
-            .collect::<Vec<&str>>();
-        assert_eq!(vec!["ts"], new_region_row_key_columns);
-    }
-
-    #[tokio::test]
     async fn test_alter_region() {
         let (_engine, table_engine, table, _object_store, _dir) =
             test_util::setup_mock_engine_and_table().await;
@@ -1029,32 +907,5 @@ mod tests {
             table_schema.timestamp_column()
         );
         assert_eq!(new_schema.version(), table_schema.version() + 1);
-    }
-
-    #[test]
-    fn test_build_primary_key_indices() {
-        // "host" and "cpu" are primary keys
-        let table_info = test_util::build_test_table_info();
-        let table_name = &table_info.name;
-        let table_meta = &table_info.meta;
-
-        let result = build_primary_key_indices(
-            table_name,
-            table_meta,
-            vec!["ts".to_string(), "host".to_string(), "cpu".to_string()],
-        );
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Primary key host already exists"));
-
-        let indices = build_primary_key_indices(
-            table_name,
-            table_meta,
-            vec!["memory".to_string(), "ts".to_string()],
-        )
-        .unwrap();
-        assert_eq!(vec![2, 3], indices);
     }
 }

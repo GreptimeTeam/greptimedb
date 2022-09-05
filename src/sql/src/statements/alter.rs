@@ -29,6 +29,4 @@ pub enum AlterTableOperation {
     AddConstraint(TableConstraint),
     /// `ADD [ COLUMN ] <column_def>`
     AddColumn { column_def: ColumnDef },
-    /// `DROP <table_constraint>`
-    DropPrimaryKey,
 }

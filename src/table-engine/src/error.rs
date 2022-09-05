@@ -175,9 +175,6 @@ pub enum Error {
         msg: String,
     },
 
-    #[snafu(display("Primary key {} already exists", key))]
-    PrimaryKeyExists { key: String, backtrace: Backtrace },
-
     #[snafu(display(
         "Projected columnd not found in region, column: {}",
         column_qualified_name
@@ -218,8 +215,7 @@ impl ErrorExt for Error {
             | ColumnNotFound { .. }
             | ProjectedColumnNotFound { .. }
             | MissingTimestampIndex { .. }
-            | TableNotFound { .. }
-            | PrimaryKeyExists { .. } => StatusCode::InvalidArguments,
+            | TableNotFound { .. } => StatusCode::InvalidArguments,
 
             TableDowncast { .. } => StatusCode::Internal,
 

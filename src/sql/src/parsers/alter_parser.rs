@@ -39,9 +39,6 @@ impl<'a> ParserContext<'a> {
                 let column_def = parser.parse_column_def()?;
                 AlterTableOperation::AddColumn { column_def }
             }
-        } else if parser.parse_keyword(Keyword::DROP) {
-            parser.expect_keywords(&[Keyword::PRIMARY, Keyword::KEY])?;
-            AlterTableOperation::DropPrimaryKey
         } else {
             return Err(ParserError::ParserError(format!(
                 "expect ADD or DROP after ALTER TABLE, found {}",
@@ -83,58 +80,6 @@ mod tests {
                             .options
                             .iter()
                             .any(|o| matches!(o.option, ColumnOption::Null)));
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn test_parse_alter_drop_primary_key() {
-        let sql = "ALTER TABLE my_metric_1 DROP PRIMARY KEY;";
-        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
-        assert_matches!(statement, Statement::Alter { .. });
-        match statement {
-            Statement::Alter(alter_table) => {
-                assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
-                assert_eq!(
-                    &AlterTableOperation::DropPrimaryKey,
-                    alter_table.alter_operation()
-                );
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn test_parse_alter_add_primary_key() {
-        let sql = "ALTER TABLE my_metric_1 ADD PRIMARY KEY (tagk_1, tagk_i);";
-        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
-        assert_matches!(statement, Statement::Alter { .. });
-        match statement {
-            Statement::Alter(alter_table) => {
-                assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
-
-                let alter_operation = alter_table.alter_operation();
-                assert_matches!(alter_operation, AlterTableOperation::AddConstraint(_));
-                match alter_operation {
-                    AlterTableOperation::AddConstraint(TableConstraint::Unique {
-                        name: _,
-                        columns,
-                        is_primary,
-                    }) => {
-                        assert!(is_primary);
-                        assert_eq!(2, columns.len());
-                        assert_eq!("tagk_1", columns[0].value);
-                        assert_eq!("tagk_i", columns[1].value);
                     }
                     _ => unreachable!(),
                 }

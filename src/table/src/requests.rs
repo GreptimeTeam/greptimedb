@@ -48,8 +48,6 @@ pub struct AlterTableRequest {
 #[derive(Debug)]
 pub enum AlterKind {
     AddColumn { new_column: ColumnSchema },
-    AddPrimaryKey { new_primary_keys: Vec<String> },
-    DropPrimaryKey,
 }
 
 /// Drop table request
