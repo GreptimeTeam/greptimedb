@@ -133,7 +133,8 @@ impl MutableVector for BinaryVectorBuilder {
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        Ok(self.mutable_array.push(value.as_binary()?))
+        self.mutable_array.push(value.as_binary()?);
+        Ok(())
     }
 
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {

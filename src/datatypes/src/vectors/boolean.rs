@@ -149,7 +149,8 @@ impl MutableVector for BooleanVectorBuilder {
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        Ok(self.mutable_array.push(value.as_boolean()?))
+        self.mutable_array.push(value.as_boolean()?);
+        Ok(())
     }
 
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
