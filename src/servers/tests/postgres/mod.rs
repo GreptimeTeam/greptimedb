@@ -65,7 +65,7 @@ async fn test_shutdown_pg_server() -> Result<()> {
             for _ in 0..1000 {
                 match create_connection(server_port).await {
                     Ok(connection) => {
-                        let rows = connection
+                        let _rows = connection
                             .simple_query("SELECT uint32s FROM numbers LIMIT 1")
                             .await
                             .unwrap();
@@ -99,7 +99,7 @@ async fn test_shutdown_pg_server() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_query_concurrently() -> Result<()> {
+async fn test_query_pg_concurrently() -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
     let table = MemTable::default_numbers_table();
