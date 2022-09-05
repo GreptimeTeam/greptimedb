@@ -41,11 +41,7 @@ impl ChunkReader for MockChunkReader {
             let data = self.memtable.get(name).unwrap();
             let mut builder = VectorBuilder::new(data_type.clone());
             for v in data {
-                if v.is_null() {
-                    builder.push_null();
-                } else {
-                    builder.push(v);
-                }
+                builder.push(v);
             }
             columns.push(builder.finish());
         }

@@ -5,7 +5,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_telemetry::logging;
-use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{
@@ -14,9 +14,7 @@ use store_api::storage::{
     RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine};
-use table::requests::{
-    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
-};
+use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::Result as TableResult;
 use table::{
     metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion},
@@ -419,9 +417,10 @@ mod tests {
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
     use datatypes::vectors::*;
     use store_api::manifest::Manifest;
-    use table::requests::InsertRequest;
+    use table::requests::{AlterKind, InsertRequest};
 
     use super::*;
     use crate::table::test_util;

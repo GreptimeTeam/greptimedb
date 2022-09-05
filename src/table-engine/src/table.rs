@@ -256,10 +256,8 @@ fn build_table_schema_with_new_column(
     let mut columns = table_schema.column_schemas().to_vec();
     columns.push(new_column.clone());
 
-    // Right now we are not support adding a timestamp index column or adding the column
+    // Right now we are not support adding the column
     // before or after some column, so just clone a new schema like this.
-    // TODO(LFC): support adding timestamp index column
-    //   maybe a custom statement syntax like "ALTER TABLE ADD TIME INDEX ts BIGINT"?
     // TODO(LFC): support adding column before or after some column
     let mut builder = SchemaBuilder::from_columns(columns).version(table_schema.version() + 1);
 
@@ -269,7 +267,7 @@ fn build_table_schema_with_new_column(
     for (k, v) in table_schema.arrow_schema().metadata.iter() {
         builder = builder.add_metadata(k, v);
     }
-    let new_schema = Arc::new(builder.build().context(error::SchemaBuildSnafu {
+    let new_schema = Arc::new(builder.build().with_context(|_| error::SchemaBuildSnafu {
         msg: format!("cannot add new column {:?}", new_column),
     })?);
     Ok(new_schema)

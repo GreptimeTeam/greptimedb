@@ -1,6 +1,5 @@
 use query::query_engine::Output;
 use snafu::prelude::*;
-use sql::ast::TableConstraint;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use table::engine::EngineContext;
 use table::requests::{AlterKind, AlterTableRequest};

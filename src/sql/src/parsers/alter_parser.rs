@@ -42,7 +42,7 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use sqlparser::ast::{ColumnOption, DataType, TableConstraint};
+    use sqlparser::ast::{ColumnOption, DataType};
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
