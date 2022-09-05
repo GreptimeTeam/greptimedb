@@ -54,7 +54,7 @@ impl Vector for NullVector {
         Arc::new(self.array.clone())
     }
 
-    fn to_box_arrow_array(&self) -> Box<dyn Array> {
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
         Box::new(self.array.clone())
     }
 

@@ -55,9 +55,9 @@ impl Vector for ConstantVector {
         v.to_arrow_array()
     }
 
-    fn to_box_arrow_array(&self) -> Box<dyn Array> {
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
         let v = self.vector.replicate(&[self.length]);
-        v.to_box_arrow_array()
+        v.to_boxed_arrow_array()
     }
 
     fn is_const(&self) -> bool {

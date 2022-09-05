@@ -82,7 +82,7 @@ impl<T: PrimitiveElement> Vector for PrimitiveVector<T> {
         Arc::new(self.array.clone())
     }
 
-    fn to_box_arrow_array(&self) -> Box<dyn Array> {
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
         Box::new(self.array.clone())
     }
 
@@ -456,7 +456,7 @@ mod tests {
         let input = Int64Vector::from_slice(&[7, 8, 9]);
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder
-            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .extend_slice_of(&Int32Vector::from_slice(&[13]), 0, 1)
             .is_err());
         let vector = builder.to_vector();
 

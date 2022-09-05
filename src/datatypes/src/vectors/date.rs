@@ -65,7 +65,7 @@ impl Vector for DateVector {
         ))
     }
 
-    fn to_box_arrow_array(&self) -> Box<dyn Array> {
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
         let validity = self.array.array.validity().cloned();
         let buffer = self.array.array.values().clone();
         Box::new(PrimitiveArray::new(

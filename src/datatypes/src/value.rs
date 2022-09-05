@@ -18,6 +18,7 @@ pub type OrderedF64 = OrderedFloat<f64>;
 /// Although compare Value with different data type is allowed, it is recommended to only
 /// compare Value with same data type. Comparing Value with different data type may not
 /// behaves as what you expect.
+// TODO(yingwen): Customize PartialOrd/Ord like [this](https://github.com/datafuselabs/databend/blob/f2a704e18ee7195559388ba8d384ead796cf400a/src/query/datavalues/src/data_value.rs#L311)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Value {
     // Null is a little special, we'd like to keep it as the first variant, so a `Null`
@@ -420,7 +421,7 @@ impl<'a> From<&'a [u8]> for ValueRef<'a> {
 }
 
 /// Reference to a [ListValue].
-// Comparision still requires some allocation (call of `to_value()`) and might be avoidable.
+// Comparison still requires some allocation (call of `to_value()`) and might be avoidable.
 #[derive(Debug, Clone, Copy)]
 pub enum ListValueRef<'a> {
     Indexed { vector: &'a ListVector, idx: usize },
@@ -446,7 +447,7 @@ impl<'a> Eq for ListValueRef<'a> {}
 
 impl<'a> Ord for ListValueRef<'a> {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Respect the order of `Value` by converting into value before comparision.
+        // Respect the order of `Value` by converting into value before comparison.
         self.to_value().cmp(&other.to_value())
     }
 }

@@ -71,7 +71,7 @@ impl Vector for BooleanVector {
         Arc::new(self.array.clone())
     }
 
-    fn to_box_arrow_array(&self) -> Box<dyn Array> {
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
         Box::new(self.array.clone())
     }
 
@@ -149,8 +149,7 @@ impl MutableVector for BooleanVectorBuilder {
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        self.mutable_array.push(value.as_boolean()?);
-        Ok(())
+        Ok(self.mutable_array.push(value.as_boolean()?))
     }
 
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {

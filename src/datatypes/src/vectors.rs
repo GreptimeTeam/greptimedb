@@ -81,7 +81,7 @@ pub trait Vector: Send + Sync + Serializable + Debug {
     fn to_arrow_array(&self) -> ArrayRef;
 
     /// Convert this vector to a new boxed arrow [Array].
-    fn to_box_arrow_array(&self) -> Box<dyn Array>;
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array>;
 
     /// Returns the validity of the Array.
     fn validity(&self) -> Validity;

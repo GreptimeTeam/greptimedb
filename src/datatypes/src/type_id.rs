@@ -53,8 +53,9 @@ impl LogicalTypeId {
             LogicalTypeId::String => ConcreteDataType::string_datatype(),
             LogicalTypeId::Binary => ConcreteDataType::binary_datatype(),
             LogicalTypeId::Date => ConcreteDataType::date_datatype(),
-            LogicalTypeId::DateTime | LogicalTypeId::List => {
-                unimplemented!("Data type for {:?} is unimplemented", self)
+            LogicalTypeId::DateTime => ConcreteDataType::datetime_datatype(),
+            LogicalTypeId::List => {
+                ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
             }
         }
     }

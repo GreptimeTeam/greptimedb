@@ -88,7 +88,7 @@ impl Vector for StringVector {
         Arc::new(self.array.clone())
     }
 
-    fn to_box_arrow_array(&self) -> Box<dyn Array> {
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
         Box::new(self.array.clone())
     }
 
@@ -166,8 +166,7 @@ impl MutableVector for StringVectorBuilder {
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        self.buffer.push(value.as_string()?);
-        Ok(())
+        Ok(self.buffer.push(value.as_string()?))
     }
 
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
