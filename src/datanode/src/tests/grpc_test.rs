@@ -3,7 +3,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::{codec::InsertBatch, column, Column, ColumnDef, CreateExpr, MutateResult};
+use api::v1::{
+    admin_result, codec::InsertBatch, column, Column, ColumnDef, CreateExpr, MutateResult,
+};
+use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
 use servers::grpc::GrpcServer;
 use servers::server::Server;
@@ -20,7 +23,7 @@ async fn test_insert_and_select() {
     instance.start().await.unwrap();
 
     tokio::spawn(async move {
-        let mut grpc_server = GrpcServer::new(instance);
+        let mut grpc_server = GrpcServer::new(instance.clone(), instance);
         let addr = "127.0.0.1:3001".parse::<SocketAddr>().unwrap();
         grpc_server.start(addr).await.unwrap()
     });
@@ -29,7 +32,8 @@ async fn test_insert_and_select() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let grpc_client = Client::connect("http://127.0.0.1:3001").await.unwrap();
-    let db = Database::new("greptime", grpc_client);
+    let db = Database::new("greptime", grpc_client.clone());
+    let admin = Admin::new("greptime", grpc_client);
 
     // testing data:
     let expected_host_col = Column {
@@ -72,13 +76,13 @@ async fn test_insert_and_select() {
 
     // create
     let expr = testing_create_expr();
-    let result = db.create(expr).await.unwrap();
+    let result = admin.create(expr).await.unwrap();
     assert_matches!(
-        result,
-        ObjectResult::Mutate(MutateResult {
+        result.result,
+        Some(admin_result::Result::Mutate(MutateResult {
             success: 1,
             failure: 0
-        })
+        }))
     );
 
     // insert

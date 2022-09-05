@@ -1,30 +1,26 @@
 use std::sync::Arc;
 
-use api::v1::{ColumnDataType, ColumnDef, CreateExpr, ObjectResult};
+use api::v1::{AdminResult, ColumnDataType, ColumnDef, CreateExpr};
+use common_error::prelude::{ErrorExt, StatusCode};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+use futures::TryFutureExt;
+use query::Output;
 use snafu::prelude::*;
 use table::requests::CreateTableRequest;
 
 use crate::error::{self, Result};
 use crate::instance::Instance;
-use crate::server::grpc::handler::build_err_result;
-use crate::server::grpc::select::to_object_result;
+use crate::server::grpc::handler::AdminResultBuilder;
 use crate::sql::SqlRequest;
 
 impl Instance {
-    pub(crate) async fn handle_create(&self, expr: CreateExpr) -> ObjectResult {
+    pub(crate) async fn handle_create(&self, expr: CreateExpr) -> AdminResult {
         let request = self.create_expr_to_request(expr);
-        let request = match request {
-            Ok(request) => request,
-            Err(e) => return build_err_result(&e),
-        };
-
-        let output = self
-            .sql_handler()
-            .execute(SqlRequest::Create(request))
+        let result = futures::future::ready(request)
+            .and_then(|request| self.sql_handler().execute(SqlRequest::Create(request)))
             .await;
-        to_object_result(output).await
+        to_admin_result(result)
     }
 
     fn create_expr_to_request(&self, expr: CreateExpr) -> Result<CreateTableRequest> {
@@ -109,6 +105,20 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         data_type,
         is_nullable: column_def.is_nullable,
     })
+}
+
+fn to_admin_result(result: Result<Output>) -> AdminResult {
+    match result {
+        Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
+            .status_code(StatusCode::Success as u32)
+            .mutate_result(rows as u32, 0)
+            .build(),
+        Ok(_) => unimplemented!(),
+        Err(err) => AdminResultBuilder::default()
+            .status_code(err.status_code() as u32)
+            .err_msg(err.to_string())
+            .build(),
+    }
 }
 
 #[cfg(test)]

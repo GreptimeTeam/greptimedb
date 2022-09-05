@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use api::v1::codec::SelectResult as GrpcSelectResult;
 use api::v1::{
-    object_expr, object_result, select_expr, CreateExpr, DatabaseRequest, ExprHeader, InsertExpr,
+    object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr,
     MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, PhysicalPlan,
     SelectExpr,
 };
@@ -125,18 +125,6 @@ impl Database {
         );
 
         Ok(res)
-    }
-
-    pub async fn create(&self, expr: CreateExpr) -> Result<ObjectResult> {
-        let header = ExprHeader {
-            version: PROTOCOL_VERSION,
-        };
-        let expr = ObjectExpr {
-            header: Some(header),
-            expr: Some(object_expr::Expr::Create(expr)),
-        };
-        let result = self.object(expr).await?;
-        result.try_into()
     }
 }
 
