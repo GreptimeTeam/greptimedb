@@ -650,7 +650,7 @@ mod tests {
             .downcast_ref::<MitoTable<MockRegion>>()
             .unwrap();
         let table_info = table.table_info();
-        let old_info = (&*table_info).clone();
+        let old_info = (*table_info).clone();
         let old_meta = &old_info.meta;
         let old_schema = &old_meta.schema;
 

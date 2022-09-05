@@ -1,6 +1,6 @@
 use sqlparser::ast::{ColumnDef, ObjectName, TableConstraint};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTable {
     table_name: ObjectName,
     alter_operation: AlterTableOperation,
@@ -23,7 +23,7 @@ impl AlterTable {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterTableOperation {
     /// `ADD <table_constraint>`
     AddConstraint(TableConstraint),
