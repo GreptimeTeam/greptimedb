@@ -13,11 +13,11 @@ use common_recordbatch::{
 use common_telemetry::debug;
 use datatypes::schema::SchemaRef;
 use futures::Stream;
-use tokio::time::{self, Duration};
 use query::Output;
 use query::QueryEngineRef;
 use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
+use tokio::time::{self, Duration};
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use crate::python::coprocessor::{exec_parsed, parse::parse_copr};
@@ -69,16 +69,33 @@ impl Stream for CoprStream {
 
 impl PyScript {
     /// repeat a job using a fixed interval
-    async fn schedule_job(&self, dur: Duration,_ctx: EvalContext, tx: tokio::sync::watch::Sender<Result<Output>>) {
+    async fn schedule_job(
+        &self,
+        dur: Duration,
+        _ctx: EvalContext,
+        tx: tokio::sync::mpsc::Sender<Option<Result<Output>>>,
+    ) {
         let mut interval = time::interval(dur);
         loop {
-                interval.tick().await;
-                let res = tx.send(self.evaluate(EvalContext::default()).await);
-                if res.is_err(){
-                    debug!("All receiver to schedule_job is closed, ending schedule job \"{}\" now", self.copr.name);
-                    return;
-                }
-            };
+            interval.tick().await;
+            if tx.is_closed() {
+                debug!(
+                    "All receiver to schedule job \"{}\" is closed, ending job now.",
+                    self.copr.name
+                );
+                break;
+            }
+            let res = tx
+                .send(Some(self.evaluate(EvalContext::default()).await))
+                .await;
+            if let Err(_err) = res {
+                debug!(
+                    "All receiver to schedule job \"{}\" is closed, ending job now.",
+                    self.copr.name
+                );
+                break;
+            }
+        }
     }
 }
 
