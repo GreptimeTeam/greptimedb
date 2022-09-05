@@ -136,26 +136,8 @@ pub enum Error {
         table_name: String,
     },
 
-    #[snafu(display(
-        "Failed to downcast table {} to engine type of {}",
-        table_name,
-        table_engine
-    ))]
-    TableDowncast {
-        backtrace: Backtrace,
-        table_name: String,
-        table_engine: String,
-    },
-
     #[snafu(display("Column {} already exists in table {}", column_name, table_name))]
     ColumnExists {
-        backtrace: Backtrace,
-        column_name: String,
-        table_name: String,
-    },
-
-    #[snafu(display("Column {} not found in table {}", column_name, table_name))]
-    ColumnNotFound {
         backtrace: Backtrace,
         column_name: String,
         table_name: String,
@@ -212,12 +194,9 @@ impl ErrorExt for Error {
             | BuildRegionDescriptor { .. }
             | TableExists { .. }
             | ColumnExists { .. }
-            | ColumnNotFound { .. }
             | ProjectedColumnNotFound { .. }
             | MissingTimestampIndex { .. }
             | TableNotFound { .. } => StatusCode::InvalidArguments,
-
-            TableDowncast { .. } => StatusCode::Internal,
 
             TableInfoNotFound { .. } => StatusCode::Unexpected,
 

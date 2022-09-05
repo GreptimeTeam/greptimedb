@@ -135,6 +135,7 @@ pub(crate) fn build_row_key_desc(
     let ts_column_schema = table_schema
         .timestamp_column()
         .context(MissingTimestampIndexSnafu { table_name })?;
+    // `unwrap` is safe because we've checked the `timestamp_column` above
     let timestamp_index = table_schema.timestamp_index().unwrap();
 
     let ts_column = ColumnDescriptorBuilder::new(

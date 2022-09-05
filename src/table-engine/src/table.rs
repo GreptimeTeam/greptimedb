@@ -48,6 +48,7 @@ fn table_manifest_dir(table_name: &str) -> String {
 /// [Table] implementation.
 pub struct MitoTable<R: Region> {
     manifest: TableManifest,
+    // guarded by `self.alter_lock`
     table_info: ArcSwap<TableInfo>,
     // TODO(dennis): a table contains multi regions
     region: R,
