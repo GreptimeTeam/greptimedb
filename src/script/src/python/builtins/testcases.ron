@@ -1,6 +1,6 @@
 // This is the file for UDF&UDAF binding from datafusion, 
 // including most test for those function(except ApproxMedian which datafusion didn't implement)
-// check src/scalars/py_udf_module/test.rs for more information
+// check src/script/builtins/test.rs::run_builtin_fn_testcases() for more information
 [
     // math expressions
     TestCase(
