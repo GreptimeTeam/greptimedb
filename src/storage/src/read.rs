@@ -191,9 +191,9 @@ mod tests {
     #[tokio::test]
     async fn test_concat_multiple_readers() {
         let readers = vec![
-            read_util::build_boxed_vec_reader(&[&[(1, Some(1)), (2, Some(2))], &[(3, None)]]),
-            read_util::build_boxed_vec_reader(&[&[(4, None)]]),
-            read_util::build_boxed_vec_reader(&[&[(5, Some(5)), (6, Some(6))]]),
+            read_util::build_boxed_reader(&[&[(1, Some(1)), (2, Some(2))], &[(3, None)]]),
+            read_util::build_boxed_reader(&[&[(4, None)]]),
+            read_util::build_boxed_reader(&[&[(5, Some(5)), (6, Some(6))]]),
         ];
 
         let mut reader = ConcatReader::new(readers);
@@ -213,10 +213,10 @@ mod tests {
     #[tokio::test]
     async fn test_concat_reader_with_empty_reader() {
         let readers = vec![
-            read_util::build_boxed_vec_reader(&[&[(1, Some(1)), (2, Some(2))], &[(3, None)]]),
+            read_util::build_boxed_reader(&[&[(1, Some(1)), (2, Some(2))], &[(3, None)]]),
             // Empty reader.
-            read_util::build_boxed_vec_reader(&[&[]]),
-            read_util::build_boxed_vec_reader(&[&[(5, Some(5)), (6, Some(6))]]),
+            read_util::build_boxed_reader(&[&[]]),
+            read_util::build_boxed_reader(&[&[(5, Some(5)), (6, Some(6))]]),
         ];
 
         let mut reader = ConcatReader::new(readers);

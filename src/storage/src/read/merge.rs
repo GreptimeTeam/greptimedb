@@ -296,6 +296,8 @@ impl Ord for Node {
 ///
 /// `Batch` from each `Source` **must** be sorted.
 struct MergeReader {
+    /// Whether is the reader initialized.
+    initialized: bool,
     /// Schema of data source.
     schema: ProjectedSchemaRef,
     /// Input data sources.
@@ -361,6 +363,7 @@ impl MergeReaderBuilder {
         let num_sources = self.sources.len();
 
         MergeReader {
+            initialized: false,
             schema: self.schema,
             sources: self.sources,
             hot: BinaryHeap::with_capacity(num_sources),
@@ -374,7 +377,12 @@ impl MergeReaderBuilder {
 
 impl MergeReader {
     async fn maybe_init(&mut self) -> Result<()> {
+        if self.initialized {
+            return Ok(());
+        }
+
         if self.sources.is_empty() {
+            self.initialized = true;
             return Ok(());
         }
 
@@ -388,8 +396,7 @@ impl MergeReader {
 
         self.refill_hot();
 
-        // The reader has been initialized.
-        assert!(self.sources.is_empty());
+        self.initialized = true;
 
         Ok(())
     }
@@ -499,5 +506,69 @@ impl MergeReader {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::read_util;
+
+    #[tokio::test]
+    async fn test_merge_reader_empty() {
+        let schema = read_util::new_projected_schema();
+
+        let mut reader = MergeReaderBuilder::new(schema).build();
+
+        assert!(reader.next_batch().await.unwrap().is_none());
+        // Call next_batch() again is allowed.
+        assert!(reader.next_batch().await.unwrap().is_none());
+    }
+
+    type Batches<'a> = &'a [&'a [(i64, Option<i64>)]];
+
+    fn build_merge_reader(sources: &[Batches], num_iter: usize, batch_size: usize) -> MergeReader {
+        let schema = read_util::new_projected_schema();
+        let mut builder = MergeReaderBuilder::new(schema).batch_size(batch_size);
+
+        for (i, source) in sources.iter().enumerate() {
+            if i < num_iter {
+                builder = builder.push_batch_iter(read_util::build_boxed_iter(source));
+            } else {
+                builder = builder.push_batch_reader(read_util::build_boxed_reader(source));
+            }
+        }
+
+        // let mut expect: Vec<_> = sources
+        //     .iter()
+        //     .flat_map(|v| v.iter())
+        //     .flat_map(|v| v.iter().copied())
+        //     .collect();
+        // expect.sort_by_key(|k| k.0);
+
+        builder.build()
+    }
+
+    #[tokio::test]
+    async fn test_merge_multiple_interleave() {
+        let mut reader = build_merge_reader(
+            &[
+                &[&[(1, Some(1)), (5, Some(5)), (9, Some(9))]],
+                &[&[(2, Some(2)), (3, Some(3)), (8, Some(8))]],
+                &[&[(7, Some(7)), (12, Some(12))]],
+            ],
+            1,
+            3,
+        );
+
+        read_util::check_reader_with_kv_batch(
+            &mut reader,
+            &[
+                &[(1, Some(1)), (2, Some(2)), (3, Some(3))],
+                &[(5, Some(5)), (7, Some(7)), (8, Some(8))],
+                &[(9, Some(9)), (12, Some(12))],
+            ],
+        )
+        .await;
     }
 }
