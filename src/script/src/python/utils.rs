@@ -49,7 +49,6 @@ pub fn py_vec_obj_to_array(
             .to_owned()
             .try_into_value::<i64>(vm)
             .map_err(|e| format_py_error(e, vm))?;
-
         let ret = PrimitiveArray::from_vec(vec![val; col_len]);
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyFloat>(obj, vm) {

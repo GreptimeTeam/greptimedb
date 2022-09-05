@@ -267,7 +267,6 @@ fn eval_aggr_fn<T: AggregateExpr>(
 ///
 #[pymodule]
 pub(crate) mod greptime_builtin {
-    use std::fmt::format;
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
@@ -661,7 +660,9 @@ pub(crate) mod greptime_builtin {
         let res = PowFunction::default()
             .eval(FunctionContext::default(), &args)
             .map_err(|err| {
-                vm.new_runtime_error(format!("Fail to eval pow() withi given args: {args:?}."))
+                vm.new_runtime_error(format!(
+                    "Fail to eval pow() withi given args: {args:?}, Error: {err}"
+                ))
             })?;
         Ok(res.into())
     }
@@ -709,20 +710,30 @@ pub(crate) mod greptime_builtin {
                 )));
             }
         }
-        let ret: Vec<PrimitiveScalar<i64>> = Vec::new();
+        let ty_error = |s: String| vm.new_type_error(s);
         // TODO(discord9): replace the unwrap()
         let oldest = oldest
             .as_any()
             .downcast_ref::<PrimitiveScalar<i64>>()
-            .unwrap()
+            .ok_or_else(|| {
+                ty_error(format!(
+                    "expect oldest to be i64, found{:?}",
+                    oldest.data_type()
+                ))
+            })?
             .value()
-            .unwrap();
+            .ok_or_else(|| ty_error("All element is Null in a time series array".to_string()))?;
         let newest = newest
             .as_any()
             .downcast_ref::<PrimitiveScalar<i64>>()
-            .unwrap()
+            .ok_or_else(|| {
+                ty_error(format!(
+                    "expect oldest to be i64, found{:?}",
+                    newest.data_type()
+                ))
+            })?
             .value()
-            .unwrap();
+            .ok_or_else(|| ty_error("All element is Null in a time series array".to_string()))?;
         if oldest > newest {
             return Err(vm.new_value_error(format!("{oldest} is greater than {newest}")));
         }
