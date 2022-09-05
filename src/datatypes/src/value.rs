@@ -15,14 +15,9 @@ pub type OrderedF64 = OrderedFloat<f64>;
 
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
 ///
-/// Although compare Value with different data type is allowed, it is recommended to only
-/// compare Value with same data type. Comparing Value with different data type may not
-/// behaves as what you expect.
-// TODO(yingwen): Customize PartialOrd/Ord like [this](https://github.com/datafuselabs/databend/blob/f2a704e18ee7195559388ba8d384ead796cf400a/src/query/datavalues/src/data_value.rs#L311)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// Comparison between values with different types (expect Null) is not allowed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Value {
-    // Null is a little special, we'd like to keep it as the first variant, so a `Null`
-    // should less than all other variants.
     Null,
 
     // Numeric types:
@@ -117,8 +112,54 @@ impl Value {
     }
 }
 
+macro_rules! impl_ord_for_value_like {
+    ($Type: ident, $left: ident, $right: ident) => {
+        if $left.is_null() && !$right.is_null() {
+            return Ordering::Less;
+        } else if !$left.is_null() && $right.is_null() {
+            return Ordering::Greater;
+        } else {
+            match ($left, $right) {
+                ($Type::Null, $Type::Null) => Ordering::Equal,
+                ($Type::Boolean(v1), $Type::Boolean(v2)) => v1.cmp(v2),
+                ($Type::UInt8(v1), $Type::UInt8(v2)) => v1.cmp(v2),
+                ($Type::UInt16(v1), $Type::UInt16(v2)) => v1.cmp(v2),
+                ($Type::UInt32(v1), $Type::UInt32(v2)) => v1.cmp(v2),
+                ($Type::UInt64(v1), $Type::UInt64(v2)) => v1.cmp(v2),
+                ($Type::Int8(v1), $Type::Int8(v2)) => v1.cmp(v2),
+                ($Type::Int16(v1), $Type::Int16(v2)) => v1.cmp(v2),
+                ($Type::Int32(v1), $Type::Int32(v2)) => v1.cmp(v2),
+                ($Type::Int64(v1), $Type::Int64(v2)) => v1.cmp(v2),
+                ($Type::Float32(v1), $Type::Float32(v2)) => v1.cmp(v2),
+                ($Type::Float64(v1), $Type::Float64(v2)) => v1.cmp(v2),
+                ($Type::String(v1), $Type::String(v2)) => v1.cmp(v2),
+                ($Type::Binary(v1), $Type::Binary(v2)) => v1.cmp(v2),
+                ($Type::Date(v1), $Type::Date(v2)) => v1.cmp(v2),
+                ($Type::DateTime(v1), $Type::DateTime(v2)) => v1.cmp(v2),
+                ($Type::List(v1), $Type::List(v2)) => v1.cmp(v2),
+                _ => panic!(
+                    "Cannot compare different values {:?} and {:?}",
+                    $left, $right
+                ),
+            }
+        }
+    };
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> Ordering {
+        impl_ord_for_value_like!(Value, self, other)
+    }
+}
+
 macro_rules! impl_value_from {
-    ($Variant:ident, $Type:ident) => {
+    ($Variant: ident, $Type: ident) => {
         impl From<$Type> for Value {
             fn from(value: $Type) -> Self {
                 Value::$Variant(value.into())
@@ -246,7 +287,7 @@ impl Ord for ListValue {
 }
 
 /// Reference to [Value].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueRef<'a> {
     Null,
 
@@ -350,6 +391,18 @@ impl<'a> ValueRef<'a> {
             }
             .fail(),
         }
+    }
+}
+
+impl<'a> PartialOrd for ValueRef<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> Ord for ValueRef<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        impl_ord_for_value_like!(ValueRef, self, other)
     }
 }
 
@@ -684,7 +737,9 @@ mod tests {
         assert!(Value::Null.is_null());
         assert!(!Value::Boolean(true).is_null());
         assert!(Value::Null < Value::Boolean(false));
+        assert!(Value::Boolean(true) > Value::Null);
         assert!(Value::Null < Value::Int32(10));
+        assert!(Value::Int32(10) > Value::Null);
     }
 
     #[test]
@@ -692,7 +747,9 @@ mod tests {
         assert!(ValueRef::Null.is_null());
         assert!(!ValueRef::Boolean(true).is_null());
         assert!(ValueRef::Null < ValueRef::Boolean(false));
+        assert!(ValueRef::Boolean(true) > ValueRef::Null);
         assert!(ValueRef::Null < ValueRef::Int32(10));
+        assert!(ValueRef::Int32(10) > ValueRef::Null);
     }
 
     #[test]
