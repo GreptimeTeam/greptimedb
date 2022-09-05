@@ -273,7 +273,7 @@ mod tests {
     fn test_date_vector_builder() {
         let input = DateVector::from_slice(&[Date::new(1), Date::new(2), Date::new(3)]);
 
-        let mut builder = DateType::default().create_mutable(3);
+        let mut builder = DateType::default().create_mutable_vector(3);
         builder
             .push_value_ref(ValueRef::Date(Date::new(5)))
             .unwrap();

@@ -188,7 +188,7 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
     fn as_arrow_type(&self) -> ArrowDataType;
 
     /// Create a mutable vector with given `capacity` of this type.
-    fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector>;
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector>;
 }
 
 pub type DataTypeRef = Arc<dyn DataType>;

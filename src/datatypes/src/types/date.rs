@@ -28,7 +28,7 @@ impl DataType for DateType {
         ArrowDataType::Date32
     }
 
-    fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector> {
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(DateVectorBuilder::with_capacity(capacity))
     }
 }

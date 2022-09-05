@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_primitive_vector_builder() {
-        let mut builder = Int64Type::default().create_mutable(3);
+        let mut builder = Int64Type::default().create_mutable_vector(3);
         builder.push_value_ref(ValueRef::Int64(123)).unwrap();
         assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
 

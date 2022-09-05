@@ -292,7 +292,7 @@ mod tests {
     fn test_binary_vector_builder() {
         let input = BinaryVector::from_slice(&[b"world", b"one", b"two"]);
 
-        let mut builder = BinaryType::default().create_mutable(3);
+        let mut builder = BinaryType::default().create_mutable_vector(3);
         builder
             .push_value_ref(ValueRef::Binary("hello".as_bytes()))
             .unwrap();

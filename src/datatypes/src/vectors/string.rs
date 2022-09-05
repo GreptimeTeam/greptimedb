@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_string_vector_builder() {
-        let mut builder = StringType::default().create_mutable(3);
+        let mut builder = StringType::default().create_mutable_vector(3);
         builder.push_value_ref(ValueRef::String("hello")).unwrap();
         assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
 

@@ -151,7 +151,7 @@ impl ListVectorBuilder {
         offsets.push(0);
         // The actual required capacity might greater than the capacity of the `ListVector`
         // if there exists child vector that has more than one element.
-        let values = inner_type.create_mutable(capacity);
+        let values = inner_type.create_mutable_vector(capacity);
 
         ListVectorBuilder {
             inner_type,
@@ -441,7 +441,8 @@ mod tests {
 
     #[test]
     fn test_list_vector_builder() {
-        let mut builder = ListType::new(ConcreteDataType::int32_datatype()).create_mutable(3);
+        let mut builder =
+            ListType::new(ConcreteDataType::int32_datatype()).create_mutable_vector(3);
         builder
             .push_value_ref(ValueRef::List(ListValueRef::Ref(&ListValue::new(
                 Some(Box::new(vec![

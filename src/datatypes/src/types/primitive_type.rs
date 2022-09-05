@@ -107,7 +107,7 @@ macro_rules! impl_numeric {
                 ArrowDataType::$TypeId
             }
 
-            fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector> {
+            fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
                 Box::new(PrimitiveVectorBuilder::<$Type>::with_capacity(capacity))
             }
         }

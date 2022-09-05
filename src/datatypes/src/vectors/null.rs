@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_null_vector_builder() {
-        let mut builder = NullType::default().create_mutable(3);
+        let mut builder = NullType::default().create_mutable_vector(3);
         builder.push_value_ref(ValueRef::Null).unwrap();
         assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
 

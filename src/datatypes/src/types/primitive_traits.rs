@@ -12,7 +12,7 @@ pub trait Primitive:
     + Clone
     + Copy
     + Into<Value>
-    + IntoValueRef
+    + IntoValueRef<'static>
     + NativeType
     + serde::Serialize
     + NativeArithmetics

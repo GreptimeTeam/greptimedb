@@ -35,7 +35,7 @@ impl DataType for StringType {
         ArrowDataType::Utf8
     }
 
-    fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector> {
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(StringVectorBuilder::with_capacity(capacity))
     }
 }

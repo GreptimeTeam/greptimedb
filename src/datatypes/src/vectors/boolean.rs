@@ -310,7 +310,7 @@ mod tests {
     fn test_boolean_vector_builder() {
         let input = BooleanVector::from_slice(&[true, false, true]);
 
-        let mut builder = BooleanType::default().create_mutable(3);
+        let mut builder = BooleanType::default().create_mutable_vector(3);
         builder.push_value_ref(ValueRef::Boolean(true)).unwrap();
         assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();

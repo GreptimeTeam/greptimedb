@@ -44,7 +44,7 @@ impl DataType for ListType {
         ArrowDataType::List(field)
     }
 
-    fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector> {
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(ListVectorBuilder::with_capacity(
             *self.inner.clone(),
             capacity,

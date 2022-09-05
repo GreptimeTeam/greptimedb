@@ -31,7 +31,7 @@ impl DataType for DateTimeType {
         ArrowDataType::Date64
     }
 
-    fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector> {
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(DateTimeVectorBuilder::with_capacity(capacity))
     }
 }

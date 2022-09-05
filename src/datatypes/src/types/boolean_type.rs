@@ -35,7 +35,7 @@ impl DataType for BooleanType {
         ArrowDataType::Boolean
     }
 
-    fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector> {
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(BooleanVectorBuilder::with_capacity(capacity))
     }
 }

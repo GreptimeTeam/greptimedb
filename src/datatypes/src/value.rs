@@ -354,11 +354,11 @@ impl<'a> ValueRef<'a> {
 
 /// A helper trait to convert copyable types to `ValueRef`.
 ///
-/// It removes the lifetime parameter from the trait and also avoid confusion
-/// with `Into<ValueRef>` in generic codes.
-pub trait IntoValueRef {
+/// It could replace the usage of `Into<ValueRef<'a>>`, thus avoid confusion between `Into<Value>`
+/// and `Into<ValueRef<'a>>` in generic codes. One typical usage is the [`Primitive`](crate::primitive_traits::Primitive) trait.
+pub trait IntoValueRef<'a> {
     /// Convert itself to [ValueRef].
-    fn into_value_ref(self) -> ValueRef<'static>;
+    fn into_value_ref(self) -> ValueRef<'a>;
 }
 
 macro_rules! impl_value_ref_from {
@@ -369,8 +369,8 @@ macro_rules! impl_value_ref_from {
             }
         }
 
-        impl IntoValueRef for $Type {
-            fn into_value_ref(self) -> ValueRef<'static> {
+        impl<'a> IntoValueRef<'a> for $Type {
+            fn into_value_ref(self) -> ValueRef<'a> {
                 ValueRef::$Variant(self.into())
             }
         }
@@ -384,8 +384,8 @@ macro_rules! impl_value_ref_from {
             }
         }
 
-        impl IntoValueRef for Option<$Type> {
-            fn into_value_ref(self) -> ValueRef<'static> {
+        impl<'a> IntoValueRef<'a> for Option<$Type> {
+            fn into_value_ref(self) -> ValueRef<'a> {
                 match self {
                     Some(v) => ValueRef::$Variant(v.into()),
                     None => ValueRef::Null,

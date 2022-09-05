@@ -36,7 +36,7 @@ impl DataType for BinaryType {
         ArrowDataType::LargeBinary
     }
 
-    fn create_mutable(&self, capacity: usize) -> Box<dyn MutableVector> {
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(BinaryVectorBuilder::with_capacity(capacity))
     }
 }
