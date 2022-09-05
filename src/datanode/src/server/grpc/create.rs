@@ -123,6 +123,7 @@ fn to_admin_result(result: Result<Output>) -> AdminResult {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
 
     use super::*;
     use crate::tests::test_util;
@@ -226,6 +227,8 @@ mod tests {
             time_index: "ts".to_string(),
             primary_keys: vec!["ts".to_string(), "host".to_string()],
             create_if_not_exists: true,
+            table_options: HashMap::new(),
+            partition_options: HashMap::new(),
         }
     }
 

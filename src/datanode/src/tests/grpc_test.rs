@@ -1,4 +1,5 @@
 use std::assert_matches::assert_matches;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -159,5 +160,7 @@ fn testing_create_expr() -> CreateExpr {
         time_index: "ts".to_string(),
         primary_keys: vec!["ts".to_string(), "host".to_string()],
         create_if_not_exists: true,
+        table_options: HashMap::new(),
+        partition_options: HashMap::new(),
     }
 }
