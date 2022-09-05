@@ -10,7 +10,7 @@ use futures::task::{Context, Poll};
 use futures::Stream;
 pub use recordbatch::RecordBatch;
 
-pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
+pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>>{
     fn schema(&self) -> SchemaRef;
 }
 
