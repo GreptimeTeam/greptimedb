@@ -57,12 +57,6 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
         ctx: &EngineContext,
         name: &str,
     ) -> Result<Option<Self::Region>, Self::Error>;
-
-    async fn alter_region(
-        &self,
-        ctx: &EngineContext,
-        descriptor: RegionDescriptor,
-    ) -> Result<(), Self::Error>;
 }
 
 /// Storage engine context.

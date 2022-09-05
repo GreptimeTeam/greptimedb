@@ -67,10 +67,6 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
     fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<Self::Region>> {
         Ok(self.inner.get_region(name))
     }
-
-    async fn alter_region(&self, _ctx: &EngineContext, _: RegionDescriptor) -> Result<()> {
-        unimplemented!()
-    }
 }
 
 impl<S: LogStore> EngineImpl<S> {

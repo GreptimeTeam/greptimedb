@@ -139,6 +139,12 @@ impl Region for MockRegion {
     fn write_request(&self) -> WriteBatch {
         WriteBatch::new(self.in_memory_metadata().schema().clone())
     }
+
+    fn alter(&self, descriptor: RegionDescriptor) -> Result<()> {
+        let metadata = descriptor.try_into().unwrap();
+        self.inner.update_metadata(metadata);
+        Ok(())
+    }
 }
 
 impl MockRegionInner {
@@ -263,16 +269,5 @@ impl StorageEngine for MockEngine {
     fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<MockRegion>> {
         let regions = self.regions.lock().unwrap();
         Ok(regions.opened_regions.get(name).cloned())
-    }
-
-    async fn alter_region(&self, _ctx: &EngineContext, descriptor: RegionDescriptor) -> Result<()> {
-        let region_name = descriptor.name.clone();
-        let metadata = descriptor.try_into().unwrap();
-
-        let mut regions = self.regions.lock().unwrap();
-        let region = regions.opened_regions.get_mut(&region_name).unwrap();
-
-        region.inner.update_metadata(metadata);
-        Ok(())
     }
 }

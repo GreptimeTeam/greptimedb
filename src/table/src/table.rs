@@ -10,7 +10,7 @@ use datatypes::schema::SchemaRef;
 
 use crate::error::Result;
 use crate::metadata::{FilterPushDownType, TableType};
-use crate::requests::InsertRequest;
+use crate::requests::{AlterTableRequest, InsertRequest};
 
 /// Table abstraction.
 #[async_trait::async_trait]
@@ -48,6 +48,10 @@ pub trait Table: Send + Sync {
     /// to optimise data retrieval.
     fn supports_filter_pushdown(&self, _filter: &Expr) -> Result<FilterPushDownType> {
         Ok(FilterPushDownType::Unsupported)
+    }
+
+    async fn alter(&self, _request: AlterTableRequest) -> Result<()> {
+        unimplemented!()
     }
 }
 

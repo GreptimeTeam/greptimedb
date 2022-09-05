@@ -137,19 +137,4 @@ async fn test_alter_table() {
         }
         _ => unreachable!(),
     }
-
-    // TODO(LFC) Test insertion validity with primary keys when there's a suitable table engine.
-    // In currently implemented table engines, primary key does not mean "uniqueness", and the
-    // actual meaning of "primary key" in our DB is not clear (or is implementation specific).
-    // So we only test SQL parsing here, and hope to test uniqueness in the future.
-    let output = instance
-        .execute_sql("alter table demo add primary key (my_tag)")
-        .await
-        .unwrap();
-    assert!(matches!(output, Output::AffectedRows(0)));
-    let output = instance
-        .execute_sql("alter table demo drop primary key")
-        .await
-        .unwrap();
-    assert!(matches!(output, Output::AffectedRows(0)));
 }

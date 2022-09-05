@@ -20,13 +20,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to alter region, region: {}, source: {}", region_name, source))]
-    AlterRegion {
-        region_name: String,
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
     #[snafu(display(
         "Failed to build table meta for table: {}, source: {}",
         table_name,
@@ -175,6 +168,13 @@ pub enum Error {
         msg: String,
     },
 
+    #[snafu(display("Failed to alter table {}, source: {}", table_name, source))]
+    AlterTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
     #[snafu(display(
         "Projected columnd not found in region, column: {}",
         column_qualified_name
@@ -198,9 +198,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateRegion { source, .. }
-            | OpenRegion { source, .. }
-            | AlterRegion { source, .. } => source.status_code(),
+            CreateRegion { source, .. } | OpenRegion { source, .. } => source.status_code(),
+
+            AlterTable { source, .. } => source.status_code(),
 
             SchemaBuild { source, .. } => source.status_code(),
 

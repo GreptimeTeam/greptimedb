@@ -5,6 +5,8 @@ use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 
+use crate::metadata::TableMetaBuilderError;
+
 common_error::define_opaque_error!(Error);
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -48,6 +50,37 @@ pub enum InnerError {
         source: ArrowError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Column {} already exists in table {}", column_name, table_name))]
+    ColumnExists {
+        column_name: String,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to build table meta for table: {}, source: {}",
+        table_name,
+        source
+    ))]
+    BuildTableMeta {
+        source: TableMetaBuilderError,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to build region descriptor for table: {}, region: {}, source: {}",
+        table_name,
+        region_name,
+        source,
+    ))]
+    BuildRegionDescriptor {
+        source: store_api::storage::RegionDescriptorBuilderError,
+        table_name: String,
+        region_name: String,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for InnerError {
@@ -57,7 +90,10 @@ impl ErrorExt for InnerError {
             | InnerError::PollStream { .. }
             | InnerError::SchemaConversion { .. }
             | InnerError::TableProjection { .. } => StatusCode::EngineExecuteQuery,
-            InnerError::MissingColumn { .. } => StatusCode::InvalidArguments,
+            InnerError::MissingColumn { .. }
+            | InnerError::ColumnExists { .. }
+            | InnerError::BuildTableMeta { .. }
+            | InnerError::BuildRegionDescriptor { .. } => StatusCode::InvalidArguments,
             InnerError::ExecuteRepeatedly { .. } => StatusCode::Unexpected,
         }
     }

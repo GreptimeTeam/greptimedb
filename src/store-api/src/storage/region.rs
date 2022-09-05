@@ -26,7 +26,7 @@ use crate::storage::metadata::RegionMeta;
 use crate::storage::requests::WriteRequest;
 use crate::storage::responses::WriteResponse;
 use crate::storage::snapshot::{ReadContext, Snapshot};
-use crate::storage::RegionId;
+use crate::storage::{RegionDescriptor, RegionId};
 
 /// Chunks of rows in storage engine.
 #[async_trait]
@@ -56,6 +56,10 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
 
     /// Create write request
     fn write_request(&self) -> Self::WriteRequest;
+
+    fn alter(&self, _descriptor: RegionDescriptor) -> Result<(), Self::Error> {
+        unimplemented!()
+    }
 }
 
 /// Context for write operations.

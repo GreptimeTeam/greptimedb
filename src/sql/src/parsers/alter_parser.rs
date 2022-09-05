@@ -14,17 +14,6 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::Alter(alter_table))
     }
 
-    // Sqlparser does not parse MySQL "ALTER ... DROP PRIMARY KEY" correctly,
-    // see https://github.com/sqlparser-rs/sqlparser-rs/issues/591.
-    // If the issue is resolved, maybe we can switch back to sqlparser's implementation.
-    //
-    // Up until the current version (0.21.0), sqlparser requires us to use
-    // "ALTER ... DROP CONSTRAINT my_constraint" to drop the primary key - the "my_constraint"
-    // corresponding to the primary key constraint introduced either in
-    // "CREATE TABLE" or "ALTER ... ADD CONSTRAINT". If we were to use this "DROP CONSTRAINT"
-    // syntax, we have to store constraint somewhere in table meta and design a whole "constraint"
-    // framework (not restrict to only primary key). If we are building a SQL database, I think
-    // it's worth the efforts. If not, maybe this easy way is more suitable:
     fn parse(&mut self) -> std::result::Result<AlterTable, ParserError> {
         let parser = &mut self.parser;
         parser.expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
