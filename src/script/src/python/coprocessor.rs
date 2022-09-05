@@ -7,7 +7,7 @@ use std::sync::Arc;
 use common_recordbatch::RecordBatch;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow;
-use datatypes::arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
+use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::schema::Schema;
@@ -25,7 +25,7 @@ use rustpython_vm::{class::PyClassImpl, AsObject};
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
-use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
+use vm::builtins::{PyBaseExceptionRef, PyTuple};
 use vm::scope::Scope;
 use vm::{Interpreter, PyObjectRef, VirtualMachine};
 
@@ -334,6 +334,7 @@ fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
 
 /// convert a tuple of `PyVector` or one `PyVector`(wrapped in a Python Object Ref[`PyObjectRef`])
 /// to a `Vec<ArrayRef>`
+/// by default, a constant(int/float/bool) gives the a constant array of same length with input args
 fn try_into_columns(
     obj: &PyObjectRef,
     vm: &VirtualMachine,
