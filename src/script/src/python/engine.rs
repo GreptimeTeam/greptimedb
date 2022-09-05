@@ -10,8 +10,10 @@ use common_recordbatch::{
     error::ExternalSnafu, error::Result as RecordBatchResult, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream,
 };
+use common_telemetry::debug;
 use datatypes::schema::SchemaRef;
 use futures::Stream;
+use tokio::time::{self, Duration};
 use query::Output;
 use query::QueryEngineRef;
 use snafu::{ensure, ResultExt};
@@ -62,6 +64,21 @@ impl Stream for CoprStream {
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.stream.size_hint()
+    }
+}
+
+impl PyScript {
+    /// repeat a job using a fixed interval
+    async fn schedule_job(&self, dur: Duration,_ctx: EvalContext, tx: tokio::sync::watch::Sender<Result<Output>>) {
+        let mut interval = time::interval(dur);
+        loop {
+                interval.tick().await;
+                let res = tx.send(self.evaluate(EvalContext::default()).await);
+                if res.is_err(){
+                    debug!("All receiver to schedule_job is closed, ending schedule job \"{}\" now", self.copr.name);
+                    return;
+                }
+            };
     }
 }
 
