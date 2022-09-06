@@ -4,6 +4,7 @@ mod basic;
 mod flush;
 mod projection;
 
+use common_telemetry::logging;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::Int64Vector;
@@ -35,7 +36,7 @@ pub fn new_metadata(region_name: &str, enable_version_column: bool) -> RegionMet
 pub struct TesterBase<S: LogStore> {
     pub region: RegionImpl<S>,
     write_ctx: WriteContext,
-    read_ctx: ReadContext,
+    pub read_ctx: ReadContext,
 }
 
 impl<S: LogStore> TesterBase<S> {
@@ -61,6 +62,8 @@ impl<S: LogStore> TesterBase<S> {
 
     /// Scan all data.
     pub async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
+        logging::info!("Full scan with ctx {:?}", self.read_ctx);
+
         let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
 
         let resp = snapshot
