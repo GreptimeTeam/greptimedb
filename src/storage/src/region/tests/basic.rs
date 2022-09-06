@@ -177,7 +177,7 @@ async fn test_scan_different_batch() {
     let data: Vec<_> = (0..=2000).map(|i| (i, Some(i))).collect();
 
     for chunk in data.chunks(100) {
-        tester.put(&chunk).await;
+        tester.put(chunk).await;
     }
 
     let batch_sizes = [1, 2, 4, 16, 64, 128, 256, 512];
