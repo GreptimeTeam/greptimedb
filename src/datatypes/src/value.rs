@@ -315,6 +315,23 @@ pub enum ValueRef<'a> {
     List(ListValueRef<'a>),
 }
 
+macro_rules! impl_as_for_value_ref {
+    ($value: ident, $Variant: ident) => {
+        match $value {
+            ValueRef::Null => Ok(None),
+            ValueRef::$Variant(v) => Ok(Some(*v)),
+            other => error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to cast value ref {:?} to {}",
+                    other,
+                    stringify!($Variant)
+                ),
+            }
+            .fail(),
+        }
+    };
+}
+
 impl<'a> ValueRef<'a> {
     /// Returns true if this is null.
     pub fn is_null(&self) -> bool {
@@ -323,74 +340,32 @@ impl<'a> ValueRef<'a> {
 
     /// Cast itself to binary slice.
     pub fn as_binary(&self) -> Result<Option<&[u8]>> {
-        match self {
-            ValueRef::Null => Ok(None),
-            ValueRef::Binary(v) => Ok(Some(v)),
-            other => error::CastTypeSnafu {
-                msg: format!("Failed to cast value ref {:?} to binary", other),
-            }
-            .fail(),
-        }
+        impl_as_for_value_ref!(self, Binary)
     }
 
     /// Cast itself to string slice.
     pub fn as_string(&self) -> Result<Option<&str>> {
-        match self {
-            ValueRef::Null => Ok(None),
-            ValueRef::String(v) => Ok(Some(v)),
-            other => error::CastTypeSnafu {
-                msg: format!("Failed to cast value ref {:?} to string", other),
-            }
-            .fail(),
-        }
+        impl_as_for_value_ref!(self, String)
     }
 
     /// Cast itself to boolean.
     pub fn as_boolean(&self) -> Result<Option<bool>> {
-        match self {
-            ValueRef::Null => Ok(None),
-            ValueRef::Boolean(v) => Ok(Some(*v)),
-            other => error::CastTypeSnafu {
-                msg: format!("Failed to cast value ref {:?} to boolean", other),
-            }
-            .fail(),
-        }
+        impl_as_for_value_ref!(self, Boolean)
     }
 
     /// Cast itself to [Date].
     pub fn as_date(&self) -> Result<Option<Date>> {
-        match self {
-            ValueRef::Null => Ok(None),
-            ValueRef::Date(v) => Ok(Some(*v)),
-            other => error::CastTypeSnafu {
-                msg: format!("Failed to cast value ref {:?} to date", other),
-            }
-            .fail(),
-        }
+        impl_as_for_value_ref!(self, Date)
     }
 
     /// Cast itself to [DateTime].
     pub fn as_datetime(&self) -> Result<Option<DateTime>> {
-        match self {
-            ValueRef::Null => Ok(None),
-            ValueRef::DateTime(v) => Ok(Some(*v)),
-            other => error::CastTypeSnafu {
-                msg: format!("Failed to cast value ref {:?} to datetime", other),
-            }
-            .fail(),
-        }
+        impl_as_for_value_ref!(self, DateTime)
     }
 
     /// Cast itself to [ListValueRef].
     pub fn as_list(&self) -> Result<Option<ListValueRef>> {
-        match self {
-            ValueRef::Null => Ok(None),
-            ValueRef::List(v) => Ok(Some(*v)),
-            other => error::CastTypeSnafu {
-                msg: format!("Failed to cast value ref {:?} to list", other),
-            }
-            .fail(),
-        }
+        impl_as_for_value_ref!(self, List)
     }
 }
 
