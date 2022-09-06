@@ -140,11 +140,7 @@ impl<R: Region> Table for MitoTable<R> {
         let stream_schema = schema.clone();
 
         let stream = Box::pin(async_stream::try_stream! {
-
-            for chunk in reader.next_chunk()
-                .await
-                .map_err(RecordBatchError::new)?
-            {
+            while let Some(chunk) = reader.next_chunk().await.map_err(RecordBatchError::new)? {
                 yield RecordBatch::new(stream_schema.clone(), chunk.columns)?
             }
         });
