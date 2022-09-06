@@ -1,14 +1,19 @@
 use std::any::TypeId;
 use std::marker::PhantomData;
 
+use arrow::array::PrimitiveArray;
 use arrow::datatypes::DataType as ArrowDataType;
 use paste::paste;
 use serde::{Deserialize, Serialize};
+use snafu::OptionExt;
 
 use crate::data_type::{ConcreteDataType, DataType};
+use crate::error::{self, Result};
+use crate::scalars::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
 use crate::types::primitive_traits::Primitive;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
+use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PrimitiveType<T: Primitive> {
@@ -24,21 +29,59 @@ impl<T: Primitive, U: Primitive> PartialEq<PrimitiveType<U>> for PrimitiveType<T
 
 impl<T: Primitive> Eq for PrimitiveType<T> {}
 
-/// Create a new [ConcreteDataType] from a primitive type.
-pub trait DataTypeBuilder {
+/// A trait that provide helper methods for a primitive type to implementing the [PrimitiveVector].
+pub trait PrimitiveElement: Primitive {
+    /// Construct the data type struct.
     fn build_data_type() -> ConcreteDataType;
+
+    /// Returns the name of the type id.
     fn type_name() -> String;
+
+    /// Dynamic cast the vector to the concrete vector type.
+    fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveArray<Self>>;
+
+    /// Cast value ref to the primitive type.
+    fn cast_value_ref(value: ValueRef) -> Result<Option<Self>>;
 }
 
-macro_rules! impl_build_data_type {
+macro_rules! impl_primitive_element {
     ($Type:ident, $TypeId:ident) => {
         paste::paste! {
-            impl DataTypeBuilder for $Type {
+            impl PrimitiveElement for $Type {
                 fn build_data_type() -> ConcreteDataType {
                     ConcreteDataType::$TypeId(PrimitiveType::<$Type>::default())
                 }
+
                 fn type_name() -> String {
                     stringify!($TypeId).to_string()
+                }
+
+                fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveArray<$Type>> {
+                    let primitive_vector = vector
+                        .as_any()
+                        .downcast_ref::<PrimitiveVector<$Type>>()
+                        .with_context(|| error::CastTypeSnafu {
+                            msg: format!(
+                                "Failed to cast {} to vector of primitive type {}",
+                                vector.vector_type_name(),
+                                stringify!($TypeId)
+                            ),
+                        })?;
+                    Ok(&primitive_vector.array)
+                }
+
+                fn cast_value_ref(value: ValueRef) -> Result<Option<Self>> {
+                    match value {
+                        ValueRef::Null => Ok(None),
+                        ValueRef::$TypeId(v) => Ok(Some(v.into())),
+                        other => error::CastTypeSnafu {
+                            msg: format!(
+                                "Failed to cast value {:?} to primitive type {}",
+                                other,
+                                stringify!($TypeId),
+                            ),
+                        }.fail(),
+                    }
                 }
             }
         }
@@ -63,6 +106,10 @@ macro_rules! impl_numeric {
             fn as_arrow_type(&self) -> ArrowDataType {
                 ArrowDataType::$TypeId
             }
+
+            fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+                Box::new(PrimitiveVectorBuilder::<$Type>::with_capacity(capacity))
+            }
         }
 
         impl std::fmt::Debug for PrimitiveType<$Type> {
@@ -79,7 +126,7 @@ macro_rules! impl_numeric {
             }
         }
 
-        impl_build_data_type!($Type, $TypeId);
+        impl_primitive_element!($Type, $TypeId);
 
         paste! {
             pub type [<$TypeId Type>]=PrimitiveType<$Type>;

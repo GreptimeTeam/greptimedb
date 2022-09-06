@@ -3,7 +3,7 @@ use arrow::types::NativeType;
 use num::NumCast;
 
 use crate::prelude::Scalar;
-use crate::value::Value;
+use crate::value::{IntoValueRef, Value};
 
 /// Primitive type.
 pub trait Primitive:
@@ -12,6 +12,7 @@ pub trait Primitive:
     + Clone
     + Copy
     + Into<Value>
+    + IntoValueRef<'static>
     + NativeType
     + serde::Serialize
     + NativeArithmetics

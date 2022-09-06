@@ -4,15 +4,14 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, BooleanArray, MutableArray, MutableBooleanArray};
 use arrow::bitmap::utils::{BitmapIter, ZipValidity};
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
 use crate::scalars::common::replicate_scalar_vector;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of boolean.
@@ -72,6 +71,10 @@ impl Vector for BooleanVector {
         Arc::new(self.array.clone())
     }
 
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
+        Box::new(self.array.clone())
+    }
+
     fn validity(&self) -> Validity {
         vectors::impl_validity_for_vector!(self.array)
     }
@@ -94,6 +97,10 @@ impl Vector for BooleanVector {
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         replicate_scalar_vector(self, offsets)
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        vectors::impl_get_ref_for_vector!(self.array, index)
     }
 }
 
@@ -140,6 +147,15 @@ impl MutableVector for BooleanVectorBuilder {
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(self.finish())
     }
+
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        self.mutable_array.push(value.as_boolean()?);
+        Ok(())
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        vectors::impl_extend_for_builder!(self.mutable_array, vector, BooleanVector, offset, length)
+    }
 }
 
 impl ScalarVectorBuilder for BooleanVectorBuilder {
@@ -179,7 +195,9 @@ mod tests {
     use serde_json;
 
     use super::*;
+    use crate::data_type::DataType;
     use crate::serialize::Serializable;
+    use crate::types::BooleanType;
 
     #[test]
     fn test_boolean_vector_misc() {
@@ -195,6 +213,7 @@ mod tests {
         for (i, b) in bools.iter().enumerate() {
             assert!(!v.is_null(i));
             assert_eq!(Value::Boolean(*b), v.get(i));
+            assert_eq!(ValueRef::Boolean(*b), v.get_ref(i));
         }
 
         let arrow_arr = v.to_arrow_array();
@@ -285,5 +304,22 @@ mod tests {
         let vector = BooleanVector::from(vec![true, false, false]);
         assert_eq!(0, vector.null_count());
         assert_eq!(Validity::AllValid, vector.validity());
+    }
+
+    #[test]
+    fn test_boolean_vector_builder() {
+        let input = BooleanVector::from_slice(&[true, false, true]);
+
+        let mut builder = BooleanType::default().create_mutable_vector(3);
+        builder.push_value_ref(ValueRef::Boolean(true)).unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(BooleanVector::from_slice(&[true, false, true]));
+        assert_eq!(expect, vector);
     }
 }

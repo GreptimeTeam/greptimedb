@@ -16,7 +16,7 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
+use arrow::array::{Array, ArrayRef};
 use arrow::bitmap::Bitmap;
 pub use binary::*;
 pub use boolean::*;
@@ -33,9 +33,9 @@ use snafu::ensure;
 pub use string::*;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{BadArrayAccessSnafu, Result};
+use crate::error::{self, Result};
 use crate::serialize::Serializable;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 
 #[derive(Debug, PartialEq)]
 pub enum Validity<'a> {
@@ -80,6 +80,9 @@ pub trait Vector: Send + Sync + Serializable + Debug {
     /// Convert this vector to a new arrow [ArrayRef].
     fn to_arrow_array(&self) -> ArrayRef;
 
+    /// Convert this vector to a new boxed arrow [Array].
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array>;
+
     /// Returns the validity of the Array.
     fn validity(&self) -> Validity;
 
@@ -110,6 +113,10 @@ pub trait Vector: Send + Sync + Serializable + Debug {
         self.null_count() == self.len()
     }
 
+    /// Slices the `Vector`, returning a new `VectorRef`.
+    ///
+    /// # Panics
+    /// This function panics if `offset + length > self.len()`.
     fn slice(&self, offset: usize, length: usize) -> VectorRef;
 
     /// Returns the clone of value at `index`.
@@ -123,7 +130,7 @@ pub trait Vector: Send + Sync + Serializable + Debug {
     fn try_get(&self, index: usize) -> Result<Value> {
         ensure!(
             index < self.len(),
-            BadArrayAccessSnafu {
+            error::BadArrayAccessSnafu {
                 index,
                 size: self.len()
             }
@@ -134,6 +141,12 @@ pub trait Vector: Send + Sync + Serializable + Debug {
     // Copies each element according offsets parameter.
     // (i-th element should be copied offsets[i] - offsets[i - 1] times.)
     fn replicate(&self, offsets: &[usize]) -> VectorRef;
+
+    /// Returns the reference of value at `index`.
+    ///
+    /// # Panics
+    /// Panic if `index` is out of bound.
+    fn get_ref(&self, index: usize) -> ValueRef;
 }
 
 pub type VectorRef = Arc<dyn Vector>;
@@ -180,8 +193,40 @@ macro_rules! impl_get_for_vector {
     };
 }
 
+macro_rules! impl_get_ref_for_vector {
+    ($array: expr, $index: ident) => {
+        if $array.is_valid($index) {
+            // Safety: The index have been checked by `is_valid()`.
+            unsafe { $array.value_unchecked($index).into() }
+        } else {
+            ValueRef::Null
+        }
+    };
+}
+
+macro_rules! impl_extend_for_builder {
+    ($mutable_array: expr, $vector: ident, $VectorType: ident, $offset: ident, $length: ident) => {{
+        use snafu::OptionExt;
+
+        let concrete_vector = $vector
+            .as_any()
+            .downcast_ref::<$VectorType>()
+            .with_context(|| crate::error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to cast vector from {} to {}",
+                    $vector.vector_type_name(),
+                    stringify!($VectorType)
+                ),
+            })?;
+        let slice = concrete_vector.array.slice($offset, $length);
+        $mutable_array.extend_trusted_len(slice.iter());
+        Ok(())
+    }};
+}
+
 pub(crate) use {
-    impl_get_for_vector, impl_try_from_arrow_array_for_vector, impl_validity_for_vector,
+    impl_extend_for_builder, impl_get_for_vector, impl_get_ref_for_vector,
+    impl_try_from_arrow_array_for_vector, impl_validity_for_vector,
 };
 
 #[cfg(test)]
@@ -192,7 +237,7 @@ pub mod tests {
     use super::helper::Helper;
     use super::*;
     use crate::data_type::DataType;
-    use crate::types::DataTypeBuilder;
+    use crate::types::PrimitiveElement;
 
     #[test]
     fn test_df_columns_to_vector() {

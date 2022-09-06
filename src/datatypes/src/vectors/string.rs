@@ -4,16 +4,15 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, MutableArray, Utf8ValuesIter};
 use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
-use crate::error::SerializeSnafu;
+use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::StringType;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// String array wrapper
@@ -89,6 +88,10 @@ impl Vector for StringVector {
         Arc::new(self.array.clone())
     }
 
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
+        Box::new(self.array.clone())
+    }
+
     fn validity(&self) -> Validity {
         vectors::impl_validity_for_vector!(self.array)
     }
@@ -111,6 +114,10 @@ impl Vector for StringVector {
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         common::replicate_scalar_vector(self, offsets)
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        vectors::impl_get_ref_for_vector!(self.array, index)
     }
 }
 
@@ -157,6 +164,15 @@ impl MutableVector for StringVectorBuilder {
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(self.finish())
     }
+
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        self.buffer.push(value.as_string()?);
+        Ok(())
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        vectors::impl_extend_for_builder!(self.buffer, vector, StringVector, offset, length)
+    }
 }
 
 impl ScalarVectorBuilder for StringVectorBuilder {
@@ -199,6 +215,7 @@ mod tests {
     use serde_json;
 
     use super::*;
+    use crate::data_type::DataType;
 
     #[test]
     fn test_string_vector_misc() {
@@ -213,6 +230,7 @@ mod tests {
 
         for (i, s) in strs.iter().enumerate() {
             assert_eq!(Value::from(*s), v.get(i));
+            assert_eq!(ValueRef::from(*s), v.get_ref(i));
             assert_eq!(Value::from(*s), v.try_get(i).unwrap());
         }
 
@@ -272,5 +290,22 @@ mod tests {
         assert_eq!(None, iter.next().unwrap());
         assert_eq!("world", iter.next().unwrap().unwrap());
         assert_eq!(None, iter.next());
+    }
+
+    #[test]
+    fn test_string_vector_builder() {
+        let mut builder = StringType::default().create_mutable_vector(3);
+        builder.push_value_ref(ValueRef::String("hello")).unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+
+        let input = StringVector::from_slice(&["world", "one", "two"]);
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(StringVector::from_slice(&["hello", "one", "two"]));
+        assert_eq!(expect, vector);
     }
 }

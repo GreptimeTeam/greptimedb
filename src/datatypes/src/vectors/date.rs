@@ -6,8 +6,8 @@ use common_time::date::Date;
 use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::ConversionSnafu;
-use crate::prelude::{ScalarVectorBuilder, Validity, Value, Vector, VectorRef};
+use crate::error::{self, Result};
+use crate::prelude::*;
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
 use crate::vectors::{MutableVector, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
@@ -24,13 +24,13 @@ impl DateVector {
         }
     }
 
-    pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> crate::error::Result<Self> {
+    pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> Result<Self> {
         Ok(Self::new(
             array
                 .as_ref()
                 .as_any()
                 .downcast_ref::<PrimitiveArray<i32>>()
-                .with_context(|| ConversionSnafu {
+                .with_context(|| error::ConversionSnafu {
                     from: format!("{:?}", array.as_ref().data_type()),
                 })?
                 .clone(),
@@ -65,6 +65,16 @@ impl Vector for DateVector {
         ))
     }
 
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
+        let validity = self.array.array.validity().cloned();
+        let buffer = self.array.array.values().clone();
+        Box::new(PrimitiveArray::new(
+            arrow::datatypes::DataType::Date32,
+            buffer,
+            validity,
+        ))
+    }
+
     fn validity(&self) -> Validity {
         self.array.validity()
     }
@@ -93,6 +103,16 @@ impl Vector for DateVector {
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         self.array.replicate(offsets)
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        match self.array.get(index) {
+            Value::Int32(v) => ValueRef::Date(Date::new(v)),
+            Value::Null => ValueRef::Null,
+            _ => {
+                unreachable!()
+            }
+        }
     }
 }
 
@@ -135,7 +155,7 @@ impl ScalarVector for DateVector {
 }
 
 impl Serializable for DateVector {
-    fn serialize_to_json(&self) -> crate::error::Result<Vec<serde_json::Value>> {
+    fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
         Ok(self
             .array
             .iter_data()
@@ -172,6 +192,26 @@ impl MutableVector for DateVectorBuilder {
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(self.finish())
     }
+
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        self.buffer.push(value.as_date()?.map(|d| d.val()));
+        Ok(())
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        let concrete_vector = vector
+            .as_any()
+            .downcast_ref::<DateVector>()
+            .with_context(|| error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to convert vector from {} to DateVector",
+                    vector.vector_type_name()
+                ),
+            })?;
+        self.buffer
+            .extend_slice_of(&concrete_vector.array, offset, length)?;
+        Ok(())
+    }
 }
 
 impl ScalarVectorBuilder for DateVectorBuilder {
@@ -197,17 +237,23 @@ impl ScalarVectorBuilder for DateVectorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_type::DataType;
+    use crate::types::DateType;
 
     #[test]
-    pub fn test_build_date_vector() {
+    fn test_build_date_vector() {
         let mut builder = DateVectorBuilder::with_capacity(4);
         builder.push(Some(Date::new(1)));
         builder.push(None);
         builder.push(Some(Date::new(-1)));
         let vector = builder.finish();
         assert_eq!(3, vector.len());
+        assert_eq!(Value::Date(Date::new(1)), vector.get(0));
+        assert_eq!(ValueRef::Date(Date::new(1)), vector.get_ref(0));
         assert_eq!(Some(Date::new(1)), vector.get_data(0));
         assert_eq!(None, vector.get_data(1));
+        assert_eq!(Value::Null, vector.get(1));
+        assert_eq!(ValueRef::Null, vector.get_ref(1));
         assert_eq!(Some(Date::new(-1)), vector.get_data(2));
         let mut iter = vector.iter_data();
         assert_eq!(Some(Date::new(1)), iter.next().unwrap());
@@ -216,10 +262,33 @@ mod tests {
     }
 
     #[test]
-    pub fn test_date_scalar() {
+    fn test_date_scalar() {
         let vector = DateVector::from_slice(&[Date::new(1), Date::new(2)]);
         assert_eq!(2, vector.len());
         assert_eq!(Some(Date::new(1)), vector.get_data(0));
         assert_eq!(Some(Date::new(2)), vector.get_data(1));
+    }
+
+    #[test]
+    fn test_date_vector_builder() {
+        let input = DateVector::from_slice(&[Date::new(1), Date::new(2), Date::new(3)]);
+
+        let mut builder = DateType::default().create_mutable_vector(3);
+        builder
+            .push_value_ref(ValueRef::Date(Date::new(5)))
+            .unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(DateVector::from_slice(&[
+            Date::new(5),
+            Date::new(2),
+            Date::new(3),
+        ]));
+        assert_eq!(expect, vector);
     }
 }

@@ -2,6 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, ListArray};
+use arrow::bitmap::MutableBitmap;
 use arrow::datatypes::DataType as ArrowDataType;
 use serde_json::Value as JsonValue;
 use snafu::prelude::*;
@@ -10,7 +11,7 @@ use crate::error::Result;
 use crate::prelude::*;
 use crate::serialize::Serializable;
 use crate::types::ListType;
-use crate::value::ListValue;
+use crate::value::{ListValue, ListValueRef};
 use crate::vectors::{impl_try_from_arrow_array_for_vector, impl_validity_for_vector};
 
 type ArrowListArray = ListArray<i32>;
@@ -47,6 +48,10 @@ impl Vector for ListVector {
 
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
+    }
+
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
@@ -94,6 +99,13 @@ impl Vector for ListVector {
         // Refer to Databend's `ArrayColumn` for more details.
         unimplemented!()
     }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        ValueRef::List(ListValueRef::Indexed {
+            vector: self,
+            idx: index,
+        })
+    }
 }
 
 impl Serializable for ListVector {
@@ -124,6 +136,134 @@ impl From<ArrowListArray> for ListVector {
 }
 
 impl_try_from_arrow_array_for_vector!(ArrowListArray, ListVector);
+
+// Some codes are ported from arrow2's MutableListArray.
+pub struct ListVectorBuilder {
+    inner_type: ConcreteDataType,
+    offsets: Vec<i32>,
+    values: Box<dyn MutableVector>,
+    validity: Option<MutableBitmap>,
+}
+
+impl ListVectorBuilder {
+    pub fn with_capacity(inner_type: ConcreteDataType, capacity: usize) -> ListVectorBuilder {
+        let mut offsets = Vec::with_capacity(capacity + 1);
+        offsets.push(0);
+        // The actual required capacity might greater than the capacity of the `ListVector`
+        // if there exists child vector that has more than one element.
+        let values = inner_type.create_mutable_vector(capacity);
+
+        ListVectorBuilder {
+            inner_type,
+            offsets,
+            values,
+            validity: None,
+        }
+    }
+
+    #[inline]
+    fn last_offset(&self) -> i32 {
+        *self.offsets.last().unwrap()
+    }
+
+    fn push_null(&mut self) {
+        self.offsets.push(self.last_offset());
+        match &mut self.validity {
+            Some(validity) => validity.push(false),
+            None => self.init_validity(),
+        }
+    }
+
+    fn init_validity(&mut self) {
+        let len = self.offsets.len() - 1;
+
+        let mut validity = MutableBitmap::with_capacity(self.offsets.capacity());
+        validity.extend_constant(len, true);
+        validity.set(len - 1, false);
+        self.validity = Some(validity)
+    }
+
+    fn push_list_value(&mut self, list_value: &ListValue) -> Result<()> {
+        if let Some(items) = list_value.items() {
+            for item in &**items {
+                self.values.push_value_ref(item.as_value_ref())?;
+            }
+        }
+        self.push_valid();
+        Ok(())
+    }
+
+    /// Needs to be called when a valid value was extended to this builder.
+    fn push_valid(&mut self) {
+        let size = self.values.len();
+        let size = i32::try_from(size).unwrap();
+        assert!(size >= *self.offsets.last().unwrap());
+
+        self.offsets.push(size);
+        if let Some(validity) = &mut self.validity {
+            validity.push(true)
+        }
+    }
+}
+
+impl MutableVector for ListVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::list_datatype(self.inner_type.clone())
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.len() - 1
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn to_vector(&mut self) -> VectorRef {
+        let array = ArrowListArray::try_new(
+            ConcreteDataType::list_datatype(self.inner_type.clone()).as_arrow_type(),
+            std::mem::take(&mut self.offsets).into(),
+            self.values.to_vector().to_arrow_array(),
+            std::mem::take(&mut self.validity).map(|x| x.into()),
+        )
+        .unwrap(); // The `ListVectorBuilder` itself should ensure it always builds a valid array.
+
+        let vector = ListVector {
+            array,
+            inner_data_type: self.inner_type.clone(),
+        };
+        Arc::new(vector)
+    }
+
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        if let Some(list_ref) = value.as_list()? {
+            match list_ref {
+                ListValueRef::Indexed { vector, idx } => match vector.get(idx).as_list()? {
+                    Some(list_value) => self.push_list_value(list_value)?,
+                    None => self.push_null(),
+                },
+                ListValueRef::Ref(list_value) => self.push_list_value(list_value)?,
+            }
+        } else {
+            self.push_null();
+        }
+
+        Ok(())
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        for idx in offset..offset + length {
+            let value = vector.get_ref(idx);
+            self.push_value_ref(value)?;
+        }
+
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -194,6 +334,17 @@ mod tests {
             )),
             list_vector.get(0)
         );
+        let value_ref = list_vector.get_ref(0);
+        assert!(matches!(
+            value_ref,
+            ValueRef::List(ListValueRef::Indexed { .. })
+        ));
+        let value_ref = list_vector.get_ref(1);
+        if let ValueRef::List(ListValueRef::Indexed { idx, .. }) = value_ref {
+            assert_eq!(1, idx);
+        } else {
+            unreachable!()
+        }
         assert_eq!(Value::Null, list_vector.get(1));
         assert_eq!(
             Value::List(ListValue::new(
@@ -240,10 +391,11 @@ mod tests {
         arrow_array.try_extend(data).unwrap();
         let arrow_array: ArrowListArray = arrow_array.into();
 
-        let list_vector = ListVector {
-            array: arrow_array,
-            inner_data_type: ConcreteDataType::int32_datatype(),
-        };
+        let list_vector = ListVector::from(arrow_array);
+        assert_eq!(
+            ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype())),
+            list_vector.data_type()
+        );
         let mut iter = list_vector.values_iter();
         assert_eq!(
             "Int64[1, 2, 3]",
@@ -272,13 +424,54 @@ mod tests {
         arrow_array.try_extend(data).unwrap();
         let arrow_array: ArrowListArray = arrow_array.into();
 
-        let list_vector = ListVector {
-            array: arrow_array,
-            inner_data_type: ConcreteDataType::int32_datatype(),
-        };
+        let list_vector = ListVector::from(arrow_array);
         assert_eq!(
             "Ok([Array([Number(1), Number(2), Number(3)]), Null, Array([Number(4), Null, Number(6)])])",
             format!("{:?}", list_vector.serialize_to_json())
         );
+    }
+
+    fn new_list_vector(data: Vec<Option<Vec<Option<i32>>>>) -> ListVector {
+        let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i32>>::new();
+        arrow_array.try_extend(data).unwrap();
+        let arrow_array: ArrowListArray = arrow_array.into();
+
+        ListVector::from(arrow_array)
+    }
+
+    #[test]
+    fn test_list_vector_builder() {
+        let mut builder =
+            ListType::new(ConcreteDataType::int32_datatype()).create_mutable_vector(3);
+        builder
+            .push_value_ref(ValueRef::List(ListValueRef::Ref(&ListValue::new(
+                Some(Box::new(vec![
+                    Value::Int32(4),
+                    Value::Null,
+                    Value::Int32(6),
+                ])),
+                ConcreteDataType::int32_datatype(),
+            ))))
+            .unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+
+        let data = vec![
+            Some(vec![Some(1), Some(2), Some(3)]),
+            None,
+            Some(vec![Some(7), Some(8), None]),
+        ];
+        let input = new_list_vector(data);
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(new_list_vector(vec![
+            Some(vec![Some(4), None, Some(6)]),
+            None,
+            Some(vec![Some(7), Some(8), None]),
+        ]));
+        assert_eq!(expect, vector);
     }
 }

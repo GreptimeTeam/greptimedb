@@ -14,8 +14,8 @@ use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{Scalar, ScalarRef};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::types::{DataTypeBuilder, Primitive};
-use crate::value::Value;
+use crate::types::{Primitive, PrimitiveElement};
+use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector for primitive data types.
@@ -61,7 +61,7 @@ impl<T: Primitive> PrimitiveVector<T> {
     }
 }
 
-impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
+impl<T: PrimitiveElement> Vector for PrimitiveVector<T> {
     fn data_type(&self) -> ConcreteDataType {
         T::build_data_type()
     }
@@ -80,6 +80,10 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
 
     fn to_arrow_array(&self) -> ArrayRef {
         Arc::new(self.array.clone())
+    }
+
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
@@ -128,6 +132,15 @@ impl<T: Primitive + DataTypeBuilder> Vector for PrimitiveVector<T> {
         }
         builder.to_vector()
     }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        if self.array.is_valid(index) {
+            // Safety: The index have been checked by `is_valid()`.
+            unsafe { self.array.value_unchecked(index).into_value_ref() }
+        } else {
+            ValueRef::Null
+        }
+    }
 }
 
 impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
@@ -154,7 +167,7 @@ impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for Pr
 
 impl<T> ScalarVector for PrimitiveVector<T>
 where
-    T: Scalar<VectorType = Self> + Primitive + DataTypeBuilder,
+    T: Scalar<VectorType = Self> + PrimitiveElement,
     for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = Self>,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
@@ -203,11 +216,11 @@ impl<'a, T: Copy> Iterator for PrimitiveIter<'a, T> {
     }
 }
 
-pub struct PrimitiveVectorBuilder<T: Primitive + DataTypeBuilder> {
+pub struct PrimitiveVectorBuilder<T: PrimitiveElement> {
     pub(crate) mutable_array: MutablePrimitiveArray<T>,
 }
 
-impl<T: Primitive + DataTypeBuilder> PrimitiveVectorBuilder<T> {
+impl<T: PrimitiveElement> PrimitiveVectorBuilder<T> {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             mutable_array: MutablePrimitiveArray::with_capacity(capacity),
@@ -228,7 +241,7 @@ pub type Int64VectorBuilder = PrimitiveVectorBuilder<i64>;
 pub type Float32VectorBuilder = PrimitiveVectorBuilder<f32>;
 pub type Float64VectorBuilder = PrimitiveVectorBuilder<f64>;
 
-impl<T: Primitive + DataTypeBuilder> MutableVector for PrimitiveVectorBuilder<T> {
+impl<T: PrimitiveElement> MutableVector for PrimitiveVectorBuilder<T> {
     fn data_type(&self) -> ConcreteDataType {
         T::build_data_type()
     }
@@ -250,11 +263,25 @@ impl<T: Primitive + DataTypeBuilder> MutableVector for PrimitiveVectorBuilder<T>
             array: std::mem::take(&mut self.mutable_array).into(),
         })
     }
+
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        let primitive = T::cast_value_ref(value)?;
+        self.mutable_array.push(primitive);
+        Ok(())
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        let primitive = T::cast_vector(vector)?;
+        // Slice the underlying array to avoid creating a new Arc.
+        let slice = primitive.slice(offset, length);
+        self.mutable_array.extend_trusted_len(slice.iter());
+        Ok(())
+    }
 }
 
 impl<T> ScalarVectorBuilder for PrimitiveVectorBuilder<T>
 where
-    T: Scalar<VectorType = PrimitiveVector<T>> + Primitive + DataTypeBuilder,
+    T: Scalar<VectorType = PrimitiveVector<T>> + PrimitiveElement,
     for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = PrimitiveVector<T>>,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
@@ -277,7 +304,7 @@ where
     }
 }
 
-impl<T: Primitive + DataTypeBuilder> Serializable for PrimitiveVector<T> {
+impl<T: PrimitiveElement> Serializable for PrimitiveVector<T> {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
         self.array
             .iter()
@@ -293,7 +320,9 @@ mod tests {
     use serde_json;
 
     use super::*;
+    use crate::data_type::DataType;
     use crate::serialize::Serializable;
+    use crate::types::Int64Type;
 
     fn check_vec(v: PrimitiveVector<i32>) {
         assert_eq!(4, v.len());
@@ -305,6 +334,7 @@ mod tests {
         for i in 0..4 {
             assert!(!v.is_null(i));
             assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
+            assert_eq!(ValueRef::Int32(i as i32 + 1), v.get_ref(i));
         }
 
         let json_value = v.serialize_to_json().unwrap();
@@ -415,5 +445,22 @@ mod tests {
         assert_eq!(20, v.memory_size());
         let v = PrimitiveVector::<i64>::from(vec![Some(0i64), Some(1i64), Some(2i64), None, None]);
         assert_eq!(40, v.memory_size());
+    }
+
+    #[test]
+    fn test_primitive_vector_builder() {
+        let mut builder = Int64Type::default().create_mutable_vector(3);
+        builder.push_value_ref(ValueRef::Int64(123)).unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+
+        let input = Int64Vector::from_slice(&[7, 8, 9]);
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(Int64Vector::from_slice(&[123, 8, 9]));
+        assert_eq!(expect, vector);
     }
 }

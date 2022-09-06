@@ -1,20 +1,22 @@
 use std::cmp::Ordering;
 
 use common_base::bytes::{Bytes, StringBytes};
+use common_time::date::Date;
+use common_time::datetime::DateTime;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
+use crate::error::{self, Result};
 use crate::prelude::*;
+use crate::vectors::ListVector;
 
 pub type OrderedF32 = OrderedFloat<f32>;
 pub type OrderedF64 = OrderedFloat<f64>;
 
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
 ///
-/// Although compare Value with different data type is allowed, it is recommended to only
-/// compare Value with same data type. Comparing Value with different data type may not
-/// behaves as what you expect.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// Comparison between values with different types (expect Null) is not allowed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Value {
     Null,
 
@@ -36,8 +38,8 @@ pub enum Value {
     Binary(Bytes),
 
     // Date & Time types:
-    Date(common_time::date::Date),
-    DateTime(common_time::datetime::DateTime),
+    Date(Date),
+    DateTime(DateTime),
 
     List(ListValue),
 }
@@ -69,13 +71,95 @@ impl Value {
         }
     }
 
+    /// Returns true if this is a null value.
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
+
+    /// Cast itself to [ListValue].
+    pub fn as_list(&self) -> Result<Option<&ListValue>> {
+        match self {
+            Value::Null => Ok(None),
+            Value::List(v) => Ok(Some(v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast {:?} to list value", other),
+            }
+            .fail(),
+        }
+    }
+
+    /// Cast itself to [ValueRef].
+    pub fn as_value_ref(&self) -> ValueRef {
+        match self {
+            Value::Null => ValueRef::Null,
+            Value::Boolean(v) => ValueRef::Boolean(*v),
+            Value::UInt8(v) => ValueRef::UInt8(*v),
+            Value::UInt16(v) => ValueRef::UInt16(*v),
+            Value::UInt32(v) => ValueRef::UInt32(*v),
+            Value::UInt64(v) => ValueRef::UInt64(*v),
+            Value::Int8(v) => ValueRef::Int8(*v),
+            Value::Int16(v) => ValueRef::Int16(*v),
+            Value::Int32(v) => ValueRef::Int32(*v),
+            Value::Int64(v) => ValueRef::Int64(*v),
+            Value::Float32(v) => ValueRef::Float32(*v),
+            Value::Float64(v) => ValueRef::Float64(*v),
+            Value::String(v) => ValueRef::String(v.as_utf8()),
+            Value::Binary(v) => ValueRef::Binary(v),
+            Value::Date(v) => ValueRef::Date(*v),
+            Value::DateTime(v) => ValueRef::DateTime(*v),
+            Value::List(v) => ValueRef::List(ListValueRef::Ref(v)),
+        }
+    }
 }
 
-macro_rules! impl_from {
-    ($Variant:ident, $Type:ident) => {
+macro_rules! impl_ord_for_value_like {
+    ($Type: ident, $left: ident, $right: ident) => {
+        if $left.is_null() && !$right.is_null() {
+            return Ordering::Less;
+        } else if !$left.is_null() && $right.is_null() {
+            return Ordering::Greater;
+        } else {
+            match ($left, $right) {
+                ($Type::Null, $Type::Null) => Ordering::Equal,
+                ($Type::Boolean(v1), $Type::Boolean(v2)) => v1.cmp(v2),
+                ($Type::UInt8(v1), $Type::UInt8(v2)) => v1.cmp(v2),
+                ($Type::UInt16(v1), $Type::UInt16(v2)) => v1.cmp(v2),
+                ($Type::UInt32(v1), $Type::UInt32(v2)) => v1.cmp(v2),
+                ($Type::UInt64(v1), $Type::UInt64(v2)) => v1.cmp(v2),
+                ($Type::Int8(v1), $Type::Int8(v2)) => v1.cmp(v2),
+                ($Type::Int16(v1), $Type::Int16(v2)) => v1.cmp(v2),
+                ($Type::Int32(v1), $Type::Int32(v2)) => v1.cmp(v2),
+                ($Type::Int64(v1), $Type::Int64(v2)) => v1.cmp(v2),
+                ($Type::Float32(v1), $Type::Float32(v2)) => v1.cmp(v2),
+                ($Type::Float64(v1), $Type::Float64(v2)) => v1.cmp(v2),
+                ($Type::String(v1), $Type::String(v2)) => v1.cmp(v2),
+                ($Type::Binary(v1), $Type::Binary(v2)) => v1.cmp(v2),
+                ($Type::Date(v1), $Type::Date(v2)) => v1.cmp(v2),
+                ($Type::DateTime(v1), $Type::DateTime(v2)) => v1.cmp(v2),
+                ($Type::List(v1), $Type::List(v2)) => v1.cmp(v2),
+                _ => panic!(
+                    "Cannot compare different values {:?} and {:?}",
+                    $left, $right
+                ),
+            }
+        }
+    };
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> Ordering {
+        impl_ord_for_value_like!(Value, self, other)
+    }
+}
+
+macro_rules! impl_value_from {
+    ($Variant: ident, $Type: ident) => {
         impl From<$Type> for Value {
             fn from(value: $Type) -> Self {
                 Value::$Variant(value.into())
@@ -93,19 +177,19 @@ macro_rules! impl_from {
     };
 }
 
-impl_from!(Boolean, bool);
-impl_from!(UInt8, u8);
-impl_from!(UInt16, u16);
-impl_from!(UInt32, u32);
-impl_from!(UInt64, u64);
-impl_from!(Int8, i8);
-impl_from!(Int16, i16);
-impl_from!(Int32, i32);
-impl_from!(Int64, i64);
-impl_from!(Float32, f32);
-impl_from!(Float64, f64);
-impl_from!(String, StringBytes);
-impl_from!(Binary, Bytes);
+impl_value_from!(Boolean, bool);
+impl_value_from!(UInt8, u8);
+impl_value_from!(UInt16, u16);
+impl_value_from!(UInt32, u32);
+impl_value_from!(UInt64, u64);
+impl_value_from!(Int8, i8);
+impl_value_from!(Int16, i16);
+impl_value_from!(Int32, i32);
+impl_value_from!(Int64, i64);
+impl_value_from!(Float32, f32);
+impl_value_from!(Float64, f64);
+impl_value_from!(String, StringBytes);
+impl_value_from!(Binary, Bytes);
 
 impl From<String> for Value {
     fn from(string: String) -> Value {
@@ -159,6 +243,7 @@ impl TryFrom<Value> for serde_json::Value {
     }
 }
 
+/// List value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListValue {
     /// List of nested Values (boxed to reduce size_of(Value))
@@ -201,10 +286,208 @@ impl Ord for ListValue {
     }
 }
 
+/// Reference to [Value].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueRef<'a> {
+    Null,
+
+    // Numeric types:
+    Boolean(bool),
+    UInt8(u8),
+    UInt16(u16),
+    UInt32(u32),
+    UInt64(u64),
+    Int8(i8),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Float32(OrderedF32),
+    Float64(OrderedF64),
+
+    // String types:
+    String(&'a str),
+    Binary(&'a [u8]),
+
+    // Date & Time types:
+    Date(Date),
+    DateTime(DateTime),
+
+    List(ListValueRef<'a>),
+}
+
+macro_rules! impl_as_for_value_ref {
+    ($value: ident, $Variant: ident) => {
+        match $value {
+            ValueRef::Null => Ok(None),
+            ValueRef::$Variant(v) => Ok(Some(*v)),
+            other => error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to cast value ref {:?} to {}",
+                    other,
+                    stringify!($Variant)
+                ),
+            }
+            .fail(),
+        }
+    };
+}
+
+impl<'a> ValueRef<'a> {
+    /// Returns true if this is null.
+    pub fn is_null(&self) -> bool {
+        matches!(self, ValueRef::Null)
+    }
+
+    /// Cast itself to binary slice.
+    pub fn as_binary(&self) -> Result<Option<&[u8]>> {
+        impl_as_for_value_ref!(self, Binary)
+    }
+
+    /// Cast itself to string slice.
+    pub fn as_string(&self) -> Result<Option<&str>> {
+        impl_as_for_value_ref!(self, String)
+    }
+
+    /// Cast itself to boolean.
+    pub fn as_boolean(&self) -> Result<Option<bool>> {
+        impl_as_for_value_ref!(self, Boolean)
+    }
+
+    /// Cast itself to [Date].
+    pub fn as_date(&self) -> Result<Option<Date>> {
+        impl_as_for_value_ref!(self, Date)
+    }
+
+    /// Cast itself to [DateTime].
+    pub fn as_datetime(&self) -> Result<Option<DateTime>> {
+        impl_as_for_value_ref!(self, DateTime)
+    }
+
+    /// Cast itself to [ListValueRef].
+    pub fn as_list(&self) -> Result<Option<ListValueRef>> {
+        impl_as_for_value_ref!(self, List)
+    }
+}
+
+impl<'a> PartialOrd for ValueRef<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> Ord for ValueRef<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        impl_ord_for_value_like!(ValueRef, self, other)
+    }
+}
+
+/// A helper trait to convert copyable types to `ValueRef`.
+///
+/// It could replace the usage of `Into<ValueRef<'a>>`, thus avoid confusion between `Into<Value>`
+/// and `Into<ValueRef<'a>>` in generic codes. One typical usage is the [`Primitive`](crate::primitive_traits::Primitive) trait.
+pub trait IntoValueRef<'a> {
+    /// Convert itself to [ValueRef].
+    fn into_value_ref(self) -> ValueRef<'a>;
+}
+
+macro_rules! impl_value_ref_from {
+    ($Variant:ident, $Type:ident) => {
+        impl From<$Type> for ValueRef<'_> {
+            fn from(value: $Type) -> Self {
+                ValueRef::$Variant(value.into())
+            }
+        }
+
+        impl<'a> IntoValueRef<'a> for $Type {
+            fn into_value_ref(self) -> ValueRef<'a> {
+                ValueRef::$Variant(self.into())
+            }
+        }
+
+        impl From<Option<$Type>> for ValueRef<'_> {
+            fn from(value: Option<$Type>) -> Self {
+                match value {
+                    Some(v) => ValueRef::$Variant(v.into()),
+                    None => ValueRef::Null,
+                }
+            }
+        }
+
+        impl<'a> IntoValueRef<'a> for Option<$Type> {
+            fn into_value_ref(self) -> ValueRef<'a> {
+                match self {
+                    Some(v) => ValueRef::$Variant(v.into()),
+                    None => ValueRef::Null,
+                }
+            }
+        }
+    };
+}
+
+impl_value_ref_from!(Boolean, bool);
+impl_value_ref_from!(UInt8, u8);
+impl_value_ref_from!(UInt16, u16);
+impl_value_ref_from!(UInt32, u32);
+impl_value_ref_from!(UInt64, u64);
+impl_value_ref_from!(Int8, i8);
+impl_value_ref_from!(Int16, i16);
+impl_value_ref_from!(Int32, i32);
+impl_value_ref_from!(Int64, i64);
+impl_value_ref_from!(Float32, f32);
+impl_value_ref_from!(Float64, f64);
+
+impl<'a> From<&'a str> for ValueRef<'a> {
+    fn from(string: &'a str) -> ValueRef<'a> {
+        ValueRef::String(string)
+    }
+}
+
+impl<'a> From<&'a [u8]> for ValueRef<'a> {
+    fn from(bytes: &'a [u8]) -> ValueRef<'a> {
+        ValueRef::Binary(bytes)
+    }
+}
+
+/// Reference to a [ListValue].
+// Comparison still requires some allocation (call of `to_value()`) and might be avoidable.
+#[derive(Debug, Clone, Copy)]
+pub enum ListValueRef<'a> {
+    Indexed { vector: &'a ListVector, idx: usize },
+    Ref(&'a ListValue),
+}
+
+impl<'a> ListValueRef<'a> {
+    fn to_value(self) -> Value {
+        match self {
+            ListValueRef::Indexed { vector, idx } => vector.get(idx),
+            ListValueRef::Ref(v) => Value::List((*v).clone()),
+        }
+    }
+}
+
+impl<'a> PartialEq for ListValueRef<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_value().eq(&other.to_value())
+    }
+}
+
+impl<'a> Eq for ListValueRef<'a> {}
+
+impl<'a> Ord for ListValueRef<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Respect the order of `Value` by converting into value before comparison.
+        self.to_value().cmp(&other.to_value())
+    }
+}
+
+impl<'a> PartialOrd for ListValueRef<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use common_time::datetime::DateTime;
-
     use super::*;
 
     #[test]
@@ -422,5 +705,166 @@ mod tests {
                 datatype: ConcreteDataType::int32_datatype(),
             }))
         );
+    }
+
+    #[test]
+    fn test_null_value() {
+        assert!(Value::Null.is_null());
+        assert!(!Value::Boolean(true).is_null());
+        assert!(Value::Null < Value::Boolean(false));
+        assert!(Value::Boolean(true) > Value::Null);
+        assert!(Value::Null < Value::Int32(10));
+        assert!(Value::Int32(10) > Value::Null);
+    }
+
+    #[test]
+    fn test_null_value_ref() {
+        assert!(ValueRef::Null.is_null());
+        assert!(!ValueRef::Boolean(true).is_null());
+        assert!(ValueRef::Null < ValueRef::Boolean(false));
+        assert!(ValueRef::Boolean(true) > ValueRef::Null);
+        assert!(ValueRef::Null < ValueRef::Int32(10));
+        assert!(ValueRef::Int32(10) > ValueRef::Null);
+    }
+
+    #[test]
+    fn test_as_value_ref() {
+        macro_rules! check_as_value_ref {
+            ($Variant: ident, $data: expr) => {
+                let value = Value::$Variant($data);
+                let value_ref = value.as_value_ref();
+                let expect_ref = ValueRef::$Variant($data);
+
+                assert_eq!(expect_ref, value_ref);
+            };
+        }
+
+        assert_eq!(ValueRef::Null, Value::Null.as_value_ref());
+        check_as_value_ref!(Boolean, true);
+        check_as_value_ref!(UInt8, 123);
+        check_as_value_ref!(UInt16, 123);
+        check_as_value_ref!(UInt32, 123);
+        check_as_value_ref!(UInt64, 123);
+        check_as_value_ref!(Int8, -12);
+        check_as_value_ref!(Int16, -12);
+        check_as_value_ref!(Int32, -12);
+        check_as_value_ref!(Int64, -12);
+        check_as_value_ref!(Float32, OrderedF32::from(16.0));
+        check_as_value_ref!(Float64, OrderedF64::from(16.0));
+
+        assert_eq!(
+            ValueRef::String("hello"),
+            Value::String("hello".into()).as_value_ref()
+        );
+        assert_eq!(
+            ValueRef::Binary(b"hello"),
+            Value::Binary("hello".as_bytes().into()).as_value_ref()
+        );
+
+        check_as_value_ref!(Date, Date::new(103));
+        check_as_value_ref!(DateTime, DateTime::new(1034));
+
+        let list = ListValue {
+            items: None,
+            datatype: ConcreteDataType::int32_datatype(),
+        };
+        assert_eq!(
+            ValueRef::List(ListValueRef::Ref(&list)),
+            Value::List(list.clone()).as_value_ref()
+        );
+    }
+
+    #[test]
+    fn test_value_ref_as() {
+        macro_rules! check_as_null {
+            ($method: ident) => {
+                assert_eq!(None, ValueRef::Null.$method().unwrap());
+            };
+        }
+
+        check_as_null!(as_binary);
+        check_as_null!(as_string);
+        check_as_null!(as_boolean);
+        check_as_null!(as_date);
+        check_as_null!(as_datetime);
+        check_as_null!(as_list);
+
+        macro_rules! check_as_correct {
+            ($data: expr, $Variant: ident, $method: ident) => {
+                assert_eq!(Some($data), ValueRef::$Variant($data).$method().unwrap());
+            };
+        }
+
+        check_as_correct!("hello", String, as_string);
+        check_as_correct!("hello".as_bytes(), Binary, as_binary);
+        check_as_correct!(true, Boolean, as_boolean);
+        check_as_correct!(Date::new(123), Date, as_date);
+        check_as_correct!(DateTime::new(12), DateTime, as_datetime);
+        let list = ListValue {
+            items: None,
+            datatype: ConcreteDataType::int32_datatype(),
+        };
+        check_as_correct!(ListValueRef::Ref(&list), List, as_list);
+
+        let wrong_value = ValueRef::Int32(12345);
+        assert!(wrong_value.as_binary().is_err());
+        assert!(wrong_value.as_string().is_err());
+        assert!(wrong_value.as_boolean().is_err());
+        assert!(wrong_value.as_date().is_err());
+        assert!(wrong_value.as_datetime().is_err());
+        assert!(wrong_value.as_list().is_err());
+    }
+
+    #[test]
+    fn test_into_value_ref() {
+        macro_rules! check_into_value_ref {
+            ($Variant: ident, $data: expr, $PrimitiveType: ident, $Wrapper: ident) => {
+                let data: $PrimitiveType = $data;
+                assert_eq!(
+                    ValueRef::$Variant($Wrapper::from(data)),
+                    data.into_value_ref()
+                );
+                assert_eq!(
+                    ValueRef::$Variant($Wrapper::from(data)),
+                    ValueRef::from(data)
+                );
+                assert_eq!(
+                    ValueRef::$Variant($Wrapper::from(data)),
+                    Some(data).into_value_ref()
+                );
+                assert_eq!(
+                    ValueRef::$Variant($Wrapper::from(data)),
+                    ValueRef::from(Some(data))
+                );
+                let x: Option<$PrimitiveType> = None;
+                assert_eq!(ValueRef::Null, x.into_value_ref());
+                assert_eq!(ValueRef::Null, x.into());
+            };
+        }
+
+        macro_rules! check_primitive_into_value_ref {
+            ($Variant: ident, $data: expr, $PrimitiveType: ident) => {
+                check_into_value_ref!($Variant, $data, $PrimitiveType, $PrimitiveType)
+            };
+        }
+
+        check_primitive_into_value_ref!(Boolean, true, bool);
+        check_primitive_into_value_ref!(UInt8, 10, u8);
+        check_primitive_into_value_ref!(UInt16, 20, u16);
+        check_primitive_into_value_ref!(UInt32, 30, u32);
+        check_primitive_into_value_ref!(UInt64, 40, u64);
+        check_primitive_into_value_ref!(Int8, -10, i8);
+        check_primitive_into_value_ref!(Int16, -20, i16);
+        check_primitive_into_value_ref!(Int32, -30, i32);
+        check_primitive_into_value_ref!(Int64, -40, i64);
+        check_into_value_ref!(Float32, 10.0, f32, OrderedF32);
+        check_into_value_ref!(Float64, 10.0, f64, OrderedF64);
+
+        let hello = "hello";
+        assert_eq!(
+            ValueRef::Binary(hello.as_bytes()),
+            ValueRef::from(hello.as_bytes())
+        );
+        assert_eq!(ValueRef::String(hello), ValueRef::from(hello));
     }
 }
