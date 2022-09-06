@@ -423,6 +423,7 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::*;
     use store_api::manifest::Manifest;
+    use store_api::storage::ReadContext;
     use table::requests::{AlterKind, InsertRequest};
 
     use super::*;
@@ -524,6 +525,46 @@ mod tests {
         let columns = batches[0].df_recordbatch.columns();
         assert_eq!(1, columns.len());
         assert_eq!(tss.to_arrow_array(), columns[0]);
+    }
+
+    #[tokio::test]
+    async fn test_create_table_scan_batches() {
+        common_telemetry::init_default_ut_logging();
+
+        let (_engine, table, _schema, _dir) = test_util::setup_test_engine_and_table().await;
+
+        // TODO(yingwen): Custom batch size once the table support setting batch_size.
+        let default_batch_size = ReadContext::default().batch_size;
+        // Insert more than batch size rows to the table.
+        let test_batch_size = default_batch_size * 4;
+        let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
+        let hosts = StringVector::from(vec!["host1"; test_batch_size]);
+        let cpus = Float64Vector::from_vec(vec![55.5; test_batch_size]);
+        let memories = Float64Vector::from_vec(vec![1024f64; test_batch_size]);
+        let tss = Int64Vector::from_vec((0..test_batch_size).map(|v| v as i64).collect());
+
+        columns_values.insert("host".to_string(), Arc::new(hosts));
+        columns_values.insert("cpu".to_string(), Arc::new(cpus));
+        columns_values.insert("memory".to_string(), Arc::new(memories));
+        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
+
+        let insert_req = InsertRequest {
+            table_name: "demo".to_string(),
+            columns_values,
+        };
+        assert_eq!(test_batch_size, table.insert(insert_req).await.unwrap());
+
+        let stream = table.scan(&None, &[], None).await.unwrap();
+        let batches = util::collect(stream).await.unwrap();
+        let mut total = 0;
+        for batch in batches {
+            assert_eq!(batch.df_recordbatch.num_columns(), 4);
+            let ts = batch.df_recordbatch.column(3);
+            let expect = tss.slice(total, ts.len());
+            assert_eq!(expect.to_arrow_array(), *ts);
+            total += ts.len();
+        }
+        assert_eq!(test_batch_size, total);
     }
 
     #[tokio::test]
