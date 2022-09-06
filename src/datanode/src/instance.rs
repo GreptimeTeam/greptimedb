@@ -39,7 +39,7 @@ type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 pub struct Instance {
     // Query service
     query_engine: QueryEngineRef,
-    sql_handler: SqlHandler<DefaultEngine>,
+    sql_handler: SqlHandler,
     // Catalog list
     catalog_manager: CatalogManagerRef,
     physical_planner: PhysicalPlanner,
@@ -62,8 +62,10 @@ impl Instance {
             ),
             object_store,
         );
+        let table_engine = Arc::new(table_engine);
+
         let catalog_manager = Arc::new(
-            catalog::LocalCatalogManager::try_new(Arc::new(table_engine.clone()))
+            catalog::LocalCatalogManager::try_new(table_engine.clone())
                 .await
                 .context(NewCatalogSnafu)?,
         );
@@ -150,7 +152,10 @@ impl Instance {
 
                 self.sql_handler.execute(SqlRequest::Create(request)).await
             }
-
+            Statement::Alter(alter_table) => {
+                let req = self.sql_handler.alter_to_request(alter_table)?;
+                self.sql_handler.execute(SqlRequest::Alter(req)).await
+            }
             _ => unimplemented!(),
         }
     }
@@ -198,12 +203,49 @@ impl Instance {
         }
     }
 
-    pub fn sql_handler(&self) -> &SqlHandler<DefaultEngine> {
+    pub fn sql_handler(&self) -> &SqlHandler {
         &self.sql_handler
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+}
+
+#[cfg(test)]
+impl Instance {
+    pub async fn new_mock() -> Result<Self> {
+        use table_engine::table::test_util::new_test_object_store;
+        use table_engine::table::test_util::MockEngine;
+        use table_engine::table::test_util::MockMitoEngine;
+
+        let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
+        let mock_engine = MockMitoEngine::new(
+            TableEngineConfig::default(),
+            MockEngine::default(),
+            object_store,
+        );
+        let mock_engine = Arc::new(mock_engine);
+
+        let catalog_manager = Arc::new(
+            catalog::LocalCatalogManager::try_new(mock_engine.clone())
+                .await
+                .unwrap(),
+        );
+
+        let factory = QueryEngineFactory::new(catalog_manager.clone());
+        let query_engine = factory.query_engine().clone();
+
+        let sql_handler = SqlHandler::new(mock_engine, catalog_manager.clone());
+        let physical_planner = PhysicalPlanner::new(query_engine.clone());
+        let script_executor = ScriptExecutor::new(query_engine.clone());
+        Ok(Self {
+            query_engine,
+            sql_handler,
+            catalog_manager,
+            physical_planner,
+            script_executor,
+        })
     }
 }
 

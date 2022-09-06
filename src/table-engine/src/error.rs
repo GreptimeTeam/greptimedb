@@ -130,6 +130,33 @@ pub enum Error {
         table_name: String,
     },
 
+    #[snafu(display("Table not found: {}", table_name))]
+    TableNotFound {
+        backtrace: Backtrace,
+        table_name: String,
+    },
+
+    #[snafu(display("Column {} already exists in table {}", column_name, table_name))]
+    ColumnExists {
+        backtrace: Backtrace,
+        column_name: String,
+        table_name: String,
+    },
+
+    #[snafu(display("Failed to build schema, msg: {}, source: {}", msg, source))]
+    SchemaBuild {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+        msg: String,
+    },
+
+    #[snafu(display("Failed to alter table {}, source: {}", table_name, source))]
+    AlterTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
     #[snafu(display(
         "Projected columnd not found in region, column: {}",
         column_qualified_name
@@ -155,6 +182,10 @@ impl ErrorExt for Error {
         match self {
             CreateRegion { source, .. } | OpenRegion { source, .. } => source.status_code(),
 
+            AlterTable { source, .. } => source.status_code(),
+
+            SchemaBuild { source, .. } => source.status_code(),
+
             BuildRowKeyDescriptor { .. }
             | BuildColumnDescriptor { .. }
             | BuildColumnFamilyDescriptor { .. }
@@ -162,8 +193,10 @@ impl ErrorExt for Error {
             | BuildTableInfo { .. }
             | BuildRegionDescriptor { .. }
             | TableExists { .. }
+            | ColumnExists { .. }
             | ProjectedColumnNotFound { .. }
-            | MissingTimestampIndex { .. } => StatusCode::InvalidArguments,
+            | MissingTimestampIndex { .. }
+            | TableNotFound { .. } => StatusCode::InvalidArguments,
 
             TableInfoNotFound { .. } => StatusCode::Unexpected,
 

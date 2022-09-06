@@ -1,17 +1,19 @@
 //! sql handler
 
-use std::sync::Arc;
-
 use catalog::CatalogManagerRef;
-use common_error::ext::BoxedError;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
+use datatypes::types::DateTimeType;
 use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
-use table::engine::{EngineContext, TableEngine};
+use sql::ast::{ColumnDef, ColumnOption, DataType as SqlDataType, ObjectName};
+use table::engine::{EngineContext, TableEngineRef};
 use table::requests::*;
 use table::TableRef;
 
-use crate::error::{GetTableSnafu, Result, TableNotFoundSnafu};
+use crate::error::{self, GetTableSnafu, Result, TableNotFoundSnafu};
 
+mod alter;
 mod create;
 mod insert;
 
@@ -19,18 +21,19 @@ mod insert;
 pub enum SqlRequest {
     Insert(InsertRequest),
     Create(CreateTableRequest),
+    Alter(AlterTableRequest),
 }
 
 // Handler to execute SQL except query
-pub struct SqlHandler<Engine: TableEngine> {
-    table_engine: Arc<Engine>,
+pub struct SqlHandler {
+    table_engine: TableEngineRef,
     catalog_manager: CatalogManagerRef,
 }
 
-impl<Engine: TableEngine> SqlHandler<Engine> {
-    pub fn new(table_engine: Engine, catalog_manager: CatalogManagerRef) -> Self {
+impl SqlHandler {
+    pub fn new(table_engine: TableEngineRef, catalog_manager: CatalogManagerRef) -> Self {
         Self {
-            table_engine: Arc::new(table_engine),
+            table_engine,
             catalog_manager,
         }
     }
@@ -39,19 +42,89 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
         match request {
             SqlRequest::Insert(req) => self.insert(req).await,
             SqlRequest::Create(req) => self.create(req).await,
+            SqlRequest::Alter(req) => self.alter(req).await,
         }
     }
 
     pub(crate) fn get_table(&self, table_name: &str) -> Result<TableRef> {
         self.table_engine
             .get_table(&EngineContext::default(), table_name)
-            .map_err(BoxedError::new)
             .context(GetTableSnafu { table_name })?
             .context(TableNotFoundSnafu { table_name })
     }
 
-    pub fn table_engine(&self) -> Arc<Engine> {
+    pub fn table_engine(&self) -> TableEngineRef {
         self.table_engine.clone()
+    }
+}
+
+/// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when
+/// catalog and schema are default) to tuple.  
+fn table_idents_to_full_name(
+    obj_name: &ObjectName,
+) -> Result<(Option<String>, Option<String>, String)> {
+    match &obj_name.0[..] {
+        [table] => Ok((None, None, table.value.clone())),
+        [catalog, schema, table] => Ok((
+            Some(catalog.value.clone()),
+            Some(schema.value.clone()),
+            table.value.clone(),
+        )),
+        _ => error::InvalidSqlSnafu {
+            msg: format!(
+                "expect table name to be <catalog>.<schema>.<table> or <table>, actual: {}",
+                obj_name
+            ),
+        }
+        .fail(),
+    }
+}
+
+fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
+    let is_nullable = column_def
+        .options
+        .iter()
+        .any(|o| matches!(o.option, ColumnOption::Null));
+    Ok(ColumnSchema {
+        name: column_def.name.value.clone(),
+        data_type: sql_data_type_to_concrete_data_type(&column_def.data_type)?,
+        is_nullable,
+    })
+}
+
+fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
+    match data_type {
+        SqlDataType::BigInt(_) => Ok(ConcreteDataType::int64_datatype()),
+        SqlDataType::Int(_) => Ok(ConcreteDataType::int32_datatype()),
+        SqlDataType::SmallInt(_) => Ok(ConcreteDataType::int16_datatype()),
+        SqlDataType::Char(_)
+        | SqlDataType::Varchar(_)
+        | SqlDataType::Text
+        | SqlDataType::String => Ok(ConcreteDataType::string_datatype()),
+        SqlDataType::Float(_) => Ok(ConcreteDataType::float32_datatype()),
+        SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
+        SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
+        SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
+        SqlDataType::Custom(obj_name) => match &obj_name.0[..] {
+            [type_name] => {
+                if type_name.value.eq_ignore_ascii_case(DateTimeType::name()) {
+                    Ok(ConcreteDataType::datetime_datatype())
+                } else {
+                    error::SqlTypeNotSupportedSnafu {
+                        t: data_type.clone(),
+                    }
+                    .fail()
+                }
+            }
+            _ => error::SqlTypeNotSupportedSnafu {
+                t: data_type.clone(),
+            }
+            .fail(),
+        },
+        _ => error::SqlTypeNotSupportedSnafu {
+            t: data_type.clone(),
+        }
+        .fail(),
     }
 }
 
@@ -165,9 +238,10 @@ mod tests {
             ),
             object_store,
         );
+        let table_engine = Arc::new(table_engine);
 
         let catalog_list = Arc::new(
-            catalog::LocalCatalogManager::try_new(Arc::new(table_engine.clone()))
+            catalog::LocalCatalogManager::try_new(table_engine.clone())
                 .await
                 .unwrap(),
         );

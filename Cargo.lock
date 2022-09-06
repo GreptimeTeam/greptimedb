@@ -1356,6 +1356,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datafusion",
+ "datafusion-common",
  "datatypes",
  "futures",
  "hyper",

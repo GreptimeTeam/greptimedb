@@ -1,3 +1,4 @@
+pub mod alter;
 pub mod create_table;
 pub mod insert;
 pub mod query;

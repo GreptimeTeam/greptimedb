@@ -12,7 +12,7 @@ pub mod memtable;
 pub mod metadata;
 pub mod proto;
 mod read;
-mod region;
+pub mod region;
 pub mod schema;
 mod snapshot;
 mod sst;

@@ -77,6 +77,8 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
 
+                    Keyword::ALTER => self.parse_alter(),
+
                     // todo(hl) support more statements.
                     _ => self.unsupported(self.peek_token_as_string()),
                 }

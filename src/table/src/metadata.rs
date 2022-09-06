@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use datatypes::schema::SchemaRef;
@@ -104,6 +105,8 @@ pub struct TableInfo {
     #[builder(default = "TableType::Base")]
     pub table_type: TableType,
 }
+
+pub type TableInfoRef = Arc<TableInfo>;
 
 impl TableInfoBuilder {
     pub fn new<S: Into<String>>(name: S, meta: TableMeta) -> Self {
