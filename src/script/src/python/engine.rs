@@ -67,36 +67,6 @@ impl Stream for CoprStream {
     }
 }
 
-impl PyScript {
-    /// repeat a job using a fixed interval
-    async fn schedule_job(
-        &self,
-        dur: Duration,
-        _ctx: EvalContext,
-        tx: tokio::sync::mpsc::Sender<Result<Output>>,
-    ) {
-        let mut interval = time::interval(dur);
-        loop {
-            interval.tick().await;
-            if tx.is_closed() {
-                debug!(
-                    "All receiver to schedule job \"{}\" is closed, ending job now.",
-                    self.copr.name
-                );
-                break;
-            }
-            let res = tx.send(self.evaluate(EvalContext::default()).await).await;
-            if let Err(_err) = res {
-                debug!(
-                    "All receiver to schedule job \"{}\" is closed, ending job now.",
-                    self.copr.name
-                );
-                break;
-            }
-        }
-    }
-}
-
 #[async_trait]
 impl Script for PyScript {
     type Error = error::Error;
@@ -128,6 +98,34 @@ impl Script for PyScript {
         } else {
             // TODO(boyan): try to retrieve sql from user request
             error::MissingSqlSnafu {}.fail()
+        }
+    }
+
+    /// repeat a job using a fixed interval
+    async fn schedule_job(
+        &self,
+        dur: Duration,
+        _ctx: EvalContext,
+        tx: tokio::sync::mpsc::Sender<Result<Output>>,
+    ) {
+        let mut interval = time::interval(dur);
+        loop {
+            interval.tick().await;
+            if tx.is_closed() {
+                debug!(
+                    "All receiver to schedule job \"{}\" is closed, ending job now.",
+                    self.copr.name
+                );
+                break;
+            }
+            let res = tx.send(self.evaluate(EvalContext::default()).await).await;
+            if let Err(_err) = res {
+                debug!(
+                    "All receiver to schedule job \"{}\" is closed, ending job now.",
+                    self.copr.name
+                );
+                break;
+            }
         }
     }
 }
