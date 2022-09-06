@@ -24,6 +24,7 @@ pub struct CreateTableRequest {
     pub schema: SchemaRef,
     pub primary_key_indices: Vec<usize>,
     pub create_if_not_exists: bool,
+    pub table_options: HashMap<String, String>,
 }
 
 /// Open table request

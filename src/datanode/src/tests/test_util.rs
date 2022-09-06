@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -66,6 +67,7 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
                 ),
                 create_if_not_exists: true,
                 primary_key_indices: Vec::default(),
+                table_options: HashMap::new(),
             },
         )
         .await

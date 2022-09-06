@@ -38,5 +38,4 @@ message CreateExpr {
   repeated string primary_keys = 7;
   bool create_if_not_exists = 8;
   map<string, string> table_options = 9;
-  map<string, string> partition_options = 10;
 }

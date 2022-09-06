@@ -20,7 +20,18 @@ impl Instance {
         let result = futures::future::ready(request)
             .and_then(|request| self.sql_handler().execute(SqlRequest::Create(request)))
             .await;
-        to_admin_result(result)
+        match result {
+            Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
+                .status_code(StatusCode::Success as u32)
+                .mutate_result(rows as u32, 0)
+                .build(),
+            // Unreachable because we are executing "CREATE TABLE"; otherwise it's an internal bug.
+            Ok(Output::RecordBatch(_)) => unreachable!(),
+            Err(err) => AdminResultBuilder::default()
+                .status_code(err.status_code() as u32)
+                .err_msg(err.to_string())
+                .build(),
+        }
     }
 
     fn create_expr_to_request(&self, expr: CreateExpr) -> Result<CreateTableRequest> {
@@ -47,6 +58,7 @@ impl Instance {
             schema,
             primary_key_indices,
             create_if_not_exists: expr.create_if_not_exists,
+            table_options: expr.table_options,
         })
     }
 }
@@ -105,20 +117,6 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         data_type,
         is_nullable: column_def.is_nullable,
     })
-}
-
-fn to_admin_result(result: Result<Output>) -> AdminResult {
-    match result {
-        Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
-            .status_code(StatusCode::Success as u32)
-            .mutate_result(rows as u32, 0)
-            .build(),
-        Ok(_) => unimplemented!(),
-        Err(err) => AdminResultBuilder::default()
-            .status_code(err.status_code() as u32)
-            .err_msg(err.to_string())
-            .build(),
-    }
 }
 
 #[cfg(test)]
@@ -228,7 +226,6 @@ mod tests {
             primary_keys: vec!["ts".to_string(), "host".to_string()],
             create_if_not_exists: true,
             table_options: HashMap::new(),
-            partition_options: HashMap::new(),
         }
     }
 
