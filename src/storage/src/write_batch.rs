@@ -7,12 +7,10 @@ use std::{
 
 use common_error::prelude::*;
 use common_time::{RangeMillis, TimestampMillis};
+use datatypes::vectors::TimestampVector;
 use datatypes::{
-    arrow::error::ArrowError,
-    data_type::ConcreteDataType,
-    prelude::ScalarVector,
-    schema::SchemaRef,
-    vectors::{Int64Vector, VectorRef},
+    arrow::error::ArrowError, data_type::ConcreteDataType, prelude::ScalarVector,
+    schema::SchemaRef, vectors::VectorRef,
 };
 use prost::{DecodeError, EncodeError};
 use snafu::ensure;
@@ -204,11 +202,10 @@ impl WriteRequest for WriteBatch {
                     let column = put_data
                         .column_by_name(ts_col_name)
                         .unwrap_or_else(|| panic!("Cannot find column by name: {}", ts_col_name));
-
-                    let ts_vector = column.as_any().downcast_ref::<Int64Vector>().unwrap(); // not expected to fail
+                    let ts_vector = column.as_any().downcast_ref::<TimestampVector>().unwrap(); // not expected to fail
                     for ts in ts_vector.iter_data().flatten() {
-                        let aligned = align_timestamp(ts, durations_millis)
-                            .context(TimestampOverflowSnafu { ts })?;
+                        let aligned = align_timestamp(ts.value(), durations_millis)
+                            .context(TimestampOverflowSnafu { ts: ts.value() })?;
                         aligned_timestamps.insert(aligned);
                     }
                 }

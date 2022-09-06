@@ -3,7 +3,8 @@ use common_time::timestamp::{TimeUnit, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::data_type::DataType;
-use crate::prelude::{LogicalTypeId, Value};
+use crate::prelude::{LogicalTypeId, MutableVector, ScalarVectorBuilder, Value};
+use crate::vectors::TimestampVectorBuilder;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimestampType {
@@ -36,5 +37,9 @@ impl DataType for TimestampType {
             TimeUnit::Microsecond => ArrowDataType::Timestamp(ArrowTimeUnit::Microsecond, None),
             TimeUnit::Nanosecond => ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
         }
+    }
+
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+        Box::new(TimestampVectorBuilder::with_capacity(capacity))
     }
 }

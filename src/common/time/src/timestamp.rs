@@ -1,9 +1,10 @@
 use core::default::Default;
 use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Copy, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Timestamp {
     value: i64,
     unit: TimeUnit,
@@ -22,13 +23,13 @@ impl Timestamp {
         self.value
     }
 
-    pub fn unify_to(&self, unit: TimeUnit) -> i64 {
+    pub fn convert_to(&self, unit: TimeUnit) -> i64 {
         // TODO(hl): May result into overflow
         self.value * self.unit.factor() / unit.factor()
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeUnit {
     #[default]
     Second,
@@ -62,8 +63,15 @@ impl Ord for Timestamp {
 
 impl PartialEq for Timestamp {
     fn eq(&self, other: &Self) -> bool {
-        self.unify_to(TimeUnit::Nanosecond) == other.unify_to(TimeUnit::Nanosecond)
+        self.convert_to(TimeUnit::Nanosecond) == other.convert_to(TimeUnit::Nanosecond)
     }
 }
 
 impl Eq for Timestamp {}
+
+impl Hash for Timestamp {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_i64(self.convert_to(TimeUnit::Nanosecond));
+        state.finish();
+    }
+}

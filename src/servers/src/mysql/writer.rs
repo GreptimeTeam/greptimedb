@@ -104,7 +104,7 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                     Value::Date(v) => row_writer.write_col(v.val())?,
                     Value::DateTime(v) => row_writer.write_col(v.val())?,
                     Value::Timestamp(v) => row_writer
-                        .write_col(v.unify_to(common_time::timestamp::TimeUnit::Second))?, // TODO(hl): Can we also write
+                        .write_col(v.convert_to(common_time::timestamp::TimeUnit::Second))?, // TODO(hl): Can we also write
                     Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(

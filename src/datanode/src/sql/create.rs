@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use catalog::RegisterTableRequest;
 use common_telemetry::tracing::info;
-use common_time::timestamp::TimeUnit;
 use datatypes::schema::SchemaBuilder;
 use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};

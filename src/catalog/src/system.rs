@@ -5,10 +5,11 @@ use std::sync::Arc;
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
+use common_time::timestamp::{TimeUnit, Timestamp};
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
-use datatypes::vectors::{BinaryVector, Int64Vector, UInt8Vector};
+use datatypes::vectors::{BinaryVector, Int64Vector, TimestampVector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
@@ -129,7 +130,7 @@ fn build_system_catalog_schema() -> Schema {
         ),
         ColumnSchema::new(
             "timestamp".to_string(),
-            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
             false,
         ),
         ColumnSchema::new(
@@ -171,7 +172,10 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
     // Timestamp in key part is intentionally left to 0
     columns_values.insert(
         "timestamp".to_string(),
-        Arc::new(Int64Vector::from_slice(&[0])) as _,
+        Arc::new(TimestampVector::from_slice(&[Timestamp::new(
+            0,
+            TimeUnit::Microsecond,
+        )])) as _,
     );
 
     columns_values.insert(

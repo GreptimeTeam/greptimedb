@@ -1,12 +1,15 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, PrimitiveArray};
+use arrow::array::{Array, ArrayRef, PrimitiveArray};
 use common_time::timestamp::{TimeUnit, Timestamp};
+use snafu::OptionExt;
 
 use crate::data_type::{ConcreteDataType, DataType};
+use crate::error;
+use crate::error::Result;
 use crate::prelude::{
-    MutableVector, ScalarVector, ScalarVectorBuilder, Validity, Value, Vector, VectorRef,
+    MutableVector, ScalarVector, ScalarVectorBuilder, Validity, Value, ValueRef, Vector, VectorRef,
 };
 use crate::serialize::Serializable;
 use crate::types::TimestampType;
@@ -16,6 +19,27 @@ use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimestampVector {
     array: PrimitiveVector<i64>,
+}
+
+impl TimestampVector {
+    pub fn new(array: PrimitiveArray<i64>) -> Self {
+        Self {
+            array: PrimitiveVector { array },
+        }
+    }
+
+    pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> Result<Self> {
+        Ok(Self::new(
+            array
+                .as_ref()
+                .as_any()
+                .downcast_ref::<PrimitiveArray<i64>>()
+                .with_context(|| error::ConversionSnafu {
+                    from: format!("{:?}", array.as_ref().data_type()),
+                })?
+                .clone(),
+        ))
+    }
 }
 
 impl Vector for TimestampVector {
@@ -41,6 +65,16 @@ impl Vector for TimestampVector {
         Arc::new(PrimitiveArray::new(
             TimestampType::new(TimeUnit::Microsecond).as_arrow_type(),
             buffer,
+            validity,
+        ))
+    }
+
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
+        let validity = self.array.array.validity().cloned();
+        let values = self.array.array.values().clone();
+        Box::new(PrimitiveArray::new(
+            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            values,
             validity,
         ))
     }
@@ -74,18 +108,18 @@ impl Vector for TimestampVector {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         self.array.replicate(offsets)
     }
-}
 
-impl TimestampVector {
-    pub fn new(array: PrimitiveArray<i64>) -> Self {
-        Self {
-            array: PrimitiveVector::new(array),
+    fn get_ref(&self, index: usize) -> ValueRef {
+        match self.array.get(index) {
+            Value::Int64(v) => ValueRef::Timestamp(Timestamp::new(v, TimeUnit::Microsecond)),
+            Value::Null => ValueRef::Null,
+            _ => unreachable!(),
         }
     }
 }
 
 impl Serializable for TimestampVector {
-    fn serialize_to_json(&self) -> crate::Result<Vec<serde_json::Value>> {
+    fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
         Ok(self
             .array
             .iter_data()
@@ -154,6 +188,27 @@ impl MutableVector for TimestampVectorBuilder {
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(self.finish())
     }
+
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        self.buffer.push(value.as_timestamp()?.map(|t| t.value()));
+        Ok(())
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        let concrete_vector = vector
+            .as_any()
+            .downcast_ref::<TimestampVector>()
+            .with_context(|| error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to convert vector from {} to DateVector",
+                    vector.vector_type_name()
+                ),
+            })?;
+
+        self.buffer
+            .extend_slice_of(&concrete_vector.array, offset, length)?;
+        Ok(())
+    }
 }
 
 impl ScalarVectorBuilder for TimestampVectorBuilder {
@@ -169,7 +224,7 @@ impl ScalarVectorBuilder for TimestampVectorBuilder {
     /// `Second`/`MilliSecond`/`Microsecond`.
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
         self.buffer
-            .push(value.map(|v| v.unify_to(TimeUnit::Microsecond)));
+            .push(value.map(|v| v.convert_to(TimeUnit::Microsecond)));
     }
 
     fn finish(&mut self) -> Self::VectorType {

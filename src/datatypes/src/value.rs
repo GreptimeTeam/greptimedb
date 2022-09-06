@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use common_base::bytes::{Bytes, StringBytes};
 use common_time::date::Date;
 use common_time::datetime::DateTime;
+use common_time::timestamp::Timestamp;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +41,7 @@ pub enum Value {
     // Date & Time types:
     Date(Date),
     DateTime(DateTime),
-    Timestamp(common_time::timestamp::Timestamp),
+    Timestamp(Timestamp),
 
     List(ListValue),
 }
@@ -110,6 +111,7 @@ impl Value {
             Value::Date(v) => ValueRef::Date(*v),
             Value::DateTime(v) => ValueRef::DateTime(*v),
             Value::List(v) => ValueRef::List(ListValueRef::Ref(v)),
+            Value::Timestamp(v) => ValueRef::Timestamp(*v),
         }
     }
 }
@@ -138,6 +140,7 @@ macro_rules! impl_ord_for_value_like {
                 ($Type::Binary(v1), $Type::Binary(v2)) => v1.cmp(v2),
                 ($Type::Date(v1), $Type::Date(v2)) => v1.cmp(v2),
                 ($Type::DateTime(v1), $Type::DateTime(v2)) => v1.cmp(v2),
+                ($Type::Timestamp(v1), $Type::Timestamp(v2)) => v1.cmp(v2),
                 ($Type::List(v1), $Type::List(v2)) => v1.cmp(v2),
                 _ => panic!(
                     "Cannot compare different values {:?} and {:?}",
@@ -314,7 +317,7 @@ pub enum ValueRef<'a> {
     // Date & Time types:
     Date(Date),
     DateTime(DateTime),
-
+    Timestamp(Timestamp),
     List(ListValueRef<'a>),
 }
 
@@ -364,6 +367,10 @@ impl<'a> ValueRef<'a> {
     /// Cast itself to [DateTime].
     pub fn as_datetime(&self) -> Result<Option<DateTime>> {
         impl_as_for_value_ref!(self, DateTime)
+    }
+
+    pub fn as_timestamp(&self) -> Result<Option<Timestamp>> {
+        impl_as_for_value_ref!(self, Timestamp)
     }
 
     /// Cast itself to [ListValueRef].
