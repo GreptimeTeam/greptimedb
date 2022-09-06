@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Copy, Hash, Serialize, Deserialize)]
 pub struct Timestamp {
     value: i64,
     unit: TimeUnit,
@@ -59,3 +59,11 @@ impl Ord for Timestamp {
         (self.value * self.unit.factor()).cmp(&(other.value * other.unit.factor()))
     }
 }
+
+impl PartialEq for Timestamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.unify_to(TimeUnit::Nanosecond) == other.unify_to(TimeUnit::Nanosecond)
+    }
+}
+
+impl Eq for Timestamp {}

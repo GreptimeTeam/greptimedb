@@ -156,7 +156,6 @@ fn parse_sql_value(
 
             parse_string_to_value(s.to_owned(), data_type)?
         }
-
         _ => todo!("Other sql value"),
     })
 }
@@ -220,7 +219,8 @@ fn sql_number_to_value(data_type: &ConcreteDataType, n: &str) -> Result<Value> {
         (Int32, i32),
         (Int64, i64),
         (Float64, f64),
-        (Float32, f32)
+        (Float32, f32),
+        (Timestamp, i64)
     )
 }
 

@@ -286,6 +286,28 @@ impl<'a> ScalarRef<'a> for common_time::datetime::DateTime {
     }
 }
 
+impl Scalar for common_time::timestamp::Timestamp {
+    type VectorType = TimestampVector;
+    type RefType<'a> = common_time::timestamp::Timestamp;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        *self
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
+
+impl<'a> ScalarRef<'a> for common_time::timestamp::Timestamp {
+    type VectorType = TimestampVector;
+    type ScalarType = common_time::timestamp::Timestamp;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        *self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use common_time::date::Date;
