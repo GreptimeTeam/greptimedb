@@ -52,19 +52,19 @@ message ColumnDef {
 }
 
 enum ColumnDataType {
-  Boolean = 0;
-  Int8 = 1;
-  Int16 = 2;
-  Int32 = 3;
-  Int64 = 4;
-  UInt8 = 5;
-  UInt16 = 6;
-  UInt32 = 7;
-  UInt64 = 8;
-  Float32 = 9;
-  Float64 = 10;
-  Binary = 11;
-  String = 12;
-  Date = 13;
-  DateTime = 14;
+  BOOLEAN = 0;
+  INT8 = 1;
+  INT16 = 2;
+  INT32 = 3;
+  INT64 = 4;
+  UINT8 = 5;
+  UINT16 = 6;
+  UINT32 = 7;
+  UINT64 = 8;
+  FLOAT32 = 9;
+  FLOAT64 = 10;
+  BINARY = 11;
+  STRING = 12;
+  DATE = 13;
+  DATETIME = 14;
 }

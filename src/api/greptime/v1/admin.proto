@@ -3,7 +3,7 @@ syntax = "proto3";
 package greptime.v1;
 
 import "greptime/v1/column.proto";
-import "greptime/v1/database.proto";
+import "greptime/v1/common.proto";
 
 message AdminRequest {
   string name = 1;

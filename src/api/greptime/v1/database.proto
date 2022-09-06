@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package greptime.v1;
 
+import "greptime/v1/common.proto";
+
 message DatabaseRequest {
   string name = 1;
   repeated ObjectExpr exprs = 2;
@@ -19,10 +21,6 @@ message ObjectExpr {
     UpdateExpr update = 4;
     DeleteExpr delete = 5;
   }
-}
-
-message ExprHeader {
-  uint32 version = 1;
 }
 
 // TODO(fys): Only support sql now, and will support promql etc in the future
@@ -58,15 +56,4 @@ message ObjectResult {
 
 message SelectResult {
   bytes raw_data = 1;
-}
-
-message ResultHeader {
-  uint32 version = 1;
-  uint32 code = 2;
-  string err_msg = 3;
-}
-
-message MutateResult {
-  uint32 success = 1;
-  uint32 failure = 2;
 }
