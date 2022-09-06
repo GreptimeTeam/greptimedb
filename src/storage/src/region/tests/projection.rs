@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use common_time::timestamp::TimeUnit;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
-use datatypes::vectors::Int64Vector;
+use datatypes::vectors::{Int64Vector, TimestampVector};
 use log_store::fs::log::LocalFileLogStore;
 use store_api::logstore::LogStore;
 use store_api::storage::{
@@ -26,7 +28,11 @@ fn new_write_batch_for_test() -> WriteBatch {
     write_batch_util::new_write_batch(
         &[
             ("k0", LogicalTypeId::Int64, false),
-            (test_util::TIMESTAMP_NAME, LogicalTypeId::Int64, false),
+            (
+                test_util::TIMESTAMP_NAME,
+                LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                false,
+            ),
             ("v0", LogicalTypeId::Int64, true),
             ("v1", LogicalTypeId::Int64, true),
         ],
@@ -46,7 +52,7 @@ fn new_put_data(len: usize, key_start: i64, ts_start: i64, initial_value: i64) -
     let mut put_data = PutData::with_num_columns(4);
 
     let k0 = Int64Vector::from_values((0..len).map(|v| key_start + v as i64));
-    let ts = Int64Vector::from_values((0..len).map(|v| ts_start + v as i64));
+    let ts = TimestampVector::from_values((0..len).map(|v| ts_start + v as i64));
     let v0 = Int64Vector::from_values(std::iter::repeat(initial_value).take(len));
     let v1 = Int64Vector::from_values((0..len).map(|v| initial_value + v as i64));
 
@@ -68,13 +74,27 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<Vec<i64>>) {
     dst.resize(num_rows, Vec::new());
     for (i, row) in dst.iter_mut().enumerate() {
         for col in &chunk.columns {
-            let val = col
-                .as_any()
-                .downcast_ref::<Int64Vector>()
-                .unwrap()
-                .get_data(i)
-                .unwrap();
-            row.push(val);
+            match col.data_type() {
+                ConcreteDataType::Int64(_) => {
+                    let val = col
+                        .as_any()
+                        .downcast_ref::<Int64Vector>()
+                        .unwrap()
+                        .get_data(i)
+                        .unwrap();
+                    row.push(val);
+                }
+                ConcreteDataType::Timestamp(_) => {
+                    let val = col
+                        .as_any()
+                        .downcast_ref::<TimestampVector>()
+                        .unwrap()
+                        .get_data(i)
+                        .unwrap();
+                    row.push(val.value());
+                }
+                _ => unreachable!(),
+            }
         }
     }
 }

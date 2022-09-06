@@ -29,6 +29,15 @@ impl Timestamp {
     }
 }
 
+impl From<i64> for Timestamp {
+    fn from(v: i64) -> Self {
+        Self {
+            value: v,
+            unit: TimeUnit::Microsecond,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeUnit {
     #[default]

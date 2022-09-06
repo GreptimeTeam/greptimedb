@@ -214,6 +214,12 @@ impl From<Vec<u8>> for Value {
     }
 }
 
+impl From<Timestamp> for Value {
+    fn from(v: Timestamp) -> Self {
+        Value::Timestamp(v)
+    }
+}
+
 impl From<&[u8]> for Value {
     fn from(bytes: &[u8]) -> Value {
         Value::Binary(bytes.into())

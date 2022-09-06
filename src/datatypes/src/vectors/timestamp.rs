@@ -40,6 +40,14 @@ impl TimestampVector {
                 .clone(),
         ))
     }
+
+    pub fn from_values<I: IntoIterator<Item = i64>>(iter: I) -> Self {
+        Self {
+            array: PrimitiveVector {
+                array: PrimitiveArray::from_values(iter),
+            },
+        }
+    }
 }
 
 impl Vector for TimestampVector {

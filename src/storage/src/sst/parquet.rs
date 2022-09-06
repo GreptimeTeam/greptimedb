@@ -263,8 +263,10 @@ impl BatchReader for ChunkStream {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{Array, Int64Array, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{Array, UInt64Array, UInt8Array};
     use datatypes::arrow::io::parquet::read::FileReader;
+    use datatypes::prelude::{ScalarVector, Vector};
+    use datatypes::vectors::TimestampVector;
     use object_store::backend::fs::Backend;
     use store_api::storage::OpType;
     use tempdir::TempDir;
@@ -324,9 +326,15 @@ mod tests {
 
         // timestamp
         assert_eq!(
-            Arc::new(Int64Array::from_slice(&[
-                1000, 1000, 1001, 2002, 2003, 2003
-            ])) as Arc<dyn Array>,
+            TimestampVector::from_slice(&[
+                1000.into(),
+                1000.into(),
+                1001.into(),
+                2002.into(),
+                2003.into(),
+                2003.into()
+            ])
+            .to_arrow_array(),
             chunk.arrays()[0]
         );
 

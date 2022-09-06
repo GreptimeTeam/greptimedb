@@ -6,6 +6,7 @@ use std::{
 
 use api::v1::{codec::InsertBatch, column::Values, Column, InsertExpr};
 use common_base::BitVec;
+use common_time::timestamp::{TimeUnit, Timestamp};
 use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::{requests::InsertRequest, Table};
@@ -169,6 +170,21 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .binary_values
             .into_iter()
             .map(|val| val.into())
+            .collect(),
+        ConcreteDataType::DateTime(_) => values
+            .i64_values
+            .into_iter()
+            .map(|v| Value::DateTime(v.into()))
+            .collect(),
+        ConcreteDataType::Date(_) => values
+            .i32_values
+            .into_iter()
+            .map(|v| Value::Date(v.into()))
+            .collect(),
+        ConcreteDataType::Timestamp(_) => values
+            .i64_values
+            .into_iter()
+            .map(|v| Value::Timestamp(Timestamp::new(v, TimeUnit::Microsecond)))
             .collect(),
         _ => unimplemented!(),
     }

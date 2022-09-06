@@ -419,7 +419,7 @@ mod tests {
     use common_recordbatch::util;
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;
-    use datatypes::prelude::ConcreteDataType;
+    use datatypes::prelude::{ConcreteDataType, ScalarVector};
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::*;
     use store_api::manifest::Manifest;
@@ -461,7 +461,7 @@ mod tests {
         let hosts = StringVector::from(vec!["host1", "host2"]);
         let cpus = Float64Vector::from_vec(vec![55.5, 66.6]);
         let memories = Float64Vector::from_vec(vec![1024f64, 4096f64]);
-        let tss = Int64Vector::from_vec(vec![1, 2]);
+        let tss = TimestampVector::from_vecs(vec![1.into(), 2.into()]);
 
         columns_values.insert("host".to_string(), Arc::new(hosts.clone()));
         columns_values.insert("cpu".to_string(), Arc::new(cpus.clone()));

@@ -5,9 +5,10 @@ mod flush;
 mod projection;
 
 use common_telemetry::logging;
+use common_time::timestamp::{TimeUnit, Timestamp};
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
-use datatypes::vectors::Int64Vector;
+use datatypes::vectors::{Int64Vector, TimestampVector};
 use log_store::fs::{log::LocalFileLogStore, noop::NoopLogStore};
 use object_store::{backend::fs, ObjectStore};
 use store_api::storage::{
@@ -51,7 +52,7 @@ impl<S: LogStore> TesterBase<S> {
     /// Put without version specified.
     ///
     /// Format of data: (timestamp, v1), timestamp is key, v1 is value.
-    pub async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+    pub async fn put(&self, data: &[(Timestamp, Option<i64>)]) -> WriteResponse {
         // Build a batch without version.
         let mut batch = new_write_batch_for_test(false);
         let put_data = new_put_data(data);
@@ -61,9 +62,8 @@ impl<S: LogStore> TesterBase<S> {
     }
 
     /// Scan all data.
-    pub async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
+    pub async fn full_scan(&self) -> Vec<(Timestamp, Option<i64>)> {
         logging::info!("Full scan with ctx {:?}", self.read_ctx);
-
         let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
 
         let resp = snapshot
@@ -94,7 +94,11 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     if enable_version_column {
         write_batch_util::new_write_batch(
             &[
-                (test_util::TIMESTAMP_NAME, LogicalTypeId::Int64, false),
+                (
+                    test_util::TIMESTAMP_NAME,
+                    LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                    false,
+                ),
                 (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
                 ("v1", LogicalTypeId::Int64, true),
             ],
@@ -103,7 +107,11 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     } else {
         write_batch_util::new_write_batch(
             &[
-                (test_util::TIMESTAMP_NAME, LogicalTypeId::Int64, false),
+                (
+                    test_util::TIMESTAMP_NAME,
+                    LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                    false,
+                ),
                 ("v1", LogicalTypeId::Int64, true),
             ],
             Some(0),
@@ -111,10 +119,10 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     }
 }
 
-fn new_put_data(data: &[(i64, Option<i64>)]) -> PutData {
+fn new_put_data(data: &[(Timestamp, Option<i64>)]) -> PutData {
     let mut put_data = PutData::with_num_columns(2);
 
-    let timestamps = Int64Vector::from_values(data.iter().map(|kv| kv.0));
+    let timestamps = TimestampVector::from_vecs(data.iter().map(|v| v.0).collect());
     let values = Int64Vector::from_iter(data.iter().map(|kv| kv.1));
 
     put_data
@@ -125,12 +133,12 @@ fn new_put_data(data: &[(i64, Option<i64>)]) -> PutData {
     put_data
 }
 
-fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
+fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(Timestamp, Option<i64>)>) {
     assert_eq!(2, chunk.columns.len());
 
     let timestamps = chunk.columns[0]
         .as_any()
-        .downcast_ref::<Int64Vector>()
+        .downcast_ref::<TimestampVector>()
         .unwrap();
     let values = chunk.columns[1]
         .as_any()
@@ -164,7 +172,11 @@ async fn test_new_region() {
     let expect_schema = schema_util::new_schema_ref(
         &[
             ("k1", LogicalTypeId::Int32, false),
-            (test_util::TIMESTAMP_NAME, LogicalTypeId::Int64, false),
+            (
+                test_util::TIMESTAMP_NAME,
+                LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                false,
+            ),
             (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
             ("v1", LogicalTypeId::Float32, true),
         ],

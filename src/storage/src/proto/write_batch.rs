@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use common_base::BitVec;
 use common_error::prelude::*;
+use common_time::timestamp::TimeUnit;
 use datatypes::schema;
 use datatypes::{
     data_type::ConcreteDataType,
@@ -13,9 +14,10 @@ use datatypes::{
         BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, Float32Vector,
         Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder,
         Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector,
-        Int8VectorBuilder, StringVector, StringVectorBuilder, UInt16Vector, UInt16VectorBuilder,
-        UInt32Vector, UInt32VectorBuilder, UInt64Vector, UInt64VectorBuilder, UInt8Vector,
-        UInt8VectorBuilder, Vector, VectorRef,
+        Int8VectorBuilder, StringVector, StringVectorBuilder, TimestampVector,
+        TimestampVectorBuilder, UInt16Vector, UInt16VectorBuilder, UInt32Vector,
+        UInt32VectorBuilder, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+        Vector, VectorRef,
     },
 };
 use paste::paste;
@@ -137,6 +139,7 @@ impl From<&ConcreteDataType> for DataType {
             ConcreteDataType::String(_) => DataType::String,
             ConcreteDataType::Null(_) => DataType::Null,
             ConcreteDataType::Binary(_) => DataType::Binary,
+            ConcreteDataType::Timestamp(_) => DataType::Timestamp,
             _ => unimplemented!(), // TODO(jiachun): Maybe support some composite types in the future , such as list, struct, etc.
         }
     }
@@ -159,6 +162,7 @@ impl From<DataType> for ConcreteDataType {
             DataType::String => ConcreteDataType::string_datatype(),
             DataType::Binary => ConcreteDataType::binary_datatype(),
             DataType::Null => ConcreteDataType::null_datatype(),
+            DataType::Timestamp => ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
         }
     }
 }
@@ -221,6 +225,7 @@ gen_columns!(f64, Float64Vector, v, v);
 gen_columns!(bool, BooleanVector, v, v);
 gen_columns!(binary, BinaryVector, v, v.to_vec());
 gen_columns!(string, StringVector, v, v.to_string());
+gen_columns!(timestamp, TimestampVector, v, v.value());
 
 #[macro_export]
 macro_rules! gen_put_data {
@@ -268,6 +273,7 @@ gen_put_data!(f64, Float64VectorBuilder, v, *v as f64);
 gen_put_data!(bool, BooleanVectorBuilder, v, *v);
 gen_put_data!(binary, BinaryVectorBuilder, v, v.as_slice());
 gen_put_data!(string, StringVectorBuilder, v, v.as_str());
+gen_put_data!(timestamp, TimestampVectorBuilder, v, (*v).into());
 
 pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
     match vector.data_type() {
@@ -284,6 +290,7 @@ pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
         ConcreteDataType::Float64(_) => gen_columns_f64(vector),
         ConcreteDataType::Binary(_) => gen_columns_binary(vector),
         ConcreteDataType::String(_) => gen_columns_string(vector),
+        ConcreteDataType::Timestamp(_) => gen_columns_timestamp(vector),
         _ => {
             unimplemented!() // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
         }
@@ -305,6 +312,7 @@ pub fn gen_put_data_vector(data_type: ConcreteDataType, column: Column) -> Resul
         ConcreteDataType::Float64(_) => gen_put_data_f64(column),
         ConcreteDataType::Binary(_) => gen_put_data_binary(column),
         ConcreteDataType::String(_) => gen_put_data_string(column),
+        ConcreteDataType::Timestamp(_) => gen_put_data_timestamp(column),
         _ => unimplemented!(), // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
     }
 }

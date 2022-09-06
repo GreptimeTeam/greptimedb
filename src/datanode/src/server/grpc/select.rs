@@ -100,10 +100,10 @@ fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
 }
 
 macro_rules! convert_arrow_array_to_grpc_vals {
-    ($data_type: expr, $arrays: ident,  $(($Type: ident, $CastType: ty, $field: ident, $MapFunction: expr)), +) => {
+    ($data_type: expr, $arrays: ident,  $(($Type: pat, $CastType: ty, $field: ident, $MapFunction: expr)), +) => {
         match $data_type {
             $(
-                arrow::datatypes::DataType::$Type => {
+                $Type => {
                     let mut vals = Values::default();
                     for array in $arrays {
                         let array = array.as_any().downcast_ref::<$CastType>().with_context(|| ConversionSnafu {
@@ -119,8 +119,8 @@ macro_rules! convert_arrow_array_to_grpc_vals {
             )+
             _ => unimplemented!(),
         }
-
     };
+
 }
 
 fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
@@ -132,26 +132,30 @@ fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
     convert_arrow_array_to_grpc_vals!(
         data_type, arrays,
 
-        (Boolean,       BooleanArray,           bool_values,    |x| {x}),
+        (arrow::datatypes::DataType::Boolean,       BooleanArray,           bool_values,    |x| {x}),
 
-        (Int8,          PrimitiveArray<i8>,     i8_values,      |x| {*x as i32}),
-        (Int16,         PrimitiveArray<i16>,    i16_values,     |x| {*x as i32}),
-        (Int32,         PrimitiveArray<i32>,    i32_values,     |x| {*x}),
-        (Int64,         PrimitiveArray<i64>,    i64_values,     |x| {*x}),
+        (arrow::datatypes::DataType::Int8,          PrimitiveArray<i8>,     i8_values,      |x| {*x as i32}),
+        (arrow::datatypes::DataType::Int16,         PrimitiveArray<i16>,    i16_values,     |x| {*x as i32}),
+        (arrow::datatypes::DataType::Int32,         PrimitiveArray<i32>,    i32_values,     |x| {*x}),
+        (arrow::datatypes::DataType::Int64,         PrimitiveArray<i64>,    i64_values,     |x| {*x}),
 
-        (UInt8,         PrimitiveArray<u8>,     u8_values,      |x| {*x as u32}),
-        (UInt16,        PrimitiveArray<u16>,    u16_values,     |x| {*x as u32}),
-        (UInt32,        PrimitiveArray<u32>,    u32_values,     |x| {*x}),
-        (UInt64,        PrimitiveArray<u64>,    u64_values,     |x| {*x}),
+        (arrow::datatypes::DataType::UInt8,         PrimitiveArray<u8>,     u8_values,      |x| {*x as u32}),
+        (arrow::datatypes::DataType::UInt16,        PrimitiveArray<u16>,    u16_values,     |x| {*x as u32}),
+        (arrow::datatypes::DataType::UInt32,        PrimitiveArray<u32>,    u32_values,     |x| {*x}),
+        (arrow::datatypes::DataType::UInt64,        PrimitiveArray<u64>,    u64_values,     |x| {*x}),
 
-        (Float32,       PrimitiveArray<f32>,    f32_values,     |x| {*x}),
-        (Float64,       PrimitiveArray<f64>,    f64_values,     |x| {*x}),
+        (arrow::datatypes::DataType::Float32,       PrimitiveArray<f32>,    f32_values,     |x| {*x}),
+        (arrow::datatypes::DataType::Float64,       PrimitiveArray<f64>,    f64_values,     |x| {*x}),
 
-        (Binary,        BinaryArray,            binary_values,  |x| {x.into()}),
-        (LargeBinary,   BinaryArray,            binary_values,  |x| {x.into()}),
+        (arrow::datatypes::DataType::Binary,        BinaryArray,            binary_values,  |x| {x.into()}),
+        (arrow::datatypes::DataType::LargeBinary,   BinaryArray,            binary_values,  |x| {x.into()}),
 
-        (Utf8,          StringArray,            string_values,  |x| {x.into()}),
-        (LargeUtf8,     StringArray,            string_values,  |x| {x.into()})
+        (arrow::datatypes::DataType::Utf8,          StringArray,            string_values,  |x| {x.into()}),
+        (arrow::datatypes::DataType::LargeUtf8,     StringArray,            string_values,  |x| {x.into()}),
+        (arrow::datatypes::DataType::Date32,        PrimitiveArray<i32>,    i32_values,     |x| {*x as i32}),
+        (arrow::datatypes::DataType::Date64,        PrimitiveArray<i64>,    i64_values,     |x| {*x as i64}),
+
+        (arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, _),  PrimitiveArray<i64>,   i64_values, |x| {*x}  )
     )
 }
 

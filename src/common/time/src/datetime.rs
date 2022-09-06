@@ -38,6 +38,12 @@ impl FromStr for DateTime {
     }
 }
 
+impl From<i64> for DateTime {
+    fn from(v: i64) -> Self {
+        Self(v)
+    }
+}
+
 impl DateTime {
     pub fn new(val: i64) -> Self {
         Self(val)

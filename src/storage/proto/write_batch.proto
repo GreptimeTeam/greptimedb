@@ -60,6 +60,7 @@ enum DataType {
   FLOAT64 = 11;
   STRING = 12;
   BINARY = 13;
+  TIMESTAMP = 14;
 }
 
 message Values {
@@ -79,4 +80,5 @@ message Values {
   repeated bool bool_values = 11;
   repeated bytes binary_values = 12;
   repeated string string_values = 13;
+  repeated int64  timestamp_values = 14;
 }

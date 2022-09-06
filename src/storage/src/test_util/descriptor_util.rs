@@ -1,3 +1,4 @@
+use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::type_id::LogicalTypeId;
 use store_api::storage::{
@@ -22,7 +23,7 @@ impl RegionDescBuilder {
             ColumnDescriptorBuilder::new(
                 2,
                 test_util::TIMESTAMP_NAME,
-                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
             )
             .is_nullable(false)
             .build()

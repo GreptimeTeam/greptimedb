@@ -33,6 +33,12 @@ impl FromStr for Date {
     }
 }
 
+impl From<i32> for Date {
+    fn from(v: i32) -> Self {
+        Self(v)
+    }
+}
+
 impl Display for Date {
     /// [Date] is formatted according to ISO-8601 standard.
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

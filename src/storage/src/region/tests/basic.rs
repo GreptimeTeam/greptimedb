@@ -1,5 +1,6 @@
 //! Region read/write tests.
 
+use common_time::timestamp::Timestamp;
 use log_store::fs::log::LocalFileLogStore;
 use store_api::storage::{OpenOptions, SequenceNumber, WriteResponse};
 use tempdir::TempDir;
@@ -81,11 +82,11 @@ impl Tester {
         self.base.as_mut().unwrap().read_ctx.batch_size = batch_size;
     }
 
-    async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+    async fn put(&self, data: &[(Timestamp, Option<i64>)]) -> WriteResponse {
         self.base().put(data).await
     }
 
-    async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
+    async fn full_scan(&self) -> Vec<(Timestamp, Option<i64>)> {
         self.base().full_scan().await
     }
 
@@ -101,11 +102,11 @@ async fn test_simple_put_scan() {
     let tester = Tester::new(REGION_NAME, store_dir).await;
 
     let data = vec![
-        (1000, Some(100)),
-        (1001, Some(101)),
-        (1002, None),
-        (1003, Some(103)),
-        (1004, Some(104)),
+        (1000.into(), Some(100)),
+        (1001.into(), Some(101)),
+        (1002.into(), None),
+        (1003.into(), Some(103)),
+        (1004.into(), Some(104)),
     ];
 
     tester.put(&data).await;
@@ -122,7 +123,7 @@ async fn test_sequence_increase() {
 
     let mut committed_sequence = tester.committed_sequence();
     for i in 0..100 {
-        tester.put(&[(i, Some(1234))]).await;
+        tester.put(&[(i.into(), Some(1234))]).await;
         committed_sequence += 1;
 
         assert_eq!(committed_sequence, tester.committed_sequence());
@@ -140,7 +141,7 @@ async fn test_reopen() {
     let mut all_data = Vec::new();
     // Reopen region multiple times.
     for i in 0..5 {
-        let data = (i, Some(i));
+        let data = (i.into(), Some(i));
         tester.put(&[data]).await;
         all_data.push(data);
 

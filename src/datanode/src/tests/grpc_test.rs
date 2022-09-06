@@ -147,7 +147,7 @@ fn testing_create_expr() -> CreateExpr {
         },
         ColumnDef {
             name: "ts".to_string(),
-            data_type: 4, // int64
+            data_type: 15, // timestamp
             is_nullable: true,
         },
     ];
