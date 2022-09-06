@@ -1,6 +1,6 @@
 //! Script engine
 
-use std::any::Any;
+use std::{any::Any, time::Duration};
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
@@ -17,6 +17,14 @@ pub trait Script {
 
     /// Evaluate the script and returns the output.
     async fn evaluate(&self, ctx: EvalContext) -> std::result::Result<Output, Self::Error>;
+
+    /// Evaluate script by given `dur`ation periodically, stop only when the receiver end of tx is all closed
+    async fn schedule_job(
+        &self,
+        dur: Duration,
+        _ctx: EvalContext,
+        tx: tokio::sync::mpsc::Sender<Result<Output, crate::python::error::Error>>,
+    );
 }
 
 #[async_trait]
