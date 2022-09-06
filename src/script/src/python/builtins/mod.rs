@@ -761,6 +761,9 @@ pub(crate) mod greptime_builtin {
         func: PyRef<PyFunction>,
         vm: &VirtualMachine,
     ) -> PyResult<PyVector> {
+        // TODO(discord9): change to use PyDict to mimic a table?
+        // then: table: PyDict, , lambda t:
+        // ts: PyStr, duration: i64
         // TODO: try to return a PyVector if possible, using concat array in arrow's compute module
         // 1. slice them according to duration
         let arrow_error = |err: ArrowError| vm.new_runtime_error(format!("Arrow Error: {err:#?}"));
@@ -822,7 +825,7 @@ pub(crate) mod greptime_builtin {
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-
+        dbg!(&fn_results);
         // 3. get returen vector and concat them
         let ret = fn_results
             .into_iter()
@@ -830,7 +833,7 @@ pub(crate) mod greptime_builtin {
                 compute::concatenate::concatenate(&[acc.as_ref(), x.as_ref()]).map(Arc::from)
             })
             .map_err(arrow_error)?
-            .unwrap();
+            .unwrap_or_else(|| Arc::from(arr.slice(0, 0)));
         // 4. return result vector
         Ok(Helper::try_into_vector(ret).map_err(datatype_error)?.into())
     }
