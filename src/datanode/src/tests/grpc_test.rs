@@ -1,8 +1,13 @@
+use std::assert_matches::assert_matches;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::{codec::InsertBatch, column, Column};
+use api::v1::{
+    admin_result, codec::InsertBatch, column, Column, ColumnDef, CreateExpr, MutateResult,
+};
+use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
 use servers::grpc::GrpcServer;
 use servers::server::Server;
@@ -18,10 +23,8 @@ async fn test_insert_and_select() {
     let instance = Arc::new(Instance::new(&opts).await.unwrap());
     instance.start().await.unwrap();
 
-    test_util::create_test_table(&instance).await.unwrap();
-
     tokio::spawn(async move {
-        let mut grpc_server = GrpcServer::new(instance);
+        let mut grpc_server = GrpcServer::new(instance.clone(), instance);
         let addr = "127.0.0.1:3001".parse::<SocketAddr>().unwrap();
         grpc_server.start(addr).await.unwrap()
     });
@@ -30,7 +33,8 @@ async fn test_insert_and_select() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let grpc_client = Client::connect("http://127.0.0.1:3001").await.unwrap();
-    let db = Database::new("greptime", grpc_client);
+    let db = Database::new("greptime", grpc_client.clone());
+    let admin = Admin::new("greptime", grpc_client);
 
     // testing data:
     let expected_host_col = Column {
@@ -71,6 +75,17 @@ async fn test_insert_and_select() {
         ..Default::default()
     };
 
+    // create
+    let expr = testing_create_expr();
+    let result = admin.create(expr).await.unwrap();
+    assert_matches!(
+        result.result,
+        Some(admin_result::Result::Mutate(MutateResult {
+            success: 1,
+            failure: 0
+        }))
+    );
+
     // insert
     let values = vec![InsertBatch {
         columns: vec![
@@ -110,5 +125,41 @@ async fn test_insert_and_select() {
                 .for_each(|(x, y)| assert_eq!(x, y));
         }
         _ => unreachable!(),
+    }
+}
+
+fn testing_create_expr() -> CreateExpr {
+    let column_defs = vec![
+        ColumnDef {
+            name: "host".to_string(),
+            data_type: 12, // string
+            is_nullable: false,
+        },
+        ColumnDef {
+            name: "cpu".to_string(),
+            data_type: 10, // float64
+            is_nullable: true,
+        },
+        ColumnDef {
+            name: "memory".to_string(),
+            data_type: 10, // float64
+            is_nullable: true,
+        },
+        ColumnDef {
+            name: "ts".to_string(),
+            data_type: 4, // int64
+            is_nullable: true,
+        },
+    ];
+    CreateExpr {
+        catalog_name: None,
+        schema_name: None,
+        table_name: "demo".to_string(),
+        desc: Some("blabla".to_string()),
+        column_defs,
+        time_index: "ts".to_string(),
+        primary_keys: vec!["ts".to_string(), "host".to_string()],
+        create_if_not_exists: true,
+        table_options: HashMap::new(),
     }
 }

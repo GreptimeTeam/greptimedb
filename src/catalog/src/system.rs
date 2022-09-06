@@ -88,6 +88,7 @@ impl SystemCatalogTable {
                 schema: schema.clone(),
                 primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX, TIMESTAMP_INDEX],
                 create_if_not_exists: true,
+                table_options: HashMap::new(),
             };
 
             let table = engine

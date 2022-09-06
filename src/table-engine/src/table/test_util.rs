@@ -1,5 +1,6 @@
 mod mock_engine;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use datatypes::prelude::ConcreteDataType;
@@ -95,6 +96,7 @@ pub async fn setup_test_engine_and_table() -> (
                 schema: schema.clone(),
                 create_if_not_exists: true,
                 primary_key_indices: Vec::default(),
+                table_options: HashMap::new(),
             },
         )
         .await
@@ -126,6 +128,7 @@ pub async fn setup_mock_engine_and_table(
                 schema: schema.clone(),
                 create_if_not_exists: true,
                 primary_key_indices: Vec::default(),
+                table_options: HashMap::new(),
             },
         )
         .await

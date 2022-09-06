@@ -31,6 +31,7 @@ common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
 datatypes = { path = "../datatypes" }
+futures = "0.3"
 hyper = { version = "0.14", features = ["full"] }
 log-store = { path = "../log-store" }
 metrics = "0.20"

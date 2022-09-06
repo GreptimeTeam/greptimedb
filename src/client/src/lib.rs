@@ -1,3 +1,4 @@
+pub mod admin;
 mod client;
 mod database;
 mod error;

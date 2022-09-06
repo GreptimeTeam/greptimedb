@@ -1,6 +1,9 @@
 use std::{fs, path, sync::Arc};
 
-use api::v1::{object_expr, select_expr, InsertExpr, ObjectExpr, ObjectResult, SelectExpr};
+use api::v1::{
+    admin_expr, object_expr, select_expr, AdminExpr, AdminResult, InsertExpr, ObjectExpr,
+    ObjectResult, SelectExpr,
+};
 use async_trait::async_trait;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
@@ -10,7 +13,7 @@ use common_telemetry::timer;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
-use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
+use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
@@ -275,5 +278,21 @@ impl GrpcQueryHandler for Instance {
             }
         };
         Ok(object_resp)
+    }
+}
+
+#[async_trait]
+impl GrpcAdminHandler for Instance {
+    async fn exec_admin_request(&self, expr: AdminExpr) -> servers::error::Result<AdminResult> {
+        let admin_resp = match expr.expr {
+            Some(admin_expr::Expr::Create(create_expr)) => self.handle_create(create_expr).await,
+            other => {
+                return servers::error::NotSupportedSnafu {
+                    feat: format!("{:?}", other),
+                }
+                .fail();
+            }
+        };
+        Ok(admin_resp)
     }
 }

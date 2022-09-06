@@ -1,6 +1,6 @@
 use api::v1::{
-    codec::SelectResult, object_result, MutateResult, ObjectResult, ResultHeader,
-    SelectResult as SelectResultRaw,
+    admin_result, codec::SelectResult, object_result, AdminResult, MutateResult, ObjectResult,
+    ResultHeader, SelectResult as SelectResultRaw,
 };
 use common_error::prelude::ErrorExt;
 
@@ -85,6 +85,61 @@ pub(crate) fn build_err_result(err: &impl ErrorExt) -> ObjectResult {
         .status_code(err.status_code() as u32)
         .err_msg(err.to_string())
         .build()
+}
+
+#[derive(Debug)]
+pub(crate) struct AdminResultBuilder {
+    version: u32,
+    code: u32,
+    err_msg: Option<String>,
+    mutate: Option<(Success, Failure)>,
+}
+
+impl AdminResultBuilder {
+    pub fn status_code(mut self, code: u32) -> Self {
+        self.code = code;
+        self
+    }
+
+    pub fn err_msg(mut self, err_msg: String) -> Self {
+        self.err_msg = Some(err_msg);
+        self
+    }
+
+    pub fn mutate_result(mut self, success: u32, failure: u32) -> Self {
+        self.mutate = Some((success, failure));
+        self
+    }
+
+    pub fn build(self) -> AdminResult {
+        let header = Some(ResultHeader {
+            version: self.version,
+            code: self.code,
+            err_msg: self.err_msg.unwrap_or_default(),
+        });
+
+        let result = if let Some((success, failure)) = self.mutate {
+            Some(admin_result::Result::Mutate(MutateResult {
+                success,
+                failure,
+            }))
+        } else {
+            None
+        };
+
+        AdminResult { header, result }
+    }
+}
+
+impl Default for AdminResultBuilder {
+    fn default() -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            code: 0,
+            err_msg: None,
+            mutate: None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -44,3 +44,27 @@ message Column {
   // If a bit in null_mask is 1, it indicates that the column value at that position is null.
   bytes null_mask = 4;
 }
+
+message ColumnDef {
+  string name = 1;
+  ColumnDataType data_type = 2;
+  bool is_nullable = 3;
+}
+
+enum ColumnDataType {
+  BOOLEAN = 0;
+  INT8 = 1;
+  INT16 = 2;
+  INT32 = 3;
+  INT64 = 4;
+  UINT8 = 5;
+  UINT16 = 6;
+  UINT32 = 7;
+  UINT64 = 8;
+  FLOAT32 = 9;
+  FLOAT64 = 10;
+  BINARY = 11;
+  STRING = 12;
+  DATE = 13;
+  DATETIME = 14;
+}

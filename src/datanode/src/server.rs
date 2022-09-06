@@ -33,7 +33,7 @@ impl Services {
         );
         Ok(Self {
             http_server: HttpServer::new(instance.clone()),
-            grpc_server: GrpcServer::new(instance.clone()),
+            grpc_server: GrpcServer::new(instance.clone(), instance.clone()),
             mysql_server: MysqlServer::create_server(instance, mysql_io_runtime),
         })
     }

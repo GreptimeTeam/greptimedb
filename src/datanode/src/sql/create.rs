@@ -150,6 +150,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             schema,
             primary_key_indices: primary_keys,
             create_if_not_exists: stmt.if_not_exists,
+            table_options: HashMap::new(),
         };
         Ok(request)
     }

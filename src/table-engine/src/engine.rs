@@ -525,6 +525,7 @@ mod tests {
             create_if_not_exists: true,
             desc: None,
             primary_key_indices: Vec::default(),
+            table_options: HashMap::new(),
         };
 
         let created_table = table_engine.create_table(&ctx, request).await.unwrap();
@@ -547,6 +548,7 @@ mod tests {
             create_if_not_exists: false,
             desc: None,
             primary_key_indices: Vec::default(),
+            table_options: HashMap::new(),
         };
 
         let result = table_engine.create_table(&ctx, request).await;

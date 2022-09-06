@@ -1357,6 +1357,7 @@ dependencies = [
  "common-time",
  "datafusion",
  "datatypes",
+ "futures",
  "hyper",
  "log-store",
  "metrics 0.20.1",
