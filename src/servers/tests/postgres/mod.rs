@@ -65,14 +65,13 @@ async fn test_shutdown_pg_server() -> Result<()> {
             for _ in 0..1000 {
                 match create_connection(server_port).await {
                     Ok(connection) => {
-                        let _rows = connection
+                        let rows = connection
                             .simple_query("SELECT uint32s FROM numbers LIMIT 1")
                             .await
                             .unwrap();
-                        //  .as_ref();
-                        // let result_text = unwrap_results(rows)[0];
-                        // let result: i32 = result_text.parse().unwrap();
-                        // assert_eq!(result, 0);
+                        let result_text = unwrap_results(&rows)[0];
+                        let result: i32 = result_text.parse().unwrap();
+                        assert_eq!(result, 0);
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                     Err(e) => {
@@ -112,12 +111,14 @@ async fn test_query_pg_concurrently() -> Result<()> {
     let threads = 4;
     let expect_executed_queries_per_worker = 1000;
     let mut join_handles = vec![];
-    for _ in 0..threads {
+    for i in 0..threads {
         join_handles.push(tokio::spawn(async move {
             let mut rand: StdRng = rand::SeedableRng::from_entropy();
 
             let mut client = create_connection(server_port).await.unwrap();
-            for _ in 0..expect_executed_queries_per_worker {
+
+            for k in 0..expect_executed_queries_per_worker {
+                dbg!(format!("pre {}: {}", &k, &i));
                 let expected: u32 = rand.gen_range(0..100);
                 let result: u32 = unwrap_results(
                     client
@@ -133,10 +134,13 @@ async fn test_query_pg_concurrently() -> Result<()> {
                 .unwrap();
                 assert_eq!(result, expected);
 
+                // 1/100 chance to reconnect
                 let should_recreate_conn = expected == 1;
                 if should_recreate_conn {
                     client = create_connection(server_port).await.unwrap();
                 }
+
+                dbg!(format!("post {}: {}", &k, &i));
             }
             expect_executed_queries_per_worker
         }))

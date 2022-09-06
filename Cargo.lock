@@ -4652,6 +4652,7 @@ dependencies = [
  "common-time",
  "datatypes",
  "futures",
+ "hex",
  "hyper",
  "metrics 0.20.1",
  "mysql_async",

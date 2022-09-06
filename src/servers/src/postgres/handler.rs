@@ -6,7 +6,7 @@ use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
 use pgwire::api::portal::Portal;
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
-use pgwire::api::results::{FieldInfo, QueryResponseBuilder, Response, Tag};
+use pgwire::api::results::{FieldInfo, Response, Tag, TextQueryResponseBuilder};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{PgWireError, PgWireResult};
 use query::Output;
@@ -42,7 +42,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
             ))),
             Output::RecordBatch(record_stream) => {
                 let schema = record_stream.schema();
-                let mut builder = QueryResponseBuilder::new(schema_to_pg(schema));
+                let mut builder = TextQueryResponseBuilder::new(schema_to_pg(schema));
                 let recordbatches = util::collect(record_stream)
                     .await
                     .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
@@ -71,24 +71,24 @@ fn schema_to_pg(origin: SchemaRef) -> Vec<FieldInfo> {
         .collect::<Vec<FieldInfo>>()
 }
 
-fn encode_value(value: &Value, builder: &mut QueryResponseBuilder) -> PgWireResult<()> {
+fn encode_value(value: &Value, builder: &mut TextQueryResponseBuilder) -> PgWireResult<()> {
     match value {
         Value::Null => builder.append_field(None::<i8>),
-        Value::Boolean(v) => builder.append_field(v),
-        Value::UInt8(v) => builder.append_field(*v as i8),
-        Value::UInt16(v) => builder.append_field(*v as i16),
-        Value::UInt32(v) => builder.append_field(*v as i32),
-        Value::UInt64(v) => builder.append_field(*v as i64),
-        Value::Int8(v) => builder.append_field(v),
-        Value::Int16(v) => builder.append_field(v),
-        Value::Int32(v) => builder.append_field(v),
-        Value::Int64(v) => builder.append_field(v),
-        Value::Float32(v) => builder.append_field(v.0),
-        Value::Float64(v) => builder.append_field(v.0),
-        Value::String(v) => builder.append_field(v.as_utf8()),
-        Value::Binary(v) => builder.append_field(v.deref()),
-        Value::Date(v) => builder.append_field(v.val()),
-        Value::DateTime(v) => builder.append_field(v.val()),
+        Value::Boolean(v) => builder.append_field(Some(v)),
+        Value::UInt8(v) => builder.append_field(Some(*v as i8)),
+        Value::UInt16(v) => builder.append_field(Some(*v as i16)),
+        Value::UInt32(v) => builder.append_field(Some(*v as i32)),
+        Value::UInt64(v) => builder.append_field(Some(*v as i64)),
+        Value::Int8(v) => builder.append_field(Some(v)),
+        Value::Int16(v) => builder.append_field(Some(v)),
+        Value::Int32(v) => builder.append_field(Some(v)),
+        Value::Int64(v) => builder.append_field(Some(v)),
+        Value::Float32(v) => builder.append_field(Some(v.0)),
+        Value::Float64(v) => builder.append_field(Some(v.0)),
+        Value::String(v) => builder.append_field(Some(v.as_utf8())),
+        Value::Binary(v) => builder.append_field(Some(hex::encode(v.deref()))),
+        Value::Date(v) => builder.append_field(Some(v.val())),
+        Value::DateTime(v) => builder.append_field(Some(v.val())),
         Value::List(_) => {
             unimplemented!("List is not supported for now")
         }
