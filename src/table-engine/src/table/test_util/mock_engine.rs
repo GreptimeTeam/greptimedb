@@ -22,6 +22,7 @@ pub type Result<T> = std::result::Result<T, MockError>;
 pub struct MockChunkReader {
     schema: SchemaRef,
     memtable: MockMemtable,
+    read: bool,
 }
 
 #[async_trait]
@@ -33,6 +34,10 @@ impl ChunkReader for MockChunkReader {
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
+        if self.read {
+            return Ok(None);
+        }
+
         let columns = self
             .schema
             .column_schemas()
@@ -47,6 +52,8 @@ impl ChunkReader for MockChunkReader {
                 builder.finish()
             })
             .collect::<Vec<VectorRef>>();
+        self.read = true;
+
         Ok(Some(Chunk::new(columns)))
     }
 }
@@ -77,6 +84,7 @@ impl Snapshot for MockSnapshot {
         let reader = MockChunkReader {
             schema: self.schema().clone(),
             memtable,
+            read: false,
         };
         Ok(ScanResponse { reader })
     }
