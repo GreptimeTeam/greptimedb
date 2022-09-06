@@ -514,6 +514,8 @@ impl MergeReader {
 mod tests {
     use super::*;
     use crate::test_util::read_util;
+    use datatypes::vectors::Int64Vector;
+    use datatypes::prelude::ScalarVector;
 
     #[tokio::test]
     async fn test_merge_reader_empty() {
@@ -555,6 +557,29 @@ mod tests {
         assert_eq!(expect, result);
     }
 
+    async fn check_merge_reader_by_batch(mut reader: MergeReader, expect_batches: Batches<'_>) {
+        let mut result = Vec::new();
+        while let Some(batch) = reader.next_batch().await.unwrap() {
+            let key = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Vector>()
+                .unwrap();
+            let value = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Vector>()
+                .unwrap();
+
+            let batch: Vec<_> = key.iter_data().zip(value.iter_data()).map(|(k, v)| (k.unwrap(), v)).collect();
+            result.push(batch);
+        }
+
+        for (expect, actual) in expect_batches.iter().zip(result.iter()) {
+            assert_eq!(expect, actual);
+        }
+    }
+
     #[tokio::test]
     async fn test_merge_multiple_interleave() {
         common_telemetry::init_default_ut_logging();
@@ -567,5 +592,38 @@ mod tests {
         let reader = build_merge_reader(input, 1, 3);
 
         check_merge_reader_result(reader, input).await;
+
+        let input: &[Batches] = &[
+            // The former two batches could be returned directly.
+            &[&[(1, Some(1)), (2, Some(2))], &[(3, Some(3)), (4, Some(4))], &[(5, Some(5)), (12, Some(12))]],
+            &[&[(6, Some(6)), (7, Some(7)), (18, Some(18))]],
+            &[&[(13, Some(13)), (15, Some(15))]],
+        ];
+        let reader = build_merge_reader(input, 1, 3);
+
+        check_merge_reader_result(reader, input).await;
+
+        let input: &[Batches] = &[
+            &[&[(1, Some(1)), (2, Some(2))], &[(5, Some(5)), (9, Some(9))], &[(14, Some(14)), (17, Some(17))]],
+            // Could not return the first batch (6, 7) directly.
+            &[&[(6, Some(6)), (7, Some(7))], &[(15, Some(15))]],
+        ];
+        let reader = build_merge_reader(input, 1, 2);
+
+        check_merge_reader_result(reader, input).await;
     }
+
+    #[tokio::test]
+    async fn test_merge_one_source() {
+        common_telemetry::init_default_ut_logging();
+
+        let input: &[Batches] = &[
+            &[&[(1, Some(1)), (2, Some(2)), (3, Some(3))], &[(4, Some(4)), (5, Some(5)), (6, Some(6))]],
+        ];
+        let reader = build_merge_reader(input, 1, 2);
+
+        check_merge_reader_result(reader, input).await;
+    }
+
+    // TODO(yingwen): Test contains empty batch.
 }
