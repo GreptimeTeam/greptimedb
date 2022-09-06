@@ -237,7 +237,7 @@ impl StoreSchema {
             let (left_col, right_col) = (left.column(idx), right.column(idx));
             // Comparision of vector is done by virtual method calls currently. Consider using
             // enum dispatch if this becomes bottleneck.
-            let order = left_col.cmp_element(i, &**right_col, j);
+            let order = left_col.get_ref(i).cmp(&right_col.get_ref(j));
             if order != Ordering::Equal {
                 return order;
             }
