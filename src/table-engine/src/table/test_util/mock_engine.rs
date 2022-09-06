@@ -7,7 +7,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use common_error::mock::MockError;
 use common_telemetry::logging;
-use datatypes::prelude::{Value, VectorBuilder};
+use datatypes::prelude::{Value, VectorBuilder, VectorRef};
 use datatypes::schema::ColumnSchema;
 use storage::metadata::{RegionMetaImpl, RegionMetadata};
 use storage::write_batch::{Mutation, WriteBatch};
@@ -33,18 +33,20 @@ impl ChunkReader for MockChunkReader {
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
-        let mut columns = vec![];
-        for ColumnSchema {
-            name, data_type, ..
-        } in self.schema.column_schemas()
-        {
-            let data = self.memtable.get(name).unwrap();
-            let mut builder = VectorBuilder::new(data_type.clone());
-            for v in data {
-                builder.push(v);
-            }
-            columns.push(builder.finish());
-        }
+        let columns = self
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| {
+                let data = self.memtable.get(&column_schema.name).unwrap();
+                let mut builder =
+                    VectorBuilder::with_capacity(column_schema.data_type.clone(), data.len());
+                for v in data {
+                    builder.push(v);
+                }
+                builder.finish()
+            })
+            .collect::<Vec<VectorRef>>();
         Ok(Some(Chunk::new(columns)))
     }
 }

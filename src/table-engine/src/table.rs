@@ -213,9 +213,20 @@ impl<R: Region> Table for MitoTable<R> {
                 table_name,
                 region_name: region.name(),
             })?;
+        logging::debug!(
+            "start altering region {} of table {}, with new region descriptor {:?}",
+            region.name(),
+            table_name,
+            region_descriptor
+        );
         region.alter(region_descriptor).map_err(TableError::new)?;
 
         // then alter table info
+        logging::debug!(
+            "start updating the manifest of table {} with new table info {:?}",
+            table_name,
+            new_info
+        );
         self.manifest
             .update(TableMetaActionList::new(vec![
                 TableMetaAction::Protocol(ProtocolAction::new()),

@@ -393,6 +393,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let table = self
             .get_table(table_name)
             .context(error::TableNotFoundSnafu { table_name })?;
+
+        logging::info!("start altering table {} with request {:?}", table_name, req);
         table
             .alter(req)
             .await
