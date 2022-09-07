@@ -111,7 +111,9 @@ const EPS: f64 = 2.0 * f64::EPSILON;
 #[derive(Debug, Serialize, Deserialize)]
 enum PyValue {
     FloatVec(Vec<f64>),
+    FloatVecWithNull(Vec<Option<f64>>),
     IntVec(Vec<i64>),
+    IntVecWithNull(Vec<Option<i64>>),
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -136,14 +138,24 @@ impl PyValue {
                 .iter()
                 .zip(b)
                 .fold(true, |acc, (x, y)| acc && (x - y).abs() <= EPS),
+
+            (Self::FloatVecWithNull(a), Self::FloatVecWithNull(b)) => a == b,
+
             (PyValue::IntVec(a), PyValue::IntVec(b)) => a == b,
+
             (PyValue::Float(a), PyValue::Float(b)) => (a - b).abs() <= EPS,
+
             (PyValue::Int(a), PyValue::Int(b)) => a == b,
+
             // for just compare the length of vector
             (PyValue::LenFloatVec(len), PyValue::FloatVec(v)) => *len == v.len(),
+
             (PyValue::LenIntVec(len), PyValue::IntVec(v)) => *len == v.len(),
+
             (PyValue::FloatVec(v), PyValue::LenFloatVec(len)) => *len == v.len(),
+
             (PyValue::IntVec(v), PyValue::LenIntVec(len)) => *len == v.len(),
+
             (
                 Self::Float(v),
                 Self::FloatWithError {
@@ -222,17 +234,24 @@ impl PyValue {
                     .as_any()
                     .downcast_ref::<Float64Array>()
                     .ok_or(format!("Can't cast {vec_f64:#?} to Float64Array!"))?;
-                let ret: Vec<f64> = vec_f64
+                let ret = vec_f64
                     .into_iter()
-                    .enumerate()
+                    .map(|v| v.map(|inner| inner.to_owned()))
+                    /* .enumerate()
                     .map(|(idx, v)| {
                         v.ok_or(format!(
                             "No null element expected, found one in {idx} position"
                         ))
                         .map(|v| v.to_owned())
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                Ok(Self::FloatVec(ret))
+                    })*/
+                    .collect::<Vec<_>>();
+                if ret.iter().all(|x| x.is_some()) {
+                    Ok(Self::FloatVec(
+                        ret.into_iter().map(|i| i.unwrap()).collect(),
+                    ))
+                } else {
+                    Ok(Self::FloatVecWithNull(ret))
+                }
             } else if is_int(ty) {
                 let vec_int = arrow::compute::cast::cast(
                     res.as_ref(),
