@@ -100,7 +100,11 @@ impl Vector for TimestampVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        self.array.slice(offset, length)
+        Arc::new(Self {
+            array: PrimitiveVector {
+                array: self.array.array.slice(offset, length),
+            },
+        })
     }
 
     fn get(&self, index: usize) -> Value {
