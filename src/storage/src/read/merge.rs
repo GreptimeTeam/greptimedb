@@ -1,7 +1,43 @@
 //! Merge reader.
 //!
-//! This implementation is inspired by [kudu's MergeIterator](https://github.com/apache/kudu/blob/9021f275824faa2bdfe699786957c40c219697c1/src/kudu/common/generic_iterators.cc#L107)
-//! and [CeresDB's MergeIterator](https://github.com/CeresDB/ceresdb/blob/02a7e3100f47cf16aa6c245ed529a6978be20fbd/analytic_engine/src/row_iter/merge.rs)
+//! The implementation of [`MergeReader`] is inspired by
+//!  [`kudu's MergeIterator`](https://github.com/apache/kudu/blob/9021f275824faa2bdfe699786957c40c219697c1/src/kudu/common/generic_iterators.cc#L107)
+//! and [`CeresDB's MergeIterator`](https://github.com/CeresDB/ceresdb/blob/02a7e3100f47cf16aa6c245ed529a6978be20fbd/analytic_engine/src/row_iter/merge.rs)
+//!
+//! The main idea of the merge algorithm is to maintain a `merge window`. The window describes,
+//! at any given time, the key range where we expect to find the row with the smallest key.
+//! A [`Node`] (known as the sub-iterator in kudu) whose NEXT overlaps with the `merge window`
+//! is said to be actively participating in the merge.
+//!
+//! The `merge window` is defined as follows:
+//! 1.  The window's start is the smallest lower bound of all nodes. We
+//!     refer to the node that owns this lower bound as LOW.
+//! 2.  The window’s end is the smallest upper bound of all nodes whose
+//!     lower bounds are less than or equal to LOW's upper bound.
+//! 2a. The window's end could be LOW's upper bound itself, if it is the smallest
+//!     upper bound, but this isn't necessarily the case.
+//! 3.  The merge window's dimensions change as the merge proceeds, though it
+//!     only ever moves "to the right" (i.e. the window start/end only increase).
+//!
+//! We can divide the nodes into two sets, one for whose next rows overlap with the `merge window`,
+//! another for whose next rows do not. The merge steady state resembles that of a traditional
+//! heap-based merge: the top-most node is popped from HOT, the lower bound is copied to the output
+//! and advanced, and the node is pushed back to HOT.
+//!
+//! In the steady state, we need to move nodes from COLD to HOT whenever the end of the merge window
+//! moves; that's a sign that the window may now overlap with a NEXT belonging to a nodes in the
+//! second set (COLD). The end of the merge window moves when a node is fully exhausted (i.e. all rows have
+//! been copied to the output), or when a node finishes its NEXT and needs to peek again.
+//!
+//! At any given time, the NEXT belonging to the top-most node in COLD is nearest the merge window.
+//! When the merge window's end has moved and we need to refill HOT, the top-most node in COLD is
+//! the best candidate. To figure out whether it should be moved, we compare its NEXT's lower bound
+//! against the upper bound in HOT's first node: if the lower bound is less than or equal to the key,
+//! we move the node from COLD to HOT. On the flip side, when a node from HOT finishes its NEXT and peeks
+//! again, we also need to check whether it has exited the merge window. The approach is similar: if
+//! its NEXT's lower bound is greater than the upper bound of HOT'S first node, it's time to move it to COLD.
+//!
+//! A full description of the merge algorithm could be found in [`kudu's comment`](https://github.com/apache/kudu/blob/9021f275824faa2bdfe699786957c40c219697c1/src/kudu/common/generic_iterators.cc#L349).
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -294,7 +330,7 @@ impl Ord for Node {
 ///
 /// `Batch` from each `Source` **must** be sorted.
 pub struct MergeReader {
-    /// Whether is the reader initialized.
+    /// Whether the reader has been initialized.
     initialized: bool,
     /// Schema of data source.
     schema: ProjectedSchemaRef,
