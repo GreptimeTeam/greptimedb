@@ -43,6 +43,7 @@ rustpython-vm = {git = "https://github.com/RustPython/RustPython", optional = tr
 snafu = {version = "0.7", features = ["backtraces"]}
 sql = { path = "../sql" }
 tokio = { version = "1.0", features = ["full"] }
+paste = "1.0"
 
 [dev-dependencies]
 catalog = { path = "../catalog" }

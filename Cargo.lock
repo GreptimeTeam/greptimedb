@@ -4364,6 +4364,7 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "paste",
  "query",
  "ron",
  "rustpython-ast",

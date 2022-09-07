@@ -272,7 +272,9 @@ pub(crate) mod greptime_builtin {
 
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{function::FunctionContext, Function};
+    use datafusion::arrow::array::{BooleanArray, Float64Array};
     use datafusion::arrow::compute::comparison::{gt_eq_scalar, lt_eq_scalar};
+    use datafusion::arrow::datatypes::DataType;
     use datafusion::arrow::error::ArrowError;
     use datafusion::arrow::scalar::{PrimitiveScalar, Scalar};
     use datafusion::physical_plan::expressions;
@@ -285,6 +287,7 @@ pub(crate) mod greptime_builtin {
     use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
     use rustpython_vm::function::{FuncArgs, KwArgs, OptionalArg};
     use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
+    use paste::paste;
 
     use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
@@ -667,20 +670,72 @@ pub(crate) mod greptime_builtin {
         Ok(res.into())
     }
 
-    // TODO: prev, sum, pow, sqrt, datetime, slice, and filter(through boolean array)
+    macro_rules! match_none_array {
+        ($VAR:ident, $LEN: ident, [$($TY:ident),*]) => {
+            paste!{
+                match $VAR{
+                    $(DataType::$TY => Arc::new(arrow::array::[<$TY Array>]::from(vec![None;$LEN])), )*
+                    _ => todo!()
+                }
+            }
+        };
+    }
+
+    fn gen_none_array(data_type: DataType, len: usize) -> ArrayRef {
+        let ret: ArrayRef = match_none_array!(data_type, len, 
+            [Boolean, 
+            Int8, Int16, Int32, Int64,
+            UInt8, UInt16, UInt32, UInt64,
+            Float32, Float64]
+        );
+        ret
+    }
 
     /// TODO: for now prev(arr)[0] == arr[0], need better fill method
     #[pyfunction]
     fn prev(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let cur: ArrayRef = cur.to_arrow_array();
         if cur.len() == 0 {
-            return Err(
-                vm.new_runtime_error("Can't give prev for a zero length array!".to_string())
-            );
+            let ret = cur.slice(0, 0);
+            let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+                vm.new_type_error(format!(
+                    "Can't cast result into vector, result: {:?}, err: {:?}",
+                    ret, e
+                ))
+            })?;
+            return Ok(ret.into());
         }
         let cur = cur.slice(0, cur.len() - 1); // except the last one that is
-        let fill = cur.slice(0, 1);
+        let fill = NullArray::new(cur.data_type().to_owned(), 1);//cur.slice(0, 1);
+        let fill = Box::new(fill);
         let ret = compute::concatenate::concatenate(&[&*fill, &*cur]).map_err(|err| {
+            vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
+        })?;
+        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+            vm.new_type_error(format!(
+                "Can't cast result into vector, result: {:?}, err: {:?}",
+                ret, e
+            ))
+        })?;
+        Ok(ret.into())
+    }
+
+    #[pyfunction]
+    fn next(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let cur: ArrayRef = cur.to_arrow_array();
+        if cur.len() == 0 {
+            let ret = cur.slice(0, 0);
+            let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+                vm.new_type_error(format!(
+                    "Can't cast result into vector, result: {:?}, err: {:?}",
+                    ret, e
+                ))
+            })?;
+            return Ok(ret.into());
+        }
+        let cur = cur.slice(1, cur.len()); // except the last one that is
+        let fill = cur.slice(cur.len()-1, 1);
+        let ret = compute::concatenate::concatenate(&[&*cur, &*fill]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
         let ret = Helper::try_into_vector(&*ret).map_err(|e| {
@@ -711,7 +766,6 @@ pub(crate) mod greptime_builtin {
             }
         }
         let ty_error = |s: String| vm.new_type_error(s);
-        // TODO(discord9): replace the unwrap()
         let oldest = oldest
             .as_any()
             .downcast_ref::<PrimitiveScalar<i64>>()
@@ -776,6 +830,7 @@ pub(crate) mod greptime_builtin {
             let newest = compute::aggregate::max(&*ts).map_err(arrow_error)?;
             gen_inteveral(&*oldest, &*newest, duration, vm)?
         };
+
         let windows = {
             slices
                 .iter()
