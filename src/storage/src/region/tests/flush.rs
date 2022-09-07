@@ -44,11 +44,11 @@ impl FlushTester {
         }
     }
 
-    async fn put(&self, data: &[(Timestamp, Option<i64>)]) -> WriteResponse {
+    async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
         self.base.put(data).await
     }
 
-    async fn full_scan(&self) -> Vec<(Timestamp, Option<i64>)> {
+    async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
         self.base.full_scan().await
     }
 
@@ -92,7 +92,7 @@ async fn test_flush_and_stall() {
     // Always trigger flush before write.
     let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
 
-    let data = [(1000.into(), Some(100))];
+    let data = [(1000, Some(100))];
     // Put one element so we have content to flush.
     tester.put(&data).await;
 
@@ -131,21 +131,17 @@ async fn test_read_after_flush() {
     let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
 
     // Put elements so we have content to flush.
-    tester.put(&[(1000.into(), Some(100))]).await;
-    tester.put(&[(2000.into(), Some(200))]).await;
+    tester.put(&[(1000, Some(100))]).await;
+    tester.put(&[(2000, Some(200))]).await;
 
     // Now set should flush to true to trigger flush.
     flush_switch.set_should_flush(true);
 
     // Put element to trigger flush.
-    tester.put(&[(3000.into(), Some(300))]).await;
+    tester.put(&[(3000, Some(300))]).await;
     tester.wait_flush_done().await;
 
-    let expect = vec![
-        (3000.into(), Some(300)),
-        (1000.into(), Some(100)),
-        (2000.into(), Some(200)),
-    ];
+    let expect = vec![(3000, Some(300)), (1000, Some(100)), (2000, Some(200))];
 
     let output = tester.full_scan().await;
     assert_eq!(expect, output);

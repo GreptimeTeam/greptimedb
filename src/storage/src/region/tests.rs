@@ -52,17 +52,19 @@ impl<S: LogStore> TesterBase<S> {
     /// Put without version specified.
     ///
     /// Format of data: (timestamp, v1), timestamp is key, v1 is value.
-    pub async fn put(&self, data: &[(Timestamp, Option<i64>)]) -> WriteResponse {
+    pub async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+        let data: Vec<(Timestamp, Option<i64>)> =
+            data.iter().map(|(l, r)| ((*l).into(), r.clone())).collect();
         // Build a batch without version.
         let mut batch = new_write_batch_for_test(false);
-        let put_data = new_put_data(data);
+        let put_data = new_put_data(&data);
         batch.put(put_data).unwrap();
 
         self.region.write(&self.write_ctx, batch).await.unwrap()
     }
 
     /// Scan all data.
-    pub async fn full_scan(&self) -> Vec<(Timestamp, Option<i64>)> {
+    pub async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
         logging::info!("Full scan with ctx {:?}", self.read_ctx);
         let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
 
@@ -133,7 +135,7 @@ fn new_put_data(data: &[(Timestamp, Option<i64>)]) -> PutData {
     put_data
 }
 
-fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(Timestamp, Option<i64>)>) {
+fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
     assert_eq!(2, chunk.columns.len());
 
     let timestamps = chunk.columns[0]
@@ -145,7 +147,7 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(Timestamp, Option<i64>)>) {
         .downcast_ref::<Int64Vector>()
         .unwrap();
     for (ts, value) in timestamps.iter_data().zip(values.iter_data()) {
-        dst.push((ts.unwrap(), value));
+        dst.push((ts.unwrap().value(), value));
     }
 }
 

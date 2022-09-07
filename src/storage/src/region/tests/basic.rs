@@ -82,11 +82,11 @@ impl Tester {
         self.base.as_mut().unwrap().read_ctx.batch_size = batch_size;
     }
 
-    async fn put(&self, data: &[(Timestamp, Option<i64>)]) -> WriteResponse {
+    async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
         self.base().put(data).await
     }
 
-    async fn full_scan(&self) -> Vec<(Timestamp, Option<i64>)> {
+    async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
         self.base().full_scan().await
     }
 
@@ -102,11 +102,11 @@ async fn test_simple_put_scan() {
     let tester = Tester::new(REGION_NAME, store_dir).await;
 
     let data = vec![
-        (1000.into(), Some(100)),
-        (1001.into(), Some(101)),
-        (1002.into(), None),
-        (1003.into(), Some(103)),
-        (1004.into(), Some(104)),
+        (1000, Some(100)),
+        (1001, Some(101)),
+        (1002, None),
+        (1003, Some(103)),
+        (1004, Some(104)),
     ];
 
     tester.put(&data).await;
