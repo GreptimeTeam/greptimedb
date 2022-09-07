@@ -80,7 +80,7 @@ impl LocalCatalogManager {
             max_table_id
         );
         self.next_table_id
-            .store(max_table_id + 1, Ordering::Relaxed);
+            .store((max_table_id + 1).max(MIN_USER_TABLE_ID), Ordering::Relaxed);
         Ok(())
     }
 

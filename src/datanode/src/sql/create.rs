@@ -166,11 +166,9 @@ mod tests {
     use sql::statements::statement::Statement;
 
     use super::*;
+    use crate::error::Error;
     use crate::sql::sql_data_type_to_concrete_data_type;
     use crate::tests::test_util::create_mock_sql_handler;
-
-    use crate::error::Error;
-
 
     fn sql_to_statement(sql: &str) -> CreateTable {
         let mut res = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();

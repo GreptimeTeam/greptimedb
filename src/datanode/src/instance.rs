@@ -236,7 +236,9 @@ impl Instance {
 
         let sql_handler = SqlHandler::new(mock_engine.clone(), catalog_manager.clone());
         let physical_planner = PhysicalPlanner::new(query_engine.clone());
-        let script_executor = ScriptExecutor::new(mock_engine, query_engine.clone()).await.unwrap();
+        let script_executor = ScriptExecutor::new(mock_engine, query_engine.clone())
+            .await
+            .unwrap();
         Ok(Self {
             query_engine,
             sql_handler,
