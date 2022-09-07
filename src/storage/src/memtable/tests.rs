@@ -359,12 +359,7 @@ fn test_duplicate_key_across_batch() {
             &*ctx.memtable,
             10, // sequence
             OpType::Put,
-            &[
-                (1000.into(), 1),
-                (1000.into(), 2),
-                (2000.into(), 1),
-                (2001.into(), 2),
-            ], // keys
+            &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
             &[(Some(1), None), (None, None), (None, None), (None, None)], // values
         );
 
@@ -372,7 +367,7 @@ fn test_duplicate_key_across_batch() {
             &*ctx.memtable,
             11, // sequence
             OpType::Put,
-            &[(1000.into(), 1), (2001.into(), 2)],     // keys
+            &[(1000, 1), (2001, 2)],                   // keys
             &[(Some(1231), None), (Some(1232), None)], // values
         );
 
@@ -386,13 +381,8 @@ fn test_duplicate_key_across_batch() {
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
-                &[
-                    (1000.into(), 1),
-                    (1000.into(), 2),
-                    (2000.into(), 1),
-                    (2001.into(), 2),
-                ], // keys
-                &[11, 10, 10, 11],                                     // sequences
+                &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
+                &[11, 10, 10, 11],                             // sequences
                 &[OpType::Put, OpType::Put, OpType::Put, OpType::Put], // op_types
                 &[
                     (Some(1231), None),
@@ -413,12 +403,7 @@ fn test_duplicate_key_in_batch() {
             &*ctx.memtable,
             10, // sequence
             OpType::Put,
-            &[
-                (1000.into(), 1),
-                (1000.into(), 2),
-                (1000.into(), 1),
-                (2001.into(), 2),
-            ], // keys
+            &[(1000, 1), (1000, 2), (1000, 1), (2001, 2)], // keys
             &[(None, None), (None, None), (Some(1234), None), (None, None)], // values
         );
 
@@ -432,9 +417,9 @@ fn test_duplicate_key_in_batch() {
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
-                &[(1000.into(), 1), (1000.into(), 2), (2001.into(), 2)], // keys
-                &[10, 10, 10],                                           // sequences
-                &[OpType::Put, OpType::Put, OpType::Put],                // op_types
+                &[(1000, 1), (1000, 2), (2001, 2)],       // keys
+                &[10, 10, 10],                            // sequences
+                &[OpType::Put, OpType::Put, OpType::Put], // op_types
                 &[(Some(1234), None), (None, None), (None, None), (None, None)], // values
             );
         }

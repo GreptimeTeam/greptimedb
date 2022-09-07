@@ -1,6 +1,4 @@
 //! Storage engine implementation.
-extern crate core;
-
 mod arrow_stream;
 mod background;
 mod chunk;

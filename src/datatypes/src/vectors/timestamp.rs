@@ -15,7 +15,7 @@ use crate::serialize::Serializable;
 use crate::types::TimestampType;
 use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
 
-/// `TimestampVector` stores timestamp in microseconds since UNIX Epoch.
+/// `TimestampVector` stores timestamp in millisecond since UNIX Epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimestampVector {
     array: PrimitiveVector<i64>,

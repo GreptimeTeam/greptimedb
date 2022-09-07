@@ -10,7 +10,6 @@ version="0.10"
 [dependencies]
 common-error = { path = "../error" }
 common-time = { path = "../time" }
-
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }

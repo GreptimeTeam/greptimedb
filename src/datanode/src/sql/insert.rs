@@ -222,6 +222,7 @@ fn sql_number_to_value(data_type: &ConcreteDataType, n: &str) -> Result<Value> {
         (Float32, f32),
         (Timestamp, i64)
     )
+    // TODO(hl): also Date/DateTime
 }
 
 fn parse_sql_number<R: FromStr + std::fmt::Debug>(n: &str) -> Result<R>

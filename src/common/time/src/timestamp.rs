@@ -40,8 +40,8 @@ impl From<i64> for Timestamp {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeUnit {
-    #[default]
     Second,
+    #[default]
     Millisecond,
     Microsecond,
     Nanosecond,
