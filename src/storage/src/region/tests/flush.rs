@@ -3,7 +3,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use common_time::timestamp::Timestamp;
 use log_store::fs::log::LocalFileLogStore;
 use store_api::storage::WriteResponse;
 use tempdir::TempDir;

@@ -1,6 +1,5 @@
 //! Region read/write tests.
 
-use common_time::timestamp::Timestamp;
 use log_store::fs::log::LocalFileLogStore;
 use store_api::storage::{OpenOptions, SequenceNumber, WriteResponse};
 use tempdir::TempDir;
@@ -141,7 +140,7 @@ async fn test_reopen() {
     let mut all_data = Vec::new();
     // Reopen region multiple times.
     for i in 0..5 {
-        let data = (i.into(), Some(i));
+        let data = (i, Some(i));
         tester.put(&[data]).await;
         all_data.push(data);
 
@@ -175,7 +174,7 @@ async fn test_scan_different_batch() {
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = Tester::new(REGION_NAME, store_dir).await;
 
-    let data: Vec<_> = (0..=2000).map(|i| (i.into(), Some(i))).collect();
+    let data: Vec<_> = (0..=2000).map(|i| (i, Some(i))).collect();
 
     for chunk in data.chunks(100) {
         tester.put(chunk).await;

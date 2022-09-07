@@ -313,7 +313,6 @@ impl<'a> ScalarRef<'a> for Timestamp {
 #[cfg(test)]
 mod tests {
     use common_time::date::Date;
-    use Timestamp;
 
     use super::*;
     use crate::vectors::binary::BinaryVector;

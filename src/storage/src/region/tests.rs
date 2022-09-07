@@ -54,7 +54,7 @@ impl<S: LogStore> TesterBase<S> {
     /// Format of data: (timestamp, v1), timestamp is key, v1 is value.
     pub async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
         let data: Vec<(Timestamp, Option<i64>)> =
-            data.iter().map(|(l, r)| ((*l).into(), r.clone())).collect();
+            data.iter().map(|(l, r)| ((*l).into(), *r)).collect();
         // Build a batch without version.
         let mut batch = new_write_batch_for_test(false);
         let put_data = new_put_data(&data);
