@@ -44,7 +44,7 @@ impl Services {
             http_server: HttpServer::new(instance.clone()),
             grpc_server: GrpcServer::new(instance.clone(), instance.clone()),
             mysql_server: MysqlServer::create_server(instance.clone(), mysql_io_runtime),
-            postgres_server: Box::new(PostgresServer::new(instance.clone(), postgres_io_runtime)),
+            postgres_server: Box::new(PostgresServer::new(instance, postgres_io_runtime)),
         })
     }
 
