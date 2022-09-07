@@ -140,7 +140,7 @@ async fn test_read_after_flush() {
     tester.put(&[(3000, Some(300))]).await;
     tester.wait_flush_done().await;
 
-    let expect = vec![(3000, Some(300)), (1000, Some(100)), (2000, Some(200))];
+    let expect = vec![(1000, Some(100)), (2000, Some(200)), (3000, Some(300))];
 
     let output = tester.full_scan().await;
     assert_eq!(expect, output);

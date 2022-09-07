@@ -214,7 +214,11 @@ impl BatchReader for ConcatReader {
 
             let reader = &mut self.readers[self.curr_idx];
             match reader.next_batch().await? {
-                Some(batch) => return Ok(Some(batch)),
+                Some(batch) => {
+                    if !batch.is_empty() {
+                        return Ok(Some(batch));
+                    }
+                }
                 None => self.curr_idx += 1,
             }
         }
