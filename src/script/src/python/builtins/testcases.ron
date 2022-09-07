@@ -909,5 +909,20 @@ next(values)"#,
             ty: Float64,
             value: FloatVecWithNull([Some(2.0), Some(3.0), None])
         ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            )
+        },
+        script: r#"
+from greptime import *
+sum(prev(values))"#,
+        expect: Ok((
+            ty: Float64,
+            value: Float(3.0)
+        ))
     )
 ]
