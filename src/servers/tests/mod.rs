@@ -18,6 +18,7 @@ use script::{
     engine::{CompileContext, EvalContext, Script, ScriptEngine},
     python::{PyEngine, PyScript},
 };
+#[cfg(feature = "postgres")]
 mod postgres;
 
 struct DummyInstance {
