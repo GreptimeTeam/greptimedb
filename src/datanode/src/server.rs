@@ -21,6 +21,7 @@ pub struct Services {
     http_server: HttpServer,
     grpc_server: GrpcServer,
     mysql_server: Box<dyn Server>,
+    #[cfg(feature = "postgres")]
     postgres_server: Box<dyn Server>,
 }
 
@@ -44,36 +45,36 @@ impl Services {
             http_server: HttpServer::new(instance.clone()),
             grpc_server: GrpcServer::new(instance.clone(), instance.clone()),
             mysql_server: MysqlServer::create_server(instance.clone(), mysql_io_runtime),
+            #[cfg(feature = "postgres")]
             postgres_server: Box::new(PostgresServer::new(instance, postgres_io_runtime)),
         })
     }
 
     // TODO(LFC): make servers started on demand (not starting mysql if no needed, for example)
     pub async fn start(&mut self, opts: &DatanodeOptions) -> Result<()> {
-        let http_addr = &opts.http_addr;
-        let http_addr: SocketAddr = http_addr
-            .parse()
-            .context(error::ParseAddrSnafu { addr: http_addr })?;
-
-        let grpc_addr = &opts.rpc_addr;
-        let grpc_addr: SocketAddr = grpc_addr
-            .parse()
-            .context(error::ParseAddrSnafu { addr: grpc_addr })?;
-
-        let mysql_addr = &opts.mysql_addr;
-        let mysql_addr: SocketAddr = mysql_addr
-            .parse()
-            .context(error::ParseAddrSnafu { addr: mysql_addr })?;
-
-        let postgres_addr = &opts.postgres_addr;
-        let postgres_addr: SocketAddr = postgres_addr.parse().context(error::ParseAddrSnafu {
-            addr: postgres_addr,
+        let http_addr: SocketAddr = opts.http_addr.parse().context(error::ParseAddrSnafu {
+            addr: &opts.http_addr,
         })?;
+
+        let grpc_addr: SocketAddr = opts.rpc_addr.parse().context(error::ParseAddrSnafu {
+            addr: &opts.rpc_addr,
+        })?;
+
+        let mysql_addr: SocketAddr = opts.mysql_addr.parse().context(error::ParseAddrSnafu {
+            addr: &opts.mysql_addr,
+        })?;
+
+        #[cfg(feature = "postgres")]
+        let postgres_addr: SocketAddr =
+            opts.postgres_addr.parse().context(error::ParseAddrSnafu {
+                addr: &opts.postgres_addr,
+            })?;
 
         try_join!(
             self.http_server.start(http_addr),
             self.grpc_server.start(grpc_addr),
             self.mysql_server.start(mysql_addr),
+            #[cfg(feature = "postgres")]
             self.postgres_server.start(postgres_addr),
         )
         .context(error::StartServerSnafu)?;
