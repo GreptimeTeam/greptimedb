@@ -11,7 +11,7 @@ pub mod manifest;
 pub mod memtable;
 pub mod metadata;
 pub mod proto;
-mod read;
+pub mod read;
 pub mod region;
 pub mod schema;
 mod snapshot;

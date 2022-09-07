@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{MutableVector, VectorRef};
+pub use merge::{MergeReader, MergeReaderBuilder};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, Result};
@@ -82,6 +83,7 @@ impl Batch {
     }
 }
 
+/// Reusable [Batch] builder.
 pub struct BatchBuilder {
     builders: Vec<Box<dyn MutableVector>>,
 }

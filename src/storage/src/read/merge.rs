@@ -293,7 +293,7 @@ impl Ord for Node {
 /// A reader that would sort and merge `Batch` from multiple sources by key.
 ///
 /// `Batch` from each `Source` **must** be sorted.
-struct MergeReader {
+pub struct MergeReader {
     /// Whether is the reader initialized.
     initialized: bool,
     /// Schema of data source.
@@ -327,37 +327,41 @@ impl BatchReader for MergeReader {
     }
 }
 
-struct MergeReaderBuilder {
+pub struct MergeReaderBuilder {
     schema: ProjectedSchemaRef,
     sources: Vec<Source>,
     batch_size: usize,
 }
 
 impl MergeReaderBuilder {
-    fn new(schema: ProjectedSchemaRef) -> Self {
+    pub fn new(schema: ProjectedSchemaRef) -> Self {
+        MergeReaderBuilder::with_capacity(schema, 0)
+    }
+
+    pub fn with_capacity(schema: ProjectedSchemaRef, capacity: usize) -> Self {
         MergeReaderBuilder {
             schema,
-            sources: Vec::new(),
+            sources: Vec::with_capacity(capacity),
             batch_size: consts::READ_BATCH_SIZE,
         }
     }
 
-    fn push_batch_iter(mut self, iter: BoxedBatchIterator) -> Self {
+    pub fn push_batch_iter(mut self, iter: BoxedBatchIterator) -> Self {
         self.sources.push(Source::Iter(iter));
         self
     }
 
-    fn push_batch_reader(mut self, reader: BoxedBatchReader) -> Self {
+    pub fn push_batch_reader(mut self, reader: BoxedBatchReader) -> Self {
         self.sources.push(Source::Reader(reader));
         self
     }
 
-    fn batch_size(mut self, size: usize) -> Self {
+    pub fn batch_size(mut self, size: usize) -> Self {
         self.batch_size = size;
         self
     }
 
-    fn build(self) -> MergeReader {
+    pub fn build(self) -> MergeReader {
         let num_sources = self.sources.len();
         let column_schemas = self.schema.schema_to_read().schema().column_schemas();
         let batch_builder = BatchBuilder::with_capacity(
@@ -512,10 +516,11 @@ impl MergeReader {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::prelude::ScalarVector;
+    use datatypes::vectors::Int64Vector;
+
     use super::*;
     use crate::test_util::read_util;
-    use datatypes::vectors::Int64Vector;
-    use datatypes::prelude::ScalarVector;
 
     #[tokio::test]
     async fn test_merge_reader_empty() {
@@ -532,7 +537,8 @@ mod tests {
 
     fn build_merge_reader(sources: &[Batches], num_iter: usize, batch_size: usize) -> MergeReader {
         let schema = read_util::new_projected_schema();
-        let mut builder = MergeReaderBuilder::new(schema).batch_size(batch_size);
+        let mut builder =
+            MergeReaderBuilder::with_capacity(schema, sources.len()).batch_size(batch_size);
 
         for (i, source) in sources.iter().enumerate() {
             if i < num_iter {
@@ -555,6 +561,9 @@ mod tests {
 
         let result = read_util::collect_kv_batch(&mut reader).await;
         assert_eq!(expect, result);
+
+        // Call next_batch() again is allowed.
+        assert!(reader.next_batch().await.unwrap().is_none());
     }
 
     async fn check_merge_reader_by_batch(mut reader: MergeReader, expect_batches: Batches<'_>) {
@@ -571,7 +580,11 @@ mod tests {
                 .downcast_ref::<Int64Vector>()
                 .unwrap();
 
-            let batch: Vec<_> = key.iter_data().zip(value.iter_data()).map(|(k, v)| (k.unwrap(), v)).collect();
+            let batch: Vec<_> = key
+                .iter_data()
+                .zip(value.iter_data())
+                .map(|(k, v)| (k.unwrap(), v))
+                .collect();
             result.push(batch);
         }
 
@@ -590,23 +603,84 @@ mod tests {
             &[&[(7, Some(7)), (12, Some(12))]],
         ];
         let reader = build_merge_reader(input, 1, 3);
-
         check_merge_reader_result(reader, input).await;
 
         let input: &[Batches] = &[
-            // The former two batches could be returned directly.
-            &[&[(1, Some(1)), (2, Some(2))], &[(3, Some(3)), (4, Some(4))], &[(5, Some(5)), (12, Some(12))]],
+            &[
+                &[(1, Some(1)), (2, Some(2))],
+                &[(3, Some(3)), (4, Some(4))],
+                &[(5, Some(5)), (12, Some(12))],
+            ],
             &[&[(6, Some(6)), (7, Some(7)), (18, Some(18))]],
             &[&[(13, Some(13)), (15, Some(15))]],
         ];
         let reader = build_merge_reader(input, 1, 3);
-
-        check_merge_reader_result(reader, input).await;
+        check_merge_reader_by_batch(
+            reader,
+            &[
+                // The former two batches could be returned directly.
+                &[(1, Some(1)), (2, Some(2))],
+                &[(3, Some(3)), (4, Some(4))],
+                &[(5, Some(5)), (6, Some(6)), (7, Some(7))],
+                &[(12, Some(12)), (13, Some(13)), (15, Some(15))],
+                &[(18, Some(18))],
+            ],
+        )
+        .await;
 
         let input: &[Batches] = &[
-            &[&[(1, Some(1)), (2, Some(2))], &[(5, Some(5)), (9, Some(9))], &[(14, Some(14)), (17, Some(17))]],
-            // Could not return the first batch (6, 7) directly.
+            &[
+                &[(1, Some(1)), (2, Some(2))],
+                &[(5, Some(5)), (9, Some(9))],
+                &[(14, Some(14)), (17, Some(17))],
+            ],
             &[&[(6, Some(6)), (7, Some(7))], &[(15, Some(15))]],
+        ];
+        let reader = build_merge_reader(input, 1, 2);
+        check_merge_reader_by_batch(
+            reader,
+            &[
+                &[(1, Some(1)), (2, Some(2))],
+                // Could not return batch (6, 7) directly.
+                &[(5, Some(5)), (6, Some(6))],
+                &[(7, Some(7)), (9, Some(9))],
+                &[(14, Some(14)), (15, Some(15))],
+                &[(17, Some(17))],
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_merge_one_source() {
+        common_telemetry::init_default_ut_logging();
+
+        let input: &[Batches] = &[&[
+            &[(1, Some(1)), (2, Some(2)), (3, Some(3))],
+            &[(4, Some(4)), (5, Some(5)), (6, Some(6))],
+        ]];
+        let reader = build_merge_reader(input, 1, 2);
+
+        check_merge_reader_result(reader, input).await;
+    }
+
+    #[tokio::test]
+    async fn test_merge_with_empty_batch() {
+        let input: &[Batches] = &[
+            &[
+                &[(1, Some(1)), (2, Some(2))],
+                &[(3, Some(3)), (6, Some(6))],
+                &[],
+                &[],
+                &[(8, Some(8)), (12, Some(12))],
+                &[],
+            ],
+            &[
+                &[(4, Some(4)), (5, Some(5))],
+                &[],
+                &[(15, None), (18, None), (20, None)],
+            ],
+            &[&[(13, Some(13)), (19, None)], &[], &[]],
         ];
         let reader = build_merge_reader(input, 1, 2);
 
@@ -614,16 +688,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_merge_one_source() {
-        common_telemetry::init_default_ut_logging();
-
+    async fn test_merge_duplicate_key() {
         let input: &[Batches] = &[
-            &[&[(1, Some(1)), (2, Some(2)), (3, Some(3))], &[(4, Some(4)), (5, Some(5)), (6, Some(6))]],
+            &[
+                &[(1, Some(1)), (5, Some(5)), (8, Some(8))],
+                &[(9, None), (11, None)],
+                &[(12, Some(12)), (15, None)],
+            ],
+            &[&[(1, Some(1)), (3, Some(3)), (8, Some(8))], &[(16, None)]],
+            &[
+                &[(7, Some(7)), (12, Some(12))],
+                &[(15, None), (16, None), (17, None)],
+            ],
+            &[&[(15, None)]],
         ];
-        let reader = build_merge_reader(input, 1, 2);
-
+        let reader = build_merge_reader(input, 2, 2);
         check_merge_reader_result(reader, input).await;
     }
-
-    // TODO(yingwen): Test contains empty batch.
 }
