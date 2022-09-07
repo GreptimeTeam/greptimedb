@@ -71,4 +71,10 @@ mod tests {
         let dt = DateTime::from_str(time).unwrap();
         assert_eq!(time, &dt.to_string());
     }
+
+    #[test]
+    pub fn test_from() {
+        let d: DateTime = 42.into();
+        assert_eq!(42, d.val());
+    }
 }

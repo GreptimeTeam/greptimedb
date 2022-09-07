@@ -92,4 +92,10 @@ mod tests {
         date.0 += 1000;
         assert_eq!(date, Date::from_str(&date.to_string()).unwrap());
     }
+
+    #[test]
+    pub fn test_from() {
+        let d: Date = 42.into();
+        assert_eq!(42, d.val());
+    }
 }

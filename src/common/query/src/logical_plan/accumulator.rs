@@ -439,4 +439,24 @@ mod tests {
             _ => unreachable!(),
         }
     }
+
+    #[test]
+    pub fn test_timestamp_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::TimestampSecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Second, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampMillisecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Millisecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampMicrosecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Microsecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampNanosecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Nanosecond, Some(1))
+        );
+    }
 }

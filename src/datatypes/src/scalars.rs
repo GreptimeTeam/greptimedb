@@ -311,6 +311,7 @@ impl<'a> ScalarRef<'a> for common_time::timestamp::Timestamp {
 #[cfg(test)]
 mod tests {
     use common_time::date::Date;
+    use common_time::timestamp::Timestamp;
 
     use super::*;
     use crate::vectors::binary::BinaryVector;
@@ -371,5 +372,15 @@ mod tests {
         let date = Date::new(1);
         assert_eq!(date, date.as_scalar_ref());
         assert_eq!(date, date.to_owned_scalar());
+    }
+
+    #[test]
+    pub fn test_build_timestamp_vector() {
+        let expect: Vec<Option<Timestamp>> = vec![Some(10.into()), None, Some(42.into())];
+        let vector: TimestampVector = build_vector_from_slice(&expect);
+        assert_vector_eq(&expect, &vector);
+        let val = vector.get_data(0).unwrap();
+        assert_eq!(val, val.as_scalar_ref());
+        assert_eq!(10, val.to_owned_scalar().value());
     }
 }

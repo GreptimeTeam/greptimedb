@@ -136,7 +136,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Float64 => Self::float64_datatype(),
             ArrowDataType::Date32 => Self::date_datatype(),
             ArrowDataType::Date64 => Self::datetime_datatype(),
-            ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_timestamp(u),
+            ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             ArrowDataType::List(field) => Self::List(ListType::new(
@@ -184,7 +184,7 @@ impl ConcreteDataType {
 
     /// Converts from arrow timestamp unit to
     // TODO(hl): maybe impl From<ArrowTimestamp> for our timestamp ?
-    pub fn from_arrow_timestamp(t: &arrow::datatypes::TimeUnit) -> Self {
+    pub fn from_arrow_time_unit(t: &arrow::datatypes::TimeUnit) -> Self {
         match t {
             arrow::datatypes::TimeUnit::Second => Self::timestamp_datatype(TimeUnit::Second),
             arrow::datatypes::TimeUnit::Millisecond => {
@@ -315,5 +315,25 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Date32),
             ConcreteDataType::Date(_)
         ));
+    }
+
+    #[test]
+    pub fn test_from_arrow_timestamp() {
+        assert_eq!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Millisecond)
+        );
+        assert_eq!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
+            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Microsecond)
+        );
+        assert_eq!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Nanosecond)
+        );
+        assert_eq!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Second),
+            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Second)
+        );
     }
 }

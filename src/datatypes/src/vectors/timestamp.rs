@@ -202,7 +202,12 @@ impl MutableVector for TimestampVectorBuilder {
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        self.buffer.push(value.as_timestamp()?.map(|t| t.value()));
+        // TODO(hl): vector and vector builder should also support customized time unit.
+        self.buffer.push(
+            value
+                .as_timestamp()?
+                .map(|t| t.convert_to(TimeUnit::Millisecond)),
+        );
         Ok(())
     }
 

@@ -84,3 +84,40 @@ impl Hash for Timestamp {
         state.finish();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    pub fn test_time_unit() {
+        assert_eq!(
+            TimeUnit::Millisecond.factor() * 1000,
+            TimeUnit::Second.factor()
+        );
+        assert_eq!(
+            TimeUnit::Microsecond.factor() * 1000000,
+            TimeUnit::Second.factor()
+        );
+        assert_eq!(
+            TimeUnit::Nanosecond.factor() * 1000000000,
+            TimeUnit::Second.factor()
+        );
+    }
+
+    #[test]
+    pub fn test_timestamp() {
+        let t = Timestamp::new(1, TimeUnit::Millisecond);
+        assert_eq!(TimeUnit::Millisecond, t.unit());
+        assert_eq!(1, t.value());
+        assert_eq!(Timestamp::new(1000, TimeUnit::Microsecond), t);
+        assert!(t > Timestamp::new(999, TimeUnit::Microsecond));
+    }
+
+    #[test]
+    pub fn test_from_i64() {
+        let t: Timestamp = 42.into();
+        assert_eq!(42, t.value());
+        assert_eq!(TimeUnit::Millisecond, t.unit());
+    }
+}

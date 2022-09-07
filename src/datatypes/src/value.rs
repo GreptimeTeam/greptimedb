@@ -248,7 +248,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Date(v) => serde_json::Value::Number(v.val().into()),
             Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
-            Value::Timestamp(v) => serde_json::to_value(v)?,
+            Value::Timestamp(v) => serde_json::to_value(v.value())?,
         };
 
         Ok(json_value)
@@ -504,6 +504,8 @@ impl<'a> PartialOrd for ListValueRef<'a> {
 
 #[cfg(test)]
 mod tests {
+    use common_time::timestamp::TimeUnit;
+
     use super::*;
 
     #[test]
@@ -621,6 +623,11 @@ mod tests {
             ConcreteDataType::binary_datatype(),
             Value::Binary(Bytes::from(b"world".as_slice())).data_type()
         );
+
+        assert_eq!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)).data_type()
+        );
     }
 
     #[test]
@@ -712,6 +719,11 @@ mod tests {
             to_json(Value::DateTime(DateTime::new(5000)))
         );
 
+        assert_eq!(
+            serde_json::Value::Number(1.into()),
+            to_json(Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)))
+        );
+
         let json_value: serde_json::Value =
             serde_json::from_str(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#).unwrap();
         assert_eq!(
@@ -767,6 +779,7 @@ mod tests {
         check_as_value_ref!(Int64, -12);
         check_as_value_ref!(Float32, OrderedF32::from(16.0));
         check_as_value_ref!(Float64, OrderedF64::from(16.0));
+        check_as_value_ref!(Timestamp, Timestamp::new(1, TimeUnit::Millisecond));
 
         assert_eq!(
             ValueRef::String("hello"),
