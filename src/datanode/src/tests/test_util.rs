@@ -51,7 +51,7 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new(
             "ts",
-            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
+            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
             true,
         ),
     ];

@@ -33,7 +33,7 @@ impl From<i64> for Timestamp {
     fn from(v: i64) -> Self {
         Self {
             value: v,
-            unit: TimeUnit::Microsecond,
+            unit: TimeUnit::Millisecond,
         }
     }
 }

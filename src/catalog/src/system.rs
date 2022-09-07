@@ -130,7 +130,7 @@ fn build_system_catalog_schema() -> Schema {
         ),
         ColumnSchema::new(
             "timestamp".to_string(),
-            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
+            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
             false,
         ),
         ColumnSchema::new(
@@ -174,7 +174,7 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
         "timestamp".to_string(),
         Arc::new(TimestampVector::from_slice(&[Timestamp::new(
             0,
-            TimeUnit::Microsecond,
+            TimeUnit::Millisecond,
         )])) as _,
     );
 

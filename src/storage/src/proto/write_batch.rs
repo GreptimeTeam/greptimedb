@@ -162,7 +162,7 @@ impl From<DataType> for ConcreteDataType {
             DataType::String => ConcreteDataType::string_datatype(),
             DataType::Binary => ConcreteDataType::binary_datatype(),
             DataType::Null => ConcreteDataType::null_datatype(),
-            DataType::Timestamp => ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
+            DataType::Timestamp => ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
         }
     }
 }

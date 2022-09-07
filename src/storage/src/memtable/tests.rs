@@ -582,7 +582,7 @@ fn test_memtable_projection() {
         assert_eq!(5, batch.num_columns());
         let k0 = Int64Array::from_slice(&[1000, 1001, 1002]);
         let k0 = PrimitiveArray::new(
-            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
             k0.values().clone(),
             k0.validity().cloned(),
         );

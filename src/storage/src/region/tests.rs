@@ -96,7 +96,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
             &[
                 (
                     test_util::TIMESTAMP_NAME,
-                    LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                    LogicalTypeId::Timestamp(TimeUnit::Millisecond),
                     false,
                 ),
                 (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
@@ -109,7 +109,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
             &[
                 (
                     test_util::TIMESTAMP_NAME,
-                    LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                    LogicalTypeId::Timestamp(TimeUnit::Millisecond),
                     false,
                 ),
                 ("v1", LogicalTypeId::Int64, true),
@@ -174,7 +174,7 @@ async fn test_new_region() {
             ("k1", LogicalTypeId::Int32, false),
             (
                 test_util::TIMESTAMP_NAME,
-                LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                LogicalTypeId::Timestamp(TimeUnit::Millisecond),
                 false,
             ),
             (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),

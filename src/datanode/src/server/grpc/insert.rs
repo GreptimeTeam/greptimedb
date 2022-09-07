@@ -184,7 +184,7 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
         ConcreteDataType::Timestamp(_) => values
             .i64_values
             .into_iter()
-            .map(|v| Value::Timestamp(Timestamp::new(v, TimeUnit::Microsecond)))
+            .map(|v| Value::Timestamp(Timestamp::new(v, TimeUnit::Millisecond)))
             .collect(),
         _ => unimplemented!(),
     }

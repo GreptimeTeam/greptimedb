@@ -30,7 +30,7 @@ fn new_write_batch_for_test() -> WriteBatch {
             ("k0", LogicalTypeId::Int64, false),
             (
                 test_util::TIMESTAMP_NAME,
-                LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                LogicalTypeId::Timestamp(TimeUnit::Millisecond),
                 false,
             ),
             ("v0", LogicalTypeId::Int64, true),

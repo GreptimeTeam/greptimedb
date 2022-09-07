@@ -149,7 +149,7 @@ impl VectorBuilder {
             (VectorBuilder::DateTime(b), Value::Int64(v)) => b.push(Some(DateTime::new(*v))),
             (VectorBuilder::Timestamp(b), Value::Timestamp(t)) => b.push(Some(*t)),
             (VectorBuilder::Timestamp(b), Value::Int64(v)) => {
-                b.push(Some(Timestamp::new(*v, TimeUnit::Microsecond)))
+                b.push(Some(Timestamp::new(*v, TimeUnit::Millisecond)))
             }
             _ => panic!(
                 "Value {:?} does not match builder type {:?}",

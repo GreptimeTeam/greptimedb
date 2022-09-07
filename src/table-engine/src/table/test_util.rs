@@ -31,7 +31,7 @@ pub fn schema_for_test() -> Schema {
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new(
             "ts",
-            ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Microsecond),
+            ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
             true,
         ),
     ];

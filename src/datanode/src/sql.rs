@@ -122,7 +122,7 @@ fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Concre
             }
             .fail(),
         },
-        SqlDataType::Timestamp => Ok(ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond)),
+        SqlDataType::Timestamp => Ok(ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond)),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }

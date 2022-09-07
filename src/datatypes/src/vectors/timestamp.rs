@@ -52,7 +52,7 @@ impl TimestampVector {
 
 impl Vector for TimestampVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond)
+        ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond)
     }
 
     fn vector_type_name(&self) -> String {
@@ -71,7 +71,7 @@ impl Vector for TimestampVector {
         let validity = self.array.array.validity().cloned();
         let buffer = self.array.array.values().clone();
         Arc::new(PrimitiveArray::new(
-            TimestampType::new(TimeUnit::Microsecond).as_arrow_type(),
+            TimestampType::new(TimeUnit::Millisecond).as_arrow_type(),
             buffer,
             validity,
         ))
@@ -81,7 +81,7 @@ impl Vector for TimestampVector {
         let validity = self.array.array.validity().cloned();
         let values = self.array.array.values().clone();
         Box::new(PrimitiveArray::new(
-            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
             values,
             validity,
         ))
@@ -110,7 +110,7 @@ impl Vector for TimestampVector {
     fn get(&self, index: usize) -> Value {
         match self.array.get(index) {
             Value::Null => Value::Null,
-            Value::Int64(v) => Value::Timestamp(Timestamp::new(v, TimeUnit::Microsecond)),
+            Value::Int64(v) => Value::Timestamp(Timestamp::new(v, TimeUnit::Millisecond)),
             _ => {
                 unreachable!()
             }
@@ -123,7 +123,7 @@ impl Vector for TimestampVector {
 
     fn get_ref(&self, index: usize) -> ValueRef {
         match self.array.get(index) {
-            Value::Int64(v) => ValueRef::Timestamp(Timestamp::new(v, TimeUnit::Microsecond)),
+            Value::Int64(v) => ValueRef::Timestamp(Timestamp::new(v, TimeUnit::Millisecond)),
             Value::Null => ValueRef::Null,
             _ => unreachable!(),
         }
@@ -152,7 +152,7 @@ impl ScalarVector for TimestampVector {
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
         self.array
             .get_data(idx)
-            .map(|v| Timestamp::new(v, TimeUnit::Microsecond))
+            .map(|v| Timestamp::new(v, TimeUnit::Millisecond))
     }
 
     fn iter_data(&self) -> Self::Iter<'_> {
@@ -172,7 +172,7 @@ impl<'a> Iterator for TimestampDataIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         self.iter
             .next()
-            .map(|v| v.map(|v| Timestamp::new(v, TimeUnit::Microsecond)))
+            .map(|v| v.map(|v| Timestamp::new(v, TimeUnit::Millisecond)))
     }
 }
 
@@ -182,7 +182,7 @@ pub struct TimestampVectorBuilder {
 
 impl MutableVector for TimestampVectorBuilder {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond)
+        ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond)
     }
 
     fn len(&self) -> usize {
@@ -236,7 +236,7 @@ impl ScalarVectorBuilder for TimestampVectorBuilder {
     /// `Second`/`MilliSecond`/`Microsecond`.
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
         self.buffer
-            .push(value.map(|v| v.convert_to(TimeUnit::Microsecond)));
+            .push(value.map(|v| v.convert_to(TimeUnit::Millisecond)));
     }
 
     fn finish(&mut self) -> Self::VectorType {
@@ -255,30 +255,30 @@ mod tests {
         let mut builder = TimestampVectorBuilder::with_capacity(3);
         builder.push(Some(Timestamp::new(1, TimeUnit::Second)));
         builder.push(None);
-        builder.push(Some(Timestamp::new(2, TimeUnit::Microsecond)));
+        builder.push(Some(Timestamp::new(2, TimeUnit::Millisecond)));
 
         let vector = builder.finish();
         assert_eq!(
-            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
+            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
             vector.data_type()
         );
         assert_eq!(3, vector.len());
         assert_eq!(
-            Value::Timestamp(Timestamp::new(1000000, TimeUnit::Microsecond)),
+            Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)),
             vector.get(0)
         );
 
         assert_eq!(Value::Null, vector.get(1));
         assert_eq!(
-            Value::Timestamp(Timestamp::new(2, TimeUnit::Microsecond)),
+            Value::Timestamp(Timestamp::new(2, TimeUnit::Millisecond)),
             vector.get(2)
         );
 
         assert_eq!(
             vec![
-                Some(Timestamp::new(1000000, TimeUnit::Microsecond)),
+                Some(Timestamp::new(1000, TimeUnit::Millisecond)),
                 None,
-                Some(Timestamp::new(2, TimeUnit::Microsecond)),
+                Some(Timestamp::new(2, TimeUnit::Millisecond)),
             ],
             vector.iter_data().collect::<Vec<_>>()
         );

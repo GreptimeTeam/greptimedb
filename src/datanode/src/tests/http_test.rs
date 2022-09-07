@@ -64,7 +64,7 @@ async fn test_sql_api() {
     let body = res.text().await;
     assert_eq!(
         body,
-        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"host","data_type":"Utf8","is_nullable":false,"metadata":{}},{"name":"cpu","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"memory","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"ts","data_type":{"Timestamp":["Microsecond",null]},"is_nullable":true,"metadata":{}}],"metadata":{"greptime:timestamp_column":"ts","greptime:version":"0"}},"columns":[["host"],[66.6],[1024.0],[0]]}]}}"#
+        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"host","data_type":"Utf8","is_nullable":false,"metadata":{}},{"name":"cpu","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"memory","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"ts","data_type":{"Timestamp":["Millisecond",null]},"is_nullable":true,"metadata":{}}],"metadata":{"greptime:timestamp_column":"ts","greptime:version":"0"}},"columns":[["host"],[66.6],[1024.0],[0]]}]}}"#
     );
 
     // select with projections
@@ -77,7 +77,7 @@ async fn test_sql_api() {
     let body = res.text().await;
     assert_eq!(
         body,
-        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"cpu","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"ts","data_type":{"Timestamp":["Microsecond",null]},"is_nullable":true,"metadata":{}}],"metadata":{"greptime:timestamp_column":"ts","greptime:version":"0"}},"columns":[[66.6],[0]]}]}}"#
+        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"cpu","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"ts","data_type":{"Timestamp":["Millisecond",null]},"is_nullable":true,"metadata":{}}],"metadata":{"greptime:timestamp_column":"ts","greptime:version":"0"}},"columns":[[66.6],[0]]}]}}"#
     );
 }
 

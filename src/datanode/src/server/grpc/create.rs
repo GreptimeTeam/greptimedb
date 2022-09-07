@@ -112,7 +112,7 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         ColumnDataType::String => ConcreteDataType::string_datatype(),
         ColumnDataType::Date => ConcreteDataType::date_datatype(),
         ColumnDataType::Datetime => ConcreteDataType::datetime_datatype(),
-        ColumnDataType::Timestamp => ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
+        ColumnDataType::Timestamp => ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
     };
     Ok(ColumnSchema {
         name: column_def.name.clone(),

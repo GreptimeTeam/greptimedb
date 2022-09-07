@@ -855,7 +855,7 @@ mod tests {
             &[
                 ("k1", LogicalTypeId::UInt64, false),
                 (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                ("ts", LogicalTypeId::Timestamp(TimeUnit::Microsecond), false),
+                ("ts", LogicalTypeId::Timestamp(TimeUnit::Millisecond), false),
                 ("v1", LogicalTypeId::Boolean, true),
             ],
             Some(2),

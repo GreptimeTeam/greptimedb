@@ -684,7 +684,7 @@ mod tests {
                 ("k0", LogicalTypeId::Int64, false),
                 (
                     "timestamp",
-                    LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                    LogicalTypeId::Timestamp(TimeUnit::Millisecond),
                     false,
                 ),
                 ("v0", LogicalTypeId::Int64, true),
@@ -724,7 +724,7 @@ mod tests {
                 ("k0", LogicalTypeId::Int64, false),
                 (
                     "timestamp",
-                    LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                    LogicalTypeId::Timestamp(TimeUnit::Millisecond),
                     false,
                 ),
                 ("v0", LogicalTypeId::Int64, true),
@@ -809,7 +809,7 @@ mod tests {
                 ("v1", LogicalTypeId::Int64, true),
                 (
                     "timestamp",
-                    LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+                    LogicalTypeId::Timestamp(TimeUnit::Millisecond),
                     false,
                 ),
             ],

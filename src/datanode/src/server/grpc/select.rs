@@ -155,7 +155,7 @@ fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
         (arrow::datatypes::DataType::Date32,        PrimitiveArray<i32>,    i32_values,     |x| {*x as i32}),
         (arrow::datatypes::DataType::Date64,        PrimitiveArray<i64>,    i64_values,     |x| {*x as i64}),
 
-        (arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, _),  PrimitiveArray<i64>,   i64_values, |x| {*x}  )
+        (arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _),  PrimitiveArray<i64>,   i64_values, |x| {*x}  )
     )
 }
 
