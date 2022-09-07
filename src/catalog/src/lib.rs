@@ -10,7 +10,7 @@ pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 pub use crate::manager::LocalCatalogManager;
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
-mod consts;
+pub mod consts;
 pub mod error;
 mod manager;
 pub mod memory;

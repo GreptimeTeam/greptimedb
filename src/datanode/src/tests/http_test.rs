@@ -110,6 +110,7 @@ async fn test_scripts_api() {
     let res = client
         .post("/v1/scripts")
         .json(&ScriptExecution {
+            name: "test".to_string(),
             script: r#"
 @copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
 def test(n):

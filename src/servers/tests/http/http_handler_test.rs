@@ -97,6 +97,7 @@ async fn test_scripts() {
 
 fn create_script_payload() -> Json<ScriptExecution> {
     Json(ScriptExecution {
+        name: "test".to_string(),
         script: r#"
 @copr(sql='select uint32s as number from numbers', args=['number'], returns=['n'])
 def test(n):

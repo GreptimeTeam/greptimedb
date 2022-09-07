@@ -4379,6 +4379,8 @@ dependencies = [
  "common-function",
  "common-query",
  "common-recordbatch",
+ "common-telemetry",
+ "common-time",
  "console",
  "datafusion",
  "datafusion-common",

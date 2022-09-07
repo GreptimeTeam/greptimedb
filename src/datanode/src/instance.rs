@@ -53,7 +53,7 @@ impl Instance {
         let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
 
-        let table_engine = DefaultEngine::new(
+        let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
@@ -61,9 +61,7 @@ impl Instance {
                 object_store.clone(),
             ),
             object_store,
-        );
-        let table_engine = Arc::new(table_engine);
-
+        ));
         let catalog_manager = Arc::new(
             catalog::LocalCatalogManager::try_new(table_engine.clone())
                 .await
@@ -71,7 +69,8 @@ impl Instance {
         );
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine().clone();
-        let script_executor = ScriptExecutor::new(query_engine.clone());
+        let script_executor =
+            ScriptExecutor::new(table_engine.clone(), query_engine.clone()).await?;
 
         Ok(Self {
             query_engine: query_engine.clone(),
@@ -220,12 +219,11 @@ impl Instance {
         use table_engine::table::test_util::MockMitoEngine;
 
         let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
-        let mock_engine = MockMitoEngine::new(
+        let mock_engine = Arc::new(MockMitoEngine::new(
             TableEngineConfig::default(),
             MockEngine::default(),
             object_store,
-        );
-        let mock_engine = Arc::new(mock_engine);
+        ));
 
         let catalog_manager = Arc::new(
             catalog::LocalCatalogManager::try_new(mock_engine.clone())
@@ -236,9 +234,9 @@ impl Instance {
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine().clone();
 
-        let sql_handler = SqlHandler::new(mock_engine, catalog_manager.clone());
+        let sql_handler = SqlHandler::new(mock_engine.clone(), catalog_manager.clone());
         let physical_planner = PhysicalPlanner::new(query_engine.clone());
-        let script_executor = ScriptExecutor::new(query_engine.clone());
+        let script_executor = ScriptExecutor::new(mock_engine, query_engine.clone()).await.unwrap();
         Ok(Self {
             query_engine,
             sql_handler,
@@ -301,8 +299,12 @@ impl SqlQueryHandler for Instance {
             .context(servers::error::ExecuteQuerySnafu { query })
     }
 
-    async fn execute_script(&self, script: &str) -> servers::error::Result<Output> {
-        self.script_executor.execute_script(script).await
+    async fn insert_script(&self, name: &str, script: &str) -> servers::error::Result<()> {
+        self.script_executor.insert_script(name, script).await
+    }
+
+    async fn execute_script(&self, name: &str) -> servers::error::Result<Output> {
+        self.script_executor.execute_script(name).await
     }
 }
 

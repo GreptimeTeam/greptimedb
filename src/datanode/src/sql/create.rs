@@ -166,9 +166,11 @@ mod tests {
     use sql::statements::statement::Statement;
 
     use super::*;
-    use crate::error::Error;
     use crate::sql::sql_data_type_to_concrete_data_type;
     use crate::tests::test_util::create_mock_sql_handler;
+
+    use crate::error::Error;
+
 
     fn sql_to_statement(sql: &str) -> CreateTable {
         let mut res = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
@@ -205,7 +207,7 @@ mod tests {
         assert_matches!(error, Error::CreateSchema { .. });
     }
 
-    /// If primary key is not specified, time index should be used as primary key.  
+    /// If primary key is not specified, time index should be used as primary key.
     #[tokio::test]
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;

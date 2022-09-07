@@ -37,6 +37,7 @@ pub async fn metrics(
 
 #[derive(Deserialize, Serialize)]
 pub struct ScriptExecution {
+    pub name: String,
     pub script: String,
 }
 
@@ -46,11 +47,19 @@ pub async fn scripts(
     Extension(query_handler): Extension<SqlQueryHandlerRef>,
     Json(payload): Json<ScriptExecution>,
 ) -> HttpResponse {
-    if payload.script.is_empty() {
-        return HttpResponse::Json(JsonResponse::with_error(Some("Invalid script".to_string())));
+    if payload.name.is_empty() || payload.script.is_empty() {
+        return HttpResponse::Json(JsonResponse::with_error(Some(
+            "Invalid name or script".to_string(),
+        )));
     }
 
-    HttpResponse::Json(
-        JsonResponse::from_output(query_handler.execute_script(&payload.script).await).await,
-    )
+    let json = match query_handler
+        .insert_script(&payload.name, &payload.script)
+        .await
+    {
+        Ok(()) => JsonResponse::with_output(None),
+        Err(e) => JsonResponse::with_error(Some(format!("Insert script error:{}", e))),
+    };
+
+    HttpResponse::Json(json)
 }

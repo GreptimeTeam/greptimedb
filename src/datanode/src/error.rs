@@ -191,6 +191,12 @@ pub enum Error {
 
     #[snafu(display("Invalid ColumnDef in protobuf msg: {}", msg))]
     InvalidColumnDef { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to start script manager, source: {}", source))]
+    StartScriptManager {
+        #[snafu(backtrace)]
+        source: script::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -232,6 +238,7 @@ impl ErrorExt for Error {
             | Error::UnsupportedExpr { .. } => StatusCode::Internal,
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
+            Error::StartScriptManager { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
         }

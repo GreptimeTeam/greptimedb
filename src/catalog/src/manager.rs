@@ -15,7 +15,9 @@ use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
 
 use super::error::Result;
-use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME};
+use crate::consts::{
+    INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
+};
 use crate::error::{
     CatalogNotFoundSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, SchemaNotFoundSnafu,
     SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
@@ -54,7 +56,7 @@ impl LocalCatalogManager {
             system: system_catalog,
             catalogs: memory_catalog_list,
             engine,
-            next_table_id: AtomicU32::new(0),
+            next_table_id: AtomicU32::new(MIN_USER_TABLE_ID),
             lock: Mutex::new(()),
         })
     }

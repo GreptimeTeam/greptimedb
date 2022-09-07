@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
@@ -14,18 +15,20 @@ mod http;
 mod mysql;
 use script::{
     engine::{CompileContext, EvalContext, Script, ScriptEngine},
-    python::PyEngine,
+    python::{PyEngine, PyScript},
 };
 
 struct DummyInstance {
     query_engine: QueryEngineRef,
     py_engine: Arc<PyEngine>,
+    scripts: RwLock<HashMap<String, Arc<PyScript>>>,
 }
 
 impl DummyInstance {
     fn new(query_engine: QueryEngineRef) -> Self {
         Self {
             py_engine: Arc::new(PyEngine::new(query_engine.clone())),
+            scripts: RwLock::new(HashMap::new()),
             query_engine,
         }
     }
@@ -37,12 +40,23 @@ impl SqlQueryHandler for DummyInstance {
         let plan = self.query_engine.sql_to_plan(query).unwrap();
         Ok(self.query_engine.execute(&plan).await.unwrap())
     }
-    async fn execute_script(&self, script: &str) -> Result<Output> {
-        let py_script = self
+
+    async fn insert_script(&self, name: &str, script: &str) -> Result<()> {
+        let script = self
             .py_engine
             .compile(script, CompileContext::default())
             .await
             .unwrap();
+        self.scripts
+            .write()
+            .unwrap()
+            .insert(name.to_string(), Arc::new(script));
+
+        Ok(())
+    }
+
+    async fn execute_script(&self, name: &str) -> Result<Output> {
+        let py_script = self.scripts.read().unwrap().get(name).unwrap().clone();
 
         Ok(py_script.evaluate(EvalContext::default()).await.unwrap())
     }

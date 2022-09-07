@@ -19,10 +19,13 @@ python = [
 
 [dependencies]
 async-trait = "0.1"
+catalog = { path = "../catalog" }
 common-error = {path = "../common/error"}
 common-function = { path = "../common/function" }
 common-query = {path = "../common/query"}
 common-recordbatch = {path = "../common/recordbatch" }
+common-telemetry = { path = "../common/telemetry" }
+common-time = { path = "../common/time" }
 console = "0.15"
 datafusion = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}
@@ -40,9 +43,9 @@ rustpython-parser = {git = "https://github.com/RustPython/RustPython", optional 
 rustpython-vm = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 snafu = {version = "0.7", features = ["backtraces"]}
 sql = { path = "../sql" }
+table = { path = "../table" }
 
 [dev-dependencies]
-catalog = { path = "../catalog" }
 ron = "0.7"
 serde = {version = "1.0", features = ["derive"]}
 table = { path = "../table" }
