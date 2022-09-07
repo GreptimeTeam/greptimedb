@@ -272,7 +272,6 @@ pub(crate) mod greptime_builtin {
 
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{function::FunctionContext, Function};
-    use datafusion::arrow::array::{BooleanArray, Float64Array};
     use datafusion::arrow::compute::comparison::{gt_eq_scalar, lt_eq_scalar};
     use datafusion::arrow::datatypes::DataType;
     use datafusion::arrow::error::ArrowError;
@@ -670,18 +669,19 @@ pub(crate) mod greptime_builtin {
         Ok(res.into())
     }
 
-    macro_rules! match_none_array {
-        ($VAR:ident, $LEN: ident, [$($TY:ident),*]) => {
-            paste!{
-                match $VAR{
-                    $(DataType::$TY => Arc::new(arrow::array::[<$TY Array>]::from(vec![None;$LEN])), )*
-                    _ => todo!()
-                }
-            }
-        };
-    }
+    
 
     fn gen_none_array(data_type: DataType, len: usize) -> ArrayRef {
+        macro_rules! match_none_array {
+            ($VAR:ident, $LEN: ident, [$($TY:ident),*]) => {
+                paste!{
+                    match $VAR{
+                        $(DataType::$TY => Arc::new(arrow::array::[<$TY Array>]::from(vec![None;$LEN])), )*
+                        _ => todo!()
+                    }
+                }
+            };
+        }
         let ret: ArrayRef = match_none_array!(data_type, len, 
             [Boolean, 
             Int8, Int16, Int32, Int64,
@@ -691,7 +691,6 @@ pub(crate) mod greptime_builtin {
         ret
     }
 
-    /// TODO: for now prev(arr)[0] == arr[0], need better fill method
     #[pyfunction]
     fn prev(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let cur: ArrayRef = cur.to_arrow_array();
@@ -706,8 +705,7 @@ pub(crate) mod greptime_builtin {
             return Ok(ret.into());
         }
         let cur = cur.slice(0, cur.len() - 1); // except the last one that is
-        let fill = NullArray::new(cur.data_type().to_owned(), 1);//cur.slice(0, 1);
-        let fill = Box::new(fill);
+        let fill = gen_none_array(cur.data_type().to_owned(), 1);//cur.slice(0, 1);
         let ret = compute::concatenate::concatenate(&[&*fill, &*cur]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
@@ -733,8 +731,8 @@ pub(crate) mod greptime_builtin {
             })?;
             return Ok(ret.into());
         }
-        let cur = cur.slice(1, cur.len()); // except the last one that is
-        let fill = cur.slice(cur.len()-1, 1);
+        let cur = cur.slice(1, cur.len()-1); // except the last one that is
+        let fill = gen_none_array(cur.data_type().to_owned(), 1);
         let ret = compute::concatenate::concatenate(&[&*cur, &*fill]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
@@ -880,7 +878,7 @@ pub(crate) mod greptime_builtin {
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-        dbg!(&fn_results);
+
         // 3. get returen vector and concat them
         let ret = fn_results
             .into_iter()
