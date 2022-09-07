@@ -84,12 +84,7 @@ async fn test_scripts() {
         HttpResponse::Json(json) => {
             assert!(json.success(), "{:?}", json);
             assert!(json.error().is_none());
-            match json.output().expect("assertion failed") {
-                JsonOutput::Rows(rows) => {
-                    assert_eq!(1, rows.len());
-                }
-                _ => unreachable!(),
-            }
+            assert!(json.output().is_none());
         }
         _ => unreachable!(),
     }

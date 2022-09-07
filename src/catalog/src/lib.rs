@@ -6,7 +6,7 @@ use std::sync::Arc;
 use table::metadata::TableId;
 use table::TableRef;
 
-pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 pub use crate::manager::LocalCatalogManager;
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 

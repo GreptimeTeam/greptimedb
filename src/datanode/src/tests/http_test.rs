@@ -123,10 +123,7 @@ def test(n):
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = res.text().await;
-    assert_eq!(
-        body,
-        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"n","data_type":"UInt32","is_nullable":false,"metadata":{}}],"metadata":{}},"columns":[[0,1,2,3,4,5,6,7,8,9]]}]}}"#
-    );
+    assert_eq!(body, r#"{"success":true}"#,);
 }
 
 async fn start_test_app(addr: &str) -> (SocketAddr, TestGuard) {
