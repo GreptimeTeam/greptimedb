@@ -176,7 +176,7 @@ impl TryFrom<ObjectResult> for Output {
                 let vectors = select
                     .columns
                     .iter()
-                    .map(column_to_vector)
+                    .map(|column| column_to_vector(column, select.row_count))
                     .collect::<Result<Vec<VectorRef>>>()?;
 
                 let column_schemas = select
@@ -217,13 +217,13 @@ impl TryFrom<ObjectResult> for Output {
     }
 }
 
-fn column_to_vector(column: &Column) -> Result<VectorRef> {
+fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
     let datatype =
         ColumnDataTypeWrapper::try_new(column.datatype).context(error::ColumnDataTypeSnafu)?;
     let column_datatype = datatype.0;
 
-    let len = column.len as usize;
-    let mut vector = VectorBuilder::with_capacity(datatype.into(), len);
+    let rows = rows as usize;
+    let mut vector = VectorBuilder::with_capacity(datatype.into(), rows);
 
     if let Some(values) = &column.values {
         let values = collect_column_values(column_datatype, values);
@@ -232,7 +232,7 @@ fn column_to_vector(column: &Column) -> Result<VectorRef> {
         let null_mask = BitVec::from_slice(&column.null_mask);
         let mut nulls_iter = null_mask.iter().by_vals().fuse();
 
-        for i in 0..len {
+        for i in 0..rows {
             if let Some(true) = nulls_iter.next() {
                 vector.push_null();
             } else {
@@ -248,7 +248,7 @@ fn column_to_vector(column: &Column) -> Result<VectorRef> {
             }
         }
     } else {
-        (0..len).for_each(|_| vector.push_null());
+        (0..rows).for_each(|_| vector.push_null());
     }
     Ok(vector.finish())
 }
@@ -318,7 +318,7 @@ mod tests {
     fn test_column_to_vector() {
         let mut column = create_test_column(Arc::new(BooleanVector::from(vec![true])));
         column.datatype = -100;
-        let result = column_to_vector(&column);
+        let result = column_to_vector(&column, 1);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
@@ -329,7 +329,7 @@ mod tests {
             ($vector: expr) => {
                 let vector = Arc::new($vector);
                 let column = create_test_column(vector.clone());
-                let result = column_to_vector(&column).unwrap();
+                let result = column_to_vector(&column, vector.len() as u32).unwrap();
                 assert_eq!(result, vector as VectorRef);
             };
         }
@@ -396,7 +396,6 @@ mod tests {
             values: Some(values(&[array.clone()]).unwrap()),
             null_mask: null_mask(&vec![array], vector.len()),
             datatype: datatype.0 as i32,
-            len: vector.len() as u32,
         }
     }
 }

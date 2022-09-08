@@ -73,7 +73,6 @@ fn try_convert(record_batches: Vec<RecordBatch>) -> Result<SelectResult> {
             datatype: ColumnDataTypeWrapper::try_from(schema.data_type.clone())
                 .context(error::ColumnDataTypeSnafu)?
                 .0 as i32,
-            len: row_count as u32,
             ..Default::default()
         };
         columns.push(column);

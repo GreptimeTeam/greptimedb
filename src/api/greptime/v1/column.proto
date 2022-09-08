@@ -49,9 +49,6 @@ message Column {
 
   // Helpful in creating vector from column.
   ColumnDataType datatype = 5;
-
-  // Explicitly set column's length here because we cannot speculate it from `values` and `null_mask`.
-  uint32 len = 6;
 }
 
 message ColumnDef {

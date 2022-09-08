@@ -49,7 +49,6 @@ async fn test_insert_and_select() {
             ..Default::default()
         }),
         datatype: 12, // string
-        len: 4,
         ..Default::default()
     };
     let expected_cpu_col = Column {
@@ -60,7 +59,6 @@ async fn test_insert_and_select() {
         }),
         null_mask: vec![2],
         datatype: 10, // float64
-        len: 4,
         ..Default::default()
     };
     let expected_mem_col = Column {
@@ -71,7 +69,6 @@ async fn test_insert_and_select() {
         }),
         null_mask: vec![4],
         datatype: 10, // float64
-        len: 4,
         ..Default::default()
     };
     let expected_ts_col = Column {
@@ -81,7 +78,6 @@ async fn test_insert_and_select() {
             ..Default::default()
         }),
         datatype: 4, // int64
-        len: 4,
         ..Default::default()
     };
 
