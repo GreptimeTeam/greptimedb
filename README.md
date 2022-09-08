@@ -80,6 +80,33 @@ docker run -p 3000:3000 \
 greptimedb
 ```
 
+### Start Frontend
+
+Frontend should connect to Datanode, so **Datanode must have been started** at first!
+
+```
+// Connects to local Datanode at its default GRPC port: 3001
+
+// Start Frontend with default options.
+cargo run -- frontend start
+
+OR
+
+// Start Frontend with `mysql-addr` option.
+cargo run -- frontend start --mysql-addr=0.0.0.0:9999
+
+OR
+
+// Start datanode with `log-dir` and `log-level` options.
+cargo run -- --log-dir=logs --log-level=debug frontend start
+```
+
+Start datanode with config file:
+
+```
+cargo run -- --log-dir=logs --log-level=debug frontend start -c ./config/frontend.example.toml
+```
+
 ### SQL Operations
 
 1. Connecting DB by [mysql client](https://dev.mysql.com/downloads/mysql/):

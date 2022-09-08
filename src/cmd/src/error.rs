@@ -11,6 +11,12 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
+    #[snafu(display("Failed to start frontend, source: {}", source))]
+    StartFrontend {
+        #[snafu(backtrace)]
+        source: frontend::error::Error,
+    },
+
     #[snafu(display("Failed to read config file: {}, source: {}", path, source))]
     ReadConfig {
         source: std::io::Error,
@@ -27,6 +33,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::StartDatanode { source } => source.status_code(),
+            Error::StartFrontend { source } => source.status_code(),
             Error::ReadConfig { .. } | Error::ParseConfig { .. } => StatusCode::InvalidArguments,
         }
     }

@@ -3,6 +3,7 @@ use std::fmt;
 use clap::Parser;
 use cmd::datanode;
 use cmd::error::Result;
+use cmd::frontend;
 use common_telemetry::{self, logging::error, logging::info};
 
 #[derive(Parser)]
@@ -26,12 +27,15 @@ impl Command {
 enum SubCommand {
     #[clap(name = "datanode")]
     Datanode(datanode::Command),
+    #[clap(name = "frontend")]
+    Frontend(frontend::Command),
 }
 
 impl SubCommand {
     async fn run(self) -> Result<()> {
         match self {
             SubCommand::Datanode(cmd) => cmd.run().await,
+            SubCommand::Frontend(cmd) => cmd.run().await,
         }
     }
 }
@@ -40,6 +44,7 @@ impl fmt::Display for SubCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SubCommand::Datanode(..) => write!(f, "greptime-datanode"),
+            SubCommand::Frontend(..) => write!(f, "greptime-frontend"),
         }
     }
 }

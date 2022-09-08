@@ -1,9 +1,8 @@
 use snafu::ResultExt;
 use sqlparser::ast::Statement as SpStatement;
 
-use crate::error;
+use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::parser::Result;
 use crate::statements::insert::Insert;
 use crate::statements::statement::Statement;
 

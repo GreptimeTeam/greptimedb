@@ -17,7 +17,7 @@ mod manager;
 pub mod memory;
 pub mod schema;
 mod system;
-mod tables;
+pub mod tables;
 
 /// Represent a list of named catalogs
 pub trait CatalogList: Sync + Send {

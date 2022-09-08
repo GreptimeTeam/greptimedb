@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDataType, ColumnDef, CreateExpr};
+use api::helper::ColumnDataTypeWrapper;
+use api::v1::{AdminResult, ColumnDef, CreateExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
-use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use query::Output;
@@ -140,30 +141,10 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
 
 fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let data_type =
-        ColumnDataType::from_i32(column_def.data_type).context(error::InvalidColumnDefSnafu {
-            msg: format!("unknown ColumnDataType {}", column_def.data_type),
-        })?;
-    let data_type = match data_type {
-        ColumnDataType::Boolean => ConcreteDataType::boolean_datatype(),
-        ColumnDataType::Int8 => ConcreteDataType::int8_datatype(),
-        ColumnDataType::Int16 => ConcreteDataType::int16_datatype(),
-        ColumnDataType::Int32 => ConcreteDataType::int32_datatype(),
-        ColumnDataType::Int64 => ConcreteDataType::int64_datatype(),
-        ColumnDataType::Uint8 => ConcreteDataType::uint8_datatype(),
-        ColumnDataType::Uint16 => ConcreteDataType::uint16_datatype(),
-        ColumnDataType::Uint32 => ConcreteDataType::uint32_datatype(),
-        ColumnDataType::Uint64 => ConcreteDataType::uint64_datatype(),
-        ColumnDataType::Float32 => ConcreteDataType::float32_datatype(),
-        ColumnDataType::Float64 => ConcreteDataType::float64_datatype(),
-        ColumnDataType::Binary => ConcreteDataType::binary_datatype(),
-        ColumnDataType::String => ConcreteDataType::string_datatype(),
-        ColumnDataType::Date => ConcreteDataType::date_datatype(),
-        ColumnDataType::Datetime => ConcreteDataType::datetime_datatype(),
-        ColumnDataType::Timestamp => ConcreteDataType::timestamp_millis_datatype(),
-    };
+        ColumnDataTypeWrapper::try_new(column_def.data_type).context(error::ColumnDataTypeSnafu)?;
     Ok(ColumnSchema {
         name: column_def.name.clone(),
-        data_type,
+        data_type: data_type.into(),
         is_nullable: column_def.is_nullable,
     })
 }
@@ -171,6 +152,8 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use datatypes::prelude::ConcreteDataType;
 
     use catalog::MIN_USER_TABLE_ID;
 
@@ -228,10 +211,10 @@ mod tests {
         };
         let result = create_column_schema(&column_def);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid ColumnDef in protobuf msg: unknown ColumnDataType 1024"));
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Column datatype error, source: Unknown proto column datatype: 1024"
+        );
 
         let column_def = ColumnDef {
             name: "a".to_string(),

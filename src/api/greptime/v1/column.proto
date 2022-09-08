@@ -29,6 +29,9 @@ message Column {
     repeated bool bool_values = 11;
     repeated bytes binary_values = 12;
     repeated string string_values = 13;
+
+    repeated int32 date_values = 14;
+    repeated int64 datetime_values = 15;
   }
   // The array of non-null values in this column.
   //
@@ -43,6 +46,12 @@ message Column {
   // Mask maps the positions of null values.
   // If a bit in null_mask is 1, it indicates that the column value at that position is null.
   bytes null_mask = 4;
+
+  // Helpful in creating vector from column.
+  ColumnDataType datatype = 5;
+
+  // Explicitly set column's length here because we cannot speculate it from `values` and `null_mask`.
+  uint32 len = 6;
 }
 
 message ColumnDef {

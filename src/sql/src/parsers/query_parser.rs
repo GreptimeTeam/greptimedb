@@ -1,8 +1,7 @@
 use snafu::prelude::*;
 
-use crate::error;
+use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::parser::Result;
 use crate::statements::query::Query;
 use crate::statements::statement::Statement;
 

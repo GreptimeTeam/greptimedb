@@ -5,6 +5,8 @@ use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
 
 use crate::data_type::ConcreteDataType;
+use crate::error::Result;
+use crate::prelude::ValueRef;
 use crate::scalars::ScalarVectorBuilder;
 use crate::value::Value;
 use crate::vectors::date::DateVectorBuilder;
@@ -157,6 +159,30 @@ impl VectorBuilder {
                 value,
                 self.data_type()
             ),
+        }
+    }
+
+    pub fn try_push_ref(&mut self, value: ValueRef) -> Result<()> {
+        match &mut *self {
+            VectorBuilder::Null(b) => {
+                *b += 1;
+                Ok(())
+            }
+            VectorBuilder::Boolean(b) => b.push_value_ref(value),
+            VectorBuilder::UInt8(b) => b.push_value_ref(value),
+            VectorBuilder::UInt16(b) => b.push_value_ref(value),
+            VectorBuilder::UInt32(b) => b.push_value_ref(value),
+            VectorBuilder::UInt64(b) => b.push_value_ref(value),
+            VectorBuilder::Int8(b) => b.push_value_ref(value),
+            VectorBuilder::Int16(b) => b.push_value_ref(value),
+            VectorBuilder::Int32(b) => b.push_value_ref(value),
+            VectorBuilder::Int64(b) => b.push_value_ref(value),
+            VectorBuilder::Float32(b) => b.push_value_ref(value),
+            VectorBuilder::Float64(b) => b.push_value_ref(value),
+            VectorBuilder::String(b) => b.push_value_ref(value),
+            VectorBuilder::Binary(b) => b.push_value_ref(value),
+            VectorBuilder::Date(b) => b.push_value_ref(value),
+            VectorBuilder::DateTime(b) => b.push_value_ref(value),
         }
     }
 

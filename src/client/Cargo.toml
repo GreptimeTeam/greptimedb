@@ -7,13 +7,21 @@ edition = "2021"
 
 [dependencies]
 api = { path = "../api" }
+async-stream = "0.3"
+catalog = { path = "../catalog" }
+common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
+common-recordbatch = { path = "../common/recordbatch" }
+common-time = { path = "../common/time" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datatypes = { path = "../datatypes" }
+query = { path = "../query" }
 snafu = { version = "0.7", features = ["backtraces"] }
 tonic = "0.8"
 
 [dev-dependencies]
+datanode = { path = "../datanode" }
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

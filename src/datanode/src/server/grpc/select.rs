@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::{codec::SelectResult, column::Values, Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::BitVec;
@@ -8,9 +9,9 @@ use common_error::status_code::StatusCode;
 use common_recordbatch::{util, RecordBatch, SendableRecordBatchStream};
 use datatypes::arrow_array::{BinaryArray, StringArray};
 use query::Output;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{ConversionSnafu, Result};
+use crate::error::{self, ConversionSnafu, Result};
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 
 pub async fn to_object_result(result: Result<Output>) -> ObjectResult {
@@ -69,6 +70,10 @@ fn try_convert(record_batches: Vec<RecordBatch>) -> Result<SelectResult> {
             column_name,
             values: Some(values(&arrays)?),
             null_mask: null_mask(&arrays, row_count),
+            datatype: ColumnDataTypeWrapper::try_from(schema.data_type.clone())
+                .context(error::ColumnDataTypeSnafu)?
+                .0 as i32,
+            len: row_count as u32,
             ..Default::default()
         };
         columns.push(column);
@@ -80,7 +85,7 @@ fn try_convert(record_batches: Vec<RecordBatch>) -> Result<SelectResult> {
     })
 }
 
-fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
+pub fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
     let null_count: usize = arrays.iter().map(|a| a.null_count()).sum();
 
     if null_count == 0 {
@@ -123,7 +128,7 @@ macro_rules! convert_arrow_array_to_grpc_vals {
 
 }
 
-fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
+pub fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
     if arrays.is_empty() {
         return Ok(Values::default());
     }
@@ -153,8 +158,9 @@ fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
 
         (DataType::Utf8,          StringArray,            string_values,  |x| {x.into()}),
         (DataType::LargeUtf8,     StringArray,            string_values,  |x| {x.into()}),
-        (DataType::Date32,        PrimitiveArray<i32>,    i32_values,     |x| {*x as i32}),
-        (DataType::Date64,        PrimitiveArray<i64>,    i64_values,     |x| {*x as i64}),
+
+        (DataType::Date32,        PrimitiveArray<i32>,    date_values,    |x| {*x as i32}),
+        (DataType::Date64,        PrimitiveArray<i64>,    datetime_values,|x| {*x as i64}),
 
         (DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _),  PrimitiveArray<i64>,   i64_values, |x| {*x}  )
     )

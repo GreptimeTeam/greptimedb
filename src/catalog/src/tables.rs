@@ -124,8 +124,8 @@ fn tables_to_record_batch(
 }
 
 pub struct TablesRecordBatchStream {
-    schema: SchemaRef,
-    stream: Pin<Box<dyn Stream<Item = RecordBatchResult<RecordBatch>> + Send>>,
+    pub schema: SchemaRef,
+    pub stream: Pin<Box<dyn Stream<Item = RecordBatchResult<RecordBatch>> + Send>>,
 }
 
 impl Stream for TablesRecordBatchStream {

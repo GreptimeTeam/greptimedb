@@ -2,9 +2,8 @@ use snafu::ResultExt;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
 
-use crate::error;
+use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::parser::Result;
 use crate::statements::alter::{AlterTable, AlterTableOperation};
 use crate::statements::statement::Statement;
 

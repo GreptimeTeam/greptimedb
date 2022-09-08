@@ -11,6 +11,10 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn new(client: GreptimeClient<Channel>) -> Self {
+        Self { client }
+    }
+
     pub async fn connect(url: impl Into<String>) -> Result<Self> {
         let url = url.into();
         let client = GreptimeClient::connect(url.clone())

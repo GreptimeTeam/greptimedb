@@ -4,6 +4,8 @@ use common_error::prelude::*;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::TokenizerError;
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// SQL parser errors.
 // Now the error in parser does not contains backtrace to avoid generating backtrace
 // every time the parser parses an invalid SQL.
@@ -39,6 +41,15 @@ pub enum Error {
         sql
     ))]
     InvalidTimeIndex { sql: String, backtrace: Backtrace },
+
+    #[snafu(display("Invalid SQL, error: {}", msg))]
+    InvalidSql { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("SQL data type not supported yet: {:?}", t))]
+    SqlTypeNotSupported {
+        t: crate::ast::DataType,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {
@@ -47,9 +58,12 @@ impl ErrorExt for Error {
 
         match self {
             Unsupported { .. } => StatusCode::Unsupported,
-            Unexpected { .. } | Syntax { .. } | InvalidTimeIndex { .. } | Tokenizer { .. } => {
-                StatusCode::InvalidSyntax
-            }
+            Unexpected { .. }
+            | Syntax { .. }
+            | InvalidTimeIndex { .. }
+            | Tokenizer { .. }
+            | InvalidSql { .. }
+            | SqlTypeNotSupported { .. } => StatusCode::InvalidSyntax,
         }
     }
 
@@ -68,7 +82,7 @@ mod tests {
 
     use super::*;
 
-    fn throw_sp_error() -> Result<(), ParserError> {
+    fn throw_sp_error() -> std::result::Result<(), ParserError> {
         Err(ParserError::ParserError("parser error".to_string()))
     }
 

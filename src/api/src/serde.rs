@@ -138,6 +138,7 @@ mod tests {
             semantic_type: SEMANTIC_TAG,
             values: Some(values),
             null_mask,
+            ..Default::default()
         };
         InsertBatch {
             columns: vec![column],
@@ -156,6 +157,7 @@ mod tests {
             semantic_type: SEMANTIC_TAG,
             values: Some(values),
             null_mask,
+            ..Default::default()
         };
         SelectResult {
             columns: vec![column],

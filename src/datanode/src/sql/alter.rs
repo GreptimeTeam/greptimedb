@@ -1,11 +1,12 @@
 use query::query_engine::Output;
 use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
+use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use table::engine::EngineContext;
 use table::requests::{AlterKind, AlterTableRequest};
 
 use crate::error::{self, Result};
-use crate::sql::{column_def_to_schema, table_idents_to_full_name, SqlHandler};
+use crate::sql::SqlHandler;
 
 impl SqlHandler {
     pub(crate) async fn alter(&self, req: AlterTableRequest) -> Result<Output> {
@@ -24,7 +25,7 @@ impl SqlHandler {
 
     pub(crate) fn alter_to_request(&self, alter_table: AlterTable) -> Result<AlterTableRequest> {
         let (catalog_name, schema_name, table_name) =
-            table_idents_to_full_name(alter_table.table_name())?;
+            table_idents_to_full_name(alter_table.table_name()).context(error::ParseSqlSnafu)?;
 
         let alter_kind = match alter_table.alter_operation() {
             AlterTableOperation::AddConstraint(table_constraint) => {
@@ -34,7 +35,7 @@ impl SqlHandler {
                 .fail()
             }
             AlterTableOperation::AddColumn { column_def } => AlterKind::AddColumn {
-                new_column: column_def_to_schema(column_def)?,
+                new_column: column_def_to_schema(column_def).context(error::ParseSqlSnafu)?,
             },
         };
         Ok(AlterTableRequest {

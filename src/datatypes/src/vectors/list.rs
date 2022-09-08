@@ -20,6 +20,7 @@ type ArrowListArray = ListArray<i32>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListVector {
     array: ArrowListArray,
+    // TODO(LFC): rename inner_data_type -> inner_datatype
     inner_data_type: ConcreteDataType,
 }
 

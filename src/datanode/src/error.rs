@@ -159,12 +159,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("SQL data type not supported yet: {:?}", t))]
-    SqlTypeNotSupported {
-        t: sql::ast::DataType,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Specified timestamp key or primary key column not found: {}", name))]
     KeyColumnNotFound { name: String, backtrace: Backtrace },
 
@@ -187,6 +181,18 @@ pub enum Error {
     IntoPhysicalPlan {
         #[snafu(backtrace)]
         source: common_grpc::Error,
+    },
+
+    #[snafu(display("Column datatype error, source: {}", source))]
+    ColumnDataType {
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
+
+    #[snafu(display("Failed to parse SQL, source: {}", source))]
+    ParseSql {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
     },
 
     #[snafu(display("Invalid ColumnDef in protobuf msg: {}", msg))]
@@ -220,7 +226,6 @@ impl ErrorExt for Error {
             | Error::IllegalInsertData { .. }
             | Error::DecodeInsert { .. }
             | Error::InvalidSql { .. }
-            | Error::SqlTypeNotSupported { .. }
             | Error::CreateSchema { .. }
             | Error::KeyColumnNotFound { .. }
             | Error::MissingField { .. }
@@ -235,7 +240,9 @@ impl ErrorExt for Error {
             | Error::InsertSystemCatalog { .. }
             | Error::Conversion { .. }
             | Error::IntoPhysicalPlan { .. }
-            | Error::UnsupportedExpr { .. } => StatusCode::Internal,
+            | Error::UnsupportedExpr { .. }
+            | Error::ColumnDataType { .. } => StatusCode::Internal,
+            Error::ParseSql { source } => source.status_code(),
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
             Error::StartScriptManager { source } => source.status_code(),
