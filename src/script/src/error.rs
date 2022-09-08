@@ -66,18 +66,13 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            CastType { .. } | ScriptsTableNotFound { .. } => StatusCode::Unexpected,
-
+            CastType { .. } => StatusCode::Unexpected,
+            ScriptsTableNotFound { .. } => StatusCode::TableNotFound,
             RegisterScriptsTable { source } | FindScriptsTable { source } => source.status_code(),
-
             InsertScript { source } => source.status_code(),
-
             CompilePython { source } | ExecutePython { source, .. } => source.status_code(),
-
             FindScript { source, .. } => source.status_code(),
-
             CollectRecords { source } => source.status_code(),
-
             ScriptNotFound { .. } => StatusCode::InvalidArguments,
         }
     }
@@ -88,5 +83,39 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use snafu::ResultExt;
+
+    use super::*;
+
+    fn throw_catalog_error() -> catalog::error::Result<()> {
+        catalog::error::IllegalManagerStateSnafu { msg: "test" }.fail()
+    }
+
+    fn throw_python_error() -> crate::python::error::Result<()> {
+        crate::python::error::CoprParseSnafu {
+            reason: "test",
+            loc: None,
+        }
+        .fail()
+    }
+
+    #[test]
+    fn test_error() {
+        let err = throw_catalog_error()
+            .context(FindScriptsTableSnafu)
+            .unwrap_err();
+        assert_eq!(StatusCode::Unexpected, err.status_code());
+        assert!(err.backtrace_opt().is_some());
+
+        let err = throw_python_error()
+            .context(ExecutePythonSnafu { name: "test" })
+            .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert!(err.backtrace_opt().is_some());
     }
 }

@@ -328,12 +328,12 @@ impl CatalogManager for LocalCatalogManager {
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
         let started = self.lock.lock().await;
 
-        if !*started {
-            return IllegalManagerStateSnafu {
+        ensure!(
+            *started,
+            IllegalManagerStateSnafu {
                 msg: "Catalog manager not started",
             }
-            .fail();
-        }
+        );
 
         let catalog_name = request
             .catalog
@@ -375,12 +375,12 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
-        if *self.lock.lock().await {
-            return IllegalManagerStateSnafu {
+        ensure!(
+            !*self.lock.lock().await,
+            IllegalManagerStateSnafu {
                 msg: "Catalog manager already started",
             }
-            .fail();
-        }
+        );
 
         let mut sys_table_requests = self.system_table_requests.lock().await;
         sys_table_requests.push(request);
