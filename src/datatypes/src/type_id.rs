@@ -36,8 +36,12 @@ pub enum LogicalTypeId {
 }
 
 impl LogicalTypeId {
+    /// Create ConcreteDataType based on this id. This method is for test only as it
+    /// would lost some info.
+    ///
     /// # Panics
     /// Panics if data type is not supported.
+    #[cfg(any(test, feature = "test"))]
     pub fn data_type(&self) -> ConcreteDataType {
         match self {
             LogicalTypeId::Null => ConcreteDataType::null_datatype(),
