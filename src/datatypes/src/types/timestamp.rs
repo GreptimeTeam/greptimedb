@@ -23,7 +23,7 @@ impl DataType for TimestampType {
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {
-        LogicalTypeId::Timestamp(self.unit)
+        LogicalTypeId::Timestamp
     }
 
     fn default_value(&self) -> Value {
@@ -55,7 +55,7 @@ mod tests {
     #[test]
     pub fn test_timestamp_type() {
         assert_eq!(
-            LogicalTypeId::Timestamp(TimeUnit::Microsecond),
+            LogicalTypeId::Timestamp,
             TimestampType::new(TimeUnit::Microsecond).logical_type_id()
         );
     }

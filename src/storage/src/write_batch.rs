@@ -805,7 +805,6 @@ mod tests {
     use std::iter;
     use std::sync::Arc;
 
-    use common_time::timestamp::TimeUnit;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::vectors::{BooleanVector, Int32Vector, Int64Vector, UInt64Vector};
 
@@ -855,7 +854,7 @@ mod tests {
             &[
                 ("k1", LogicalTypeId::UInt64, false),
                 (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                ("ts", LogicalTypeId::Timestamp(TimeUnit::Millisecond), false),
+                ("ts", LogicalTypeId::Timestamp, false),
                 ("v1", LogicalTypeId::Boolean, true),
             ],
             Some(2),

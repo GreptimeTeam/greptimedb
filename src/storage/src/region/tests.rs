@@ -5,7 +5,7 @@ mod flush;
 mod projection;
 
 use common_telemetry::logging;
-use common_time::timestamp::{TimeUnit, Timestamp};
+use common_time::timestamp::Timestamp;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, TimestampVector};
@@ -96,11 +96,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     if enable_version_column {
         write_batch_util::new_write_batch(
             &[
-                (
-                    test_util::TIMESTAMP_NAME,
-                    LogicalTypeId::Timestamp(TimeUnit::Millisecond),
-                    false,
-                ),
+                (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
                 (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
                 ("v1", LogicalTypeId::Int64, true),
             ],
@@ -109,11 +105,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     } else {
         write_batch_util::new_write_batch(
             &[
-                (
-                    test_util::TIMESTAMP_NAME,
-                    LogicalTypeId::Timestamp(TimeUnit::Millisecond),
-                    false,
-                ),
+                (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
                 ("v1", LogicalTypeId::Int64, true),
             ],
             Some(0),
@@ -174,11 +166,7 @@ async fn test_new_region() {
     let expect_schema = schema_util::new_schema_ref(
         &[
             ("k1", LogicalTypeId::Int32, false),
-            (
-                test_util::TIMESTAMP_NAME,
-                LogicalTypeId::Timestamp(TimeUnit::Millisecond),
-                false,
-            ),
+            (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
             (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
             ("v1", LogicalTypeId::Float32, true),
         ],

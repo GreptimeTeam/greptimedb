@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use common_time::timestamp::TimeUnit;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
@@ -28,11 +27,7 @@ fn new_write_batch_for_test() -> WriteBatch {
     write_batch_util::new_write_batch(
         &[
             ("k0", LogicalTypeId::Int64, false),
-            (
-                test_util::TIMESTAMP_NAME,
-                LogicalTypeId::Timestamp(TimeUnit::Millisecond),
-                false,
-            ),
+            (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
             ("v0", LogicalTypeId::Int64, true),
             ("v1", LogicalTypeId::Int64, true),
         ],

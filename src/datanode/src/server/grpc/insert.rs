@@ -186,8 +186,8 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .into_iter()
             .map(|v| Value::Timestamp(Timestamp::from_millis(v)))
             .collect(),
-        ConcreteDataType::Null(_) => unimplemented!(),
-        ConcreteDataType::List(_) => unimplemented!(),
+        ConcreteDataType::Null(_) => unreachable!(),
+        ConcreteDataType::List(_) => unreachable!(),
     }
 }
 

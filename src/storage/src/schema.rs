@@ -632,7 +632,6 @@ fn build_user_schema(columns: &ColumnsMetadata, version: u32) -> Result<Schema> 
 
 #[cfg(test)]
 mod tests {
-    use common_time::timestamp::TimeUnit;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::vectors::{Int64Vector, UInt64Vector, UInt8Vector};
 
@@ -682,11 +681,7 @@ mod tests {
         let expect_schema = schema_util::new_schema_with_version(
             &[
                 ("k0", LogicalTypeId::Int64, false),
-                (
-                    "timestamp",
-                    LogicalTypeId::Timestamp(TimeUnit::Millisecond),
-                    false,
-                ),
+                ("timestamp", LogicalTypeId::Timestamp, false),
                 ("v0", LogicalTypeId::Int64, true),
             ],
             Some(1),
@@ -722,11 +717,7 @@ mod tests {
         let expect_schema = schema_util::new_schema_with_version(
             &[
                 ("k0", LogicalTypeId::Int64, false),
-                (
-                    "timestamp",
-                    LogicalTypeId::Timestamp(TimeUnit::Millisecond),
-                    false,
-                ),
+                ("timestamp", LogicalTypeId::Timestamp, false),
                 ("v0", LogicalTypeId::Int64, true),
                 (consts::SEQUENCE_COLUMN_NAME, LogicalTypeId::UInt64, false),
                 (consts::OP_TYPE_COLUMN_NAME, LogicalTypeId::UInt8, false),
@@ -807,11 +798,7 @@ mod tests {
         let expect_user = schema_util::new_schema_with_version(
             &[
                 ("v1", LogicalTypeId::Int64, true),
-                (
-                    "timestamp",
-                    LogicalTypeId::Timestamp(TimeUnit::Millisecond),
-                    false,
-                ),
+                ("timestamp", LogicalTypeId::Timestamp, false),
             ],
             Some(1),
             123,
