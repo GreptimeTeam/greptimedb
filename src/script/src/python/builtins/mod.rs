@@ -283,10 +283,10 @@ pub(crate) mod greptime_builtin {
     use datatypes::arrow::array::{ArrayRef, NullArray};
     use datatypes::arrow::compute;
     use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector};
+    use paste::paste;
     use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
     use rustpython_vm::function::{FuncArgs, KwArgs, OptionalArg};
     use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
-    use paste::paste;
 
     use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
@@ -669,8 +669,6 @@ pub(crate) mod greptime_builtin {
         Ok(res.into())
     }
 
-    
-
     fn gen_none_array(data_type: DataType, len: usize) -> ArrayRef {
         macro_rules! match_none_array {
             ($VAR:ident, $LEN: ident, [$($TY:ident),*]) => {
@@ -682,11 +680,10 @@ pub(crate) mod greptime_builtin {
                 }
             };
         }
-        let ret: ArrayRef = match_none_array!(data_type, len, 
-            [Boolean, 
-            Int8, Int16, Int32, Int64,
-            UInt8, UInt16, UInt32, UInt64,
-            Float32, Float64]//There is not a Float16Array, I wonder why?
+        let ret: ArrayRef = match_none_array!(
+            data_type,
+            len,
+            [Boolean, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64] //There is not a Float16Array, I wonder why?
         );
         ret
     }
@@ -705,7 +702,7 @@ pub(crate) mod greptime_builtin {
             return Ok(ret.into());
         }
         let cur = cur.slice(0, cur.len() - 1); // except the last one that is
-        let fill = gen_none_array(cur.data_type().to_owned(), 1);//cur.slice(0, 1);
+        let fill = gen_none_array(cur.data_type().to_owned(), 1); //cur.slice(0, 1);
         let ret = compute::concatenate::concatenate(&[&*fill, &*cur]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
@@ -731,7 +728,7 @@ pub(crate) mod greptime_builtin {
             })?;
             return Ok(ret.into());
         }
-        let cur = cur.slice(1, cur.len()-1); // except the last one that is
+        let cur = cur.slice(1, cur.len() - 1); // except the last one that is
         let fill = gen_none_array(cur.data_type().to_owned(), 1);
         let ret = compute::concatenate::concatenate(&[&*cur, &*fill]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))

@@ -236,16 +236,7 @@ def calc_rvs(open_time, close):
         10120.43,
     ]);
     let open_time_array = PrimitiveArray::from_slice([
-        300i64,
-        900i64,
-        1200i64,
-        1800i64,
-        2400i64,
-        3000i64,
-        3600i64,
-        4200i64,
-        4800i64,
-        5400i64,
+        300i64, 900i64, 1200i64, 1800i64, 2400i64, 3000i64, 3600i64, 4200i64, 4800i64, 5400i64,
         6000i64,
     ]);
     let schema = Arc::new(Schema::from(vec![

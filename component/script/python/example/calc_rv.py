@@ -44,13 +44,15 @@ def as_table(kline: list):
     "rv_60d",
     "rv_90d",
     "rv_180d"
-],
-sql="select open_time, close from k_line")
+])
 def calc_rvs(open_time, close):
-    from greptime import vector, log, prev, sqrt, datetime, pow, sum
+    from greptime import vector, log, prev, sqrt, datetime, pow, sum, last
+    import greptime as g
     def calc_rv(close, open_time, time, interval):
         mask = (open_time < time) & (open_time > time - interval)
         close = close[mask]
+        open_time = open_time[mask]
+        close = g.interval(open_time, close, datetime("10m"), lambda x:last(x))
 
         avg_time_interval = (open_time[-1] - open_time[0])/(len(open_time)-1)
         ref = log(close/prev(close))
@@ -60,10 +62,10 @@ def calc_rvs(open_time, close):
     # how to get env var,
     # maybe through accessing scope and serde then send to remote?
     timepoint = open_time[-1]
-    rv_7d = calc_rv(close, open_time, timepoint, datetime("7d"))
-    rv_15d = calc_rv(close, open_time, timepoint, datetime("15d"))
-    rv_30d = calc_rv(close, open_time, timepoint, datetime("30d"))
-    rv_60d = calc_rv(close, open_time, timepoint, datetime("60d"))
-    rv_90d = calc_rv(close, open_time, timepoint, datetime("90d"))
-    rv_180d = calc_rv(close, open_time, timepoint, datetime("180d"))
+    rv_7d = vector([calc_rv(close, open_time, timepoint, datetime("7d"))])
+    rv_15d = vector([calc_rv(close, open_time, timepoint, datetime("15d"))])
+    rv_30d = vector([calc_rv(close, open_time, timepoint, datetime("30d"))])
+    rv_60d = vector([calc_rv(close, open_time, timepoint, datetime("60d"))])
+    rv_90d = vector([calc_rv(close, open_time, timepoint, datetime("90d"))])
+    rv_180d = vector([calc_rv(close, open_time, timepoint, datetime("180d"))])
     return rv_7d, rv_15d, rv_30d, rv_60d, rv_90d, rv_180d

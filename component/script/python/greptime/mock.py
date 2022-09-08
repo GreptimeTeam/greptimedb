@@ -4,7 +4,7 @@ it can only run on mock data and support by numpy
 """
 from typing import Any
 import numpy as np
-from .greptime import i32,i64,f32,f64, vector, interval, query, prev, datetime, log, sum, sqrt, pow, nan, copr, coprocessor
+from .greptime import i32,i64,f32,f64, vector, interval, prev, datetime, log, sum, sqrt, pow, nan, copr, coprocessor
 
 import inspect
 import functools
