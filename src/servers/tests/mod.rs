@@ -58,7 +58,7 @@ impl SqlQueryHandler for DummyInstance {
     async fn execute_script(&self, name: &str) -> Result<Output> {
         let py_script = self.scripts.read().unwrap().get(name).unwrap().clone();
 
-        Ok(py_script.evaluate(EvalContext::default()).await.unwrap())
+        Ok(py_script.execute(EvalContext::default()).await.unwrap())
     }
 }
 

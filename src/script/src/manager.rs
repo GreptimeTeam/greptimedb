@@ -37,7 +37,7 @@ impl ScriptManager {
         })
     }
 
-    pub async fn compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
+    async fn compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
         let script = Arc::new(
             self.py_engine
                 .compile(script, CompileContext::default())
@@ -72,26 +72,24 @@ impl ScriptManager {
         let script = script.context(ScriptNotFoundSnafu { name })?;
 
         script
-            .evaluate(EvalContext::default())
+            .execute(EvalContext::default())
             .await
             .context(ExecutePythonSnafu { name })
     }
 
-    pub async fn delete(_name: &str) -> Result<()> {
-        todo!();
-    }
-
-    pub async fn update_and_compile(_name: &str) -> Result<()> {
-        todo!();
-    }
-
     async fn try_find_script_and_compile(&self, name: &str) -> Result<Option<Arc<PyScript>>> {
         // FIXME(dennis): SQL injection
-        let sql = format!("select script from scripts where name='{}'", name);
+        let sql = format!(
+            "select script from {} where name='{}'",
+            self.table.name(),
+            name
+        );
+
         let plan = self
             .query_engine
             .sql_to_plan(&sql)
             .context(FindScriptSnafu { name })?;
+
         let stream = match self
             .query_engine
             .execute(&plan)
@@ -110,6 +108,9 @@ impl ScriptManager {
         assert!(records[0].df_recordbatch.num_columns() == 1);
 
         let record = &records[0].df_recordbatch;
+
+        println!("{:?}", record);
+
         let script_column = record
             .column(0)
             .as_any()
@@ -125,5 +126,85 @@ impl ScriptManager {
         let script = script_column.value(0);
 
         Ok(Some(self.compile(name, script).await?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use catalog::CatalogManager;
+    use query::QueryEngineFactory;
+    use table_engine::config::EngineConfig as TableEngineConfig;
+    use table_engine::table::test_util::new_test_object_store;
+
+    use super::*;
+    type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
+    use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
+    use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
+    use table_engine::engine::MitoEngine;
+    use tempdir::TempDir;
+
+    #[tokio::test]
+    async fn test_insert_find_compile_script() {
+        let wal_dir = TempDir::new("test_insert_find_compile_script_wal").unwrap();
+        let wal_dir_str = wal_dir.path().to_string_lossy();
+
+        common_telemetry::init_default_ut_logging();
+        let (_dir, object_store) = new_test_object_store("test_insert_find_compile_script").await;
+        let log_config = LogConfig {
+            log_file_dir: wal_dir_str.to_string(),
+            ..Default::default()
+        };
+
+        let log_store = LocalFileLogStore::open(&log_config).await.unwrap();
+
+        let mock_engine = Arc::new(DefaultEngine::new(
+            TableEngineConfig::default(),
+            EngineImpl::new(
+                StorageEngineConfig::default(),
+                Arc::new(log_store),
+                object_store.clone(),
+            ),
+            object_store,
+        ));
+
+        let catalog_manager = Arc::new(
+            catalog::LocalCatalogManager::try_new(mock_engine.clone())
+                .await
+                .unwrap(),
+        );
+
+        let factory = QueryEngineFactory::new(catalog_manager.clone());
+        let query_engine = factory.query_engine().clone();
+        let mgr = ScriptManager::new(catalog_manager.clone(), query_engine)
+            .await
+            .unwrap();
+        catalog_manager.start().await.unwrap();
+
+        let name = "test";
+        mgr.table
+            .insert(
+                name,
+                r#"
+@copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
+def test(n):
+    return n + 1;
+"#,
+            )
+            .await
+            .unwrap();
+
+        {
+            let cached = mgr.compiled.read().unwrap();
+            assert!(cached.get(name).is_none());
+        }
+
+        // try to find and compile
+        let script = mgr.try_find_script_and_compile(name).await.unwrap();
+        assert!(script.is_some());
+
+        {
+            let cached = mgr.compiled.read().unwrap();
+            assert!(cached.get(name).is_some());
+        }
     }
 }

@@ -123,7 +123,7 @@ impl HttpServer {
                     // handlers
                     .route("/sql", routing::get(handler::sql))
                     .route("/scripts", routing::post(handler::scripts))
-                    .route("/run_script", routing::post(handler::run_script)),
+                    .route("/run-script", routing::post(handler::run_script)),
             )
             .route("/metrics", routing::get(handler::metrics))
             // middlewares

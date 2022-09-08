@@ -16,7 +16,7 @@ pub trait Script {
     fn as_any(&self) -> &dyn Any;
 
     /// Evaluate the script and returns the output.
-    async fn evaluate(&self, ctx: EvalContext) -> std::result::Result<Output, Self::Error>;
+    async fn execute(&self, ctx: EvalContext) -> std::result::Result<Output, Self::Error>;
 }
 
 #[async_trait]

@@ -4389,6 +4389,7 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "log-store",
  "query",
  "ron",
  "rustpython-ast",
@@ -4400,7 +4401,10 @@ dependencies = [
  "serde",
  "snafu",
  "sql",
+ "storage",
  "table",
+ "table-engine",
+ "tempdir",
  "tokio",
  "tokio-test",
 ]

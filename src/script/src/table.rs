@@ -21,6 +21,7 @@ pub const SCRIPTS_TABLE_NAME: &str = "scripts";
 
 pub struct ScriptsTable {
     catalog_manager: CatalogManagerRef,
+    name: String,
 }
 
 impl ScriptsTable {
@@ -49,7 +50,14 @@ impl ScriptsTable {
             .await
             .context(RegisterScriptsTableSnafu)?;
 
-        Ok(Self { catalog_manager })
+        Ok(Self {
+            catalog_manager,
+            name: catalog::format_full_table_name(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                SCRIPTS_TABLE_NAME,
+            ),
+        })
     }
 
     pub async fn insert(&self, name: &str, script: &str) -> Result<()> {
@@ -99,9 +107,14 @@ impl ScriptsTable {
             .await
             .context(InsertScriptSnafu)?;
 
-        logging::info!("Inserted script: {} into scripts table.", name);
+        logging::info!("Inserted script: name={} into scripts table.", name);
 
         Ok(())
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 

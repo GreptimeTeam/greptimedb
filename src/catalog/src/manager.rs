@@ -105,9 +105,15 @@ impl LocalCatalogManager {
                     .await
                     .with_context(|_| CreateTableSnafu {
                         table_info: format!(
-                            "{:?}.{:?}.{}, id: {}",
-                            &create_req.catalog_name,
-                            &create_req.schema_name,
+                            "{}.{}.{}, id: {}",
+                            create_req
+                                .catalog_name
+                                .as_deref()
+                                .unwrap_or(DEFAULT_CATALOG_NAME),
+                            create_req
+                                .schema_name
+                                .as_deref()
+                                .unwrap_or(DEFAULT_SCHEMA_NAME),
                             &create_req.table_name,
                             create_req.id
                         ),
