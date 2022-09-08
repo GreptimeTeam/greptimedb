@@ -122,7 +122,7 @@ async fn test_sequence_increase() {
 
     let mut committed_sequence = tester.committed_sequence();
     for i in 0..100 {
-        tester.put(&[(i.into(), Some(1234))]).await;
+        tester.put(&[(i, Some(1234))]).await;
         committed_sequence += 1;
 
         assert_eq!(committed_sequence, tester.committed_sequence());

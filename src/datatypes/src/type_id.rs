@@ -32,7 +32,7 @@ pub enum LogicalTypeId {
     /// seconds/milliseconds/microseconds/nanoseconds, determined by precision.
     DateTime,
 
-    Timestamp(TimeUnit),
+    Timestamp,
 
     List,
 }
@@ -58,7 +58,7 @@ impl LogicalTypeId {
             LogicalTypeId::Binary => ConcreteDataType::binary_datatype(),
             LogicalTypeId::Date => ConcreteDataType::date_datatype(),
             LogicalTypeId::DateTime => ConcreteDataType::datetime_datatype(),
-            LogicalTypeId::Timestamp(u) => ConcreteDataType::timestamp_datatype(*u),
+            LogicalTypeId::Timestamp => ConcreteDataType::timestamp_millis_datatype(), // to timestamp type with default time unit
             LogicalTypeId::List => {
                 ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
             }

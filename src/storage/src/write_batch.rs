@@ -805,7 +805,7 @@ mod tests {
     use std::iter;
     use std::sync::Arc;
 
-    use common_time::timestamp::{TimeUnit, Timestamp};
+    use common_time::timestamp::TimeUnit;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::vectors::{BooleanVector, Int32Vector, Int64Vector, UInt64Vector};
 
@@ -1010,14 +1010,7 @@ mod tests {
     #[test]
     pub fn test_write_batch_time_range() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3, 4, 5, 6]));
-        let tsv = Arc::new(TimestampVector::from_vec(vec![
-            Timestamp::from(-21),
-            Timestamp::from(-20),
-            Timestamp::from(-1),
-            Timestamp::from(0),
-            Timestamp::from(1),
-            Timestamp::from(20),
-        ] as Vec<Timestamp>));
+        let tsv = Arc::new(TimestampVector::from_vec(vec![-21, -20, -1, 0, 1, 20]));
         let boolv = Arc::new(BooleanVector::from(vec![
             true, false, true, false, false, false,
         ]));
