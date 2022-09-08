@@ -109,8 +109,6 @@ impl ScriptManager {
 
         let record = &records[0].df_recordbatch;
 
-        println!("{:?}", record);
-
         let script_column = record
             .column(0)
             .as_any()
