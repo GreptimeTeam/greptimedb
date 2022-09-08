@@ -89,6 +89,11 @@ class vector(np.ndarray):
     def filter(self, lst_bool):
         return self[lst_bool]
 
+def last(lst):
+    return lst[-1]
+
+def first(lst):
+    return lst[0]
 
 def prev(lst):
     ret = np.zeros(len(lst))
@@ -96,35 +101,22 @@ def prev(lst):
     ret[0] = nan
     return ret
 
+def next(lst):
+    ret = np.zeros(len(lst))
+    ret[:-1] = lst[1:]
+    ret[-1] = nan
+    return ret
 
-def query(sql: str):
-    pass
-
-
-def interval(arr: list, duration: int, fill, step: None | int = None, explicitOffset=False):
+def interval(ts: vector, arr: vector, duration: int, func):
     """
     Note that this is a mock function with same functionailty to the actual Python Coprocessor
     `arr` is a vector of integral or temporal type.
-
-    `duration` is the length of sliding window
-
-    `step` being the length when sliding window take a step
-
-    `fill` indicate how to fill missing value:
-    - "prev": use previous
-    - "post": next
-    - "linear": linear interpolation, if not possible to interpolate certain types, fallback to prev
-    - "null": use null
-    - "none": do not interpolate
     """
-    if step is None:
-        step = duration
-
-    tot_len = int(np.ceil(len(arr) // step))
-    slices = np.zeros((tot_len, int(duration)))
-    for idx, start in enumerate(range(0, len(arr), step)):
-        slices[idx] = arr[start:(start + duration)]
-    return slices
+    start = np.min(ts)
+    end = np.max(ts)
+    masks = [(ts >= i) & (ts <= (i+duration)) for i in range(start, end, duration)]
+    lst_res = [func(arr[mask]) for mask in masks]
+    return lst_res
 
 
 def factor(unit: str) -> int:
