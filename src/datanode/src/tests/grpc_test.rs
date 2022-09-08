@@ -9,6 +9,7 @@ use api::v1::{
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
+use common_grpc::column::{F64_INDEX, I64_INDEX, STRING_INDEX};
 use servers::grpc::GrpcServer;
 use servers::server::Server;
 
@@ -46,6 +47,7 @@ async fn test_insert_and_select() {
                 .collect(),
             ..Default::default()
         }),
+        value_index: Some(STRING_INDEX),
         ..Default::default()
     };
     let expected_cpu_col = Column {
@@ -54,6 +56,7 @@ async fn test_insert_and_select() {
             f64_values: vec![0.31, 0.41, 0.2],
             ..Default::default()
         }),
+        value_index: Some(F64_INDEX),
         null_mask: vec![2],
         ..Default::default()
     };
@@ -63,6 +66,7 @@ async fn test_insert_and_select() {
             f64_values: vec![0.1, 0.2, 0.3],
             ..Default::default()
         }),
+        value_index: Some(F64_INDEX),
         null_mask: vec![4],
         ..Default::default()
     };
@@ -72,6 +76,7 @@ async fn test_insert_and_select() {
             i64_values: vec![100, 101, 102, 103],
             ..Default::default()
         }),
+        value_index: Some(I64_INDEX),
         ..Default::default()
     };
 

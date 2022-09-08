@@ -31,4 +31,10 @@ pub enum Error {
         source: DecodeError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Unsupported datatype: {}", datatype))]
+    UnsupportedDataType {
+        datatype: String,
+        backtrace: Backtrace,
+    },
 }

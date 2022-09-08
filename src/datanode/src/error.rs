@@ -186,6 +186,12 @@ pub enum Error {
         source: common_grpc::Error,
     },
 
+    #[snafu(display("Failed to get value index, source: {}", source))]
+    IntoValueIndex {
+        #[snafu(backtrace)]
+        source: common_grpc::Error,
+    },
+
     #[snafu(display("Invalid ColumnDef in protobuf msg: {}", msg))]
     InvalidColumnDef { msg: String, backtrace: Backtrace },
 }
@@ -225,6 +231,7 @@ impl ErrorExt for Error {
             | Error::InsertSystemCatalog { .. }
             | Error::Conversion { .. }
             | Error::IntoPhysicalPlan { .. }
+            | Error::IntoValueIndex { .. }
             | Error::UnsupportedExpr { .. } => StatusCode::Internal,
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),

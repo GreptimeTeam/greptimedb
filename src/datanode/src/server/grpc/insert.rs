@@ -312,6 +312,7 @@ mod tests {
             semantic_type: SEMANTIC_TAG,
             values: Some(host_vals),
             null_mask: vec![0],
+            ..Default::default()
         };
 
         let cpu_vals = column::Values {
@@ -323,6 +324,7 @@ mod tests {
             semantic_type: SEMANTIC_FEILD,
             values: Some(cpu_vals),
             null_mask: vec![2],
+            ..Default::default()
         };
 
         let mem_vals = column::Values {
@@ -334,6 +336,7 @@ mod tests {
             semantic_type: SEMANTIC_FEILD,
             values: Some(mem_vals),
             null_mask: vec![1],
+            ..Default::default()
         };
 
         let ts_vals = column::Values {
@@ -345,6 +348,7 @@ mod tests {
             semantic_type: SEMANTIC_TS,
             values: Some(ts_vals),
             null_mask: vec![0],
+            ..Default::default()
         };
 
         let insert_batch = InsertBatch {
