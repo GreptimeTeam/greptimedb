@@ -106,15 +106,9 @@ mod tests {
             ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
             v.data_type()
         );
-        assert_eq!(
-            Value::Timestamp(Timestamp::new(42, TimeUnit::Millisecond)),
-            v.get(0)
-        );
+        assert_eq!(Value::Timestamp(Timestamp::from_millis(42)), v.get(0));
         assert_eq!(Value::Null, v.get(1));
         // Push a timestamp with different unit will convert the value to value with time unit millisecond.
-        assert_eq!(
-            Value::Timestamp(Timestamp::new(96_000, TimeUnit::Millisecond)),
-            v.get(2)
-        );
+        assert_eq!(Value::Timestamp(Timestamp::from_millis(96_000)), v.get(2));
     }
 }

@@ -626,7 +626,7 @@ mod tests {
 
         assert_eq!(
             ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
-            Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)).data_type()
+            Value::Timestamp(Timestamp::from_millis(1)).data_type()
         );
     }
 
@@ -721,7 +721,7 @@ mod tests {
 
         assert_eq!(
             serde_json::Value::Number(1.into()),
-            to_json(Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)))
+            to_json(Value::Timestamp(Timestamp::from_millis(1)))
         );
 
         let json_value: serde_json::Value =
@@ -779,7 +779,7 @@ mod tests {
         check_as_value_ref!(Int64, -12);
         check_as_value_ref!(Float32, OrderedF32::from(16.0));
         check_as_value_ref!(Float64, OrderedF64::from(16.0));
-        check_as_value_ref!(Timestamp, Timestamp::new(1, TimeUnit::Millisecond));
+        check_as_value_ref!(Timestamp, Timestamp::from_millis(1));
 
         assert_eq!(
             ValueRef::String("hello"),

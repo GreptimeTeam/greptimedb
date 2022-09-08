@@ -172,10 +172,7 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
     // Timestamp in key part is intentionally left to 0
     columns_values.insert(
         "timestamp".to_string(),
-        Arc::new(TimestampVector::from_slice(&[Timestamp::new(
-            0,
-            TimeUnit::Millisecond,
-        )])) as _,
+        Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(0)])) as _,
     );
 
     columns_values.insert(

@@ -2,6 +2,7 @@ use core::default::Default;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
@@ -13,6 +14,13 @@ pub struct Timestamp {
 impl Timestamp {
     pub fn new(value: i64, unit: TimeUnit) -> Self {
         Self { unit, value }
+    }
+
+    pub fn from_millis(value: i64) -> Self {
+        Self {
+            value,
+            unit: TimeUnit::Millisecond,
+        }
     }
 
     pub fn unit(&self) -> TimeUnit {

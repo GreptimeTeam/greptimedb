@@ -110,7 +110,7 @@ impl Vector for TimestampVector {
     fn get(&self, index: usize) -> Value {
         match self.array.get(index) {
             Value::Null => Value::Null,
-            Value::Int64(v) => Value::Timestamp(Timestamp::new(v, TimeUnit::Millisecond)),
+            Value::Int64(v) => Value::Timestamp(Timestamp::from_millis(v)),
             _ => {
                 unreachable!()
             }
@@ -123,7 +123,7 @@ impl Vector for TimestampVector {
 
     fn get_ref(&self, index: usize) -> ValueRef {
         match self.array.get(index) {
-            Value::Int64(v) => ValueRef::Timestamp(Timestamp::new(v, TimeUnit::Millisecond)),
+            Value::Int64(v) => ValueRef::Timestamp(Timestamp::from_millis(v)),
             Value::Null => ValueRef::Null,
             _ => unreachable!(),
         }
@@ -150,9 +150,7 @@ impl ScalarVector for TimestampVector {
     type Builder = TimestampVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        self.array
-            .get_data(idx)
-            .map(|v| Timestamp::new(v, TimeUnit::Millisecond))
+        self.array.get_data(idx).map(Timestamp::from_millis)
     }
 
     fn iter_data(&self) -> Self::Iter<'_> {
@@ -170,9 +168,7 @@ impl<'a> Iterator for TimestampDataIter<'a> {
     type Item = Option<Timestamp>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next()
-            .map(|v| v.map(|v| Timestamp::new(v, TimeUnit::Millisecond)))
+        self.iter.next().map(|v| v.map(Timestamp::from_millis))
     }
 }
 

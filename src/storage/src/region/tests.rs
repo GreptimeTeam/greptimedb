@@ -124,7 +124,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
 fn new_put_data(data: &[(Timestamp, Option<i64>)]) -> PutData {
     let mut put_data = PutData::with_num_columns(2);
 
-    let timestamps = TimestampVector::from_vecs(data.iter().map(|v| v.0).collect());
+    let timestamps = TimestampVector::from_vec(data.iter().map(|v| v.0).collect());
     let values = Int64Vector::from_iter(data.iter().map(|kv| kv.1));
 
     put_data

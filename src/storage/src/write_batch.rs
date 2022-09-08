@@ -866,11 +866,7 @@ mod tests {
     fn test_write_batch_put() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true]));
-        let tsv = Arc::new(TimestampVector::from_vecs(vec![
-            0.into(),
-            0.into(),
-            0.into(),
-        ]));
+        let tsv = Arc::new(TimestampVector::from_vec(vec![0, 0, 0]));
 
         let mut put_data = PutData::new();
         put_data.add_key_column("k1", intv.clone()).unwrap();
@@ -974,11 +970,7 @@ mod tests {
     #[test]
     fn test_put_unknown_column() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-        let tsv = Arc::new(TimestampVector::from_vecs(vec![
-            0.into(),
-            0.into(),
-            0.into(),
-        ]));
+        let tsv = Arc::new(TimestampVector::from_vec(vec![0, 0, 0]));
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true]));
 
         let mut put_data = PutData::new();
@@ -1018,7 +1010,7 @@ mod tests {
     #[test]
     pub fn test_write_batch_time_range() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3, 4, 5, 6]));
-        let tsv = Arc::new(TimestampVector::from_vecs(vec![
+        let tsv = Arc::new(TimestampVector::from_vec(vec![
             Timestamp::from(-21),
             Timestamp::from(-20),
             Timestamp::from(-1),
@@ -1054,11 +1046,7 @@ mod tests {
         for i in 0..10 {
             let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
             let boolv = Arc::new(BooleanVector::from(vec![Some(true), Some(false), None]));
-            let tsv = Arc::new(TimestampVector::from_vecs(vec![
-                i.into(),
-                i.into(),
-                i.into(),
-            ]));
+            let tsv = Arc::new(TimestampVector::from_vec(vec![i, i, i]));
 
             let mut put_data = PutData::new();
             put_data.add_key_column("k1", intv.clone()).unwrap();
@@ -1112,11 +1100,7 @@ mod tests {
         let mut batch = new_test_batch();
         for _ in 0..10 {
             let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-            let tsv = Arc::new(TimestampVector::from_vecs(vec![
-                0.into(),
-                0.into(),
-                0.into(),
-            ]));
+            let tsv = Arc::new(TimestampVector::from_vec(vec![0, 0, 0]));
 
             let mut put_data = PutData::new();
             put_data.add_key_column("k1", intv.clone()).unwrap();

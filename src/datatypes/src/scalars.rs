@@ -102,11 +102,11 @@ where
         builder.finish()
     }
 
-    fn from_vecs(values: Vec<Self::OwnedItem>) -> Self {
-        let it = values.iter();
+    fn from_vec<I: Into<Self::OwnedItem>>(values: Vec<I>) -> Self {
+        let it = values.into_iter();
         let mut builder = Self::Builder::with_capacity(get_iter_capacity(&it));
         for item in it {
-            builder.push(Some(item.as_scalar_ref()));
+            builder.push(Some(item.into().as_scalar_ref()));
         }
         builder.finish()
     }

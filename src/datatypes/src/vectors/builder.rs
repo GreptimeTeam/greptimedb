@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use common_time::date::Date;
 use common_time::datetime::DateTime;
-use common_time::timestamp::{TimeUnit, Timestamp};
+use common_time::timestamp::Timestamp;
 
 use crate::data_type::ConcreteDataType;
 use crate::scalars::ScalarVectorBuilder;
@@ -149,8 +149,9 @@ impl VectorBuilder {
             (VectorBuilder::DateTime(b), Value::Int64(v)) => b.push(Some(DateTime::new(*v))),
             (VectorBuilder::Timestamp(b), Value::Timestamp(t)) => b.push(Some(*t)),
             (VectorBuilder::Timestamp(b), Value::Int64(v)) => {
-                b.push(Some(Timestamp::new(*v, TimeUnit::Millisecond)))
+                b.push(Some(Timestamp::from_millis(*v)))
             }
+
             _ => panic!(
                 "Value {:?} does not match builder type {:?}",
                 value,

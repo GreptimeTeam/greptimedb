@@ -461,7 +461,7 @@ mod tests {
         let hosts = StringVector::from(vec!["host1", "host2"]);
         let cpus = Float64Vector::from_vec(vec![55.5, 66.6]);
         let memories = Float64Vector::from_vec(vec![1024f64, 4096f64]);
-        let tss = TimestampVector::from_vecs(vec![1.into(), 2.into()]);
+        let tss = TimestampVector::from_vec(vec![1, 2]);
 
         columns_values.insert("host".to_string(), Arc::new(hosts.clone()));
         columns_values.insert("cpu".to_string(), Arc::new(cpus.clone()));
