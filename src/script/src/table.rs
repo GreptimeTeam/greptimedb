@@ -2,69 +2,54 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::consts::{INFORMATION_SCHEMA_NAME, SCRIPTS_TABLE_ID, SYSTEM_CATALOG_NAME};
+use catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, SCRIPTS_TABLE_ID};
+use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_telemetry::logging;
 use common_time::util;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
 use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
-use snafu::ResultExt;
-use table::engine::{EngineContext, TableEngineRef};
-use table::requests::{CreateTableRequest, InsertRequest, OpenTableRequest};
-use table::TableRef;
+use snafu::{OptionExt, ResultExt};
+use table::requests::{CreateTableRequest, InsertRequest};
 
-use crate::error::{CreateScriptsTableSnafu, InsertScriptSnafu, OpenScriptsTableSnafu, Result};
+use crate::error::{
+    FindScriptsTableSnafu, InsertScriptSnafu, RegisterScriptsTableSnafu, Result,
+    ScriptsTableNotFoundSnafu,
+};
 
 pub const SCRIPTS_TABLE_NAME: &str = "scripts";
 
 pub struct ScriptsTable {
-    _schema: SchemaRef,
-    table: TableRef,
+    catalog_manager: CatalogManagerRef,
 }
 
 impl ScriptsTable {
-    pub async fn new(engine: TableEngineRef) -> Result<Self> {
-        let request = OpenTableRequest {
-            catalog_name: SYSTEM_CATALOG_NAME.to_string(),
-            schema_name: INFORMATION_SCHEMA_NAME.to_string(),
-            table_name: SCRIPTS_TABLE_NAME.to_string(),
-            table_id: SCRIPTS_TABLE_ID,
-        };
+    pub async fn new(catalog_manager: CatalogManagerRef) -> Result<Self> {
         let schema = Arc::new(build_scripts_schema());
-        let ctx = EngineContext::default();
+        // TODO(dennis): we put scripts table into default catalog and schema.
+        // maybe put into system catalog?
+        let request = CreateTableRequest {
+            id: SCRIPTS_TABLE_ID,
+            catalog_name: Some(DEFAULT_CATALOG_NAME.to_string()),
+            schema_name: Some(DEFAULT_SCHEMA_NAME.to_string()),
+            table_name: SCRIPTS_TABLE_NAME.to_string(),
+            desc: Some("Scripts table".to_string()),
+            schema,
+            // name and timestamp as primary key
+            primary_key_indices: vec![0, 3],
+            create_if_not_exists: true,
+            table_options: HashMap::default(),
+        };
 
-        if let Some(table) = engine
-            .open_table(&ctx, request)
+        catalog_manager
+            .register_system_table(RegisterSystemTableRequest {
+                create_table_request: request,
+                open_hook: None,
+            })
             .await
-            .context(OpenScriptsTableSnafu)?
-        {
-            Ok(Self {
-                table,
-                _schema: schema,
-            })
-        } else {
-            let request = CreateTableRequest {
-                id: SCRIPTS_TABLE_ID,
-                catalog_name: Some(SYSTEM_CATALOG_NAME.to_string()),
-                schema_name: Some(INFORMATION_SCHEMA_NAME.to_string()),
-                table_name: SCRIPTS_TABLE_NAME.to_string(),
-                desc: Some("Scripts table".to_string()),
-                schema: schema.clone(),
-                // name and timestamp as primary key
-                primary_key_indices: vec![0, 3],
-                create_if_not_exists: true,
-                table_options: HashMap::default(),
-            };
+            .context(RegisterScriptsTableSnafu)?;
 
-            let table = engine
-                .create_table(&ctx, request)
-                .await
-                .context(CreateScriptsTableSnafu)?;
-            Ok(Self {
-                table,
-                _schema: schema,
-            })
-        }
+        Ok(Self { catalog_manager })
     }
 
     pub async fn insert(&self, name: &str, script: &str) -> Result<()> {
@@ -96,11 +81,20 @@ impl ScriptsTable {
             Arc::new(Int64Vector::from_slice(&[util::current_time_millis()])) as _,
         );
 
-        let _ = self
-            .table
+        let table = self
+            .catalog_manager
+            .table(
+                Some(DEFAULT_CATALOG_NAME),
+                Some(DEFAULT_SCHEMA_NAME),
+                SCRIPTS_TABLE_NAME,
+            )
+            .context(FindScriptsTableSnafu)?
+            .context(ScriptsTableNotFoundSnafu)?;
+
+        let _ = table
             .insert(InsertRequest {
                 table_name: SCRIPTS_TABLE_NAME.to_string(),
-                columns_values: HashMap::default(),
+                columns_values,
             })
             .await
             .context(InsertScriptSnafu)?;

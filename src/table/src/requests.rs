@@ -14,7 +14,7 @@ pub struct InsertRequest {
 }
 
 /// Create table request
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CreateTableRequest {
     pub id: TableId,
     pub catalog_name: Option<String>,

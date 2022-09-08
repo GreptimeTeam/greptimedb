@@ -8,16 +8,20 @@ use snafu::{Backtrace, ErrorCompat};
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Failed to open scripts table, source: {}", source))]
-    OpenScriptsTable {
+    FindScriptsTable {
         #[snafu(backtrace)]
-        source: table::error::Error,
+        source: catalog::error::Error,
     },
 
-    #[snafu(display("Failed to create scripts table, source: {}", source))]
-    CreateScriptsTable {
+    #[snafu(display("Failed to open scripts table, source: {}", source))]
+    RegisterScriptsTable {
         #[snafu(backtrace)]
-        source: table::error::Error,
+        source: catalog::error::Error,
     },
+
+    #[snafu(display("Scripts table not found"))]
+    ScriptsTableNotFound { backtrace: Backtrace },
+
     #[snafu(display("Failed to insert script to scripts table, source: {}", source))]
     InsertScript {
         #[snafu(backtrace)]
@@ -45,6 +49,15 @@ pub enum Error {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
+
+    #[snafu(display("Failed to collect record batch, source: {}", source))]
+    CollectRecords {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to cast type, msg: {}", msg))]
+    CastType { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -53,13 +66,17 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            OpenScriptsTable { .. } | CreateScriptsTable { .. } => StatusCode::Unexpected,
+            CastType { .. } | ScriptsTableNotFound { .. } => StatusCode::Unexpected,
+
+            RegisterScriptsTable { source } | FindScriptsTable { source } => source.status_code(),
 
             InsertScript { source } => source.status_code(),
 
             CompilePython { source } | ExecutePython { source, .. } => source.status_code(),
 
             FindScript { source, .. } => source.status_code(),
+
+            CollectRecords { source } => source.status_code(),
 
             ScriptNotFound { .. } => StatusCode::InvalidArguments,
         }

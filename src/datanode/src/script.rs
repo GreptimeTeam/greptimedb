@@ -1,6 +1,6 @@
+use catalog::CatalogManagerRef;
 use query::Output;
 use query::QueryEngineRef;
-use table::engine::TableEngineRef;
 
 use crate::error::Result;
 
@@ -12,7 +12,7 @@ mod dummy {
 
     impl ScriptExecutor {
         pub async fn new(
-            _table_engine: TableEngineRef,
+            _catalog_manager: CatalogManagerRef,
             _query_engine: QueryEngineRef,
         ) -> Result<Self> {
             Ok(Self {})
@@ -47,11 +47,11 @@ mod python {
 
     impl ScriptExecutor {
         pub async fn new(
-            table_engine: TableEngineRef,
+            catalog_manager: CatalogManagerRef,
             query_engine: QueryEngineRef,
         ) -> Result<Self> {
             Ok(Self {
-                script_manager: ScriptManager::new(table_engine, query_engine)
+                script_manager: ScriptManager::new(catalog_manager, query_engine)
                     .await
                     .context(crate::error::StartScriptManagerSnafu)?,
             })

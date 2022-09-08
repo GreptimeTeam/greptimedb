@@ -41,7 +41,7 @@ pub struct ScriptExecution {
     pub script: String,
 }
 
-/// Handler to execute scripts
+/// Handler to insert and compile script
 #[axum_macros::debug_handler]
 pub async fn scripts(
     Extension(query_handler): Extension<SqlQueryHandlerRef>,
@@ -53,13 +53,30 @@ pub async fn scripts(
         )));
     }
 
-    let json = match query_handler
+    let body = match query_handler
         .insert_script(&payload.name, &payload.script)
         .await
     {
         Ok(()) => JsonResponse::with_output(None),
-        Err(e) => JsonResponse::with_error(Some(format!("Insert script error:{}", e))),
+        Err(e) => JsonResponse::with_error(Some(format!("Insert script error: {}", e))),
     };
 
-    HttpResponse::Json(json)
+    HttpResponse::Json(body)
+}
+
+/// Handler to execute script
+#[axum_macros::debug_handler]
+pub async fn run_script(
+    Extension(query_handler): Extension<SqlQueryHandlerRef>,
+    Query(params): Query<HashMap<String, String>>,
+) -> HttpResponse {
+    let name = params.get("name");
+
+    if name.is_none() || name.unwrap().is_empty() {
+        return HttpResponse::Json(JsonResponse::with_error(Some("Invalid name".to_string())));
+    }
+
+    let output = query_handler.execute_script(name.unwrap()).await;
+
+    HttpResponse::Json(JsonResponse::from_output(output).await)
 }

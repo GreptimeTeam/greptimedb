@@ -21,6 +21,17 @@ pub enum Error {
         source: table::error::Error,
     },
 
+    #[snafu(display(
+        "Failed to create table, table info: {}, source: {}",
+        table_info,
+        source
+    ))]
+    CreateTable {
+        table_info: String,
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
     #[snafu(display("System catalog is not valid: {}", msg))]
     SystemCatalog { msg: String, backtrace: Backtrace },
 
@@ -89,6 +100,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
+
+    #[snafu(display("Illegal catalog manager state: {}", msg))]
+    IllegalManagerState { backtrace: Backtrace, msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -101,6 +115,7 @@ impl ErrorExt for Error {
             | Error::CreateSystemCatalog { .. }
             | Error::SchemaNotFound { .. }
             | Error::TableNotFound { .. }
+            | Error::IllegalManagerState { .. }
             | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
             Error::SystemCatalog { .. }
             | Error::SystemCatalogTypeMismatch { .. }
@@ -108,6 +123,7 @@ impl ErrorExt for Error {
             | Error::ValueDeserialize { .. }
             | Error::CatalogNotFound { .. }
             | Error::OpenTable { .. }
+            | Error::CreateTable { .. }
             | Error::ReadSystemCatalog { .. }
             | Error::InsertTableRecord { .. } => StatusCode::StorageUnavailable,
             Error::RegisterTable { .. } => StatusCode::Internal,

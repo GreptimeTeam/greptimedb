@@ -2,15 +2,17 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use catalog::CatalogManagerRef;
 use common_recordbatch::util;
+use common_telemetry::logging;
 use datatypes::arrow::array::Utf8Array;
 use query::{Output, QueryEngineRef};
 use snafu::{OptionExt, ResultExt};
-use table::engine::TableEngineRef;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use crate::error::{
-    CompilePythonSnafu, ExecutePythonSnafu, FindScriptSnafu, Result, ScriptNotFoundSnafu,
+    CastTypeSnafu, CollectRecordsSnafu, CompilePythonSnafu, ExecutePythonSnafu, FindScriptSnafu,
+    Result, ScriptNotFoundSnafu,
 };
 use crate::python::{PyEngine, PyScript};
 use crate::table::ScriptsTable;
@@ -23,17 +25,19 @@ pub struct ScriptManager {
 }
 
 impl ScriptManager {
-    pub async fn new(table_engine: TableEngineRef, query_engine: QueryEngineRef) -> Result<Self> {
+    pub async fn new(
+        catalog_manager: CatalogManagerRef,
+        query_engine: QueryEngineRef,
+    ) -> Result<Self> {
         Ok(Self {
             compiled: RwLock::new(HashMap::default()),
             py_engine: PyEngine::new(query_engine.clone()),
             query_engine,
-            table: ScriptsTable::new(table_engine).await?,
+            table: ScriptsTable::new(catalog_manager).await?,
         })
     }
 
-    pub async fn insert_and_compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
-        self.table.insert(name, script).await?;
+    pub async fn compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
         let script = Arc::new(
             self.py_engine
                 .compile(script, CompileContext::default())
@@ -44,7 +48,14 @@ impl ScriptManager {
         let mut compiled = self.compiled.write().unwrap();
         compiled.insert(name.to_string(), script.clone());
 
+        logging::info!("Compiled and cached script: {}", name);
+
         Ok(script)
+    }
+
+    pub async fn insert_and_compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
+        self.table.insert(name, script).await?;
+        self.compile(name, script).await
     }
 
     pub async fn execute(&self, name: &str) -> Result<Output> {
@@ -90,7 +101,7 @@ impl ScriptManager {
             Output::RecordBatch(stream) => stream,
             _ => unreachable!(),
         };
-        let records = util::collect(stream).await.unwrap();
+        let records = util::collect(stream).await.context(CollectRecordsSnafu)?;
 
         if records.is_empty() {
             return Ok(None);
@@ -98,17 +109,21 @@ impl ScriptManager {
         assert!(records.len() == 1);
         assert!(records[0].df_recordbatch.num_columns() == 1);
 
-        let script_column = records[0]
-            .df_recordbatch
+        let record = &records[0].df_recordbatch;
+        let script_column = record
             .column(0)
             .as_any()
             .downcast_ref::<Utf8Array<i32>>()
-            .unwrap();
+            .context(CastTypeSnafu {
+                msg: format!(
+                    "can't downcast {:?} array into utf8 array",
+                    record.column(0).data_type()
+                ),
+            })?;
+
         assert!(script_column.len() == 1);
         let script = script_column.value(0);
 
-        let script = self.insert_and_compile(name, script).await?;
-
-        Ok(Some(script))
+        Ok(Some(self.compile(name, script).await?))
     }
 }

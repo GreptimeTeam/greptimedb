@@ -13,14 +13,16 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
+use table::TableRef;
 
 use super::error::Result;
 use crate::consts::{
     INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
 };
 use crate::error::{
-    CatalogNotFoundSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, SchemaNotFoundSnafu,
-    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    CatalogNotFoundSnafu, CreateTableSnafu, IllegalManagerStateSnafu, OpenTableSnafu,
+    ReadSystemCatalogSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
+    SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
 use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
@@ -30,7 +32,8 @@ use crate::system::{
 use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
-    RegisterTableRequest, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, DEFAULT_CATALOG_NAME,
+    DEFAULT_SCHEMA_NAME,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -39,7 +42,8 @@ pub struct LocalCatalogManager {
     catalogs: Arc<MemoryCatalogList>,
     engine: TableEngineRef,
     next_table_id: AtomicU32,
-    lock: Mutex<()>,
+    lock: Mutex<bool>,
+    system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
 }
 
 impl LocalCatalogManager {
@@ -57,7 +61,8 @@ impl LocalCatalogManager {
             catalogs: memory_catalog_list,
             engine,
             next_table_id: AtomicU32::new(MIN_USER_TABLE_ID),
-            lock: Mutex::new(()),
+            lock: Mutex::new(false),
+            system_table_requests: Mutex::new(Vec::default()),
         })
     }
 
@@ -81,6 +86,54 @@ impl LocalCatalogManager {
         );
         self.next_table_id
             .store((max_table_id + 1).max(MIN_USER_TABLE_ID), Ordering::Relaxed);
+        *self.lock.lock().await = true;
+
+        // Processing system table hooks
+        let mut sys_table_requests = self.system_table_requests.lock().await;
+        for req in sys_table_requests.drain(..) {
+            let table = if let Some(table) = self.table(
+                req.create_table_request.catalog_name.as_deref(),
+                req.create_table_request.schema_name.as_deref(),
+                &req.create_table_request.table_name,
+            )? {
+                table
+            } else {
+                let create_req = req.create_table_request;
+                let table = self
+                    .engine
+                    .create_table(&EngineContext::default(), create_req.clone())
+                    .await
+                    .with_context(|_| CreateTableSnafu {
+                        table_info: format!(
+                            "{:?}.{:?}.{}, id: {}",
+                            &create_req.catalog_name,
+                            &create_req.schema_name,
+                            &create_req.table_name,
+                            create_req.id
+                        ),
+                    })?;
+                self.register_table(RegisterTableRequest {
+                    catalog: create_req.catalog_name.clone(),
+                    schema: create_req.schema_name.clone(),
+                    table_name: create_req.table_name.clone(),
+                    table_id: create_req.id,
+                    table: table.clone(),
+                })
+                .await?;
+
+                info!(
+                    "Created and registered system table: {}",
+                    create_req.table_name
+                );
+
+                table
+            };
+
+            if let Some(hook) = req.open_hook {
+                (hook)(table)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -267,7 +320,15 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
-        let _lock = self.lock.lock().await;
+        let started = self.lock.lock().await;
+
+        if !*started {
+            return IllegalManagerStateSnafu {
+                msg: "Catalog manager not started",
+            }
+            .fail();
+        }
+
         let catalog_name = request
             .catalog
             .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
@@ -305,5 +366,40 @@ impl CatalogManager for LocalCatalogManager {
 
         schema.register_table(request.table_name, request.table)?;
         Ok(1)
+    }
+
+    async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
+        if *self.lock.lock().await {
+            return IllegalManagerStateSnafu {
+                msg: "Catalog manager already started",
+            }
+            .fail();
+        }
+
+        let mut sys_table_requests = self.system_table_requests.lock().await;
+        sys_table_requests.push(request);
+
+        Ok(())
+    }
+
+    fn table(
+        &self,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table_name: &str,
+    ) -> Result<Option<TableRef>> {
+        let catalog_name = catalog.unwrap_or(DEFAULT_CATALOG_NAME);
+        let schema_name = schema.unwrap_or(DEFAULT_SCHEMA_NAME);
+
+        let catalog = self
+            .catalogs
+            .catalog(catalog_name)
+            .context(CatalogNotFoundSnafu { catalog_name })?;
+        let schema = catalog
+            .schema(schema_name)
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", catalog_name, schema_name),
+            })?;
+        Ok(schema.table(table_name))
     }
 }
