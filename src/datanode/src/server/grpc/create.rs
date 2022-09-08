@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use api::v1::{AdminResult, ColumnDataType, ColumnDef, CreateExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
-use common_time::timestamp::TimeUnit;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
@@ -112,7 +111,7 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         ColumnDataType::String => ConcreteDataType::string_datatype(),
         ColumnDataType::Date => ConcreteDataType::date_datatype(),
         ColumnDataType::Datetime => ConcreteDataType::datetime_datatype(),
-        ColumnDataType::Timestamp => ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+        ColumnDataType::Timestamp => ConcreteDataType::timestamp_millis_datatype(),
     };
     Ok(ColumnSchema {
         name: column_def.name.clone(),

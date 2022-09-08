@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use common_base::BitVec;
 use common_error::prelude::*;
-use common_time::timestamp::TimeUnit;
 use datatypes::schema;
 use datatypes::{
     data_type::ConcreteDataType,
@@ -162,7 +161,7 @@ impl From<DataType> for ConcreteDataType {
             DataType::String => ConcreteDataType::string_datatype(),
             DataType::Binary => ConcreteDataType::binary_datatype(),
             DataType::Null => ConcreteDataType::null_datatype(),
-            DataType::Timestamp => ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            DataType::Timestamp => ConcreteDataType::timestamp_millis_datatype(),
         }
     }
 }

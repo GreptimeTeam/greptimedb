@@ -158,7 +158,6 @@ impl SqlHandler {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use common_time::timestamp::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
     use sql::ast::Ident;
     use sql::ast::{DataType as SqlDataType, ObjectName};
@@ -332,7 +331,7 @@ mod tests {
         );
         check_type(
             SqlDataType::Timestamp,
-            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            ConcreteDataType::timestamp_millis_datatype(),
         );
     }
 }

@@ -504,8 +504,6 @@ impl<'a> PartialOrd for ListValueRef<'a> {
 
 #[cfg(test)]
 mod tests {
-    use common_time::timestamp::TimeUnit;
-
     use super::*;
 
     #[test]
@@ -625,7 +623,7 @@ mod tests {
         );
 
         assert_eq!(
-            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            ConcreteDataType::timestamp_millis_datatype(),
             Value::Timestamp(Timestamp::from_millis(1)).data_type()
         );
     }

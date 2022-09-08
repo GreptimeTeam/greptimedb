@@ -1,7 +1,6 @@
 //! sql handler
 
 use catalog::CatalogManagerRef;
-use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::types::DateTimeType;
@@ -122,7 +121,7 @@ fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Concre
             }
             .fail(),
         },
-        SqlDataType::Timestamp => Ok(ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond)),
+        SqlDataType::Timestamp => Ok(ConcreteDataType::timestamp_millis_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }

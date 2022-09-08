@@ -2,7 +2,6 @@ use core::default::Default;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
-use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]

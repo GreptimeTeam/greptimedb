@@ -182,6 +182,10 @@ impl ConcreteDataType {
         ConcreteDataType::Timestamp(TimestampType::new(unit))
     }
 
+    pub fn timestamp_millis_datatype() -> Self {
+        ConcreteDataType::Timestamp(TimestampType::new(TimeUnit::Millisecond))
+    }
+
     /// Converts from arrow timestamp unit to
     // TODO(hl): maybe impl From<ArrowTimestamp> for our timestamp ?
     pub fn from_arrow_time_unit(t: &arrow::datatypes::TimeUnit) -> Self {
@@ -320,7 +324,7 @@ mod tests {
     #[test]
     pub fn test_from_arrow_timestamp() {
         assert_eq!(
-            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            ConcreteDataType::timestamp_millis_datatype(),
             ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Millisecond)
         );
         assert_eq!(

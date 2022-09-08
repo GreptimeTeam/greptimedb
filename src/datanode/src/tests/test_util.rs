@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_time::timestamp::TimeUnit;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use snafu::ResultExt;
@@ -49,11 +48,7 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new(
-            "ts",
-            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
-            true,
-        ),
+        ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true),
     ];
 
     let table_name = "demo";

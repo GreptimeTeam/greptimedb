@@ -102,10 +102,7 @@ mod tests {
             .push_value_ref(ValueRef::Timestamp(Timestamp::new(96, TimeUnit::Second)))
             .unwrap();
         let v = builder.to_vector();
-        assert_eq!(
-            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
-            v.data_type()
-        );
+        assert_eq!(ConcreteDataType::timestamp_millis_datatype(), v.data_type());
         assert_eq!(Value::Timestamp(Timestamp::from_millis(42)), v.get(0));
         assert_eq!(Value::Null, v.get(1));
         // Push a timestamp with different unit will convert the value to value with time unit millisecond.

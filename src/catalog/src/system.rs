@@ -5,7 +5,7 @@ use std::sync::Arc;
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
-use common_time::timestamp::{TimeUnit, Timestamp};
+use common_time::timestamp::Timestamp;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
@@ -130,7 +130,7 @@ fn build_system_catalog_schema() -> Schema {
         ),
         ColumnSchema::new(
             "timestamp".to_string(),
-            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            ConcreteDataType::timestamp_millis_datatype(),
             false,
         ),
         ColumnSchema::new(
