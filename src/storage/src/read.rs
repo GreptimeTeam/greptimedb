@@ -121,8 +121,12 @@ impl BatchBuilder {
     /// Extend the builder by slice of batch.
     ///
     /// # Panics
-    /// Panics if `offset + length > batch.num_rows()`.
+    /// Panics if
+    /// - `offset + length > batch.num_rows()`.
+    /// - Number of columns in `batch` is not equal to the builder's.
     pub fn extend_slice_of(&mut self, batch: &Batch, offset: usize, length: usize) -> Result<()> {
+        assert_eq!(self.builders.len(), batch.num_columns());
+
         for (builder, column) in self.builders.iter_mut().zip(batch.columns()) {
             builder
                 .extend_slice_of(&**column, offset, length)
@@ -135,8 +139,12 @@ impl BatchBuilder {
     /// Push `i-th` row of batch into the builder.
     ///
     /// # Panics
-    /// Panics if `i` is out of bound.
+    /// Panics if
+    /// - `i` is out of bound.
+    /// - Number of columns in `batch` is not equal to the builder's.
     pub fn push_row_of(&mut self, batch: &Batch, i: usize) -> Result<()> {
+        assert_eq!(self.builders.len(), batch.num_columns());
+
         for (builder, column) in self.builders.iter_mut().zip(batch.columns()) {
             let value = column.get_ref(i);
             builder

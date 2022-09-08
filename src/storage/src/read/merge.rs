@@ -518,12 +518,12 @@ impl MergeReader {
     /// Fetch next batch from this node and reset its cursor, then push the node back to a
     /// proper heap.
     async fn reheap(&mut self, mut node: Node) -> Result<()> {
-        let fetched = node.maybe_fetch_next_batch().await?;
+        let fetched_new_batch = node.maybe_fetch_next_batch().await?;
 
         if node.is_eof() {
             // The merge window would be updated, need to refill the hot heap.
             self.refill_hot();
-        } else if fetched {
+        } else if fetched_new_batch {
             // A new batch has been fetched from the node, thus the key range of this node
             // has been changed. Try to find a proper heap for this node.
             let node_is_cold = if let Some(hottest) = self.hot.peek() {
