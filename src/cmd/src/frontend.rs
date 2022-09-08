@@ -75,3 +75,26 @@ impl TryFrom<StartCommand> for FrontendOptions {
         Ok(opts)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_try_from_start_command() {
+        let command = StartCommand {
+            http_addr: Some("127.0.0.1:1234".to_string()),
+            grpc_addr: None,
+            mysql_addr: Some("127.0.0.1:5678".to_string()),
+            config_file: None,
+        };
+
+        let opts: FrontendOptions = command.try_into().unwrap();
+        assert_eq!(opts.http_addr, Some("127.0.0.1:1234".to_string()));
+        assert_eq!(opts.mysql_addr, Some("127.0.0.1:5678".to_string()));
+
+        let default_opts = FrontendOptions::default();
+        assert_eq!(opts.grpc_addr, default_opts.grpc_addr);
+        assert_eq!(opts.mysql_runtime_size, default_opts.mysql_runtime_size);
+    }
+}
