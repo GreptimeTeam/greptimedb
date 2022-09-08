@@ -50,6 +50,6 @@ message AlterExpr {
   }
 }
 
-message AddColumn{
+message AddColumn {
   ColumnDef column_def = 1;
 }
