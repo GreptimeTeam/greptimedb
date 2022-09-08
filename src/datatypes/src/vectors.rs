@@ -13,6 +13,15 @@ pub mod primitive;
 mod string;
 mod timestamp;
 
+pub mod all {
+    //! All vector types.
+    pub use crate::vectors::{
+        BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
+        Int16Vector, Int32Vector, Int64Vector, Int8Vector, ListVector, NullVector, StringVector,
+        UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, TimestampVector,
+    };
+}
+
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;

@@ -2,6 +2,7 @@
 #![feature(assert_matches)]
 
 pub mod arrow_array;
+mod compute;
 pub mod data_type;
 pub mod deserialize;
 pub mod error;
