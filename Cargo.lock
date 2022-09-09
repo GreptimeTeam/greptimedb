@@ -846,6 +846,7 @@ dependencies = [
  "datatypes",
  "quote",
  "snafu",
+ "static_assertions",
  "syn",
 ]
 
