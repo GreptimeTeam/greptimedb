@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
-use datatypes::vectors::{Int64Vector, UInt64Vector, UInt8Vector};
+use datatypes::vectors::{Int64Vector, TimestampVector, UInt64Vector, UInt8Vector};
 
 use crate::error::Result;
 use crate::memtable::{BatchIterator, BoxedBatchIterator, RowOrdering};
@@ -30,7 +30,7 @@ pub fn new_projected_schema() -> ProjectedSchemaRef {
 
 /// Build a new batch, with 0 sequence and op_type.
 fn new_kv_batch(key_values: &[(i64, Option<i64>)]) -> Batch {
-    let key = Arc::new(Int64Vector::from_values(key_values.iter().map(|v| v.0)));
+    let key = Arc::new(TimestampVector::from_values(key_values.iter().map(|v| v.0)));
     let value = Arc::new(Int64Vector::from_iter(key_values.iter().map(|v| v.1)));
     let sequences = Arc::new(UInt64Vector::from_vec(vec![0; key_values.len()]));
     let op_types = Arc::new(UInt8Vector::from_vec(vec![0; key_values.len()]));
@@ -43,7 +43,7 @@ fn check_kv_batch(batches: &[Batch], expect: &[&[(i64, Option<i64>)]]) {
         let key = batch
             .column(0)
             .as_any()
-            .downcast_ref::<Int64Vector>()
+            .downcast_ref::<TimestampVector>()
             .unwrap();
         let value = batch
             .column(1)
@@ -52,7 +52,7 @@ fn check_kv_batch(batches: &[Batch], expect: &[&[(i64, Option<i64>)]]) {
             .unwrap();
 
         for (i, (k, v)) in key_values.iter().enumerate() {
-            assert_eq!(key.get_data(i).unwrap(), *k,);
+            assert_eq!(key.get_data(i).unwrap().value(), *k);
             assert_eq!(value.get_data(i), *v,);
         }
     }
@@ -65,7 +65,7 @@ pub async fn collect_kv_batch(reader: &mut dyn BatchReader) -> Vec<(i64, Option<
         let key = batch
             .column(0)
             .as_any()
-            .downcast_ref::<Int64Vector>()
+            .downcast_ref::<TimestampVector>()
             .unwrap();
         let value = batch
             .column(1)
@@ -74,7 +74,7 @@ pub async fn collect_kv_batch(reader: &mut dyn BatchReader) -> Vec<(i64, Option<
             .unwrap();
 
         for (k, v) in key.iter_data().zip(value.iter_data()) {
-            result.push((k.unwrap(), v));
+            result.push((k.unwrap().value(), v));
         }
     }
 

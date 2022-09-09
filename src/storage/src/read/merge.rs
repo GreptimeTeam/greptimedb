@@ -591,7 +591,7 @@ impl MergeReader {
 #[cfg(test)]
 mod tests {
     use datatypes::prelude::ScalarVector;
-    use datatypes::vectors::Int64Vector;
+    use datatypes::vectors::{Int64Vector, TimestampVector};
 
     use super::*;
     use crate::test_util::read_util;
@@ -676,7 +676,7 @@ mod tests {
             let key = batch
                 .column(0)
                 .as_any()
-                .downcast_ref::<Int64Vector>()
+                .downcast_ref::<TimestampVector>()
                 .unwrap();
             let value = batch
                 .column(1)
@@ -687,7 +687,7 @@ mod tests {
             let batch: Vec<_> = key
                 .iter_data()
                 .zip(value.iter_data())
-                .map(|(k, v)| (k.unwrap(), v))
+                .map(|(k, v)| (k.unwrap().value(), v))
                 .collect();
             result.push(batch);
         }
