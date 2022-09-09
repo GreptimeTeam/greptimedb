@@ -20,7 +20,8 @@ pub async fn to_object_result(result: Result<Output>) -> ObjectResult {
             .status_code(StatusCode::Success as u32)
             .mutate_result(rows as u32, 0)
             .build(),
-        Ok(Output::RecordBatch(stream)) => record_batchs(stream).await,
+        Ok(Output::Stream(stream)) => record_batchs(stream).await,
+        Ok(Output::RecordBatches(recordbatches)) => build_result(recordbatches.to_vec()).await,
         Err(err) => ObjectResultBuilder::new()
             .status_code(err.status_code() as u32)
             .err_msg(err.to_string())
@@ -29,15 +30,18 @@ pub async fn to_object_result(result: Result<Output>) -> ObjectResult {
 }
 
 async fn record_batchs(stream: SendableRecordBatchStream) -> ObjectResult {
-    let builder = ObjectResultBuilder::new();
     match util::collect(stream).await {
-        Ok(record_batches) => match try_convert(record_batches) {
-            Ok(select_result) => builder
-                .status_code(StatusCode::Success as u32)
-                .select_result(select_result)
-                .build(),
-            Err(err) => build_err_result(&err),
-        },
+        Ok(recordbatches) => build_result(recordbatches).await,
+        Err(err) => build_err_result(&err),
+    }
+}
+
+async fn build_result(recordbatches: Vec<RecordBatch>) -> ObjectResult {
+    match try_convert(recordbatches) {
+        Ok(select_result) => ObjectResultBuilder::new()
+            .status_code(StatusCode::Success as u32)
+            .select_result(select_result)
+            .build(),
         Err(err) => build_err_result(&err),
     }
 }

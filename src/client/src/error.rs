@@ -64,6 +64,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Failed to create RecordBatches, source: {}", source))]
+    CreateRecordBatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -82,6 +88,7 @@ impl ErrorExt for Error {
             | Error::InvalidColumnProto { .. }
             | Error::ColumnDataType { .. } => StatusCode::Internal,
             Error::CreateVector { source } => source.status_code(),
+            Error::CreateRecordBatches { source } => source.status_code(),
         }
     }
 

@@ -88,9 +88,7 @@ impl Script for PyScript {
             let res = self.query_engine.execute(&plan).await?;
             let copr = self.copr.clone();
             match res {
-                query::Output::RecordBatch(stream) => {
-                    Ok(Output::RecordBatch(Box::pin(CoprStream { copr, stream })))
-                }
+                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream { copr, stream }))),
                 _ => unreachable!(),
             }
         } else {
@@ -178,7 +176,7 @@ def test(a, b, c):
             .unwrap();
         let output = script.execute(EvalContext::default()).await.unwrap();
         match output {
-            Output::RecordBatch(stream) => {
+            Output::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());
@@ -209,7 +207,7 @@ def test(a):
             .unwrap();
         let output = script.execute(EvalContext::default()).await.unwrap();
         match output {
-            Output::RecordBatch(stream) => {
+            Output::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());

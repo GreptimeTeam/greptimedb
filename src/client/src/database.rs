@@ -7,13 +7,11 @@ use api::v1::{
     DatabaseRequest, ExprHeader, InsertExpr, MutateResult as GrpcMutateResult, ObjectExpr,
     ObjectResult as GrpcObjectResult, PhysicalPlan, SelectExpr,
 };
-use async_stream::stream;
-use catalog::tables::TablesRecordBatchStream;
 use common_base::BitVec;
 use common_error::status_code::StatusCode;
 use common_grpc::AsExcutionPlan;
 use common_grpc::DefaultAsPlanImpl;
-use common_recordbatch::RecordBatch;
+use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
@@ -193,16 +191,10 @@ impl TryFrom<ObjectResult> for Output {
                     .collect::<Vec<ColumnSchema>>();
 
                 let schema = Arc::new(Schema::new(column_schemas));
-                let recordbatch = RecordBatch::new(schema.clone(), vectors);
-
-                // The recordbatch is wrapped into a stream only to accommodate the `Output` type,
-                // it will soon be collected in server writer (for example, see `MysqlResultWriter::write`).
-                // TODO(LFC) Evaluate the streaming overhead here,
-                // if it's not neglectable, maybe we need to abandon the `Output` as return type?
-                let stream = Box::pin(stream! {
-                    yield recordbatch
-                });
-                Output::RecordBatch(Box::pin(TablesRecordBatchStream { schema, stream }))
+                let recordbatches = RecordBatch::new(schema, vectors)
+                    .and_then(|batch| RecordBatches::try_new(batch.schema.clone(), vec![batch]))
+                    .context(error::CreateRecordBatchesSnafu)?;
+                Output::RecordBatches(recordbatches)
             }
             ObjectResult::Mutate(mutate) => {
                 if mutate.failure != 0 {

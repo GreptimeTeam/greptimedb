@@ -236,7 +236,6 @@ mod tests {
         admin_expr, admin_result, column, object_expr, object_result, select_expr, Column,
         ExprHeader, MutateResult, SelectExpr,
     };
-    use common_recordbatch::util;
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
@@ -289,9 +288,9 @@ mod tests {
             .await
             .unwrap();
         match output {
-            Output::RecordBatch(stream) => {
-                let recordbatches = util::collect(stream).await.unwrap();
+            Output::RecordBatches(recordbatches) => {
                 let recordbatches = recordbatches
+                    .to_vec()
                     .into_iter()
                     .map(|r| r.df_recordbatch)
                     .collect::<Vec<DfRecordBatch>>();

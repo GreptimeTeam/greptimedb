@@ -9,6 +9,7 @@ use error::Result;
 use futures::task::{Context, Poll};
 use futures::Stream;
 pub use recordbatch::RecordBatch;
+use snafu::ensure;
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn schema(&self) -> SchemaRef;
@@ -41,5 +42,35 @@ impl Stream for EmptyRecordBatchStream {
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(None)
+    }
+}
+
+pub struct RecordBatches {
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+}
+
+impl RecordBatches {
+    pub fn try_new(schema: SchemaRef, batches: Vec<RecordBatch>) -> Result<Self> {
+        for batch in batches.iter() {
+            ensure!(
+                batch.schema == schema,
+                error::CreateRecordBatchesSnafu {
+                    reason: format!(
+                        "expect RecordBatch schema equals {:?}, actual: {:?}",
+                        schema, batch.schema
+                    )
+                }
+            )
+        }
+        Ok(Self { schema, batches })
+    }
+
+    pub fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    pub fn to_vec(self) -> Vec<RecordBatch> {
+        self.batches
     }
 }

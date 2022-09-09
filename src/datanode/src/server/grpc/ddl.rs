@@ -27,7 +27,7 @@ impl Instance {
                 .mutate_result(rows as u32, 0)
                 .build(),
             // Unreachable because we are executing "CREATE TABLE"; otherwise it's an internal bug.
-            Ok(Output::RecordBatch(_)) => unreachable!(),
+            Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => unreachable!(),
             Err(err) => AdminResultBuilder::default()
                 .status_code(err.status_code() as u32)
                 .err_msg(err.to_string())

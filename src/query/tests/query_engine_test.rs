@@ -63,7 +63,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let output = engine.execute(&plan).await?;
 
     let recordbatch = match output {
-        Output::RecordBatch(recordbatch) => recordbatch,
+        Output::Stream(recordbatch) => recordbatch,
         _ => unreachable!(),
     };
 
@@ -121,7 +121,7 @@ async fn test_udf() -> Result<()> {
 
     let output = engine.execute(&plan).await?;
     let recordbatch = match output {
-        Output::RecordBatch(recordbatch) => recordbatch,
+        Output::Stream(recordbatch) => recordbatch,
         _ => unreachable!(),
     };
 
@@ -244,7 +244,7 @@ where
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     let numbers = util::collect(recordbatch_stream).await.unwrap();
@@ -349,7 +349,7 @@ async fn execute_median<'a>(
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     util::collect(recordbatch_stream).await

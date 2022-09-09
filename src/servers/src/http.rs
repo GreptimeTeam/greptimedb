@@ -81,10 +81,13 @@ impl JsonResponse {
             Ok(Output::AffectedRows(rows)) => {
                 Self::with_output(Some(JsonOutput::AffectedRows(rows)))
             }
-            Ok(Output::RecordBatch(stream)) => match util::collect(stream).await {
+            Ok(Output::Stream(stream)) => match util::collect(stream).await {
                 Ok(rows) => Self::with_output(Some(JsonOutput::Rows(rows))),
                 Err(e) => Self::with_error(Some(format!("Recordbatch error: {}", e))),
             },
+            Ok(Output::RecordBatches(recordbatches)) => {
+                Self::with_output(Some(JsonOutput::Rows(recordbatches.to_vec())))
+            }
             Err(e) => Self::with_error(Some(format!("Query engine output error: {}", e))),
         }
     }

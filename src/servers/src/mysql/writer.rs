@@ -34,7 +34,7 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
         })?;
         match output {
             Ok(output) => match output {
-                Output::RecordBatch(stream) => {
+                Output::Stream(stream) => {
                     let schema = stream.schema().clone();
                     let recordbatches = util::collect(stream)
                         .await
@@ -42,6 +42,13 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                     let query_result = QueryResult {
                         recordbatches,
                         schema,
+                    };
+                    Self::write_query_result(query_result, writer)?
+                }
+                Output::RecordBatches(recordbatches) => {
+                    let query_result = QueryResult {
+                        schema: recordbatches.schema(),
+                        recordbatches: recordbatches.to_vec(),
                     };
                     Self::write_query_result(query_result, writer)?
                 }
