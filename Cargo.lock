@@ -816,6 +816,7 @@ dependencies = [
  "arrow2",
  "chrono-tz",
  "common-error",
+ "common-function-macro",
  "common-query",
  "datafusion-common",
  "datatypes",
@@ -834,6 +835,18 @@ dependencies = [
  "serde",
  "snafu",
  "statrs",
+]
+
+[[package]]
+name = "common-function-macro"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "common-query",
+ "datatypes",
+ "quote",
+ "snafu",
+ "syn",
 ]
 
 [[package]]
@@ -3670,6 +3683,7 @@ dependencies = [
  "catalog",
  "common-error",
  "common-function",
+ "common-function-macro",
  "common-query",
  "common-recordbatch",
  "common-telemetry",

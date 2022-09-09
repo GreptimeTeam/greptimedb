@@ -1,4 +1,4 @@
-mod accumulator;
+pub mod accumulator;
 mod expr;
 mod udaf;
 mod udf;
@@ -177,17 +177,19 @@ mod tests {
     #[derive(Debug)]
     struct DummyAccumulatorCreator;
 
-    impl AggregateFunctionCreator for DummyAccumulatorCreator {
-        fn creator(&self) -> AccumulatorCreatorFunction {
-            Arc::new(|_| Ok(Box::new(DummyAccumulator)))
-        }
-
+    impl AggrFuncTypeStore for DummyAccumulatorCreator {
         fn input_types(&self) -> Result<Vec<ConcreteDataType>> {
             Ok(vec![ConcreteDataType::float64_datatype()])
         }
 
         fn set_input_types(&self, _: Vec<ConcreteDataType>) -> Result<()> {
             Ok(())
+        }
+    }
+
+    impl AggregateFunctionCreator for DummyAccumulatorCreator {
+        fn creator(&self) -> AccumulatorCreatorFunction {
+            Arc::new(|_| Ok(Box::new(DummyAccumulator)))
         }
 
         fn output_type(&self) -> Result<ConcreteDataType> {

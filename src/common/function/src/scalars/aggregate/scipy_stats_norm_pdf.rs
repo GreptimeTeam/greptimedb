@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
-use arc_swap::ArcSwapOption;
+use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{
     self, BadAccumulatorImplSnafu, CreateAccumulatorSnafu, DowncastVectorSnafu,
-    FromScalarValueSnafu, GenerateFunctionSnafu, InvalidInputColSnafu, InvalidInputStateSnafu,
-    Result,
+    FromScalarValueSnafu, GenerateFunctionSnafu, InvalidInputColSnafu, Result,
 };
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
@@ -174,10 +173,9 @@ where
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ScipyStatsNormPdfAccumulatorCreator {
-    input_types: ArcSwapOption<Vec<ConcreteDataType>>,
-}
+#[as_aggr_func_creator]
+#[derive(Debug, Default, AggrFuncTypeStore)]
+pub struct ScipyStatsNormPdfAccumulatorCreator {}
 
 impl AggregateFunctionCreator for ScipyStatsNormPdfAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
@@ -198,23 +196,6 @@ impl AggregateFunctionCreator for ScipyStatsNormPdfAccumulatorCreator {
             )
         });
         creator
-    }
-
-    fn input_types(&self) -> Result<Vec<ConcreteDataType>> {
-        let input_types = self.input_types.load();
-        ensure!(input_types.is_some(), InvalidInputStateSnafu);
-        Ok(input_types.as_ref().unwrap().as_ref().clone())
-    }
-
-    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> Result<()> {
-        let old = self.input_types.swap(Some(Arc::new(input_types.clone())));
-        if let Some(old) = old {
-            ensure!(old.len() == input_types.len(), InvalidInputStateSnafu);
-            for (x, y) in old.iter().zip(input_types.iter()) {
-                ensure!(x == y, InvalidInputStateSnafu);
-            }
-        }
-        Ok(())
     }
 
     fn output_type(&self) -> Result<ConcreteDataType> {

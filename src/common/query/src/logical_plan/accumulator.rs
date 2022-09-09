@@ -45,25 +45,33 @@ pub trait Accumulator: Send + Sync + Debug {
 }
 
 /// An `AggregateFunctionCreator` dynamically creates `Accumulator`.
-/// DataFusion does not provide the input data's types when creating Accumulator, we have to stores
-/// it somewhere else ourself. So an `AggregateFunctionCreator` often has a companion struct, that
-/// can store the input data types, and knows the output and states types of an Accumulator.
-/// That's how we create the Accumulator generically.
-pub trait AggregateFunctionCreator: Send + Sync + Debug {
+///
+/// An `AggregateFunctionCreator` often has a companion struct, that
+/// can store the input data types (impl [AggrFuncTypeStore]), and knows the output and states
+/// types of an Accumulator.
+pub trait AggregateFunctionCreator: AggrFuncTypeStore {
     /// Create a function that can create a new accumulator with some input data type.
     fn creator(&self) -> AccumulatorCreatorFunction;
-
-    /// Get the input data type of the Accumulator.
-    fn input_types(&self) -> Result<Vec<ConcreteDataType>>;
-
-    /// Store the input data type that is provided by DataFusion at runtime.
-    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> Result<()>;
 
     /// Get the Accumulator's output data type.
     fn output_type(&self) -> Result<ConcreteDataType>;
 
     /// Get the Accumulator's state data types.
     fn state_types(&self) -> Result<Vec<ConcreteDataType>>;
+}
+
+/// `AggrFuncTypeStore` stores the aggregate function's input data's types.
+///
+/// When creating Accumulator generically, we have to know the input data's types.
+/// However, DataFusion does not provide the input data's types at the time of creating Accumulator.
+/// To solve the problem, we store the datatypes upfront here.
+pub trait AggrFuncTypeStore: Send + Sync + Debug {
+    /// Get the input data types of the Accumulator.
+    fn input_types(&self) -> Result<Vec<ConcreteDataType>>;
+
+    /// Store the input data types that are provided by DataFusion at runtime (when it is evaluating
+    /// return type function).
+    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> Result<()>;
 }
 
 pub fn make_accumulator_function(
