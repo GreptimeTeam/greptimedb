@@ -1,9 +1,12 @@
-use crate::error::Result;
-use crate::vectors::{Vector, VectorRef, ListVector, NullVector, BooleanVector, BooleanVectorBuilder};
 use arrow::bitmap::MutableBitmap;
-use crate::scalars::ScalarVectorBuilder;
-use crate::scalars::ScalarVector;
+
 use crate::data_type::ConcreteDataType;
+use crate::error::Result;
+use crate::scalars::ScalarVector;
+use crate::scalars::ScalarVectorBuilder;
+use crate::vectors::{
+    BooleanVector, BooleanVectorBuilder, ListVector, NullVector, Vector, VectorRef,
+};
 
 macro_rules! with_match_scalar_vector {
     ($key: expr, $KeyType: ident, | $_: tt $T: ident | $body: tt, $nbody: tt) => {{
@@ -38,8 +41,8 @@ macro_rules! with_match_scalar_vector {
 // TODO(yingwen): Allow pass closure.
 macro_rules! dispatch_vector_compute2 {
     ($vector: ident, | $_1: tt $ScalarVector: ident | $sbody: tt, | $_2: tt $NullVector: ident | $nbody: tt, | $_3: tt $ListVector: ident | $lbody: tt) => {{
-        use $crate::vectors::{all::*, Vector};
         use $crate::data_type::ConcreteDataType;
+        use $crate::vectors::{all::*, Vector};
 
         macro_rules! __with_ty_s__ {
             ( $_1 $ScalarVector: ident ) => {
@@ -63,140 +66,140 @@ macro_rules! dispatch_vector_compute2 {
                 // $compute.compute_null(v)
                 //
                 __with_ty_n__! { NullVector }
-            },
+            }
             ConcreteDataType::Boolean(_) => {
                 __with_ty_s__! { BooleanVector }
-            },
+            }
             ConcreteDataType::Int8(_) => {
                 __with_ty_s__! { Int8Vector }
-            },
+            }
             ConcreteDataType::Int16(_) => {
                 __with_ty_s__! { Int16Vector }
-            },
+            }
             ConcreteDataType::Int32(_) => {
                 __with_ty_s__! { Int32Vector }
-            },
+            }
             ConcreteDataType::Int64(_) => {
                 __with_ty_s__! { Int64Vector }
-            },
+            }
             ConcreteDataType::UInt8(_) => {
                 __with_ty_s__! { UInt8Vector }
-            },
+            }
             ConcreteDataType::UInt16(_) => {
                 __with_ty_s__! { UInt16Vector }
-            },
+            }
             ConcreteDataType::UInt32(_) => {
                 __with_ty_s__! { UInt32Vector }
-            },
+            }
             ConcreteDataType::UInt64(_) => {
                 __with_ty_s__! { UInt64Vector }
-            },
+            }
             ConcreteDataType::Float32(_) => {
                 __with_ty_s__! { Float32Vector }
-            },
+            }
             ConcreteDataType::Float64(_) => {
                 __with_ty_s__! { Float64Vector }
-            },
+            }
             ConcreteDataType::Binary(_) => {
                 __with_ty_s__! { BinaryVector }
-            },
+            }
             ConcreteDataType::String(_) => {
                 __with_ty_s__! { StringVector }
-            },
+            }
             ConcreteDataType::Date(_) => {
                 __with_ty_s__! { DateVector }
-            },
+            }
             ConcreteDataType::DateTime(_) => {
                 __with_ty_s__! { DateTimeVector }
-            },
+            }
             ConcreteDataType::Timestamp(_) => {
                 __with_ty_s__! { TimestampVector }
-            },
+            }
             ConcreteDataType::List(_) => {
                 __with_ty_l__! { ListVector }
-            },
+            }
         }
     }};
 }
 
 macro_rules! dispatch_vector_compute {
     ($vector: ident, $compute: ident) => {
-        use $crate::vectors::{all::*, Vector};
         use $crate::data_type::ConcreteDataType;
+        use $crate::vectors::{all::*, Vector};
 
         match $vector.data_type() {
             ConcreteDataType::Null(_) => {
                 let v = $vector.as_any().downcast_ref::<NullVector>().unwrap();
                 $compute.compute_null(v)
-            },
+            }
             ConcreteDataType::Boolean(_) => {
                 let v = $vector.as_any().downcast_ref::<BooleanVector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::Int8(_) => {
                 let v = $vector.as_any().downcast_ref::<Int8Vector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::Int16(_) => {
                 let v = $vector.as_any().downcast_ref::<Int16Vector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::Int32(_) => {
                 let v = $vector.as_any().downcast_ref::<Int32Vector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::Int64(_) => {
                 let v = $vector.as_any().downcast_ref::<Int64Vector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::UInt8(_) => {
                 let v = $vector.as_any().downcast_ref::<UInt8Vector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::UInt16(_) => {
                 let v = $vector.as_any().downcast_ref::<UInt16Vector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::UInt32(_) => {
                 let v = $vector.as_any().downcast_ref::<UInt32Vector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::UInt64(_) => {
                 let v = $vector.as_any().downcast_ref::<UInt64Vector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::Float32(_) => {
                 let v = $vector.as_any().downcast_ref::<Float32Vector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::Float64(_) => {
                 let v = $vector.as_any().downcast_ref::<Float64Vector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::Binary(_) => {
                 let v = $vector.as_any().downcast_ref::<BinaryVector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::String(_) => {
                 let v = $vector.as_any().downcast_ref::<StringVector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::Date(_) => {
                 let v = $vector.as_any().downcast_ref::<DateVector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::DateTime(_) => {
                 let v = $vector.as_any().downcast_ref::<DateTimeVector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::Timestamp(_) => {
                 let v = $vector.as_any().downcast_ref::<TimestampVector>().unwrap();
                 $compute.compute_scalar(v)
-            },
+            }
             ConcreteDataType::List(_) => {
                 let v = $vector.as_any().downcast_ref::<ListVector>().unwrap();
                 $compute.compute_list(v)
-            },
+            }
         }
     };
 }
@@ -229,12 +232,18 @@ struct Dedup {
 
 impl Dedup {
     fn compute_scalar<'a: 'b, 'b, T: ScalarVector>(&'a mut self, vector: &'b T)
-    where T::RefItem<'b>: PartialEq {
+    where
+        T::RefItem<'b>: PartialEq,
+    {
         if vector.is_empty() {
             return;
         }
 
-        for ((i, current), next) in vector.iter_data().enumerate().zip(vector.iter_data().skip(1)) {
+        for ((i, current), next) in vector
+            .iter_data()
+            .enumerate()
+            .zip(vector.iter_data().skip(1))
+        {
             if current != next {
                 // If next element is a different element, we mark it as selected.
                 self.selected.set(i + 1, true);

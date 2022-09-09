@@ -18,7 +18,7 @@ pub mod all {
     pub use crate::vectors::{
         BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
         Int16Vector, Int32Vector, Int64Vector, Int8Vector, ListVector, NullVector, StringVector,
-        UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, TimestampVector,
+        TimestampVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector,
     };
 }
 

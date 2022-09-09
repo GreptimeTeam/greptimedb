@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use common_time::timestamp::Timestamp;
+use common_time::{Date, DateTime, Timestamp};
 
 use crate::prelude::*;
 use crate::vectors::date::DateVector;
@@ -244,9 +244,9 @@ impl<'a> ScalarRef<'a> for &'a [u8] {
     }
 }
 
-impl Scalar for common_time::date::Date {
+impl Scalar for Date {
     type VectorType = DateVector;
-    type RefType<'a> = common_time::date::Date;
+    type RefType<'a> = Date;
 
     fn as_scalar_ref(&self) -> Self::RefType<'_> {
         *self
@@ -257,18 +257,18 @@ impl Scalar for common_time::date::Date {
     }
 }
 
-impl<'a> ScalarRef<'a> for common_time::date::Date {
+impl<'a> ScalarRef<'a> for Date {
     type VectorType = DateVector;
-    type ScalarType = common_time::date::Date;
+    type ScalarType = Date;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
         *self
     }
 }
 
-impl Scalar for common_time::datetime::DateTime {
+impl Scalar for DateTime {
     type VectorType = DateTimeVector;
-    type RefType<'a> = common_time::datetime::DateTime;
+    type RefType<'a> = DateTime;
 
     fn as_scalar_ref(&self) -> Self::RefType<'_> {
         *self
@@ -279,9 +279,9 @@ impl Scalar for common_time::datetime::DateTime {
     }
 }
 
-impl<'a> ScalarRef<'a> for common_time::datetime::DateTime {
+impl<'a> ScalarRef<'a> for DateTime {
     type VectorType = DateTimeVector;
-    type ScalarType = common_time::datetime::DateTime;
+    type ScalarType = DateTime;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
         *self
@@ -312,7 +312,7 @@ impl<'a> ScalarRef<'a> for Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use common_time::date::Date;
+    use Date;
 
     use super::*;
     use crate::vectors::binary::BinaryVector;
