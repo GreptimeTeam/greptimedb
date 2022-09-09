@@ -262,7 +262,6 @@ impl ErrorExt for Error {
             | BatchMissingTimestamp { .. }
             | InvalidTimestamp { .. }
             | InvalidProjection { .. }
-            | PushBatch { .. }
             | BuildBatch { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. }
@@ -294,6 +293,8 @@ impl ErrorExt for Error {
             | ReadParquetIo { .. }
             | InvalidRegionState { .. }
             | ReadWal { .. } => StatusCode::StorageUnavailable,
+
+            PushBatch { source, .. } => source.status_code(),
         }
     }
 

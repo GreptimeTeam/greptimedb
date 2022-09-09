@@ -37,7 +37,8 @@
 //! again, we also need to check whether it has exited the merge window. The approach is similar: if
 //! its NEXT's lower bound is greater than the upper bound of HOT'S first node, it's time to move it to COLD.
 //!
-//! A full description of the merge algorithm could be found in [`kudu's comment`](https://github.com/apache/kudu/blob/9021f275824faa2bdfe699786957c40c219697c1/src/kudu/common/generic_iterators.cc#L349).
+//! A full description of the merge algorithm could be found in [`kudu's comment`](https://github.com/apache/kudu/blob/9021f275824faa2bdfe699786957c40c219697c1/src/kudu/common/generic_iterators.cc#L349)
+//!  and the [google doc](https://docs.google.com/document/d/1uP0ubjM6ulnKVCRrXtwT_dqrTWjF9tlFSRk0JN2e_O0/edit#).
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -210,12 +211,20 @@ impl Node {
         })
     }
 
+    /// Returns the reference to the cursor.
+    ///
+    /// # Panics
+    /// Panics if `self` is EOF.
+    fn cursor_ref(&self) -> &BatchCursor {
+        self.cursor.as_ref().unwrap()
+    }
+
     /// Returns first row in cursor.
     ///
     /// # Panics
     /// Panics if `self` is EOF.
     fn first_row(&self) -> RowCursor {
-        self.cursor.as_ref().unwrap().first_row()
+        self.cursor_ref().first_row()
     }
 
     /// Returns last row in cursor.
@@ -223,7 +232,7 @@ impl Node {
     /// # Panics
     /// Panics if `self` is EOF.
     fn last_row(&self) -> RowCursor {
-        self.cursor.as_ref().unwrap().last_row()
+        self.cursor_ref().last_row()
     }
 
     /// Compare first row of two nodes.
@@ -251,7 +260,7 @@ impl Node {
         let last = other.last_row();
         // `self` is after `other` if min (first) row of `self` is greater than
         // max (last) row of `other`.
-        matches!(first.compare(&self.schema, &last), Ordering::Greater)
+        first.compare(&self.schema, &last) == Ordering::Greater
     }
 
     /// Fetch next batch and reset its cursor if `self` isn't EOF and the cursor
@@ -259,7 +268,7 @@ impl Node {
     ///
     /// Returns true if a new batch has been fetched.
     async fn maybe_fetch_next_batch(&mut self) -> Result<bool> {
-        let need_fetch = !self.is_eof() && self.cursor.as_ref().unwrap().is_empty();
+        let need_fetch = !self.is_eof() && self.cursor_ref().is_empty();
         if !need_fetch {
             // Still has remaining rows, no need to fetch.
             return Ok(false);
@@ -279,12 +288,20 @@ impl Node {
         }
     }
 
+    /// Returns the mutable reference to the cursor.
+    ///
+    /// # Panics
+    /// Panics if `self` is EOF.
+    fn cursor_mut(&mut self) -> &mut BatchCursor {
+        self.cursor.as_mut().unwrap()
+    }
+
     /// Take batch from this node.
     ///
     /// # Panics
     /// Panics if `self` is EOF.
     fn take_batch_slice(&mut self, length: usize) -> Batch {
-        self.cursor.as_mut().unwrap().take_batch_slice(length)
+        self.cursor_mut().take_batch_slice(length)
     }
 
     /// Push at most `length` rows from `self` to the `builder`.
@@ -292,7 +309,7 @@ impl Node {
     /// # Panics
     /// Panics if `self` is EOF.
     fn push_rows_to(&mut self, builder: &mut BatchBuilder, length: usize) -> Result<()> {
-        self.cursor.as_mut().unwrap().push_rows_to(builder, length)
+        self.cursor_mut().push_rows_to(builder, length)
     }
 
     /// Push next row from `self` to the `builder`.
@@ -300,7 +317,7 @@ impl Node {
     /// # Panics
     /// Panics if `self` is EOF.
     fn push_next_row_to(&mut self, builder: &mut BatchBuilder) -> Result<()> {
-        self.cursor.as_mut().unwrap().push_next_row_to(builder)
+        self.cursor_mut().push_next_row_to(builder)
     }
 }
 
@@ -418,7 +435,8 @@ impl MergeReaderBuilder {
 }
 
 impl MergeReader {
-    async fn maybe_init(&mut self) -> Result<()> {
+    /// Initialize the reader if it has not yet been initialized.
+    async fn try_init(&mut self) -> Result<()> {
         if self.initialized {
             return Ok(());
         }
@@ -444,7 +462,7 @@ impl MergeReader {
     }
 
     async fn fetch_next_batch(&mut self) -> Result<Option<Batch>> {
-        self.maybe_init().await?;
+        self.try_init().await?;
 
         while !self.hot.is_empty() && self.batch_builder.num_rows() < self.batch_size {
             if self.hot.len() == 1 {
