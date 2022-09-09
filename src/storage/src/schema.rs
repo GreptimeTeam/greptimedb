@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -230,6 +231,20 @@ impl StoreSchema {
         Ok(Batch::new(columns))
     }
 
+    fn compare_row_of_batch(&self, left: &Batch, i: usize, right: &Batch, j: usize) -> Ordering {
+        let indices = self.full_key_indices();
+        for idx in indices {
+            let (left_col, right_col) = (left.column(idx), right.column(idx));
+            // Comparision of vector is done by virtual method calls currently. Consider using
+            // enum dispatch if this becomes bottleneck.
+            let order = left_col.get_ref(i).cmp(&right_col.get_ref(j));
+            if order != Ordering::Equal {
+                return order;
+            }
+        }
+        Ordering::Equal
+    }
+
     fn from_columns_metadata(columns: &ColumnsMetadata, version: u32) -> Result<StoreSchema> {
         let column_schemas: Vec<_> = columns
             .iter_all_columns()
@@ -299,6 +314,13 @@ impl StoreSchema {
     #[inline]
     fn num_columns(&self) -> usize {
         self.schema.num_columns()
+    }
+
+    fn full_key_indices(&self) -> impl Iterator<Item = usize> {
+        // row key, sequence, op_type
+        (0..self.row_key_end)
+            .chain(std::iter::once(self.sequence_index()))
+            .chain(std::iter::once(self.op_type_index()))
     }
 }
 
@@ -528,6 +550,25 @@ impl ProjectedSchema {
         columns.push(op_types);
 
         Batch::new(columns)
+    }
+
+    /// Compare `i-th` in `left` to `j-th` row in `right` by key (row key + internal columns).
+    ///
+    /// The caller should ensure `left` and `right` have same schema as `self.schema_to_read()`.
+    ///
+    /// # Panics
+    /// Panics if
+    /// - `i` or `j` is out of bound.
+    /// - `left` or `right` has insufficient column num.
+    #[inline]
+    pub fn compare_row_of_batch(
+        &self,
+        left: &Batch,
+        i: usize,
+        right: &Batch,
+        j: usize,
+    ) -> Ordering {
+        self.schema_to_read.compare_row_of_batch(left, i, right, j)
     }
 
     fn build_schema_to_read(

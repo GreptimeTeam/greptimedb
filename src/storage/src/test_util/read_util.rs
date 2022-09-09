@@ -2,10 +2,31 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datatypes::prelude::ScalarVector;
+use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, UInt64Vector, UInt8Vector};
 
 use crate::error::Result;
+use crate::memtable::{BatchIterator, BoxedBatchIterator, RowOrdering};
+use crate::metadata::RegionMetadata;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
+use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
+use crate::test_util::descriptor_util::RegionDescBuilder;
+
+/// Create a new region schema (timestamp, v0).
+fn new_region_schema() -> RegionSchemaRef {
+    let desc = RegionDescBuilder::new("read-util")
+        .enable_version_column(false)
+        .push_value_column(("v0", LogicalTypeId::Int64, true))
+        .build();
+    let metadata: RegionMetadata = desc.try_into().unwrap();
+    metadata.schema().clone()
+}
+
+/// Create a new projected schema (timestamp, v0).
+pub fn new_projected_schema() -> ProjectedSchemaRef {
+    let region_schema = new_region_schema();
+    Arc::new(ProjectedSchema::new(region_schema, None).unwrap())
+}
 
 /// Build a new batch, with 0 sequence and op_type.
 fn new_kv_batch(key_values: &[(i64, Option<i64>)]) -> Batch {
@@ -38,6 +59,28 @@ fn check_kv_batch(batches: &[Batch], expect: &[&[(i64, Option<i64>)]]) {
     assert_eq!(batches.len(), expect.len());
 }
 
+pub async fn collect_kv_batch(reader: &mut dyn BatchReader) -> Vec<(i64, Option<i64>)> {
+    let mut result = Vec::new();
+    while let Some(batch) = reader.next_batch().await.unwrap() {
+        let key = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Vector>()
+            .unwrap();
+        let value = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Vector>()
+            .unwrap();
+
+        for (k, v) in key.iter_data().zip(value.iter_data()) {
+            result.push((k.unwrap(), v));
+        }
+    }
+
+    result
+}
+
 pub async fn check_reader_with_kv_batch(
     reader: &mut dyn BatchReader,
     expect: &[&[(i64, Option<i64>)]],
@@ -50,8 +93,9 @@ pub async fn check_reader_with_kv_batch(
     check_kv_batch(&result, expect);
 }
 
-/// A reader for test that takes batch from Vec.
+/// A reader for test that pop batch from Vec.
 pub struct VecBatchReader {
+    schema: ProjectedSchemaRef,
     batches: Vec<Batch>,
 }
 
@@ -59,7 +103,10 @@ impl VecBatchReader {
     fn new(mut batches: Vec<Batch>) -> VecBatchReader {
         batches.reverse();
 
-        VecBatchReader { batches }
+        VecBatchReader {
+            schema: new_projected_schema(),
+            batches,
+        }
     }
 }
 
@@ -70,16 +117,38 @@ impl BatchReader for VecBatchReader {
     }
 }
 
+impl Iterator for VecBatchReader {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Result<Batch>> {
+        self.batches.pop().map(Ok)
+    }
+}
+
+impl BatchIterator for VecBatchReader {
+    fn schema(&self) -> ProjectedSchemaRef {
+        self.schema.clone()
+    }
+
+    fn ordering(&self) -> RowOrdering {
+        // TODO(yingwen): Allow setting the row ordering.
+        RowOrdering::Key
+    }
+}
+
 pub fn build_vec_reader(batches: &[&[(i64, Option<i64>)]]) -> VecBatchReader {
     let batches: Vec<_> = batches
         .iter()
-        .filter(|key_values| !key_values.is_empty())
         .map(|key_values| new_kv_batch(key_values))
         .collect();
 
     VecBatchReader::new(batches)
 }
 
-pub fn build_boxed_vec_reader(batches: &[&[(i64, Option<i64>)]]) -> BoxedBatchReader {
+pub fn build_boxed_reader(batches: &[&[(i64, Option<i64>)]]) -> BoxedBatchReader {
+    Box::new(build_vec_reader(batches))
+}
+
+pub fn build_boxed_iter(batches: &[&[(i64, Option<i64>)]]) -> BoxedBatchIterator {
     Box::new(build_vec_reader(batches))
 }
