@@ -20,8 +20,7 @@ type ArrowListArray = ListArray<i32>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListVector {
     array: ArrowListArray,
-    // TODO(LFC): rename inner_data_type -> inner_datatype
-    inner_data_type: ConcreteDataType,
+    inner_datatype: ConcreteDataType,
 }
 
 impl ListVector {
@@ -32,7 +31,7 @@ impl ListVector {
 
 impl Vector for ListVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::List(ListType::new(self.inner_data_type.clone()))
+        ConcreteDataType::List(ListType::new(self.inner_datatype.clone()))
     }
 
     fn vector_type_name(&self) -> String {
@@ -90,7 +89,7 @@ impl Vector for ListVector {
             .collect::<Vec<Value>>();
         Value::List(ListValue::new(
             Some(Box::new(values)),
-            self.inner_data_type.clone(),
+            self.inner_datatype.clone(),
         ))
     }
 
@@ -125,13 +124,13 @@ impl Serializable for ListVector {
 
 impl From<ArrowListArray> for ListVector {
     fn from(array: ArrowListArray) -> Self {
-        let inner_data_type = ConcreteDataType::from_arrow_type(match array.data_type() {
+        let inner_datatype = ConcreteDataType::from_arrow_type(match array.data_type() {
             ArrowDataType::List(field) => &field.data_type,
             _ => unreachable!(),
         });
         Self {
             array,
-            inner_data_type,
+            inner_datatype,
         }
     }
 }
@@ -235,7 +234,7 @@ impl MutableVector for ListVectorBuilder {
 
         let vector = ListVector {
             array,
-            inner_data_type: self.inner_type.clone(),
+            inner_datatype: self.inner_type.clone(),
         };
         Arc::new(vector)
     }
@@ -287,7 +286,7 @@ mod tests {
 
         let list_vector = ListVector {
             array: arrow_array.clone(),
-            inner_data_type: ConcreteDataType::int32_datatype(),
+            inner_datatype: ConcreteDataType::int32_datatype(),
         };
         assert_eq!(
             ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype())),
@@ -375,7 +374,7 @@ mod tests {
 
         let list_vector = ListVector::try_from_arrow_array(array_ref).unwrap();
         assert_eq!(
-            "ListVector { array: ListArray[[1, 2, 3], None, [4, None, 6]], inner_data_type: UInt32(UInt32) }",
+            "ListVector { array: ListArray[[1, 2, 3], None, [4, None, 6]], inner_datatype: UInt32(UInt32) }",
             format!("{:?}", list_vector)
         );
     }

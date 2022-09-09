@@ -185,8 +185,7 @@ impl TryFrom<ObjectResult> for Output {
                     .map(|(column, vector)| {
                         let datatype = vector.data_type();
                         // nullable or not, does not affect the output
-                        let is_nullable = true;
-                        ColumnSchema::new(&column.column_name, datatype, is_nullable)
+                        ColumnSchema::new(&column.column_name, datatype, true)
                     })
                     .collect::<Vec<ColumnSchema>>();
 
@@ -211,12 +210,12 @@ impl TryFrom<ObjectResult> for Output {
 }
 
 fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
-    let datatype =
+    let wrapper =
         ColumnDataTypeWrapper::try_new(column.datatype).context(error::ColumnDataTypeSnafu)?;
-    let column_datatype = datatype.0;
+    let column_datatype = wrapper.datatype();
 
     let rows = rows as usize;
-    let mut vector = VectorBuilder::with_capacity(datatype.into(), rows);
+    let mut vector = VectorBuilder::with_capacity(wrapper.into(), rows);
 
     if let Some(values) = &column.values {
         let values = collect_column_values(column_datatype, values);
@@ -386,14 +385,14 @@ mod tests {
     }
 
     fn create_test_column(vector: VectorRef) -> Column {
-        let datatype: ColumnDataTypeWrapper = vector.data_type().try_into().unwrap();
+        let wrapper: ColumnDataTypeWrapper = vector.data_type().try_into().unwrap();
         let array = vector.to_arrow_array();
         Column {
             column_name: "test".to_string(),
             semantic_type: 1,
             values: Some(values(&[array.clone()]).unwrap()),
             null_mask: null_mask(&vec![array], vector.len()),
-            datatype: datatype.0 as i32,
+            datatype: wrapper.datatype() as i32,
         }
     }
 }

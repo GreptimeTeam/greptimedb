@@ -24,9 +24,7 @@ impl Services {
 
     pub(crate) async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
         let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
-            let http_addr: SocketAddr = http_addr
-                .parse()
-                .context(error::ParseAddrSnafu { addr: http_addr })?;
+            let http_addr = parse_addr(http_addr)?;
 
             let http_server = HttpServer::new(self.instance.clone());
 
@@ -36,9 +34,7 @@ impl Services {
         };
 
         let grpc_server_and_addr = if let Some(grpc_addr) = &opts.grpc_addr {
-            let grpc_addr: SocketAddr = grpc_addr
-                .parse()
-                .context(error::ParseAddrSnafu { addr: grpc_addr })?;
+            let grpc_addr = parse_addr(grpc_addr)?;
 
             let grpc_server = GrpcServer::new(self.instance.clone(), self.instance.clone());
 
@@ -48,9 +44,7 @@ impl Services {
         };
 
         let mysql_server_and_addr = if let Some(mysql_addr) = &opts.mysql_addr {
-            let mysql_addr: SocketAddr = mysql_addr
-                .parse()
-                .context(error::ParseAddrSnafu { addr: mysql_addr })?;
+            let mysql_addr = parse_addr(mysql_addr)?;
 
             let mysql_io_runtime = Arc::new(
                 RuntimeBuilder::default()
@@ -75,6 +69,10 @@ impl Services {
         .context(error::StartServerSnafu)?;
         Ok(())
     }
+}
+
+fn parse_addr(addr: &str) -> Result<SocketAddr> {
+    addr.parse().context(error::ParseAddrSnafu { addr })
 }
 
 async fn start_server(

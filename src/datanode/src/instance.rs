@@ -292,6 +292,7 @@ async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFile
     Ok(log_store)
 }
 
+// TODO(LFC): Refactor datanode and frontend instances, separate impl for each query handler.
 #[async_trait]
 impl SqlQueryHandler for Instance {
     async fn do_query(&self, query: &str) -> servers::error::Result<Output> {

@@ -4,13 +4,17 @@ use snafu::prelude::*;
 use crate::error::{self, Result};
 use crate::v1::ColumnDataType;
 
-pub struct ColumnDataTypeWrapper(pub ColumnDataType);
+pub struct ColumnDataTypeWrapper(ColumnDataType);
 
 impl ColumnDataTypeWrapper {
     pub fn try_new(datatype: i32) -> Result<Self> {
         let datatype = ColumnDataType::from_i32(datatype)
             .context(error::UnknownColumnDataTypeSnafu { datatype })?;
         Ok(Self(datatype))
+    }
+
+    pub fn datatype(&self) -> ColumnDataType {
+        self.0
     }
 }
 
@@ -58,7 +62,9 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::Date(_) => ColumnDataType::Date,
             ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
             ConcreteDataType::Timestamp(_) => ColumnDataType::Timestamp,
-            _ => return error::IntoColumnDataTypeSnafu { from: datatype }.fail(),
+            ConcreteDataType::Null(_) | ConcreteDataType::List(_) => {
+                return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
+            }
         });
         Ok(datatype)
     }

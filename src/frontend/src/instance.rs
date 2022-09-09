@@ -184,7 +184,7 @@ fn columns_to_expr(column_defs: &[ColumnDef]) -> Result<Vec<GrpcColumnDef>> {
         .iter()
         .map(|c| {
             ColumnDataTypeWrapper::try_from(c.data_type.clone())
-                .map(|w| w.0)
+                .map(|w| w.datatype())
                 .context(error::ColumnDataTypeSnafu)
         })
         .collect::<Result<Vec<ColumnDataType>>>()?;
