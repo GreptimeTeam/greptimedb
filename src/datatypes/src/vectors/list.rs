@@ -246,7 +246,7 @@ impl MutableVector for ListVectorBuilder {
                     Some(list_value) => self.push_list_value(list_value)?,
                     None => self.push_null(),
                 },
-                ListValueRef::Ref(list_value) => self.push_list_value(list_value)?,
+                ListValueRef::Ref { val } => self.push_list_value(val)?,
             }
         } else {
             self.push_null();
@@ -445,14 +445,16 @@ mod tests {
         let mut builder =
             ListType::new(ConcreteDataType::int32_datatype()).create_mutable_vector(3);
         builder
-            .push_value_ref(ValueRef::List(ListValueRef::Ref(&ListValue::new(
-                Some(Box::new(vec![
-                    Value::Int32(4),
-                    Value::Null,
-                    Value::Int32(6),
-                ])),
-                ConcreteDataType::int32_datatype(),
-            ))))
+            .push_value_ref(ValueRef::List(ListValueRef::Ref {
+                val: &ListValue::new(
+                    Some(Box::new(vec![
+                        Value::Int32(4),
+                        Value::Null,
+                        Value::Int32(6),
+                    ])),
+                    ConcreteDataType::int32_datatype(),
+                ),
+            }))
             .unwrap();
         assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
 
