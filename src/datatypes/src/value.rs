@@ -480,8 +480,10 @@ impl<'a> From<Option<ListValueRef<'a>>> for ValueRef<'a> {
 }
 
 /// Reference to a [ListValue].
-// TODO(yingwen): Comparison still requires some allocation (call of `to_value()`) and
-// might be avoidable by downcasting and comparing the underlying array slice.
+///
+/// Now comparison still requires some allocation (call of `to_value()`) and
+/// might be avoidable by downcasting and comparing the underlying array slice
+/// if it becomes bottleneck.
 #[derive(Debug, Clone, Copy)]
 pub enum ListValueRef<'a> {
     Indexed { vector: &'a ListVector, idx: usize },
