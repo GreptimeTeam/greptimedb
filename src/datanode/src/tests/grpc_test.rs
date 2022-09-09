@@ -74,10 +74,10 @@ async fn test_insert_and_select() {
     let expected_ts_col = Column {
         column_name: "ts".to_string(),
         values: Some(column::Values {
-            i64_values: vec![100, 101, 102, 103],
+            ts_millis_values: vec![100, 101, 102, 103],
             ..Default::default()
         }),
-        datatype: 4, // int64
+        datatype: 15, // timestamp
         ..Default::default()
     };
 

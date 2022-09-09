@@ -32,6 +32,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
             ColumnDataType::Datetime => ConcreteDataType::datetime_datatype(),
+            ColumnDataType::Timestamp => ConcreteDataType::timestamp_millis_datatype(),
         }
     }
 }
@@ -56,6 +57,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::String(_) => ColumnDataType::String,
             ConcreteDataType::Date(_) => ColumnDataType::Date,
             ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
+            ConcreteDataType::Timestamp(_) => ColumnDataType::Timestamp,
             _ => return error::IntoColumnDataTypeSnafu { from: datatype }.fail(),
         });
         Ok(datatype)

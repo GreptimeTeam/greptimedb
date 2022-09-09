@@ -257,7 +257,7 @@ mod tests {
 
         let sql = r#"CREATE TABLE demo(
                             host STRING,
-                            ts BIGINT,
+                            ts TIMESTAMP,
                             cpu DOUBLE NULL,
                             memory DOUBLE NULL,
                             TIME INDEX (ts),
@@ -298,13 +298,13 @@ mod tests {
                 let pretty_print = arrow_print::write(&recordbatches);
                 let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
                 let expected = vec![
-                    "+----------------+------+-----+--------+",
-                    "| host           | ts   | cpu | memory |",
-                    "+----------------+------+-----+--------+",
-                    "| frontend.host1 | 1000 | 1.1 | 100    |",
-                    "| frontend.host2 | 2000 |     |        |",
-                    "| frontend.host3 | 3000 | 3.3 | 300    |",
-                    "+----------------+------+-----+--------+",
+                    "+----------------+---------------------+-----+--------+",
+                    "| host           | ts                  | cpu | memory |",
+                    "+----------------+---------------------+-----+--------+",
+                    "| frontend.host1 | 1970-01-01 00:00:01 | 1.1 | 100    |",
+                    "| frontend.host2 | 1970-01-01 00:00:02 |     |        |",
+                    "| frontend.host3 | 1970-01-01 00:00:03 | 3.3 | 300    |",
+                    "+----------------+---------------------+-----+--------+",
                 ];
                 assert_eq!(pretty_print, expected);
             }
@@ -355,10 +355,10 @@ mod tests {
         let expected_ts_col = Column {
             column_name: "ts".to_string(),
             values: Some(column::Values {
-                i64_values: vec![1000, 2000, 3000, 4000],
+                ts_millis_values: vec![1000, 2000, 3000, 4000],
                 ..Default::default()
             }),
-            datatype: 4, // int64
+            datatype: 15, // timestamp
             ..Default::default()
         };
 
@@ -519,7 +519,7 @@ mod tests {
             },
             GrpcColumnDef {
                 name: "ts".to_string(),
-                data_type: 4, // int64
+                data_type: 15, // timestamp
                 is_nullable: true,
             },
         ];

@@ -76,6 +76,7 @@ fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Concre
             }
             .fail(),
         },
+        SqlDataType::Timestamp => Ok(ConcreteDataType::timestamp_millis_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -123,6 +124,10 @@ mod tests {
         check_type(
             SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")])),
             ConcreteDataType::datetime_datatype(),
+        );
+        check_type(
+            SqlDataType::Timestamp,
+            ConcreteDataType::timestamp_millis_datatype(),
         );
     }
 }

@@ -32,6 +32,7 @@ message Column {
 
     repeated int32 date_values = 14;
     repeated int64 datetime_values = 15;
+    repeated int64 ts_millis_values = 16;
   }
   // The array of non-null values in this column.
   //

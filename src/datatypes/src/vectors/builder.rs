@@ -183,6 +183,7 @@ impl VectorBuilder {
             VectorBuilder::Binary(b) => b.push_value_ref(value),
             VectorBuilder::Date(b) => b.push_value_ref(value),
             VectorBuilder::DateTime(b) => b.push_value_ref(value),
+            VectorBuilder::Timestamp(b) => b.push_value_ref(value),
         }
     }
 

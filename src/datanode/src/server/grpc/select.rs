@@ -161,7 +161,7 @@ pub fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
         (DataType::Date32,        PrimitiveArray<i32>,    date_values,    |x| {*x as i32}),
         (DataType::Date64,        PrimitiveArray<i64>,    datetime_values,|x| {*x as i64}),
 
-        (DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _),  PrimitiveArray<i64>,   i64_values, |x| {*x}  )
+        (DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _), PrimitiveArray<i64>, ts_millis_values, |x| {*x})
     )
 }
 

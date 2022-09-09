@@ -16,6 +16,7 @@ use common_grpc::DefaultAsPlanImpl;
 use common_recordbatch::RecordBatch;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
+use common_time::timestamp::Timestamp;
 use datafusion::physical_plan::ExecutionPlan;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -298,6 +299,11 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
         ColumnDataType::Datetime => {
             collect_values!(values.datetime_values, |v| ValueRef::DateTime(
                 DateTime::new(*v)
+            ))
+        }
+        ColumnDataType::Timestamp => {
+            collect_values!(values.ts_millis_values, |v| ValueRef::Timestamp(
+                Timestamp::from_millis(*v)
             ))
         }
     }
