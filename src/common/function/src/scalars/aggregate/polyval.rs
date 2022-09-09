@@ -237,7 +237,7 @@ impl AggregateFunctionCreator for PolyvalAccumulatorCreator {
         with_match_primitive_type_id!(
             input_type,
             |$S| {
-                Ok(PrimitiveType::<<$S as Primitive>::LargestType>::default().logical_type_id().data_type())
+                Ok(PrimitiveType::<<$S as Primitive>::LargestType>::default().into())
             },
             {
                 unreachable!()

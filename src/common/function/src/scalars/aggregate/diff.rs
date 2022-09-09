@@ -168,7 +168,7 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
         with_match_primitive_type_id!(
             input_types[0].logical_type_id(),
             |$S| {
-                Ok(ConcreteDataType::list_datatype(PrimitiveType::<<$S as Primitive>::LargestType>::default().logical_type_id().data_type()))
+                Ok(ConcreteDataType::list_datatype(PrimitiveType::<<$S as Primitive>::LargestType>::default().into()))
             },
             {
                 unreachable!()
@@ -182,7 +182,7 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
         with_match_primitive_type_id!(
             input_types[0].logical_type_id(),
             |$S| {
-                Ok(vec![ConcreteDataType::list_datatype(PrimitiveType::<$S>::default().logical_type_id().data_type())])
+                Ok(vec![ConcreteDataType::list_datatype(PrimitiveType::<$S>::default().into())])
             },
             {
                 unreachable!()
