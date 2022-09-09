@@ -633,6 +633,8 @@ mod tests {
         let output = format!("{:?}", left);
         assert!(output.contains("cursor"));
         assert!(output.contains("pos: 1"));
+        let output = format!("{:?}", right);
+        assert!(output.contains("cursor"));
         let output = format!("{:?}", left.first_row());
         assert!(output.contains("pos: 1"));
     }
