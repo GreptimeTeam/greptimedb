@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_build_date_vector() {
+    fn test_build_date_vector() {
         let expect: Vec<Option<Date>> = vec![
             Some(Date::new(0)),
             Some(Date::new(-1)),
@@ -401,14 +401,14 @@ mod tests {
     }
 
     #[test]
-    pub fn test_date_scalar() {
+    fn test_date_scalar() {
         let date = Date::new(1);
         assert_eq!(date, date.as_scalar_ref());
         assert_eq!(date, date.to_owned_scalar());
     }
 
     #[test]
-    pub fn test_build_timestamp_vector() {
+    fn test_build_timestamp_vector() {
         let expect: Vec<Option<Timestamp>> = vec![Some(10.into()), None, Some(42.into())];
         let vector: TimestampVector = build_vector_from_slice(&expect);
         assert_vector_eq(&expect, &vector);
