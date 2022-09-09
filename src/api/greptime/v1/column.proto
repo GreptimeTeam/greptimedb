@@ -40,8 +40,8 @@ message Column {
   //     null_masks: 00100000 00000010
   Values values = 3;
 
-  // Required by select
-  optional int32 value_index = 4;
+  // Required by select, not required by insert
+  optional ColumnDataType data_type = 4;
 
   // Mask maps the positions of null values.
   // If a bit in null_mask is 1, it indicates that the column value at that position is null.

@@ -1,51 +1,38 @@
+use api::v1::ColumnDataType;
 use arrow::datatypes::DataType;
 
 use crate::error::Error;
 use crate::error::UnsupportedDataTypeSnafu;
 
-pub const I8_INDEX: i32 = 0;
-pub const I16_INDEX: i32 = 1;
-pub const I32_INDEX: i32 = 2;
-pub const I64_INDEX: i32 = 3;
-pub const U8_INDEX: i32 = 4;
-pub const U16_INDEX: i32 = 5;
-pub const U32_INDEX: i32 = 6;
-pub const U64_INDEX: i32 = 7;
-pub const F32_INDEX: i32 = 8;
-pub const F64_INDEX: i32 = 9;
-pub const BOOL_INDEX: i32 = 10;
-pub const BYTES_INDEX: i32 = 11;
-pub const STRING_INDEX: i32 = 12;
-
-pub struct ValueIndex {
-    pub idx: i32,
+pub struct ColumnDataTypeWrapper {
+    pub datatype: ColumnDataType,
 }
 
-impl TryFrom<&DataType> for ValueIndex {
+impl TryFrom<&DataType> for ColumnDataTypeWrapper {
     type Error = Error;
 
     fn try_from(datatype: &DataType) -> Result<Self, Self::Error> {
-        let idx = match datatype {
-            DataType::Int8 => I8_INDEX,
-            DataType::Int16 => I16_INDEX,
-            DataType::Int32 => I32_INDEX,
-            DataType::Int64 => I64_INDEX,
+        let datatype = match datatype {
+            DataType::Int8 => ColumnDataType::Int8,
+            DataType::Int16 => ColumnDataType::Int16,
+            DataType::Int32 => ColumnDataType::Int32,
+            DataType::Int64 => ColumnDataType::Int64,
 
-            DataType::UInt8 => U8_INDEX,
-            DataType::UInt16 => U16_INDEX,
-            DataType::UInt32 => U32_INDEX,
-            DataType::UInt64 => U64_INDEX,
+            DataType::UInt8 => ColumnDataType::Uint8,
+            DataType::UInt16 => ColumnDataType::Uint16,
+            DataType::UInt32 => ColumnDataType::Uint32,
+            DataType::UInt64 => ColumnDataType::Uint64,
 
-            DataType::Float32 => F32_INDEX,
-            DataType::Float64 => F64_INDEX,
+            DataType::Float32 => ColumnDataType::Float32,
+            DataType::Float64 => ColumnDataType::Float64,
 
-            DataType::Boolean => BOOL_INDEX,
+            DataType::Boolean => ColumnDataType::Boolean,
 
-            DataType::Binary => BYTES_INDEX,
-            DataType::LargeBinary => BYTES_INDEX,
+            DataType::Binary => ColumnDataType::Binary,
+            DataType::LargeBinary => ColumnDataType::Binary,
 
-            DataType::Utf8 => STRING_INDEX,
-            DataType::LargeUtf8 => STRING_INDEX,
+            DataType::Utf8 => ColumnDataType::String,
+            DataType::LargeUtf8 => ColumnDataType::String,
             other => {
                 return UnsupportedDataTypeSnafu {
                     datatype: format!("{:?}", other),
@@ -53,24 +40,43 @@ impl TryFrom<&DataType> for ValueIndex {
                 .fail()?
             }
         };
-        Ok(Self { idx })
+        Ok(Self { datatype })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use api::v1::ColumnDataType;
     use arrow::datatypes::DataType;
 
-    use crate::column::{ValueIndex, I8_INDEX, STRING_INDEX};
+    use crate::column::ColumnDataTypeWrapper;
 
     #[test]
-    fn test_value_index() {
-        let datatype = &DataType::UInt8;
-        let value_index: ValueIndex = datatype.try_into().unwrap();
-        assert_eq!(I8_INDEX, value_index.idx);
-
-        let datatype = &DataType::Utf8;
-        let value_index: ValueIndex = datatype.try_into().unwrap();
-        assert_eq!(STRING_INDEX, value_index.idx);
+    fn test_type_convert() {
+        let types = vec![
+            (DataType::Int8, ColumnDataType::Int8),
+            (DataType::Int16, ColumnDataType::Int16),
+            (DataType::Int32, ColumnDataType::Int32),
+            (DataType::Int64, ColumnDataType::Int64),
+            (DataType::UInt8, ColumnDataType::Uint8),
+            (DataType::UInt16, ColumnDataType::Uint16),
+            (DataType::UInt32, ColumnDataType::Uint32),
+            (DataType::UInt64, ColumnDataType::Uint64),
+            (DataType::Float32, ColumnDataType::Float32),
+            (DataType::Float64, ColumnDataType::Float64),
+            (DataType::Boolean, ColumnDataType::Boolean),
+            (DataType::Binary, ColumnDataType::Binary),
+            (DataType::LargeBinary, ColumnDataType::Binary),
+            (DataType::Utf8, ColumnDataType::String),
+            (DataType::LargeUtf8, ColumnDataType::String),
+        ];
+        for (t1, t2) in types {
+            assert_eq!(
+                t2,
+                TryInto::<ColumnDataTypeWrapper>::try_into(&t1)
+                    .unwrap()
+                    .datatype
+            );
+        }
     }
 }

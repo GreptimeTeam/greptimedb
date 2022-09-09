@@ -5,7 +5,7 @@ use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::BitVec;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_grpc::column::ValueIndex;
+use common_grpc::column::ColumnDataTypeWrapper;
 use common_recordbatch::{util, RecordBatch, SendableRecordBatchStream};
 use datatypes::arrow_array::{BinaryArray, StringArray};
 use query::Output;
@@ -66,11 +66,11 @@ fn try_convert(record_batches: Vec<RecordBatch>) -> Result<SelectResult> {
             .map(|r| r.df_recordbatch.columns()[idx].clone())
             .collect();
 
-        if let Some((values, value_index)) = values(&arrays)? {
+        if let Some((values, data_type)) = values(&arrays)? {
             let column = Column {
                 column_name,
                 values: Some(values),
-                value_index: Some(value_index.idx),
+                data_type: Some(data_type.datatype.into()),
                 null_mask: null_mask(&arrays, row_count),
                 ..Default::default()
             };
@@ -127,12 +127,12 @@ macro_rules! convert_arrow_array_to_grpc_vals {
     };
 }
 
-fn values(arrays: &[Arc<dyn Array>]) -> Result<Option<(Values, ValueIndex)>> {
+fn values(arrays: &[Arc<dyn Array>]) -> Result<Option<(Values, ColumnDataTypeWrapper)>> {
     if arrays.is_empty() {
         return Ok(None);
     }
     let data_type = arrays[0].data_type();
-    let val_index: ValueIndex = data_type.try_into().context(IntoValueIndexSnafu)?;
+    let val_index: ColumnDataTypeWrapper = data_type.try_into().context(IntoValueIndexSnafu)?;
 
     let vals = convert_arrow_array_to_grpc_vals!(
         data_type, arrays,
@@ -169,7 +169,6 @@ mod tests {
         array::{Array, BooleanArray, PrimitiveArray},
         datatypes::{DataType, Field},
     };
-    use common_grpc::column::{BOOL_INDEX, I32_INDEX, STRING_INDEX};
     use common_recordbatch::RecordBatch;
     use datafusion::field_util::SchemaExt;
     use datatypes::arrow::datatypes::Schema as ArrowSchema;
@@ -210,7 +209,7 @@ mod tests {
         let values = values(&[array]).unwrap().unwrap();
 
         assert_eq!(vec![1, 2, 3], values.0.i32_values);
-        assert_eq!(I32_INDEX, values.1.idx);
+        assert_eq!(api::v1::ColumnDataType::Int32, values.1.datatype);
     }
 
     #[test]
@@ -227,7 +226,7 @@ mod tests {
         let values = values(&[array]).unwrap().unwrap();
 
         assert_eq!(vec!["1", "2", "3"], values.0.string_values);
-        assert_eq!(STRING_INDEX, values.1.idx);
+        assert_eq!(api::v1::ColumnDataType::String, values.1.datatype);
     }
 
     #[test]
@@ -238,7 +237,7 @@ mod tests {
         let values = values(&[array]).unwrap().unwrap();
 
         assert_eq!(vec![true, false, false], values.0.bool_values);
-        assert_eq!(BOOL_INDEX, values.1.idx);
+        assert_eq!(api::v1::ColumnDataType::Boolean, values.1.datatype);
     }
 
     #[test]
@@ -249,7 +248,7 @@ mod tests {
         let values = values(&[array]).unwrap().unwrap();
 
         assert_eq!(Vec::<bool>::default(), values.0.bool_values);
-        assert_eq!(BOOL_INDEX, values.1.idx);
+        assert_eq!(api::v1::ColumnDataType::Boolean, values.1.datatype);
     }
 
     #[test]
