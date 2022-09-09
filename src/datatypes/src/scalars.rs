@@ -3,8 +3,7 @@ use std::any::Any;
 use common_time::{Date, DateTime, Timestamp};
 
 use crate::prelude::*;
-use crate::vectors::date::DateVector;
-use crate::vectors::datetime::DateTimeVector;
+use crate::value::{ListValue, ListValueRef};
 use crate::vectors::*;
 
 pub mod common;
@@ -307,6 +306,39 @@ impl<'a> ScalarRef<'a> for Timestamp {
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
         *self
+    }
+}
+
+impl Scalar for ListValue {
+    type VectorType = ListVector;
+    type RefType<'a> = ListValueRef<'a>;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        ListValueRef::Ref { val: self }
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
+
+impl<'a> ScalarRef<'a> for ListValueRef<'a> {
+    type VectorType = ListVector;
+    type ScalarType = ListValue;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        match self {
+            ListValueRef::Indexed { vector, idx } => match vector.get(*idx) {
+                // Normally should not get `Value::Null` if the `ListValueRef` comes
+                // from the iterator of the ListVector, but we avoid panic and just
+                // returns a default list value in such case since `ListValueRef` may
+                // be constructed manually.
+                Value::Null => ListValue::default(),
+                Value::List(v) => v,
+                _ => unreachable!(),
+            },
+            ListValueRef::Ref { val } => (*val).clone(),
+        }
     }
 }
 

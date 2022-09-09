@@ -282,6 +282,12 @@ impl ListValue {
     }
 }
 
+impl Default for ListValue {
+    fn default() -> ListValue {
+        ListValue::new(None, ConcreteDataType::null_datatype())
+    }
+}
+
 impl PartialOrd for ListValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -464,8 +470,18 @@ impl<'a> From<&'a [u8]> for ValueRef<'a> {
     }
 }
 
+impl<'a> From<Option<ListValueRef<'a>>> for ValueRef<'a> {
+    fn from(list: Option<ListValueRef>) -> ValueRef {
+        match list {
+            Some(v) => ValueRef::List(v),
+            None => ValueRef::Null,
+        }
+    }
+}
+
 /// Reference to a [ListValue].
-// Comparison still requires some allocation (call of `to_value()`) and might be avoidable.
+// TODO(yingwen): Comparison still requires some allocation (call of `to_value()`) and
+// might be avoidable by downcasting and comparing the underlying array slice.
 #[derive(Debug, Clone, Copy)]
 pub enum ListValueRef<'a> {
     Indexed { vector: &'a ListVector, idx: usize },
@@ -473,6 +489,7 @@ pub enum ListValueRef<'a> {
 }
 
 impl<'a> ListValueRef<'a> {
+    /// Convert self to [Value]. This method would clone the underlying data.
     fn to_value(self) -> Value {
         match self {
             ListValueRef::Indexed { vector, idx } => vector.get(idx),

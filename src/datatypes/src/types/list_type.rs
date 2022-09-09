@@ -45,7 +45,7 @@ impl DataType for ListType {
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        Box::new(ListVectorBuilder::with_capacity(
+        Box::new(ListVectorBuilder::with_type_capacity(
             *self.inner.clone(),
             capacity,
         ))

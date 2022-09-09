@@ -1,7 +1,9 @@
 use std::any::Any;
+use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, ListArray};
+use arrow::bitmap::utils::ZipValidity;
 use arrow::bitmap::MutableBitmap;
 use arrow::datatypes::DataType as ArrowDataType;
 use serde_json::Value as JsonValue;
@@ -137,6 +139,70 @@ impl From<ArrowListArray> for ListVector {
 
 impl_try_from_arrow_array_for_vector!(ArrowListArray, ListVector);
 
+pub struct ListVectorIter<'a> {
+    vector: &'a ListVector,
+    iter: ZipValidity<'a, usize, Range<usize>>,
+}
+
+impl<'a> ListVectorIter<'a> {
+    pub fn new(vector: &'a ListVector) -> ListVectorIter<'a> {
+        let iter = ZipValidity::new(
+            0..vector.len(),
+            vector.array.validity().as_ref().map(|x| x.iter()),
+        );
+
+        Self { vector, iter }
+    }
+}
+
+impl<'a> Iterator for ListVectorIter<'a> {
+    type Item = Option<ListValueRef<'a>>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|idx_opt| {
+            idx_opt.map(|idx| ListValueRef::Indexed {
+                vector: self.vector,
+                idx,
+            })
+        })
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+
+    #[inline]
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        self.iter.nth(n).map(|idx_opt| {
+            idx_opt.map(|idx| ListValueRef::Indexed {
+                vector: self.vector,
+                idx,
+            })
+        })
+    }
+}
+
+impl ScalarVector for ListVector {
+    type OwnedItem = ListValue;
+    type RefItem<'a> = ListValueRef<'a>;
+    type Iter<'a> = ListVectorIter<'a>;
+    type Builder = ListVectorBuilder;
+
+    fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
+        if self.array.is_valid(idx) {
+            Some(ListValueRef::Indexed { vector: self, idx })
+        } else {
+            None
+        }
+    }
+
+    fn iter_data(&self) -> Self::Iter<'_> {
+        ListVectorIter::new(self)
+    }
+}
+
 // Some codes are ported from arrow2's MutableListArray.
 pub struct ListVectorBuilder {
     inner_type: ConcreteDataType,
@@ -146,7 +212,7 @@ pub struct ListVectorBuilder {
 }
 
 impl ListVectorBuilder {
-    pub fn with_capacity(inner_type: ConcreteDataType, capacity: usize) -> ListVectorBuilder {
+    pub fn with_type_capacity(inner_type: ConcreteDataType, capacity: usize) -> ListVectorBuilder {
         let mut offsets = Vec::with_capacity(capacity + 1);
         offsets.push(0);
         // The actual required capacity might greater than the capacity of the `ListVector`
@@ -224,19 +290,7 @@ impl MutableVector for ListVectorBuilder {
     }
 
     fn to_vector(&mut self) -> VectorRef {
-        let array = ArrowListArray::try_new(
-            ConcreteDataType::list_datatype(self.inner_type.clone()).as_arrow_type(),
-            std::mem::take(&mut self.offsets).into(),
-            self.values.to_vector().to_arrow_array(),
-            std::mem::take(&mut self.validity).map(|x| x.into()),
-        )
-        .unwrap(); // The `ListVectorBuilder` itself should ensure it always builds a valid array.
-
-        let vector = ListVector {
-            array,
-            inner_datatype: self.inner_type.clone(),
-        };
-        Arc::new(vector)
+        Arc::new(self.finish())
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
@@ -262,6 +316,34 @@ impl MutableVector for ListVectorBuilder {
         }
 
         Ok(())
+    }
+}
+
+impl ScalarVectorBuilder for ListVectorBuilder {
+    type VectorType = ListVector;
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self::with_type_capacity(ConcreteDataType::null_datatype(), capacity)
+    }
+
+    fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
+        // We expect the input ListValue has the same inner type as the builder.
+        self.push_value_ref(value.into()).unwrap();
+    }
+
+    fn finish(&mut self) -> Self::VectorType {
+        let array = ArrowListArray::try_new(
+            ConcreteDataType::list_datatype(self.inner_type.clone()).as_arrow_type(),
+            std::mem::take(&mut self.offsets).into(),
+            self.values.to_vector().to_arrow_array(),
+            std::mem::take(&mut self.validity).map(|x| x.into()),
+        )
+        .unwrap(); // The `ListVectorBuilder` itself should ensure it always builds a valid array.
+
+        ListVector {
+            array,
+            inner_datatype: self.inner_type.clone(),
+        }
     }
 }
 
