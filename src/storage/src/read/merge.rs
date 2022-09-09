@@ -42,6 +42,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::fmt;
 
 use async_trait::async_trait;
 use store_api::storage::consts;
@@ -78,6 +79,15 @@ impl Source {
     }
 }
 
+impl fmt::Debug for Source {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Source::Iter(_) => write!(f, "Iter(..)"),
+            Source::Reader(_) => write!(f, "Reader(..)"),
+        }
+    }
+}
+
 /// Reference to a row in [BatchCursor].
 #[derive(Debug)]
 struct RowCursor<'a> {
@@ -93,6 +103,7 @@ impl<'a> RowCursor<'a> {
 }
 
 /// A `BatchCursor` wraps the `Batch` and allows reading the `Batch` by row.
+#[derive(Debug)]
 struct BatchCursor {
     /// Current buffered `Batch`.
     ///
@@ -199,6 +210,15 @@ struct Node {
     ///
     /// `None` means the `source` has reached EOF.
     cursor: Option<BatchCursor>,
+}
+
+impl fmt::Debug for Node {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Node")
+            .field("source", &self.source)
+            .field("cursor", &self.cursor)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Node {
@@ -585,6 +605,36 @@ mod tests {
         assert!(reader.next_batch().await.unwrap().is_none());
         // Call next_batch() again is allowed.
         assert!(reader.next_batch().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_node() {
+        let schema = read_util::new_projected_schema();
+        let left_source = read_util::build_boxed_iter(&[&[(1, None), (3, None), (5, None)]]);
+        let mut left = Node::new(schema.clone(), Source::Iter(left_source))
+            .await
+            .unwrap();
+
+        let right_source = read_util::build_boxed_reader(&[&[(2, None), (3, None), (6, None)]]);
+        let mut right = Node::new(schema.clone(), Source::Reader(right_source))
+            .await
+            .unwrap();
+
+        // We use reverse order for a node.
+        assert!(left > right);
+        assert_ne!(left, right);
+
+        // Advance the left and right node.
+        left.cursor_mut().pos += 1;
+        right.cursor_mut().pos += 1;
+        assert_eq!(left, right);
+
+        // Check Debug is implemented.
+        let output = format!("{:?}", left);
+        assert!(output.contains("cursor"));
+        assert!(output.contains("pos: 1"));
+        let output = format!("{:?}", left.first_row());
+        assert!(output.contains("pos: 1"));
     }
 
     type Batches<'a> = &'a [&'a [(i64, Option<i64>)]];
