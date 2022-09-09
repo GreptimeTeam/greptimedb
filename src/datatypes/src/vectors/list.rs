@@ -26,6 +26,10 @@ pub struct ListVector {
 }
 
 impl ListVector {
+    /// Only iterate values in the [ListVector].
+    ///
+    /// Be careful to use this method as it would ignore validity and replace null
+    /// by empty vector.
     pub fn values_iter(&self) -> Box<dyn Iterator<Item = Result<VectorRef>> + '_> {
         Box::new(self.array.values_iter().map(VectorHelper::try_into_vector))
     }
@@ -327,7 +331,9 @@ impl ScalarVectorBuilder for ListVectorBuilder {
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        // We expect the input ListValue has the same inner type as the builder.
+        // We expect the input ListValue has the same inner type as the builder when using
+        // push(), so just panic if `push_value_ref()` returns error, which indicate an
+        // invalid input value type.
         self.push_value_ref(value.into()).unwrap();
     }
 
@@ -558,5 +564,50 @@ mod tests {
             Some(vec![Some(7), Some(8), None]),
         ]));
         assert_eq!(expect, vector);
+    }
+
+    #[test]
+    fn test_list_vector_for_scalar() {
+        let mut builder =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 2);
+        builder.push(None);
+        builder.push(Some(ListValueRef::Ref {
+            val: &ListValue::new(
+                Some(Box::new(vec![
+                    Value::Int32(4),
+                    Value::Null,
+                    Value::Int32(6),
+                ])),
+                ConcreteDataType::int32_datatype(),
+            ),
+        }));
+        let vector = builder.finish();
+
+        let expect = new_list_vector(vec![None, Some(vec![Some(4), None, Some(6)])]);
+        assert_eq!(expect, vector);
+
+        assert!(vector.get_data(0).is_none());
+        assert_eq!(
+            ListValueRef::Indexed {
+                vector: &vector,
+                idx: 1
+            },
+            vector.get_data(1).unwrap()
+        );
+        assert_eq!(
+            *vector.get(1).as_list().unwrap().unwrap(),
+            vector.get_data(1).unwrap().to_owned_scalar()
+        );
+
+        let mut iter = vector.iter_data();
+        assert!(iter.next().unwrap().is_none());
+        assert_eq!(
+            ListValueRef::Indexed {
+                vector: &vector,
+                idx: 1
+            },
+            iter.next().unwrap().unwrap()
+        );
+        assert!(iter.next().is_none());
     }
 }
