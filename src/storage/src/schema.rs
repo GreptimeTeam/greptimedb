@@ -722,7 +722,7 @@ mod tests {
         let expect_schema = schema_util::new_schema_with_version(
             &[
                 ("k0", LogicalTypeId::Int64, false),
-                ("timestamp", LogicalTypeId::Int64, false),
+                ("timestamp", LogicalTypeId::Timestamp, false),
                 ("v0", LogicalTypeId::Int64, true),
             ],
             Some(1),
@@ -758,7 +758,7 @@ mod tests {
         let expect_schema = schema_util::new_schema_with_version(
             &[
                 ("k0", LogicalTypeId::Int64, false),
-                ("timestamp", LogicalTypeId::Int64, false),
+                ("timestamp", LogicalTypeId::Timestamp, false),
                 ("v0", LogicalTypeId::Int64, true),
                 (consts::SEQUENCE_COLUMN_NAME, LogicalTypeId::UInt64, false),
                 (consts::OP_TYPE_COLUMN_NAME, LogicalTypeId::UInt8, false),
@@ -839,7 +839,7 @@ mod tests {
         let expect_user = schema_util::new_schema_with_version(
             &[
                 ("v1", LogicalTypeId::Int64, true),
-                ("timestamp", LogicalTypeId::Int64, false),
+                ("timestamp", LogicalTypeId::Timestamp, false),
             ],
             Some(1),
             123,

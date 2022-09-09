@@ -29,7 +29,11 @@ pub fn schema_for_test() -> Schema {
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
+            true,
+        ),
     ];
 
     SchemaBuilder::from(column_schemas)

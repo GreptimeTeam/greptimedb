@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
+use common_time::timestamp::TimeUnit;
 use paste::paste;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
-use crate::types::DateTimeType;
 use crate::types::{
     BinaryType, BooleanType, DateType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
     Int8Type, ListType, NullType, StringType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
+use crate::types::{DateTimeType, TimestampType};
 use crate::value::Value;
 use crate::vectors::MutableVector;
 
@@ -38,6 +39,7 @@ pub enum ConcreteDataType {
 
     Date(DateType),
     DateTime(DateTimeType),
+    Timestamp(TimestampType),
 
     List(ListType),
 }
@@ -70,6 +72,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Int64(_)
                 | ConcreteDataType::Date(_)
                 | ConcreteDataType::DateTime(_)
+                | ConcreteDataType::Timestamp(_)
         )
     }
 
@@ -84,7 +87,10 @@ impl ConcreteDataType {
     }
 
     pub fn is_timestamp(&self) -> bool {
-        matches!(self, ConcreteDataType::Int64(_))
+        matches!(
+            self,
+            ConcreteDataType::Int64(_) | ConcreteDataType::Timestamp(_)
+        )
     }
 
     pub fn numerics() -> Vec<ConcreteDataType> {
@@ -130,6 +136,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Float64 => Self::float64_datatype(),
             ArrowDataType::Date32 => Self::date_datatype(),
             ArrowDataType::Date64 => Self::datetime_datatype(),
+            ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             ArrowDataType::List(field) => Self::List(ListType::new(
@@ -169,6 +176,31 @@ impl_new_concrete_type_functions!(
 impl ConcreteDataType {
     pub fn list_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
         ConcreteDataType::List(ListType::new(inner_type))
+    }
+
+    pub fn timestamp_datatype(unit: TimeUnit) -> Self {
+        ConcreteDataType::Timestamp(TimestampType::new(unit))
+    }
+
+    pub fn timestamp_millis_datatype() -> Self {
+        ConcreteDataType::Timestamp(TimestampType::new(TimeUnit::Millisecond))
+    }
+
+    /// Converts from arrow timestamp unit to
+    // TODO(hl): maybe impl From<ArrowTimestamp> for our timestamp ?
+    pub fn from_arrow_time_unit(t: &arrow::datatypes::TimeUnit) -> Self {
+        match t {
+            arrow::datatypes::TimeUnit::Second => Self::timestamp_datatype(TimeUnit::Second),
+            arrow::datatypes::TimeUnit::Millisecond => {
+                Self::timestamp_datatype(TimeUnit::Millisecond)
+            }
+            arrow::datatypes::TimeUnit::Microsecond => {
+                Self::timestamp_datatype(TimeUnit::Microsecond)
+            }
+            arrow::datatypes::TimeUnit::Nanosecond => {
+                Self::timestamp_datatype(TimeUnit::Nanosecond)
+            }
+        }
     }
 }
 
@@ -287,5 +319,25 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Date32),
             ConcreteDataType::Date(_)
         ));
+    }
+
+    #[test]
+    pub fn test_from_arrow_timestamp() {
+        assert_eq!(
+            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Millisecond)
+        );
+        assert_eq!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
+            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Microsecond)
+        );
+        assert_eq!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Nanosecond)
+        );
+        assert_eq!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Second),
+            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Second)
+        );
     }
 }

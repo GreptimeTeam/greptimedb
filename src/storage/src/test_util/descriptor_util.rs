@@ -22,7 +22,7 @@ impl RegionDescBuilder {
             ColumnDescriptorBuilder::new(
                 2,
                 test_util::TIMESTAMP_NAME,
-                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::timestamp_millis_datatype(),
             )
             .is_nullable(false)
             .build()

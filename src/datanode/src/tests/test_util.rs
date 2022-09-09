@@ -48,7 +48,7 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
+        ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true),
     ];
 
     let table_name = "demo";

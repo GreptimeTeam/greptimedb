@@ -11,6 +11,7 @@ pub mod mutable;
 pub mod null;
 pub mod primitive;
 mod string;
+mod timestamp;
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -31,6 +32,7 @@ pub use null::*;
 pub use primitive::*;
 use snafu::ensure;
 pub use string::*;
+pub use timestamp::*;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};

@@ -67,4 +67,5 @@ enum ColumnDataType {
   STRING = 12;
   DATE = 13;
   DATETIME = 14;
+  TIMESTAMP = 15;
 }

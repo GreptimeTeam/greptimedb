@@ -329,5 +329,9 @@ mod tests {
             SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")])),
             ConcreteDataType::datetime_datatype(),
         );
+        check_type(
+            SqlDataType::Timestamp,
+            ConcreteDataType::timestamp_millis_datatype(),
+        );
     }
 }

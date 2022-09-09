@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use common_time::date::Date;
 use common_time::datetime::DateTime;
+use common_time::timestamp::Timestamp;
 
 use crate::data_type::ConcreteDataType;
 use crate::scalars::ScalarVectorBuilder;
@@ -11,8 +12,8 @@ use crate::vectors::datetime::DateTimeVectorBuilder;
 use crate::vectors::{
     BinaryVectorBuilder, BooleanVectorBuilder, Float32VectorBuilder, Float64VectorBuilder,
     Int16VectorBuilder, Int32VectorBuilder, Int64VectorBuilder, Int8VectorBuilder, MutableVector,
-    NullVector, StringVectorBuilder, UInt16VectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder,
-    UInt8VectorBuilder, VectorRef,
+    NullVector, StringVectorBuilder, TimestampVectorBuilder, UInt16VectorBuilder,
+    UInt32VectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
 };
 
 pub enum VectorBuilder {
@@ -37,6 +38,7 @@ pub enum VectorBuilder {
 
     Date(DateVectorBuilder),
     DateTime(DateTimeVectorBuilder),
+    Timestamp(TimestampVectorBuilder),
 }
 
 impl VectorBuilder {
@@ -92,6 +94,9 @@ impl VectorBuilder {
             ConcreteDataType::DateTime(_) => {
                 VectorBuilder::DateTime(DateTimeVectorBuilder::with_capacity(capacity))
             }
+            ConcreteDataType::Timestamp(_) => {
+                VectorBuilder::Timestamp(TimestampVectorBuilder::with_capacity(capacity))
+            }
             _ => unimplemented!(),
         }
     }
@@ -114,6 +119,7 @@ impl VectorBuilder {
             VectorBuilder::Binary(b) => b.data_type(),
             VectorBuilder::Date(b) => b.data_type(),
             VectorBuilder::DateTime(b) => b.data_type(),
+            VectorBuilder::Timestamp(b) => b.data_type(),
         }
     }
 
@@ -141,6 +147,11 @@ impl VectorBuilder {
             (VectorBuilder::Date(b), Value::Int32(v)) => b.push(Some(Date::new(*v))),
             (VectorBuilder::DateTime(b), Value::DateTime(v)) => b.push(Some(*v)),
             (VectorBuilder::DateTime(b), Value::Int64(v)) => b.push(Some(DateTime::new(*v))),
+            (VectorBuilder::Timestamp(b), Value::Timestamp(t)) => b.push(Some(*t)),
+            (VectorBuilder::Timestamp(b), Value::Int64(v)) => {
+                b.push(Some(Timestamp::from_millis(*v)))
+            }
+
             _ => panic!(
                 "Value {:?} does not match builder type {:?}",
                 value,
@@ -167,6 +178,7 @@ impl VectorBuilder {
             VectorBuilder::Binary(b) => b.push(None),
             VectorBuilder::Date(b) => b.push(None),
             VectorBuilder::DateTime(b) => b.push(None),
+            VectorBuilder::Timestamp(b) => b.push(None),
         }
     }
 
@@ -188,6 +200,7 @@ impl VectorBuilder {
             VectorBuilder::Binary(b) => Arc::new(b.finish()),
             VectorBuilder::Date(b) => Arc::new(b.finish()),
             VectorBuilder::DateTime(b) => Arc::new(b.finish()),
+            VectorBuilder::Timestamp(b) => Arc::new(b.finish()),
         }
     }
 }
