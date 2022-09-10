@@ -58,7 +58,7 @@ pub enum Error {
         table_name: String,
     },
 
-    #[snafu(display("Missing required field in protobuf when altering, field: {}", field))]
+    #[snafu(display("Missing required field in protobuf, field: {}", field))]
     Missingfield { field: String, backtrace: Backtrace },
 
     #[snafu(display(
