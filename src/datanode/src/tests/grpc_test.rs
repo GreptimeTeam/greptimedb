@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::{
-    admin_result, codec::InsertBatch, column, Column, ColumnDef, CreateExpr, MutateResult,
+    admin_result, alter_expr::Kind, codec::InsertBatch, column, AddColumn, AlterExpr, Column,
+    ColumnDef, CreateExpr, MutateResult,
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
@@ -85,6 +86,24 @@ async fn test_insert_and_select() {
             failure: 0
         }))
     );
+
+    //alter
+    let add_column = ColumnDef {
+        name: "test_column".to_string(),
+        data_type: 4, // int64
+        is_nullable: true,
+    };
+    let kind = Kind::AddColumn(AddColumn {
+        column_def: Some(add_column),
+    });
+    let expr = AlterExpr {
+        table_name: "test_table".to_string(),
+        catalog_name: None,
+        schema_name: None,
+        kind: Some(kind),
+    };
+    let result = admin.alter(expr).await.unwrap();
+    assert_eq!(result.result,None);
 
     // insert
     let values = vec![InsertBatch {
