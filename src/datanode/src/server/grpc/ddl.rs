@@ -9,7 +9,7 @@ use query::Output;
 use snafu::prelude::*;
 use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest};
 
-use crate::error::{self, Result};
+use crate::error::{self, MissingfieldSnafu, Result};
 use crate::instance::Instance;
 use crate::server::grpc::handler::AdminResultBuilder;
 use crate::sql::SqlRequest;
@@ -35,7 +35,16 @@ impl Instance {
     }
 
     pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> AdminResult {
-        let request = self.alter_expr_to_request(expr);
+        let request = match self.alter_expr_to_request(expr).transpose() {
+            Some(req) => req,
+            None => {
+                return AdminResultBuilder::default()
+                    .status_code(StatusCode::Success as u32)
+                    .mutate_result(0, 0)
+                    .build()
+            }
+        };
+
         let result = futures::future::ready(request)
             .and_then(|request| self.sql_handler().execute(SqlRequest::Alter(request)))
             .await;
@@ -80,10 +89,19 @@ impl Instance {
         })
     }
 
-    fn alter_expr_to_request(&self, expr: AlterExpr) -> Result<AlterTableRequest> {
-        match expr.kind.unwrap() {
-            Kind::AddColumn(add_column) => {
-                let x = add_column.column_def.unwrap();
+    fn alter_expr_to_request(&self, expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
+        match expr.kind {
+            Some(Kind::AddColumn(add_column)) => {
+                let x;
+                match add_column.column_def {
+                    Some(column_def) => x = column_def,
+                    None => {
+                        return MissingfieldSnafu {
+                            field: "colunm_def",
+                        }
+                        .fail()
+                    }
+                }
                 let alter_kind = AlterKind::AddColumn {
                     new_column: create_column_schema(&x)?,
                 };
@@ -93,8 +111,9 @@ impl Instance {
                     table_name: expr.table_name,
                     alter_kind,
                 };
-                Ok(request)
+                Ok(Some(request))
             }
+            None => Ok(None),
         }
     }
 }

@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::ColumnDataType;
 use api::v1::{
     admin_result, alter_expr::Kind, codec::InsertBatch, column, AddColumn, AlterExpr, Column,
     ColumnDef, CreateExpr, MutateResult,
@@ -90,7 +91,7 @@ async fn test_insert_and_select() {
     //alter
     let add_column = ColumnDef {
         name: "test_column".to_string(),
-        data_type: 4, // int64
+        data_type: ColumnDataType::Int64.into(),
         is_nullable: true,
     };
     let kind = Kind::AddColumn(AddColumn {
