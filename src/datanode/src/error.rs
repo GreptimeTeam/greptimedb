@@ -59,7 +59,7 @@ pub enum Error {
     },
 
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
-    Missingfield { field: String, backtrace: Backtrace },
+    MissingField { field: String, backtrace: Backtrace },
 
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
