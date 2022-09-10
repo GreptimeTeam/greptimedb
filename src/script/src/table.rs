@@ -4,28 +4,35 @@ use std::sync::Arc;
 
 use catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, SCRIPTS_TABLE_ID};
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
+use common_recordbatch::util as record_util;
 use common_telemetry::logging;
 use common_time::util;
+use datatypes::arrow::array::Utf8Array;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
 use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
-use snafu::{OptionExt, ResultExt};
+use query::{Output, QueryEngineRef};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CreateTableRequest, InsertRequest};
 
 use crate::error::{
-    FindScriptsTableSnafu, InsertScriptSnafu, RegisterScriptsTableSnafu, Result,
-    ScriptsTableNotFoundSnafu,
+    CastTypeSnafu, CollectRecordsSnafu, FindScriptSnafu, FindScriptsTableSnafu, InsertScriptSnafu,
+    RegisterScriptsTableSnafu, Result, ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
 };
 
 pub const SCRIPTS_TABLE_NAME: &str = "scripts";
 
 pub struct ScriptsTable {
     catalog_manager: CatalogManagerRef,
+    query_engine: QueryEngineRef,
     name: String,
 }
 
 impl ScriptsTable {
-    pub async fn new(catalog_manager: CatalogManagerRef) -> Result<Self> {
+    pub async fn new(
+        catalog_manager: CatalogManagerRef,
+        query_engine: QueryEngineRef,
+    ) -> Result<Self> {
         let schema = Arc::new(build_scripts_schema());
         // TODO(dennis): we put scripts table into default catalog and schema.
         // maybe put into system catalog?
@@ -52,6 +59,7 @@ impl ScriptsTable {
 
         Ok(Self {
             catalog_manager,
+            query_engine,
             name: catalog::format_full_table_name(
                 DEFAULT_CATALOG_NAME,
                 DEFAULT_SCHEMA_NAME,
@@ -105,11 +113,57 @@ impl ScriptsTable {
                 columns_values,
             })
             .await
-            .context(InsertScriptSnafu)?;
+            .context(InsertScriptSnafu { name })?;
 
         logging::info!("Inserted script: name={} into scripts table.", name);
 
         Ok(())
+    }
+
+    pub async fn find_script_by_name(&self, name: &str) -> Result<String> {
+        // FIXME(dennis): SQL injection
+        // TODO(dennis): we use sql to find the script, the better way is use a function
+        //               such as `find_record_by_primary_key` in table_engine.
+        let sql = format!("select script from {} where name='{}'", self.name(), name);
+
+        let plan = self
+            .query_engine
+            .sql_to_plan(&sql)
+            .context(FindScriptSnafu { name })?;
+
+        let stream = match self
+            .query_engine
+            .execute(&plan)
+            .await
+            .context(FindScriptSnafu { name })?
+        {
+            Output::RecordBatch(stream) => stream,
+            _ => unreachable!(),
+        };
+        let records = record_util::collect(stream)
+            .await
+            .context(CollectRecordsSnafu)?;
+
+        ensure!(!records.is_empty(), ScriptNotFoundSnafu { name });
+
+        assert!(records.len() == 1);
+        assert!(records[0].df_recordbatch.num_columns() == 1);
+
+        let record = &records[0].df_recordbatch;
+
+        let script_column = record
+            .column(0)
+            .as_any()
+            .downcast_ref::<Utf8Array<i32>>()
+            .context(CastTypeSnafu {
+                msg: format!(
+                    "can't downcast {:?} array into utf8 array",
+                    record.column(0).data_type()
+                ),
+            })?;
+
+        assert!(script_column.len() == 1);
+        Ok(script_column.value(0).to_string())
     }
 
     #[inline]

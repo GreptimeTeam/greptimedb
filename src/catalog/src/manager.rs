@@ -42,7 +42,7 @@ pub struct LocalCatalogManager {
     catalogs: Arc<MemoryCatalogList>,
     engine: TableEngineRef,
     next_table_id: AtomicU32,
-    lock: Mutex<bool>,
+    init_lock: Mutex<bool>,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
 }
 
@@ -61,7 +61,7 @@ impl LocalCatalogManager {
             catalogs: memory_catalog_list,
             engine,
             next_table_id: AtomicU32::new(MIN_USER_TABLE_ID),
-            lock: Mutex::new(false),
+            init_lock: Mutex::new(false),
             system_table_requests: Mutex::new(Vec::default()),
         })
     }
@@ -86,51 +86,44 @@ impl LocalCatalogManager {
         );
         self.next_table_id
             .store((max_table_id + 1).max(MIN_USER_TABLE_ID), Ordering::Relaxed);
-        *self.lock.lock().await = true;
+        *self.init_lock.lock().await = true;
 
         // Processing system table hooks
         let mut sys_table_requests = self.system_table_requests.lock().await;
         for req in sys_table_requests.drain(..) {
-            let table = if let Some(table) = self.table(
-                req.create_table_request.catalog_name.as_deref(),
-                req.create_table_request.schema_name.as_deref(),
-                &req.create_table_request.table_name,
-            )? {
+            let catalog_name = &req.create_table_request.catalog_name;
+            let schema_name = &req.create_table_request.schema_name;
+            let table_name = &req.create_table_request.table_name;
+            let table_id = req.create_table_request.id;
+
+            let table = if let Some(table) =
+                self.table(catalog_name.as_deref(), schema_name.as_deref(), table_name)?
+            {
                 table
             } else {
-                let create_req = req.create_table_request;
                 let table = self
                     .engine
-                    .create_table(&EngineContext::default(), create_req.clone())
+                    .create_table(&EngineContext::default(), req.create_table_request.clone())
                     .await
                     .with_context(|_| CreateTableSnafu {
                         table_info: format!(
                             "{}.{}.{}, id: {}",
-                            create_req
-                                .catalog_name
-                                .as_deref()
-                                .unwrap_or(DEFAULT_CATALOG_NAME),
-                            create_req
-                                .schema_name
-                                .as_deref()
-                                .unwrap_or(DEFAULT_SCHEMA_NAME),
-                            &create_req.table_name,
-                            create_req.id
+                            catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME),
+                            schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME),
+                            table_name,
+                            table_id,
                         ),
                     })?;
                 self.register_table(RegisterTableRequest {
-                    catalog: create_req.catalog_name.clone(),
-                    schema: create_req.schema_name.clone(),
-                    table_name: create_req.table_name.clone(),
-                    table_id: create_req.id,
+                    catalog: catalog_name.clone(),
+                    schema: schema_name.clone(),
+                    table_name: table_name.clone(),
+                    table_id,
                     table: table.clone(),
                 })
                 .await?;
 
-                info!(
-                    "Created and registered system table: {}",
-                    create_req.table_name
-                );
+                info!("Created and registered system table: {}", table_name);
 
                 table
             };
@@ -326,7 +319,7 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
-        let started = self.lock.lock().await;
+        let started = self.init_lock.lock().await;
 
         ensure!(
             *started,
@@ -376,7 +369,7 @@ impl CatalogManager for LocalCatalogManager {
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
         ensure!(
-            !*self.lock.lock().await,
+            !*self.init_lock.lock().await,
             IllegalManagerStateSnafu {
                 msg: "Catalog manager already started",
             }

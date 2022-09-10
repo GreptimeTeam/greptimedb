@@ -3,24 +3,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use catalog::CatalogManagerRef;
-use common_recordbatch::util;
 use common_telemetry::logging;
-use datatypes::arrow::array::Utf8Array;
 use query::{Output, QueryEngineRef};
 use snafu::{OptionExt, ResultExt};
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::error::{
-    CastTypeSnafu, CollectRecordsSnafu, CompilePythonSnafu, ExecutePythonSnafu, FindScriptSnafu,
-    Result, ScriptNotFoundSnafu,
-};
+use crate::error::{CompilePythonSnafu, ExecutePythonSnafu, Result, ScriptNotFoundSnafu};
 use crate::python::{PyEngine, PyScript};
 use crate::table::ScriptsTable;
 
 pub struct ScriptManager {
     compiled: RwLock<HashMap<String, Arc<PyScript>>>,
     py_engine: PyEngine,
-    query_engine: QueryEngineRef,
     table: ScriptsTable,
 }
 
@@ -32,8 +26,7 @@ impl ScriptManager {
         Ok(Self {
             compiled: RwLock::new(HashMap::default()),
             py_engine: PyEngine::new(query_engine.clone()),
-            query_engine,
-            table: ScriptsTable::new(catalog_manager).await?,
+            table: ScriptsTable::new(catalog_manager, query_engine).await?,
         })
     }
 
@@ -42,7 +35,7 @@ impl ScriptManager {
             self.py_engine
                 .compile(script, CompileContext::default())
                 .await
-                .context(CompilePythonSnafu)?,
+                .context(CompilePythonSnafu { name })?,
         );
 
         let mut compiled = self.compiled.write().unwrap();
@@ -54,8 +47,9 @@ impl ScriptManager {
     }
 
     pub async fn insert_and_compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
+        let compiled_script = self.compile(name, script).await?;
         self.table.insert(name, script).await?;
-        self.compile(name, script).await
+        Ok(compiled_script)
     }
 
     pub async fn execute(&self, name: &str) -> Result<Output> {
@@ -78,52 +72,9 @@ impl ScriptManager {
     }
 
     async fn try_find_script_and_compile(&self, name: &str) -> Result<Option<Arc<PyScript>>> {
-        // FIXME(dennis): SQL injection
-        let sql = format!(
-            "select script from {} where name='{}'",
-            self.table.name(),
-            name
-        );
+        let script = self.table.find_script_by_name(name).await?;
 
-        let plan = self
-            .query_engine
-            .sql_to_plan(&sql)
-            .context(FindScriptSnafu { name })?;
-
-        let stream = match self
-            .query_engine
-            .execute(&plan)
-            .await
-            .context(FindScriptSnafu { name })?
-        {
-            Output::RecordBatch(stream) => stream,
-            _ => unreachable!(),
-        };
-        let records = util::collect(stream).await.context(CollectRecordsSnafu)?;
-
-        if records.is_empty() {
-            return Ok(None);
-        }
-        assert!(records.len() == 1);
-        assert!(records[0].df_recordbatch.num_columns() == 1);
-
-        let record = &records[0].df_recordbatch;
-
-        let script_column = record
-            .column(0)
-            .as_any()
-            .downcast_ref::<Utf8Array<i32>>()
-            .context(CastTypeSnafu {
-                msg: format!(
-                    "can't downcast {:?} array into utf8 array",
-                    record.column(0).data_type()
-                ),
-            })?;
-
-        assert!(script_column.len() == 1);
-        let script = script_column.value(0);
-
-        Ok(Some(self.compile(name, script).await?))
+        Ok(Some(self.compile(name, &script).await?))
     }
 }
 

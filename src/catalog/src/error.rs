@@ -111,23 +111,27 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::InvalidKey { .. }
-            | Error::OpenSystemCatalog { .. }
-            | Error::CreateSystemCatalog { .. }
             | Error::SchemaNotFound { .. }
             | Error::TableNotFound { .. }
             | Error::IllegalManagerState { .. }
-            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
-            Error::SystemCatalog { .. }
-            | Error::SystemCatalogTypeMismatch { .. }
-            | Error::EmptyValue
-            | Error::ValueDeserialize { .. }
             | Error::CatalogNotFound { .. }
-            | Error::OpenTable { .. }
-            | Error::CreateTable { .. }
-            | Error::ReadSystemCatalog { .. }
-            | Error::InsertTableRecord { .. } => StatusCode::StorageUnavailable,
+            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
+
+            Error::SystemCatalog { .. } | Error::EmptyValue | Error::ValueDeserialize { .. } => {
+                StatusCode::StorageUnavailable
+            }
+
+            Error::ReadSystemCatalog { source, .. } => source.status_code(),
+            Error::SystemCatalogTypeMismatch { source, .. } => source.status_code(),
+
             Error::RegisterTable { .. } => StatusCode::Internal,
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
+
+            Error::OpenSystemCatalog { source, .. }
+            | Error::CreateSystemCatalog { source, .. }
+            | Error::InsertTableRecord { source, .. }
+            | Error::OpenTable { source, .. }
+            | Error::CreateTable { source, .. } => source.status_code(),
         }
     }
 
@@ -171,7 +175,7 @@ mod tests {
         );
 
         assert_eq!(
-            StatusCode::Unexpected,
+            StatusCode::StorageUnavailable,
             Error::OpenSystemCatalog {
                 source: table::error::Error::new(MockError::new(StatusCode::StorageUnavailable))
             }
@@ -179,7 +183,7 @@ mod tests {
         );
 
         assert_eq!(
-            StatusCode::Unexpected,
+            StatusCode::StorageUnavailable,
             Error::CreateSystemCatalog {
                 source: table::error::Error::new(MockError::new(StatusCode::StorageUnavailable))
             }
@@ -196,7 +200,7 @@ mod tests {
         );
 
         assert_eq!(
-            StatusCode::StorageUnavailable,
+            StatusCode::Internal,
             Error::SystemCatalogTypeMismatch {
                 data_type: DataType::Boolean,
                 source: datatypes::error::Error::UnsupportedArrowType {
