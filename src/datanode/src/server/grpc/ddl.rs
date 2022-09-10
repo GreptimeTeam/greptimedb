@@ -92,7 +92,15 @@ impl Instance {
     fn alter_expr_to_request(&self, expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
         match expr.kind {
             Some(Kind::AddColumn(add_column)) => {
-                let x;
+                let column_def = match add_column.column_def {
+                    Some(column_def) => x = column_def,
+                    None => {
+                        return MissingfieldSnafu {
+                            field: "colunm_def",
+                        }
+                        .fail()
+                    }
+                }
                 match add_column.column_def {
                     Some(column_def) => x = column_def,
                     None => {
