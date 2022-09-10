@@ -6,11 +6,13 @@ use catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, SCRIPTS_TABLE_I
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_recordbatch::util as record_util;
 use common_telemetry::logging;
+use common_time::timestamp::Timestamp;
 use common_time::util;
 use datatypes::arrow::array::Utf8Array;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::ScalarVector;
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
-use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
+use datatypes::vectors::{StringVector, TimestampVector, VectorRef};
 use query::{Output, QueryEngineRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CreateTableRequest, InsertRequest};
@@ -86,15 +88,19 @@ impl ScriptsTable {
         // Timestamp in key part is intentionally left to 0
         columns_values.insert(
             "timestamp".to_string(),
-            Arc::new(Int64Vector::from_slice(&[0])) as _,
+            Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(0)])) as _,
         );
         columns_values.insert(
             "gmt_created".to_string(),
-            Arc::new(Int64Vector::from_slice(&[util::current_time_millis()])) as _,
+            Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
+                util::current_time_millis(),
+            )])) as _,
         );
         columns_values.insert(
             "gmt_modified".to_string(),
-            Arc::new(Int64Vector::from_slice(&[util::current_time_millis()])) as _,
+            Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
+                util::current_time_millis(),
+            )])) as _,
         );
 
         let table = self
@@ -192,17 +198,17 @@ fn build_scripts_schema() -> Schema {
         ),
         ColumnSchema::new(
             "timestamp".to_string(),
-            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::timestamp_millis_datatype(),
             false,
         ),
         ColumnSchema::new(
             "gmt_created".to_string(),
-            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::timestamp_millis_datatype(),
             false,
         ),
         ColumnSchema::new(
             "gmt_modified".to_string(),
-            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::timestamp_millis_datatype(),
             false,
         ),
     ];
