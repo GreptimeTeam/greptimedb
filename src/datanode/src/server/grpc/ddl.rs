@@ -9,7 +9,7 @@ use query::Output;
 use snafu::prelude::*;
 use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest};
 
-use crate::error::{self, MissingfieldSnafu, Result};
+use crate::error::{self, MissingFieldSnafu, Result};
 use crate::instance::Instance;
 use crate::server::grpc::handler::AdminResultBuilder;
 use crate::sql::SqlRequest;
@@ -92,7 +92,7 @@ impl Instance {
     fn alter_expr_to_request(&self, expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
         match expr.kind {
             Some(Kind::AddColumn(add_column)) => {
-                let column_def = add_column.column_def.context(MissingfieldSnafu {
+                let column_def = add_column.column_def.context(MissingFieldSnafu {
                     field: "column_def",
                 })?;
                 let alter_kind = AlterKind::AddColumn {
