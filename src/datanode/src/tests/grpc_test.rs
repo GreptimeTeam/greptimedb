@@ -103,7 +103,7 @@ async fn test_insert_and_select() {
         kind: Some(kind),
     };
     let result = admin.alter(expr).await.unwrap();
-    assert_eq!(result.result,None);
+    assert_eq!(result.result, None);
 
     // insert
     let values = vec![InsertBatch {

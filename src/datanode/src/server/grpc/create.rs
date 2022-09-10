@@ -81,22 +81,21 @@ impl Instance {
     }
 
     fn alter_expr_to_request(&self, expr: AlterExpr) -> Result<AlterTableRequest> {
-        let request: AlterTableRequest;
         match expr.kind.unwrap() {
             Kind::AddColumn(add_column) => {
                 let x = add_column.column_def.unwrap();
                 let alter_kind = AlterKind::AddColumn {
                     new_column: create_column_schema(&x)?,
                 };
-                request = AlterTableRequest {
+                let request = AlterTableRequest {
                     catalog_name: expr.catalog_name,
                     schema_name: expr.schema_name,
                     table_name: expr.table_name,
                     alter_kind,
-                }
+                };
+                Ok(request)
             }
         }
-        return Ok(request);
     }
 }
 
