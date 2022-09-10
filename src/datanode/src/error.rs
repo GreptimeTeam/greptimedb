@@ -58,6 +58,9 @@ pub enum Error {
         table_name: String,
     },
 
+    #[snafu(display("Missing required field in protobuf, field: {}", field))]
+    MissingField { field: String, backtrace: Backtrace },
+
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
         columns,
@@ -214,6 +217,7 @@ impl ErrorExt for Error {
             | Error::SqlTypeNotSupported { .. }
             | Error::CreateSchema { .. }
             | Error::KeyColumnNotFound { .. }
+            | Error::MissingField { .. }
             | Error::ConstraintNotSupported { .. }
             | Error::InvalidColumnDef { .. } => StatusCode::InvalidArguments,
             // TODO(yingwen): Further categorize http error.

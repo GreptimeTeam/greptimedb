@@ -32,6 +32,17 @@ impl Admin {
         Ok(self.do_request(vec![expr]).await?.remove(0))
     }
 
+    pub async fn alter(&self, expr: AlterExpr) -> Result<AdminResult> {
+        let header = ExprHeader {
+            version: PROTOCOL_VERSION,
+        };
+        let expr = AdminExpr {
+            header: Some(header),
+            expr: Some(admin_expr::Expr::Alter(expr)),
+        };
+        Ok(self.do_request(vec![expr]).await?.remove(0))
+    }
+
     /// Invariants: the lengths of input vec (`Vec<AdminExpr>`) and output vec (`Vec<AdminResult>`) are equal.
     async fn do_request(&self, exprs: Vec<AdminExpr>) -> Result<Vec<AdminResult>> {
         let expr_count = exprs.len();

@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
-use api::v1::{AdminResult, ColumnDataType, ColumnDef, CreateExpr};
+use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDataType, ColumnDef, CreateExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use query::Output;
 use snafu::prelude::*;
-use table::requests::CreateTableRequest;
+use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest};
 
-use crate::error::{self, Result};
+use crate::error::{self, MissingFieldSnafu, Result};
 use crate::instance::Instance;
 use crate::server::grpc::handler::AdminResultBuilder;
 use crate::sql::SqlRequest;
@@ -26,6 +26,33 @@ impl Instance {
                 .mutate_result(rows as u32, 0)
                 .build(),
             // Unreachable because we are executing "CREATE TABLE"; otherwise it's an internal bug.
+            Ok(Output::RecordBatch(_)) => unreachable!(),
+            Err(err) => AdminResultBuilder::default()
+                .status_code(err.status_code() as u32)
+                .err_msg(err.to_string())
+                .build(),
+        }
+    }
+
+    pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> AdminResult {
+        let request = match self.alter_expr_to_request(expr).transpose() {
+            Some(req) => req,
+            None => {
+                return AdminResultBuilder::default()
+                    .status_code(StatusCode::Success as u32)
+                    .mutate_result(0, 0)
+                    .build()
+            }
+        };
+
+        let result = futures::future::ready(request)
+            .and_then(|request| self.sql_handler().execute(SqlRequest::Alter(request)))
+            .await;
+        match result {
+            Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
+                .status_code(StatusCode::Success as u32)
+                .mutate_result(rows as u32, 0)
+                .build(),
             Ok(Output::RecordBatch(_)) => unreachable!(),
             Err(err) => AdminResultBuilder::default()
                 .status_code(err.status_code() as u32)
@@ -60,6 +87,27 @@ impl Instance {
             create_if_not_exists: expr.create_if_not_exists,
             table_options: expr.table_options,
         })
+    }
+
+    fn alter_expr_to_request(&self, expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
+        match expr.kind {
+            Some(Kind::AddColumn(add_column)) => {
+                let column_def = add_column.column_def.context(MissingFieldSnafu {
+                    field: "column_def",
+                })?;
+                let alter_kind = AlterKind::AddColumn {
+                    new_column: create_column_schema(&column_def)?,
+                };
+                let request = AlterTableRequest {
+                    catalog_name: expr.catalog_name,
+                    schema_name: expr.schema_name,
+                    table_name: expr.table_name,
+                    alter_kind,
+                };
+                Ok(Some(request))
+            }
+            None => Ok(None),
+        }
     }
 }
 

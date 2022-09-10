@@ -328,6 +328,7 @@ impl GrpcAdminHandler for Instance {
     async fn exec_admin_request(&self, expr: AdminExpr) -> servers::error::Result<AdminResult> {
         let admin_resp = match expr.expr {
             Some(admin_expr::Expr::Create(create_expr)) => self.handle_create(create_expr).await,
+            Some(admin_expr::Expr::Alter(alter_expr)) => self.handle_alter(alter_expr).await,
             other => {
                 return servers::error::NotSupportedSnafu {
                     feat: format!("{:?}", other),
