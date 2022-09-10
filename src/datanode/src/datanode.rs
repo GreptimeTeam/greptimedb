@@ -26,7 +26,9 @@ pub struct DatanodeOptions {
     pub rpc_addr: String,
     pub mysql_addr: String,
     pub mysql_runtime_size: u32,
+    #[cfg(feature = "postgres")]
     pub postgres_addr: String,
+    #[cfg(feature = "postgres")]
     pub postgres_runtime_size: u32,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
@@ -39,7 +41,9 @@ impl Default for DatanodeOptions {
             rpc_addr: "0.0.0.0:3001".to_string(),
             mysql_addr: "0.0.0.0:3306".to_string(),
             mysql_runtime_size: 2,
+            #[cfg(feature = "postgres")]
             postgres_addr: "0.0.0.0:5432".to_string(),
+            #[cfg(feature = "postgres")]
             postgres_runtime_size: 2,
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),

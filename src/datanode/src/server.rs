@@ -34,6 +34,7 @@ impl Services {
                 .build()
                 .context(error::RuntimeResourceSnafu)?,
         );
+        #[cfg(feature = "postgres")]
         let postgres_io_runtime = Arc::new(
             RuntimeBuilder::default()
                 .worker_threads(opts.postgres_runtime_size as usize)

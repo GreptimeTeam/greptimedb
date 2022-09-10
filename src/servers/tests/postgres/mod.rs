@@ -109,16 +109,15 @@ async fn test_query_pg_concurrently() -> Result<()> {
     let server_port = server_addr.port();
 
     let threads = 4;
-    let expect_executed_queries_per_worker = 1000;
+    let expect_executed_queries_per_worker = 300;
     let mut join_handles = vec![];
-    for i in 0..threads {
+    for _i in 0..threads {
         join_handles.push(tokio::spawn(async move {
             let mut rand: StdRng = rand::SeedableRng::from_entropy();
 
             let mut client = create_connection(server_port).await.unwrap();
 
-            for k in 0..expect_executed_queries_per_worker {
-                dbg!(format!("pre {}: {}", &k, &i));
+            for _k in 0..expect_executed_queries_per_worker {
                 let expected: u32 = rand.gen_range(0..100);
                 let result: u32 = unwrap_results(
                     client
@@ -139,8 +138,6 @@ async fn test_query_pg_concurrently() -> Result<()> {
                 if should_recreate_conn {
                     client = create_connection(server_port).await.unwrap();
                 }
-
-                dbg!(format!("post {}: {}", &k, &i));
             }
             expect_executed_queries_per_worker
         }))
