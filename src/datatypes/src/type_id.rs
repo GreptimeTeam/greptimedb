@@ -1,3 +1,4 @@
+#[cfg(any(test, feature = "test"))]
 use crate::data_type::ConcreteDataType;
 
 /// Unique identifier for logical data type.

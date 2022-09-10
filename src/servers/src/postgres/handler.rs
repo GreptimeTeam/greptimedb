@@ -89,6 +89,7 @@ fn encode_value(value: &Value, builder: &mut TextQueryResponseBuilder) -> PgWire
         Value::Binary(v) => builder.append_field(Some(hex::encode(v.deref()))),
         Value::Date(v) => builder.append_field(Some(v.val())),
         Value::DateTime(v) => builder.append_field(Some(v.val())),
+        Value::Timestamp(v) => builder.append_field(Some(v.value())),
         Value::List(_) => {
             unimplemented!("List is not supported for now")
         }
@@ -109,7 +110,8 @@ fn type_translate(origin: &ConcreteDataType) -> Type {
         &ConcreteDataType::String(_) => Type::VARCHAR,
         &ConcreteDataType::Date(_) => Type::DATE,
         &ConcreteDataType::DateTime(_) => Type::TIMESTAMP,
-        _ => unimplemented!("Unsupported greptime type"),
+        &ConcreteDataType::Timestamp(_) => Type::TIMESTAMP,
+        &ConcreteDataType::List(_) => unimplemented!("Unsupported greptime type"),
     }
 }
 
