@@ -167,7 +167,6 @@ fn resolve_result(resp: &SimpleQueryMessage, col_index: usize) -> Option<&str> {
 fn unwrap_results(resp: &[SimpleQueryMessage]) -> Vec<&str> {
     resp.iter()
         .map(|m| resolve_result(m, 0))
-        .filter(Option::is_some)
-        .map(|m| m.unwrap())
+        .flatten()
         .collect()
 }
