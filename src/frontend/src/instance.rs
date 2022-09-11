@@ -32,20 +32,30 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub(crate) async fn try_new(opts: &FrontendOptions) -> Result<Self> {
-        let addr = opts.datanode_grpc_addr();
-        let client = Client::connect(&addr)
-            .await
-            .context(error::ConnectDatanodeSnafu { addr })?;
+    pub(crate) fn new() -> Self {
+        let client = Client::default();
         let db = Database::new("greptime", client.clone());
         let admin = Admin::new("greptime", client);
-        Ok(Self { db, admin })
+        Self { db, admin }
+    }
+
+    pub(crate) async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
+        let addr = opts.datanode_grpc_addr();
+        self.db
+            .start(addr.clone())
+            .await
+            .context(error::ConnectDatanodeSnafu { addr: addr.clone() })?;
+        self.admin
+            .start(addr.clone())
+            .await
+            .context(error::ConnectDatanodeSnafu { addr })?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 impl Instance {
-    pub fn new(client: Client) -> Self {
+    pub fn with_client(client: Client) -> Self {
         Self {
             db: Database::new("greptime", client.clone()),
             admin: Admin::new("greptime", client),
@@ -495,8 +505,8 @@ mod tests {
             }))
             .await
             .unwrap();
-        let client = Client::new(GreptimeClient::new(channel));
-        Arc::new(Instance::new(client))
+        let client = Client::with_client(GreptimeClient::new(channel));
+        Arc::new(Instance::with_client(client))
     }
 
     fn create_expr() -> CreateExpr {

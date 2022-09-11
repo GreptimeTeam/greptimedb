@@ -47,6 +47,12 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Illegal Frontend state: {}", err_msg))]
+    IllegalFrontendState {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -61,6 +67,7 @@ impl ErrorExt for Error {
             Error::StartServer { source, .. } => source.status_code(),
             Error::ParseSql { source } => source.status_code(),
             Error::ColumnDataType { .. } => StatusCode::Internal,
+            Error::IllegalFrontendState { .. } => StatusCode::Unexpected,
         }
     }
 

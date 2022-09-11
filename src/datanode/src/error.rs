@@ -229,8 +229,7 @@ impl ErrorExt for Error {
             | Error::CreateSchema { .. }
             | Error::KeyColumnNotFound { .. }
             | Error::MissingField { .. }
-            | Error::ConstraintNotSupported { .. }
-            | Error::InvalidColumnDef { .. } => StatusCode::InvalidArguments,
+            | Error::ConstraintNotSupported { .. } => StatusCode::InvalidArguments,
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }
             | Error::ParseAddr { .. }

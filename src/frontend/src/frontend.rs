@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use snafu::prelude::*;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::instance::Instance;
 use crate::server::Services;
 
@@ -34,17 +35,28 @@ impl FrontendOptions {
 
 pub struct Frontend {
     opts: FrontendOptions,
-    services: Services,
+    instance: Option<Instance>,
 }
 
 impl Frontend {
-    pub async fn try_new(opts: FrontendOptions) -> Result<Self> {
-        let instance = Arc::new(Instance::try_new(&opts).await?);
-        let services = Services::new(instance);
-        Ok(Self { opts, services })
+    pub fn new(opts: FrontendOptions) -> Self {
+        let instance = Instance::new();
+        Self {
+            opts,
+            instance: Some(instance),
+        }
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        self.services.start(&self.opts).await
+        let mut instance = self
+            .instance
+            .take()
+            .context(error::IllegalFrontendStateSnafu {
+                err_msg: "Frontend instance not initialized",
+            })?;
+        instance.start(&self.opts).await?;
+
+        let instance = Arc::new(instance);
+        Services::start(&self.opts, instance).await
     }
 }

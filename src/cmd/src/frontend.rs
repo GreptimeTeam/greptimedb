@@ -1,6 +1,5 @@
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
-use futures::TryFutureExt;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -46,10 +45,8 @@ struct StartCommand {
 impl StartCommand {
     async fn run(self) -> Result<()> {
         let opts = self.try_into()?;
-        Frontend::try_new(opts)
-            .and_then(|mut frontend| async move { frontend.start().await })
-            .await
-            .context(error::StartFrontendSnafu)
+        let mut frontend = Frontend::new(opts);
+        frontend.start().await.context(error::StartFrontendSnafu)
     }
 }
 

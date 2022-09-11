@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use api::v1::ColumnDataType;
 use api::v1::{
-    admin_result, alter_expr::Kind, codec::InsertBatch, column, AddColumn, AlterExpr, Column,
-    ColumnDef, CreateExpr, MutateResult,
+    admin_result, alter_expr::Kind, codec::InsertBatch, column, insert_expr, AddColumn, AlterExpr,
+    Column, ColumnDef, CreateExpr, InsertExpr, MutateResult,
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};

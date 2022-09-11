@@ -13,20 +13,14 @@ use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
 use crate::instance::InstanceRef;
 
-pub(crate) struct Services {
-    instance: InstanceRef,
-}
+pub(crate) struct Services;
 
 impl Services {
-    pub(crate) fn new(instance: InstanceRef) -> Self {
-        Self { instance }
-    }
-
-    pub(crate) async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
+    pub(crate) async fn start(opts: &FrontendOptions, instance: InstanceRef) -> Result<()> {
         let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
             let http_addr = parse_addr(http_addr)?;
 
-            let http_server = HttpServer::new(self.instance.clone());
+            let http_server = HttpServer::new(instance.clone());
 
             Some((Box::new(http_server) as _, http_addr))
         } else {
@@ -36,7 +30,7 @@ impl Services {
         let grpc_server_and_addr = if let Some(grpc_addr) = &opts.grpc_addr {
             let grpc_addr = parse_addr(grpc_addr)?;
 
-            let grpc_server = GrpcServer::new(self.instance.clone(), self.instance.clone());
+            let grpc_server = GrpcServer::new(instance.clone(), instance.clone());
 
             Some((Box::new(grpc_server) as _, grpc_addr))
         } else {
@@ -54,7 +48,7 @@ impl Services {
                     .context(error::RuntimeResourceSnafu)?,
             );
 
-            let mysql_server = MysqlServer::create_server(self.instance.clone(), mysql_io_runtime);
+            let mysql_server = MysqlServer::create_server(instance.clone(), mysql_io_runtime);
 
             Some((mysql_server, mysql_addr))
         } else {

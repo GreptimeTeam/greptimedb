@@ -70,6 +70,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
+
+    #[snafu(display("Illegal GRPC client state: {}", err_msg))]
+    IllegalGrpcClientState {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -89,6 +95,7 @@ impl ErrorExt for Error {
             | Error::ColumnDataType { .. } => StatusCode::Internal,
             Error::CreateVector { source } => source.status_code(),
             Error::CreateRecordBatches { source } => source.status_code(),
+            Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
         }
     }
 

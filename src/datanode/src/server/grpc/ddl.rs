@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDataType, ColumnDef, CreateExpr};
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{AdminResult, ColumnDef, CreateExpr};
+use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
@@ -54,7 +53,7 @@ impl Instance {
                 .status_code(StatusCode::Success as u32)
                 .mutate_result(rows as u32, 0)
                 .build(),
-            Ok(Output::RecordBatch(_)) => unreachable!(),
+            Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => unreachable!(),
             Err(err) => AdminResultBuilder::default()
                 .status_code(err.status_code() as u32)
                 .err_msg(err.to_string())

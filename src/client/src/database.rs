@@ -42,6 +42,10 @@ impl Database {
         }
     }
 
+    pub async fn start(&mut self, url: impl Into<String>) -> Result<()> {
+        self.client.start(url).await
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

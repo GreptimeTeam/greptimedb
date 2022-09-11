@@ -22,6 +22,10 @@ impl Admin {
         }
     }
 
+    pub async fn start(&mut self, url: impl Into<String>) -> Result<()> {
+        self.client.start(url).await
+    }
+
     pub async fn create(&self, expr: CreateExpr) -> Result<AdminResult> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
@@ -46,7 +50,7 @@ impl Admin {
             header: Some(header),
             expr: Some(admin_expr::Expr::Alter(expr)),
         };
-        Ok(self.do_request(vec![expr]).await?.remove(0))
+        Ok(self.do_requests(vec![expr]).await?.remove(0))
     }
 
     /// Invariants: the lengths of input vec (`Vec<AdminExpr>`) and output vec (`Vec<AdminResult>`) are equal.
