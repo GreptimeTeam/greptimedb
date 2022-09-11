@@ -29,7 +29,7 @@ pub struct PostgresServer {
     // A handle holding the TCP accepting task.
     join_handle: Option<JoinHandle<()>>,
 
-    startup_handler: Arc<NoopStartupHandler>,
+    auth_handler: Arc<NoopStartupHandler>,
     query_handler: Arc<PostgresServerHandler>,
     io_runtime: Arc<Runtime>,
 }
@@ -45,7 +45,7 @@ impl PostgresServer {
             abort_registration: Some(registration),
             join_handle: None,
 
-            startup_handler,
+            auth_handler: startup_handler,
             query_handler: postgres_handler,
 
             io_runtime,
@@ -66,7 +66,7 @@ impl PostgresServer {
 
     fn accept(&self, accepting_stream: Abortable<TcpListenerStream>) -> impl Future<Output = ()> {
         let io_runtime = self.io_runtime.clone();
-        let auth_handler = self.startup_handler.clone();
+        let auth_handler = self.auth_handler.clone();
         let query_handler = self.query_handler.clone();
 
         accepting_stream.for_each(move |tcp_stream| {

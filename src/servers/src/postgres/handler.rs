@@ -2,6 +2,7 @@ use std::ops::Deref;
 
 use async_trait::async_trait;
 use common_recordbatch::util;
+use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
 use pgwire::api::portal::Portal;
@@ -75,10 +76,10 @@ fn encode_value(value: &Value, builder: &mut TextQueryResponseBuilder) -> PgWire
     match value {
         Value::Null => builder.append_field(None::<i8>),
         Value::Boolean(v) => builder.append_field(Some(v)),
-        Value::UInt8(v) => builder.append_field(Some(*v as i8)),
-        Value::UInt16(v) => builder.append_field(Some(*v as i16)),
-        Value::UInt32(v) => builder.append_field(Some(*v as i32)),
-        Value::UInt64(v) => builder.append_field(Some(*v as i64)),
+        Value::UInt8(v) => builder.append_field(Some(v)),
+        Value::UInt16(v) => builder.append_field(Some(v)),
+        Value::UInt32(v) => builder.append_field(Some(v)),
+        Value::UInt64(v) => builder.append_field(Some(v)),
         Value::Int8(v) => builder.append_field(Some(v)),
         Value::Int16(v) => builder.append_field(Some(v)),
         Value::Int32(v) => builder.append_field(Some(v)),
@@ -89,7 +90,7 @@ fn encode_value(value: &Value, builder: &mut TextQueryResponseBuilder) -> PgWire
         Value::Binary(v) => builder.append_field(Some(hex::encode(v.deref()))),
         Value::Date(v) => builder.append_field(Some(v.val())),
         Value::DateTime(v) => builder.append_field(Some(v.val())),
-        Value::Timestamp(v) => builder.append_field(Some(v.value())),
+        Value::Timestamp(v) => builder.append_field(Some(v.convert_to(TimeUnit::Millisecond))),
         Value::List(_) => {
             unimplemented!("List is not supported for now")
         }
