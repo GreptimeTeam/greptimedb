@@ -5,7 +5,7 @@ use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::prelude::ValueRef;
 use crate::scalars::ScalarVectorBuilder;
 use crate::value::Value;
@@ -165,6 +165,12 @@ impl VectorBuilder {
     pub fn try_push_ref(&mut self, value: ValueRef) -> Result<()> {
         match &mut *self {
             VectorBuilder::Null(b) => {
+                if !value.is_null() {
+                    return error::CastTypeSnafu {
+                        msg: "unable to accept non-null value in NullVectorBuilder",
+                    }
+                    .fail();
+                }
                 *b += 1;
                 Ok(())
             }
@@ -250,19 +256,37 @@ mod tests {
             for i in 0..10 {
                 builder.push(&Value::$Type(i));
             }
+            for i in 10..20 {
+                builder.try_push_ref(ValueRef::$Type(i)).unwrap();
+            }
             let vector = builder.finish();
 
-            for i in 0..10 {
+            for i in 0..20 {
                 assert_eq!(Value::$Type(i), vector.get(i as usize));
             }
 
             let mut builder = VectorBuilder::new(ConcreteDataType::$datatype());
             builder.push(&Value::Null);
             builder.push(&Value::$Type(100));
+            builder.try_push_ref(ValueRef::Null).unwrap();
+            builder.try_push_ref(ValueRef::$Type(101)).unwrap();
+
+            let result = builder.try_push_ref(ValueRef::Boolean(true));
+            assert!(result.is_err());
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                format!(
+                    "Failed to cast value Boolean(true) to primitive type {}",
+                    stringify!($Type)
+                ),
+            );
+
             let vector = builder.finish();
 
             assert!(vector.is_null(0));
             assert_eq!(Value::$Type(100), vector.get(1));
+            assert!(vector.is_null(2));
+            assert_eq!(Value::$Type(101), vector.get(3));
         };
     }
 
@@ -271,8 +295,19 @@ mod tests {
         let mut builder = VectorBuilder::new(ConcreteDataType::null_datatype());
         assert_eq!(ConcreteDataType::null_datatype(), builder.data_type());
         builder.push(&Value::Null);
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "unable to accept non-null value in NullVectorBuilder"
+        );
+
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let vector = builder.finish();
         assert!(vector.is_null(0));
+        assert!(vector.is_null(1));
     }
 
     #[test]
@@ -294,13 +329,43 @@ mod tests {
         assert_eq!(data_type, builder.data_type());
 
         builder.push(&Value::Float32(OrderedFloat(1.0)));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value Boolean(true) to primitive type Float32"
+        );
+
+        builder
+            .try_push_ref(ValueRef::Float32(OrderedFloat(2.0)))
+            .unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let vector = builder.finish();
         assert_eq!(Value::Float32(OrderedFloat(1.0)), vector.get(0));
+        assert_eq!(Value::Float32(OrderedFloat(2.0)), vector.get(1));
+        assert_eq!(Value::Null, vector.get(2));
 
         let mut builder = VectorBuilder::new(ConcreteDataType::float64_datatype());
         builder.push(&Value::Float64(OrderedFloat(2.0)));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value Boolean(true) to primitive type Float64"
+        );
+
+        builder
+            .try_push_ref(ValueRef::Float64(OrderedFloat(3.0)))
+            .unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let vector = builder.finish();
         assert_eq!(Value::Float64(OrderedFloat(2.0)), vector.get(0));
+        assert_eq!(Value::Float64(OrderedFloat(3.0)), vector.get(1));
+        assert_eq!(Value::Null, vector.get(2));
     }
 
     #[test]
@@ -310,8 +375,21 @@ mod tests {
         let mut builder = VectorBuilder::new(data_type.clone());
         assert_eq!(data_type, builder.data_type());
         builder.push(&Value::Binary(hello.into()));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value ref Boolean(true) to Binary"
+        );
+
+        builder.try_push_ref(ValueRef::Binary(b"world")).unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let vector = builder.finish();
         assert_eq!(Value::Binary(hello.into()), vector.get(0));
+        assert_eq!(ValueRef::Binary(b"world"), vector.get_ref(1));
+        assert_eq!(Value::Null, vector.get(2));
     }
 
     #[test]
@@ -321,8 +399,21 @@ mod tests {
         let mut builder = VectorBuilder::new(data_type.clone());
         assert_eq!(data_type, builder.data_type());
         builder.push(&Value::String(hello.into()));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value ref Boolean(true) to String"
+        );
+
+        builder.try_push_ref(ValueRef::String("world")).unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let vector = builder.finish();
         assert_eq!(Value::String(hello.into()), vector.get(0));
+        assert_eq!(ValueRef::String("world"), vector.get_ref(1));
+        assert_eq!(Value::Null, vector.get(2));
     }
 
     #[test]
@@ -331,10 +422,25 @@ mod tests {
         assert_eq!(ConcreteDataType::date_datatype(), builder.data_type());
         builder.push_null();
         builder.push(&Value::Date(Date::new(123)));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value ref Boolean(true) to Date"
+        );
+
+        builder
+            .try_push_ref(ValueRef::Date(Date::new(456)))
+            .unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let v = builder.finish();
         let v = v.as_any().downcast_ref::<DateVector>().unwrap();
         assert_eq!(Value::Null, v.get(0));
         assert_eq!(Value::Date(Date::new(123)), v.get(1));
+        assert_eq!(ValueRef::Date(Date::new(456)), v.get_ref(2));
+        assert_eq!(ValueRef::Null, v.get_ref(3));
         assert_eq!(
             &arrow::datatypes::DataType::Date32,
             v.to_arrow_array().data_type()
@@ -347,10 +453,25 @@ mod tests {
         assert_eq!(ConcreteDataType::datetime_datatype(), builder.data_type());
         builder.push_null();
         builder.push(&Value::DateTime(DateTime::new(123)));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value ref Boolean(true) to DateTime"
+        );
+
+        builder
+            .try_push_ref(ValueRef::DateTime(DateTime::new(456)))
+            .unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let v = builder.finish();
         let v = v.as_any().downcast_ref::<DateTimeVector>().unwrap();
         assert_eq!(Value::Null, v.get(0));
         assert_eq!(Value::DateTime(DateTime::new(123)), v.get(1));
+        assert_eq!(ValueRef::DateTime(DateTime::new(456)), v.get_ref(2));
+        assert_eq!(ValueRef::Null, v.get_ref(3));
         assert_eq!(
             &arrow::datatypes::DataType::Date64,
             v.to_arrow_array().data_type()
