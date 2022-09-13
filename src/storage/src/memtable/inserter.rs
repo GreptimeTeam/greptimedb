@@ -5,7 +5,7 @@ use std::time::Duration;
 use common_time::{RangeMillis, TimestampMillis};
 use datatypes::prelude::ScalarVector;
 use datatypes::schema::SchemaRef;
-use datatypes::vectors::{Int64Vector, NullVector, VectorRef};
+use datatypes::vectors::{NullVector, TimestampVector, VectorRef};
 use snafu::{ensure, OptionExt};
 use store_api::storage::{ColumnDescriptor, OpType, SequenceNumber};
 
@@ -210,7 +210,7 @@ struct SliceIndex {
 /// Panics if the duration is too large to be represented by i64, or `timestamps` are not all
 /// included by `time_range_indexes`.
 fn compute_slice_indexes(
-    timestamps: &Int64Vector,
+    timestamps: &TimestampVector,
     duration: Duration,
     time_range_indexes: &RangeIndexMap,
 ) -> Vec<SliceIndex> {
@@ -228,7 +228,7 @@ fn compute_slice_indexes(
     for (i, ts) in timestamps.iter_data().enumerate() {
         // Find index for time range of the timestamp.
         let current_range_index = ts
-            .and_then(|v| TimestampMillis::new(v).align_by_bucket(duration_ms))
+            .and_then(|v| TimestampMillis::new(v.value()).align_by_bucket(duration_ms))
             .and_then(|aligned| time_range_indexes.get(&aligned).copied());
 
         match current_range_index {
@@ -289,6 +289,9 @@ fn compute_slice_indexes(
 
 #[cfg(test)]
 mod tests {
+    use common_time::timestamp::Timestamp;
+    use datatypes::prelude::ScalarVectorBuilder;
+    use datatypes::vectors::{Int64Vector, TimestampVector, TimestampVectorBuilder};
     use datatypes::{type_id::LogicalTypeId, value::Value};
     use store_api::storage::{PutOperation, WriteRequest};
 
@@ -318,12 +321,18 @@ mod tests {
     ) {
         assert!(duration > 0);
 
-        let timestamps = Int64Vector::from_iter(timestamps.iter());
+        let mut builder = TimestampVectorBuilder::with_capacity(0);
+        for v in timestamps {
+            builder.push(v.map(common_time::timestamp::Timestamp::from_millis));
+        }
+
+        let ts_vec = builder.finish();
+
         let time_ranges = new_time_ranges(range_starts, duration);
         let time_range_indexes = new_range_index_map(&time_ranges);
 
         let slice_indexes = compute_slice_indexes(
-            &timestamps,
+            &ts_vec,
             Duration::from_millis(duration as u64),
             &time_range_indexes,
         );
@@ -536,7 +545,7 @@ mod tests {
         );
 
         check_compute_slice_indexes(
-            &[Some(i64::MIN), Some(99), Some(15)],
+            &[Some(-1), Some(99), Some(15)],
             &[0],
             100,
             &[SliceIndex {
@@ -550,7 +559,7 @@ mod tests {
     fn new_test_write_batch() -> WriteBatch {
         write_batch_util::new_write_batch(
             &[
-                ("ts", LogicalTypeId::Int64, false),
+                ("ts", LogicalTypeId::Timestamp, false),
                 ("value", LogicalTypeId::Int64, true),
             ],
             Some(0),
@@ -559,7 +568,7 @@ mod tests {
 
     fn new_region_schema() -> RegionSchemaRef {
         let desc = RegionDescBuilder::new("test")
-            .timestamp(("ts", LogicalTypeId::Int64, false))
+            .timestamp(("ts", LogicalTypeId::Timestamp, false))
             .push_value_column(("value", LogicalTypeId::Int64, true))
             .enable_version_column(false)
             .build();
@@ -570,7 +579,7 @@ mod tests {
 
     fn put_batch(batch: &mut WriteBatch, data: &[(i64, Option<i64>)]) {
         let mut put_data = PutData::with_num_columns(2);
-        let ts = Int64Vector::from_values(data.iter().map(|v| v.0));
+        let ts = TimestampVector::from_values(data.iter().map(|v| v.0));
         put_data.add_key_column("ts", Arc::new(ts)).unwrap();
         let value = Int64Vector::from_iter(data.iter().map(|v| v.1));
         put_data.add_value_column("value", Arc::new(value)).unwrap();
@@ -602,7 +611,7 @@ mod tests {
             for i in 0..row_num {
                 let ts = batch.column(0).get(i);
                 let v = batch.column(1).get(i);
-                assert_eq!(Value::from(data[index].0), ts);
+                assert_eq!(Value::Timestamp(Timestamp::from_millis(data[index].0)), ts);
                 assert_eq!(Value::from(data[index].1), v);
                 assert_eq!(Value::from(sequence), batch.column(2).get(i));
 

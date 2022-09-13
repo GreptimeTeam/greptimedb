@@ -554,7 +554,7 @@ mod tests {
     fn test_descriptor_to_region_metadata() {
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)
-            .timestamp(("ts", LogicalTypeId::Int64, false))
+            .timestamp(("ts", LogicalTypeId::Timestamp, false))
             .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_value_column(("v1", LogicalTypeId::Float32, true))
@@ -563,7 +563,7 @@ mod tests {
         let expect_schema = schema_util::new_schema_ref(
             &[
                 ("k1", LogicalTypeId::Int32, false),
-                ("ts", LogicalTypeId::Int64, false),
+                ("ts", LogicalTypeId::Timestamp, false),
                 ("v1", LogicalTypeId::Float32, true),
             ],
             Some(1),
@@ -663,10 +663,11 @@ mod tests {
     }
 
     fn new_metadata(enable_version_column: bool) -> RegionMetadata {
-        let timestamp = ColumnDescriptorBuilder::new(2, "ts", ConcreteDataType::int64_datatype())
-            .is_nullable(false)
-            .build()
-            .unwrap();
+        let timestamp =
+            ColumnDescriptorBuilder::new(2, "ts", ConcreteDataType::timestamp_millis_datatype())
+                .is_nullable(false)
+                .build()
+                .unwrap();
         let row_key = RowKeyDescriptorBuilder::new(timestamp)
             .push_column(
                 ColumnDescriptorBuilder::new(3, "k1", ConcreteDataType::int64_datatype())
@@ -703,7 +704,7 @@ mod tests {
         let expect_schema = schema_util::new_schema_ref(
             &[
                 ("k1", LogicalTypeId::Int64, false),
-                ("ts", LogicalTypeId::Int64, false),
+                ("ts", LogicalTypeId::Timestamp, false),
                 ("v1", LogicalTypeId::Int64, true),
             ],
             Some(1),
@@ -750,7 +751,7 @@ mod tests {
         let expect_schema = schema_util::new_schema_ref(
             &[
                 ("k1", LogicalTypeId::Int64, false),
-                ("ts", LogicalTypeId::Int64, false),
+                ("ts", LogicalTypeId::Timestamp, false),
                 (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
                 ("v1", LogicalTypeId::Int64, true),
             ],
