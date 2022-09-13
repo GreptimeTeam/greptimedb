@@ -357,7 +357,7 @@ mod tests {
         };
 
         let ts_vals = column::Values {
-            i64_values: vec![100, 101],
+            ts_millis_values: vec![100, 101],
             ..Default::default()
         };
         let ts_column = Column {
@@ -365,7 +365,7 @@ mod tests {
             semantic_type: SEMANTIC_TS,
             values: Some(ts_vals),
             null_mask: vec![0],
-            ..Default::default()
+            datatype: 15,
         };
 
         let insert_batch = InsertBatch {
