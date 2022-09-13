@@ -4,13 +4,14 @@ use std::any::Any;
 use std::sync::Arc;
 
 use table::metadata::TableId;
+use table::requests::CreateTableRequest;
 use table::TableRef;
 
-pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 pub use crate::manager::LocalCatalogManager;
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
-mod consts;
+pub mod consts;
 pub mod error;
 mod manager;
 pub mod memory;
@@ -70,9 +71,33 @@ pub trait CatalogManager: CatalogList {
     /// Registers a table given given catalog/schema to catalog manager,
     /// returns table registered.
     async fn register_table(&self, request: RegisterTableRequest) -> error::Result<usize>;
+
+    /// Register a system table, should be called before starting the manager.
+    async fn register_system_table(&self, request: RegisterSystemTableRequest)
+        -> error::Result<()>;
+
+    /// Returns the table by catalog, schema and table name.
+    fn table(
+        &self,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table_name: &str,
+    ) -> error::Result<Option<TableRef>>;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;
+
+/// Hook called after system table opening.
+pub type OpenSystemTableHook = Arc<dyn Fn(TableRef) -> error::Result<()> + Send + Sync>;
+
+/// Register system table request:
+/// - When system table is already created and registered, the hook will be called
+///     with table ref after opening the system table
+/// - When system table is not exists, create and register the table by create_table_request and calls open_hook with the created table.
+pub struct RegisterSystemTableRequest {
+    pub create_table_request: CreateTableRequest,
+    pub open_hook: Option<OpenSystemTableHook>,
+}
 
 pub struct RegisterTableRequest {
     pub catalog: Option<String>,

@@ -48,11 +48,11 @@ pub enum Error {
 
     /// errors in coprocessors' parse check for types and etc.
     #[snafu(display("Coprocessor error: {} {}.", reason,
-    if let Some(loc) = loc{
-        format!("at {loc}")
-    }else{
-        "".into()
-    }))]
+                    if let Some(loc) = loc{
+                        format!("at {loc}")
+                    }else{
+                        "".into()
+                    }))]
     CoprParse {
         backtrace: Backtrace,
         reason: String,
@@ -89,12 +89,13 @@ impl From<QueryError> for Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::Arrow { .. }
-            | Error::TypeCast { .. }
-            | Error::DatabaseQuery { .. }
-            | Error::PyRuntime { .. }
-            | Error::RecordBatch { .. }
-            | Error::Other { .. } => StatusCode::Internal,
+            Error::Arrow { .. } | Error::PyRuntime { .. } | Error::Other { .. } => {
+                StatusCode::Internal
+            }
+
+            Error::RecordBatch { source } => source.status_code(),
+            Error::DatabaseQuery { source } => source.status_code(),
+            Error::TypeCast { source } => source.status_code(),
 
             Error::PyParse { .. }
             | Error::PyCompile { .. }
@@ -185,5 +186,25 @@ pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
         Error::PyParse { source, .. } => (source.error.to_string(), Some(source.location)),
         Error::PyCompile { source, .. } => (source.error.to_string(), Some(source.location)),
         _ => (format!("Unknown error: {:?}", err), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::mock::MockError;
+    use snafu::ResultExt;
+
+    use super::*;
+
+    fn throw_query_error() -> query::error::Result<()> {
+        let mock_err = MockError::with_backtrace(StatusCode::TableColumnNotFound);
+        Err(query::error::Error::new(mock_err))
+    }
+
+    #[test]
+    fn test_error() {
+        let err = throw_query_error().context(DatabaseQuerySnafu).unwrap_err();
+        assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
+        assert!(err.backtrace_opt().is_some());
     }
 }

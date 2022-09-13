@@ -59,7 +59,7 @@ impl SqlHandler {
 }
 
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when
-/// catalog and schema are default) to tuple.  
+/// catalog and schema are default) to tuple.
 fn table_idents_to_full_name(
     obj_name: &ObjectName,
 ) -> Result<(Option<String>, Option<String>, String)> {
@@ -230,7 +230,7 @@ mod tests {
                            ('host2', 88.8,  333.3, 1655276558000)
                            "#;
 
-        let table_engine = MitoEngine::<EngineImpl<NoopLogStore>>::new(
+        let table_engine = Arc::new(MitoEngine::<EngineImpl<NoopLogStore>>::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
@@ -238,8 +238,7 @@ mod tests {
                 object_store.clone(),
             ),
             object_store,
-        );
-        let table_engine = Arc::new(table_engine);
+        ));
 
         let catalog_list = Arc::new(
             catalog::LocalCatalogManager::try_new(table_engine.clone())

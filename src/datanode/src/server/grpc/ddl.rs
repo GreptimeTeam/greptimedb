@@ -172,6 +172,8 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
 mod tests {
     use std::collections::HashMap;
 
+    use catalog::MIN_USER_TABLE_ID;
+
     use super::*;
     use crate::tests::test_util;
 
@@ -183,7 +185,7 @@ mod tests {
 
         let expr = testing_create_expr();
         let request = instance.create_expr_to_request(expr).unwrap();
-        assert_eq!(request.id, 1);
+        assert_eq!(request.id, MIN_USER_TABLE_ID);
         assert_eq!(request.catalog_name, None);
         assert_eq!(request.schema_name, None);
         assert_eq!(request.table_name, "my-metrics");

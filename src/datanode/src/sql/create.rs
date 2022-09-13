@@ -205,7 +205,7 @@ mod tests {
         assert_matches!(error, Error::CreateSchema { .. });
     }
 
-    /// If primary key is not specified, time index should be used as primary key.  
+    /// If primary key is not specified, time index should be used as primary key.
     #[tokio::test]
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;

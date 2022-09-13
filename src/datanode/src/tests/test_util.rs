@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use snafu::ResultExt;
@@ -57,7 +57,7 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
         .create_table(
             &EngineContext::default(),
             CreateTableRequest {
-                id: 1,
+                id: MIN_USER_TABLE_ID,
                 catalog_name: None,
                 schema_name: None,
                 table_name: table_name.to_string(),

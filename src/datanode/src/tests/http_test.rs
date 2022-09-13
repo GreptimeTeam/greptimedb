@@ -110,10 +110,11 @@ async fn test_scripts_api() {
     let res = client
         .post("/v1/scripts")
         .json(&ScriptExecution {
+            name: "test".to_string(),
             script: r#"
 @copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
 def test(n):
-    return n;
+    return n + 1;
 "#
             .to_string(),
         })
@@ -122,9 +123,16 @@ def test(n):
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = res.text().await;
+    assert_eq!(body, r#"{"success":true}"#,);
+
+    // call script
+    let res = client.post("/v1/run-script?name=test").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = res.text().await;
     assert_eq!(
         body,
-        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"n","data_type":"UInt32","is_nullable":false,"metadata":{}}],"metadata":{}},"columns":[[0,1,2,3,4,5,6,7,8,9]]}]}}"#
+        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"n","data_type":"Float64","is_nullable":false,"metadata":{}}],"metadata":{}},"columns":[[1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0,10.0]]}]}}"#,
     );
 }
 
