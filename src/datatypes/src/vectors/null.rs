@@ -83,17 +83,6 @@ impl Vector for NullVector {
         Value::Null
     }
 
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        debug_assert!(
-            offsets.len() == self.len(),
-            "Size of offsets must match size of column"
-        );
-
-        Arc::new(Self {
-            array: NullArray::new(ArrowDataType::Null, *offsets.last().unwrap() as usize),
-        })
-    }
-
     fn get_ref(&self, _index: usize) -> ValueRef {
         // Skips bound check for null array.
         ValueRef::Null
@@ -177,6 +166,14 @@ impl MutableVector for NullVectorBuilder {
         self.length += length;
         Ok(())
     }
+}
+
+pub(crate) fn replicate_null(vector: &NullVector, offsets: &[usize]) -> VectorRef {
+    assert_eq!(offsets.len(), vector.len());
+
+    Arc::new(NullVector {
+        array: NullArray::new(ArrowDataType::Null, *offsets.last().unwrap() as usize),
+    })
 }
 
 #[cfg(test)]

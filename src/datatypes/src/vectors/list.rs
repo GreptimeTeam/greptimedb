@@ -99,13 +99,6 @@ impl Vector for ListVector {
         ))
     }
 
-    fn replicate(&self, _: &[usize]) -> VectorRef {
-        // ListVector can be a scalar vector for implementing this `replicate` method. However,
-        // that requires a lot of efforts, starting from not using Arrow's ListArray.
-        // Refer to Databend's `ArrayColumn` for more details.
-        unimplemented!()
-    }
-
     fn get_ref(&self, index: usize) -> ValueRef {
         ValueRef::List(ListValueRef::Indexed {
             vector: self,

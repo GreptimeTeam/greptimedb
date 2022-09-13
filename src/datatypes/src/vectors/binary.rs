@@ -9,7 +9,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
-use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
+use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
@@ -77,10 +77,6 @@ impl Vector for BinaryVector {
 
     fn get(&self, index: usize) -> Value {
         vectors::impl_get_for_vector!(self.array, index)
-    }
-
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        common::replicate_scalar_vector(self, offsets)
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {

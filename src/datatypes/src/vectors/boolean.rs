@@ -8,7 +8,6 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
-use crate::scalars::common::replicate_scalar_vector;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
@@ -93,10 +92,6 @@ impl Vector for BooleanVector {
 
     fn get(&self, index: usize) -> Value {
         vectors::impl_get_for_vector!(self.array, index)
-    }
-
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        replicate_scalar_vector(self, offsets)
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {

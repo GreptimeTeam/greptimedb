@@ -1,7 +1,9 @@
 //! Compute operations for vectors.
 
+// TODO(yingwen): Rename to find_dup/find_duplication
 pub mod dedup;
 
+// FIXME(yingwen): constant vector.
 /// Match `vector` and apply `body` with scalar vector type `T` if `vector` is a
 /// scalar vector, or apply `nbody` if the vector is a `NullVector`.
 macro_rules! match_scalar_vector {

@@ -6,8 +6,6 @@ use crate::prelude::*;
 use crate::value::{ListValue, ListValueRef};
 use crate::vectors::*;
 
-pub mod common;
-
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
     match iter.size_hint() {
         (_lower, Some(upper)) => upper,

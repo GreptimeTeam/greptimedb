@@ -95,15 +95,6 @@ impl Vector for ConstantVector {
         self.vector.get(0)
     }
 
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        debug_assert!(
-            offsets.len() == self.len(),
-            "Size of offsets must match size of column"
-        );
-
-        Arc::new(Self::new(self.vector.clone(), *offsets.last().unwrap()))
-    }
-
     fn get_ref(&self, _index: usize) -> ValueRef {
         self.vector.get_ref(0)
     }
@@ -128,6 +119,15 @@ impl Serializable for ConstantVector {
             .collect::<serde_json::Result<_>>()
             .context(SerializeSnafu)
     }
+}
+
+pub(crate) fn replicate_constant(vector: &ConstantVector, offsets: &[usize]) -> VectorRef {
+    assert_eq!(offsets.len(), vector.len());
+
+    Arc::new(ConstantVector::new(
+        vector.vector.clone(),
+        *offsets.last().unwrap(),
+    ))
 }
 
 #[cfg(test)]

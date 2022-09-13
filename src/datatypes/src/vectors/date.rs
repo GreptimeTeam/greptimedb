@@ -10,7 +10,9 @@ use crate::error::{self, Result};
 use crate::prelude::*;
 use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
-use crate::vectors::{MutableVector, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
+use crate::vectors::{
+    MutableVector, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder, VectorOp,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DateVector {
@@ -101,10 +103,6 @@ impl Vector for DateVector {
                 unreachable!()
             }
         }
-    }
-
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        self.array.replicate(offsets)
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
@@ -234,6 +232,10 @@ impl ScalarVectorBuilder for DateVectorBuilder {
             array: self.buffer.finish(),
         }
     }
+}
+
+pub(crate) fn replicate_date(vector: &DateVector, offsets: &[usize]) -> VectorRef {
+    vector.array.replicate(offsets)
 }
 
 #[cfg(test)]

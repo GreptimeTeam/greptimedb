@@ -13,7 +13,7 @@ use crate::prelude::{
 };
 use crate::serialize::Serializable;
 use crate::types::TimestampType;
-use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
+use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder, VectorOp};
 
 /// `TimestampVector` stores timestamp in millisecond since UNIX Epoch.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,10 +115,6 @@ impl Vector for TimestampVector {
                 unreachable!()
             }
         }
-    }
-
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        self.array.replicate(offsets)
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
@@ -245,6 +241,10 @@ impl ScalarVectorBuilder for TimestampVectorBuilder {
             array: self.buffer.finish(),
         }
     }
+}
+
+pub(crate) fn replicate_timestamp(vector: &TimestampVector, offsets: &[usize]) -> VectorRef {
+    vector.array.replicate(offsets)
 }
 
 #[cfg(test)]

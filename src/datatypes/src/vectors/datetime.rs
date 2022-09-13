@@ -11,7 +11,7 @@ use crate::prelude::{
     MutableVector, ScalarVector, ScalarVectorBuilder, Validity, Value, ValueRef, Vector, VectorRef,
 };
 use crate::serialize::Serializable;
-use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
+use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder, VectorOp};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DateTimeVector {
@@ -102,10 +102,6 @@ impl Vector for DateTimeVector {
                 unreachable!()
             }
         }
-    }
-
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        self.array.replicate(offsets)
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
@@ -234,6 +230,10 @@ impl ScalarVector for DateTimeVector {
             iter: self.array.iter_data(),
         }
     }
+}
+
+pub(crate) fn replicate_datetime(vector: &DateTimeVector, offsets: &[usize]) -> VectorRef {
+    vector.array.replicate(offsets)
 }
 
 #[cfg(test)]

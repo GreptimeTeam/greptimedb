@@ -106,33 +106,6 @@ impl<T: PrimitiveElement> Vector for PrimitiveVector<T> {
         vectors::impl_get_for_vector!(self.array, index)
     }
 
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        debug_assert!(
-            offsets.len() == self.len(),
-            "Size of offsets must match size of column"
-        );
-
-        if offsets.is_empty() {
-            return self.slice(0, 0);
-        }
-
-        let mut builder =
-            PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap() as usize);
-
-        let mut previous_offset = 0;
-
-        for (i, offset) in offsets.iter().enumerate() {
-            let data = unsafe { self.array.value_unchecked(i) };
-            builder.mutable_array.extend(
-                std::iter::repeat(data)
-                    .take(*offset - previous_offset)
-                    .map(Option::Some),
-            );
-            previous_offset = *offset;
-        }
-        builder.to_vector()
-    }
-
     fn get_ref(&self, index: usize) -> ValueRef {
         if self.array.is_valid(index) {
             // Safety: The index have been checked by `is_valid()`.
@@ -314,6 +287,32 @@ impl<T: PrimitiveElement> Serializable for PrimitiveVector<T> {
     }
 }
 
+pub(crate) fn replicate_primitive<T: PrimitiveElement>(
+    vector: &PrimitiveVector<T>,
+    offsets: &[usize],
+) -> VectorRef {
+    assert_eq!(offsets.len(), vector.len());
+
+    if offsets.is_empty() {
+        return vector.slice(0, 0);
+    }
+
+    let mut builder = PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap() as usize);
+
+    let mut previous_offset = 0;
+
+    for (i, offset) in offsets.iter().enumerate() {
+        let data = unsafe { vector.array.value_unchecked(i) };
+        builder.mutable_array.extend(
+            std::iter::repeat(data)
+                .take(*offset - previous_offset)
+                .map(Option::Some),
+        );
+        previous_offset = *offset;
+    }
+    builder.to_vector()
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
@@ -323,6 +322,7 @@ mod tests {
     use crate::data_type::DataType;
     use crate::serialize::Serializable;
     use crate::types::Int64Type;
+    use crate::vectors::VectorOp;
 
     fn check_vec(v: PrimitiveVector<i32>) {
         assert_eq!(4, v.len());
