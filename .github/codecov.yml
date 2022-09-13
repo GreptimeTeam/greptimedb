@@ -8,4 +8,3 @@ coverage:
         threshold: 1%
 ignore:
   - "**/error*.rs" # ignore all error.rs files
-  - "common/function-macro" # procedure macro don't run with "panic=abort" which is defined in grcov
