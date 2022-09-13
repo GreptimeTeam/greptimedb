@@ -382,7 +382,7 @@ mod tests {
     fn test_schema_with_timestamp() {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
         ];
         let schema = SchemaBuilder::from(column_schemas.clone())
             .timestamp_index(1)
