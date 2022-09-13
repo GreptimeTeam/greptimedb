@@ -15,6 +15,7 @@ python = [
   "dep:rustpython-compiler-core",
   "dep:rustpython-bytecode",
   "dep:rustpython-ast",
+  "dep:paste"
 ]
 
 [dependencies]
@@ -23,7 +24,6 @@ common-error = {path = "../common/error"}
 common-function = { path = "../common/function" }
 common-query = {path = "../common/query"}
 common-recordbatch = {path = "../common/recordbatch" }
-# for logging
 common-telemetry = { path = "../common/telemetry" }
 console = "0.15"
 datafusion = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
@@ -40,10 +40,11 @@ rustpython-compiler = {git = "https://github.com/RustPython/RustPython", optiona
 rustpython-compiler-core = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 rustpython-parser = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
 rustpython-vm = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
+paste = { version = "1.0", optional = true}
 snafu = {version = "0.7", features = ["backtraces"]}
 sql = { path = "../sql" }
 tokio = { version = "1.0", features = ["full"] }
-paste = "1.0"
+
 
 [dev-dependencies]
 catalog = { path = "../catalog" }

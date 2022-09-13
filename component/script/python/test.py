@@ -32,7 +32,7 @@ if __name__ == "__main__":
         close = table["close"]
         open_time = table["open_time"]
         env = {"close":close, "open_time": open_time}
-        # print("env:", env)
+
         res = mock_tester(calc_rvs, env=env)
         print("Mock result:", [i[0] for i in res])
         exit()
