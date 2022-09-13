@@ -29,12 +29,12 @@ pub fn init_default_ut_logging() {
 
     START.call_once(|| {
         let mut g = GLOBAL_UT_LOG_GUARD.as_ref().lock().unwrap();
-        *g = Some(init_global_logging(
-            "unittest",
-            "/tmp/__unittest_logs",
-            "DEBUG",
-            false,
-        ));
+        let dir = if env::var("CODECOV_TOKEN").is_ok() {
+            "__unittest_logs"
+        } else {
+            "/tmp/__unittest_logs"
+        };
+        *g = Some(init_global_logging("unittest", dir, "DEBUG", false));
     });
 }
 
