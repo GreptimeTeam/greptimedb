@@ -18,13 +18,6 @@ pub trait Script {
     /// Evaluate the script and returns the output.
     async fn evaluate(&self, ctx: EvalContext) -> std::result::Result<Output, Self::Error>;
 
-    /// Evaluate script by given `Duration` periodically, stop only when the receiver end of tx is all closed
-    async fn schedule_job(
-        &self,
-        dur: Duration,
-        ctx: EvalContext,
-        tx: tokio::sync::mpsc::Sender<Result<Output, crate::python::error::Error>>,
-    );
 }
 
 #[async_trait]

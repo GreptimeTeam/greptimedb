@@ -100,34 +100,6 @@ impl Script for PyScript {
             error::MissingSqlSnafu {}.fail()
         }
     }
-
-    /// repeat a job using a fixed interval
-    async fn schedule_job(
-        &self,
-        dur: Duration,
-        _ctx: EvalContext,
-        tx: tokio::sync::mpsc::Sender<Result<Output>>,
-    ) {
-        let mut interval = time::interval(dur);
-        loop {
-            interval.tick().await;
-            if tx.is_closed() {
-                debug!(
-                    "All receiver to schedule job \"{}\" is closed, ending job now.",
-                    self.copr.name
-                );
-                break;
-            }
-            let res = tx.send(self.evaluate(EvalContext::default()).await).await;
-            if let Err(_err) = res {
-                debug!(
-                    "All receiver to schedule job \"{}\" is closed, ending job now.",
-                    self.copr.name
-                );
-                break;
-            }
-        }
-    }
 }
 
 pub struct PyEngine {
@@ -179,59 +151,6 @@ mod tests {
     use table::table::numbers::NumbersTable;
 
     use super::*;
-
-    #[allow(clippy::print_stdout)]
-    #[tokio::test]
-    async fn test_schedule() {
-        init_default_ut_logging();
-        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
-
-        let default_schema = Arc::new(MemorySchemaProvider::new());
-        default_schema
-            .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
-            .unwrap();
-        let default_catalog = Arc::new(MemoryCatalogProvider::new());
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema);
-        catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
-
-        let factory = QueryEngineFactory::new(catalog_list);
-        let query_engine = factory.query_engine();
-
-        let script_engine = PyEngine::new(query_engine.clone());
-
-        let script = r#"
-@copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
-def test(a, b, c):
-    import greptime as g
-    return g.vector([42 + a[0] + b[1] + c[2]])
-"#;
-        let script = script_engine
-            .compile(script, CompileContext::default())
-            .await
-            .unwrap();
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-        tokio::spawn(async move {
-            script
-                .schedule_job(Duration::from_secs(1), EvalContext::default(), tx)
-                .await;
-        });
-        for _ in 0..10 {
-            match rx.recv().await {
-                Some(Ok(Output::AffectedRows(_))) => todo!(),
-                Some(Ok(Output::RecordBatch(stream))) => {
-                    match util::collect(stream).await {
-                        Ok(rows) => println!("Result: {rows:?}"),
-                        Err(err) => println!("Error: {err:#?}"),
-                    };
-                }
-                Some(Err(err)) => println!("Error: {err}"),
-                None => {
-                    panic!("Sender of scheduled job dropped, which is unexpected, something is wrong...");
-                }
-            }
-        }
-    }
 
     #[tokio::test]
     async fn test_compile_evaluate() {
