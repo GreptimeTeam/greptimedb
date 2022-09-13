@@ -62,6 +62,7 @@ mod tests {
     use catalog::SchemaProvider;
     use common_query::logical_plan::Expr;
     use common_recordbatch::SendableRecordBatchStream;
+    use common_time::timestamp::Timestamp;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
@@ -92,7 +93,7 @@ mod tests {
                 ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
                 ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
                 ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
+                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true),
             ];
 
             Arc::new(
@@ -208,8 +209,14 @@ mod tests {
 
                 let ts = &columns_values["ts"];
                 assert_eq!(2, ts.len());
-                assert_eq!(Value::from(1655276557000i64), ts.get(0));
-                assert_eq!(Value::from(1655276558000i64), ts.get(1));
+                assert_eq!(
+                    Value::from(Timestamp::from_millis(1655276557000i64)),
+                    ts.get(0)
+                );
+                assert_eq!(
+                    Value::from(Timestamp::from_millis(1655276558000i64)),
+                    ts.get(1)
+                );
             }
             _ => {
                 panic!("Not supposed to reach here")

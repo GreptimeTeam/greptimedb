@@ -87,10 +87,7 @@ impl ConcreteDataType {
     }
 
     pub fn is_timestamp(&self) -> bool {
-        matches!(
-            self,
-            ConcreteDataType::Int64(_) | ConcreteDataType::Timestamp(_)
-        )
+        matches!(self, ConcreteDataType::Timestamp(_))
     }
 
     pub fn numerics() -> Vec<ConcreteDataType> {
@@ -339,5 +336,18 @@ mod tests {
             ConcreteDataType::timestamp_datatype(TimeUnit::Second),
             ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Second)
         );
+    }
+
+    #[test]
+    pub fn test_is_timestamp() {
+        assert!(ConcreteDataType::timestamp_millis_datatype().is_timestamp());
+        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Second).is_timestamp());
+        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond).is_timestamp());
+        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond).is_timestamp());
+        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond).is_timestamp());
+
+        // since timestamp data type is implemented, int64 is no longer allowed
+        // to be used a data type for timestamp column
+        assert!(!ConcreteDataType::int64_datatype().is_timestamp());
     }
 }

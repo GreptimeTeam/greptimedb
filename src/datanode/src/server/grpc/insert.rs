@@ -207,6 +207,7 @@ mod tests {
     use common_base::BitVec;
     use common_query::prelude::Expr;
     use common_recordbatch::SendableRecordBatchStream;
+    use common_time::timestamp::Timestamp;
     use datatypes::{
         data_type::ConcreteDataType,
         schema::{ColumnSchema, SchemaBuilder, SchemaRef},
@@ -241,8 +242,8 @@ mod tests {
         assert_eq!(Value::Float64(0.1.into()), memory.get(1));
 
         let ts = insert_req.columns_values.get("ts").unwrap();
-        assert_eq!(Value::Int64(100), ts.get(0));
-        assert_eq!(Value::Int64(101), ts.get(1));
+        assert_eq!(Value::Timestamp(Timestamp::from_millis(100)), ts.get(0));
+        assert_eq!(Value::Timestamp(Timestamp::from_millis(101)), ts.get(1));
     }
 
     #[test]
@@ -292,7 +293,7 @@ mod tests {
                 ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
                 ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
                 ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
+                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true),
             ];
 
             Arc::new(
@@ -314,7 +315,7 @@ mod tests {
 
     fn mock_insert_batches() -> Vec<Vec<u8>> {
         const SEMANTIC_TAG: i32 = 0;
-        const SEMANTIC_FEILD: i32 = 1;
+        const SEMANTIC_FIELD: i32 = 1;
         const SEMANTIC_TS: i32 = 2;
 
         let row_count = 2;
@@ -337,7 +338,7 @@ mod tests {
         };
         let cpu_column = Column {
             column_name: "cpu".to_string(),
-            semantic_type: SEMANTIC_FEILD,
+            semantic_type: SEMANTIC_FIELD,
             values: Some(cpu_vals),
             null_mask: vec![2],
             ..Default::default()
@@ -349,7 +350,7 @@ mod tests {
         };
         let mem_column = Column {
             column_name: "memory".to_string(),
-            semantic_type: SEMANTIC_FEILD,
+            semantic_type: SEMANTIC_FIELD,
             values: Some(mem_vals),
             null_mask: vec![1],
             ..Default::default()
