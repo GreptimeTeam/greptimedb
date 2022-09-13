@@ -29,7 +29,10 @@ pub fn init_default_ut_logging() {
 
     START.call_once(|| {
         let mut g = GLOBAL_UT_LOG_GUARD.as_ref().lock().unwrap();
-        let dir = if env::var("CODECOV_TOKEN").is_ok() {
+        // When running in Github's code coverage pipeline, env "CODECOV" is set.
+        // This is to fix the problem that the "/tmp" disk space of code coverage runner's is rather small,
+        // if we write logs in it, coverage tests would fail due to disk space exploded.
+        let dir = if env::var("CODECOV").is_ok() {
             "__unittest_logs"
         } else {
             "/tmp/__unittest_logs"
