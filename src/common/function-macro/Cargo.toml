@@ -16,3 +16,7 @@ syn = "1.0"
 [dev-dependencies]
 arc-swap = "1.0"
 static_assertions = "1.1.0"
+
+[profile.test]
+# https://github.com/servo/rust-cssparser/issues/273#issuecomment-619533177
+panic = "abort"
