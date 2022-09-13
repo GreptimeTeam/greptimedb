@@ -59,6 +59,10 @@ impl<T: Primitive> PrimitiveVector<T> {
             array: PrimitiveArray::from_values(iter),
         }
     }
+
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        &self.array
+    }
 }
 
 impl<T: PrimitiveElement> Vector for PrimitiveVector<T> {

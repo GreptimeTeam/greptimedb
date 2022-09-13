@@ -21,6 +21,12 @@ pub struct StringVector {
     array: StringArray,
 }
 
+impl StringVector {
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        &self.array
+    }
+}
+
 impl From<StringArray> for StringVector {
     fn from(array: StringArray) -> Self {
         Self { array }

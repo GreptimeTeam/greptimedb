@@ -50,6 +50,12 @@ pub enum Error {
 
     #[snafu(display("{}", msg))]
     CastType { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Arrow failed to compute, source: {}", source))]
+    ArrowCompute {
+        source: arrow::error::ArrowError,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {

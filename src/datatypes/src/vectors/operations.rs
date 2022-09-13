@@ -1,8 +1,10 @@
 mod dedup;
+mod filter;
 mod replicate;
 
 use arrow::bitmap::MutableBitmap;
 
+use crate::error::Result;
 use crate::types::PrimitiveElement;
 use crate::vectors::all::*;
 use crate::vectors::{Vector, VectorRef};
@@ -30,6 +32,11 @@ pub trait VectorOp {
     /// - `selected.len() < self.len()`.
     /// - `prev_vector` and `self` have different data types.
     fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>);
+
+    /// Filters the vector, returns elements matching the `filter` (i.e. where the values are true).
+    ///
+    /// Note that the nulls of `filter` are interpreted as `false` will lead to these elements being masked out.
+    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef>;
 }
 
 macro_rules! impl_scalar_vector_op {
@@ -43,6 +50,10 @@ macro_rules! impl_scalar_vector_op {
                 let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<$VectorType>());
                 dedup::dedup_scalar(self, selected, prev_vector);
             }
+
+            fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+                filter::filter_non_constant!(self, $VectorType, filter)
+            }
         }
     )+};
 
@@ -55,6 +66,10 @@ macro_rules! impl_scalar_vector_op {
             fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
                 let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<$VectorType>());
                 dedup::dedup_scalar(self, selected, prev_vector);
+            }
+
+            fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+                filter::filter_non_constant!(self, $VectorType, filter)
             }
         }
     )+};
@@ -76,6 +91,10 @@ impl VectorOp for ConstantVector {
         let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<ConstantVector>());
         dedup::dedup_constant(self, selected, prev_vector);
     }
+
+    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+        filter::filter_constant(self, filter)
+    }
 }
 
 impl VectorOp for NullVector {
@@ -86,6 +105,10 @@ impl VectorOp for NullVector {
     fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
         let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<NullVector>());
         dedup::dedup_null(self, selected, prev_vector);
+    }
+
+    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+        filter::filter_non_constant!(self, NullVector, filter)
     }
 }
 
@@ -101,5 +124,9 @@ where
         let prev_vector =
             prev_vector.and_then(|pv| pv.as_any().downcast_ref::<PrimitiveVector<T>>());
         dedup::dedup_scalar(self, selected, prev_vector);
+    }
+
+    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+        filter::filter_non_constant!(self, PrimitiveVector<T>, filter)
     }
 }

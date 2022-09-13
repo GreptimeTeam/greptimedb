@@ -20,6 +20,12 @@ pub struct BinaryVector {
     array: BinaryArray,
 }
 
+impl BinaryVector {
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        &self.array
+    }
+}
+
 impl From<BinaryArray> for BinaryVector {
     fn from(array: BinaryArray) -> Self {
         Self { array }

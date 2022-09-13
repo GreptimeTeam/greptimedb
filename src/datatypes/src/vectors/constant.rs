@@ -10,7 +10,7 @@ use crate::error::{Result, SerializeSnafu};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
 use crate::vectors::Helper;
-use crate::vectors::{Validity, Vector, VectorRef};
+use crate::vectors::{BooleanVector, Validity, Vector, VectorRef};
 
 #[derive(Clone)]
 pub struct ConstantVector {
@@ -128,6 +128,20 @@ pub(crate) fn replicate_constant(vector: &ConstantVector, offsets: &[usize]) -> 
         vector.vector.clone(),
         *offsets.last().unwrap(),
     ))
+}
+
+pub(crate) fn filter_constant(
+    vector: &ConstantVector,
+    filter: &BooleanVector,
+) -> Result<VectorRef> {
+    let length = filter.len() - filter.as_boolean_array().values().null_count();
+    if length == vector.len() {
+        return Ok(Arc::new(vector.clone()));
+    }
+    Ok(Arc::new(ConstantVector::new(
+        vector.inner().clone(),
+        length,
+    )))
 }
 
 #[cfg(test)]

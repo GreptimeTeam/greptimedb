@@ -25,6 +25,10 @@ impl NullVector {
             array: NullArray::new(ArrowDataType::Null, n),
         }
     }
+
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        &self.array
+    }
 }
 
 impl From<NullArray> for NullVector {

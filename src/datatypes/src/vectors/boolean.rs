@@ -19,6 +19,16 @@ pub struct BooleanVector {
     array: BooleanArray,
 }
 
+impl BooleanVector {
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        &self.array
+    }
+
+    pub(crate) fn as_boolean_array(&self) -> &BooleanArray {
+        &self.array
+    }
+}
+
 impl From<Vec<bool>> for BooleanVector {
     fn from(data: Vec<bool>) -> Self {
         BooleanVector {

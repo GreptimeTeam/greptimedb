@@ -33,6 +33,10 @@ impl ListVector {
     pub fn values_iter(&self) -> Box<dyn Iterator<Item = Result<VectorRef>> + '_> {
         Box::new(self.array.values_iter().map(VectorHelper::try_into_vector))
     }
+
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        &self.array
+    }
 }
 
 impl Vector for ListVector {

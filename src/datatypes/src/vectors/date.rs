@@ -38,6 +38,10 @@ impl DateVector {
                 .clone(),
         ))
     }
+
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        self.array.as_arrow()
+    }
 }
 
 impl Vector for DateVector {
