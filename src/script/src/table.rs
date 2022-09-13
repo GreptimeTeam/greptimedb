@@ -152,8 +152,8 @@ impl ScriptsTable {
 
         ensure!(!records.is_empty(), ScriptNotFoundSnafu { name });
 
-        assert!(records.len() == 1);
-        assert!(records[0].df_recordbatch.num_columns() == 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].df_recordbatch.num_columns(), 1);
 
         let record = &records[0].df_recordbatch;
 
@@ -168,7 +168,7 @@ impl ScriptsTable {
                 ),
             })?;
 
-        assert!(script_column.len() == 1);
+        assert_eq!(script_column.len(), 1);
         Ok(script_column.value(0).to_string())
     }
 
