@@ -140,9 +140,7 @@ impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for Pr
 
 impl<T> ScalarVector for PrimitiveVector<T>
 where
-    T: Scalar<VectorType = Self> + PrimitiveElement,
-    for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = Self>,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    T: PrimitiveElement,
 {
     type OwnedItem = T;
     type RefItem<'a> = T;
