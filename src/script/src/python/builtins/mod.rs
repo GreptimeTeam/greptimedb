@@ -669,13 +669,13 @@ pub(crate) mod greptime_builtin {
         Ok(res.into())
     }
 
-    fn gen_none_array(data_type: DataType, len: usize) -> ArrayRef {
+    fn gen_none_array(data_type: DataType, len: usize, vm: &VirtualMachine) -> PyResult<ArrayRef> {
         macro_rules! match_none_array {
             ($VAR:ident, $LEN: ident, [$($TY:ident),*]) => {
                 paste!{
                     match $VAR{
                         $(DataType::$TY => Arc::new(arrow::array::[<$TY Array>]::from(vec![None;$LEN])), )*
-                        _ => todo!()
+                        _ => return Err(vm.new_type_error(format!("gen_none_array() does not support {:?}", data_type)))
                     }
                 }
             };
@@ -683,9 +683,9 @@ pub(crate) mod greptime_builtin {
         let ret: ArrayRef = match_none_array!(
             data_type,
             len,
-            [Boolean, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64] //There is not a Float16Array, I wonder why?
+            [Boolean, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64] // We don't support float16 right now, it's not common in usage.
         );
-        ret
+        Ok(ret)
     }
 
     #[pyfunction]
@@ -702,7 +702,7 @@ pub(crate) mod greptime_builtin {
             return Ok(ret.into());
         }
         let cur = cur.slice(0, cur.len() - 1); // except the last one that is
-        let fill = gen_none_array(cur.data_type().to_owned(), 1); //cur.slice(0, 1);
+        let fill = gen_none_array(cur.data_type().to_owned(), 1, vm)?;
         let ret = compute::concatenate::concatenate(&[&*fill, &*cur]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
@@ -729,7 +729,7 @@ pub(crate) mod greptime_builtin {
             return Ok(ret.into());
         }
         let cur = cur.slice(1, cur.len() - 1); // except the last one that is
-        let fill = gen_none_array(cur.data_type().to_owned(), 1);
+        let fill = gen_none_array(cur.data_type().to_owned(), 1, vm)?;
         let ret = compute::concatenate::concatenate(&[&*cur, &*fill]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
@@ -740,6 +740,21 @@ pub(crate) mod greptime_builtin {
             ))
         })?;
         Ok(ret.into())
+    }
+
+    fn try_scalar_to_value(scalar: &dyn Scalar, vm: &VirtualMachine) -> PyResult<i64> {
+        let ty_error = |s: String| vm.new_type_error(s);
+        scalar
+            .as_any()
+            .downcast_ref::<PrimitiveScalar<i64>>()
+            .ok_or_else(|| {
+                ty_error(format!(
+                    "expect scalar to be i64, found{:?}",
+                    scalar.data_type()
+                ))
+            })?
+            .value()
+            .ok_or_else(|| ty_error("All element is Null in a time series array".to_string()))
     }
 
     /// generate interval time point
@@ -760,29 +775,9 @@ pub(crate) mod greptime_builtin {
                 )));
             }
         }
-        let ty_error = |s: String| vm.new_type_error(s);
-        let oldest = oldest
-            .as_any()
-            .downcast_ref::<PrimitiveScalar<i64>>()
-            .ok_or_else(|| {
-                ty_error(format!(
-                    "expect oldest to be i64, found{:?}",
-                    oldest.data_type()
-                ))
-            })?
-            .value()
-            .ok_or_else(|| ty_error("All element is Null in a time series array".to_string()))?;
-        let newest = newest
-            .as_any()
-            .downcast_ref::<PrimitiveScalar<i64>>()
-            .ok_or_else(|| {
-                ty_error(format!(
-                    "expect oldest to be i64, found{:?}",
-                    newest.data_type()
-                ))
-            })?
-            .value()
-            .ok_or_else(|| ty_error("All element is Null in a time series array".to_string()))?;
+
+        let oldest = try_scalar_to_value(oldest, vm)?;
+        let newest = try_scalar_to_value(newest, vm)?;
         if oldest > newest {
             return Err(vm.new_value_error(format!("{oldest} is greater than {newest}")));
         }

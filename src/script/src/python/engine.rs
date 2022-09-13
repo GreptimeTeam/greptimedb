@@ -218,26 +218,16 @@ def test(a, b, c):
         });
         for _ in 0..10 {
             match rx.recv().await {
-                Some(v) => {
-                    match v {
-                        Ok(out) => {
-                            match out {
-                                Output::AffectedRows(_) => todo!(),
-                                Output::RecordBatch(stream) => {
-                                    match util::collect(stream).await {
-                                        Ok(rows) => println!("Result: {rows:?}"),
-                                        Err(err) => println!("Error: {err:#?}"),
-                                    };
-                                }
-                            }
-                            println!("Output something.");
-                        }
-                        Err(err) => println!("Error: {err}"),
+                Some(Ok(Output::AffectedRows(_))) => todo!(),
+                Some(Ok(Output::RecordBatch(stream))) => {
+                    match util::collect(stream).await {
+                        Ok(rows) => println!("Result: {rows:?}"),
+                        Err(err) => println!("Error: {err:#?}"),
                     };
                 }
+                Some(Err(err)) => println!("Error: {err}"),
                 None => {
-                    debug!("Sender of scheduled job dropped, which is unexpected, something is wrong...");
-                    println!("Sender of scheduled job dropped, which is unexpected, something is wrong...");
+                    panic!("Sender of scheduled job dropped, which is unexpected, something is wrong...");
                 }
             }
         }
