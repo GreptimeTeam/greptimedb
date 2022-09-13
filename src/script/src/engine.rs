@@ -1,6 +1,6 @@
 //! Script engine
 
-use std::{any::Any, time::Duration};
+use std::any::Any;
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
@@ -17,7 +17,6 @@ pub trait Script {
 
     /// Evaluate the script and returns the output.
     async fn evaluate(&self, ctx: EvalContext) -> std::result::Result<Output, Self::Error>;
-
 }
 
 #[async_trait]

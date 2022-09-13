@@ -10,14 +10,12 @@ use common_recordbatch::{
     error::ExternalSnafu, error::Result as RecordBatchResult, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use common_telemetry::debug;
 use datatypes::schema::SchemaRef;
 use futures::Stream;
 use query::Output;
 use query::QueryEngineRef;
 use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
-use tokio::time::{self, Duration};
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use crate::python::coprocessor::{exec_parsed, parse::parse_copr};
@@ -142,7 +140,6 @@ mod tests {
         CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
     };
     use common_recordbatch::util;
-    use common_telemetry::init_default_ut_logging;
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;
     use datatypes::arrow::array::Float64Array;
