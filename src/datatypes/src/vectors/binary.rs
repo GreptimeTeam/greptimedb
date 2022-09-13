@@ -4,16 +4,14 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef};
 use arrow::array::{BinaryValueIter, MutableArray};
 use arrow::bitmap::utils::ZipValidity;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};
 use crate::data_type::ConcreteDataType;
-use crate::error::Result;
-use crate::error::SerializeSnafu;
+use crate::error::{self, Result};
 use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of binary strings.
@@ -57,6 +55,10 @@ impl Vector for BinaryVector {
         Arc::new(self.array.clone())
     }
 
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
+        Box::new(self.array.clone())
+    }
+
     fn validity(&self) -> Validity {
         vectors::impl_validity_for_vector!(self.array)
     }
@@ -79,6 +81,10 @@ impl Vector for BinaryVector {
 
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         common::replicate_scalar_vector(self, offsets)
+    }
+
+    fn get_ref(&self, index: usize) -> ValueRef {
+        vectors::impl_get_ref_for_vector!(self.array, index)
     }
 }
 
@@ -125,6 +131,15 @@ impl MutableVector for BinaryVectorBuilder {
     fn to_vector(&mut self) -> VectorRef {
         Arc::new(self.finish())
     }
+
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        self.mutable_array.push(value.as_binary()?);
+        Ok(())
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        vectors::impl_extend_for_builder!(self.mutable_array, vector, BinaryVector, offset, length)
+    }
 }
 
 impl ScalarVectorBuilder for BinaryVectorBuilder {
@@ -155,7 +170,7 @@ impl Serializable for BinaryVector {
                 Some(vec) => serde_json::to_value(vec),
             })
             .collect::<serde_json::Result<_>>()
-            .context(SerializeSnafu)
+            .context(error::SerializeSnafu)
     }
 }
 
@@ -169,11 +184,13 @@ mod tests {
 
     use super::*;
     use crate::arrow_array::BinaryArray;
+    use crate::data_type::DataType;
     use crate::serialize::Serializable;
+    use crate::types::BinaryType;
 
     #[test]
     fn test_binary_vector_misc() {
-        let v = BinaryVector::from(BinaryArray::from_slice(&vec![vec![1, 2, 3], vec![1, 2, 3]]));
+        let v = BinaryVector::from(BinaryArray::from_slice(&[vec![1, 2, 3], vec![1, 2, 3]]));
 
         assert_eq!(2, v.len());
         assert_eq!("BinaryVector", v.vector_type_name());
@@ -185,6 +202,7 @@ mod tests {
         for i in 0..2 {
             assert!(!v.is_null(i));
             assert_eq!(Value::Binary(Bytes::from(vec![1, 2, 3])), v.get(i));
+            assert_eq!(ValueRef::Binary(&[1, 2, 3]), v.get_ref(i));
         }
 
         let arrow_arr = v.to_arrow_array();
@@ -194,8 +212,7 @@ mod tests {
 
     #[test]
     fn test_serialize_binary_vector_to_json() {
-        let vector =
-            BinaryVector::from(BinaryArray::from_slice(&vec![vec![1, 2, 3], vec![1, 2, 3]]));
+        let vector = BinaryVector::from(BinaryArray::from_slice(&[vec![1, 2, 3], vec![1, 2, 3]]));
 
         let json_value = vector.serialize_to_json().unwrap();
         assert_eq!(
@@ -221,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_from_arrow_array() {
-        let arrow_array = BinaryArray::from_slice(&vec![vec![1, 2, 3], vec![1, 2, 3]]);
+        let arrow_array = BinaryArray::from_slice(&[vec![1, 2, 3], vec![1, 2, 3]]);
         let original = arrow_array.clone();
         let vector = BinaryVector::from(arrow_array);
         assert_eq!(original, vector.array);
@@ -269,5 +286,24 @@ mod tests {
         let slots = validity.slots().unwrap();
         assert_eq!(1, slots.null_count());
         assert!(!slots.get_bit(1));
+    }
+
+    #[test]
+    fn test_binary_vector_builder() {
+        let input = BinaryVector::from_slice(&[b"world", b"one", b"two"]);
+
+        let mut builder = BinaryType::default().create_mutable_vector(3);
+        builder
+            .push_value_ref(ValueRef::Binary("hello".as_bytes()))
+            .unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(BinaryVector::from_slice(&[b"hello", b"one", b"two"]));
+        assert_eq!(expect, vector);
     }
 }

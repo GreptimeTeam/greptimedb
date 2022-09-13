@@ -5,12 +5,10 @@ use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
-use crate::error::{self, Error, SyntaxSnafu, TokenizerSnafu};
+use crate::error::{self, Result, SyntaxSnafu, TokenizerSnafu};
 use crate::statements::show_database::SqlShowDatabase;
 use crate::statements::show_kind::ShowKind;
 use crate::statements::statement::Statement;
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
@@ -76,6 +74,8 @@ impl<'a> ParserContext<'a> {
                     Keyword::INSERT => self.parse_insert(),
 
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
+
+                    Keyword::ALTER => self.parse_alter(),
 
                     // todo(hl) support more statements.
                     _ => self.unsupported(self.peek_token_as_string()),

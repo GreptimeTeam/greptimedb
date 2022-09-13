@@ -1,17 +1,21 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use snafu::ResultExt;
 use table::engine::EngineContext;
 use table::engine::TableEngineRef;
 use table::requests::CreateTableRequest;
+use table_engine::config::EngineConfig;
+use table_engine::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use tempdir::TempDir;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{CreateTableSnafu, Result};
 use crate::instance::Instance;
+use crate::sql::SqlHandler;
 
 /// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
 /// Only for test.
@@ -44,7 +48,7 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), true),
+        ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true),
     ];
 
     let table_name = "demo";
@@ -53,7 +57,7 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
         .create_table(
             &EngineContext::default(),
             CreateTableRequest {
-                id: 1,
+                id: MIN_USER_TABLE_ID,
                 catalog_name: None,
                 schema_name: None,
                 table_name: table_name.to_string(),
@@ -65,7 +69,8 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
                         .expect("ts is expected to be timestamp column"),
                 ),
                 create_if_not_exists: true,
-                primary_key_indices: Vec::default(),
+                primary_key_indices: vec![3, 0], // "host" and "ts" are primary keys
+                table_options: HashMap::new(),
             },
         )
         .await
@@ -81,4 +86,19 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
         .register_table(table_name.to_string(), table)
         .unwrap();
     Ok(())
+}
+
+pub async fn create_mock_sql_handler() -> SqlHandler {
+    let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
+    let mock_engine = Arc::new(MockMitoEngine::new(
+        EngineConfig::default(),
+        MockEngine::default(),
+        object_store,
+    ));
+    let catalog_manager = Arc::new(
+        catalog::LocalCatalogManager::try_new(mock_engine.clone())
+            .await
+            .unwrap(),
+    );
+    SqlHandler::new(mock_engine, catalog_manager)
 }

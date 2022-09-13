@@ -11,7 +11,7 @@ use datafusion::field_util::SchemaExt;
 use datatypes::for_all_ordered_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::DataTypeBuilder;
+use datatypes::types::PrimitiveElement;
 use datatypes::vectors::PrimitiveVector;
 use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
@@ -48,7 +48,7 @@ async fn test_percentile_correctness() -> Result<()> {
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     let record_batch = util::collect(recordbatch_stream).await.unwrap();
@@ -65,7 +65,7 @@ async fn test_percentile_success<T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Result<()>
 where
-    T: Primitive + AsPrimitive<f64> + DataTypeBuilder,
+    T: PrimitiveElement + AsPrimitive<f64>,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     let result = execute_percentile(column_name, table_name, engine.clone())
@@ -108,7 +108,7 @@ async fn execute_percentile<'a>(
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     util::collect(recordbatch_stream).await
@@ -120,7 +120,7 @@ async fn test_percentile_failed<T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Result<()>
 where
-    T: Primitive + DataTypeBuilder,
+    T: PrimitiveElement,
 {
     let result = execute_percentile(column_name, table_name, engine).await;
     assert!(result.is_err());

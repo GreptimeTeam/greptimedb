@@ -5,12 +5,13 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_telemetry::logging;
+use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{
-    self, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
-    CreateOptions, OpenOptions, RegionDescriptorBuilder, RegionId, RowKeyDescriptor,
-    RowKeyDescriptorBuilder, StorageEngine,
+    ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
+    CreateOptions, EngineContext as StorageEngineContext, OpenOptions, RegionDescriptorBuilder,
+    RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
@@ -29,7 +30,7 @@ use crate::error::{
 use crate::table::MitoTable;
 
 pub const MITO_ENGINE: &str = "mito";
-const INIT_COLUMN_ID: ColumnId = 0;
+pub const INIT_COLUMN_ID: ColumnId = 0;
 const INIT_TABLE_VERSION: TableVersion = 0;
 
 /// Generate region name in the form of "{TABLE_ID}_{REGION_NUMBER}"
@@ -89,18 +90,18 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
 
     async fn alter_table(
         &self,
-        _ctx: &EngineContext,
-        _request: AlterTableRequest,
+        ctx: &EngineContext,
+        req: AlterTableRequest,
     ) -> TableResult<TableRef> {
-        unimplemented!();
+        Ok(self.inner.alter_table(ctx, req).await?)
     }
 
     fn get_table(&self, _ctx: &EngineContext, name: &str) -> TableResult<Option<TableRef>> {
         Ok(self.inner.get_table(name))
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, _name: &str) -> bool {
-        unimplemented!();
+    fn table_exists(&self, _ctx: &EngineContext, name: &str) -> bool {
+        self.inner.get_table(name).is_some()
     }
 
     async fn drop_table(
@@ -125,18 +126,17 @@ struct MitoEngineInner<S: StorageEngine> {
     table_mutex: Mutex<()>,
 }
 
-fn build_row_key_desc_from_schema(
+pub(crate) fn build_row_key_desc(
     mut column_id: ColumnId,
-    request: &CreateTableRequest,
+    table_name: &str,
+    table_schema: &SchemaRef,
+    primary_key_indices: &Vec<usize>,
 ) -> Result<(ColumnId, RowKeyDescriptor)> {
-    let ts_column_schema =
-        request
-            .schema
-            .timestamp_column()
-            .context(MissingTimestampIndexSnafu {
-                table_name: &request.table_name,
-            })?;
-    let timestamp_index = request.schema.timestamp_index().unwrap();
+    let ts_column_schema = table_schema
+        .timestamp_column()
+        .context(MissingTimestampIndexSnafu { table_name })?;
+    // `unwrap` is safe because we've checked the `timestamp_column` above
+    let timestamp_index = table_schema.timestamp_index().unwrap();
 
     let ts_column = ColumnDescriptorBuilder::new(
         column_id,
@@ -147,16 +147,16 @@ fn build_row_key_desc_from_schema(
     .build()
     .context(BuildColumnDescriptorSnafu {
         column_name: &ts_column_schema.name,
-        table_name: &request.table_name,
+        table_name,
     })?;
     column_id += 1;
 
-    let column_schemas = &request.schema.column_schemas();
+    let column_schemas = &table_schema.column_schemas();
 
     //TODO(boyan): enable version column by table option?
     let mut builder = RowKeyDescriptorBuilder::new(ts_column);
 
-    for index in &request.primary_key_indices {
+    for index in primary_key_indices {
         if *index == timestamp_index {
             continue;
         }
@@ -172,7 +172,7 @@ fn build_row_key_desc_from_schema(
         .build()
         .context(BuildColumnDescriptorSnafu {
             column_name: &column_schema.name,
-            table_name: &request.table_name,
+            table_name,
         })?;
 
         builder = builder.push_column(column);
@@ -181,27 +181,24 @@ fn build_row_key_desc_from_schema(
 
     Ok((
         column_id,
-        builder.build().context(BuildRowKeyDescriptorSnafu {
-            table_name: &request.table_name,
-        })?,
+        builder
+            .build()
+            .context(BuildRowKeyDescriptorSnafu { table_name })?,
     ))
 }
 
-fn build_column_family_from_request(
+pub(crate) fn build_column_family(
     mut column_id: ColumnId,
-    request: &CreateTableRequest,
+    table_name: &str,
+    table_schema: &SchemaRef,
+    primary_key_indices: &[usize],
 ) -> Result<(ColumnId, ColumnFamilyDescriptor)> {
     let mut builder = ColumnFamilyDescriptorBuilder::default();
 
-    let primary_key_indices = &request.primary_key_indices;
-    let ts_index = request
-        .schema
+    let ts_index = table_schema
         .timestamp_index()
-        .context(MissingTimestampIndexSnafu {
-            table_name: &request.table_name,
-        })?;
-    let column_schemas = request
-        .schema
+        .context(MissingTimestampIndexSnafu { table_name })?;
+    let column_schemas = table_schema
         .column_schemas()
         .iter()
         .enumerate()
@@ -217,7 +214,7 @@ fn build_column_family_from_request(
         .build()
         .context(BuildColumnDescriptorSnafu {
             column_name: &column_schema.name,
-            table_name: &request.table_name,
+            table_name,
         })?;
 
         builder = builder.push_column(column);
@@ -226,9 +223,9 @@ fn build_column_family_from_request(
 
     Ok((
         column_id,
-        builder.build().context(BuildColumnFamilyDescriptorSnafu {
-            table_name: &request.table_name,
-        })?,
+        builder
+            .build()
+            .context(BuildColumnFamilyDescriptorSnafu { table_name })?,
     ))
 }
 
@@ -248,9 +245,20 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             }
         }
 
-        let (next_column_id, default_cf) =
-            build_column_family_from_request(INIT_COLUMN_ID, &request)?;
-        let (next_column_id, row_key) = build_row_key_desc_from_schema(next_column_id, &request)?;
+        let table_schema = &request.schema;
+        let primary_key_indices = &request.primary_key_indices;
+        let (next_column_id, default_cf) = build_column_family(
+            INIT_COLUMN_ID,
+            table_name,
+            table_schema,
+            primary_key_indices,
+        )?;
+        let (next_column_id, row_key) = build_row_key_desc(
+            next_column_id,
+            table_name,
+            table_schema,
+            primary_key_indices,
+        )?;
 
         let table_id = request.id;
         // TODO(dennis): supports multi regions;
@@ -285,7 +293,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let region = self
             .storage_engine
-            .create_region(&storage::EngineContext::default(), region_descriptor, &opts)
+            .create_region(&StorageEngineContext::default(), region_descriptor, &opts)
             .await
             .map_err(BoxedError::new)
             .context(error::CreateRegionSnafu)?;
@@ -340,7 +348,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 return Ok(Some(table));
             }
 
-            let engine_ctx = storage::EngineContext::default();
+            let engine_ctx = StorageEngineContext::default();
             let opts = OpenOptions {
                 parent_dir: table_dir(table_name),
             };
@@ -379,6 +387,20 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     fn get_table(&self, name: &str) -> Option<TableRef> {
         self.tables.read().unwrap().get(name).cloned()
     }
+
+    async fn alter_table(&self, _ctx: &EngineContext, req: AlterTableRequest) -> Result<TableRef> {
+        let table_name = &req.table_name.clone();
+        let table = self
+            .get_table(table_name)
+            .context(error::TableNotFoundSnafu { table_name })?;
+
+        logging::info!("start altering table {} with request {:?}", table_name, req);
+        table
+            .alter(req)
+            .await
+            .context(error::AlterTableSnafu { table_name })?;
+        Ok(table)
+    }
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
@@ -397,13 +419,16 @@ mod tests {
     use common_recordbatch::util;
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;
+    use datatypes::prelude::{ConcreteDataType, ScalarVector};
+    use datatypes::schema::ColumnSchema;
     use datatypes::vectors::*;
     use store_api::manifest::Manifest;
-    use table::requests::InsertRequest;
+    use store_api::storage::ReadContext;
+    use table::requests::{AlterKind, InsertRequest};
 
     use super::*;
     use crate::table::test_util;
-    use crate::table::test_util::MockRegion;
+    use crate::table::test_util::{MockRegion, TABLE_NAME};
 
     #[test]
     fn test_region_name() {
@@ -436,7 +461,7 @@ mod tests {
         let hosts = StringVector::from(vec!["host1", "host2"]);
         let cpus = Float64Vector::from_vec(vec![55.5, 66.6]);
         let memories = Float64Vector::from_vec(vec![1024f64, 4096f64]);
-        let tss = Int64Vector::from_vec(vec![1, 2]);
+        let tss = TimestampVector::from_vec(vec![1, 2]);
 
         columns_values.insert("host".to_string(), Arc::new(hosts.clone()));
         columns_values.insert("cpu".to_string(), Arc::new(cpus.clone()));
@@ -503,6 +528,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_table_scan_batches() {
+        common_telemetry::init_default_ut_logging();
+
+        let (_engine, table, _schema, _dir) = test_util::setup_test_engine_and_table().await;
+
+        // TODO(yingwen): Custom batch size once the table support setting batch_size.
+        let default_batch_size = ReadContext::default().batch_size;
+        // Insert more than batch size rows to the table.
+        let test_batch_size = default_batch_size * 4;
+        let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
+        let hosts = StringVector::from(vec!["host1"; test_batch_size]);
+        let cpus = Float64Vector::from_vec(vec![55.5; test_batch_size]);
+        let memories = Float64Vector::from_vec(vec![1024f64; test_batch_size]);
+        let tss = TimestampVector::from_values((0..test_batch_size).map(|v| v as i64));
+
+        columns_values.insert("host".to_string(), Arc::new(hosts));
+        columns_values.insert("cpu".to_string(), Arc::new(cpus));
+        columns_values.insert("memory".to_string(), Arc::new(memories));
+        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
+
+        let insert_req = InsertRequest {
+            table_name: "demo".to_string(),
+            columns_values,
+        };
+        assert_eq!(test_batch_size, table.insert(insert_req).await.unwrap());
+
+        let stream = table.scan(&None, &[], None).await.unwrap();
+        let batches = util::collect(stream).await.unwrap();
+        let mut total = 0;
+        for batch in batches {
+            assert_eq!(batch.df_recordbatch.num_columns(), 4);
+            let ts = batch.df_recordbatch.column(3);
+            let expect = tss.slice(total, ts.len());
+            assert_eq!(expect.to_arrow_array(), *ts);
+            total += ts.len();
+        }
+        assert_eq!(test_batch_size, total);
+    }
+
+    #[tokio::test]
     async fn test_create_if_not_exists() {
         common_telemetry::init_default_ut_logging();
         let ctx = EngineContext::default();
@@ -525,6 +590,7 @@ mod tests {
             create_if_not_exists: true,
             desc: None,
             primary_key_indices: Vec::default(),
+            table_options: HashMap::new(),
         };
 
         let created_table = table_engine.create_table(&ctx, request).await.unwrap();
@@ -547,6 +613,7 @@ mod tests {
             create_if_not_exists: false,
             desc: None,
             primary_key_indices: Vec::default(),
+            table_options: HashMap::new(),
         };
 
         let result = table_engine.create_table(&ctx, request).await;
@@ -614,5 +681,51 @@ mod tests {
         assert_eq!(4294967396, region_id(1, 100));
         assert_eq!(8589934602, region_id(2, 10));
         assert_eq!(18446744069414584330, region_id(u32::MAX, 10));
+    }
+
+    #[tokio::test]
+    async fn test_alter_table_add_column() {
+        let (_engine, table_engine, table, _object_store, _dir) =
+            test_util::setup_mock_engine_and_table().await;
+
+        let table = table
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+        let table_info = table.table_info();
+        let old_info = (*table_info).clone();
+        let old_meta = &old_info.meta;
+        let old_schema = &old_meta.schema;
+
+        let new_column = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let req = AlterTableRequest {
+            catalog_name: None,
+            schema_name: None,
+            table_name: TABLE_NAME.to_string(),
+            alter_kind: AlterKind::AddColumn {
+                new_column: new_column.clone(),
+            },
+        };
+        let table = table_engine
+            .alter_table(&EngineContext::default(), req)
+            .await
+            .unwrap();
+
+        let table = table
+            .as_any()
+            .downcast_ref::<MitoTable<MockRegion>>()
+            .unwrap();
+        let new_info = table.table_info();
+        let new_meta = &new_info.meta;
+        let new_schema = &new_meta.schema;
+
+        assert_eq!(new_schema.num_columns(), old_schema.num_columns() + 1);
+        assert_eq!(
+            new_schema.column_schemas().split_last().unwrap(),
+            (&new_column, old_schema.column_schemas())
+        );
+        assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
+        assert_eq!(new_schema.version(), old_schema.version() + 1);
+        assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 1);
     }
 }

@@ -5,15 +5,14 @@ use std::sync::Arc;
 use arrow::array::ArrayRef;
 use arrow::array::{Array, NullArray};
 use arrow::datatypes::DataType as ArrowDataType;
-use snafu::OptionExt;
+use snafu::{ensure, OptionExt};
 
 use crate::data_type::ConcreteDataType;
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::serialize::Serializable;
 use crate::types::NullType;
-use crate::value::Value;
-use crate::vectors::impl_try_from_arrow_array_for_vector;
-use crate::vectors::{Validity, Vector, VectorRef};
+use crate::value::{Value, ValueRef};
+use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 #[derive(PartialEq)]
 pub struct NullVector {
@@ -55,6 +54,10 @@ impl Vector for NullVector {
         Arc::new(self.array.clone())
     }
 
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
+        Box::new(self.array.clone())
+    }
+
     fn validity(&self) -> Validity {
         Validity::AllNull
     }
@@ -90,6 +93,11 @@ impl Vector for NullVector {
             array: NullArray::new(ArrowDataType::Null, *offsets.last().unwrap() as usize),
         })
     }
+
+    fn get_ref(&self, _index: usize) -> ValueRef {
+        // Skips bound check for null array.
+        ValueRef::Null
+    }
 }
 
 impl fmt::Debug for NullVector {
@@ -106,13 +114,77 @@ impl Serializable for NullVector {
     }
 }
 
-impl_try_from_arrow_array_for_vector!(NullArray, NullVector);
+vectors::impl_try_from_arrow_array_for_vector!(NullArray, NullVector);
+
+#[derive(Default)]
+pub struct NullVectorBuilder {
+    length: usize,
+}
+
+impl MutableVector for NullVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::null_datatype()
+    }
+
+    fn len(&self) -> usize {
+        self.length
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn to_vector(&mut self) -> VectorRef {
+        let vector = Arc::new(NullVector::new(self.length));
+        self.length = 0;
+        vector
+    }
+
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+        ensure!(
+            value.is_null(),
+            error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to null", value),
+            }
+        );
+
+        self.length += 1;
+        Ok(())
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        vector
+            .as_any()
+            .downcast_ref::<NullVector>()
+            .with_context(|| error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to convert vector from {} to NullVector",
+                    vector.vector_type_name()
+                ),
+            })?;
+        assert!(
+            offset + length <= vector.len(),
+            "offset {} + length {} must less than {}",
+            offset,
+            length,
+            vector.len()
+        );
+
+        self.length += length;
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use serde_json;
 
     use super::*;
+    use crate::data_type::DataType;
 
     #[test]
     fn test_null_vector_misc() {
@@ -135,6 +207,7 @@ mod tests {
         for i in 0..32 {
             assert!(v.is_null(i));
             assert_eq!(Value::Null, v.get(i));
+            assert_eq!(ValueRef::Null, v.get_ref(i));
         }
     }
 
@@ -159,5 +232,22 @@ mod tests {
         let vector = NullVector::new(5);
         assert_eq!(Validity::AllNull, vector.validity());
         assert_eq!(5, vector.null_count());
+    }
+
+    #[test]
+    fn test_null_vector_builder() {
+        let mut builder = NullType::default().create_mutable_vector(3);
+        builder.push_value_ref(ValueRef::Null).unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+
+        let input = NullVector::new(3);
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(input);
+        assert_eq!(expect, vector);
     }
 }

@@ -49,36 +49,50 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to execute script: {}, source: {}", script, source))]
+    #[snafu(display("Failed to insert script with name: {}, source: {}", name, source))]
+    InsertScript {
+        name: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to execute script by name: {}, source: {}", name, source))]
     ExecuteScript {
-        script: String,
+        name: String,
         #[snafu(backtrace)]
         source: BoxedError,
     },
 
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
+
+    #[snafu(display("Invalid query: {}", reason))]
+    InvalidQuery {
+        reason: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
+        use Error::*;
         match self {
-            Error::Internal { .. }
-            | Error::InternalIo { .. }
-            | Error::TokioIo { .. }
-            | Error::VectorConversion { .. }
-            | Error::CollectRecordbatch { .. }
-            | Error::StartHttp { .. }
-            | Error::StartGrpc { .. }
-            | Error::TcpBind { .. } => StatusCode::Internal,
+            Internal { .. }
+            | InternalIo { .. }
+            | TokioIo { .. }
+            | VectorConversion { .. }
+            | CollectRecordbatch { .. }
+            | StartHttp { .. }
+            | StartGrpc { .. }
+            | TcpBind { .. } => StatusCode::Internal,
 
-            Error::ExecuteScript { source, .. } | Error::ExecuteQuery { source, .. } => {
-                source.status_code()
-            }
+            InsertScript { source, .. }
+            | ExecuteScript { source, .. }
+            | ExecuteQuery { source, .. } => source.status_code(),
 
-            Error::NotSupported { .. } => StatusCode::InvalidArguments,
+            NotSupported { .. } | InvalidQuery { .. } => StatusCode::InvalidArguments,
         }
     }
 

@@ -27,13 +27,21 @@ pub enum InnerError {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Failed to create RecordBatches, reason: {}", reason))]
+    CreateRecordBatches {
+        reason: String,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for InnerError {
     fn status_code(&self) -> StatusCode {
         match self {
             InnerError::NewDfRecordBatch { .. } => StatusCode::InvalidArguments,
-            InnerError::DataTypes { .. } => StatusCode::Internal,
+            InnerError::DataTypes { .. } | InnerError::CreateRecordBatches { .. } => {
+                StatusCode::Internal
+            }
             InnerError::External { source } => source.status_code(),
         }
     }

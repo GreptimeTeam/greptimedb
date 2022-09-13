@@ -13,12 +13,16 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
+use table::TableRef;
 
 use super::error::Result;
-use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME};
+use crate::consts::{
+    INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
+};
 use crate::error::{
-    CatalogNotFoundSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, SchemaNotFoundSnafu,
-    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    CatalogNotFoundSnafu, CreateTableSnafu, IllegalManagerStateSnafu, OpenTableSnafu,
+    ReadSystemCatalogSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
+    SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
 use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
@@ -28,7 +32,8 @@ use crate::system::{
 use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
-    RegisterTableRequest, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, DEFAULT_CATALOG_NAME,
+    DEFAULT_SCHEMA_NAME,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -37,7 +42,8 @@ pub struct LocalCatalogManager {
     catalogs: Arc<MemoryCatalogList>,
     engine: TableEngineRef,
     next_table_id: AtomicU32,
-    lock: Mutex<()>,
+    init_lock: Mutex<bool>,
+    system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
 }
 
 impl LocalCatalogManager {
@@ -54,8 +60,9 @@ impl LocalCatalogManager {
             system: system_catalog,
             catalogs: memory_catalog_list,
             engine,
-            next_table_id: AtomicU32::new(0),
-            lock: Mutex::new(()),
+            next_table_id: AtomicU32::new(MIN_USER_TABLE_ID),
+            init_lock: Mutex::new(false),
+            system_table_requests: Mutex::new(Vec::default()),
         })
     }
 
@@ -78,7 +85,54 @@ impl LocalCatalogManager {
             max_table_id
         );
         self.next_table_id
-            .store(max_table_id + 1, Ordering::Relaxed);
+            .store((max_table_id + 1).max(MIN_USER_TABLE_ID), Ordering::Relaxed);
+        *self.init_lock.lock().await = true;
+
+        // Processing system table hooks
+        let mut sys_table_requests = self.system_table_requests.lock().await;
+        for req in sys_table_requests.drain(..) {
+            let catalog_name = &req.create_table_request.catalog_name;
+            let schema_name = &req.create_table_request.schema_name;
+            let table_name = &req.create_table_request.table_name;
+            let table_id = req.create_table_request.id;
+
+            let table = if let Some(table) =
+                self.table(catalog_name.as_deref(), schema_name.as_deref(), table_name)?
+            {
+                table
+            } else {
+                let table = self
+                    .engine
+                    .create_table(&EngineContext::default(), req.create_table_request.clone())
+                    .await
+                    .with_context(|_| CreateTableSnafu {
+                        table_info: format!(
+                            "{}.{}.{}, id: {}",
+                            catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME),
+                            schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME),
+                            table_name,
+                            table_id,
+                        ),
+                    })?;
+                self.register_table(RegisterTableRequest {
+                    catalog: catalog_name.clone(),
+                    schema: schema_name.clone(),
+                    table_name: table_name.clone(),
+                    table_id,
+                    table: table.clone(),
+                })
+                .await?;
+
+                info!("Created and registered system table: {}", table_name);
+
+                table
+            };
+
+            if let Some(hook) = req.open_hook {
+                (hook)(table)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -265,7 +319,15 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
-        let _lock = self.lock.lock().await;
+        let started = self.init_lock.lock().await;
+
+        ensure!(
+            *started,
+            IllegalManagerStateSnafu {
+                msg: "Catalog manager not started",
+            }
+        );
+
         let catalog_name = request
             .catalog
             .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
@@ -303,5 +365,40 @@ impl CatalogManager for LocalCatalogManager {
 
         schema.register_table(request.table_name, request.table)?;
         Ok(1)
+    }
+
+    async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
+        ensure!(
+            !*self.init_lock.lock().await,
+            IllegalManagerStateSnafu {
+                msg: "Catalog manager already started",
+            }
+        );
+
+        let mut sys_table_requests = self.system_table_requests.lock().await;
+        sys_table_requests.push(request);
+
+        Ok(())
+    }
+
+    fn table(
+        &self,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table_name: &str,
+    ) -> Result<Option<TableRef>> {
+        let catalog_name = catalog.unwrap_or(DEFAULT_CATALOG_NAME);
+        let schema_name = schema.unwrap_or(DEFAULT_SCHEMA_NAME);
+
+        let catalog = self
+            .catalogs
+            .catalog(catalog_name)
+            .context(CatalogNotFoundSnafu { catalog_name })?;
+        let schema = catalog
+            .schema(schema_name)
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", catalog_name, schema_name),
+            })?;
+        Ok(schema.table(table_name))
     }
 }

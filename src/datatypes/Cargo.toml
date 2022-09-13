@@ -3,6 +3,10 @@ name = "datatypes"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+test = []
+
 [dependencies.arrow]
 package = "arrow2"
 version = "0.10"

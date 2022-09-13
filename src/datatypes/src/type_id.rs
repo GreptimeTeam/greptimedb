@@ -30,12 +30,18 @@ pub enum LogicalTypeId {
     /// seconds/milliseconds/microseconds/nanoseconds, determined by precision.
     DateTime,
 
+    Timestamp,
+
     List,
 }
 
 impl LogicalTypeId {
+    /// Create ConcreteDataType based on this id. This method is for test only as it
+    /// would lost some info.
+    ///
     /// # Panics
     /// Panics if data type is not supported.
+    #[cfg(any(test, feature = "test"))]
     pub fn data_type(&self) -> ConcreteDataType {
         match self {
             LogicalTypeId::Null => ConcreteDataType::null_datatype(),
@@ -53,8 +59,10 @@ impl LogicalTypeId {
             LogicalTypeId::String => ConcreteDataType::string_datatype(),
             LogicalTypeId::Binary => ConcreteDataType::binary_datatype(),
             LogicalTypeId::Date => ConcreteDataType::date_datatype(),
-            LogicalTypeId::DateTime | LogicalTypeId::List => {
-                unimplemented!("Data type for {:?} is unimplemented", self)
+            LogicalTypeId::DateTime => ConcreteDataType::datetime_datatype(),
+            LogicalTypeId::Timestamp => ConcreteDataType::timestamp_millis_datatype(), // to timestamp type with default time unit
+            LogicalTypeId::List => {
+                ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
             }
         }
     }

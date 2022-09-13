@@ -76,6 +76,11 @@ impl Tester {
         self.base.as_ref().unwrap()
     }
 
+    #[inline]
+    fn set_batch_size(&mut self, batch_size: usize) {
+        self.base.as_mut().unwrap().read_ctx.batch_size = batch_size;
+    }
+
     async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
         self.base().put(data).await
     }
@@ -161,4 +166,25 @@ async fn test_open_empty() {
 
     let ret = tester.try_reopen().await;
     assert!(!ret.unwrap());
+}
+
+#[tokio::test]
+async fn test_scan_different_batch() {
+    let dir = TempDir::new("different-batch").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+    let mut tester = Tester::new(REGION_NAME, store_dir).await;
+
+    let data: Vec<_> = (0..=2000).map(|i| (i, Some(i))).collect();
+
+    for chunk in data.chunks(100) {
+        tester.put(chunk).await;
+    }
+
+    let batch_sizes = [1, 2, 4, 16, 64, 128, 256, 512];
+    for batch_size in batch_sizes {
+        tester.set_batch_size(batch_size);
+
+        let output = tester.full_scan().await;
+        assert_eq!(data, output);
+    }
 }

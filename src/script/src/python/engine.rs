@@ -77,7 +77,7 @@ impl Script for PyScript {
         self
     }
 
-    async fn evaluate(&self, _ctx: EvalContext) -> Result<Output> {
+    async fn execute(&self, _ctx: EvalContext) -> Result<Output> {
         if let Some(sql) = &self.copr.deco_args.sql {
             let stmt = self.query_engine.sql_to_statement(sql)?;
             ensure!(
@@ -88,9 +88,7 @@ impl Script for PyScript {
             let res = self.query_engine.execute(&plan).await?;
             let copr = self.copr.clone();
             match res {
-                query::Output::RecordBatch(stream) => {
-                    Ok(Output::RecordBatch(Box::pin(CoprStream { copr, stream })))
-                }
+                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream { copr, stream }))),
                 _ => unreachable!(),
             }
         } else {
@@ -150,7 +148,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_compile_evaluate() {
+    async fn test_compile_execute() {
         let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
@@ -176,9 +174,9 @@ def test(a, b, c):
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let output = script.evaluate(EvalContext::default()).await.unwrap();
+        let output = script.execute(EvalContext::default()).await.unwrap();
         match output {
-            Output::RecordBatch(stream) => {
+            Output::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());
@@ -207,9 +205,9 @@ def test(a):
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let output = script.evaluate(EvalContext::default()).await.unwrap();
+        let output = script.execute(EvalContext::default()).await.unwrap();
         match output {
-            Output::RecordBatch(stream) => {
+            Output::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());

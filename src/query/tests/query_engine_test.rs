@@ -16,7 +16,7 @@ use datafusion::logical_plan::LogicalPlanBuilder;
 use datatypes::for_all_ordered_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::DataTypeBuilder;
+use datatypes::types::PrimitiveElement;
 use datatypes::vectors::{Float32Vector, Float64Vector, PrimitiveVector, UInt32Vector};
 use num::NumCast;
 use query::error::Result;
@@ -63,7 +63,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let output = engine.execute(&plan).await?;
 
     let recordbatch = match output {
-        Output::RecordBatch(recordbatch) => recordbatch,
+        Output::Stream(recordbatch) => recordbatch,
         _ => unreachable!(),
     };
 
@@ -121,7 +121,7 @@ async fn test_udf() -> Result<()> {
 
     let output = engine.execute(&plan).await?;
     let recordbatch = match output {
-        Output::RecordBatch(recordbatch) => recordbatch,
+        Output::Stream(recordbatch) => recordbatch,
         _ => unreachable!(),
     };
 
@@ -236,7 +236,7 @@ async fn get_numbers_from_table<'s, T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Vec<T>
 where
-    T: Primitive + DataTypeBuilder,
+    T: PrimitiveElement,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     let sql = format!("SELECT {} FROM {}", column_name, table_name);
@@ -244,7 +244,7 @@ where
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     let numbers = util::collect(recordbatch_stream).await.unwrap();
@@ -285,7 +285,7 @@ async fn test_median_success<T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Result<()>
 where
-    T: Primitive + Ord + DataTypeBuilder,
+    T: PrimitiveElement + Ord,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     let result = execute_median(column_name, table_name, engine.clone())
@@ -324,7 +324,7 @@ async fn test_median_failed<T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Result<()>
 where
-    T: Primitive + DataTypeBuilder,
+    T: PrimitiveElement,
 {
     let result = execute_median(column_name, table_name, engine).await;
     assert!(result.is_err());
@@ -349,7 +349,7 @@ async fn execute_median<'a>(
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     util::collect(recordbatch_stream).await

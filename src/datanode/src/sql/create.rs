@@ -3,25 +3,24 @@ use std::sync::Arc;
 
 use catalog::RegisterTableRequest;
 use common_telemetry::tracing::info;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, SchemaBuilder};
-use datatypes::types::DateTimeType;
+use datatypes::schema::SchemaBuilder;
 use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
-use sql::ast::{ColumnDef, ColumnOption, DataType as SqlDataType, ObjectName, TableConstraint};
+use sql::ast::TableConstraint;
 use sql::statements::create_table::CreateTable;
+use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use store_api::storage::consts::TIME_INDEX_NAME;
-use table::engine::{EngineContext, TableEngine};
+use table::engine::EngineContext;
 use table::metadata::TableId;
 use table::requests::*;
 
 use crate::error::{
-    ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu, InsertSystemCatalogSnafu,
-    InvalidCreateTableSqlSnafu, KeyColumnNotFoundSnafu, Result, SqlTypeNotSupportedSnafu,
+    self, ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu,
+    InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu, Result,
 };
 use crate::sql::SqlHandler;
 
-impl<Engine: TableEngine> SqlHandler<Engine> {
+impl SqlHandler {
     pub(crate) async fn create(&self, req: CreateTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
         let catalog_name = req.catalog_name.clone();
@@ -63,7 +62,8 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
         let mut ts_index = usize::MAX;
         let mut primary_keys = vec![];
 
-        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(stmt.name)?;
+        let (catalog_name, schema_name, table_name) =
+            table_idents_to_full_name(&stmt.name).context(error::ParseSqlSnafu)?;
 
         let col_map = stmt
             .columns
@@ -88,7 +88,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
                                 },
                             )?;
                         } else {
-                            return InvalidCreateTableSqlSnafu {
+                            return error::InvalidSqlSnafu {
                                 msg: format!("Cannot recognize named UNIQUE constraint: {}", name),
                             }
                             .fail();
@@ -102,7 +102,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
                             )?);
                         }
                     } else {
-                        return InvalidCreateTableSqlSnafu {
+                        return error::InvalidSqlSnafu {
                             msg: format!(
                                 "Unrecognized non-primary unnamed UNIQUE constraint: {:?}",
                                 name
@@ -131,7 +131,7 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
         let columns_schemas: Vec<_> = stmt
             .columns
             .iter()
-            .map(column_def_to_schema)
+            .map(|column| column_def_to_schema(column).context(error::ParseSqlSnafu))
             .collect::<Result<Vec<_>>>()?;
 
         let schema = Arc::new(
@@ -150,69 +150,9 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
             schema,
             primary_key_indices: primary_keys,
             create_if_not_exists: stmt.if_not_exists,
+            table_options: HashMap::new(),
         };
         Ok(request)
-    }
-}
-
-/// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when catalog and schema are default)
-/// to tuples  
-fn table_idents_to_full_name(
-    obj_name: ObjectName,
-) -> Result<(Option<String>, Option<String>, String)> {
-    match &obj_name.0[..] {
-        [table] => Ok((None, None, table.value.clone())),
-        [catalog, schema, table] => Ok((
-            Some(catalog.value.clone()),
-            Some(schema.value.clone()),
-            table.value.clone(),
-        )),
-        _ => InvalidCreateTableSqlSnafu {
-            msg: format!(
-                "table name can only be <catalog>.<schema>.<table> or <table>, but found: {}",
-                obj_name
-            ),
-        }
-        .fail(),
-    }
-}
-
-fn column_def_to_schema(def: &ColumnDef) -> Result<ColumnSchema> {
-    let is_nullable = def
-        .options
-        .iter()
-        .any(|o| matches!(o.option, ColumnOption::Null));
-    Ok(ColumnSchema {
-        name: def.name.value.clone(),
-        data_type: sql_data_type_to_concrete_data_type(&def.data_type)?,
-        is_nullable,
-    })
-}
-
-fn sql_data_type_to_concrete_data_type(t: &SqlDataType) -> Result<ConcreteDataType> {
-    match t {
-        SqlDataType::BigInt(_) => Ok(ConcreteDataType::int64_datatype()),
-        SqlDataType::Int(_) => Ok(ConcreteDataType::int32_datatype()),
-        SqlDataType::SmallInt(_) => Ok(ConcreteDataType::int16_datatype()),
-        SqlDataType::Char(_)
-        | SqlDataType::Varchar(_)
-        | SqlDataType::Text
-        | SqlDataType::String => Ok(ConcreteDataType::string_datatype()),
-        SqlDataType::Float(_) => Ok(ConcreteDataType::float32_datatype()),
-        SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
-        SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
-        SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
-        SqlDataType::Custom(obj_name) => match &obj_name.0[..] {
-            [type_name] => {
-                if type_name.value.eq_ignore_ascii_case(DateTimeType::name()) {
-                    Ok(ConcreteDataType::datetime_datatype())
-                } else {
-                    SqlTypeNotSupportedSnafu { t: t.clone() }.fail()
-                }
-            }
-            _ => SqlTypeNotSupportedSnafu { t: t.clone() }.fail(),
-        },
-        _ => SqlTypeNotSupportedSnafu { t: t.clone() }.fail(),
     }
 }
 
@@ -220,28 +160,14 @@ fn sql_data_type_to_concrete_data_type(t: &SqlDataType) -> Result<ConcreteDataTy
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use sql::ast::Ident;
+    use datatypes::prelude::ConcreteDataType;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
-    use table_engine::config::EngineConfig;
-    use table_engine::engine::MitoEngine;
-    use table_engine::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 
     use super::*;
     use crate::error::Error;
-
-    async fn create_mock_sql_handler() -> SqlHandler<MitoEngine<MockEngine>> {
-        let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
-        let mock_engine =
-            MockMitoEngine::new(EngineConfig::default(), MockEngine::default(), object_store);
-        let catalog_manager = Arc::new(
-            catalog::LocalCatalogManager::try_new(Arc::new(mock_engine.clone()))
-                .await
-                .unwrap(),
-        );
-        SqlHandler::new(mock_engine, catalog_manager)
-    }
+    use crate::tests::test_util::create_mock_sql_handler;
 
     fn sql_to_statement(sql: &str) -> CreateTable {
         let mut res = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
@@ -278,7 +204,7 @@ mod tests {
         assert_matches!(error, Error::CreateSchema { .. });
     }
 
-    /// If primary key is not specified, time index should be used as primary key.  
+    /// If primary key is not specified, time index should be used as primary key.
     #[tokio::test]
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;
@@ -363,44 +289,6 @@ mod tests {
                 .column_schema_by_name("memory")
                 .unwrap()
                 .data_type
-        );
-    }
-
-    fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
-        assert_eq!(
-            data_type,
-            sql_data_type_to_concrete_data_type(&sql_type).unwrap()
-        );
-    }
-
-    #[test]
-    pub fn test_sql_data_type_to_concrete_data_type() {
-        check_type(
-            SqlDataType::BigInt(None),
-            ConcreteDataType::int64_datatype(),
-        );
-        check_type(SqlDataType::Int(None), ConcreteDataType::int32_datatype());
-        check_type(
-            SqlDataType::SmallInt(None),
-            ConcreteDataType::int16_datatype(),
-        );
-        check_type(SqlDataType::Char(None), ConcreteDataType::string_datatype());
-        check_type(
-            SqlDataType::Varchar(None),
-            ConcreteDataType::string_datatype(),
-        );
-        check_type(SqlDataType::Text, ConcreteDataType::string_datatype());
-        check_type(SqlDataType::String, ConcreteDataType::string_datatype());
-        check_type(
-            SqlDataType::Float(None),
-            ConcreteDataType::float32_datatype(),
-        );
-        check_type(SqlDataType::Double, ConcreteDataType::float64_datatype());
-        check_type(SqlDataType::Boolean, ConcreteDataType::boolean_datatype());
-        check_type(SqlDataType::Date, ConcreteDataType::date_datatype());
-        check_type(
-            SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")])),
-            ConcreteDataType::datetime_datatype(),
         );
     }
 }

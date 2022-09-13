@@ -20,11 +20,13 @@ python = [
 
 [dependencies]
 async-trait = "0.1"
+catalog = { path = "../catalog" }
 common-error = {path = "../common/error"}
 common-function = { path = "../common/function" }
 common-query = {path = "../common/query"}
 common-recordbatch = {path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
+common-time = { path = "../common/time" }
 console = "0.15"
 datafusion = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
 datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}
@@ -44,12 +46,14 @@ paste = { version = "1.0", optional = true}
 snafu = {version = "0.7", features = ["backtraces"]}
 sql = { path = "../sql" }
 tokio = { version = "1.0", features = ["full"] }
-
+table = { path = "../table" }
 
 [dev-dependencies]
-catalog = { path = "../catalog" }
+log-store = { path = "../log-store" }
 ron = "0.7"
 serde = {version = "1.0", features = ["derive"]}
-table = { path = "../table" }
+storage = { path = "../storage" }
+table-engine = { path = "../table-engine", features = ["test"] }
+tempdir = "0.3"
 tokio = { version = "1.18", features = ["full"] }
 tokio-test = "0.4"

@@ -1,6 +1,9 @@
 use std::{fs, path, sync::Arc};
 
-use api::v1::{object_expr, select_expr, InsertExpr, ObjectExpr, ObjectResult, SelectExpr};
+use api::v1::{
+    admin_expr, insert_expr, object_expr, select_expr, AdminExpr, AdminResult, ObjectExpr,
+    ObjectResult, SelectExpr,
+};
 use async_trait::async_trait;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
@@ -10,7 +13,7 @@ use common_telemetry::timer;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
 use query::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
-use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
+use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
@@ -36,7 +39,7 @@ type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 pub struct Instance {
     // Query service
     query_engine: QueryEngineRef,
-    sql_handler: SqlHandler<DefaultEngine>,
+    sql_handler: SqlHandler,
     // Catalog list
     catalog_manager: CatalogManagerRef,
     physical_planner: PhysicalPlanner,
@@ -50,7 +53,7 @@ impl Instance {
         let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
 
-        let table_engine = DefaultEngine::new(
+        let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
@@ -58,15 +61,16 @@ impl Instance {
                 object_store.clone(),
             ),
             object_store,
-        );
+        ));
         let catalog_manager = Arc::new(
-            catalog::LocalCatalogManager::try_new(Arc::new(table_engine.clone()))
+            catalog::LocalCatalogManager::try_new(table_engine.clone())
                 .await
                 .context(NewCatalogSnafu)?,
         );
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine().clone();
-        let script_executor = ScriptExecutor::new(query_engine.clone());
+        let script_executor =
+            ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
         Ok(Self {
             query_engine: query_engine.clone(),
@@ -77,7 +81,11 @@ impl Instance {
         })
     }
 
-    pub async fn execute_grpc_insert(&self, insert_expr: InsertExpr) -> Result<Output> {
+    pub async fn execute_grpc_insert(
+        &self,
+        table_name: &str,
+        values: insert_expr::Values,
+    ) -> Result<Output> {
         let schema_provider = self
             .catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
@@ -85,12 +93,11 @@ impl Instance {
             .schema(DEFAULT_SCHEMA_NAME)
             .unwrap();
 
-        let table_name = &insert_expr.table_name.clone();
         let table = schema_provider
             .table(table_name)
             .context(TableNotFoundSnafu { table_name })?;
 
-        let insert = insertion_expr_to_request(insert_expr, table.clone())?;
+        let insert = insertion_expr_to_request(table_name, values, table.clone())?;
 
         let affected_rows = table
             .insert(insert)
@@ -147,7 +154,10 @@ impl Instance {
 
                 self.sql_handler.execute(SqlRequest::Create(request)).await
             }
-
+            Statement::Alter(alter_table) => {
+                let req = self.sql_handler.alter_to_request(alter_table)?;
+                self.sql_handler.execute(SqlRequest::Alter(req)).await
+            }
             _ => unimplemented!(),
         }
     }
@@ -160,8 +170,8 @@ impl Instance {
         Ok(())
     }
 
-    async fn handle_insert(&self, insert_expr: InsertExpr) -> ObjectResult {
-        match self.execute_grpc_insert(insert_expr).await {
+    async fn handle_insert(&self, table_name: &str, values: insert_expr::Values) -> ObjectResult {
+        match self.execute_grpc_insert(table_name, values).await {
             Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
                 .status_code(StatusCode::Success as u32)
                 .mutate_result(rows as u32, 0)
@@ -195,12 +205,51 @@ impl Instance {
         }
     }
 
-    pub fn sql_handler(&self) -> &SqlHandler<DefaultEngine> {
+    pub fn sql_handler(&self) -> &SqlHandler {
         &self.sql_handler
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+}
+
+#[cfg(test)]
+impl Instance {
+    pub async fn new_mock() -> Result<Self> {
+        use table_engine::table::test_util::new_test_object_store;
+        use table_engine::table::test_util::MockEngine;
+        use table_engine::table::test_util::MockMitoEngine;
+
+        let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
+        let mock_engine = Arc::new(MockMitoEngine::new(
+            TableEngineConfig::default(),
+            MockEngine::default(),
+            object_store,
+        ));
+
+        let catalog_manager = Arc::new(
+            catalog::LocalCatalogManager::try_new(mock_engine.clone())
+                .await
+                .unwrap(),
+        );
+
+        let factory = QueryEngineFactory::new(catalog_manager.clone());
+        let query_engine = factory.query_engine().clone();
+
+        let sql_handler = SqlHandler::new(mock_engine.clone(), catalog_manager.clone());
+        let physical_planner = PhysicalPlanner::new(query_engine.clone());
+        let script_executor = ScriptExecutor::new(catalog_manager.clone(), query_engine.clone())
+            .await
+            .unwrap();
+
+        Ok(Self {
+            query_engine,
+            sql_handler,
+            catalog_manager,
+            physical_planner,
+            script_executor,
+        })
     }
 }
 
@@ -243,6 +292,7 @@ async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFile
     Ok(log_store)
 }
 
+// TODO(LFC): Refactor datanode and frontend instances, separate impl for each query handler.
 #[async_trait]
 impl SqlQueryHandler for Instance {
     async fn do_query(&self, query: &str) -> servers::error::Result<Output> {
@@ -256,8 +306,12 @@ impl SqlQueryHandler for Instance {
             .context(servers::error::ExecuteQuerySnafu { query })
     }
 
-    async fn execute_script(&self, script: &str) -> servers::error::Result<Output> {
-        self.script_executor.execute_script(script).await
+    async fn insert_script(&self, name: &str, script: &str) -> servers::error::Result<()> {
+        self.script_executor.insert_script(name, script).await
+    }
+
+    async fn execute_script(&self, name: &str) -> servers::error::Result<Output> {
+        self.script_executor.execute_script(name).await
     }
 }
 
@@ -265,7 +319,23 @@ impl SqlQueryHandler for Instance {
 impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> servers::error::Result<ObjectResult> {
         let object_resp = match query.expr {
-            Some(object_expr::Expr::Insert(insert_expr)) => self.handle_insert(insert_expr).await,
+            Some(object_expr::Expr::Insert(insert_expr)) => {
+                let table_name = &insert_expr.table_name;
+                let expr = insert_expr
+                    .expr
+                    .context(servers::error::InvalidQuerySnafu {
+                        reason: "missing `expr` in `InsertExpr`",
+                    })?;
+                match expr {
+                    insert_expr::Expr::Values(values) => {
+                        self.handle_insert(table_name, values).await
+                    }
+                    insert_expr::Expr::Sql(sql) => {
+                        let output = self.execute_sql(&sql).await;
+                        to_object_result(output).await
+                    }
+                }
+            }
             Some(object_expr::Expr::Select(select_expr)) => self.handle_select(select_expr).await,
             other => {
                 return servers::error::NotSupportedSnafu {
@@ -275,5 +345,22 @@ impl GrpcQueryHandler for Instance {
             }
         };
         Ok(object_resp)
+    }
+}
+
+#[async_trait]
+impl GrpcAdminHandler for Instance {
+    async fn exec_admin_request(&self, expr: AdminExpr) -> servers::error::Result<AdminResult> {
+        let admin_resp = match expr.expr {
+            Some(admin_expr::Expr::Create(create_expr)) => self.handle_create(create_expr).await,
+            Some(admin_expr::Expr::Alter(alter_expr)) => self.handle_alter(alter_expr).await,
+            other => {
+                return servers::error::NotSupportedSnafu {
+                    feat: format!("{:?}", other),
+                }
+                .fail();
+            }
+        };
+        Ok(admin_resp)
     }
 }

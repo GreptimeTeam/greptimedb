@@ -1,7 +1,6 @@
 use std::any::Any;
 
 use api::serde::DecodeError;
-use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
@@ -40,7 +39,14 @@ pub enum Error {
     GetTable {
         table_name: String,
         #[snafu(backtrace)]
-        source: BoxedError,
+        source: TableError,
+    },
+
+    #[snafu(display("Failed to alter table {}, source: {}", table_name, source))]
+    AlterTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: TableError,
     },
 
     #[snafu(display("Table not found: {}", table_name))]
@@ -51,6 +57,9 @@ pub enum Error {
         column_name: String,
         table_name: String,
     },
+
+    #[snafu(display("Missing required field in protobuf, field: {}", field))]
+    MissingField { field: String, backtrace: Backtrace },
 
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
@@ -135,8 +144,8 @@ pub enum Error {
         source: common_runtime::error::Error,
     },
 
-    #[snafu(display("Invalid CREATE TABLE sql statement, cause: {}", msg))]
-    InvalidCreateTableSql { msg: String, backtrace: Backtrace },
+    #[snafu(display("Invalid SQL, error: {}", msg))]
+    InvalidSql { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to create schema when creating table, source: {}", source))]
     CreateSchema {
@@ -148,12 +157,6 @@ pub enum Error {
     ConvertSchema {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
-    },
-
-    #[snafu(display("SQL data type not supported yet: {:?}", t))]
-    SqlTypeNotSupported {
-        t: sql::ast::DataType,
-        backtrace: Backtrace,
     },
 
     #[snafu(display("Specified timestamp key or primary key column not found: {}", name))]
@@ -179,6 +182,24 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc::Error,
     },
+
+    #[snafu(display("Column datatype error, source: {}", source))]
+    ColumnDataType {
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
+
+    #[snafu(display("Failed to parse SQL, source: {}", source))]
+    ParseSql {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
+
+    #[snafu(display("Failed to start script manager, source: {}", source))]
+    StartScriptManager {
+        #[snafu(backtrace)]
+        source: script::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -189,8 +210,9 @@ impl ErrorExt for Error {
             Error::ExecuteSql { source } => source.status_code(),
             Error::ExecutePhysicalPlan { source } => source.status_code(),
             Error::NewCatalog { source } => source.status_code(),
-            Error::CreateTable { source, .. } => source.status_code(),
-            Error::GetTable { source, .. } => source.status_code(),
+            Error::CreateTable { source, .. }
+            | Error::GetTable { source, .. }
+            | Error::AlterTable { source, .. } => source.status_code(),
             Error::Insert { source, .. } => source.status_code(),
             Error::ConvertSchema { source, .. } => source.status_code(),
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
@@ -200,10 +222,10 @@ impl ErrorExt for Error {
             | Error::ColumnTypeMismatch { .. }
             | Error::IllegalInsertData { .. }
             | Error::DecodeInsert { .. }
-            | Error::InvalidCreateTableSql { .. }
-            | Error::SqlTypeNotSupported { .. }
+            | Error::InvalidSql { .. }
             | Error::CreateSchema { .. }
             | Error::KeyColumnNotFound { .. }
+            | Error::MissingField { .. }
             | Error::ConstraintNotSupported { .. } => StatusCode::InvalidArguments,
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }
@@ -214,9 +236,12 @@ impl ErrorExt for Error {
             | Error::InsertSystemCatalog { .. }
             | Error::Conversion { .. }
             | Error::IntoPhysicalPlan { .. }
-            | Error::UnsupportedExpr { .. } => StatusCode::Internal,
+            | Error::UnsupportedExpr { .. }
+            | Error::ColumnDataType { .. } => StatusCode::Internal,
+            Error::ParseSql { source } => source.status_code(),
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
+            Error::StartScriptManager { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
         }
@@ -239,6 +264,7 @@ impl From<Error> for tonic::Status {
 
 #[cfg(test)]
 mod tests {
+    use common_error::ext::BoxedError;
     use common_error::mock::MockError;
 
     use super::*;

@@ -291,9 +291,7 @@ fn create_located<T>(node: T, loc: Location) -> Located<T> {
 }
 
 /// cast a `dyn Array` of type unsigned/int/float into a `dyn Vector`
-fn try_into_vector<T: datatypes::types::Primitive + datatypes::types::DataTypeBuilder>(
-    arg: Arc<dyn Array>,
-) -> Result<Arc<dyn Vector>> {
+fn try_into_vector<T: datatypes::types::Primitive>(arg: Arc<dyn Array>) -> Result<Arc<dyn Vector>> {
     // wrap try_into_vector in here to convert `datatypes::error::Error` to `python::error::Error`
     Helper::try_into_vector(arg).context(TypeCastSnafu)
 }

@@ -1,21 +1,34 @@
-use api::v1::{BatchRequest, BatchResponse, DatabaseResponse};
+use api::v1::{AdminResponse, BatchRequest, BatchResponse, DatabaseResponse};
 
 use crate::error::Result;
-use crate::query_handler::GrpcQueryHandlerRef;
+use crate::query_handler::{GrpcAdminHandlerRef, GrpcQueryHandlerRef};
 
 #[derive(Clone)]
 pub struct BatchHandler {
     query_handler: GrpcQueryHandlerRef,
+    admin_handler: GrpcAdminHandlerRef,
 }
 
 impl BatchHandler {
-    pub fn new(query_handler: GrpcQueryHandlerRef) -> Self {
-        Self { query_handler }
+    pub fn new(query_handler: GrpcQueryHandlerRef, admin_handler: GrpcAdminHandlerRef) -> Self {
+        Self {
+            query_handler,
+            admin_handler,
+        }
     }
 
     pub async fn batch(&self, batch_req: BatchRequest) -> Result<BatchResponse> {
         let mut batch_resp = BatchResponse::default();
+        let mut admin_resp = AdminResponse::default();
         let mut db_resp = DatabaseResponse::default();
+
+        for admin_req in batch_req.admins {
+            for admin_expr in admin_req.exprs {
+                let admin_result = self.admin_handler.exec_admin_request(admin_expr).await?;
+                admin_resp.results.push(admin_result);
+            }
+        }
+        batch_resp.admins.push(admin_resp);
 
         for db_req in batch_req.databases {
             for obj_expr in db_req.exprs {

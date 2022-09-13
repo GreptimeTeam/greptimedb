@@ -15,6 +15,7 @@ use datatypes::arrow::{
     },
 };
 use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::Value;
 use datatypes::value::OrderedFloat;
 use datatypes::{
     value,
@@ -850,7 +851,9 @@ pub fn pyobj_try_to_typed_val(
                 }
             }
             ConcreteDataType::List(_) => unreachable!(),
-            ConcreteDataType::Date(_) | ConcreteDataType::DateTime(_) => todo!(),
+            ConcreteDataType::Date(_)
+            | ConcreteDataType::DateTime(_)
+            | ConcreteDataType::Timestamp(_) => todo!(),
         }
     } else if is_instance::<PyNone>(&obj, vm) {
         // if Untyped then by default return types with highest precision
@@ -906,6 +909,7 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         // is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt
         value::Value::Date(v) => vm.ctx.new_int(v.val()).into(),
         value::Value::DateTime(v) => vm.ctx.new_int(v.val()).into(),
+        Value::Timestamp(v) => vm.ctx.new_int(v.value()).into(),
         value::Value::List(_) => unreachable!(),
     }
 }

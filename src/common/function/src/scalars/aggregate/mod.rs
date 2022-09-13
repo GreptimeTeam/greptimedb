@@ -64,55 +64,24 @@ pub(crate) struct AggregateFunctions;
 
 impl AggregateFunctions {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "median",
-            1,
-            Arc::new(|| Arc::new(MedianAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "diff",
-            1,
-            Arc::new(|| Arc::new(DiffAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "mean",
-            1,
-            Arc::new(|| Arc::new(MeanAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "polyval",
-            2,
-            Arc::new(|| Arc::new(PolyvalAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "argmax",
-            1,
-            Arc::new(|| Arc::new(ArgmaxAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "argmin",
-            1,
-            Arc::new(|| Arc::new(ArgminAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "diff",
-            1,
-            Arc::new(|| Arc::new(DiffAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "percentile",
-            2,
-            Arc::new(|| Arc::new(PercentileAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "scipystatsnormcdf",
-            2,
-            Arc::new(|| Arc::new(ScipyStatsNormCdfAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "scipystatsnormpdf",
-            2,
-            Arc::new(|| Arc::new(ScipyStatsNormPdfAccumulatorCreator::default())),
-        )));
+        macro_rules! register_aggr_func {
+            ($name :expr, $arg_count :expr, $creator :ty) => {
+                registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
+                    $name,
+                    $arg_count,
+                    Arc::new(|| Arc::new(<$creator>::default())),
+                )));
+            };
+        }
+
+        register_aggr_func!("median", 1, MedianAccumulatorCreator);
+        register_aggr_func!("diff", 1, DiffAccumulatorCreator);
+        register_aggr_func!("mean", 1, MeanAccumulatorCreator);
+        register_aggr_func!("polyval", 2, PolyvalAccumulatorCreator);
+        register_aggr_func!("argmax", 1, ArgmaxAccumulatorCreator);
+        register_aggr_func!("argmin", 1, ArgminAccumulatorCreator);
+        register_aggr_func!("percentile", 2, PercentileAccumulatorCreator);
+        register_aggr_func!("scipystatsnormcdf", 2, ScipyStatsNormCdfAccumulatorCreator);
+        register_aggr_func!("scipystatsnormpdf", 2, ScipyStatsNormPdfAccumulatorCreator);
     }
 }

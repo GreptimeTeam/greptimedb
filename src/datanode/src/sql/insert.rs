@@ -10,7 +10,6 @@ use snafu::OptionExt;
 use snafu::ResultExt;
 use sql::ast::Value as SqlValue;
 use sql::statements::insert::Insert;
-use table::engine::TableEngine;
 use table::requests::*;
 
 use crate::error::{
@@ -19,7 +18,7 @@ use crate::error::{
 };
 use crate::sql::{SqlHandler, SqlRequest};
 
-impl<Engine: TableEngine> SqlHandler<Engine> {
+impl SqlHandler {
     pub(crate) async fn insert(&self, req: InsertRequest) -> Result<Output> {
         let table_name = &req.table_name.to_string();
         let table = self.get_table(table_name)?;
@@ -157,7 +156,6 @@ fn parse_sql_value(
 
             parse_string_to_value(s.to_owned(), data_type)?
         }
-
         _ => todo!("Other sql value"),
     })
 }
@@ -221,8 +219,10 @@ fn sql_number_to_value(data_type: &ConcreteDataType, n: &str) -> Result<Value> {
         (Int32, i32),
         (Int64, i64),
         (Float64, f64),
-        (Float32, f32)
+        (Float32, f32),
+        (Timestamp, i64)
     )
+    // TODO(hl): also Date/DateTime
 }
 
 fn parse_sql_number<R: FromStr + std::fmt::Debug>(n: &str) -> Result<R>

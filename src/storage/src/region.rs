@@ -52,6 +52,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
     type WriteRequest = WriteBatch;
     type Snapshot = SnapshotImpl;
 
+    fn id(&self) -> RegionId {
+        self.inner.shared.id
+    }
+
     fn name(&self) -> &str {
         &self.inner.shared.name
     }

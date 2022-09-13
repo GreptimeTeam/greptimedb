@@ -12,6 +12,7 @@ common-error = { path = "../common/error" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
+common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 hyper = { version = "0.14", features = ["full"] }

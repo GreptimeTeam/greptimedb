@@ -1,8 +1,7 @@
 use snafu::prelude::*;
 
-use crate::error;
+use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::parser::Result;
 use crate::statements::query::Query;
 use crate::statements::statement::Statement;
 
@@ -22,7 +21,6 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use sqlparser::dialect::GenericDialect;
 
-    use super::*;
     use crate::parser::ParserContext;
 
     #[test]
@@ -36,19 +34,13 @@ mod tests {
     }
 
     #[test]
-    pub fn test_parser_invalid_query() {
-        // sql without selection
-        let sql = "SELECT FROM table_1";
-
-        let parser = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        match &parser[0] {
-            Statement::ShowDatabases(_) => {
-                panic!("Not expected to be a show database statement")
-            }
-            Statement::Insert(_) => {
-                panic!("Not expected to be a show database statement")
-            }
-            Statement::Create(_) | Statement::Query(_) => {}
-        }
+    pub fn test_parse_invalid_query() {
+        let sql = "SELECT * FROM table_1 WHERE";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Expected an expression"));
     }
 }

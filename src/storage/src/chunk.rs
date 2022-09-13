@@ -6,11 +6,9 @@ use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef, MemtableSet};
-use crate::read::{Batch, BatchReader, ConcatReader};
+use crate::read::{BoxedBatchReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions, Visitor};
-
-type BoxedIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
 
 /// Chunk reader implementation.
 // Now we use async-trait to implement the chunk reader, which is easier to implement than
@@ -18,8 +16,7 @@ type BoxedIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
 // necessary to do so.
 pub struct ChunkReaderImpl {
     schema: ProjectedSchemaRef,
-    iter: Option<BoxedIterator>,
-    sst_reader: ConcatReader,
+    sst_reader: BoxedBatchReader,
 }
 
 #[async_trait]
@@ -31,7 +28,7 @@ impl ChunkReader for ChunkReaderImpl {
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
-        let batch = match self.fetch_batch().await? {
+        let batch = match self.sst_reader.next_batch().await? {
             Some(b) => b,
             None => return Ok(None),
         };
@@ -43,27 +40,8 @@ impl ChunkReader for ChunkReaderImpl {
 }
 
 impl ChunkReaderImpl {
-    pub fn new(
-        schema: ProjectedSchemaRef,
-        iter: BoxedIterator,
-        sst_reader: ConcatReader,
-    ) -> ChunkReaderImpl {
-        ChunkReaderImpl {
-            schema,
-            iter: Some(iter),
-            sst_reader,
-        }
-    }
-
-    async fn fetch_batch(&mut self) -> Result<Option<Batch>> {
-        if let Some(iter) = &mut self.iter {
-            match iter.next() {
-                Some(b) => return Ok(Some(b?)),
-                None => self.iter = None,
-            }
-        }
-
-        self.sst_reader.next_batch().await
+    pub fn new(schema: ProjectedSchemaRef, sst_reader: BoxedBatchReader) -> ChunkReaderImpl {
+        ChunkReaderImpl { schema, sst_reader }
     }
 }
 
@@ -130,31 +108,32 @@ impl ChunkReaderBuilder {
                 .context(error::InvalidProjectionSnafu)?,
         );
 
+        let num_sources = self.memtables.len() + self.files_to_read.len();
+        let mut reader_builder = MergeReaderBuilder::with_capacity(schema.clone(), num_sources)
+            .batch_size(self.iter_ctx.batch_size);
+
         self.iter_ctx.projected_schema = Some(schema.clone());
-        let mut iters = Vec::with_capacity(self.memtables.len());
         for mem in self.memtables {
             let iter = mem.iter(&self.iter_ctx)?;
-            iters.push(iter);
+            reader_builder = reader_builder.push_batch_iter(iter);
         }
-        // Now we just simply chain all iterators together, ignore duplications/ordering.
-        let iter = Box::new(iters.into_iter().flatten());
 
         let read_opts = ReadOptions {
             batch_size: self.iter_ctx.batch_size,
             projected_schema: schema.clone(),
         };
-        let mut sst_readers = Vec::with_capacity(self.files_to_read.len());
         for file in &self.files_to_read {
             let reader = self
                 .sst_layer
                 .read_sst(file.file_name(), &read_opts)
                 .await?;
 
-            sst_readers.push(reader);
+            reader_builder = reader_builder.push_batch_reader(reader);
         }
-        let reader = ConcatReader::new(sst_readers);
 
-        Ok(ChunkReaderImpl::new(schema, iter, reader))
+        let reader = reader_builder.build();
+
+        Ok(ChunkReaderImpl::new(schema, Box::new(reader)))
     }
 }
 

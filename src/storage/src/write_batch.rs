@@ -7,12 +7,10 @@ use std::{
 
 use common_error::prelude::*;
 use common_time::{RangeMillis, TimestampMillis};
+use datatypes::vectors::TimestampVector;
 use datatypes::{
-    arrow::error::ArrowError,
-    data_type::ConcreteDataType,
-    prelude::ScalarVector,
-    schema::SchemaRef,
-    vectors::{Int64Vector, VectorRef},
+    arrow::error::ArrowError, data_type::ConcreteDataType, prelude::ScalarVector,
+    schema::SchemaRef, vectors::VectorRef,
 };
 use prost::{DecodeError, EncodeError};
 use snafu::ensure;
@@ -204,11 +202,10 @@ impl WriteRequest for WriteBatch {
                     let column = put_data
                         .column_by_name(ts_col_name)
                         .unwrap_or_else(|| panic!("Cannot find column by name: {}", ts_col_name));
-
-                    let ts_vector = column.as_any().downcast_ref::<Int64Vector>().unwrap(); // not expected to fail
+                    let ts_vector = column.as_any().downcast_ref::<TimestampVector>().unwrap(); // not expected to fail
                     for ts in ts_vector.iter_data().flatten() {
-                        let aligned = align_timestamp(ts, durations_millis)
-                            .context(TimestampOverflowSnafu { ts })?;
+                        let aligned = align_timestamp(ts.value(), durations_millis)
+                            .context(TimestampOverflowSnafu { ts: ts.value() })?;
                         aligned_timestamps.insert(aligned);
                     }
                 }
@@ -857,7 +854,7 @@ mod tests {
             &[
                 ("k1", LogicalTypeId::UInt64, false),
                 (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                ("ts", LogicalTypeId::Int64, false),
+                ("ts", LogicalTypeId::Timestamp, false),
                 ("v1", LogicalTypeId::Boolean, true),
             ],
             Some(2),
@@ -868,7 +865,7 @@ mod tests {
     fn test_write_batch_put() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true]));
-        let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
+        let tsv = Arc::new(TimestampVector::from_vec(vec![0, 0, 0]));
 
         let mut put_data = PutData::new();
         put_data.add_key_column("k1", intv.clone()).unwrap();
@@ -972,7 +969,7 @@ mod tests {
     #[test]
     fn test_put_unknown_column() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-        let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
+        let tsv = Arc::new(TimestampVector::from_vec(vec![0, 0, 0]));
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true]));
 
         let mut put_data = PutData::new();
@@ -1012,7 +1009,7 @@ mod tests {
     #[test]
     pub fn test_write_batch_time_range() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3, 4, 5, 6]));
-        let tsv = Arc::new(Int64Vector::from_vec(vec![-21, -20, -1, 0, 1, 20]));
+        let tsv = Arc::new(TimestampVector::from_vec(vec![-21, -20, -1, 0, 1, 20]));
         let boolv = Arc::new(BooleanVector::from(vec![
             true, false, true, false, false, false,
         ]));
@@ -1041,7 +1038,7 @@ mod tests {
         for i in 0..10 {
             let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
             let boolv = Arc::new(BooleanVector::from(vec![Some(true), Some(false), None]));
-            let tsv = Arc::new(Int64Vector::from_vec(vec![i, i, i]));
+            let tsv = Arc::new(TimestampVector::from_vec(vec![i, i, i]));
 
             let mut put_data = PutData::new();
             put_data.add_key_column("k1", intv.clone()).unwrap();
@@ -1095,7 +1092,7 @@ mod tests {
         let mut batch = new_test_batch();
         for _ in 0..10 {
             let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-            let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
+            let tsv = Arc::new(TimestampVector::from_vec(vec![0, 0, 0]));
 
             let mut put_data = PutData::new();
             put_data.add_key_column("k1", intv.clone()).unwrap();

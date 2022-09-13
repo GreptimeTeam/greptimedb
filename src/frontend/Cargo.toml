@@ -1,0 +1,38 @@
+[package]
+name = "frontend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies.arrow]
+package = "arrow2"
+version = "0.10"
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+
+[dependencies]
+api = { path = "../api" }
+async-stream = "0.3"
+async-trait = "0.1"
+catalog = { path = "../catalog" }
+client = { path = "../client" }
+common-base = { path = "../common/base" }
+common-error = { path = "../common/error" }
+common-recordbatch = { path = "../common/recordbatch" }
+common-runtime = { path = "../common/runtime" }
+common-telemetry = { path = "../common/telemetry" }
+common-time = { path = "../common/time" }
+datatypes = { path = "../datatypes" }
+query = { path = "../query" }
+snafu = { version = "0.7", features = ["backtraces"] }
+tokio = { version = "1.18", features = ["full"] }
+serde = "1.0"
+servers = { path = "../servers" }
+sql = { path = "../sql" }
+
+[dev-dependencies]
+datanode = { path = "../datanode" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+futures = "0.3"
+tonic = "0.8"
+tempdir = "0.3"
+tower = "0.4"

@@ -34,7 +34,7 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
         })?;
         match output {
             Ok(output) => match output {
-                Output::RecordBatch(stream) => {
+                Output::Stream(stream) => {
                     let schema = stream.schema().clone();
                     let recordbatches = util::collect(stream)
                         .await
@@ -42,6 +42,13 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                     let query_result = QueryResult {
                         recordbatches,
                         schema,
+                    };
+                    Self::write_query_result(query_result, writer)?
+                }
+                Output::RecordBatches(recordbatches) => {
+                    let query_result = QueryResult {
+                        schema: recordbatches.schema(),
+                        recordbatches: recordbatches.to_vec(),
                     };
                     Self::write_query_result(query_result, writer)?
                 }
@@ -103,6 +110,8 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                     Value::Binary(v) => row_writer.write_col(v.deref())?,
                     Value::Date(v) => row_writer.write_col(v.val())?,
                     Value::DateTime(v) => row_writer.write_col(v.val())?,
+                    Value::Timestamp(v) => row_writer
+                        .write_col(v.convert_to(common_time::timestamp::TimeUnit::Second))?, // TODO(hl): Can we also write
                     Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(

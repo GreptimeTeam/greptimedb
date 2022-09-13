@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use common_time::date::Date;
 use common_time::datetime::DateTime;
+use common_time::timestamp::Timestamp;
 
 use crate::data_type::ConcreteDataType;
+use crate::error::{self, Result};
+use crate::prelude::ValueRef;
 use crate::scalars::ScalarVectorBuilder;
 use crate::value::Value;
 use crate::vectors::date::DateVectorBuilder;
@@ -11,8 +14,8 @@ use crate::vectors::datetime::DateTimeVectorBuilder;
 use crate::vectors::{
     BinaryVectorBuilder, BooleanVectorBuilder, Float32VectorBuilder, Float64VectorBuilder,
     Int16VectorBuilder, Int32VectorBuilder, Int64VectorBuilder, Int8VectorBuilder, MutableVector,
-    NullVector, StringVectorBuilder, UInt16VectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder,
-    UInt8VectorBuilder, VectorRef,
+    NullVector, StringVectorBuilder, TimestampVectorBuilder, UInt16VectorBuilder,
+    UInt32VectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
 };
 
 pub enum VectorBuilder {
@@ -37,6 +40,7 @@ pub enum VectorBuilder {
 
     Date(DateVectorBuilder),
     DateTime(DateTimeVectorBuilder),
+    Timestamp(TimestampVectorBuilder),
 }
 
 impl VectorBuilder {
@@ -92,6 +96,9 @@ impl VectorBuilder {
             ConcreteDataType::DateTime(_) => {
                 VectorBuilder::DateTime(DateTimeVectorBuilder::with_capacity(capacity))
             }
+            ConcreteDataType::Timestamp(_) => {
+                VectorBuilder::Timestamp(TimestampVectorBuilder::with_capacity(capacity))
+            }
             _ => unimplemented!(),
         }
     }
@@ -114,6 +121,7 @@ impl VectorBuilder {
             VectorBuilder::Binary(b) => b.data_type(),
             VectorBuilder::Date(b) => b.data_type(),
             VectorBuilder::DateTime(b) => b.data_type(),
+            VectorBuilder::Timestamp(b) => b.data_type(),
         }
     }
 
@@ -141,11 +149,47 @@ impl VectorBuilder {
             (VectorBuilder::Date(b), Value::Int32(v)) => b.push(Some(Date::new(*v))),
             (VectorBuilder::DateTime(b), Value::DateTime(v)) => b.push(Some(*v)),
             (VectorBuilder::DateTime(b), Value::Int64(v)) => b.push(Some(DateTime::new(*v))),
+            (VectorBuilder::Timestamp(b), Value::Timestamp(t)) => b.push(Some(*t)),
+            (VectorBuilder::Timestamp(b), Value::Int64(v)) => {
+                b.push(Some(Timestamp::from_millis(*v)))
+            }
+
             _ => panic!(
                 "Value {:?} does not match builder type {:?}",
                 value,
                 self.data_type()
             ),
+        }
+    }
+
+    pub fn try_push_ref(&mut self, value: ValueRef) -> Result<()> {
+        match &mut *self {
+            VectorBuilder::Null(b) => {
+                if !value.is_null() {
+                    return error::CastTypeSnafu {
+                        msg: "unable to accept non-null value in NullVectorBuilder",
+                    }
+                    .fail();
+                }
+                *b += 1;
+                Ok(())
+            }
+            VectorBuilder::Boolean(b) => b.push_value_ref(value),
+            VectorBuilder::UInt8(b) => b.push_value_ref(value),
+            VectorBuilder::UInt16(b) => b.push_value_ref(value),
+            VectorBuilder::UInt32(b) => b.push_value_ref(value),
+            VectorBuilder::UInt64(b) => b.push_value_ref(value),
+            VectorBuilder::Int8(b) => b.push_value_ref(value),
+            VectorBuilder::Int16(b) => b.push_value_ref(value),
+            VectorBuilder::Int32(b) => b.push_value_ref(value),
+            VectorBuilder::Int64(b) => b.push_value_ref(value),
+            VectorBuilder::Float32(b) => b.push_value_ref(value),
+            VectorBuilder::Float64(b) => b.push_value_ref(value),
+            VectorBuilder::String(b) => b.push_value_ref(value),
+            VectorBuilder::Binary(b) => b.push_value_ref(value),
+            VectorBuilder::Date(b) => b.push_value_ref(value),
+            VectorBuilder::DateTime(b) => b.push_value_ref(value),
+            VectorBuilder::Timestamp(b) => b.push_value_ref(value),
         }
     }
 
@@ -167,6 +211,7 @@ impl VectorBuilder {
             VectorBuilder::Binary(b) => b.push(None),
             VectorBuilder::Date(b) => b.push(None),
             VectorBuilder::DateTime(b) => b.push(None),
+            VectorBuilder::Timestamp(b) => b.push(None),
         }
     }
 
@@ -188,6 +233,7 @@ impl VectorBuilder {
             VectorBuilder::Binary(b) => Arc::new(b.finish()),
             VectorBuilder::Date(b) => Arc::new(b.finish()),
             VectorBuilder::DateTime(b) => Arc::new(b.finish()),
+            VectorBuilder::Timestamp(b) => Arc::new(b.finish()),
         }
     }
 }
@@ -210,19 +256,37 @@ mod tests {
             for i in 0..10 {
                 builder.push(&Value::$Type(i));
             }
+            for i in 10..20 {
+                builder.try_push_ref(ValueRef::$Type(i)).unwrap();
+            }
             let vector = builder.finish();
 
-            for i in 0..10 {
+            for i in 0..20 {
                 assert_eq!(Value::$Type(i), vector.get(i as usize));
             }
 
             let mut builder = VectorBuilder::new(ConcreteDataType::$datatype());
             builder.push(&Value::Null);
             builder.push(&Value::$Type(100));
+            builder.try_push_ref(ValueRef::Null).unwrap();
+            builder.try_push_ref(ValueRef::$Type(101)).unwrap();
+
+            let result = builder.try_push_ref(ValueRef::Boolean(true));
+            assert!(result.is_err());
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                format!(
+                    "Failed to cast value Boolean(true) to primitive type {}",
+                    stringify!($Type)
+                ),
+            );
+
             let vector = builder.finish();
 
             assert!(vector.is_null(0));
             assert_eq!(Value::$Type(100), vector.get(1));
+            assert!(vector.is_null(2));
+            assert_eq!(Value::$Type(101), vector.get(3));
         };
     }
 
@@ -231,8 +295,19 @@ mod tests {
         let mut builder = VectorBuilder::new(ConcreteDataType::null_datatype());
         assert_eq!(ConcreteDataType::null_datatype(), builder.data_type());
         builder.push(&Value::Null);
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "unable to accept non-null value in NullVectorBuilder"
+        );
+
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let vector = builder.finish();
         assert!(vector.is_null(0));
+        assert!(vector.is_null(1));
     }
 
     #[test]
@@ -254,13 +329,43 @@ mod tests {
         assert_eq!(data_type, builder.data_type());
 
         builder.push(&Value::Float32(OrderedFloat(1.0)));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value Boolean(true) to primitive type Float32"
+        );
+
+        builder
+            .try_push_ref(ValueRef::Float32(OrderedFloat(2.0)))
+            .unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let vector = builder.finish();
         assert_eq!(Value::Float32(OrderedFloat(1.0)), vector.get(0));
+        assert_eq!(Value::Float32(OrderedFloat(2.0)), vector.get(1));
+        assert_eq!(Value::Null, vector.get(2));
 
         let mut builder = VectorBuilder::new(ConcreteDataType::float64_datatype());
         builder.push(&Value::Float64(OrderedFloat(2.0)));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value Boolean(true) to primitive type Float64"
+        );
+
+        builder
+            .try_push_ref(ValueRef::Float64(OrderedFloat(3.0)))
+            .unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let vector = builder.finish();
         assert_eq!(Value::Float64(OrderedFloat(2.0)), vector.get(0));
+        assert_eq!(Value::Float64(OrderedFloat(3.0)), vector.get(1));
+        assert_eq!(Value::Null, vector.get(2));
     }
 
     #[test]
@@ -270,8 +375,21 @@ mod tests {
         let mut builder = VectorBuilder::new(data_type.clone());
         assert_eq!(data_type, builder.data_type());
         builder.push(&Value::Binary(hello.into()));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value ref Boolean(true) to Binary"
+        );
+
+        builder.try_push_ref(ValueRef::Binary(b"world")).unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let vector = builder.finish();
         assert_eq!(Value::Binary(hello.into()), vector.get(0));
+        assert_eq!(ValueRef::Binary(b"world"), vector.get_ref(1));
+        assert_eq!(Value::Null, vector.get(2));
     }
 
     #[test]
@@ -281,8 +399,21 @@ mod tests {
         let mut builder = VectorBuilder::new(data_type.clone());
         assert_eq!(data_type, builder.data_type());
         builder.push(&Value::String(hello.into()));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value ref Boolean(true) to String"
+        );
+
+        builder.try_push_ref(ValueRef::String("world")).unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let vector = builder.finish();
         assert_eq!(Value::String(hello.into()), vector.get(0));
+        assert_eq!(ValueRef::String("world"), vector.get_ref(1));
+        assert_eq!(Value::Null, vector.get(2));
     }
 
     #[test]
@@ -291,10 +422,25 @@ mod tests {
         assert_eq!(ConcreteDataType::date_datatype(), builder.data_type());
         builder.push_null();
         builder.push(&Value::Date(Date::new(123)));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value ref Boolean(true) to Date"
+        );
+
+        builder
+            .try_push_ref(ValueRef::Date(Date::new(456)))
+            .unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let v = builder.finish();
         let v = v.as_any().downcast_ref::<DateVector>().unwrap();
         assert_eq!(Value::Null, v.get(0));
         assert_eq!(Value::Date(Date::new(123)), v.get(1));
+        assert_eq!(ValueRef::Date(Date::new(456)), v.get_ref(2));
+        assert_eq!(ValueRef::Null, v.get_ref(3));
         assert_eq!(
             &arrow::datatypes::DataType::Date32,
             v.to_arrow_array().data_type()
@@ -307,10 +453,25 @@ mod tests {
         assert_eq!(ConcreteDataType::datetime_datatype(), builder.data_type());
         builder.push_null();
         builder.push(&Value::DateTime(DateTime::new(123)));
+
+        let result = builder.try_push_ref(ValueRef::Boolean(true));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to cast value ref Boolean(true) to DateTime"
+        );
+
+        builder
+            .try_push_ref(ValueRef::DateTime(DateTime::new(456)))
+            .unwrap();
+        builder.try_push_ref(ValueRef::Null).unwrap();
+
         let v = builder.finish();
         let v = v.as_any().downcast_ref::<DateTimeVector>().unwrap();
         assert_eq!(Value::Null, v.get(0));
         assert_eq!(Value::DateTime(DateTime::new(123)), v.get(1));
+        assert_eq!(ValueRef::DateTime(DateTime::new(456)), v.get_ref(2));
+        assert_eq!(ValueRef::Null, v.get_ref(3));
         assert_eq!(
             &arrow::datatypes::DataType::Date64,
             v.to_arrow_array().data_type()

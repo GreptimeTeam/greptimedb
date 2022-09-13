@@ -1,0 +1,18 @@
+[package]
+name = "common-function-macro"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+common-query = { path = "../query" }
+datatypes = { path = "../../datatypes" }
+quote = "1.0"
+snafu = { version = "0.7", features = ["backtraces"] }
+syn = "1.0"
+
+[dev-dependencies]
+arc-swap = "1.0"
+static_assertions = "1.1.0"

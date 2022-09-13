@@ -79,14 +79,14 @@ impl QueryEngine for DatafusionQueryEngine {
         let physical_plan = self.create_physical_plan(&mut ctx, &logical_plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
-        Ok(Output::RecordBatch(
+        Ok(Output::Stream(
             self.execute_stream(&ctx, &physical_plan).await?,
         ))
     }
 
     async fn execute_physical(&self, plan: &Arc<dyn PhysicalPlan>) -> Result<Output> {
         let ctx = QueryContext::new(self.state.clone());
-        Ok(Output::RecordBatch(self.execute_stream(&ctx, plan).await?))
+        Ok(Output::Stream(self.execute_stream(&ctx, plan).await?))
     }
 
     fn register_udf(&self, udf: ScalarUdf) {
@@ -267,7 +267,7 @@ mod tests {
         let output = engine.execute(&plan).await.unwrap();
 
         match output {
-            Output::RecordBatch(recordbatch) => {
+            Output::Stream(recordbatch) => {
                 let numbers = util::collect(recordbatch).await.unwrap();
                 assert_eq!(1, numbers.len());
                 assert_eq!(numbers[0].df_recordbatch.num_columns(), 1);

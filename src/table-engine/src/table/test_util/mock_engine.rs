@@ -1,23 +1,28 @@
 //! A mock storage engine for table test purpose.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use common_error::mock::MockError;
 use common_telemetry::logging;
-use storage::metadata::{RegionMetaImpl, RegionMetadataRef};
-use storage::write_batch::WriteBatch;
+use datatypes::prelude::{Value, VectorBuilder, VectorRef};
+use datatypes::schema::ColumnSchema;
+use storage::metadata::{RegionMetaImpl, RegionMetadata};
+use storage::write_batch::{Mutation, WriteBatch};
 use store_api::storage::{
     Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse, OpenOptions,
-    ReadContext, Region, RegionDescriptor, RegionMeta, ScanRequest, ScanResponse, SchemaRef,
-    Snapshot, StorageEngine, WriteContext, WriteResponse,
+    ReadContext, Region, RegionDescriptor, RegionId, RegionMeta, ScanRequest, ScanResponse,
+    SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
 
 pub struct MockChunkReader {
     schema: SchemaRef,
+    memtable: MockMemtable,
+    read: bool,
 }
 
 #[async_trait]
@@ -29,12 +34,33 @@ impl ChunkReader for MockChunkReader {
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
-        Ok(None)
+        if self.read {
+            return Ok(None);
+        }
+
+        let columns = self
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| {
+                let data = self.memtable.get(&column_schema.name).unwrap();
+                let mut builder =
+                    VectorBuilder::with_capacity(column_schema.data_type.clone(), data.len());
+                for v in data {
+                    builder.push(v);
+                }
+                builder.finish()
+            })
+            .collect::<Vec<VectorRef>>();
+        self.read = true;
+
+        Ok(Some(Chunk::new(columns)))
     }
 }
 
 pub struct MockSnapshot {
-    metadata: RegionMetadataRef,
+    schema: SchemaRef,
+    region: Arc<MockRegionInner>,
 }
 
 #[async_trait]
@@ -43,7 +69,7 @@ impl Snapshot for MockSnapshot {
     type Reader = MockChunkReader;
 
     fn schema(&self) -> &SchemaRef {
-        self.metadata.user_schema()
+        &self.schema
     }
 
     async fn scan(
@@ -51,10 +77,15 @@ impl Snapshot for MockSnapshot {
         _ctx: &ReadContext,
         _request: ScanRequest,
     ) -> Result<ScanResponse<MockChunkReader>> {
-        let reader = MockChunkReader {
-            schema: self.metadata.user_schema().clone(),
+        let memtable = {
+            let memtable = self.region.memtable.read().unwrap();
+            memtable.clone()
         };
-
+        let reader = MockChunkReader {
+            schema: self.schema().clone(),
+            memtable,
+            read: false,
+        };
         Ok(ScanResponse { reader })
     }
 
@@ -69,9 +100,16 @@ impl Snapshot for MockSnapshot {
 pub struct MockRegion {
     // FIXME(yingwen): Remove this once name is provided by metadata.
     name: String,
-    // We share the same metadata definition with the storage engine.
-    metadata: RegionMetadataRef,
+    pub inner: Arc<MockRegionInner>,
 }
+
+#[derive(Debug)]
+pub struct MockRegionInner {
+    pub metadata: ArcSwap<RegionMetadata>,
+    memtable: Arc<RwLock<MockMemtable>>,
+}
+
+type MockMemtable = HashMap<String, Vec<Value>>;
 
 #[async_trait]
 impl Region for MockRegion {
@@ -80,26 +118,84 @@ impl Region for MockRegion {
     type WriteRequest = WriteBatch;
     type Snapshot = MockSnapshot;
 
+    fn id(&self) -> RegionId {
+        self.inner.metadata.load().id()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
 
     fn in_memory_metadata(&self) -> RegionMetaImpl {
-        RegionMetaImpl::new(self.metadata.clone())
+        RegionMetaImpl::new(self.inner.metadata.load().clone())
     }
 
-    async fn write(&self, _ctx: &WriteContext, _request: WriteBatch) -> Result<WriteResponse> {
+    async fn write(&self, _ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
+        self.inner.write(request);
         Ok(WriteResponse {})
     }
 
     fn snapshot(&self, _ctx: &ReadContext) -> Result<MockSnapshot> {
         Ok(MockSnapshot {
-            metadata: self.metadata.clone(),
+            schema: self.inner.metadata.load().user_schema().clone(),
+            region: self.inner.clone(),
         })
     }
 
     fn write_request(&self) -> WriteBatch {
         WriteBatch::new(self.in_memory_metadata().schema().clone())
+    }
+
+    fn alter(&self, descriptor: RegionDescriptor) -> Result<()> {
+        let metadata = descriptor.try_into().unwrap();
+        self.inner.update_metadata(metadata);
+        Ok(())
+    }
+}
+
+impl MockRegionInner {
+    fn new(metadata: RegionMetadata) -> Self {
+        let mut memtable = HashMap::new();
+        for column in metadata.user_schema().column_schemas() {
+            memtable.insert(column.name.clone(), vec![]);
+        }
+        Self {
+            metadata: ArcSwap::new(Arc::new(metadata)),
+            memtable: Arc::new(RwLock::new(memtable)),
+        }
+    }
+
+    fn update_metadata(&self, metadata: RegionMetadata) {
+        {
+            let mut memtable = self.memtable.write().unwrap();
+
+            let rows = memtable.values().last().unwrap().len();
+
+            // currently dropping columns are not supported, so we only add columns here
+            for column in metadata.user_schema().column_schemas() {
+                let _ = memtable
+                    .entry(column.name.clone())
+                    .or_insert_with(|| vec![Value::Null; rows]);
+            }
+        }
+        self.metadata.swap(Arc::new(metadata));
+    }
+
+    fn write(&self, request: WriteBatch) {
+        let metadata = self.metadata.load();
+
+        let mut memtable = self.memtable.write().unwrap();
+
+        for Mutation::Put(put) in request.iter() {
+            for ColumnSchema { name, .. } in metadata.user_schema().column_schemas() {
+                let column = memtable.get_mut(name).unwrap();
+                if let Some(data) = put.column_by_name(name) {
+                    (0..data.len()).for_each(|i| column.push(data.get(i)));
+                } else {
+                    column.extend_from_slice(&vec![Value::Null; put.num_rows()]);
+                }
+            }
+        }
     }
 }
 
@@ -165,7 +261,7 @@ impl StorageEngine for MockEngine {
         let metadata = descriptor.try_into().unwrap();
         let region = MockRegion {
             name: name.clone(),
-            metadata: Arc::new(metadata),
+            inner: Arc::new(MockRegionInner::new(metadata)),
         };
         regions.opened_regions.insert(name, region.clone());
 

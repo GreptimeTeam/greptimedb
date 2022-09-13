@@ -8,7 +8,7 @@ use common_recordbatch::{util, RecordBatch};
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::DataTypeBuilder;
+use datatypes::types::PrimitiveElement;
 use datatypes::vectors::PrimitiveVector;
 use query::query_engine::{Output, QueryEngineFactory};
 use query::QueryEngine;
@@ -59,7 +59,7 @@ pub async fn get_numbers_from_table<'s, T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Vec<T>
 where
-    T: Primitive + DataTypeBuilder,
+    T: PrimitiveElement,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     let sql = format!("SELECT {} FROM {}", column_name, table_name);
@@ -67,7 +67,7 @@ where
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     let numbers = util::collect(recordbatch_stream).await.unwrap();

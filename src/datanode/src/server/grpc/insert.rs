@@ -4,8 +4,9 @@ use std::{
     sync::Arc,
 };
 
-use api::v1::{codec::InsertBatch, column::Values, Column, InsertExpr};
+use api::v1::{codec::InsertBatch, column::Values, insert_expr, Column};
 use common_base::BitVec;
+use common_time::timestamp::Timestamp;
 use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::{requests::InsertRequest, Table};
@@ -13,13 +14,13 @@ use table::{requests::InsertRequest, Table};
 use crate::error::{ColumnNotFoundSnafu, DecodeInsertSnafu, IllegalInsertDataSnafu, Result};
 
 pub fn insertion_expr_to_request(
-    insert: InsertExpr,
+    table_name: &str,
+    values: insert_expr::Values,
     table: Arc<dyn Table>,
 ) -> Result<InsertRequest> {
     let schema = table.schema();
-    let table_name = &insert.table_name;
     let mut columns_builders = HashMap::with_capacity(schema.column_schemas().len());
-    let insert_batches = insert_batches(insert.values)?;
+    let insert_batches = insert_batches(values.values)?;
 
     for InsertBatch { columns, row_count } in insert_batches {
         for Column {
@@ -170,7 +171,23 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .into_iter()
             .map(|val| val.into())
             .collect(),
-        _ => unimplemented!(),
+        ConcreteDataType::DateTime(_) => values
+            .i64_values
+            .into_iter()
+            .map(|v| Value::DateTime(v.into()))
+            .collect(),
+        ConcreteDataType::Date(_) => values
+            .i32_values
+            .into_iter()
+            .map(|v| Value::Date(v.into()))
+            .collect(),
+        ConcreteDataType::Timestamp(_) => values
+            .ts_millis_values
+            .into_iter()
+            .map(|v| Value::Timestamp(Timestamp::from_millis(v)))
+            .collect(),
+        ConcreteDataType::Null(_) => unreachable!(),
+        ConcreteDataType::List(_) => unreachable!(),
     }
 }
 
@@ -185,7 +202,7 @@ mod tests {
     use api::v1::{
         codec::InsertBatch,
         column::{self, Values},
-        Column, InsertExpr,
+        insert_expr, Column,
     };
     use common_base::BitVec;
     use common_query::prelude::Expr;
@@ -202,13 +219,12 @@ mod tests {
 
     #[test]
     fn test_insertion_expr_to_request() {
-        let insert_expr = InsertExpr {
-            table_name: "demo".to_string(),
-            values: mock_insert_batches(),
-        };
         let table: Arc<dyn Table> = Arc::new(DemoTable {});
 
-        let insert_req = insertion_expr_to_request(insert_expr, table).unwrap();
+        let values = insert_expr::Values {
+            values: mock_insert_batches(),
+        };
+        let insert_req = insertion_expr_to_request("demo", values, table).unwrap();
 
         assert_eq!("demo", insert_req.table_name);
 
@@ -312,6 +328,7 @@ mod tests {
             semantic_type: SEMANTIC_TAG,
             values: Some(host_vals),
             null_mask: vec![0],
+            ..Default::default()
         };
 
         let cpu_vals = column::Values {
@@ -323,6 +340,7 @@ mod tests {
             semantic_type: SEMANTIC_FEILD,
             values: Some(cpu_vals),
             null_mask: vec![2],
+            ..Default::default()
         };
 
         let mem_vals = column::Values {
@@ -334,6 +352,7 @@ mod tests {
             semantic_type: SEMANTIC_FEILD,
             values: Some(mem_vals),
             null_mask: vec![1],
+            ..Default::default()
         };
 
         let ts_vals = column::Values {
@@ -345,6 +364,7 @@ mod tests {
             semantic_type: SEMANTIC_TS,
             values: Some(ts_vals),
             null_mask: vec![0],
+            ..Default::default()
         };
 
         let insert_batch = InsertBatch {

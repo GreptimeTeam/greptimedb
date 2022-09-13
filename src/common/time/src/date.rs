@@ -33,6 +33,12 @@ impl FromStr for Date {
     }
 }
 
+impl From<i32> for Date {
+    fn from(v: i32) -> Self {
+        Self(v)
+    }
+}
+
 impl Display for Date {
     /// [Date] is formatted according to ISO-8601 standard.
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -85,5 +91,11 @@ mod tests {
         let mut date = Date::from_str("9999-12-31").unwrap();
         date.0 += 1000;
         assert_eq!(date, Date::from_str(&date.to_string()).unwrap());
+    }
+
+    #[test]
+    pub fn test_from() {
+        let d: Date = 42.into();
+        assert_eq!(42, d.val());
     }
 }

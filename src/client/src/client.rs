@@ -5,18 +5,43 @@ use tonic::transport::Channel;
 use crate::error;
 use crate::Result;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Client {
-    client: GreptimeClient<Channel>,
+    client: Option<GreptimeClient<Channel>>,
 }
 
 impl Client {
+    pub async fn start(&mut self, url: impl Into<String>) -> Result<()> {
+        match self.client.as_ref() {
+            None => {
+                let url = url.into();
+                let client = GreptimeClient::connect(url.clone())
+                    .await
+                    .context(error::ConnectFailedSnafu { url })?;
+                self.client = Some(client);
+                Ok(())
+            }
+            Some(_) => error::IllegalGrpcClientStateSnafu {
+                err_msg: "already started",
+            }
+            .fail(),
+        }
+    }
+
+    pub fn with_client(client: GreptimeClient<Channel>) -> Self {
+        Self {
+            client: Some(client),
+        }
+    }
+
     pub async fn connect(url: impl Into<String>) -> Result<Self> {
         let url = url.into();
         let client = GreptimeClient::connect(url.clone())
             .await
             .context(error::ConnectFailedSnafu { url })?;
-        Ok(Self { client })
+        Ok(Self {
+            client: Some(client),
+        })
     }
 
     pub async fn admin(&self, req: AdminRequest) -> Result<AdminResponse> {
@@ -48,12 +73,18 @@ impl Client {
     }
 
     pub async fn batch(&self, req: BatchRequest) -> Result<BatchResponse> {
-        let res = self
-            .client
-            .clone()
-            .batch(req)
-            .await
-            .context(error::TonicStatusSnafu)?;
-        Ok(res.into_inner())
+        if let Some(client) = self.client.as_ref() {
+            let res = client
+                .clone()
+                .batch(req)
+                .await
+                .context(error::TonicStatusSnafu)?;
+            Ok(res.into_inner())
+        } else {
+            error::IllegalGrpcClientStateSnafu {
+                err_msg: "not started",
+            }
+            .fail()
+        }
     }
 }

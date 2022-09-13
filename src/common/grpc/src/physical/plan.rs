@@ -152,7 +152,7 @@ impl ExecutionPlan for MockExecution {
 
     fn schema(&self) -> arrow::datatypes::SchemaRef {
         let field1 = Field::new("id", DataType::UInt32, false);
-        let field2 = Field::new("name", DataType::LargeUtf8, false);
+        let field2 = Field::new("name", DataType::Utf8, false);
         let field3 = Field::new("age", DataType::UInt32, false);
         Arc::new(arrow::datatypes::Schema::new(vec![field1, field2, field3]))
     }
@@ -190,7 +190,7 @@ impl ExecutionPlan for MockExecution {
         let age_array = Arc::new(PrimitiveArray::from_slice([25u32, 28, 27, 35, 25]));
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::UInt32, false),
-            Field::new("name", DataType::LargeUtf8, false),
+            Field::new("name", DataType::Utf8, false),
             Field::new("age", DataType::UInt32, false),
         ]));
         let record_batch =

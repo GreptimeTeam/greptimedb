@@ -1,7 +1,9 @@
-use datatypes::arrow::array::{Int64Array, UInt64Array, UInt8Array};
+use common_time::timestamp::Timestamp;
+use datatypes::arrow;
+use datatypes::arrow::array::{Int64Array, PrimitiveArray, UInt64Array, UInt8Array};
 use datatypes::prelude::*;
 use datatypes::type_id::LogicalTypeId;
-use datatypes::vectors::{Int64VectorBuilder, UInt64VectorBuilder};
+use datatypes::vectors::{TimestampVectorBuilder, UInt64VectorBuilder};
 
 use super::*;
 use crate::metadata::RegionMetadata;
@@ -30,13 +32,13 @@ fn kvs_for_test_with_index(
     sequence: SequenceNumber,
     op_type: OpType,
     start_index_in_batch: usize,
-    keys: &[(i64, u64)],
+    keys: &[(Timestamp, u64)],
     values: &[(Option<u64>, Option<u64>)],
 ) -> KeyValues {
     assert_eq!(keys.len(), values.len());
 
     let mut key_builders = (
-        Int64VectorBuilder::with_capacity(keys.len()),
+        TimestampVectorBuilder::with_capacity(keys.len()),
         UInt64VectorBuilder::with_capacity(keys.len()),
     );
     for key in keys {
@@ -78,7 +80,7 @@ fn kvs_for_test_with_index(
 fn kvs_for_test(
     sequence: SequenceNumber,
     op_type: OpType,
-    keys: &[(i64, u64)],
+    keys: &[(Timestamp, u64)],
     values: &[(Option<u64>, Option<u64>)],
 ) -> KeyValues {
     kvs_for_test_with_index(sequence, op_type, 0, keys, values)
@@ -91,7 +93,9 @@ pub fn write_kvs(
     keys: &[(i64, u64)],
     values: &[(Option<u64>, Option<u64>)],
 ) {
-    let kvs = kvs_for_test(sequence, op_type, keys, values);
+    let keys: Vec<(Timestamp, u64)> = keys.iter().map(|(l, r)| ((*l).into(), *r)).collect();
+
+    let kvs = kvs_for_test(sequence, op_type, &keys, values);
 
     memtable.write(&kvs).unwrap();
 }
@@ -111,6 +115,8 @@ fn check_iter_content(
     op_types: &[OpType],
     values: &[(Option<u64>, Option<u64>)],
 ) {
+    let keys: Vec<(Timestamp, u64)> = keys.iter().map(|(l, r)| ((*l).into(), *r)).collect();
+
     let mut index = 0;
     for batch in iter {
         let batch = batch.unwrap();
@@ -560,6 +566,12 @@ fn test_memtable_projection() {
 
         assert_eq!(5, batch.num_columns());
         let k0 = Int64Array::from_slice(&[1000, 1001, 1002]);
+        let k0 = PrimitiveArray::new(
+            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            k0.values().clone(),
+            k0.validity().cloned(),
+        );
+
         let k1 = UInt64Array::from_slice(&[0, 1, 2]);
         let v0 = UInt64Array::from_slice(&[10, 11, 12]);
         let sequences = UInt64Array::from_slice(&[9, 9, 9]);

@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 
 use datatypes::prelude::VectorRef;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::{ColumnSchema, SchemaRef};
 
 use crate::metadata::TableId;
 
@@ -14,7 +14,7 @@ pub struct InsertRequest {
 }
 
 /// Create table request
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CreateTableRequest {
     pub id: TableId,
     pub catalog_name: Option<String>,
@@ -24,6 +24,7 @@ pub struct CreateTableRequest {
     pub schema: SchemaRef,
     pub primary_key_indices: Vec<usize>,
     pub create_if_not_exists: bool,
+    pub table_options: HashMap<String, String>,
 }
 
 /// Open table request
@@ -37,7 +38,17 @@ pub struct OpenTableRequest {
 
 /// Alter table request
 #[derive(Debug)]
-pub struct AlterTableRequest {}
+pub struct AlterTableRequest {
+    pub catalog_name: Option<String>,
+    pub schema_name: Option<String>,
+    pub table_name: String,
+    pub alter_kind: AlterKind,
+}
+
+#[derive(Debug)]
+pub enum AlterKind {
+    AddColumn { new_column: ColumnSchema },
+}
 
 /// Drop table request
 #[derive(Debug)]

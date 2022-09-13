@@ -31,7 +31,7 @@ pub fn init_default_ut_logging() {
         let mut g = GLOBAL_UT_LOG_GUARD.as_ref().lock().unwrap();
         *g = Some(init_global_logging(
             "unittest",
-            "__unittest_logs",
+            "/tmp/__unittest_logs",
             "DEBUG",
             false,
         ));
@@ -74,6 +74,7 @@ pub fn init_global_logging(
         .with_target("datafusion", Level::WARN)
         .with_target("reqwest", Level::WARN)
         .with_target("sqlparser", Level::WARN)
+        .with_target("h2", Level::INFO)
         .with_default(
             directives
                 .parse::<filter::LevelFilter>()

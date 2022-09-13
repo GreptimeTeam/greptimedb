@@ -32,6 +32,7 @@ tokio = "1.0"
 
 [dev-dependencies]
 approx_eq = "0.1"
+common-function-macro = { path = "../common/function-macro" }
 num = "0.4"
 num-traits = "0.2"
 format_num = "0.1"

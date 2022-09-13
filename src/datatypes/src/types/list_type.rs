@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
 use crate::value::ListValue;
+use crate::vectors::{ListVectorBuilder, MutableVector};
 
 /// Used to represent the List datatype.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,6 +42,13 @@ impl DataType for ListType {
     fn as_arrow_type(&self) -> ArrowDataType {
         let field = Box::new(Field::new("item", self.inner.as_arrow_type(), true));
         ArrowDataType::List(field)
+    }
+
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+        Box::new(ListVectorBuilder::with_capacity(
+            *self.inner.clone(),
+            capacity,
+        ))
     }
 }
 

@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package greptime.v1;
+
+message ExprHeader {
+  uint32 version = 1;
+}
+
+message ResultHeader {
+  uint32 version = 1;
+  uint32 code = 2;
+  string err_msg = 3;
+}
+
+message MutateResult {
+  uint32 success = 1;
+  uint32 failure = 2;
+}

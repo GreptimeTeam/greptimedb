@@ -2,12 +2,12 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use arc_swap::ArcSwapOption;
 use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{
     CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 use common_function::scalars::aggregate::AggregateFunctionMeta;
+use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::CreateAccumulatorSnafu;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Accumulator;
@@ -18,7 +18,7 @@ use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::DataTypeBuilder;
+use datatypes::types::PrimitiveElement;
 use datatypes::types::PrimitiveType;
 use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
@@ -54,10 +54,9 @@ where
     }
 }
 
-#[derive(Debug, Default)]
-struct MySumAccumulatorCreator {
-    input_type: ArcSwapOption<Vec<ConcreteDataType>>,
-}
+#[as_aggr_func_creator]
+#[derive(Debug, Default, AggrFuncTypeStore)]
+struct MySumAccumulatorCreator {}
 
 impl AggregateFunctionCreator for MySumAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
@@ -78,26 +77,6 @@ impl AggregateFunctionCreator for MySumAccumulatorCreator {
             )
         });
         creator
-    }
-
-    fn input_types(&self) -> QueryResult<Vec<ConcreteDataType>> {
-        Ok(self.input_type
-            .load()
-            .as_ref()
-            .expect("input_type is not present, check if DataFusion has changed its UDAF execution logic")
-            .as_ref()
-            .clone())
-    }
-
-    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> QueryResult<()> {
-        let old = self.input_type.swap(Some(Arc::new(input_types.clone())));
-        if let Some(old) = old {
-            assert_eq!(old.len(), input_types.len());
-            old.iter().zip(input_types.iter()).for_each(|(x, y)|
-                assert_eq!(x, y, "input type {:?} != {:?}, check if DataFusion has changed its UDAF execution logic", x, y)
-            );
-        }
-        Ok(())
     }
 
     fn output_type(&self) -> QueryResult<ConcreteDataType> {
@@ -211,7 +190,7 @@ async fn test_my_sum() -> Result<()> {
 
 async fn test_my_sum_with<T>(numbers: Vec<T>, expected: Vec<&str>) -> Result<()>
 where
-    T: Primitive + DataTypeBuilder,
+    T: PrimitiveElement,
 {
     let table_name = format!("{}_numbers", std::any::type_name::<T>());
     let column_name = format!("{}_number", std::any::type_name::<T>());
@@ -243,7 +222,7 @@ where
 
     let output = engine.execute(&plan).await?;
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     let recordbatch = util::collect(recordbatch_stream).await.unwrap();

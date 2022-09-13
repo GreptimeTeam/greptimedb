@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use arrow::array::ArrayRef;
+use common_time::timestamp::TimeUnit;
 use datafusion_common::Result as DfResult;
 use datafusion_expr::Accumulator as DfAccumulator;
 use datatypes::prelude::*;
@@ -44,25 +45,33 @@ pub trait Accumulator: Send + Sync + Debug {
 }
 
 /// An `AggregateFunctionCreator` dynamically creates `Accumulator`.
-/// DataFusion does not provide the input data's types when creating Accumulator, we have to stores
-/// it somewhere else ourself. So an `AggregateFunctionCreator` often has a companion struct, that
-/// can store the input data types, and knows the output and states types of an Accumulator.
-/// That's how we create the Accumulator generically.
-pub trait AggregateFunctionCreator: Send + Sync + Debug {
+///
+/// An `AggregateFunctionCreator` often has a companion struct, that
+/// can store the input data types (impl [AggrFuncTypeStore]), and knows the output and states
+/// types of an Accumulator.
+pub trait AggregateFunctionCreator: AggrFuncTypeStore {
     /// Create a function that can create a new accumulator with some input data type.
     fn creator(&self) -> AccumulatorCreatorFunction;
-
-    /// Get the input data type of the Accumulator.
-    fn input_types(&self) -> Result<Vec<ConcreteDataType>>;
-
-    /// Store the input data type that is provided by DataFusion at runtime.
-    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> Result<()>;
 
     /// Get the Accumulator's output data type.
     fn output_type(&self) -> Result<ConcreteDataType>;
 
     /// Get the Accumulator's state data types.
     fn state_types(&self) -> Result<Vec<ConcreteDataType>>;
+}
+
+/// `AggrFuncTypeStore` stores the aggregate function's input data's types.
+///
+/// When creating Accumulator generically, we have to know the input data's types.
+/// However, DataFusion does not provide the input data's types at the time of creating Accumulator.
+/// To solve the problem, we store the datatypes upfront here.
+pub trait AggrFuncTypeStore: Send + Sync + Debug {
+    /// Get the input data types of the Accumulator.
+    fn input_types(&self) -> Result<Vec<ConcreteDataType>>;
+
+    /// Store the input data types that are provided by DataFusion at runtime (when it is evaluating
+    /// return type function).
+    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> Result<()>;
 }
 
 pub fn make_accumulator_function(
@@ -178,13 +187,23 @@ fn try_into_scalar_value(value: Value, datatype: &ConcreteDataType) -> Result<Sc
         Value::Int64(v) => ScalarValue::Int64(Some(v)),
         Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
         Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
-        Value::String(v) => ScalarValue::LargeUtf8(Some(v.as_utf8().to_string())),
+        Value::String(v) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
         Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
         Value::Date(v) => ScalarValue::Date32(Some(v.val())),
         Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
         Value::Null => try_convert_null_value(datatype)?,
         Value::List(list) => try_convert_list_value(list)?,
+        Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
     })
+}
+
+fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
+    match unit {
+        TimeUnit::Second => ScalarValue::TimestampSecond(val, None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(val, None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(val, None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(val, None),
+    }
 }
 
 fn try_convert_null_value(datatype: &ConcreteDataType) -> Result<ScalarValue> {
@@ -201,7 +220,8 @@ fn try_convert_null_value(datatype: &ConcreteDataType) -> Result<ScalarValue> {
         ConcreteDataType::Float32(_) => ScalarValue::Float32(None),
         ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
         ConcreteDataType::Binary(_) => ScalarValue::LargeBinary(None),
-        ConcreteDataType::String(_) => ScalarValue::LargeUtf8(None),
+        ConcreteDataType::String(_) => ScalarValue::Utf8(None),
+        ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit, None),
         _ => {
             return error::BadAccumulatorImplSnafu {
                 err_msg: format!(
@@ -330,10 +350,10 @@ mod tests {
             .unwrap()
         );
         assert_eq!(
-            ScalarValue::LargeUtf8(Some("hello".to_string())),
+            ScalarValue::Utf8(Some("hello".to_string())),
             try_into_scalar_value(
                 Value::String(StringBytes::from("hello")),
-                &ConcreteDataType::string_datatype()
+                &ConcreteDataType::string_datatype(),
             )
             .unwrap()
         );
@@ -394,7 +414,7 @@ mod tests {
             try_into_scalar_value(Value::Null, &ConcreteDataType::float64_datatype()).unwrap()
         );
         assert_eq!(
-            ScalarValue::LargeUtf8(None),
+            ScalarValue::Utf8(None),
             try_into_scalar_value(Value::Null, &ConcreteDataType::string_datatype()).unwrap()
         );
         assert_eq!(
@@ -426,5 +446,25 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    pub fn test_timestamp_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::TimestampSecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Second, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampMillisecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Millisecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampMicrosecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Microsecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampNanosecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Nanosecond, Some(1))
+        );
     }
 }

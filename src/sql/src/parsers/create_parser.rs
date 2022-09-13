@@ -5,10 +5,8 @@ use sqlparser::{dialect::keywords::Keyword, tokenizer::Token};
 use table_engine::engine;
 
 use crate::ast::{ColumnDef, Ident, TableConstraint};
-use crate::error;
-use crate::error::{InvalidTimeIndexSnafu, SyntaxSnafu};
+use crate::error::{self, InvalidTimeIndexSnafu, Result, SyntaxSnafu};
 use crate::parser::ParserContext;
-use crate::parser::Result;
 use crate::statements::create_table::{CreateTable, TIME_INDEX};
 use crate::statements::statement::Statement;
 

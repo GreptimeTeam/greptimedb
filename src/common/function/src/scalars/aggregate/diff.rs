@@ -1,10 +1,9 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use arc_swap::ArcSwapOption;
+use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{
-    CreateAccumulatorSnafu, DowncastVectorSnafu, FromScalarValueSnafu, InvalidInputStateSnafu,
-    Result,
+    CreateAccumulatorSnafu, DowncastVectorSnafu, FromScalarValueSnafu, Result,
 };
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
@@ -118,10 +117,9 @@ where
     }
 }
 
-#[derive(Debug, Default)]
-pub struct DiffAccumulatorCreator {
-    input_types: ArcSwapOption<Vec<ConcreteDataType>>,
-}
+#[as_aggr_func_creator]
+#[derive(Debug, Default, AggrFuncTypeStore)]
+pub struct DiffAccumulatorCreator {}
 
 impl AggregateFunctionCreator for DiffAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
@@ -144,31 +142,13 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
         creator
     }
 
-    fn input_types(&self) -> Result<Vec<ConcreteDataType>> {
-        let input_types = self.input_types.load();
-        ensure!(input_types.is_some(), InvalidInputStateSnafu);
-
-        Ok(input_types.as_ref().unwrap().as_ref().clone())
-    }
-
-    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> Result<()> {
-        let old = self.input_types.swap(Some(Arc::new(input_types.clone())));
-        if let Some(old) = old {
-            ensure!(old.len() != input_types.len(), InvalidInputStateSnafu);
-            for (x, y) in old.iter().zip(input_types.iter()) {
-                ensure!(x == y, InvalidInputStateSnafu);
-            }
-        }
-        Ok(())
-    }
-
     fn output_type(&self) -> Result<ConcreteDataType> {
         let input_types = self.input_types()?;
         ensure!(input_types.len() == 1, InvalidInputStateSnafu);
         with_match_primitive_type_id!(
             input_types[0].logical_type_id(),
             |$S| {
-                Ok(ConcreteDataType::list_datatype(PrimitiveType::<<$S as Primitive>::LargestType>::default().logical_type_id().data_type()))
+                Ok(ConcreteDataType::list_datatype(PrimitiveType::<<$S as Primitive>::LargestType>::default().into()))
             },
             {
                 unreachable!()
@@ -182,7 +162,7 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
         with_match_primitive_type_id!(
             input_types[0].logical_type_id(),
             |$S| {
-                Ok(vec![ConcreteDataType::list_datatype(PrimitiveType::<$S>::default().logical_type_id().data_type())])
+                Ok(vec![ConcreteDataType::list_datatype(PrimitiveType::<$S>::default().into())])
             },
             {
                 unreachable!()

@@ -38,6 +38,12 @@ impl FromStr for DateTime {
     }
 }
 
+impl From<i64> for DateTime {
+    fn from(v: i64) -> Self {
+        Self(v)
+    }
+}
+
 impl DateTime {
     pub fn new(val: i64) -> Self {
         Self(val)
@@ -64,5 +70,11 @@ mod tests {
         let time = "1970-01-01 00:00:00";
         let dt = DateTime::from_str(time).unwrap();
         assert_eq!(time, &dt.to_string());
+    }
+
+    #[test]
+    pub fn test_from() {
+        let d: DateTime = 42.into();
+        assert_eq!(42, d.val());
     }
 }

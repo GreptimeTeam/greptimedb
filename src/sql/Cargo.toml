@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 common-error = { path = "../common/error" }
+datatypes = { path = "../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.15.0"
 table-engine = { path = "../table-engine" }

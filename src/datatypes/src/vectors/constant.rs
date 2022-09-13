@@ -2,13 +2,13 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
+use arrow::array::{Array, ArrayRef};
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{Result, SerializeSnafu};
 use crate::serialize::Serializable;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vectors::Helper;
 use crate::vectors::{Validity, Vector, VectorRef};
 
@@ -55,6 +55,11 @@ impl Vector for ConstantVector {
         v.to_arrow_array()
     }
 
+    fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
+        let v = self.vector.replicate(&[self.length]);
+        v.to_boxed_arrow_array()
+    }
+
     fn is_const(&self) -> bool {
         true
     }
@@ -97,6 +102,10 @@ impl Vector for ConstantVector {
         );
 
         Arc::new(Self::new(self.vector.clone(), *offsets.last().unwrap()))
+    }
+
+    fn get_ref(&self, _index: usize) -> ValueRef {
+        self.vector.get_ref(0)
     }
 }
 

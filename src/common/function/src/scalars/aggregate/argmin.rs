@@ -1,10 +1,8 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use arc_swap::ArcSwapOption;
-use common_query::error::{
-    BadAccumulatorImplSnafu, CreateAccumulatorSnafu, InvalidInputStateSnafu, Result,
-};
+use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
+use common_query::error::{BadAccumulatorImplSnafu, CreateAccumulatorSnafu, Result};
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::vectors::ConstantVector;
@@ -107,10 +105,9 @@ where
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ArgminAccumulatorCreator {
-    input_types: ArcSwapOption<Vec<ConcreteDataType>>,
-}
+#[as_aggr_func_creator]
+#[derive(Debug, Default, AggrFuncTypeStore)]
+pub struct ArgminAccumulatorCreator {}
 
 impl AggregateFunctionCreator for ArgminAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
@@ -131,23 +128,6 @@ impl AggregateFunctionCreator for ArgminAccumulatorCreator {
             )
         });
         creator
-    }
-
-    fn input_types(&self) -> Result<Vec<ConcreteDataType>> {
-        let input_types = self.input_types.load();
-        ensure!(input_types.is_some(), InvalidInputStateSnafu);
-        Ok(input_types.as_ref().unwrap().as_ref().clone())
-    }
-
-    fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> Result<()> {
-        let old = self.input_types.swap(Some(Arc::new(input_types.clone())));
-        if let Some(old) = old {
-            ensure!(old.len() == input_types.len(), InvalidInputStateSnafu);
-            for (x, y) in old.iter().zip(input_types.iter()) {
-                ensure!(x == y, InvalidInputStateSnafu);
-            }
-        }
-        Ok(())
     }
 
     fn output_type(&self) -> Result<ConcreteDataType> {

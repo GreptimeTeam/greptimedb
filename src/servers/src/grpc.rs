@@ -12,21 +12,25 @@ use tonic::{Request, Response, Status};
 
 use crate::error::{Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::grpc::handler::BatchHandler;
-use crate::query_handler::GrpcQueryHandlerRef;
+use crate::query_handler::{GrpcAdminHandlerRef, GrpcQueryHandlerRef};
 use crate::server::Server;
 
 pub struct GrpcServer {
     query_handler: GrpcQueryHandlerRef,
+    admin_handler: GrpcAdminHandlerRef,
 }
 
 impl GrpcServer {
-    pub fn new(query_handler: GrpcQueryHandlerRef) -> Self {
-        Self { query_handler }
+    pub fn new(query_handler: GrpcQueryHandlerRef, admin_handler: GrpcAdminHandlerRef) -> Self {
+        Self {
+            query_handler,
+            admin_handler,
+        }
     }
 
     pub fn create_service(&self) -> greptime_server::GreptimeServer<GrpcService> {
         let service = GrpcService {
-            handler: BatchHandler::new(self.query_handler.clone()),
+            handler: BatchHandler::new(self.query_handler.clone(), self.admin_handler.clone()),
         };
         greptime_server::GreptimeServer::new(service)
     }

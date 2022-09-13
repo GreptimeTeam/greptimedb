@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package greptime.v1;
 
+import "greptime/v1/common.proto";
+
 message DatabaseRequest {
   string name = 1;
   repeated ObjectExpr exprs = 2;
@@ -21,10 +23,6 @@ message ObjectExpr {
   }
 }
 
-message ExprHeader {
-  uint32 version = 1;
-}
-
 // TODO(fys): Only support sql now, and will support promql etc in the future
 message SelectExpr {
   oneof expr {
@@ -40,7 +38,23 @@ message PhysicalPlan {
 
 message InsertExpr {
   string table_name = 1;
-  repeated bytes values = 2;
+
+  message Values {
+    repeated bytes values = 1;
+  }
+
+  oneof expr {
+    Values values = 2;
+
+    // TODO(LFC): Remove field "sql" in InsertExpr.
+    // When Frontend instance received an insertion SQL (`insert into ...`), it's anticipated to parse the SQL and
+    // assemble the values to insert to feed Datanode. In other words, inserting data through Datanode instance's GRPC
+    // interface shouldn't use SQL directly.
+    // Then why the "sql" field exists here? It's because the Frontend needs table schema to create the values to insert,
+    // which is currently not able to find anywhere. (Maybe the table schema is suppose to be fetched from Meta?)
+    // The "sql" field is meant to be removed in the future.
+    string sql = 3;
+  }
 }
 
 // TODO(jiachun)
@@ -58,15 +72,4 @@ message ObjectResult {
 
 message SelectResult {
   bytes raw_data = 1;
-}
-
-message ResultHeader {
-  uint32 version = 1;
-  uint32 code = 2;
-  string err_msg = 3;
-}
-
-message MutateResult {
-  uint32 success = 1;
-  uint32 failure = 2;
 }

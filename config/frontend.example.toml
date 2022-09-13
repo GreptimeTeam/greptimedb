@@ -1,0 +1,4 @@
+http_addr = '0.0.0.0:4000'
+grpc_addr = '0.0.0.0:4001'
+mysql_addr = '0.0.0.0:4003'
+mysql_runtime_size = 4

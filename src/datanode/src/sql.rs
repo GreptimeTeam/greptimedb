@@ -1,17 +1,15 @@
 //! sql handler
 
-use std::sync::Arc;
-
 use catalog::CatalogManagerRef;
-use common_error::ext::BoxedError;
 use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
-use table::engine::{EngineContext, TableEngine};
+use table::engine::{EngineContext, TableEngineRef};
 use table::requests::*;
 use table::TableRef;
 
 use crate::error::{GetTableSnafu, Result, TableNotFoundSnafu};
 
+mod alter;
 mod create;
 mod insert;
 
@@ -19,18 +17,19 @@ mod insert;
 pub enum SqlRequest {
     Insert(InsertRequest),
     Create(CreateTableRequest),
+    Alter(AlterTableRequest),
 }
 
 // Handler to execute SQL except query
-pub struct SqlHandler<Engine: TableEngine> {
-    table_engine: Arc<Engine>,
+pub struct SqlHandler {
+    table_engine: TableEngineRef,
     catalog_manager: CatalogManagerRef,
 }
 
-impl<Engine: TableEngine> SqlHandler<Engine> {
-    pub fn new(table_engine: Engine, catalog_manager: CatalogManagerRef) -> Self {
+impl SqlHandler {
+    pub fn new(table_engine: TableEngineRef, catalog_manager: CatalogManagerRef) -> Self {
         Self {
-            table_engine: Arc::new(table_engine),
+            table_engine,
             catalog_manager,
         }
     }
@@ -39,18 +38,18 @@ impl<Engine: TableEngine> SqlHandler<Engine> {
         match request {
             SqlRequest::Insert(req) => self.insert(req).await,
             SqlRequest::Create(req) => self.create(req).await,
+            SqlRequest::Alter(req) => self.alter(req).await,
         }
     }
 
     pub(crate) fn get_table(&self, table_name: &str) -> Result<TableRef> {
         self.table_engine
             .get_table(&EngineContext::default(), table_name)
-            .map_err(BoxedError::new)
             .context(GetTableSnafu { table_name })?
             .context(TableNotFoundSnafu { table_name })
     }
 
-    pub fn table_engine(&self) -> Arc<Engine> {
+    pub fn table_engine(&self) -> TableEngineRef {
         self.table_engine.clone()
     }
 }
@@ -156,7 +155,7 @@ mod tests {
                            ('host2', 88.8,  333.3, 1655276558000)
                            "#;
 
-        let table_engine = MitoEngine::<EngineImpl<NoopLogStore>>::new(
+        let table_engine = Arc::new(MitoEngine::<EngineImpl<NoopLogStore>>::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
@@ -164,10 +163,10 @@ mod tests {
                 object_store.clone(),
             ),
             object_store,
-        );
+        ));
 
         let catalog_list = Arc::new(
-            catalog::LocalCatalogManager::try_new(Arc::new(table_engine.clone()))
+            catalog::LocalCatalogManager::try_new(table_engine.clone())
                 .await
                 .unwrap(),
         );
