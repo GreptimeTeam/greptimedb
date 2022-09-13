@@ -840,12 +840,7 @@ pub(crate) mod greptime_builtin {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        // 2. apply function on each slice
-        let fn_results = windows.into_iter().map(|window|{
-            Helper::try_into_vector(window)
-            .map(PyVector::from)
-            .map_err(datatype_error)
-        }).map(|v|{
+        let apply_interval_function = |v: PyResult<PyVector>|{
             match v{
                 Ok(v) => {
                     let args = FuncArgs::new(vec![v.into_pyobject(vm)], KwArgs::default());
@@ -868,7 +863,14 @@ pub(crate) mod greptime_builtin {
                 },
                 Err(e) => Err(e),
             }
-        })
+        };
+
+        // 2. apply function on each slice
+        let fn_results = windows.into_iter().map(|window|{
+            Helper::try_into_vector(window)
+            .map(PyVector::from)
+            .map_err(datatype_error)
+        }).map(apply_interval_function)
         .collect::<Result<Vec<_>, _>>()?;
 
         // 3. get returen vector and concat them
