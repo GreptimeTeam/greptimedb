@@ -195,9 +195,6 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Invalid ColumnDef in protobuf msg: {}", msg))]
-    InvalidColumnDef { msg: String, backtrace: Backtrace },
-
     #[snafu(display("Failed to start script manager, source: {}", source))]
     StartScriptManager {
         #[snafu(backtrace)]

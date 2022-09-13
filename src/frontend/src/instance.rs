@@ -113,6 +113,13 @@ impl SqlQueryHandler for Instance {
         .context(server_error::ExecuteQuerySnafu { query })
     }
 
+    async fn insert_script(&self, _name: &str, _script: &str) -> server_error::Result<()> {
+        server_error::NotSupportedSnafu {
+            feat: "Script execution in Frontend",
+        }
+        .fail()
+    }
+
     async fn execute_script(&self, _script: &str) -> server_error::Result<Output> {
         server_error::NotSupportedSnafu {
             feat: "Script execution in Frontend",

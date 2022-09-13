@@ -143,7 +143,7 @@ impl ScriptsTable {
             .await
             .context(FindScriptSnafu { name })?
         {
-            Output::RecordBatch(stream) => stream,
+            Output::Stream(stream) => stream,
             _ => unreachable!(),
         };
         let records = record_util::collect(stream)

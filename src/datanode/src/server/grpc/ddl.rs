@@ -152,9 +152,8 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
 mod tests {
     use std::collections::HashMap;
 
-    use datatypes::prelude::ConcreteDataType;
-
     use catalog::MIN_USER_TABLE_ID;
+    use datatypes::prelude::ConcreteDataType;
 
     use super::*;
     use crate::tests::test_util;
