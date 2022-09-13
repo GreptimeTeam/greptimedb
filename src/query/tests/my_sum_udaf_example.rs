@@ -222,7 +222,7 @@ where
 
     let output = engine.execute(&plan).await?;
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     let recordbatch = util::collect(recordbatch_stream).await.unwrap();

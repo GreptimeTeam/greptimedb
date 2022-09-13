@@ -8,6 +8,7 @@ use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
 use sql::ast::TableConstraint;
 use sql::statements::create_table::CreateTable;
+use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use store_api::storage::consts::TIME_INDEX_NAME;
 use table::engine::EngineContext;
 use table::metadata::TableId;
@@ -17,7 +18,7 @@ use crate::error::{
     self, ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu,
     InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu, Result,
 };
-use crate::sql::{column_def_to_schema, table_idents_to_full_name, SqlHandler};
+use crate::sql::SqlHandler;
 
 impl SqlHandler {
     pub(crate) async fn create(&self, req: CreateTableRequest) -> Result<Output> {
@@ -61,7 +62,8 @@ impl SqlHandler {
         let mut ts_index = usize::MAX;
         let mut primary_keys = vec![];
 
-        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&stmt.name)?;
+        let (catalog_name, schema_name, table_name) =
+            table_idents_to_full_name(&stmt.name).context(error::ParseSqlSnafu)?;
 
         let col_map = stmt
             .columns
@@ -129,7 +131,7 @@ impl SqlHandler {
         let columns_schemas: Vec<_> = stmt
             .columns
             .iter()
-            .map(column_def_to_schema)
+            .map(|column| column_def_to_schema(column).context(error::ParseSqlSnafu))
             .collect::<Result<Vec<_>>>()?;
 
         let schema = Arc::new(
@@ -159,15 +161,12 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use datatypes::prelude::ConcreteDataType;
-    use sql::ast::Ident;
-    use sql::ast::{DataType as SqlDataType, ObjectName};
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
     use super::*;
     use crate::error::Error;
-    use crate::sql::sql_data_type_to_concrete_data_type;
     use crate::tests::test_util::create_mock_sql_handler;
 
     fn sql_to_statement(sql: &str) -> CreateTable {
@@ -290,48 +289,6 @@ mod tests {
                 .column_schema_by_name("memory")
                 .unwrap()
                 .data_type
-        );
-    }
-
-    fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
-        assert_eq!(
-            data_type,
-            sql_data_type_to_concrete_data_type(&sql_type).unwrap()
-        );
-    }
-
-    #[test]
-    pub fn test_sql_data_type_to_concrete_data_type() {
-        check_type(
-            SqlDataType::BigInt(None),
-            ConcreteDataType::int64_datatype(),
-        );
-        check_type(SqlDataType::Int(None), ConcreteDataType::int32_datatype());
-        check_type(
-            SqlDataType::SmallInt(None),
-            ConcreteDataType::int16_datatype(),
-        );
-        check_type(SqlDataType::Char(None), ConcreteDataType::string_datatype());
-        check_type(
-            SqlDataType::Varchar(None),
-            ConcreteDataType::string_datatype(),
-        );
-        check_type(SqlDataType::Text, ConcreteDataType::string_datatype());
-        check_type(SqlDataType::String, ConcreteDataType::string_datatype());
-        check_type(
-            SqlDataType::Float(None),
-            ConcreteDataType::float32_datatype(),
-        );
-        check_type(SqlDataType::Double, ConcreteDataType::float64_datatype());
-        check_type(SqlDataType::Boolean, ConcreteDataType::boolean_datatype());
-        check_type(SqlDataType::Date, ConcreteDataType::date_datatype());
-        check_type(
-            SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")])),
-            ConcreteDataType::datetime_datatype(),
-        );
-        check_type(
-            SqlDataType::Timestamp,
-            ConcreteDataType::timestamp_millis_datatype(),
         );
     }
 }

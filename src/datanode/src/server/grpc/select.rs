@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::{codec::SelectResult, column::Values, Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::BitVec;
@@ -8,9 +9,9 @@ use common_error::status_code::StatusCode;
 use common_recordbatch::{util, RecordBatch, SendableRecordBatchStream};
 use datatypes::arrow_array::{BinaryArray, StringArray};
 use query::Output;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{ConversionSnafu, Result};
+use crate::error::{self, ConversionSnafu, Result};
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 
 pub async fn to_object_result(result: Result<Output>) -> ObjectResult {
@@ -19,7 +20,8 @@ pub async fn to_object_result(result: Result<Output>) -> ObjectResult {
             .status_code(StatusCode::Success as u32)
             .mutate_result(rows as u32, 0)
             .build(),
-        Ok(Output::RecordBatch(stream)) => record_batchs(stream).await,
+        Ok(Output::Stream(stream)) => record_batchs(stream).await,
+        Ok(Output::RecordBatches(recordbatches)) => build_result(recordbatches.to_vec()).await,
         Err(err) => ObjectResultBuilder::new()
             .status_code(err.status_code() as u32)
             .err_msg(err.to_string())
@@ -28,15 +30,18 @@ pub async fn to_object_result(result: Result<Output>) -> ObjectResult {
 }
 
 async fn record_batchs(stream: SendableRecordBatchStream) -> ObjectResult {
-    let builder = ObjectResultBuilder::new();
     match util::collect(stream).await {
-        Ok(record_batches) => match try_convert(record_batches) {
-            Ok(select_result) => builder
-                .status_code(StatusCode::Success as u32)
-                .select_result(select_result)
-                .build(),
-            Err(err) => build_err_result(&err),
-        },
+        Ok(recordbatches) => build_result(recordbatches).await,
+        Err(err) => build_err_result(&err),
+    }
+}
+
+async fn build_result(recordbatches: Vec<RecordBatch>) -> ObjectResult {
+    match try_convert(recordbatches) {
+        Ok(select_result) => ObjectResultBuilder::new()
+            .status_code(StatusCode::Success as u32)
+            .select_result(select_result)
+            .build(),
         Err(err) => build_err_result(&err),
     }
 }
@@ -69,6 +74,9 @@ fn try_convert(record_batches: Vec<RecordBatch>) -> Result<SelectResult> {
             column_name,
             values: Some(values(&arrays)?),
             null_mask: null_mask(&arrays, row_count),
+            datatype: ColumnDataTypeWrapper::try_from(schema.data_type.clone())
+                .context(error::ColumnDataTypeSnafu)?
+                .datatype() as i32,
             ..Default::default()
         };
         columns.push(column);
@@ -80,7 +88,7 @@ fn try_convert(record_batches: Vec<RecordBatch>) -> Result<SelectResult> {
     })
 }
 
-fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
+pub fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
     let null_count: usize = arrays.iter().map(|a| a.null_count()).sum();
 
     if null_count == 0 {
@@ -123,7 +131,7 @@ macro_rules! convert_arrow_array_to_grpc_vals {
 
 }
 
-fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
+pub fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
     if arrays.is_empty() {
         return Ok(Values::default());
     }
@@ -153,10 +161,11 @@ fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
 
         (DataType::Utf8,          StringArray,            string_values,  |x| {x.into()}),
         (DataType::LargeUtf8,     StringArray,            string_values,  |x| {x.into()}),
-        (DataType::Date32,        PrimitiveArray<i32>,    i32_values,     |x| {*x as i32}),
-        (DataType::Date64,        PrimitiveArray<i64>,    i64_values,     |x| {*x as i64}),
 
-        (DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _),  PrimitiveArray<i64>,   i64_values, |x| {*x}  )
+        (DataType::Date32,        PrimitiveArray<i32>,    date_values,    |x| {*x as i32}),
+        (DataType::Date64,        PrimitiveArray<i64>,    datetime_values,|x| {*x as i64}),
+
+        (DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _), PrimitiveArray<i64>, ts_millis_values, |x| {*x})
     )
 }
 

@@ -1,4 +1,6 @@
 use api::v1::*;
+use common_error::prelude::StatusCode;
+use query::Output;
 use snafu::prelude::*;
 
 use crate::database::PROTOCOL_VERSION;
@@ -20,6 +22,10 @@ impl Admin {
         }
     }
 
+    pub async fn start(&mut self, url: impl Into<String>) -> Result<()> {
+        self.client.start(url).await
+    }
+
     pub async fn create(&self, expr: CreateExpr) -> Result<AdminResult> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
@@ -28,8 +34,12 @@ impl Admin {
             header: Some(header),
             expr: Some(admin_expr::Expr::Create(expr)),
         };
-        // `remove(0)` is safe because of `do_request`'s invariants.
-        Ok(self.do_request(vec![expr]).await?.remove(0))
+        self.do_request(expr).await
+    }
+
+    pub async fn do_request(&self, expr: AdminExpr) -> Result<AdminResult> {
+        // `remove(0)` is safe because of `do_requests`'s invariants.
+        Ok(self.do_requests(vec![expr]).await?.remove(0))
     }
 
     pub async fn alter(&self, expr: AlterExpr) -> Result<AdminResult> {
@@ -40,11 +50,11 @@ impl Admin {
             header: Some(header),
             expr: Some(admin_expr::Expr::Alter(expr)),
         };
-        Ok(self.do_request(vec![expr]).await?.remove(0))
+        Ok(self.do_requests(vec![expr]).await?.remove(0))
     }
 
     /// Invariants: the lengths of input vec (`Vec<AdminExpr>`) and output vec (`Vec<AdminResult>`) are equal.
-    async fn do_request(&self, exprs: Vec<AdminExpr>) -> Result<Vec<AdminResult>> {
+    async fn do_requests(&self, exprs: Vec<AdminExpr>) -> Result<Vec<AdminResult>> {
         let expr_count = exprs.len();
         let req = AdminRequest {
             name: self.name.clone(),
@@ -64,4 +74,33 @@ impl Admin {
         );
         Ok(results)
     }
+}
+
+pub fn admin_result_to_output(admin_result: AdminResult) -> Result<Output> {
+    let header = admin_result.header.context(error::MissingHeaderSnafu)?;
+    if !StatusCode::is_success(header.code) {
+        return error::DatanodeSnafu {
+            code: header.code,
+            msg: header.err_msg,
+        }
+        .fail();
+    }
+
+    let result = admin_result.result.context(error::MissingResultSnafu {
+        name: "result".to_string(),
+        expected: 1_usize,
+        actual: 0_usize,
+    })?;
+    let output = match result {
+        admin_result::Result::Mutate(mutate) => {
+            if mutate.failure != 0 {
+                return error::MutateFailureSnafu {
+                    failure: mutate.failure,
+                }
+                .fail();
+            }
+            Output::AffectedRows(mutate.success as usize)
+        }
+    };
+    Ok(output)
 }

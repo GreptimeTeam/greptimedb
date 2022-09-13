@@ -13,7 +13,13 @@ async fn run() {
     let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
     let db = Database::new("greptime", client);
 
-    db.insert("demo", insert_batches()).await.unwrap();
+    let expr = InsertExpr {
+        table_name: "demo".to_string(),
+        expr: Some(insert_expr::Expr::Values(insert_expr::Values {
+            values: insert_batches(),
+        })),
+    };
+    db.insert(expr).await.unwrap();
 }
 
 fn insert_batches() -> Vec<Vec<u8>> {
@@ -37,6 +43,7 @@ fn insert_batches() -> Vec<Vec<u8>> {
         semantic_type: SEMANTIC_TAG,
         values: Some(host_vals),
         null_mask: vec![0],
+        ..Default::default()
     };
 
     let cpu_vals = column::Values {
@@ -48,6 +55,7 @@ fn insert_batches() -> Vec<Vec<u8>> {
         semantic_type: SEMANTIC_FEILD,
         values: Some(cpu_vals),
         null_mask: vec![2],
+        ..Default::default()
     };
 
     let mem_vals = column::Values {
@@ -59,6 +67,7 @@ fn insert_batches() -> Vec<Vec<u8>> {
         semantic_type: SEMANTIC_FEILD,
         values: Some(mem_vals),
         null_mask: vec![4],
+        ..Default::default()
     };
 
     let ts_vals = column::Values {
@@ -70,6 +79,7 @@ fn insert_batches() -> Vec<Vec<u8>> {
         semantic_type: SEMANTIC_TS,
         values: Some(ts_vals),
         null_mask: vec![0],
+        ..Default::default()
     };
 
     let insert_batch = InsertBatch {

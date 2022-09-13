@@ -48,7 +48,7 @@ async fn test_percentile_correctness() -> Result<()> {
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     let record_batch = util::collect(recordbatch_stream).await.unwrap();
@@ -108,7 +108,7 @@ async fn execute_percentile<'a>(
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
-        Output::RecordBatch(batch) => batch,
+        Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
     util::collect(recordbatch_stream).await

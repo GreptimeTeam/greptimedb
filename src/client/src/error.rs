@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::sync::Arc;
 
 use api::serde::DecodeError;
@@ -42,6 +43,67 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc::Error,
     },
+
+    #[snafu(display("Mutate result has failure {}", failure))]
+    MutateFailure { failure: u32, backtrace: Backtrace },
+
+    #[snafu(display("Invalid column proto: {}", err_msg))]
+    InvalidColumnProto {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Column datatype error, source: {}", source))]
+    ColumnDataType {
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
+
+    #[snafu(display("Failed to create vector, source: {}", source))]
+    CreateVector {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to create RecordBatches, source: {}", source))]
+    CreateRecordBatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Illegal GRPC client state: {}", err_msg))]
+    IllegalGrpcClientState {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Error::ConnectFailed { .. }
+            | Error::MissingResult { .. }
+            | Error::MissingHeader { .. }
+            | Error::TonicStatus { .. }
+            | Error::DecodeSelect { .. }
+            | Error::Datanode { .. }
+            | Error::EncodePhysical { .. }
+            | Error::MutateFailure { .. }
+            | Error::InvalidColumnProto { .. }
+            | Error::ColumnDataType { .. } => StatusCode::Internal,
+            Error::CreateVector { source } => source.status_code(),
+            Error::CreateRecordBatches { source } => source.status_code(),
+            Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
+        }
+    }
+
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

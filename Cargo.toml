@@ -16,6 +16,7 @@ members = [
     "src/cmd",
     "src/datanode",
     "src/datatypes",
+    "src/frontend",
     "src/log-store",
     "src/logical-plans",
     "src/object-store",

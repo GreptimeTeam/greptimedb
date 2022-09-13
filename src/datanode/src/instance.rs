@@ -1,7 +1,7 @@
 use std::{fs, path, sync::Arc};
 
 use api::v1::{
-    admin_expr, object_expr, select_expr, AdminExpr, AdminResult, InsertExpr, ObjectExpr,
+    admin_expr, insert_expr, object_expr, select_expr, AdminExpr, AdminResult, ObjectExpr,
     ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
@@ -81,7 +81,11 @@ impl Instance {
         })
     }
 
-    pub async fn execute_grpc_insert(&self, insert_expr: InsertExpr) -> Result<Output> {
+    pub async fn execute_grpc_insert(
+        &self,
+        table_name: &str,
+        values: insert_expr::Values,
+    ) -> Result<Output> {
         let schema_provider = self
             .catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
@@ -89,12 +93,11 @@ impl Instance {
             .schema(DEFAULT_SCHEMA_NAME)
             .unwrap();
 
-        let table_name = &insert_expr.table_name.clone();
         let table = schema_provider
             .table(table_name)
             .context(TableNotFoundSnafu { table_name })?;
 
-        let insert = insertion_expr_to_request(insert_expr, table.clone())?;
+        let insert = insertion_expr_to_request(table_name, values, table.clone())?;
 
         let affected_rows = table
             .insert(insert)
@@ -167,8 +170,8 @@ impl Instance {
         Ok(())
     }
 
-    async fn handle_insert(&self, insert_expr: InsertExpr) -> ObjectResult {
-        match self.execute_grpc_insert(insert_expr).await {
+    async fn handle_insert(&self, table_name: &str, values: insert_expr::Values) -> ObjectResult {
+        match self.execute_grpc_insert(table_name, values).await {
             Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
                 .status_code(StatusCode::Success as u32)
                 .mutate_result(rows as u32, 0)
@@ -289,6 +292,7 @@ async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFile
     Ok(log_store)
 }
 
+// TODO(LFC): Refactor datanode and frontend instances, separate impl for each query handler.
 #[async_trait]
 impl SqlQueryHandler for Instance {
     async fn do_query(&self, query: &str) -> servers::error::Result<Output> {
@@ -315,7 +319,23 @@ impl SqlQueryHandler for Instance {
 impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> servers::error::Result<ObjectResult> {
         let object_resp = match query.expr {
-            Some(object_expr::Expr::Insert(insert_expr)) => self.handle_insert(insert_expr).await,
+            Some(object_expr::Expr::Insert(insert_expr)) => {
+                let table_name = &insert_expr.table_name;
+                let expr = insert_expr
+                    .expr
+                    .context(servers::error::InvalidQuerySnafu {
+                        reason: "missing `expr` in `InsertExpr`",
+                    })?;
+                match expr {
+                    insert_expr::Expr::Values(values) => {
+                        self.handle_insert(table_name, values).await
+                    }
+                    insert_expr::Expr::Sql(sql) => {
+                        let output = self.execute_sql(&sql).await;
+                        to_object_result(output).await
+                    }
+                }
+            }
             Some(object_expr::Expr::Select(select_expr)) => self.handle_select(select_expr).await,
             other => {
                 return servers::error::NotSupportedSnafu {

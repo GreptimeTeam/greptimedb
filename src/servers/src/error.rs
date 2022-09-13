@@ -65,6 +65,12 @@ pub enum Error {
 
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
+
+    #[snafu(display("Invalid query: {}", reason))]
+    InvalidQuery {
+        reason: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -86,7 +92,7 @@ impl ErrorExt for Error {
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. } => source.status_code(),
 
-            NotSupported { .. } => StatusCode::InvalidArguments,
+            NotSupported { .. } | InvalidQuery { .. } => StatusCode::InvalidArguments,
         }
     }
 

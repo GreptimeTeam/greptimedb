@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use api::v1::ColumnDataType;
 use api::v1::{
-    admin_result, alter_expr::Kind, codec::InsertBatch, column, AddColumn, AlterExpr, Column,
-    ColumnDef, CreateExpr, MutateResult,
+    admin_result, alter_expr::Kind, codec::InsertBatch, column, insert_expr, AddColumn, AlterExpr,
+    Column, ColumnDef, CreateExpr, InsertExpr, MutateResult,
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
@@ -48,6 +48,7 @@ async fn test_insert_and_select() {
                 .collect(),
             ..Default::default()
         }),
+        datatype: 12, // string
         ..Default::default()
     };
     let expected_cpu_col = Column {
@@ -57,6 +58,7 @@ async fn test_insert_and_select() {
             ..Default::default()
         }),
         null_mask: vec![2],
+        datatype: 10, // float64
         ..Default::default()
     };
     let expected_mem_col = Column {
@@ -66,14 +68,16 @@ async fn test_insert_and_select() {
             ..Default::default()
         }),
         null_mask: vec![4],
+        datatype: 10, // float64
         ..Default::default()
     };
     let expected_ts_col = Column {
         column_name: "ts".to_string(),
         values: Some(column::Values {
-            i64_values: vec![100, 101, 102, 103],
+            ts_millis_values: vec![100, 101, 102, 103],
             ..Default::default()
         }),
+        datatype: 15, // timestamp
         ..Default::default()
     };
 
@@ -117,7 +121,11 @@ async fn test_insert_and_select() {
         row_count: 4,
     }
     .into()];
-    let result = db.insert("demo", values).await;
+    let expr = InsertExpr {
+        table_name: "demo".to_string(),
+        expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
+    };
+    let result = db.insert(expr).await;
     assert!(result.is_ok());
 
     // select

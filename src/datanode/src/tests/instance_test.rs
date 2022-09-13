@@ -40,7 +40,7 @@ async fn test_execute_query() {
         .await
         .unwrap();
     match output {
-        Output::RecordBatch(recordbatch) => {
+        Output::Stream(recordbatch) => {
             let numbers = util::collect(recordbatch).await.unwrap();
             let columns = numbers[0].df_recordbatch.columns();
             assert_eq!(1, columns.len());
@@ -116,7 +116,7 @@ async fn test_alter_table() {
 
     let output = instance.execute_sql("select * from demo").await.unwrap();
     match output {
-        Output::RecordBatch(stream) => {
+        Output::Stream(stream) => {
             let recordbatches = util::collect(stream).await.unwrap();
             let recordbatch = recordbatches
                 .into_iter()
