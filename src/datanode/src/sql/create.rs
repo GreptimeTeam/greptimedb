@@ -183,7 +183,7 @@ mod tests {
     #[tokio::test]
     pub async fn test_create_to_request() {
         let handler = create_mock_sql_handler().await;
-        let parsed_stmt = sql_to_statement("create table demo_table( host string, ts bigint, cpu double default 0, memory double, TIME INDEX (ts), PRIMARY KEY(ts, host)) engine=mito with(regions=1);");
+        let parsed_stmt = sql_to_statement("create table demo_table( host string, ts timestamp, cpu double default 0, memory double, TIME INDEX (ts), PRIMARY KEY(ts, host)) engine=mito with(regions=1);");
         let c = handler.create_to_request(42, parsed_stmt).unwrap();
         assert_eq!("demo_table", c.table_name);
         assert_eq!(42, c.id);
@@ -209,7 +209,7 @@ mod tests {
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;
 
-        let parsed_stmt = sql_to_statement("create table demo_table( host string, ts bigint, cpu double default 0, memory double, TIME INDEX (ts)) engine=mito with(regions=1);");
+        let parsed_stmt = sql_to_statement("create table demo_table( host string, ts timestamp, cpu double default 0, memory double, TIME INDEX (ts)) engine=mito with(regions=1);");
 
         let c = handler.create_to_request(42, parsed_stmt).unwrap();
         assert_eq!(1, c.primary_key_indices.len());
@@ -237,7 +237,7 @@ mod tests {
         let create_table = sql_to_statement(
             r"create table c.s.demo(
                              host string,
-                             ts bigint,
+                             ts timestamp,
                              cpu double default 0,
                              memory double,
                              TIME INDEX (ts),
@@ -267,7 +267,7 @@ mod tests {
                 .data_type
         );
         assert_eq!(
-            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::timestamp_millis_datatype(),
             request
                 .schema
                 .column_schema_by_name("ts")

@@ -4,6 +4,7 @@ use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use query::Output;
 
+use crate::error;
 use crate::instance::Instance;
 use crate::tests::test_util;
 
@@ -67,7 +68,7 @@ pub async fn test_execute_create() {
         .execute_sql(
             r#"create table test_table(
                             host string,
-                            ts bigint,
+                            ts timestamp,
                             cpu double default 0,
                             memory double,
                             TIME INDEX (ts),
@@ -77,6 +78,29 @@ pub async fn test_execute_create() {
         .await
         .unwrap();
     assert!(matches!(output, Output::AffectedRows(1)));
+}
+
+#[tokio::test]
+pub async fn test_create_table_illegal_timestamp_type() {
+    common_telemetry::init_default_ut_logging();
+
+    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let instance = Instance::new(&opts).await.unwrap();
+    instance.start().await.unwrap();
+
+    let output = instance
+        .execute_sql(
+            r#"create table test_table(
+                            host string,
+                            ts bigint,
+                            cpu double default 0,
+                            memory double,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(ts, host)
+                        ) engine=mito with(regions=1);"#,
+        )
+        .await;
+    assert!(matches!(output, Err(error::Error::CreateSchema { .. })));
 }
 
 #[tokio::test]

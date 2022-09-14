@@ -234,7 +234,7 @@ mod tests {
             },
             ColumnDef {
                 name: "ts".to_string(),
-                data_type: 4, // int64
+                data_type: 15, // timestamp
                 is_nullable: false,
             },
             ColumnDef {
@@ -270,7 +270,7 @@ mod tests {
             },
             ColumnSchema {
                 name: "ts".to_string(),
-                data_type: ConcreteDataType::int64_datatype(),
+                data_type: ConcreteDataType::timestamp_millis_datatype(),
                 is_nullable: false,
             },
             ColumnSchema {

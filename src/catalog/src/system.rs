@@ -9,7 +9,7 @@ use common_time::timestamp::Timestamp;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
-use datatypes::vectors::{BinaryVector, Int64Vector, TimestampVector, UInt8Vector};
+use datatypes::vectors::{BinaryVector, TimestampVector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
@@ -140,12 +140,12 @@ fn build_system_catalog_schema() -> Schema {
         ),
         ColumnSchema::new(
             "gmt_created".to_string(),
-            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::timestamp_millis_datatype(),
             false,
         ),
         ColumnSchema::new(
             "gmt_modified".to_string(),
-            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::timestamp_millis_datatype(),
             false,
         ),
     ];
@@ -186,12 +186,16 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
 
     columns_values.insert(
         "gmt_created".to_string(),
-        Arc::new(Int64Vector::from_slice(&[util::current_time_millis()])) as _,
+        Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
+            util::current_time_millis(),
+        )])) as _,
     );
 
     columns_values.insert(
         "gmt_modified".to_string(),
-        Arc::new(Int64Vector::from_slice(&[util::current_time_millis()])) as _,
+        Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
+            util::current_time_millis(),
+        )])) as _,
     );
 
     InsertRequest {
