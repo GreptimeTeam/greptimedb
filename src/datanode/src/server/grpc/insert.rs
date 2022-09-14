@@ -365,7 +365,7 @@ mod tests {
             semantic_type: SEMANTIC_TS,
             values: Some(ts_vals),
             null_mask: vec![0],
-            datatype: 15,
+            datatype: Some(15),
         };
 
         let insert_batch = InsertBatch {

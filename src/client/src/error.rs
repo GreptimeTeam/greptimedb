@@ -76,6 +76,9 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Missing required field in protobuf, field: {}", field))]
+    MissingField { field: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -92,7 +95,8 @@ impl ErrorExt for Error {
             | Error::EncodePhysical { .. }
             | Error::MutateFailure { .. }
             | Error::InvalidColumnProto { .. }
-            | Error::ColumnDataType { .. } => StatusCode::Internal,
+            | Error::ColumnDataType { .. }
+            | Error::MissingField { .. } => StatusCode::Internal,
             Error::CreateVector { source } => source.status_code(),
             Error::CreateRecordBatches { source } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,

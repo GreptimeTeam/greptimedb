@@ -211,7 +211,7 @@ fn columns_to_expr(column_defs: &[ColumnDef]) -> Result<Vec<GrpcColumnDef>> {
         .zip(column_datatypes.into_iter())
         .map(|(schema, datatype)| GrpcColumnDef {
             name: schema.name.clone(),
-            data_type: datatype as i32,
+            datatype: datatype as i32,
             is_nullable: schema.is_nullable,
         })
         .collect::<Vec<GrpcColumnDef>>())
@@ -345,7 +345,7 @@ mod tests {
                     .collect(),
                 ..Default::default()
             }),
-            datatype: 12, // string
+            datatype: Some(12), // string
             ..Default::default()
         };
         let expected_cpu_col = Column {
@@ -355,7 +355,7 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![2],
-            datatype: 10, // float64
+            datatype: Some(10), // float64
             ..Default::default()
         };
         let expected_mem_col = Column {
@@ -365,7 +365,7 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![4],
-            datatype: 10, // float64
+            datatype: Some(10), // float64
             ..Default::default()
         };
         let expected_ts_col = Column {
@@ -374,7 +374,7 @@ mod tests {
                 ts_millis_values: vec![1000, 2000, 3000, 4000],
                 ..Default::default()
             }),
-            datatype: 15, // timestamp
+            datatype: Some(15), // timestamp
             ..Default::default()
         };
 
@@ -520,22 +520,22 @@ mod tests {
         let column_defs = vec![
             GrpcColumnDef {
                 name: "host".to_string(),
-                data_type: 12, // string
+                datatype: 12, // string
                 is_nullable: false,
             },
             GrpcColumnDef {
                 name: "cpu".to_string(),
-                data_type: 10, // float64
+                datatype: 10, // float64
                 is_nullable: true,
             },
             GrpcColumnDef {
                 name: "memory".to_string(),
-                data_type: 10, // float64
+                datatype: 10, // float64
                 is_nullable: true,
             },
             GrpcColumnDef {
                 name: "ts".to_string(),
-                data_type: 15, // timestamp
+                datatype: 15, // timestamp
                 is_nullable: true,
             },
         ];

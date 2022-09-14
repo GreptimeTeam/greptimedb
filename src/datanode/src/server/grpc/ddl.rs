@@ -140,7 +140,7 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
 
 fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let data_type =
-        ColumnDataTypeWrapper::try_new(column_def.data_type).context(error::ColumnDataTypeSnafu)?;
+        ColumnDataTypeWrapper::try_new(column_def.datatype).context(error::ColumnDataTypeSnafu)?;
     Ok(ColumnSchema {
         name: column_def.name.clone(),
         data_type: data_type.into(),
@@ -204,7 +204,7 @@ mod tests {
     fn test_create_column_schema() {
         let column_def = ColumnDef {
             name: "a".to_string(),
-            data_type: 1024,
+            datatype: 1024,
             is_nullable: true,
         };
         let result = create_column_schema(&column_def);
@@ -216,7 +216,7 @@ mod tests {
 
         let column_def = ColumnDef {
             name: "a".to_string(),
-            data_type: 12, // string
+            datatype: 12, // string
             is_nullable: true,
         };
         let column_schema = create_column_schema(&column_def).unwrap();
@@ -229,22 +229,22 @@ mod tests {
         let column_defs = vec![
             ColumnDef {
                 name: "host".to_string(),
-                data_type: 12, // string
+                datatype: 12, // string
                 is_nullable: false,
             },
             ColumnDef {
                 name: "ts".to_string(),
-                data_type: 15, // timestamp
+                datatype: 15, // timestamp
                 is_nullable: false,
             },
             ColumnDef {
                 name: "cpu".to_string(),
-                data_type: 9, // float32
+                datatype: 9, // float32
                 is_nullable: true,
             },
             ColumnDef {
                 name: "memory".to_string(),
-                data_type: 10, // float64
+                datatype: 10, // float64
                 is_nullable: true,
             },
         ];
