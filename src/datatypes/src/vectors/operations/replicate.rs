@@ -27,14 +27,16 @@ pub(crate) fn replicate_scalar<C: ScalarVector>(c: &C, offsets: &[usize]) -> Vec
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::vectors::{PrimitiveVector, VectorOp};
+    use crate::vectors::{ConstantVector, NullVector, PrimitiveVector, StringVector, VectorOp};
 
     #[test]
-    fn test_replicate() {
+    fn test_replicate_primitive() {
         let v = PrimitiveVector::<i32>::from_slice((0..5).collect::<Vec<i32>>());
 
-        let offsets = [0usize, 1usize, 2usize, 3usize, 4usize];
+        let offsets = [0, 1, 2, 3, 4];
 
         let v = v.replicate(&offsets);
         assert_eq!(4, v.len());
@@ -42,5 +44,39 @@ mod tests {
         for i in 0..4 {
             assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
         }
+    }
+
+    #[test]
+    fn test_replicate_scalar() {
+        let v = StringVector::from_slice(&["0", "1", "2", "3"]);
+        let offsets = [1, 3, 5, 6];
+
+        let v = v.replicate(&offsets);
+        assert_eq!(6, v.len());
+
+        let expect: VectorRef = Arc::new(StringVector::from_slice(&["0", "1", "1", "2", "2", "3"]));
+        assert_eq!(expect, v);
+    }
+
+    #[test]
+    fn test_replicate_constant() {
+        let v = Arc::new(StringVector::from_slice(&["hello"]));
+        let cv = ConstantVector::new(v.clone(), 2);
+        let offsets = [1, 4];
+
+        let cv = cv.replicate(&offsets);
+        assert_eq!(4, cv.len());
+
+        let expect: VectorRef = Arc::new(ConstantVector::new(v, 4));
+        assert_eq!(expect, cv);
+    }
+
+    #[test]
+    fn test_replicate_null() {
+        let v = NullVector::new(3);
+        let offsets = [1, 3, 5];
+
+        let v = v.replicate(&offsets);
+        assert_eq!(5, v.len());
     }
 }
