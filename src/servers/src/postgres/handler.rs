@@ -12,6 +12,7 @@ use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{PgWireError, PgWireResult};
 use query::Output;
 
+use crate::error::{self, Error, Result};
 use crate::query_handler::SqlQueryHandlerRef;
 
 pub struct PostgresServerHandler {
@@ -43,7 +44,9 @@ impl SimpleQueryHandler for PostgresServerHandler {
             ))),
             Output::Stream(record_stream) => {
                 let schema = record_stream.schema();
-                let mut builder = TextQueryResponseBuilder::new(schema_to_pg(schema));
+                let pg_schema =
+                    schema_to_pg(schema).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                let mut builder = TextQueryResponseBuilder::new(pg_schema);
                 let recordbatches = util::collect(record_stream)
                     .await
                     .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
@@ -62,7 +65,9 @@ impl SimpleQueryHandler for PostgresServerHandler {
             }
             Output::RecordBatches(recordbatches) => {
                 let schema = recordbatches.schema();
-                let mut builder = TextQueryResponseBuilder::new(schema_to_pg(schema));
+                let pg_schema =
+                    schema_to_pg(schema).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                let mut builder = TextQueryResponseBuilder::new(pg_schema);
 
                 for recordbatch in recordbatches.to_vec() {
                     for row in recordbatch.rows() {
@@ -80,12 +85,19 @@ impl SimpleQueryHandler for PostgresServerHandler {
     }
 }
 
-fn schema_to_pg(origin: SchemaRef) -> Vec<FieldInfo> {
+fn schema_to_pg(origin: SchemaRef) -> Result<Vec<FieldInfo>> {
     origin
         .column_schemas()
         .iter()
-        .map(|col| FieldInfo::new(col.name.clone(), None, None, type_translate(&col.data_type)))
-        .collect::<Vec<FieldInfo>>()
+        .map(|col| {
+            Ok(FieldInfo::new(
+                col.name.clone(),
+                None,
+                None,
+                type_translate(&col.data_type)?,
+            ))
+        })
+        .collect::<Result<Vec<FieldInfo>>>()
 }
 
 fn encode_value(value: &Value, builder: &mut TextQueryResponseBuilder) -> PgWireResult<()> {
@@ -108,27 +120,35 @@ fn encode_value(value: &Value, builder: &mut TextQueryResponseBuilder) -> PgWire
         Value::DateTime(v) => builder.append_field(Some(v.val())),
         Value::Timestamp(v) => builder.append_field(Some(v.convert_to(TimeUnit::Millisecond))),
         Value::List(_) => {
-            unimplemented!("List is not supported for now")
+            return Err(PgWireError::ApiError(Box::new(Error::Internal {
+                err_msg: format!(
+                    "cannot write value {:?} in postgres protocol: unimplemented",
+                    &value
+                ),
+            })));
         }
     }
 }
 
-fn type_translate(origin: &ConcreteDataType) -> Type {
+fn type_translate(origin: &ConcreteDataType) -> Result<Type> {
     match origin {
-        &ConcreteDataType::Null(_) => Type::UNKNOWN,
-        &ConcreteDataType::Boolean(_) => Type::BOOL,
-        &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => Type::CHAR,
-        &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => Type::INT2,
-        &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => Type::INT4,
-        &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => Type::INT8,
-        &ConcreteDataType::Float32(_) => Type::FLOAT4,
-        &ConcreteDataType::Float64(_) => Type::FLOAT8,
-        &ConcreteDataType::Binary(_) => Type::BYTEA,
-        &ConcreteDataType::String(_) => Type::VARCHAR,
-        &ConcreteDataType::Date(_) => Type::DATE,
-        &ConcreteDataType::DateTime(_) => Type::TIMESTAMP,
-        &ConcreteDataType::Timestamp(_) => Type::TIMESTAMP,
-        &ConcreteDataType::List(_) => unimplemented!("Unsupported greptime type"),
+        &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
+        &ConcreteDataType::Boolean(_) => Ok(Type::BOOL),
+        &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => Ok(Type::CHAR),
+        &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT2),
+        &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT4),
+        &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => Ok(Type::INT8),
+        &ConcreteDataType::Float32(_) => Ok(Type::FLOAT4),
+        &ConcreteDataType::Float64(_) => Ok(Type::FLOAT8),
+        &ConcreteDataType::Binary(_) => Ok(Type::BYTEA),
+        &ConcreteDataType::String(_) => Ok(Type::VARCHAR),
+        &ConcreteDataType::Date(_) => Ok(Type::DATE),
+        &ConcreteDataType::DateTime(_) => Ok(Type::TIMESTAMP),
+        &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
+        &ConcreteDataType::List(_) => error::InternalSnafu {
+            err_msg: format!("not implemented for column datatype {:?}", origin),
+        }
+        .fail(),
     }
 }
 
