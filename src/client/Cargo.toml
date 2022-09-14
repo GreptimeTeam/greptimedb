@@ -17,7 +17,6 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-time = { path = "../common/time" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
 datatypes = { path = "../datatypes" }
-query = { path = "../query" }
 snafu = { version = "0.7", features = ["backtraces"] }
 tonic = "0.8"
 
