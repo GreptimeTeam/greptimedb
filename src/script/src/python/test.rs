@@ -18,7 +18,7 @@ use super::error::{get_error_reason_loc, visualize_loc};
 use crate::python::coprocessor::AnnotationInfo;
 use crate::python::error::pretty_print_error_in_src;
 use crate::python::{
-    coprocessor, coprocessor::parse::parse_copr, coprocessor::Coprocessor, error::Error,
+    coprocessor, coprocessor::parse::parse_and_compile_copr, coprocessor::Coprocessor, error::Error,
 };
 
 #[derive(Deserialize, Debug)]
@@ -31,7 +31,7 @@ struct TestCase {
 #[derive(Deserialize, Debug)]
 enum Predicate {
     ParseIsOk {
-        result: Coprocessor,
+        result: Box<Coprocessor>,
     },
     ParseIsErr {
         /// used to check if after serialize [`Error`] into a String, that string contains `reason`
@@ -81,13 +81,13 @@ fn run_ron_testcases() {
         print!(".ron test {}", testcase.name);
         match testcase.predicate {
             Predicate::ParseIsOk { result } => {
-                let copr = parse_copr(&testcase.code);
+                let copr = parse_and_compile_copr(&testcase.code);
                 let mut copr = copr.unwrap();
                 copr.script = "".into();
-                assert_eq!(copr, result);
+                assert_eq!(copr, *result);
             }
             Predicate::ParseIsErr { reason } => {
-                let copr = parse_copr(&testcase.code);
+                let copr = parse_and_compile_copr(&testcase.code);
                 if copr.is_ok() {
                     eprintln!("Expect to be err, found{copr:#?}");
                     panic!()
@@ -180,7 +180,7 @@ def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#;
     let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
-    let copr = parse_copr(python_source);
+    let copr = parse_and_compile_copr(python_source);
     dbg!(copr);
 }
 

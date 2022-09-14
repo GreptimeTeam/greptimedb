@@ -1,13 +1,19 @@
-// This is the file for python coprocessor's testcases, 
+// This is the file for python coprocessor's testcases,
 // including coprocessor parsing test and execute test
 // check src/script/python/test.rs::run_ron_testcases() for more information
 [
     (
         name: "correct_parse",
         code: r#"
+import greptime as gt
+from greptime import pow
+def add(a, b):
+    return a + b
+def sub(a, b):
+    return a - b
 @copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vector[_], vector[_ | None]):
-    return cpu + mem, cpu - mem, cpu * mem, cpu / mem
+    return add(cpu, mem), sub(cpu, mem), cpu * mem, cpu / mem
         "#,
         predicate: ParseIsOk(
             result: (
@@ -54,7 +60,21 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: "Expect one decorator"
+            reason: "Coprocessor not found in script"
+        )
+    ),
+    (
+        name: "too_many_decorators",
+        code: r#"
+@copr(args=["a"], returns=["r"])
+def test1(a):
+    return a;
+@copr(args=["a"], returns=["r"])
+def test2(a):
+    return a;
+"#,
+        predicate: ParseIsErr(
+            reason: "Expect one and only one python function with `@coprocessor` or `@cpor` decorator"
         )
     ),
     (
@@ -173,8 +193,8 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)]
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: 
-            "Expect one and only one python function with `@coprocessor` or `@cpor` decorator"
+            reason:
+            "Expect a function definition, but found a"
         )
     ),
     (
@@ -186,7 +206,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[None|None], vector[into(f64)]
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: 
+            reason:
             "Expect decorator with name `copr` or `coprocessor`, found"
         )
     ),
@@ -198,7 +218,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: 
+            reason:
             " keyword argument, found "
         )
     ),
@@ -210,7 +230,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#,
         predicate: ParseIsErr(
-            reason: 
+            reason:
             " keyword argument, found "
         )
     ),
@@ -219,7 +239,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
         name: "correct_exec",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
     return cpu + mem, cpu - mem
 "#,
@@ -251,7 +271,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         name: "constant_float_col",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
     return cpu + mem, 1.0
 "#,
@@ -283,7 +303,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         name: "constant_int_col",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
     return cpu + mem, 1
 "#,
@@ -315,7 +335,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         name: "constant_bool_col",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
     return cpu + mem, True
 "#,
@@ -358,7 +378,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], vector[f64], vecto
         name: "div_by_zero",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
     return cpu + mem, cpu - mem*(1/0)
 "#,
@@ -370,7 +390,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         name: "unexpected_token",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
-def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None], 
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
     return cpu + mem, cpu - mem***
 "#,
@@ -407,7 +427,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64]):
 42
 "#,
         predicate: ParseIsErr(
-            reason: "Expect a function definition, found a"
+            reason: "Expect a function definition, but found a"
         )
     )
 ]
