@@ -7,7 +7,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231300,
+            "open_time": 300,
             "open": "10107",
             "high": "10109.34",
             "low": "10106.71",
@@ -16,7 +16,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231360,
+            "open_time": 900,
             "open": "10106.79",
             "high": "10109.27",
             "low": "10105.92",
@@ -25,7 +25,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231420,
+            "open_time": 1200,
             "open": "10106.09",
             "high": "10108.75",
             "low": "10104.66",
@@ -34,7 +34,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231480,
+            "open_time": 1800,
             "open": "10108.73",
             "high": "10109.52",
             "low": "10106.07",
@@ -43,7 +43,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231540,
+            "open_time": 2400,
             "open": "10106.38",
             "high": "10109.48",
             "low": "10104.81",
@@ -52,7 +52,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231600,
+            "open_time": 3000,
             "open": "10106.95",
             "high": "10109.48",
             "low": "10106.6",
@@ -61,7 +61,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231660,
+            "open_time": 3600,
             "open": "10107.55",
             "high": "10109.28",
             "low": "10104.68",
@@ -70,7 +70,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231720,
+            "open_time": 4200,
             "open": "10104.68",
             "high": "10109.18",
             "low": "10104.14",
@@ -79,7 +79,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231780,
+            "open_time": 4800,
             "open": "10108.8",
             "high": "10117.36",
             "low": "10108.8",
@@ -88,7 +88,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231840,
+            "open_time": 5400,
             "open": "10115.96",
             "high": "10119.19",
             "low": "10115.96",
@@ -97,7 +97,7 @@
         {
             "symbol": "BTCUSD",
             "period": "1",
-            "open_time": 1581231900,
+            "open_time": 6000,
             "open": "10117.08",
             "high": "10120.73",
             "low": "10116.96",

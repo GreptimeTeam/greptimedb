@@ -7,7 +7,7 @@ use std::sync::Arc;
 use common_recordbatch::RecordBatch;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow;
-use datatypes::arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
+use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::schema::Schema;
@@ -22,8 +22,10 @@ use rustpython_parser::{
 };
 use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
+#[cfg(test)]
+use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
-use vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyTuple};
+use vm::builtins::{PyBaseExceptionRef, PyTuple};
 use vm::scope::Scope;
 use vm::{Interpreter, PyObjectRef, VirtualMachine};
 
@@ -31,18 +33,11 @@ use crate::fail_parse_error;
 use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::{ret_parse_error, DecoratorArgs};
 use crate::python::error::{
-    ensure, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu, PyParseSnafu, Result,
-    TypeCastSnafu,
+    ensure, ret_other_error_with, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu,
+    PyParseSnafu, Result, TypeCastSnafu,
 };
-use crate::python::utils::format_py_error;
+use crate::python::utils::{format_py_error, py_vec_obj_to_array};
 use crate::python::{utils::is_instance, PyVector};
-
-fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
-    OtherSnafu { reason }
-}
-
-#[cfg(test)]
-use serde::Deserialize;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,43 +330,9 @@ fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
     Ok(args)
 }
 
-/// convert a single PyVector or a number(a constant) into a Array(or a constant array)
-fn py_vec_to_array_ref(obj: &PyObjectRef, vm: &VirtualMachine, col_len: usize) -> Result<ArrayRef> {
-    if is_instance::<PyVector>(obj, vm) {
-        let pyv = obj.payload::<PyVector>().with_context(|| {
-            ret_other_error_with(format!("can't cast obj {:?} to PyVector", obj))
-        })?;
-        Ok(pyv.to_arrow_array())
-    } else if is_instance::<PyInt>(obj, vm) {
-        let val = obj
-            .to_owned()
-            .try_into_value::<i64>(vm)
-            .map_err(|e| format_py_error(e, vm))?;
-
-        let ret = PrimitiveArray::from_vec(vec![val; col_len]);
-        Ok(Arc::new(ret) as _)
-    } else if is_instance::<PyFloat>(obj, vm) {
-        let val = obj
-            .to_owned()
-            .try_into_value::<f64>(vm)
-            .map_err(|e| format_py_error(e, vm))?;
-        let ret = PrimitiveArray::from_vec(vec![val; col_len]);
-        Ok(Arc::new(ret) as _)
-    } else if is_instance::<PyBool>(obj, vm) {
-        let val = obj
-            .to_owned()
-            .try_into_value::<bool>(vm)
-            .map_err(|e| format_py_error(e, vm))?;
-
-        let ret = BooleanArray::from_iter(std::iter::repeat(Some(val)).take(5));
-        Ok(Arc::new(ret) as _)
-    } else {
-        ret_other_error_with(format!("Expect a vector or a constant, found {:?}", obj)).fail()
-    }
-}
-
 /// convert a tuple of `PyVector` or one `PyVector`(wrapped in a Python Object Ref[`PyObjectRef`])
 /// to a `Vec<ArrayRef>`
+/// by default, a constant(int/float/bool) gives the a constant array of same length with input args
 fn try_into_columns(
     obj: &PyObjectRef,
     vm: &VirtualMachine,
@@ -383,11 +344,11 @@ fn try_into_columns(
         })?;
         let cols = tuple
             .iter()
-            .map(|obj| py_vec_to_array_ref(obj, vm, col_len))
+            .map(|obj| py_vec_obj_to_array(obj, vm, col_len))
             .collect::<Result<Vec<ArrayRef>>>()?;
         Ok(cols)
     } else {
-        let col = py_vec_to_array_ref(obj, vm, col_len)?;
+        let col = py_vec_obj_to_array(obj, vm, col_len)?;
         Ok(vec![col])
     }
 }

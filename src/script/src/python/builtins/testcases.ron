@@ -1,6 +1,6 @@
 // This is the file for UDF&UDAF binding from datafusion, 
 // including most test for those function(except ApproxMedian which datafusion didn't implement)
-// check src/scalars/py_udf_module/test.rs for more information
+// check src/script/builtins/test.rs::run_builtin_fn_testcases() for more information
 [
     // math expressions
     TestCase(
@@ -670,7 +670,10 @@ pow(values, pows)"#,
         script: r#"
 from greptime import *
 pow(values, 1)"#,
-        expect: Err("TypeError: Can't cast operand of type `int` into `vector`.")
+        expect: Ok((
+            value: FloatVec([ 1.0, 2.0, 3.0]),
+            ty: Float64
+        ))
     ),
     TestCase(
         input: {
@@ -781,4 +784,145 @@ from greptime import *
 sin(num)"#,
         expect: Err("Can't cast object of type str into vector or scalar")
     ),
+    TestCase(
+        input: {},
+        script: r#"
+from greptime import *
+datetime("7d")"#,
+        expect: Ok((
+            ty: Int64,
+            value: Int(604800)
+        ))
+    ),
+    TestCase(
+        input: {},
+        script: r#"
+from greptime import *
+datetime("7dd")"#,
+        expect: Err("Unknown time unit")
+    ),
+    TestCase(
+        input: {},
+        script: r#"
+from greptime import *
+datetime("d7")"#,
+        expect: Err("Python Runtime error, error:")
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "ts": Var(
+                ty: Int64,
+                value: IntVec([0, 9, 20])
+            ),
+        },
+        script: r#"
+from greptime import *
+interval(ts, values, 10, lambda x:sum(x))"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVec([3.0, 3.0])
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0, 4.0])
+            ),
+            "ts": Var(
+                ty: Int64,
+                value: IntVec([0, 9, 19, 20])
+            ),
+        },
+        script: r#"
+from greptime import *
+interval(ts, values, 10, lambda x:last(x))"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVec([2.0, 4.0])
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0, 4.0])
+            ),
+            "ts": Var(
+                ty: Int64,
+                value: IntVec([0, 9, 19, 20])
+            ),
+        },
+        script: r#"
+from greptime import *
+interval(ts, values, 10, lambda x:first(x))"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVec([1.0, 3.0])
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([])
+            )
+        },
+        script: r#"
+from greptime import *
+prev(values)"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVec([1.0])
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            )
+        },
+        script: r#"
+from greptime import *
+prev(values)"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVecWithNull([None, Some(1.0), Some(2.0)])
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            )
+        },
+        script: r#"
+from greptime import *
+next(values)"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVecWithNull([Some(2.0), Some(3.0), None])
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            )
+        },
+        script: r#"
+from greptime import *
+sum(prev(values))"#,
+        expect: Ok((
+            ty: Float64,
+            value: Float(3.0)
+        ))
+    )
 ]

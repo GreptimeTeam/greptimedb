@@ -1,6 +1,6 @@
 // This is the file for python coprocessor's testcases, 
 // including coprocessor parsing test and execute test
-// check src/scalars/python/test.rs for more information
+// check src/script/python/test.rs::run_ron_testcases() for more information
 [
     (
         name: "correct_parse",

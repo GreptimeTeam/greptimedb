@@ -26,6 +26,16 @@ def get_db(req:str):
     return requests.get("http://{}{}".format(get_conn_addr(), req))
 
 if __name__ == "__main__":
+    with open("component/script/python/example/kline.json", "r") as kline_file:
+        kline = json.load(kline_file)
+        table = as_table(kline["result"])
+        close = table["close"]
+        open_time = table["open_time"]
+        env = {"close":close, "open_time": open_time}
+
+        res = mock_tester(calc_rvs, env=env)
+        print("Mock result:", [i[0] for i in res])
+        exit()
     if len(sys.argv)!=2:
         raise Exception("Expect only one address as cmd's args")
     set_conn_addr(sys.argv[1])
@@ -42,11 +52,6 @@ if __name__ == "__main__":
         open_time = table["open_time"]
         init_table(close, open_time)
 
-        # print(repr(close), repr(open_time))
-        # print("calc_rv:", calc_rv(close, open_time, open_time[-1]+datetime("10m"), datetime("7d")))
-        env = {"close":close, "open_time": open_time}
-        # print("env:", env)
-        print("Mock result:", mock_tester(calc_rvs, env=env))
         real = calc_rvs()
         print(real)
         try:
