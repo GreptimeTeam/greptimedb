@@ -870,7 +870,7 @@ pub fn pyobj_try_to_typed_val(
                             .map(DateTime::new)
                             .map(value::Value::DateTime),
                         ConcreteDataType::Timestamp(_) => {
-                            // FIXME(dennis): we always considert the timestamp unit is millis, it's not correct if user defined with other units.
+                            // FIXME(dennis): we always considert the timestamp unit is millis, it's not correct if user define timestamp column with other units.
                             obj.try_into_value::<i64>(vm)
                                 .ok()
                                 .map(Timestamp::from_millis)
@@ -934,7 +934,7 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         value::Value::String(s) => vm.ctx.new_str(s.as_utf8()).into(),
         // is this copy necessary?
         value::Value::Binary(b) => vm.ctx.new_bytes(b.deref().to_vec()).into(),
-        // TODO(dennis):is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt, but it's better to cast into python Date, DateTime objects etc..
+        // TODO(dennis):is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt, but it's better to be cast into python Date, DateTime objects etc..
         value::Value::Date(v) => vm.ctx.new_int(v.val()).into(),
         value::Value::DateTime(v) => vm.ctx.new_int(v.val()).into(),
         // FIXME(dennis): lose the timestamp unit here

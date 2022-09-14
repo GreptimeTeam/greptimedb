@@ -54,6 +54,9 @@ pub struct Coprocessor {
     /// store its corresponding script, also skip serde when in `cfg(test)` to reduce work in compare
     #[cfg_attr(test, serde(skip))]
     pub script: String,
+    // We must use option here, because we use `serde` to deserialize coprocessor
+    // from ron file and `Deserialize` requires Coprocessor implementing `Default` trait,
+    // but CodeObject doesn't.
     #[cfg_attr(test, serde(skip))]
     pub code_obj: Option<CodeObject>,
 }
@@ -370,6 +373,7 @@ pub(crate) fn exec_with_cached_vm(
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
 
+        assert!(copr.code_obj.is_some());
         // It's safe to unwrap code_object, it's already compiled before.
         let code_obj = vm.ctx.new_code(copr.code_obj.clone().unwrap());
         let ret = vm
@@ -467,5 +471,6 @@ def test(a, b, c):
         assert_eq!(copr.arg_types, vec![None, None, None]);
         assert_eq!(copr.return_types, vec![None]);
         assert_eq!(copr.script, script);
+        assert!(copr.code_obj.is_some());
     }
 }

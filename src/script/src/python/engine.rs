@@ -199,9 +199,10 @@ def test(a, b, c):
 
         // test list comprehension
         let script = r#"
+import greptime as gt
+
 @copr(args=["number"], returns = ["r"], sql="select number from numbers limit 100")
 def test(a):
-   import greptime as gt
    return gt.vector([x for x in a if x % 2 == 0])
 "#;
         let script = script_engine
