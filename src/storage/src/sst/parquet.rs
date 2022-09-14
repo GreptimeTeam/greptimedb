@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
+use common_telemetry::debug;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk;
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
@@ -199,7 +200,7 @@ impl<'a> ParquetReader<'a> {
         let arrow_schema =
             infer_schema(&metadata).context(error::ReadParquetSnafu { file: &file_path })?;
 
-        let filter_res = self
+        let pruned_row_groups = self
             .predicate
             .prune_row_groups(Arc::new(arrow_schema.clone()), &metadata.row_groups);
 
@@ -210,15 +211,16 @@ impl<'a> ParquetReader<'a> {
 
         let projected_fields = self.projected_fields().to_vec();
         let chunk_stream = try_stream!({
-            for (idx, valid) in filter_res.iter().enumerate() {
+            for (idx, valid) in pruned_row_groups.iter().enumerate() {
                 if !valid {
+                    debug!("Pruned {} row groups", idx);
                     continue;
                 }
 
                 let rg = &metadata.row_groups[idx];
                 let column_chunks = read_columns_many_async(
                     &reader_factory,
-                    &rg,
+                    rg,
                     projected_fields.clone(),
                     Some(chunk_size),
                 )
