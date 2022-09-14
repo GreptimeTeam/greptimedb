@@ -1,0 +1,13 @@
+repos:
+-   repo: https://github.com/killme2008/cargo-sort
+    rev: v2.0
+    hooks:
+    -    id: cargo-sort
+         args: [--workspace]
+-   repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
+    hooks:
+    -    id: fmt
+    -    id: clippy
+         args: [--workspace --all-targets -- -D warnings]
+    -    id: cargo-check
