@@ -41,7 +41,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
                 "OK",
                 Some(rows),
             ))),
-            Output::RecordBatch(record_stream) => {
+            Output::Stream(record_stream) => {
                 let schema = record_stream.schema();
                 let mut builder = TextQueryResponseBuilder::new(schema_to_pg(schema));
                 let recordbatches = util::collect(record_stream)
@@ -49,6 +49,22 @@ impl SimpleQueryHandler for PostgresServerHandler {
                     .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
                 for recordbatch in recordbatches {
+                    for row in recordbatch.rows() {
+                        let row = row.map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                        for value in row.into_iter() {
+                            encode_value(&value, &mut builder)?;
+                        }
+                        builder.finish_row();
+                    }
+                }
+
+                Ok(Response::Query(builder.build()))
+            }
+            Output::RecordBatches(recordbatches) => {
+                let schema = recordbatches.schema();
+                let mut builder = TextQueryResponseBuilder::new(schema_to_pg(schema));
+
+                for recordbatch in recordbatches.to_vec() {
                     for row in recordbatch.rows() {
                         let row = row.map_err(|e| PgWireError::ApiError(Box::new(e)))?;
                         for value in row.into_iter() {
