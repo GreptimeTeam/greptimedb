@@ -324,7 +324,6 @@ mod tests {
     use crate::data_type::DataType;
     use crate::serialize::Serializable;
     use crate::types::Int64Type;
-    use crate::vectors::VectorOp;
 
     fn check_vec(v: PrimitiveVector<i32>) {
         assert_eq!(4, v.len());
@@ -425,20 +424,6 @@ mod tests {
         let vector = PrimitiveVector::<i32>::from_slice(vec![1, 2, 3, 4]);
         assert_eq!(0, vector.null_count());
         assert_eq!(Validity::AllValid, vector.validity());
-    }
-
-    #[test]
-    fn test_replicate() {
-        let v = PrimitiveVector::<i32>::from_slice((0..5).collect::<Vec<i32>>());
-
-        let offsets = [0usize, 1usize, 2usize, 3usize, 4usize];
-
-        let v = v.replicate(&offsets);
-        assert_eq!(4, v.len());
-
-        for i in 0..4 {
-            assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
-        }
     }
 
     #[test]

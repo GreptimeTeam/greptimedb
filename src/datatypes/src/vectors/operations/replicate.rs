@@ -24,3 +24,23 @@ pub(crate) fn replicate_scalar<C: ScalarVector>(c: &C, offsets: &[usize]) -> Vec
     }
     builder.to_vector()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vectors::{PrimitiveVector, VectorOp};
+
+    #[test]
+    fn test_replicate() {
+        let v = PrimitiveVector::<i32>::from_slice((0..5).collect::<Vec<i32>>());
+
+        let offsets = [0usize, 1usize, 2usize, 3usize, 4usize];
+
+        let v = v.replicate(&offsets);
+        assert_eq!(4, v.len());
+
+        for i in 0..4 {
+            assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
+        }
+    }
+}
