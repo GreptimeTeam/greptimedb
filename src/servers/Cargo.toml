@@ -16,6 +16,7 @@ common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
+hex = { version = "0.4", optional = true }
 hyper = { version = "0.14", features = ["full"] }
 metrics = "0.20"
 num_cpus = "1.13"
@@ -30,11 +31,10 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
-hex = "0.4"
 
 [features]
 default = ["postgres"]
-postgres = ["pgwire"]
+postgres = ["hex", "pgwire"]
 
 [dev-dependencies]
 catalog = { path = "../catalog" }
