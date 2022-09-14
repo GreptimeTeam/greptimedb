@@ -29,14 +29,15 @@ pub fn init_default_ut_logging() {
 
     START.call_once(|| {
         let mut g = GLOBAL_UT_LOG_GUARD.as_ref().lock().unwrap();
+
         // When running in Github's actions, env "UNITTEST_LOG_DIR" is set to a directory other
         // than "/tmp".
         // This is to fix the problem that the "/tmp" disk space of action runner's is small,
         // if we write testing logs in it, actions would fail due to disk out of space error.
-        let dir = env::var("UNITTEST_LOG_DIR")
-            .unwrap_or("/tmp/__unittest_logs".to_string())
-            .as_str();
-        *g = Some(init_global_logging("unittest", dir, "DEBUG", false));
+        let dir =
+            env::var("UNITTEST_LOG_DIR").unwrap_or_else(|_| "/tmp/__unittest_logs".to_string());
+
+        *g = Some(init_global_logging("unittest", &dir, "DEBUG", false));
 
         info!("logs dir = {}", dir);
     });
