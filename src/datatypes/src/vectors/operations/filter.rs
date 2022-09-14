@@ -14,3 +14,54 @@ macro_rules! filter_non_constant {
 }
 
 pub(crate) use filter_non_constant;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::scalars::ScalarVector;
+    use crate::vectors::{BooleanVector, ConstantVector, Int32Vector, VectorOp, VectorRef};
+
+    fn check_filter_non_constant(expect: &[i32], input: &[i32], filter: &[bool]) {
+        let v = Int32Vector::from_slice(input);
+        let filter = BooleanVector::from_slice(filter);
+        let out = v.filter(&filter).unwrap();
+
+        let expect: VectorRef = Arc::new(Int32Vector::from_slice(expect));
+        assert_eq!(expect, out);
+    }
+
+    #[test]
+    fn test_filter_non_constant() {
+        check_filter_non_constant(&[], &[], &[]);
+        check_filter_non_constant(&[5], &[5], &[true]);
+        check_filter_non_constant(&[], &[5], &[false]);
+        check_filter_non_constant(&[], &[5, 6], &[false, false]);
+        check_filter_non_constant(&[5, 6], &[5, 6], &[true, true]);
+        check_filter_non_constant(&[], &[5, 6, 7], &[false, false, false]);
+        check_filter_non_constant(&[5], &[5, 6, 7], &[true, false, false]);
+        check_filter_non_constant(&[6], &[5, 6, 7], &[false, true, false]);
+        check_filter_non_constant(&[7], &[5, 6, 7], &[false, false, true]);
+        check_filter_non_constant(&[5, 7], &[5, 6, 7], &[true, false, true]);
+    }
+
+    fn check_filter_constant(expect_length: usize, input_length: usize, filter: &[bool]) {
+        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[123])), input_length);
+        let filter = BooleanVector::from_slice(filter);
+        let out = v.filter(&filter).unwrap();
+
+        assert!(out.is_const());
+        assert_eq!(expect_length, out.len());
+    }
+
+    #[test]
+    fn test_filter_constant() {
+        check_filter_constant(0, 0, &[]);
+        check_filter_constant(1, 1, &[true]);
+        check_filter_constant(0, 1, &[false]);
+        check_filter_constant(1, 2, &[false, true]);
+        check_filter_constant(2, 2, &[true, true]);
+        check_filter_constant(1, 4, &[false, false, false, true]);
+        check_filter_constant(2, 4, &[false, true, false, true]);
+    }
+}
