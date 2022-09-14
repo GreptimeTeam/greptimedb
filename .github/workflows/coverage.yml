@@ -24,6 +24,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
           profile: minimal
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.0.0
       - name: Cleanup disk
         uses: curoky/cleanup-disk-action@v2.0
         with:

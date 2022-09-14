@@ -20,6 +20,8 @@ jobs:
           profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.0.0
       - uses: actions-rs/cargo@v1
         with:
           command: check
@@ -37,6 +39,8 @@ jobs:
           profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.0.0
       - uses: actions-rs/cargo@v1
         with:
           command: test
@@ -60,6 +64,8 @@ jobs:
           profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.0.0
       - run: rustup component add rustfmt
       - uses: actions-rs/cargo@v1
         with:
@@ -78,6 +84,8 @@ jobs:
           profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.0.0
       - run: rustup component add clippy
       - uses: actions-rs/cargo@v1
         with:
