@@ -121,7 +121,7 @@ cargo run -- --log-dir=logs --log-level=debug frontend start -c ./config/fronten
    ```SQL
    CREATE TABLE monitor (
      host STRING,
-     ts BIGINT,
+     ts TIMESTAMP,
      cpu DOUBLE DEFAULT 0,
      memory DOUBLE,
      TIME INDEX (ts),
