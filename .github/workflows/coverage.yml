@@ -24,6 +24,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
           profile: minimal
+      - uses: Swatinem/rust-cache@v1
       - name: show disk
         continue-on-error: true
         run:
