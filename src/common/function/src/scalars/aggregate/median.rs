@@ -9,9 +9,10 @@ use common_query::error::{
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::prelude::*;
+use datatypes::types::OrdPrimitive;
 use datatypes::value::ListValue;
 use datatypes::vectors::{ConstantVector, ListVector};
-use datatypes::with_match_ordered_primitive_type_id;
+use datatypes::with_match_primitive_type_id;
 use num::NumCast;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -36,17 +37,19 @@ use snafu::{ensure, OptionExt, ResultExt};
 #[derive(Debug, Default)]
 pub struct Median<T>
 where
-    T: Primitive + Ord,
+    T: Primitive,
 {
-    greater: BinaryHeap<Reverse<T>>,
-    not_greater: BinaryHeap<T>,
+    greater: BinaryHeap<Reverse<OrdPrimitive<T>>>,
+    not_greater: BinaryHeap<OrdPrimitive<T>>,
 }
 
 impl<T> Median<T>
 where
-    T: Primitive + Ord,
+    T: Primitive,
 {
     fn push(&mut self, value: T) {
+        let value = OrdPrimitive::<T>(value);
+
         if self.not_greater.is_empty() {
             self.not_greater.push(value);
             return;
@@ -70,7 +73,7 @@ where
 // to use them.
 impl<T> Accumulator for Median<T>
 where
-    T: Primitive + Ord,
+    T: Primitive,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     // This function serializes our state to `ScalarValue`, which DataFusion uses to pass this
@@ -165,8 +168,8 @@ where
             let greater = self.greater.peek().unwrap();
 
             // the following three NumCast's `unwrap`s are safe because T is primitive
-            let not_greater_v: f64 = NumCast::from(not_greater).unwrap();
-            let greater_v: f64 = NumCast::from(greater.0).unwrap();
+            let not_greater_v: f64 = NumCast::from(not_greater.as_primitive()).unwrap();
+            let greater_v: f64 = NumCast::from(greater.0.as_primitive()).unwrap();
             let median: T = NumCast::from((not_greater_v + greater_v) / 2.0).unwrap();
             median.into()
         };
@@ -182,7 +185,7 @@ impl AggregateFunctionCreator for MedianAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
         let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
             let input_type = &types[0];
-            with_match_ordered_primitive_type_id!(
+            with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
                     Ok(Box::new(Median::<$S>::default()))
