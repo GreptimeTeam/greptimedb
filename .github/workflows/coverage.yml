@@ -37,6 +37,9 @@ jobs:
           GT_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           GT_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
           GITHUB_ACTION: true
+      - name: Try cleaning up the tmp dir
+        run: du -sh /tmp/*
+        shell: bash
       - name: Gather coverage data
         id: coverage
         uses: actions-rs/grcov@v0.1
