@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use async_trait::async_trait;
-use common_recordbatch::util;
+use common_recordbatch::{util, RecordBatch};
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
@@ -44,45 +44,40 @@ impl SimpleQueryHandler for PostgresServerHandler {
             ))),
             Output::Stream(record_stream) => {
                 let schema = record_stream.schema();
-                let pg_schema =
-                    schema_to_pg(schema).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                let mut builder = TextQueryResponseBuilder::new(pg_schema);
                 let recordbatches = util::collect(record_stream)
                     .await
                     .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-
-                for recordbatch in recordbatches {
-                    for row in recordbatch.rows() {
-                        let row = row.map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                        for value in row.into_iter() {
-                            encode_value(&value, &mut builder)?;
-                        }
-                        builder.finish_row();
-                    }
-                }
-
-                Ok(Response::Query(builder.build()))
+                recordbatches_to_query_response(recordbatches.iter(), schema)
             }
             Output::RecordBatches(recordbatches) => {
                 let schema = recordbatches.schema();
-                let pg_schema =
-                    schema_to_pg(schema).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                let mut builder = TextQueryResponseBuilder::new(pg_schema);
-
-                for recordbatch in recordbatches.to_vec() {
-                    for row in recordbatch.rows() {
-                        let row = row.map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                        for value in row.into_iter() {
-                            encode_value(&value, &mut builder)?;
-                        }
-                        builder.finish_row();
-                    }
-                }
-
-                Ok(Response::Query(builder.build()))
+                recordbatches_to_query_response(recordbatches.to_vec().iter(), schema)
             }
         }
     }
+}
+
+fn recordbatches_to_query_response<'a, I>(
+    recordbatches: I,
+    schema: SchemaRef,
+) -> PgWireResult<Response>
+where
+    I: Iterator<Item = &'a RecordBatch>,
+{
+    let pg_schema = schema_to_pg(schema).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    let mut builder = TextQueryResponseBuilder::new(pg_schema);
+
+    for recordbatch in recordbatches {
+        for row in recordbatch.rows() {
+            let row = row.map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            for value in row.into_iter() {
+                encode_value(&value, &mut builder)?;
+            }
+            builder.finish_row();
+        }
+    }
+
+    Ok(Response::Query(builder.build()))
 }
 
 fn schema_to_pg(origin: SchemaRef) -> Result<Vec<FieldInfo>> {
