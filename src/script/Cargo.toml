@@ -21,37 +21,37 @@ python = [
 [dependencies]
 async-trait = "0.1"
 catalog = { path = "../catalog" }
-common-error = {path = "../common/error"}
+common-error = { path = "../common/error" }
 common-function = { path = "../common/function" }
-common-query = {path = "../common/query"}
-common-recordbatch = {path = "../common/recordbatch" }
+common-query = { path = "../common/query" }
+common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 console = "0.15"
-datafusion = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
-datafusion-common = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2"}
-datafusion-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
-datafusion-physical-expr = {git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true}
-datatypes = {path = "../datatypes"}
-futures-util = "0.3"
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true }
+datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true }
+datatypes = { path = "../datatypes" }
 futures = "0.3"
+futures-util = "0.3"
+paste = { version = "1.0", optional = true }
 query = { path = "../query" }
-rustpython-ast = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
-rustpython-bytecode = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
-rustpython-compiler = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
-rustpython-compiler-core = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
-rustpython-parser = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
-rustpython-vm = {git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d"}
-paste = { version = "1.0", optional = true}
-snafu = {version = "0.7", features = ["backtraces"]}
+rustpython-ast = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
+rustpython-bytecode = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
+rustpython-compiler = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
+rustpython-compiler-core = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
+rustpython-parser = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
+rustpython-vm = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
+snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
-tokio = { version = "1.0", features = ["full"] }
 table = { path = "../table" }
+tokio = { version = "1.0", features = ["full"] }
 
 [dev-dependencies]
 log-store = { path = "../log-store" }
 ron = "0.7"
-serde = {version = "1.0", features = ["derive"]}
+serde = { version = "1.0", features = ["derive"] }
 storage = { path = "../storage" }
 table-engine = { path = "../table-engine", features = ["test"] }
 tempdir = "0.3"

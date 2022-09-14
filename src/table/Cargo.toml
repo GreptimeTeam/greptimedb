@@ -6,11 +6,11 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-common-error = {path = "../common/error" }
-common-query = {path = "../common/query" }
-common-recordbatch = {path = "../common/recordbatch" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
+common-error = { path = "../common/error" }
+common-query = { path = "../common/query" }
+common-recordbatch = { path = "../common/recordbatch" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../datatypes" }
 derive_builder = "0.11"
 futures = "0.3"

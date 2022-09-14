@@ -2,12 +2,11 @@
 name = "common-telemetry"
 version = "0.1.0"
 edition = "2021"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
 console = ["console-subscriber"]
-deadlock_detection=["parking_lot"]
+deadlock_detection =["parking_lot"]
 
 [dependencies]
 backtrace = "0.3"

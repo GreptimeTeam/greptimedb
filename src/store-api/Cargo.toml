@@ -2,7 +2,6 @@
 name = "store-api"
 version = "0.1.0"
 edition = "2021"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -12,11 +11,11 @@ common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
+derive_builder = "0.11"
 futures = "0.3"
 object-store = { path = "../object-store" }
 serde = { version = "1.0", features = ["derive"] }
 snafu = { version = "0.7", features = ["backtraces"] }
-derive_builder = "0.11"
 
 [dev-dependencies]
 async-stream = "0.3"
