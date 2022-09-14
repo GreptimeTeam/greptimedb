@@ -165,13 +165,18 @@ $ brew install pre-commit
 $
 ```
 
-3. Install the git hook scripts
+3. Install the git hook scripts:
 
 ```
 $ pre-commit install
 pre-commit installed at .git/hooks/pre-commit
+
+$ pre-commit install --hook-type commit-msg
+pre-commit installed at .git/hooks/commit-msg
 ```
 
 now `pre-commit` will run automatically on `git commit`.
 
-4. Branch from `develop` and make your contribution, create a PR when you are ready, feel free and have fun!
+4.
+
+5. Branch from `develop` and make your contribution, create a PR when you are ready, feel free and have fun!

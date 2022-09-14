@@ -1,9 +1,16 @@
 repos:
--   repo: https://github.com/killme2008/cargo-sort
-    rev: v2.0
+-   repo: https://github.com/compilerla/conventional-pre-commit
+    rev: 47923ce11be4a936cd216d427d985dd342adb751
+    hooks:
+    -    id: conventional-pre-commit
+         stages: [commit-msg]
+
+-   repo: https://github.com/DevinR528/cargo-sort
+    rev: e6a795bc6b2c0958f9ef52af4863bbd7cc17238f
     hooks:
     -    id: cargo-sort
          args: ["--workspace"]
+
 -   repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:
