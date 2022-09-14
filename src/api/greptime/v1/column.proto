@@ -49,12 +49,12 @@ message Column {
   bytes null_mask = 4;
 
   // Helpful in creating vector from column.
-  ColumnDataType datatype = 5;
+  optional ColumnDataType datatype = 5;
 }
 
 message ColumnDef {
   string name = 1;
-  ColumnDataType data_type = 2;
+  ColumnDataType datatype = 2;
   bool is_nullable = 3;
 }
 

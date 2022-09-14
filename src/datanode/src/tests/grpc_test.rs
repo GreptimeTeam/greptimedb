@@ -48,7 +48,7 @@ async fn test_insert_and_select() {
                 .collect(),
             ..Default::default()
         }),
-        datatype: 12, // string
+        datatype: Some(12), // string
         ..Default::default()
     };
     let expected_cpu_col = Column {
@@ -58,7 +58,7 @@ async fn test_insert_and_select() {
             ..Default::default()
         }),
         null_mask: vec![2],
-        datatype: 10, // float64
+        datatype: Some(10), // float64
         ..Default::default()
     };
     let expected_mem_col = Column {
@@ -68,7 +68,7 @@ async fn test_insert_and_select() {
             ..Default::default()
         }),
         null_mask: vec![4],
-        datatype: 10, // float64
+        datatype: Some(10), // float64
         ..Default::default()
     };
     let expected_ts_col = Column {
@@ -77,7 +77,7 @@ async fn test_insert_and_select() {
             ts_millis_values: vec![100, 101, 102, 103],
             ..Default::default()
         }),
-        datatype: 15, // timestamp
+        datatype: Some(15), // timestamp
         ..Default::default()
     };
 
@@ -95,7 +95,7 @@ async fn test_insert_and_select() {
     //alter
     let add_column = ColumnDef {
         name: "test_column".to_string(),
-        data_type: ColumnDataType::Int64.into(),
+        datatype: ColumnDataType::Int64.into(),
         is_nullable: true,
     };
     let kind = Kind::AddColumn(AddColumn {
@@ -160,22 +160,22 @@ fn testing_create_expr() -> CreateExpr {
     let column_defs = vec![
         ColumnDef {
             name: "host".to_string(),
-            data_type: 12, // string
+            datatype: 12, // string
             is_nullable: false,
         },
         ColumnDef {
             name: "cpu".to_string(),
-            data_type: 10, // float64
+            datatype: 10, // float64
             is_nullable: true,
         },
         ColumnDef {
             name: "memory".to_string(),
-            data_type: 10, // float64
+            datatype: 10, // float64
             is_nullable: true,
         },
         ColumnDef {
             name: "ts".to_string(),
-            data_type: 15, // timestamp
+            datatype: 15, // timestamp
             is_nullable: true,
         },
     ];
