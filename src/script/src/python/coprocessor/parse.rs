@@ -500,7 +500,7 @@ pub fn parse_and_compile_copr(script: &str) -> Result<Coprocessor> {
             stmt.node,
             ast::StmtKind::Import { .. } | ast::StmtKind::ImportFrom { .. }
         ) {
-            // import statement is allowd.
+            // import statements are allowed.
         } else {
             return fail_parse_error!(
                 format!(

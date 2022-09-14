@@ -90,7 +90,7 @@ pub fn compile_script(name: &str, deco_args: &DecoratorArgs, script: &str) -> Re
                 stmt.node,
                 ast::StmtKind::Import { .. } | ast::StmtKind::ImportFrom { .. }
             ) {
-                // import statement is allowd.
+                // import statements are allowed.
             } else {
                 // already checked in parser
                 unreachable!()
