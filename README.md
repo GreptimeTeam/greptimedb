@@ -177,6 +177,4 @@ pre-commit installed at .git/hooks/commit-msg
 
 now `pre-commit` will run automatically on `git commit`.
 
-4.
-
-5. Branch from `develop` and make your contribution, create a PR when you are ready, feel free and have fun!
+4. Check out branch from `develop` and make your contribution. Follow the [style guide](https://github.com/GreptimeTeam/docs/blob/main/style-guide/zh.md). Create a PR when you are ready, feel free and have fun!
