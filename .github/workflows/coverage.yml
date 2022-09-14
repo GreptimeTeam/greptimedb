@@ -36,7 +36,7 @@ jobs:
           GT_S3_BUCKET: ${{ secrets.S3_BUCKET }}
           GT_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           GT_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
-          CODECOV: true
+          GITHUB_ACTION: true
       - name: Gather coverage data
         id: coverage
         uses: actions-rs/grcov@v0.1
