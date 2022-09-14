@@ -114,14 +114,12 @@ fn encode_value(value: &Value, builder: &mut TextQueryResponseBuilder) -> PgWire
         Value::Date(v) => builder.append_field(Some(v.val())),
         Value::DateTime(v) => builder.append_field(Some(v.val())),
         Value::Timestamp(v) => builder.append_field(Some(v.convert_to(TimeUnit::Millisecond))),
-        Value::List(_) => {
-            return Err(PgWireError::ApiError(Box::new(Error::Internal {
-                err_msg: format!(
-                    "cannot write value {:?} in postgres protocol: unimplemented",
-                    &value
-                ),
-            })));
-        }
+        Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
+            err_msg: format!(
+                "cannot write value {:?} in postgres protocol: unimplemented",
+                &value
+            ),
+        }))),
     }
 }
 
