@@ -154,3 +154,134 @@ impl ExtendedQueryHandler for PostgresServerHandler {
         unimplemented!()
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::value::ListValue;
+    use pgwire::api::results::FieldInfo;
+    use pgwire::api::Type;
+
+    use super::*;
+
+    #[test]
+    fn test_schema_convert() {
+        let column_schemas = vec![
+            ColumnSchema::new("nulls", ConcreteDataType::null_datatype(), true),
+            ColumnSchema::new("bools", ConcreteDataType::boolean_datatype(), true),
+            ColumnSchema::new("int8s", ConcreteDataType::int8_datatype(), true),
+            ColumnSchema::new("int16s", ConcreteDataType::int16_datatype(), true),
+            ColumnSchema::new("int32s", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("int64s", ConcreteDataType::int64_datatype(), true),
+            ColumnSchema::new("uint8s", ConcreteDataType::uint8_datatype(), true),
+            ColumnSchema::new("uint16s", ConcreteDataType::uint16_datatype(), true),
+            ColumnSchema::new("uint32s", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new("uint64s", ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new("float32s", ConcreteDataType::float32_datatype(), true),
+            ColumnSchema::new("float64s", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("binaries", ConcreteDataType::binary_datatype(), true),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "timestamps",
+                ConcreteDataType::timestamp_millis_datatype(),
+                true,
+            ),
+            ColumnSchema::new("dates", ConcreteDataType::date_datatype(), true),
+        ];
+        let pg_field_info = vec![
+            FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN),
+            FieldInfo::new("bools".into(), None, None, Type::BOOL),
+            FieldInfo::new("int8s".into(), None, None, Type::CHAR),
+            FieldInfo::new("int16s".into(), None, None, Type::INT2),
+            FieldInfo::new("int32s".into(), None, None, Type::INT4),
+            FieldInfo::new("int64s".into(), None, None, Type::INT8),
+            FieldInfo::new("uint8s".into(), None, None, Type::CHAR),
+            FieldInfo::new("uint16s".into(), None, None, Type::INT2),
+            FieldInfo::new("uint32s".into(), None, None, Type::INT4),
+            FieldInfo::new("uint64s".into(), None, None, Type::INT8),
+            FieldInfo::new("float32s".into(), None, None, Type::FLOAT4),
+            FieldInfo::new("float64s".into(), None, None, Type::FLOAT8),
+            FieldInfo::new("binaries".into(), None, None, Type::BYTEA),
+            FieldInfo::new("strings".into(), None, None, Type::VARCHAR),
+            FieldInfo::new("timestamps".into(), None, None, Type::TIMESTAMP),
+            FieldInfo::new("dates".into(), None, None, Type::DATE),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let fs = schema_to_pg(schema).unwrap();
+        assert_eq!(fs, pg_field_info);
+    }
+
+    #[test]
+    fn test_encode_text_format_data() {
+        let schema = vec![
+            FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN),
+            FieldInfo::new("bools".into(), None, None, Type::BOOL),
+            FieldInfo::new("uint8s".into(), None, None, Type::CHAR),
+            FieldInfo::new("uint16s".into(), None, None, Type::INT2),
+            FieldInfo::new("uint32s".into(), None, None, Type::INT4),
+            FieldInfo::new("uint64s".into(), None, None, Type::INT8),
+            FieldInfo::new("int8s".into(), None, None, Type::CHAR),
+            FieldInfo::new("int8s".into(), None, None, Type::CHAR),
+            FieldInfo::new("int16s".into(), None, None, Type::INT2),
+            FieldInfo::new("int16s".into(), None, None, Type::INT2),
+            FieldInfo::new("int32s".into(), None, None, Type::INT4),
+            FieldInfo::new("int32s".into(), None, None, Type::INT4),
+            FieldInfo::new("int64s".into(), None, None, Type::INT8),
+            FieldInfo::new("int64s".into(), None, None, Type::INT8),
+            FieldInfo::new("float32s".into(), None, None, Type::FLOAT4),
+            FieldInfo::new("float32s".into(), None, None, Type::FLOAT4),
+            FieldInfo::new("float32s".into(), None, None, Type::FLOAT4),
+            FieldInfo::new("float64s".into(), None, None, Type::FLOAT8),
+            FieldInfo::new("float64s".into(), None, None, Type::FLOAT8),
+            FieldInfo::new("float64s".into(), None, None, Type::FLOAT8),
+            FieldInfo::new("strings".into(), None, None, Type::VARCHAR),
+            FieldInfo::new("binaries".into(), None, None, Type::BYTEA),
+            FieldInfo::new("dates".into(), None, None, Type::DATE),
+            FieldInfo::new("datetimes".into(), None, None, Type::TIMESTAMP),
+            FieldInfo::new("timestamps".into(), None, None, Type::TIMESTAMP),
+        ];
+
+        let values = vec![
+            Value::Null,
+            Value::Boolean(true),
+            Value::UInt8(u8::MAX),
+            Value::UInt16(u16::MAX),
+            Value::UInt32(u32::MAX),
+            Value::UInt64(u64::MAX),
+            Value::Int8(i8::MAX),
+            Value::Int8(i8::MIN),
+            Value::Int16(i16::MAX),
+            Value::Int16(i16::MIN),
+            Value::Int32(i32::MAX),
+            Value::Int32(i32::MIN),
+            Value::Int64(i64::MAX),
+            Value::Int64(i64::MIN),
+            Value::Float32(f32::MAX.into()),
+            Value::Float32(f32::MIN.into()),
+            Value::Float32(0f32.into()),
+            Value::Float64(f64::MAX.into()),
+            Value::Float64(f64::MIN.into()),
+            Value::Float64(0f64.into()),
+            Value::String("greptime".into()),
+            Value::Binary("greptime".as_bytes().into()),
+            Value::Date(1001i32.into()),
+            Value::DateTime(1000001i64.into()),
+            Value::Timestamp(1000001i64.into()),
+        ];
+        let mut builder = TextQueryResponseBuilder::new(schema);
+        for i in values {
+            assert!(encode_value(&i, &mut builder).is_ok());
+        }
+
+        assert!(encode_value(
+            &Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::int8_datatype()
+            ),),
+            &mut builder
+        )
+        .is_err());
+    }
+}
