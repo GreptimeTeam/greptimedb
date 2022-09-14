@@ -24,6 +24,28 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
           profile: minimal
+      - name: show disk
+        continue-on-error: true
+        run:
+          df -h
+      - name: show current
+        continue-on-error: true
+        run: |
+          ls -lh
+          du -sh
+          du -sh *
+          df -h
+      - name: Cleanup disk
+        uses: curoky/cleanup-disk-action@v2.0
+        with:
+          retain: 'rust'
+      - name: after cleanup disk
+        continue-on-error: true
+        run: |
+          ls -lh
+          du -sh
+          du -sh *
+          df -h
       - name: Execute tests
         uses: actions-rs/cargo@v1
         with:
@@ -36,9 +58,27 @@ jobs:
           GT_S3_BUCKET: ${{ secrets.S3_BUCKET }}
           GT_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           GT_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+      - name: show disk again
+        continue-on-error: true
+        run:
+          df -h
+      - name: show current again
+        continue-on-error: true
+        run: |
+          ls -lh
+          du -sh
+          du -sh *
       - name: Gather coverage data
+        continue-on-error: true
         id: coverage
         uses: actions-rs/grcov@v0.1
+      - name: show current final
+        continue-on-error: true
+        run: |
+          ls -lh
+          du -sh
+          du -sh *
+          df -h
       - name: Codecov upload
         uses: codecov/codecov-action@v2
         with:
