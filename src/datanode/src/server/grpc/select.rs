@@ -6,9 +6,9 @@ use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::BitVec;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_query::Output;
 use common_recordbatch::{util, RecordBatch, SendableRecordBatchStream};
 use datatypes::arrow_array::{BinaryArray, StringArray};
-use query::Output;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, ConversionSnafu, Result};

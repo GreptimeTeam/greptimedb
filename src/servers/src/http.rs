@@ -10,9 +10,9 @@ use axum::{
     response::{Json, Response},
     routing, BoxError, Extension, Router,
 };
+use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
-use query::Output;
 use serde::Serialize;
 use snafu::ResultExt;
 use tower::{timeout::TimeoutLayer, ServiceBuilder};

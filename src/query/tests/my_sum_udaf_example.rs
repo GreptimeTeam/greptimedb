@@ -13,6 +13,7 @@ use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Accumulator;
 use common_query::logical_plan::AggregateFunctionCreator;
 use common_query::prelude::*;
+use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
@@ -24,7 +25,6 @@ use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use query::error::Result;
-use query::query_engine::Output;
 use query::QueryEngineFactory;
 use test_util::MemTable;
 

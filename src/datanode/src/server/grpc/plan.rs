@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use common_grpc::AsExcutionPlan;
 use common_grpc::DefaultAsPlanImpl;
+use common_query::Output;
 use datatypes::schema::Schema;
 use query::PhysicalPlanAdapter;
-use query::{plan::PhysicalPlan, Output, QueryEngineRef};
+use query::{plan::PhysicalPlan, QueryEngineRef};
 use snafu::ResultExt;
 
 use crate::error::Result;

@@ -4,6 +4,7 @@ use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProv
 use catalog::{
     CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
+use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
 use datafusion::field_util::FieldExt;
@@ -16,7 +17,6 @@ use datatypes::vectors::PrimitiveVector;
 use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
 use query::error::Result;
-use query::query_engine::Output;
 use query::{QueryEngine, QueryEngineFactory};
 use test_util::MemTable;
 

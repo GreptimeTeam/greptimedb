@@ -6,7 +6,8 @@ use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProv
 use catalog::{
     CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
-use query::{Output, QueryEngineFactory, QueryEngineRef};
+use common_query::Output;
+use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::Result;
 use servers::query_handler::{SqlQueryHandler, SqlQueryHandlerRef};
 use test_util::MemTable;

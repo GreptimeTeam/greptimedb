@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, SCRIPTS_TABLE_ID};
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
+use common_query::Output;
 use common_recordbatch::util as record_util;
 use common_telemetry::logging;
 use common_time::timestamp::Timestamp;
@@ -13,7 +14,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
 use datatypes::vectors::{StringVector, TimestampVector, VectorRef};
-use query::{Output, QueryEngineRef};
+use query::QueryEngineRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CreateTableRequest, InsertRequest};
 

@@ -7,7 +7,7 @@ use catalog::CatalogList;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::prelude::ScalarUdf;
-use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use common_query::Output;
 use sql::statements::statement::Statement;
 
 use crate::datafusion::DatafusionQueryEngine;
@@ -15,13 +15,6 @@ use crate::error::Result;
 use crate::plan::{LogicalPlan, PhysicalPlan};
 pub use crate::query_engine::context::QueryContext;
 pub use crate::query_engine::state::QueryEngineState;
-
-/// Sql output
-pub enum Output {
-    AffectedRows(usize),
-    RecordBatches(RecordBatches),
-    Stream(SendableRecordBatchStream),
-}
 
 #[async_trait::async_trait]
 pub trait QueryEngine: Send + Sync {

@@ -4,13 +4,14 @@ use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProv
 use catalog::{
     CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
+use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::types::PrimitiveElement;
 use datatypes::vectors::PrimitiveVector;
-use query::query_engine::{Output, QueryEngineFactory};
+use query::query_engine::QueryEngineFactory;
 use query::QueryEngine;
 use rand::Rng;
 use test_util::MemTable;

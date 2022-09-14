@@ -6,13 +6,13 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
+use common_query::Output;
 use common_recordbatch::{
     error::ExternalSnafu, error::Result as RecordBatchResult, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use datatypes::schema::SchemaRef;
 use futures::Stream;
-use query::Output;
 use query::QueryEngineRef;
 use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;

@@ -1,4 +1,4 @@
-use query::query_engine::Output;
+use common_query::Output;
 use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};

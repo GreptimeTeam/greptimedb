@@ -1,13 +1,13 @@
 use std::io;
 use std::ops::Deref;
 
+use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
-use query::Output;
 use snafu::prelude::*;
 
 use crate::error::{self, Error, Result};

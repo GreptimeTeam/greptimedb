@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use api::v1::{AdminExpr, AdminResult, ObjectExpr, ObjectResult};
 use async_trait::async_trait;
-use query::Output;
+use common_query::Output;
 
 use crate::error::Result;
 

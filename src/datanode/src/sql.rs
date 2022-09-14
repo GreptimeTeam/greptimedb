@@ -1,7 +1,7 @@
 //! sql handler
 
 use catalog::CatalogManagerRef;
-use query::query_engine::Output;
+use common_query::Output;
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::*;

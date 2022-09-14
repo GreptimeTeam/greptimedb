@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use catalog::CatalogManagerRef;
+use common_query::Output;
 use common_telemetry::logging;
-use query::{Output, QueryEngineRef};
+use query::QueryEngineRef;
 use snafu::{OptionExt, ResultExt};
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
