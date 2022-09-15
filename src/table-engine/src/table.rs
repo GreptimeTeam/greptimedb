@@ -24,7 +24,7 @@ use store_api::storage::{
     WriteContext, WriteRequest,
 };
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
-use table::metadata::{TableInfoRef, TableMetaBuilder};
+use table::metadata::{FilterPushDownType, TableInfoRef, TableMetaBuilder};
 use table::requests::{AlterKind, AlterTableRequest, InsertRequest};
 use table::{
     metadata::{TableInfo, TableType},
@@ -243,6 +243,10 @@ impl<R: Region> Table for MitoTable<R> {
         // is altered while the table's is not. Then the metadata integrity between region and
         // table cannot be hold.
         Ok(())
+    }
+
+    fn supports_filter_pushdown(&self, _filter: &Expr) -> table::error::Result<FilterPushDownType> {
+        Ok(FilterPushDownType::Exact)
     }
 }
 

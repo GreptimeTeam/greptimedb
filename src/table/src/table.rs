@@ -47,7 +47,7 @@ pub trait Table: Send + Sync {
     /// Tests whether the table provider can make use of a filter expression
     /// to optimise data retrieval.
     fn supports_filter_pushdown(&self, _filter: &Expr) -> Result<FilterPushDownType> {
-        Ok(FilterPushDownType::Exact)
+        Ok(FilterPushDownType::Unsupported)
     }
 
     async fn alter(&self, _request: AlterTableRequest) -> Result<()> {

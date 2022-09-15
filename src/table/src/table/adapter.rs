@@ -1,7 +1,7 @@
+use core::fmt::Formatter;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::any::Any;
-use std::fmt;
 use std::fmt::Debug;
 use std::mem;
 use std::sync::{Arc, Mutex};
@@ -41,9 +41,10 @@ struct ExecutionPlanAdapter {
 }
 
 impl Debug for ExecutionPlanAdapter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        //TODO(dennis) better debug info
-        write!(f, "ExecutionPlan(PlaceHolder)")
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ExecutionPlanAdapter")
+            .field("schema", &self.schema)
+            .finish()
     }
 }
 

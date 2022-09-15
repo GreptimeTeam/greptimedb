@@ -61,7 +61,9 @@ impl Predicate {
 mod tests {
     pub use datafusion::parquet::schema::types::{BasicTypeInfo, PhysicalType};
     use datafusion_common::Column;
+    use datafusion_expr::Expr;
     use datafusion_expr::Literal;
+    use datafusion_expr::Operator;
     use datatypes::arrow::array::{Int32Array, Utf8Array};
     use datatypes::arrow::chunk::Chunk;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
@@ -145,12 +147,10 @@ mod tests {
         assert_eq!(expect, res);
     }
 
-    fn gt_predicate(max_val: i32) -> Predicate {
-        Predicate::new(vec![datafusion_expr::Expr::BinaryExpr {
-            left: Box::new(datafusion_expr::Expr::Column(Column::from_name(
-                "cnt".to_string(),
-            ))),
-            op: datafusion_expr::Operator::Gt,
+    fn gen_predicate(max_val: i32, op: Operator) -> Predicate {
+        Predicate::new(vec![Expr::BinaryExpr {
+            left: Box::new(Expr::Column(Column::from_name("cnt".to_string()))),
+            op,
             right: Box::new(max_val.lit()),
         }
         .into()])
@@ -163,13 +163,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_all_match() {
-        let p = gt_predicate(3);
+        let p = gen_predicate(3, Operator::Gt);
         assert_prune(2, p, vec![false]).await;
     }
 
     #[tokio::test]
-    async fn test_prune() {
-        let p = gt_predicate(30);
+    async fn test_prune_gt() {
+        let p = gen_predicate(29, Operator::Gt);
         assert_prune(
             100,
             p,
@@ -178,5 +178,51 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_prune_eq_expr() {
+        let p = gen_predicate(30, Operator::Eq);
+        assert_prune(40, p, vec![false, false, false, true]).await;
+    }
+
+    #[tokio::test]
+    async fn test_prune_neq_expr() {
+        let p = gen_predicate(30, Operator::NotEq);
+        assert_prune(40, p, vec![true, true, true, true]).await;
+    }
+
+    #[tokio::test]
+    async fn test_prune_gteq_expr() {
+        let p = gen_predicate(29, Operator::GtEq);
+        assert_prune(40, p, vec![false, false, true, true]).await;
+    }
+
+    #[tokio::test]
+    async fn test_prune_lt_expr() {
+        let p = gen_predicate(30, Operator::Lt);
+        assert_prune(40, p, vec![true, true, true, false]).await;
+    }
+
+    #[tokio::test]
+    async fn test_prune_lteq_expr() {
+        let p = gen_predicate(30, Operator::LtEq);
+        assert_prune(40, p, vec![true, true, true, true]).await;
+    }
+
+    #[tokio::test]
+    async fn test_prune_between_expr() {
+        let p = gen_predicate(30, Operator::LtEq);
+        assert_prune(40, p, vec![true, true, true, true]).await;
+    }
+
+    #[tokio::test]
+    async fn test_or() {
+        // cnt > 30 or cnt < 20
+        let e = Expr::Column(Column::from_name("cnt"))
+            .gt(30.lit())
+            .or(Expr::Column(Column::from_name("cnt")).lt(20.lit()));
+        let p = Predicate::new(vec![e.into()]);
+        assert_prune(40, p, vec![true, true, false, true]).await;
     }
 }

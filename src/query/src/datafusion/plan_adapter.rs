@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::fmt::{self, Debug};
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
@@ -22,6 +22,7 @@ use crate::executor::Runtime;
 use crate::plan::{Partitioning, PhysicalPlan};
 
 /// Datafusion ExecutionPlan -> greptime PhysicalPlan
+#[derive(Debug)]
 pub struct PhysicalPlanAdapter {
     plan: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
@@ -109,16 +110,10 @@ impl PhysicalPlan for PhysicalPlanAdapter {
 }
 
 /// Greptime PhysicalPlan -> datafusion ExecutionPlan.
+#[derive(Debug)]
 struct ExecutionPlanAdapter {
     plan: Arc<dyn PhysicalPlan>,
     schema: SchemaRef,
-}
-
-impl Debug for ExecutionPlanAdapter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        //TODO(dennis) better debug info
-        write!(f, "ExecutionPlan(PlaceHolder)")
-    }
 }
 
 #[async_trait::async_trait]
