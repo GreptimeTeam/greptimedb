@@ -1,3 +1,4 @@
+pub mod compile;
 pub mod parse;
 
 use std::collections::HashMap;
@@ -14,12 +15,6 @@ use datatypes::schema::Schema;
 use datatypes::vectors::Helper;
 use datatypes::vectors::{BooleanVector, Vector, VectorRef};
 use rustpython_bytecode::CodeObject;
-use rustpython_compiler_core::compile;
-use rustpython_parser::{
-    ast,
-    ast::{Located, Location},
-    parser,
-};
 use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
 #[cfg(test)]
@@ -29,12 +24,10 @@ use vm::builtins::{PyBaseExceptionRef, PyTuple};
 use vm::scope::Scope;
 use vm::{Interpreter, PyObjectRef, VirtualMachine};
 
-use crate::fail_parse_error;
 use crate::python::builtins::greptime_builtin;
-use crate::python::coprocessor::parse::{ret_parse_error, DecoratorArgs};
+use crate::python::coprocessor::parse::DecoratorArgs;
 use crate::python::error::{
-    ensure, ret_other_error_with, ArrowSnafu, CoprParseSnafu, OtherSnafu, PyCompileSnafu,
-    PyParseSnafu, Result, TypeCastSnafu,
+    ensure, ret_other_error_with, ArrowSnafu, OtherSnafu, Result, TypeCastSnafu,
 };
 use crate::python::utils::{format_py_error, py_vec_obj_to_array};
 use crate::python::{utils::is_instance, PyVector};
@@ -50,7 +43,7 @@ pub struct AnnotationInfo {
 pub type CoprocessorRef = Arc<Coprocessor>;
 
 #[cfg_attr(test, derive(Deserialize))]
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, Clone)]
 pub struct Coprocessor {
     pub name: String,
     pub deco_args: DecoratorArgs,
@@ -61,141 +54,26 @@ pub struct Coprocessor {
     /// store its corresponding script, also skip serde when in `cfg(test)` to reduce work in compare
     #[cfg_attr(test, serde(skip))]
     pub script: String,
+    // We must use option here, because we use `serde` to deserialize coprocessor
+    // from ron file and `Deserialize` requires Coprocessor implementing `Default` trait,
+    // but CodeObject doesn't.
+    #[cfg_attr(test, serde(skip))]
+    pub code_obj: Option<CodeObject>,
 }
 
+impl PartialEq for Coprocessor {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.deco_args == other.deco_args
+            && self.arg_types == other.arg_types
+            && self.return_types == other.return_types
+            && self.script == other.script
+    }
+}
+
+impl Eq for Coprocessor {}
+
 impl Coprocessor {
-    /// generate a call to the coprocessor function
-    /// with arguments given in decorator's `args` list
-    /// also set in location in source code to `loc`
-    fn gen_call(&self, loc: &Location) -> ast::Stmt<()> {
-        let mut loc = loc.to_owned();
-        // adding a line to avoid confusing if any error occurs when calling the function
-        // then the pretty print will point to the last line in code
-        // instead of point to any of existing code written by user.
-        loc.newline();
-        let args: Vec<Located<ast::ExprKind>> = self
-            .deco_args
-            .arg_names
-            .iter()
-            .map(|v| {
-                let node = ast::ExprKind::Name {
-                    id: v.to_owned(),
-                    ctx: ast::ExprContext::Load,
-                };
-                create_located(node, loc)
-            })
-            .collect();
-        let func = ast::ExprKind::Call {
-            func: Box::new(create_located(
-                ast::ExprKind::Name {
-                    id: self.name.to_owned(),
-                    ctx: ast::ExprContext::Load,
-                },
-                loc,
-            )),
-            args,
-            keywords: Vec::new(),
-        };
-        let stmt = ast::StmtKind::Expr {
-            value: Box::new(create_located(func, loc)),
-        };
-        create_located(stmt, loc)
-    }
-
-    /// check if `Mod` is of one line of statement
-    fn check_before_compile(top: &ast::Mod) -> Result<()> {
-        if let ast::Mod::Interactive { body: code } = top {
-            ensure!(
-                code.len() == 1,
-                CoprParseSnafu {
-                    reason: format!(
-                        "Expect only one statement in script, found {} statement",
-                        code.len()
-                    ),
-                    loc: code.first().map(|s| s.location)
-                }
-            );
-
-            if let ast::StmtKind::FunctionDef {
-                name: _,
-                args: _,
-                body: _,
-                decorator_list: _,
-                returns: _,
-                type_comment: __main__,
-            } = &code[0].node
-            {
-            } else {
-                return fail_parse_error!(
-                    format!("Expect the one and only statement in script as a function def, but instead found: {:?}", code[0].node),
-                    Some(code[0].location)
-                );
-            }
-        } else {
-            return fail_parse_error!(
-                format!("Expect statement in script, found: {:?}", top),
-                None,
-            );
-        }
-        Ok(())
-    }
-
-    /// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
-    ///
-    /// The rationale is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
-    /// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
-    /// And add a function call in the end and also
-    /// strip type annotation
-    fn strip_append_and_compile(&self) -> Result<CodeObject> {
-        let script = &self.script;
-        // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
-        let mut top = parser::parse(script, parser::Mode::Interactive).context(PyParseSnafu)?;
-        Self::check_before_compile(&top)?;
-        // erase decorator
-        if let ast::Mod::Interactive { body } = &mut top {
-            let code = body;
-            if let ast::StmtKind::FunctionDef {
-                name: _,
-                args,
-                body: _,
-                decorator_list,
-                returns,
-                type_comment: __main__,
-            } = &mut code[0].node
-            {
-                *decorator_list = Vec::new();
-                // strip type annotation
-                // def a(b: int, c:int) -> int
-                // will became
-                // def a(b, c)
-                *returns = None;
-                for arg in &mut args.args {
-                    arg.node.annotation = None;
-                }
-            } else {
-                // already done in check function
-                unreachable!()
-            }
-            let loc = code[0].location;
-
-            // This manually construct ast has no corrsponding code
-            // in the script, so just give it a location that don't exist in orginal script
-            // (which doesn't matter because Location usually only used in pretty print errors)
-            code.push(self.gen_call(&loc));
-        } else {
-            // already done in check function
-            unreachable!()
-        }
-        // use `compile::Mode::BlockExpr` so it return the result of statement
-        compile::compile_top(
-            &top,
-            "<embedded>".to_owned(),
-            compile::Mode::BlockExpr,
-            compile::CompileOpts { optimize: 0 },
-        )
-        .context(PyCompileSnafu)
-    }
-
     /// generate [`Schema`] according to return names, types,
     /// if no annotation
     /// the datatypes of the actual columns is used directly
@@ -284,10 +162,6 @@ impl Coprocessor {
         }
         Ok(())
     }
-}
-
-fn create_located<T>(node: T, loc: Location) -> Located<T> {
-    Located::new(loc, node)
 }
 
 /// cast a `dyn Array` of type unsigned/int/float into a `dyn Vector`
@@ -483,7 +357,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<RecordBatch>
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
-    let copr = parse::parse_copr(script)?;
+    let copr = parse::parse_and_compile_copr(script)?;
     exec_parsed(&copr, rb)
 }
 
@@ -499,8 +373,8 @@ pub(crate) fn exec_with_cached_vm(
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
 
-        let code_obj = copr.strip_append_and_compile()?;
-        let code_obj = vm.ctx.new_code(code_obj);
+        // It's safe to unwrap code_object, it's already compiled before.
+        let code_obj = vm.ctx.new_code(copr.code_obj.clone().unwrap());
         let ret = vm
             .run_code_obj(code_obj, scope)
             .map_err(|e| format_py_error(e, vm))?;
@@ -566,4 +440,36 @@ pub fn exec_copr_print(
     res.map_err(|e| {
         crate::python::error::pretty_print_error_in_src(script, &e, ln_offset, filename)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::python::coprocessor::parse::parse_and_compile_copr;
+
+    #[test]
+    fn test_parse_copr() {
+        let script = r#"
+def add(a, b):
+    return a + b
+
+@copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
+def test(a, b, c):
+    import greptime as g
+    return add(a, b) / g.sqrt(c)
+"#;
+
+        let copr = parse_and_compile_copr(script).unwrap();
+        assert_eq!(copr.name, "test");
+        let deco_args = copr.deco_args.clone();
+        assert_eq!(
+            deco_args.sql.unwrap(),
+            "select number as a,number as b,number as c from numbers limit 100"
+        );
+        assert_eq!(deco_args.ret_names, vec!["r"]);
+        assert_eq!(deco_args.arg_names, vec!["a", "b", "c"]);
+        assert_eq!(copr.arg_types, vec![None, None, None]);
+        assert_eq!(copr.return_types, vec![None]);
+        assert_eq!(copr.script, script);
+        assert!(copr.code_obj.is_some());
+    }
 }

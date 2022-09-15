@@ -1,6 +1,9 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
+use common_time::date::Date;
+use common_time::datetime::DateTime;
+use common_time::timestamp::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::compute;
@@ -853,7 +856,32 @@ pub fn pyobj_try_to_typed_val(
             ConcreteDataType::List(_) => unreachable!(),
             ConcreteDataType::Date(_)
             | ConcreteDataType::DateTime(_)
-            | ConcreteDataType::Timestamp(_) => todo!(),
+            | ConcreteDataType::Timestamp(_) => {
+                if is_instance::<PyInt>(&obj, vm) {
+                    match dtype {
+                        ConcreteDataType::Date(_) => obj
+                            .try_into_value::<i32>(vm)
+                            .ok()
+                            .map(Date::new)
+                            .map(value::Value::Date),
+                        ConcreteDataType::DateTime(_) => obj
+                            .try_into_value::<i64>(vm)
+                            .ok()
+                            .map(DateTime::new)
+                            .map(value::Value::DateTime),
+                        ConcreteDataType::Timestamp(_) => {
+                            // FIXME(dennis): we always consider the timestamp unit is millis, it's not correct if user define timestamp column with other units.
+                            obj.try_into_value::<i64>(vm)
+                                .ok()
+                                .map(Timestamp::from_millis)
+                                .map(value::Value::Timestamp)
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    None
+                }
+            }
         }
     } else if is_instance::<PyNone>(&obj, vm) {
         // if Untyped then by default return types with highest precision
@@ -906,9 +934,10 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         value::Value::String(s) => vm.ctx.new_str(s.as_utf8()).into(),
         // is this copy necessary?
         value::Value::Binary(b) => vm.ctx.new_bytes(b.deref().to_vec()).into(),
-        // is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt
+        // TODO(dennis):is `Date` and `DateTime` supported yet? For now just ad hoc into PyInt, but it's better to be cast into python Date, DateTime objects etc..
         value::Value::Date(v) => vm.ctx.new_int(v.val()).into(),
         value::Value::DateTime(v) => vm.ctx.new_int(v.val()).into(),
+        // FIXME(dennis): lose the timestamp unit here
         Value::Timestamp(v) => vm.ctx.new_int(v.value()).into(),
         value::Value::List(_) => unreachable!(),
     }

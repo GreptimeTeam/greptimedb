@@ -8,8 +8,9 @@ use rustpython_parser::{
 };
 #[cfg(test)]
 use serde::Deserialize;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
+use crate::python::coprocessor::compile;
 use crate::python::coprocessor::AnnotationInfo;
 use crate::python::coprocessor::Coprocessor;
 use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
@@ -415,107 +416,104 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
     Ok(return_types)
 }
 
-/// check if the list of statements contain only one statement and
-/// that statement is a function call with one decorator
-fn check_copr(stmts: &Vec<ast::Stmt<()>>) -> Result<()> {
-    ensure!(
-        stmts.len() == 1,
-        CoprParseSnafu {
-            reason:
-                "Expect one and only one python function with `@coprocessor` or `@cpor` decorator"
-                    .to_string(),
-            loc: stmts.first().map(|s| s.location)
-        }
-    );
-    if let ast::StmtKind::FunctionDef {
-        name: _,
-        args: _,
-        body: _,
-        decorator_list,
-        returns: _,
-        type_comment: _,
-    } = &stmts[0].node
-    {
-        ensure!(
-            decorator_list.len() == 1,
-            CoprParseSnafu {
-                reason: "Expect one decorator",
-                loc: decorator_list.first().map(|s| s.location)
-            }
-        );
-    } else {
-        return fail_parse_error!(
-            format!(
-                "Expect a function definition, found a \n{:#?}",
-                &stmts[0].node
-            ),
-            Some(stmts[0].location),
-        );
-    }
-    Ok(())
-}
-
 /// parse script and return `Coprocessor` struct with info extract from ast
-pub fn parse_copr(script: &str) -> Result<Coprocessor> {
+pub fn parse_and_compile_copr(script: &str) -> Result<Coprocessor> {
     let python_ast = parser::parse_program(script).context(PyParseSnafu)?;
-    check_copr(&python_ast)?;
-    if let ast::StmtKind::FunctionDef {
-        name,
-        args: fn_args,
-        body: _,
-        decorator_list,
-        returns,
-        type_comment: _,
-    } = &python_ast[0].node
-    {
-        let decorator = &decorator_list[0];
-        let deco_args = parse_decorator(decorator)?;
 
-        // get arg types from type annotation
-        let arg_types = get_arg_annotations(fn_args)?;
+    let mut coprocessor = None;
 
-        // get return types from type annotation
-        let return_types = if let Some(rets) = returns {
-            get_return_annotations(rets)?
+    for stmt in python_ast {
+        if let ast::StmtKind::FunctionDef {
+            name,
+            args: fn_args,
+            body: _,
+            decorator_list,
+            returns,
+            type_comment: _,
+        } = &stmt.node
+        {
+            if !decorator_list.is_empty() {
+                ensure!(coprocessor.is_none(),
+                        CoprParseSnafu {
+                            reason: "Expect one and only one python function with `@coprocessor` or `@cpor` decorator",
+                            loc: stmt.location,
+                        }
+                );
+                ensure!(
+                    decorator_list.len() == 1,
+                    CoprParseSnafu {
+                        reason: "Expect one decorator",
+                        loc: decorator_list.first().map(|s| s.location)
+                    }
+                );
+
+                let decorator = &decorator_list[0];
+                let deco_args = parse_decorator(decorator)?;
+
+                // get arg types from type annotation
+                let arg_types = get_arg_annotations(fn_args)?;
+
+                // get return types from type annotation
+                let return_types = if let Some(rets) = returns {
+                    get_return_annotations(rets)?
+                } else {
+                    // if no anntation at all, set it to all None
+                    std::iter::repeat(None)
+                        .take(deco_args.ret_names.len())
+                        .collect()
+                };
+
+                // make sure both arguments&returns in fucntion
+                // and in decorator have same length
+                ensure!(
+                    deco_args.arg_names.len() == arg_types.len(),
+                    CoprParseSnafu {
+                        reason: format!(
+                            "args number in decorator({}) and function({}) doesn't match",
+                            deco_args.arg_names.len(),
+                            arg_types.len()
+                        ),
+                        loc: None
+                    }
+                );
+                ensure!(
+                    deco_args.ret_names.len() == return_types.len(),
+                    CoprParseSnafu {
+                        reason: format!(
+                            "returns number in decorator( {} ) and function annotation( {} ) doesn't match",
+                            deco_args.ret_names.len(),
+                            return_types.len()
+                        ),
+                        loc: None
+                    }
+                );
+                coprocessor = Some(Coprocessor {
+                    code_obj: Some(compile::compile_script(name, &deco_args, script)?),
+                    name: name.to_string(),
+                    deco_args,
+                    arg_types,
+                    return_types,
+                    script: script.to_owned(),
+                });
+            }
+        } else if matches!(
+            stmt.node,
+            ast::StmtKind::Import { .. } | ast::StmtKind::ImportFrom { .. }
+        ) {
+            // import statements are allowed.
         } else {
-            // if no anntation at all, set it to all None
-            std::iter::repeat(None)
-                .take(deco_args.ret_names.len())
-                .collect()
-        };
-
-        // make sure both arguments&returns in fucntion
-        // and in decorator have same length
-        ensure!(
-            deco_args.arg_names.len() == arg_types.len(),
-            CoprParseSnafu {
-                reason: format!(
-                    "args number in decorator({}) and function({}) doesn't match",
-                    deco_args.arg_names.len(),
-                    arg_types.len()
+            return fail_parse_error!(
+                format!(
+                    "Expect a function definition, but found a \n{:#?}",
+                    &stmt.node
                 ),
-                loc: None
-            }
-        );
-        ensure!(
-            deco_args.ret_names.len() == return_types.len(),
-            CoprParseSnafu {
-                reason: format!(
-                    "returns number in decorator( {} ) and function annotation( {} ) doesn't match",
-                    deco_args.ret_names.len(),
-                    return_types.len()
-                ),
-                loc: None
-            }
-        );
-        Ok(Coprocessor {
-            name: name.to_string(),
-            deco_args,
-            arg_types,
-            return_types,
-            script: script.to_owned(),
-        })
-    } else {
-        unreachable!()
+                Some(stmt.location),
+            );
+        }
     }
+
+    coprocessor.context(CoprParseSnafu {
+        reason: "Coprocessor not found in script",
+        loc: None,
+    })
 }

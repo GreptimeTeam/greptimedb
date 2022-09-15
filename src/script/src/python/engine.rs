@@ -18,7 +18,7 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::coprocessor::{exec_parsed, parse::parse_copr};
+use crate::python::coprocessor::{exec_parsed, parse};
 use crate::python::{
     coprocessor::CoprocessorRef,
     error::{self, Result},
@@ -122,7 +122,7 @@ impl ScriptEngine for PyEngine {
     }
 
     async fn compile(&self, script: &str, _ctx: CompileContext) -> Result<PyScript> {
-        let copr = Arc::new(parse_copr(script)?);
+        let copr = Arc::new(parse::parse_and_compile_copr(script)?);
 
         Ok(PyScript {
             copr,
@@ -165,10 +165,13 @@ mod tests {
         let script_engine = PyEngine::new(query_engine.clone());
 
         let script = r#"
+import greptime as g
+def add(a, b):
+    return a + b;
+
 @copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
 def test(a, b, c):
-    import greptime as g
-    return (a + b) / g.sqrt(c)
+    return add(a, b) / g.sqrt(c)
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())
@@ -196,9 +199,10 @@ def test(a, b, c):
 
         // test list comprehension
         let script = r#"
+import greptime as gt
+
 @copr(args=["number"], returns = ["r"], sql="select number from numbers limit 100")
 def test(a):
-   import greptime as gt
    return gt.vector([x for x in a if x % 2 == 0])
 "#;
         let script = script_engine
