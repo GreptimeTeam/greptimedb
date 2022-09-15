@@ -275,13 +275,21 @@ mod test {
             assert!(encode_value(&i, &mut builder).is_ok());
         }
 
-        assert!(encode_value(
+        let err = encode_value(
             &Value::List(ListValue::new(
                 Some(Box::new(vec![])),
-                ConcreteDataType::int8_datatype()
-            ),),
-            &mut builder
+                ConcreteDataType::int8_datatype(),
+            )),
+            &mut builder,
         )
-        .is_err());
+        .unwrap_err();
+        match err {
+            PgWireError::ApiError(e) => {
+                assert!(format!("{}", e).contains("Internal error:"));
+            }
+            _ => {
+                unreachable!()
+            }
+        }
     }
 }
