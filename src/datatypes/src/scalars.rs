@@ -404,6 +404,41 @@ mod tests {
     }
 
     #[test]
+    fn test_datetime_scalar() {
+        let dt = DateTime::new(123);
+        assert_eq!(dt, dt.as_scalar_ref());
+        assert_eq!(dt, dt.to_owned_scalar());
+    }
+
+    #[test]
+    fn test_list_value_scalar() {
+        let list_value = ListValue::new(
+            Some(Box::new(vec![Value::Int32(123)])),
+            ConcreteDataType::int32_datatype(),
+        );
+        let list_ref = ListValueRef::Ref { val: &list_value };
+        assert_eq!(list_ref, list_value.as_scalar_ref());
+        assert_eq!(list_value, list_ref.to_owned_scalar());
+
+        let mut builder =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 1);
+        builder.push(None);
+        builder.push(Some(list_value.as_scalar_ref()));
+        let vector = builder.finish();
+
+        let ref_on_vec = ListValueRef::Indexed {
+            vector: &vector,
+            idx: 0,
+        };
+        assert_eq!(ListValue::default(), ref_on_vec.to_owned_scalar());
+        let ref_on_vec = ListValueRef::Indexed {
+            vector: &vector,
+            idx: 1,
+        };
+        assert_eq!(list_value, ref_on_vec.to_owned_scalar());
+    }
+
+    #[test]
     fn test_build_timestamp_vector() {
         let expect: Vec<Option<Timestamp>> = vec![Some(10.into()), None, Some(42.into())];
         let vector: TimestampVector = build_vector_from_slice(&expect);

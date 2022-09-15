@@ -13,7 +13,7 @@ use crate::prelude::{
 };
 use crate::serialize::Serializable;
 use crate::types::TimestampType;
-use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder, VectorOp};
+use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
 
 /// `TimestampVector` stores timestamp in millisecond since UNIX Epoch.
 #[derive(Debug, Clone, PartialEq)]
@@ -248,7 +248,12 @@ impl ScalarVectorBuilder for TimestampVectorBuilder {
 }
 
 pub(crate) fn replicate_timestamp(vector: &TimestampVector, offsets: &[usize]) -> VectorRef {
-    vector.array.replicate(offsets)
+    let array = crate::vectors::primitive::replicate_primitive_with_type(
+        &vector.array,
+        offsets,
+        vector.data_type(),
+    );
+    Arc::new(TimestampVector { array })
 }
 
 #[cfg(test)]
@@ -287,5 +292,14 @@ mod tests {
             ],
             vector.iter_data().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_timestamp_from_arrow() {
+        let vector =
+            TimestampVector::from_slice(&[Timestamp::from_millis(1), Timestamp::from_millis(2)]);
+        let arrow = vector.as_arrow().slice(0, vector.len());
+        let vector2 = TimestampVector::try_from_arrow_array(&arrow).unwrap();
+        assert_eq!(vector, vector2);
     }
 }

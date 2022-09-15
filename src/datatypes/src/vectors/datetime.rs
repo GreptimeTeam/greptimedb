@@ -11,7 +11,7 @@ use crate::prelude::{
     MutableVector, ScalarVector, ScalarVectorBuilder, Validity, Value, ValueRef, Vector, VectorRef,
 };
 use crate::serialize::Serializable;
-use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder, VectorOp};
+use crate::vectors::{PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DateTimeVector {
@@ -237,7 +237,12 @@ impl ScalarVector for DateTimeVector {
 }
 
 pub(crate) fn replicate_datetime(vector: &DateTimeVector, offsets: &[usize]) -> VectorRef {
-    vector.array.replicate(offsets)
+    let array = crate::vectors::primitive::replicate_primitive_with_type(
+        &vector.array,
+        offsets,
+        vector.data_type(),
+    );
+    Arc::new(DateTimeVector { array })
 }
 
 #[cfg(test)]
@@ -315,5 +320,13 @@ mod tests {
             DateTime::new(3),
         ]));
         assert_eq!(expect, vector);
+    }
+
+    #[test]
+    fn test_datetime_from_arrow() {
+        let vector = DateTimeVector::from_slice(&[DateTime::new(1), DateTime::new(2)]);
+        let arrow = vector.as_arrow().slice(0, vector.len());
+        let vector2 = DateTimeVector::try_from_arrow_array(&arrow).unwrap();
+        assert_eq!(vector, vector2);
     }
 }

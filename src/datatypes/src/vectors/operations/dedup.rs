@@ -84,7 +84,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::vectors::{Int32Vector, VectorOp};
+    use crate::vectors::{Int32Vector, StringVector, VectorOp};
 
     fn check_bitmap(expect: &[bool], selected: &MutableBitmap) {
         assert_eq!(expect.len(), selected.len());
@@ -191,5 +191,34 @@ mod tests {
         for len in 0..5 {
             check_dedup_constant(len);
         }
+    }
+
+    #[test]
+    fn test_dedup_string() {
+        let input = StringVector::from_slice(&["a", "a", "b", "c"]);
+        let mut selected = MutableBitmap::from_len_zeroed(4);
+        input.dedup(&mut selected, None);
+        let expect = vec![true, false, true, true];
+        check_bitmap(&expect, &selected);
+    }
+
+    macro_rules! impl_dedup_date_like_test {
+        ($VectorType: ident, $ValueType: ident, $method: ident) => {{
+            use common_time::$ValueType;
+            use $crate::vectors::$VectorType;
+
+            let v = $VectorType::from_iterator([8, 8, 9, 10].into_iter().map($ValueType::$method));
+            let mut selected = MutableBitmap::from_len_zeroed(4);
+            v.dedup(&mut selected, None);
+            let expect = vec![true, false, true, true];
+            check_bitmap(&expect, &selected);
+        }};
+    }
+
+    #[test]
+    fn test_dedup_date_like() {
+        impl_dedup_date_like_test!(DateVector, Date, new);
+        impl_dedup_date_like_test!(DateTimeVector, DateTime, new);
+        impl_dedup_date_like_test!(TimestampVector, Timestamp, from_millis);
     }
 }

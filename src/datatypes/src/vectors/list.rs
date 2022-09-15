@@ -564,6 +564,26 @@ mod tests {
     }
 
     #[test]
+    fn test_list_vector_no_type() {
+        let null_value = ListValue::new(
+            Some(Box::new(vec![Value::Null, Value::Null])),
+            ConcreteDataType::null_datatype(),
+        );
+
+        let mut builder = ListVectorBuilder::with_capacity(1);
+        builder.push(None);
+        builder.push(Some(ListValueRef::Ref { val: &null_value }));
+        let vector = builder.finish();
+        assert_eq!(
+            ConcreteDataType::list_datatype(ConcreteDataType::null_datatype()),
+            vector.data_type()
+        );
+
+        assert_eq!(Value::Null, vector.get(0));
+        assert_eq!(Value::List(null_value), vector.get(1));
+    }
+
+    #[test]
     fn test_list_vector_for_scalar() {
         let mut builder =
             ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 2);
@@ -606,5 +626,15 @@ mod tests {
             iter.next().unwrap().unwrap()
         );
         assert!(iter.next().is_none());
+
+        let mut iter = vector.iter_data();
+        assert_eq!(2, iter.size_hint().0);
+        assert_eq!(
+            ListValueRef::Indexed {
+                vector: &vector,
+                idx: 1
+            },
+            iter.nth(1).unwrap().unwrap()
+        );
     }
 }

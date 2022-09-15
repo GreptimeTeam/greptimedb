@@ -8,7 +8,7 @@ use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
 use snafu::{OptionExt, ResultExt};
 
-use crate::data_type::ConcreteDataType;
+use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::ConversionSnafu;
 use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{Scalar, ScalarRef};
@@ -191,16 +191,18 @@ impl<'a, T: Copy> Iterator for PrimitiveIter<'a, T> {
     }
 }
 
-pub struct PrimitiveVectorBuilder<T: PrimitiveElement> {
-    pub(crate) mutable_array: MutablePrimitiveArray<T>,
+impl<T: PrimitiveElement> Serializable for PrimitiveVector<T> {
+    fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
+        self.array
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<_>>()
+            .context(SerializeSnafu)
+    }
 }
 
-impl<T: PrimitiveElement> PrimitiveVectorBuilder<T> {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            mutable_array: MutablePrimitiveArray::with_capacity(capacity),
-        }
-    }
+pub struct PrimitiveVectorBuilder<T: PrimitiveElement> {
+    pub(crate) mutable_array: MutablePrimitiveArray<T>,
 }
 
 pub type UInt8VectorBuilder = PrimitiveVectorBuilder<u8>;
@@ -279,13 +281,14 @@ where
     }
 }
 
-impl<T: PrimitiveElement> Serializable for PrimitiveVector<T> {
-    fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
-        self.array
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<serde_json::Result<_>>()
-            .context(SerializeSnafu)
+impl<T: PrimitiveElement> PrimitiveVectorBuilder<T> {
+    fn with_type_capacity(data_type: ConcreteDataType, capacity: usize) -> Self {
+        Self {
+            mutable_array: MutablePrimitiveArray::with_capacity_from(
+                capacity,
+                data_type.as_arrow_type(),
+            ),
+        }
     }
 }
 
@@ -293,13 +296,30 @@ pub(crate) fn replicate_primitive<T: PrimitiveElement>(
     vector: &PrimitiveVector<T>,
     offsets: &[usize],
 ) -> VectorRef {
+    Arc::new(replicate_primitive_with_type(
+        vector,
+        offsets,
+        T::build_data_type(),
+    ))
+}
+
+// Remove `data_type` param once https://github.com/GreptimeTeam/greptimedb/issues/228 is fixed.
+pub(crate) fn replicate_primitive_with_type<T: PrimitiveElement>(
+    vector: &PrimitiveVector<T>,
+    offsets: &[usize],
+    data_type: ConcreteDataType,
+) -> PrimitiveVector<T> {
     assert_eq!(offsets.len(), vector.len());
 
     if offsets.is_empty() {
-        return vector.slice(0, 0);
+        // Just use `vector.slice()` once https://github.com/GreptimeTeam/greptimedb/issues/228 is fixed.
+        return PrimitiveVector::from(vector.array.slice(0, 0));
     }
 
-    let mut builder = PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap() as usize);
+    let mut builder = PrimitiveVectorBuilder::<T>::with_type_capacity(
+        data_type,
+        *offsets.last().unwrap() as usize,
+    );
 
     let mut previous_offset = 0;
 
@@ -312,7 +332,7 @@ pub(crate) fn replicate_primitive<T: PrimitiveElement>(
         );
         previous_offset = *offset;
     }
-    builder.to_vector()
+    builder.finish()
 }
 
 #[cfg(test)]
