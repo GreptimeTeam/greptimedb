@@ -1,6 +1,7 @@
 use std::ops::Deref;
 
 use async_trait::async_trait;
+use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
@@ -10,7 +11,6 @@ use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{FieldInfo, Response, Tag, TextQueryResponseBuilder};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{PgWireError, PgWireResult};
-use query::Output;
 
 use crate::error::{self, Error, Result};
 use crate::query_handler::SqlQueryHandlerRef;
