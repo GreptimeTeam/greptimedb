@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use common_error::ext::ErrorExt;
+use common_query::logical_plan::Expr;
 use common_time::RangeMillis;
 use datatypes::vectors::VectorRef;
 
@@ -34,7 +35,7 @@ pub trait PutOperation: Send {
     fn add_value_column(&mut self, name: &str, vector: VectorRef) -> Result<(), Self::Error>;
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ScanRequest {
     /// Max sequence number to read, None for latest sequence.
     ///
@@ -43,6 +44,8 @@ pub struct ScanRequest {
     pub sequence: Option<SequenceNumber>,
     /// Indices of columns to read, `None` to read all columns.
     pub projection: Option<Vec<usize>>,
+    /// Filters pushed down
+    pub filters: Vec<Expr>,
 }
 
 #[derive(Debug)]

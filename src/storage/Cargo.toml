@@ -15,6 +15,7 @@ common-error = { path = "../common/error" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+common-query = { path = "../common/query" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"

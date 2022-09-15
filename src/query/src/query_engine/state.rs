@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
+use datafusion::optimizer::filter_push_down::FilterPushDown;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 
 use crate::datafusion::DfCatalogListAdapter;
@@ -30,10 +31,12 @@ impl fmt::Debug for QueryEngineState {
 
 impl QueryEngineState {
     pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
-        let config = ExecutionConfig::new().with_default_catalog_and_schema(
-            catalog::DEFAULT_CATALOG_NAME,
-            catalog::DEFAULT_SCHEMA_NAME,
-        );
+        let config = ExecutionConfig::new()
+            .with_default_catalog_and_schema(
+                catalog::DEFAULT_CATALOG_NAME,
+                catalog::DEFAULT_SCHEMA_NAME,
+            )
+            .with_optimizer_rules(vec![Arc::new(FilterPushDown::new())]);
         let df_context = ExecutionContext::with_config(config);
 
         df_context.state.lock().catalog_list = Arc::new(DfCatalogListAdapter::new(

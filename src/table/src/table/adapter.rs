@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 ///  Datafusion table adpaters
 use datafusion::datasource::{
@@ -202,7 +203,7 @@ impl Table for TableAdapter {
         limit: Option<usize>,
     ) -> Result<SendableRecordBatchStream> {
         let filters: Vec<DfExpr> = filters.iter().map(|e| e.df_expr().clone()).collect();
-
+        debug!("TableScan filter size: {}", filters.len());
         let execution_plan = self
             .table_provider
             .scan(projection, &filters, limit)

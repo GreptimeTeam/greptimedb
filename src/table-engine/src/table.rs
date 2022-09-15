@@ -118,16 +118,17 @@ impl<R: Region> Table for MitoTable<R> {
     async fn scan(
         &self,
         projection: &Option<Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         _limit: Option<usize>,
     ) -> TableResult<SendableRecordBatchStream> {
         let read_ctx = ReadContext::default();
         let snapshot = self.region.snapshot(&read_ctx).map_err(TableError::new)?;
 
         let projection = self.transform_projection(&self.region, projection.clone())?;
-
+        let filters = filters.into();
         let scan_request = ScanRequest {
             projection,
+            filters,
             ..Default::default()
         };
         let mut reader = snapshot

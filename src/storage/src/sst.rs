@@ -171,13 +171,14 @@ pub struct WriteOptions {
     // TODO(yingwen): [flush] row group size.
 }
 
-#[derive(Debug)]
 pub struct ReadOptions {
     /// Suggested size of each batch.
     pub batch_size: usize,
     /// The schema that user expected to read, might not the same as the
     /// schema of the SST file.
     pub projected_schema: ProjectedSchemaRef,
+
+    pub predicate: Predicate,
 }
 
 /// SST access layer.
@@ -241,7 +242,7 @@ impl AccessLayer for FsAccessLayer {
             &file_path,
             self.object_store.clone(),
             opts.projected_schema.clone(),
-            Predicate::empty(),
+            opts.predicate.clone(),
         );
 
         let stream = reader.chunk_stream(opts.batch_size).await?;
