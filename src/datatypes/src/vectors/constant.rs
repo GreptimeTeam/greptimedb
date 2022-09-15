@@ -19,7 +19,13 @@ pub struct ConstantVector {
 }
 
 impl ConstantVector {
+    /// Create a new [ConstantVector].
+    ///
+    /// # Panics
+    /// Panics if `vector.len() != 1`.
     pub fn new(vector: VectorRef, length: usize) -> Self {
+        assert_eq!(1, vector.len());
+
         // Avoid const recursion.
         if vector.is_const() {
             let vec: &ConstantVector = unsafe { Helper::static_cast(&vector) };
@@ -30,6 +36,11 @@ impl ConstantVector {
 
     pub fn inner(&self) -> &VectorRef {
         &self.vector
+    }
+
+    /// Returns the constant value.
+    pub fn get_constant_ref(&self) -> ValueRef {
+        self.vector.get_ref(0)
     }
 }
 
@@ -102,18 +113,13 @@ impl Vector for ConstantVector {
 
 impl fmt::Debug for ConstantVector {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "ConstantVector([{:?}; {}])",
-            self.try_get(0).unwrap_or(Value::Null),
-            self.len()
-        )
+        write!(f, "ConstantVector([{:?}; {}])", self.get(0), self.len())
     }
 }
 
 impl Serializable for ConstantVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        std::iter::repeat(self.try_get(0)?)
+        std::iter::repeat(self.get(0))
             .take(self.len())
             .map(serde_json::Value::try_from)
             .collect::<serde_json::Result<_>>()
@@ -123,6 +129,10 @@ impl Serializable for ConstantVector {
 
 pub(crate) fn replicate_constant(vector: &ConstantVector, offsets: &[usize]) -> VectorRef {
     assert_eq!(offsets.len(), vector.len());
+
+    if offsets.is_empty() {
+        return vector.slice(0, 0);
+    }
 
     Arc::new(ConstantVector::new(
         vector.vector.clone(),

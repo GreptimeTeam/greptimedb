@@ -67,12 +67,11 @@ pub(crate) fn dedup_constant(
         return;
     }
 
-    let mut equal_to_prev = false;
-    if let Some(prev) = prev_vector {
-        if !prev.is_empty() && vector.get_ref(0) == prev.get_ref(0) {
-            equal_to_prev = true;
-        }
-    }
+    let equal_to_prev = if let Some(prev) = prev_vector {
+        !prev.is_empty() && vector.get_constant_ref() == prev.get_constant_ref()
+    } else {
+        false
+    };
 
     if !equal_to_prev {
         selected.set(0, true);

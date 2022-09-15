@@ -323,15 +323,20 @@ impl MutableVector for ListVectorBuilder {
 impl ScalarVectorBuilder for ListVectorBuilder {
     type VectorType = ListVector;
 
-    fn with_capacity(capacity: usize) -> Self {
-        Self::with_type_capacity(ConcreteDataType::null_datatype(), capacity)
+    fn with_capacity(_capacity: usize) -> Self {
+        panic!("Must use ListVectorBuilder::with_type_capacity()");
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
         // We expect the input ListValue has the same inner type as the builder when using
         // push(), so just panic if `push_value_ref()` returns error, which indicate an
         // invalid input value type.
-        self.push_value_ref(value.into()).unwrap();
+        self.push_value_ref(value.into()).unwrap_or_else(|e| {
+            panic!(
+                "Failed to push value, expect value type {:?}, err:{}",
+                self.inner_type, e
+            );
+        });
     }
 
     fn finish(&mut self) -> Self::VectorType {
@@ -561,26 +566,6 @@ mod tests {
             Some(vec![Some(7), Some(8), None]),
         ]));
         assert_eq!(expect, vector);
-    }
-
-    #[test]
-    fn test_list_vector_no_type() {
-        let null_value = ListValue::new(
-            Some(Box::new(vec![Value::Null, Value::Null])),
-            ConcreteDataType::null_datatype(),
-        );
-
-        let mut builder = ListVectorBuilder::with_capacity(1);
-        builder.push(None);
-        builder.push(Some(ListValueRef::Ref { val: &null_value }));
-        let vector = builder.finish();
-        assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::null_datatype()),
-            vector.data_type()
-        );
-
-        assert_eq!(Value::Null, vector.get(0));
-        assert_eq!(Value::List(null_value), vector.get(1));
     }
 
     #[test]

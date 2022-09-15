@@ -175,7 +175,7 @@ mod tests {
                 5,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(BooleanVector::from(vec![true, false])),
+                Arc::new(BooleanVector::from(vec![false])),
                 4,
             )),
         );
@@ -185,7 +185,7 @@ mod tests {
                 5,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(Int32Vector::from_slice(vec![1, 2])),
+                Arc::new(Int32Vector::from_slice(vec![1])),
                 4,
             )),
         );

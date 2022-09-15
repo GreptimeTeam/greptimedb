@@ -41,31 +41,14 @@ pub trait VectorOp {
 }
 
 macro_rules! impl_scalar_vector_op {
-    ($($VectorType: ident),+) => {$(
-        impl VectorOp for $VectorType {
-            fn replicate(&self, offsets: &[usize]) -> VectorRef {
-                replicate::replicate_scalar(self, offsets)
-            }
-
-            fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
-                let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<$VectorType>());
-                dedup::dedup_scalar(self, selected, prev_vector);
-            }
-
-            fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
-                filter::filter_non_constant!(self, $VectorType, filter)
-            }
-        }
-    )+};
-
-    ($( { $VectorType: ident, replicate: $replicate: ident } ),+) => {$(
+    ($( { $VectorType: ident, $replicate: ident } ),+) => {$(
         impl VectorOp for $VectorType {
             fn replicate(&self, offsets: &[usize]) -> VectorRef {
                 replicate::$replicate(self, offsets)
             }
 
             fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
-                let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<$VectorType>());
+                let prev_vector = prev_vector.map(|pv| pv.as_any().downcast_ref::<$VectorType>().unwrap());
                 dedup::dedup_scalar(self, selected, prev_vector);
             }
 
@@ -76,11 +59,14 @@ macro_rules! impl_scalar_vector_op {
     )+};
 }
 
-impl_scalar_vector_op!(BinaryVector, BooleanVector, ListVector, StringVector);
 impl_scalar_vector_op!(
-    { DateVector, replicate: replicate_date },
-    { DateTimeVector, replicate: replicate_datetime },
-    { TimestampVector, replicate: replicate_timestamp }
+    { BinaryVector, replicate_scalar },
+    { BooleanVector, replicate_scalar },
+    { ListVector, replicate_scalar },
+    { StringVector, replicate_scalar },
+    { DateVector, replicate_date },
+    { DateTimeVector, replicate_datetime },
+    { TimestampVector, replicate_timestamp }
 );
 
 impl VectorOp for ConstantVector {
