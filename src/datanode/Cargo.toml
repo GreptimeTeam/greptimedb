@@ -54,7 +54,7 @@ version = "0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
 
 [dev-dependencies]
-axum-test-helper = "0.1"
+axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 client = { path = "../client" }
 common-query = { path = "../common/query" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
