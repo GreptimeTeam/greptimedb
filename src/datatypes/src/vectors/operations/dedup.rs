@@ -103,12 +103,12 @@ mod tests {
         prev: Option<&[i32]>,
     ) {
         let input = Int32Vector::from_iter(input);
-        let prev = prev.map(|p| Int32Vector::from_slice(p));
+        let prev = prev.map(Int32Vector::from_slice);
 
         let mut selected = MutableBitmap::from_len_zeroed(input.len());
-        input.dedup(&mut selected, prev.as_ref().map(|v| &*v as _));
+        input.dedup(&mut selected, prev.as_ref().map(|v| v as _));
 
-        check_bitmap(&expect, &selected);
+        check_bitmap(expect, &selected);
     }
 
     #[test]
@@ -153,7 +153,7 @@ mod tests {
 
         let mut selected = MutableBitmap::from_len_zeroed(input.len());
         let prev = Some(NullVector::new(1));
-        input.dedup(&mut selected, prev.as_ref().map(|v| &*v as _));
+        input.dedup(&mut selected, prev.as_ref().map(|v| v as _));
         let expect = vec![false; len];
         check_bitmap(&expect, &selected);
     }
@@ -181,7 +181,7 @@ mod tests {
             Arc::new(Int32Vector::from_slice(&[8])),
             1,
         ));
-        input.dedup(&mut selected, prev.as_ref().map(|v| &*v as _));
+        input.dedup(&mut selected, prev.as_ref().map(|v| v as _));
         let expect = vec![false; len];
         check_bitmap(&expect, &selected);
     }

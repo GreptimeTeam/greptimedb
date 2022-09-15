@@ -342,8 +342,6 @@ impl<'a> ScalarRef<'a> for ListValueRef<'a> {
 
 #[cfg(test)]
 mod tests {
-    use Date;
-
     use super::*;
     use crate::vectors::binary::BinaryVector;
     use crate::vectors::primitive::Int32Vector;
