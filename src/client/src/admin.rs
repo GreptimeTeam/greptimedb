@@ -1,6 +1,6 @@
 use api::v1::*;
 use common_error::prelude::StatusCode;
-use query::Output;
+use common_query::Output;
 use snafu::prelude::*;
 
 use crate::database::PROTOCOL_VERSION;

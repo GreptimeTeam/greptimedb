@@ -4,7 +4,7 @@ use std::any::Any;
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
-use query::Output;
+use common_query::Output;
 
 #[async_trait]
 pub trait Script {

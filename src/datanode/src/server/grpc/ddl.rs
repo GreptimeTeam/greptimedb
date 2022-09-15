@@ -3,9 +3,9 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
+use common_query::Output;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
-use query::Output;
 use snafu::prelude::*;
 use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest};
 

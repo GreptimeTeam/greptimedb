@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::RegisterTableRequest;
+use common_query::Output;
 use common_telemetry::tracing::info;
 use datatypes::schema::SchemaBuilder;
-use query::query_engine::Output;
 use snafu::{OptionExt, ResultExt};
 use sql::ast::TableConstraint;
 use sql::statements::create_table::CreateTable;

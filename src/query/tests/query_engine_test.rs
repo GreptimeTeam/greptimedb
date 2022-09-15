@@ -8,6 +8,7 @@ use catalog::{
     CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
+use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
 use datafusion::field_util::FieldExt;
@@ -21,7 +22,7 @@ use datatypes::vectors::{Float32Vector, Float64Vector, PrimitiveVector, UInt32Ve
 use num::NumCast;
 use query::error::Result;
 use query::plan::LogicalPlan;
-use query::query_engine::{Output, QueryEngineFactory};
+use query::query_engine::QueryEngineFactory;
 use query::QueryEngine;
 use rand::Rng;
 use table::table::adapter::DfTableProviderAdapter;

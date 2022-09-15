@@ -11,6 +11,7 @@ use common_base::BitVec;
 use common_error::status_code::StatusCode;
 use common_grpc::AsExcutionPlan;
 use common_grpc::DefaultAsPlanImpl;
+use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::date::Date;
 use common_time::datetime::DateTime;
@@ -18,7 +19,6 @@ use common_time::timestamp::Timestamp;
 use datafusion::physical_plan::ExecutionPlan;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use query::Output;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;

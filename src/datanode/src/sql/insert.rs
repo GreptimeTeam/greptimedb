@@ -1,10 +1,10 @@
 use std::str::FromStr;
 
 use catalog::SchemaProviderRef;
+use common_query::Output;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::prelude::VectorBuilder;
 use datatypes::value::Value;
-use query::query_engine::Output;
 use snafu::ensure;
 use snafu::OptionExt;
 use snafu::ResultExt;

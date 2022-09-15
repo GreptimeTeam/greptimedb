@@ -1,5 +1,5 @@
 use catalog::CatalogManagerRef;
-use query::Output;
+use common_query::Output;
 use query::QueryEngineRef;
 
 use crate::error::Result;

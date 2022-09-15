@@ -9,6 +9,7 @@ async-trait = "0.1"
 axum = "0.5"
 axum-macros = "0.2"
 common-error = { path = "../common/error" }
+common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }

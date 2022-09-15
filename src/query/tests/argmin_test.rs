@@ -1,6 +1,7 @@
 use std::sync::Arc;
 mod function;
 
+use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
 use datafusion::field_util::FieldExt;
@@ -10,7 +11,6 @@ use datatypes::prelude::*;
 use datatypes::types::PrimitiveElement;
 use function::{create_query_engine, get_numbers_from_table};
 use query::error::Result;
-use query::query_engine::Output;
 use query::QueryEngine;
 
 #[tokio::test]

@@ -11,7 +11,7 @@ use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
-use common_query::prelude::ScalarUdf;
+use common_query::{prelude::ScalarUdf, Output};
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use snafu::{OptionExt, ResultExt};
@@ -31,7 +31,7 @@ use crate::{
     physical_planner::PhysicalPlanner,
     plan::{LogicalPlan, PhysicalPlan},
     planner::Planner,
-    Output, QueryEngine,
+    QueryEngine,
 };
 
 pub(crate) struct DatafusionQueryEngine {
@@ -220,12 +220,13 @@ mod tests {
     use catalog::{
         CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
     };
+    use common_query::Output;
     use common_recordbatch::util;
     use datafusion::field_util::FieldExt;
     use datafusion::field_util::SchemaExt;
     use table::table::numbers::NumbersTable;
 
-    use crate::query_engine::{Output, QueryEngineFactory, QueryEngineRef};
+    use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
     fn create_test_engine() -> QueryEngineRef {
         let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
