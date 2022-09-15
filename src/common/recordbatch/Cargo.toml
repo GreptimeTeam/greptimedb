@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 common-error = { path = "../error" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2", features = ["simd"]}
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2"}
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 paste = "1.0"

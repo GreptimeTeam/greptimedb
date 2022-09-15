@@ -3,10 +3,6 @@ name = "common-query"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies.arrow]
-package = "arrow2"
-version="0.10"
-
 [dependencies]
 common-error = { path = "../error" }
 common-recordbatch = { path = "../recordbatch" }
@@ -18,6 +14,10 @@ datatypes = { path = "../../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 statrs = "0.15"
 
+[dependencies.arrow]
+package = "arrow2"
+version = "0.10"
+
 [dev-dependencies]
-tokio = { version = "1.0", features = ["full"] }
 common-base = { path = "../base" }
+tokio = { version = "1.0", features = ["full"] }

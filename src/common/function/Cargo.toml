@@ -3,18 +3,13 @@ edition = "2021"
 name = "common-function"
 version = "0.1.0"
 
-[dependencies.arrow]
-features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
-package = "arrow2"
-version = "0.10"
-
 [dependencies]
 arc-swap = "1.0"
 chrono-tz = "0.6"
 common-error = { path = "../error" }
-common-query = { path = "../query" }
 common-function-macro = { path = "../function-macro" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git" , branch = "arrow2" }
+common-query = { path = "../query" }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../../datatypes" }
 libc = "0.2"
 num = "0.4"
@@ -24,6 +19,11 @@ paste = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
 statrs = "0.15"
 
+[dependencies.arrow]
+features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+package = "arrow2"
+version = "0.10"
+
 [dev-dependencies]
 ron = "0.7"
-serde = {version = "1.0", features = ["derive"]}
+serde = { version = "1.0", features = ["derive"] }

@@ -13,7 +13,7 @@ byteorder = "1.4"
 bytes = "1.1"
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
-common-runtime = {path = "../common/runtime"}
+common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 crc = "3.0"
 futures = "0.3"
