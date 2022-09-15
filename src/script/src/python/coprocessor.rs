@@ -373,7 +373,6 @@ pub(crate) fn exec_with_cached_vm(
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
 
-        assert!(copr.code_obj.is_some());
         // It's safe to unwrap code_object, it's already compiled before.
         let code_obj = vm.ctx.new_code(copr.code_obj.clone().unwrap());
         let ret = vm
