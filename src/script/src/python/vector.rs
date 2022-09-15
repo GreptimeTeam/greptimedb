@@ -870,7 +870,7 @@ pub fn pyobj_try_to_typed_val(
                             .map(DateTime::new)
                             .map(value::Value::DateTime),
                         ConcreteDataType::Timestamp(_) => {
-                            // FIXME(dennis): we always considert the timestamp unit is millis, it's not correct if user define timestamp column with other units.
+                            // FIXME(dennis): we always consider the timestamp unit is millis, it's not correct if user define timestamp column with other units.
                             obj.try_into_value::<i64>(vm)
                                 .ok()
                                 .map(Timestamp::from_millis)
