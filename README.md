@@ -173,6 +173,9 @@ pre-commit installed at .git/hooks/pre-commit
 
 $ pre-commit install --hook-type commit-msg
 pre-commit installed at .git/hooks/commit-msg
+
+$ pre-commit install --hook-type pre-push
+pre-commit installed at .git/hooks/pre-pus
 ```
 
 now `pre-commit` will run automatically on `git commit`.
