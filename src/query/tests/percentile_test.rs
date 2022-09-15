@@ -9,7 +9,7 @@ use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
 use datafusion::field_util::FieldExt;
 use datafusion::field_util::SchemaExt;
-use datatypes::for_all_ordered_primitive_types;
+use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::types::PrimitiveElement;
@@ -25,9 +25,6 @@ async fn test_percentile_aggregator() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let engine = create_query_engine();
 
-    test_percentile_failed::<f32>("f32_number", "numbers", engine.clone()).await?;
-    test_percentile_failed::<f64>("f64_number", "numbers", engine.clone()).await?;
-
     macro_rules! test_percentile {
         ([], $( { $T:ty } ),*) => {
             $(
@@ -36,7 +33,7 @@ async fn test_percentile_aggregator() -> Result<()> {
             )*
         }
     }
-    for_all_ordered_primitive_types! { test_percentile }
+    for_all_primitive_types! { test_percentile }
     Ok(())
 }
 
@@ -112,24 +109,6 @@ async fn execute_percentile<'a>(
         _ => unreachable!(),
     };
     util::collect(recordbatch_stream).await
-}
-
-async fn test_percentile_failed<T>(
-    column_name: &str,
-    table_name: &str,
-    engine: Arc<dyn QueryEngine>,
-) -> Result<()>
-where
-    T: PrimitiveElement,
-{
-    let result = execute_percentile(column_name, table_name, engine).await;
-    assert!(result.is_err());
-    let error = result.unwrap_err();
-    assert!(error.to_string().contains(&format!(
-        "Failed to create accumulator: \"PERCENTILE\" aggregate function not support data type {}",
-        T::type_name()
-    )));
-    Ok(())
 }
 
 fn create_correctness_engine() -> Arc<dyn QueryEngine> {

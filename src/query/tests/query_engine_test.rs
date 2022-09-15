@@ -14,11 +14,11 @@ use common_recordbatch::{util, RecordBatch};
 use datafusion::field_util::FieldExt;
 use datafusion::field_util::SchemaExt;
 use datafusion::logical_plan::LogicalPlanBuilder;
-use datatypes::for_all_ordered_primitive_types;
+use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::PrimitiveElement;
-use datatypes::vectors::{Float32Vector, Float64Vector, PrimitiveVector, UInt32Vector};
+use datatypes::types::{OrdPrimitive, PrimitiveElement};
+use datatypes::vectors::{PrimitiveVector, UInt32Vector};
 use num::NumCast;
 use query::error::Result;
 use query::plan::LogicalPlan;
@@ -149,7 +149,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
     let catalog_list = Arc::new(MemoryCatalogList::default());
 
-    // create table with ordered primitives, and all columns' length are even
+    // create table with primitives, and all columns' length are even
     let mut column_schemas = vec![];
     let mut columns = vec![];
     macro_rules! create_even_number_table {
@@ -161,13 +161,13 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
                 let column_schema = ColumnSchema::new(column_name, Value::from(<$T>::default()).data_type(), true);
                 column_schemas.push(column_schema);
 
-                let numbers = (1..=100).map(|_| rng.gen_range(<$T>::MIN..<$T>::MAX)).collect::<Vec<$T>>();
+                let numbers = (1..=100).map(|_| rng.gen::<$T>()).collect::<Vec<$T>>();
                 let column: VectorRef = Arc::new(PrimitiveVector::<$T>::from_vec(numbers.to_vec()));
                 columns.push(column);
             )*
         }
     }
-    for_all_ordered_primitive_types! { create_even_number_table }
+    for_all_primitive_types! { create_even_number_table }
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
@@ -179,7 +179,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
         )
         .unwrap();
 
-    // create table with ordered primitives, and all columns' length are odd
+    // create table with primitives, and all columns' length are odd
     let mut column_schemas = vec![];
     let mut columns = vec![];
     macro_rules! create_odd_number_table {
@@ -191,37 +191,19 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
                 let column_schema = ColumnSchema::new(column_name, Value::from(<$T>::default()).data_type(), true);
                 column_schemas.push(column_schema);
 
-                let numbers = (1..=99).map(|_| rng.gen_range(<$T>::MIN..<$T>::MAX)).collect::<Vec<$T>>();
+                let numbers = (1..=99).map(|_| rng.gen::<$T>()).collect::<Vec<$T>>();
                 let column: VectorRef = Arc::new(PrimitiveVector::<$T>::from_vec(numbers.to_vec()));
                 columns.push(column);
             )*
         }
     }
-    for_all_ordered_primitive_types! { create_odd_number_table }
+    for_all_primitive_types! { create_odd_number_table }
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let odd_number_table = Arc::new(MemTable::new("odd_numbers", recordbatch));
     schema_provider
         .register_table(odd_number_table.table_name().to_string(), odd_number_table)
-        .unwrap();
-
-    // create table with floating numbers
-    let column_schemas = vec![
-        ColumnSchema::new("f32_number", ConcreteDataType::float32_datatype(), true),
-        ColumnSchema::new("f64_number", ConcreteDataType::float64_datatype(), true),
-    ];
-    let f32_numbers: VectorRef = Arc::new(Float32Vector::from_vec(vec![1.0f32, 2.0, 3.0]));
-    let f64_numbers: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0f64, 2.0, 3.0]));
-    let columns = vec![f32_numbers, f64_numbers];
-    let schema = Arc::new(Schema::new(column_schemas));
-    let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let float_number_table = Arc::new(MemTable::new("float_numbers", recordbatch));
-    schema_provider
-        .register_table(
-            float_number_table.table_name().to_string(),
-            float_number_table,
-        )
         .unwrap();
 
     catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
@@ -235,7 +217,7 @@ async fn get_numbers_from_table<'s, T>(
     column_name: &'s str,
     table_name: &'s str,
     engine: Arc<dyn QueryEngine>,
-) -> Vec<T>
+) -> Vec<OrdPrimitive<T>>
 where
     T: PrimitiveElement,
     for<'a> T: Scalar<RefType<'a> = T>,
@@ -253,7 +235,11 @@ where
     let columns = numbers[0].df_recordbatch.columns();
     let column = VectorHelper::try_into_vector(&columns[0]).unwrap();
     let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(&column) };
-    column.iter_data().flatten().collect::<Vec<T>>()
+    column
+        .iter_data()
+        .flatten()
+        .map(|x| OrdPrimitive::<T>(x))
+        .collect::<Vec<OrdPrimitive<T>>>()
 }
 
 #[tokio::test]
@@ -261,9 +247,6 @@ async fn test_median_aggregator() -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
     let engine = create_query_engine();
-
-    test_median_failed::<f32>("f32_number", "float_numbers", engine.clone()).await?;
-    test_median_failed::<f64>("f64_number", "float_numbers", engine.clone()).await?;
 
     macro_rules! test_median {
         ([], $( { $T:ty } ),*) => {
@@ -276,7 +259,7 @@ async fn test_median_aggregator() -> Result<()> {
             )*
         }
     }
-    for_all_ordered_primitive_types! { test_median }
+    for_all_primitive_types! { test_median }
     Ok(())
 }
 
@@ -286,7 +269,7 @@ async fn test_median_success<T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Result<()>
 where
-    T: PrimitiveElement + Ord,
+    T: PrimitiveElement,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     let result = execute_median(column_name, table_name, engine.clone())
@@ -310,30 +293,12 @@ where
     let expected_median: Value = if len % 2 == 1 {
         numbers[len / 2]
     } else {
-        let a: f64 = NumCast::from(numbers[len / 2 - 1]).unwrap();
-        let b: f64 = NumCast::from(numbers[len / 2]).unwrap();
-        NumCast::from(a / 2.0 + b / 2.0).unwrap()
+        let a: f64 = NumCast::from(numbers[len / 2 - 1].as_primitive()).unwrap();
+        let b: f64 = NumCast::from(numbers[len / 2].as_primitive()).unwrap();
+        OrdPrimitive::<T>(NumCast::from(a / 2.0 + b / 2.0).unwrap())
     }
     .into();
     assert_eq!(expected_median, median);
-    Ok(())
-}
-
-async fn test_median_failed<T>(
-    column_name: &str,
-    table_name: &str,
-    engine: Arc<dyn QueryEngine>,
-) -> Result<()>
-where
-    T: PrimitiveElement,
-{
-    let result = execute_median(column_name, table_name, engine).await;
-    assert!(result.is_err());
-    let error = result.unwrap_err();
-    assert!(error.to_string().contains(&format!(
-        "Failed to create accumulator: \"MEDIAN\" aggregate function not support data type {}",
-        T::type_name()
-    )));
     Ok(())
 }
 

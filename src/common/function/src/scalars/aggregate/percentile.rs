@@ -10,9 +10,10 @@ use common_query::error::{
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::prelude::*;
+use datatypes::types::OrdPrimitive;
 use datatypes::value::{ListValue, OrderedFloat};
 use datatypes::vectors::{ConstantVector, Float64Vector, ListVector};
-use datatypes::with_match_ordered_primitive_type_id;
+use datatypes::with_match_primitive_type_id;
 use num::NumCast;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -37,19 +38,21 @@ use snafu::{ensure, OptionExt, ResultExt};
 #[derive(Debug, Default)]
 pub struct Percentile<T>
 where
-    T: Primitive + Ord,
+    T: Primitive,
 {
-    greater: BinaryHeap<Reverse<T>>,
-    not_greater: BinaryHeap<T>,
+    greater: BinaryHeap<Reverse<OrdPrimitive<T>>>,
+    not_greater: BinaryHeap<OrdPrimitive<T>>,
     n: u64,
     p: Option<f64>,
 }
 
 impl<T> Percentile<T>
 where
-    T: Primitive + Ord,
+    T: Primitive,
 {
     fn push(&mut self, value: T) {
+        let value = OrdPrimitive::<T>(value);
+
         self.n += 1;
         if self.not_greater.is_empty() {
             self.not_greater.push(value);
@@ -76,7 +79,7 @@ where
 
 impl<T> Accumulator for Percentile<T>
 where
-    T: Primitive + Ord,
+    T: Primitive,
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     fn state(&self) -> Result<Vec<Value>> {
@@ -212,7 +215,7 @@ where
         if not_greater.is_none() {
             return Ok(Value::Null);
         }
-        let not_greater = *self.not_greater.peek().unwrap();
+        let not_greater = (*self.not_greater.peek().unwrap()).as_primitive();
         let percentile = if self.greater.is_empty() {
             NumCast::from(not_greater).unwrap()
         } else {
@@ -224,7 +227,7 @@ where
             };
             let fract = (((self.n - 1) as f64) * p / 100_f64).fract();
             let not_greater_v: f64 = NumCast::from(not_greater).unwrap();
-            let greater_v: f64 = NumCast::from(greater.0).unwrap();
+            let greater_v: f64 = NumCast::from(greater.0.as_primitive()).unwrap();
             not_greater_v * (1.0 - fract) + greater_v * fract
         };
         Ok(Value::from(percentile))
@@ -239,7 +242,7 @@ impl AggregateFunctionCreator for PercentileAccumulatorCreator {
     fn creator(&self) -> AccumulatorCreatorFunction {
         let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
             let input_type = &types[0];
-            with_match_ordered_primitive_type_id!(
+            with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
                     Ok(Box::new(Percentile::<$S>::default()))
