@@ -17,4 +17,5 @@ repos:
     -    id: fmt
     -    id: clippy
          args: ["--workspace", "--all-targets", "--", "-D", "warnings", "-D", "clippy::print_stdout", "-D", "clippy::print_stderr"]
+         stages: [push]
     -    id: cargo-check
