@@ -268,6 +268,7 @@ impl MutableVector for ListVectorBuilder {
 #[cfg(test)]
 mod tests {
     use arrow::array::{MutableListArray, MutablePrimitiveArray, TryExtend};
+    use serde_json::json;
 
     use super::*;
     use crate::types::ListType;
@@ -426,8 +427,8 @@ mod tests {
 
         let list_vector = ListVector::from(arrow_array);
         assert_eq!(
-            "Ok([Array([Number(1), Number(2), Number(3)]), Null, Array([Number(4), Null, Number(6)])])",
-            format!("{:?}", list_vector.serialize_to_json())
+            vec![json!([1, 2, 3]), json!(null), json!([4, null, 6]),],
+            list_vector.serialize_to_json().unwrap()
         );
     }
 

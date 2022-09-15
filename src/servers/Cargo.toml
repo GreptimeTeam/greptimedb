@@ -16,10 +16,12 @@ common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
+hex = { version = "0.4", optional = true }
 hyper = { version = "0.14", features = ["full"] }
 metrics = "0.20"
 num_cpus = "1.13"
 opensrv-mysql = "0.1"
+pgwire = { version = "0.3", optional = true }
 query = { path = "../query" }
 serde = "1.0"
 serde_json = "1.0"
@@ -30,6 +32,10 @@ tonic = "0.8"
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 
+[features]
+default = ["postgres"]
+postgres = ["hex", "pgwire"]
+
 [dev-dependencies]
 catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
@@ -37,3 +43,4 @@ mysql_async = "0.30"
 rand = "0.8"
 script = { path = "../script", features = ["python"] }
 test-util = { path = "../../test-util" }
+tokio-postgres = "0.7"

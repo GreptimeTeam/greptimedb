@@ -71,6 +71,7 @@ impl RecordBatches {
         self.schema.clone()
     }
 
+    // TODO: a new name that to avoid misunderstanding it as an allocation operation
     pub fn to_vec(self) -> Vec<RecordBatch> {
         self.batches
     }

@@ -5,6 +5,10 @@ wal_dir = '/tmp/greptimedb/wal'
 mysql_addr = '0.0.0.0:3306'
 mysql_runtime_size = 4
 
+# applied when postgres feature enbaled
+postgres_addr = '0.0.0.0:5432'
+postgres_runtime_size = 4
+
 [storage]
 type = 'File'
 data_dir = '/tmp/greptimedb/data/'
