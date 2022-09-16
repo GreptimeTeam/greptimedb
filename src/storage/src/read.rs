@@ -97,8 +97,26 @@ pub trait BatchOp {
     /// - `left` or `right` has insufficient column num.
     fn compare_row(&self, left: &Batch, i: usize, right: &Batch, j: usize) -> Ordering;
 
+    /// Dedup rows in `batch` by row key.
+    ///
+    /// If `prev` is `Some` and not empty, the last row of `prev` would be used to dedup
+    /// current `batch`. Set `i-th` bit of `selected` to `true` if we need to keep `i-th`
+    /// row. So the caller could use `selected` to build a [BooleanVector] to filter the
+    /// batch.
+    ///
+    /// The caller must ensure `selected` is initialized by filling `batch.num_rows()` bits
+    /// to zero.
+    ///
+    /// # Panics
+    /// Panics if `batch` and `prev` have different number of columns (unless `prev` is
+    /// empty).
     fn dedup(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>);
 
+    /// Filters the `batch`, returns elements matching the `filter` (i.e. where the values
+    /// are true).
+    ///
+    /// Note that the nulls of `filter` are interpreted as `false` will lead to these elements
+    /// being masked out.
     fn filter(&self, batch: &Batch, filter: &BooleanVector) -> Result<Batch>;
 }
 
