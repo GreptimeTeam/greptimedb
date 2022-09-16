@@ -89,7 +89,9 @@ impl Vector for DateTimeVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        self.array.slice(offset, length)
+        Arc::new(Self {
+            array: PrimitiveVector::new(self.array.array.slice(offset, length)),
+        })
     }
 
     fn get(&self, index: usize) -> Value {

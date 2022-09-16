@@ -326,6 +326,32 @@ mod tests {
             }
             _ => unreachable!(),
         };
+
+        let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
+        let output = SqlQueryHandler::do_query(&*frontend_instance, sql)
+            .await
+            .unwrap();
+        match output {
+            Output::RecordBatches(recordbatches) => {
+                let recordbatches = recordbatches
+                    .to_vec()
+                    .into_iter()
+                    .map(|r| r.df_recordbatch)
+                    .collect::<Vec<DfRecordBatch>>();
+                let pretty_print = arrow_print::write(&recordbatches);
+                let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
+                let expected = vec![
+                    "+----------------+---------------------+-----+--------+",
+                    "| host           | ts                  | cpu | memory |",
+                    "+----------------+---------------------+-----+--------+",
+                    "| frontend.host2 | 1970-01-01 00:00:02 |     |        |",
+                    "| frontend.host3 | 1970-01-01 00:00:03 | 3.3 | 300    |",
+                    "+----------------+---------------------+-----+--------+",
+                ];
+                assert_eq!(pretty_print, expected);
+            }
+            _ => unreachable!(),
+        };
     }
 
     #[tokio::test]
