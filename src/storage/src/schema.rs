@@ -641,13 +641,13 @@ impl BatchOp for ProjectedSchema {
         if let Some(prev) = prev {
             assert_eq!(batch.num_columns(), prev.num_columns());
 
-            let indices = self.schema_to_read.full_key_indices();
+            let indices = self.schema_to_read.row_key_indices();
             for idx in indices {
                 let (current, prev_col) = (batch.column(idx), prev.column(idx));
                 current.dedup(selected, Some(prev_col).map(|v| v.as_ref()));
             }
         } else {
-            let indices = self.schema_to_read.full_key_indices();
+            let indices = self.schema_to_read.row_key_indices();
             for idx in indices {
                 let current = batch.column(idx);
                 current.dedup(selected, None);

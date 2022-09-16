@@ -61,3 +61,72 @@ impl<R: BatchReader> BatchReader for DedupReader<R> {
             .transpose()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use store_api::storage::OpType;
+
+    use super::*;
+    use crate::test_util::read_util;
+
+    #[tokio::test]
+    async fn test_dedup_reader_empty() {
+        let schema = read_util::new_projected_schema();
+        let reader = read_util::build_vec_reader(&[]);
+        let mut reader = DedupReader::new(schema, reader);
+
+        assert!(reader.next_batch().await.unwrap().is_none());
+        // Call next_batch() again is allowed.
+        assert!(reader.next_batch().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dedup_by_sequence() {
+        let schema = read_util::new_projected_schema();
+        let reader = read_util::build_full_vec_reader(&[
+            // key, value, sequence, op_type
+            &[
+                (100, 1, 1000, OpType::Put),
+                (100, 2, 999, OpType::Put),
+                (100, 3, 998, OpType::Put),
+                (101, 1, 1000, OpType::Put),
+            ],
+            &[
+                (101, 2, 999, OpType::Put),
+                (102, 12, 1000, OpType::Put),
+                (103, 13, 1000, OpType::Put),
+            ],
+            &[(103, 2, 999, OpType::Put)],
+        ]);
+        let mut reader = DedupReader::new(schema, reader);
+
+        let result = read_util::collect_kv_batch(&mut reader).await;
+        let expect = [
+            (100, Some(1)),
+            (101, Some(1)),
+            (102, Some(12)),
+            (103, Some(13)),
+        ];
+        assert_eq!(&expect, &result[..]);
+    }
+
+    #[tokio::test]
+    async fn test_dedup_contains_empty() {
+        let schema = read_util::new_projected_schema();
+        let reader = read_util::build_full_vec_reader(&[
+            // key, value, sequence, op_type
+            &[
+                (100, 1, 1000, OpType::Put),
+                (100, 2, 999, OpType::Put),
+                (101, 1, 1000, OpType::Put),
+            ],
+            &[],
+            &[(101, 2, 999, OpType::Put), (102, 12, 1000, OpType::Put)],
+        ]);
+        let mut reader = DedupReader::new(schema, reader);
+
+        let result = read_util::collect_kv_batch(&mut reader).await;
+        let expect = [(100, Some(1)), (101, Some(1)), (102, Some(12))];
+        assert_eq!(&expect, &result[..]);
+    }
+}

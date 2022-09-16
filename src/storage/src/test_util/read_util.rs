@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, TimestampVector, UInt64Vector, UInt8Vector};
+use store_api::storage::OpType;
 
 use crate::error::Result;
 use crate::memtable::{BatchIterator, BoxedBatchIterator, RowOrdering};
@@ -34,6 +35,18 @@ fn new_kv_batch(key_values: &[(i64, Option<i64>)]) -> Batch {
     let value = Arc::new(Int64Vector::from_iter(key_values.iter().map(|v| v.1)));
     let sequences = Arc::new(UInt64Vector::from_vec(vec![0; key_values.len()]));
     let op_types = Arc::new(UInt8Vector::from_vec(vec![0; key_values.len()]));
+
+    Batch::new(vec![key, value, sequences, op_types])
+}
+
+/// Build a new batch from (key, value, sequence, op_type)
+fn new_full_kv_batch(all_values: &[(i64, i64, u64, OpType)]) -> Batch {
+    let key = Arc::new(TimestampVector::from_values(all_values.iter().map(|v| v.0)));
+    let value = Arc::new(Int64Vector::from_values(all_values.iter().map(|v| v.1)));
+    let sequences = Arc::new(UInt64Vector::from_values(all_values.iter().map(|v| v.2)));
+    let op_types = Arc::new(UInt8Vector::from_values(
+        all_values.iter().map(|v| v.3.as_u8()),
+    ));
 
     Batch::new(vec![key, value, sequences, op_types])
 }
@@ -140,6 +153,15 @@ pub fn build_vec_reader(batches: &[&[(i64, Option<i64>)]]) -> VecBatchReader {
     let batches: Vec<_> = batches
         .iter()
         .map(|key_values| new_kv_batch(key_values))
+        .collect();
+
+    VecBatchReader::new(batches)
+}
+
+pub fn build_full_vec_reader(batches: &[&[(i64, i64, u64, OpType)]]) -> VecBatchReader {
+    let batches: Vec<_> = batches
+        .iter()
+        .map(|key_values| new_full_kv_batch(key_values))
         .collect();
 
     VecBatchReader::new(batches)
