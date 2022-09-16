@@ -80,7 +80,9 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
 mod test {
     use arrow::array::Int64Array as ArrowI64Array;
     use arrow::array::*;
-    use common_time::timestamp::TimeUnit;
+    use arrow::buffer::Buffer;
+    use arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
+    use common_time::timestamp::{TimeUnit, Timestamp};
 
     use super::*;
     use crate::prelude::Vector;
@@ -141,6 +143,26 @@ mod test {
         assert_eq!(
             value,
             Value::Timestamp(Timestamp::new(2, TimeUnit::Millisecond))
+        );
+
+        let array4 = PrimitiveArray::<i64>::from_data(
+            DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            Buffer::from_slice(&vec![1, 2, 3, 4]),
+            None,
+        );
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)),
+            arrow_array_get(&array4, 0).unwrap()
+        );
+
+        let array4 = PrimitiveArray::<i64>::from_data(
+            DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+            Buffer::from_slice(&vec![1, 2, 3, 4]),
+            None,
+        );
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Nanosecond)),
+            arrow_array_get(&array4, 0).unwrap()
         );
     }
 }
