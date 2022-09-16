@@ -1,6 +1,7 @@
 //! Common structs and utilities for read.
 
 mod merge;
+mod dedup;
 
 use async_trait::async_trait;
 use datatypes::data_type::DataType;
