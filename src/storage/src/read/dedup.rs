@@ -1,7 +1,10 @@
-use crate::schema::ProjectedSchemaRef;
-use crate::read::{Batch, BatchReader};
 use async_trait::async_trait;
+use datatypes::arrow::bitmap::MutableBitmap;
+use datatypes::vectors::BooleanVector;
+
 use crate::error::Result;
+use crate::read::{Batch, BatchOp, BatchReader};
+use crate::schema::ProjectedSchemaRef;
 
 /// A reader that dedup rows from inner reader.
 struct DedupReader<R> {
@@ -21,11 +24,40 @@ impl<R> DedupReader<R> {
             prev_batch: None,
         }
     }
+
+    /// Take `batch` and then returns a new batch with no duplicated rows.
+    fn dedup_batch(&mut self, batch: Batch) -> Result<Batch> {
+        if batch.is_empty() {
+            // No need to update `prev_batch` if current batch is empty.
+            return Ok(batch);
+        }
+
+        // The `arrow` filter needs `BooleanArray` as input so there is no convenient
+        // and efficient way to reuse the bitmap. Though we could use `MutableBooleanArray`,
+        // but we couldn't zero all bits in the mutable array easily.
+        let mut selected = MutableBitmap::from_len_zeroed(batch.num_rows());
+        self.schema
+            .dedup(&batch, &mut selected, self.prev_batch.as_ref());
+
+        // Store current batch to `prev_batch` so we could compare the next batch
+        // with this batch. Use `clone_from` to reuse allocated memory if possible.
+        self.prev_batch
+            .get_or_insert_with(Batch::default)
+            .clone_from(&batch);
+
+        let filter = BooleanVector::from(selected);
+        // Filter duplicate rows.
+        self.schema.filter(&batch, &filter)
+    }
 }
 
 #[async_trait]
 impl<R: BatchReader> BatchReader for DedupReader<R> {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        unimplemented!()
+        self.reader
+            .next_batch()
+            .await?
+            .map(|batch| self.dedup_batch(batch))
+            .transpose()
     }
 }

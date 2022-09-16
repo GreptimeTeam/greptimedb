@@ -1,5 +1,6 @@
 //! Common structs and utilities for read.
 
+mod dedup;
 mod merge;
 
 use std::cmp::Ordering;
