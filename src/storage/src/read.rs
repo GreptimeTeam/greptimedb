@@ -1,12 +1,14 @@
 //! Common structs and utilities for read.
 
 mod merge;
-mod dedup;
+
+use std::cmp::Ordering;
 
 use async_trait::async_trait;
+use datatypes::arrow::bitmap::MutableBitmap;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::{MutableVector, VectorRef};
+use datatypes::vectors::{BooleanVector, MutableVector, VectorRef};
 pub use merge::{MergeReader, MergeReaderBuilder};
 use snafu::{ensure, ResultExt};
 
@@ -82,6 +84,23 @@ impl Batch {
         let length = columns[0].len();
         assert!(columns.iter().all(|col| col.len() == length));
     }
+}
+
+/// Compute operations for Batch.
+pub trait BatchOp {
+    /// Compare `i-th` in `left` to `j-th` row in `right` by key (row key + internal columns).
+    ///
+    /// The caller should ensure `left` and `right` have same schema as `self`.
+    ///
+    /// # Panics
+    /// Panics if
+    /// - `i` or `j` is out of bound.
+    /// - `left` or `right` has insufficient column num.
+    fn compare_row(&self, left: &Batch, i: usize, right: &Batch, j: usize) -> Ordering;
+
+    fn dedup(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>);
+
+    fn filter(&self, batch: &Batch, filter: &BooleanVector) -> Result<Batch>;
 }
 
 /// Reusable [Batch] builder.

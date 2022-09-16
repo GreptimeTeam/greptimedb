@@ -43,7 +43,10 @@ impl ChunkReader for ChunkReaderImpl {
 
 impl ChunkReaderImpl {
     pub fn new(schema: ProjectedSchemaRef, batch_reader: BoxedBatchReader) -> ChunkReaderImpl {
-        ChunkReaderImpl { schema, batch_reader }
+        ChunkReaderImpl {
+            schema,
+            batch_reader,
+        }
     }
 }
 

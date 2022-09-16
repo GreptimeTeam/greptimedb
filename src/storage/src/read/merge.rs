@@ -49,7 +49,7 @@ use store_api::storage::consts;
 
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
-use crate::read::{Batch, BatchBuilder, BatchReader, BoxedBatchReader};
+use crate::read::{Batch, BatchBuilder, BatchOp, BatchReader, BoxedBatchReader};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef};
 
 /// Batch data source.
@@ -98,7 +98,7 @@ struct RowCursor<'a> {
 impl<'a> RowCursor<'a> {
     #[inline]
     fn compare(&self, schema: &ProjectedSchema, other: &RowCursor) -> Ordering {
-        schema.compare_row_of_batch(self.batch, self.pos, other.batch, other.pos)
+        schema.compare_row(self.batch, self.pos, other.batch, other.pos)
     }
 }
 

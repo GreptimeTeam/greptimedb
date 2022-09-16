@@ -4,16 +4,18 @@ use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::arrow::array::Array;
+use datatypes::arrow::bitmap::MutableBitmap;
 use datatypes::arrow::chunk::Chunk as ArrowChunk;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::schema::Metadata;
-use datatypes::vectors::{Helper, VectorRef};
+use datatypes::vectors::{BooleanVector, Helper, VectorRef};
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use store_api::storage::{consts, Chunk, ColumnId, ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 
+use crate::error;
 use crate::metadata::{ColumnMetadata, ColumnsMetadata, ColumnsMetadataRef};
-use crate::read::Batch;
+use crate::read::{Batch, BatchOp};
 
 const ROW_KEY_END_KEY: &str = "greptime:storage:row_key_end";
 const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
@@ -231,20 +233,6 @@ impl StoreSchema {
         Ok(Batch::new(columns))
     }
 
-    fn compare_row_of_batch(&self, left: &Batch, i: usize, right: &Batch, j: usize) -> Ordering {
-        let indices = self.full_key_indices();
-        for idx in indices {
-            let (left_col, right_col) = (left.column(idx), right.column(idx));
-            // Comparision of vector is done by virtual method calls currently. Consider using
-            // enum dispatch if this becomes bottleneck.
-            let order = left_col.get_ref(i).cmp(&right_col.get_ref(j));
-            if order != Ordering::Equal {
-                return order;
-            }
-        }
-        Ordering::Equal
-    }
-
     fn from_columns_metadata(columns: &ColumnsMetadata, version: u32) -> Result<StoreSchema> {
         let column_schemas: Vec<_> = columns
             .iter_all_columns()
@@ -316,6 +304,7 @@ impl StoreSchema {
         self.schema.num_columns()
     }
 
+    /// Returns indices of all key columns (row key columns and internal columns).
     fn full_key_indices(&self) -> impl Iterator<Item = usize> {
         // row key, sequence, op_type
         (0..self.row_key_end)
@@ -552,25 +541,6 @@ impl ProjectedSchema {
         Batch::new(columns)
     }
 
-    /// Compare `i-th` in `left` to `j-th` row in `right` by key (row key + internal columns).
-    ///
-    /// The caller should ensure `left` and `right` have same schema as `self.schema_to_read()`.
-    ///
-    /// # Panics
-    /// Panics if
-    /// - `i` or `j` is out of bound.
-    /// - `left` or `right` has insufficient column num.
-    #[inline]
-    pub fn compare_row_of_batch(
-        &self,
-        left: &Batch,
-        i: usize,
-        right: &Batch,
-        j: usize,
-    ) -> Ordering {
-        self.schema_to_read.compare_row_of_batch(left, i, right, j)
-    }
-
     fn build_schema_to_read(
         region_schema: &RegionSchema,
         projection: &Projection,
@@ -649,6 +619,55 @@ impl ProjectedSchema {
         }
 
         Ok(())
+    }
+}
+
+impl BatchOp for ProjectedSchema {
+    fn compare_row(&self, left: &Batch, i: usize, right: &Batch, j: usize) -> Ordering {
+        let indices = self.schema_to_read.full_key_indices();
+        for idx in indices {
+            let (left_col, right_col) = (left.column(idx), right.column(idx));
+            // Comparision of vector is done by virtual method calls currently. Consider using
+            // enum dispatch if this becomes bottleneck.
+            let order = left_col.get_ref(i).cmp(&right_col.get_ref(j));
+            if order != Ordering::Equal {
+                return order;
+            }
+        }
+        Ordering::Equal
+    }
+
+    fn dedup(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>) {
+        if let Some(prev) = prev {
+            assert_eq!(batch.num_columns(), prev.num_columns());
+
+            let indices = self.schema_to_read.full_key_indices();
+            for idx in indices {
+                let (current, prev_col) = (batch.column(idx), prev.column(idx));
+                current.dedup(selected, Some(prev_col).map(|v| v.as_ref()));
+            }
+        } else {
+            let indices = self.schema_to_read.full_key_indices();
+            for idx in indices {
+                let current = batch.column(idx);
+                current.dedup(selected, None);
+            }
+        }
+    }
+
+    fn filter(&self, batch: &Batch, filter: &BooleanVector) -> error::Result<Batch> {
+        let columns = batch
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                v.filter(filter).context(error::FilterColumnSnafu {
+                    name: self.schema_to_read.column_name(i),
+                })
+            })
+            .collect::<error::Result<Vec<_>>>()?;
+
+        Ok(Batch::new(columns))
     }
 }
 
