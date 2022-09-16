@@ -15,10 +15,8 @@ use snafu::{ensure, ResultExt};
 use crate::error::{self, Result};
 
 /// Storage internal representation of a batch of rows.
-///
-/// `Batch` must contain at least one column, but might not hold any row.
 // Now the structure of `Batch` is still unstable, all pub fields may be changed.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct Batch {
     /// Rows organized in columnar format.
     ///
@@ -31,9 +29,7 @@ impl Batch {
     /// Create a new `Batch` from `columns`.
     ///
     /// # Panics
-    /// Panics if
-    /// - `columns` is empty.
-    /// - vectors in `columns` have different length.
+    /// Panics if vectors in `columns` have different length.
     pub fn new(columns: Vec<VectorRef>) -> Batch {
         Self::assert_columns(&columns);
 
@@ -47,8 +43,7 @@ impl Batch {
 
     #[inline]
     pub fn num_rows(&self) -> usize {
-        // The invariant of `Batch::new()` ensure columns isn't empty.
-        self.columns[0].len()
+        self.columns.get(0).map(|v| v.len()).unwrap_or(0)
     }
 
     #[inline]
@@ -80,7 +75,10 @@ impl Batch {
     }
 
     fn assert_columns(columns: &[VectorRef]) {
-        assert!(!columns.is_empty());
+        if columns.is_empty() {
+            return;
+        }
+
         let length = columns[0].len();
         assert!(columns.iter().all(|col| col.len() == length));
     }
