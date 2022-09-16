@@ -21,7 +21,7 @@ pub async fn to_object_result(result: Result<Output>) -> ObjectResult {
             .mutate_result(rows as u32, 0)
             .build(),
         Ok(Output::Stream(stream)) => record_batchs(stream).await,
-        Ok(Output::RecordBatches(recordbatches)) => build_result(recordbatches.to_vec()).await,
+        Ok(Output::RecordBatches(recordbatches)) => build_result(recordbatches.take()).await,
         Err(err) => ObjectResultBuilder::new()
             .status_code(err.status_code() as u32)
             .err_msg(err.to_string())
