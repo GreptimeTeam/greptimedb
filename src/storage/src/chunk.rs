@@ -18,7 +18,7 @@ use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions, Visitor};
 // necessary to do so.
 pub struct ChunkReaderImpl {
     schema: ProjectedSchemaRef,
-    sst_reader: BoxedBatchReader,
+    batch_reader: BoxedBatchReader,
 }
 
 #[async_trait]
@@ -30,7 +30,7 @@ impl ChunkReader for ChunkReaderImpl {
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
-        let batch = match self.sst_reader.next_batch().await? {
+        let batch = match self.batch_reader.next_batch().await? {
             Some(b) => b,
             None => return Ok(None),
         };
@@ -42,8 +42,8 @@ impl ChunkReader for ChunkReaderImpl {
 }
 
 impl ChunkReaderImpl {
-    pub fn new(schema: ProjectedSchemaRef, sst_reader: BoxedBatchReader) -> ChunkReaderImpl {
-        ChunkReaderImpl { schema, sst_reader }
+    pub fn new(schema: ProjectedSchemaRef, batch_reader: BoxedBatchReader) -> ChunkReaderImpl {
+        ChunkReaderImpl { schema, batch_reader }
     }
 }
 
