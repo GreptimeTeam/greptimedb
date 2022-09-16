@@ -48,7 +48,7 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                 Output::RecordBatches(recordbatches) => {
                     let query_result = QueryResult {
                         schema: recordbatches.schema(),
-                        recordbatches: recordbatches.to_vec(),
+                        recordbatches: recordbatches.take(),
                     };
                     Self::write_query_result(query_result, writer)?
                 }

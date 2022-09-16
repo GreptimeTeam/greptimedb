@@ -287,7 +287,7 @@ mod tests {
             _ => unreachable!(),
         }
 
-        let sql = r#"insert into demo(host, cpu, memory, ts) values 
+        let sql = r#"insert into demo(host, cpu, memory, ts) values
                                 ('frontend.host1', 1.1, 100, 1000),
                                 ('frontend.host2', null, null, 2000),
                                 ('frontend.host3', 3.3, 300, 3000)
@@ -307,7 +307,7 @@ mod tests {
         match output {
             Output::RecordBatches(recordbatches) => {
                 let recordbatches = recordbatches
-                    .to_vec()
+                    .take()
                     .into_iter()
                     .map(|r| r.df_recordbatch)
                     .collect::<Vec<DfRecordBatch>>();

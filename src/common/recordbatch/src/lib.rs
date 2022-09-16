@@ -71,8 +71,7 @@ impl RecordBatches {
         self.schema.clone()
     }
 
-    // TODO: a new name that to avoid misunderstanding it as an allocation operation
-    pub fn to_vec(self) -> Vec<RecordBatch> {
+    pub fn take(self) -> Vec<RecordBatch> {
         self.batches
     }
 }
@@ -115,6 +114,6 @@ mod tests {
 
         let batches = RecordBatches::try_new(schema1.clone(), vec![batch1.clone()]).unwrap();
         assert_eq!(schema1, batches.schema());
-        assert_eq!(vec![batch1], batches.to_vec());
+        assert_eq!(vec![batch1], batches.take());
     }
 }

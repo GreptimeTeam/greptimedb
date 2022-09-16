@@ -51,7 +51,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
             }
             Output::RecordBatches(recordbatches) => {
                 let schema = recordbatches.schema();
-                recordbatches_to_query_response(recordbatches.to_vec().iter(), schema)
+                recordbatches_to_query_response(recordbatches.take().iter(), schema)
             }
         }
     }

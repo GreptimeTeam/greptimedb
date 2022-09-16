@@ -86,7 +86,7 @@ impl JsonResponse {
                 Err(e) => Self::with_error(Some(format!("Recordbatch error: {}", e))),
             },
             Ok(Output::RecordBatches(recordbatches)) => {
-                Self::with_output(Some(JsonOutput::Rows(recordbatches.to_vec())))
+                Self::with_output(Some(JsonOutput::Rows(recordbatches.take())))
             }
             Err(e) => Self::with_error(Some(format!("Query engine output error: {}", e))),
         }
