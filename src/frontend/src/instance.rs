@@ -334,7 +334,7 @@ mod tests {
         match output {
             Output::RecordBatches(recordbatches) => {
                 let recordbatches = recordbatches
-                    .to_vec()
+                    .take()
                     .into_iter()
                     .map(|r| r.df_recordbatch)
                     .collect::<Vec<DfRecordBatch>>();
