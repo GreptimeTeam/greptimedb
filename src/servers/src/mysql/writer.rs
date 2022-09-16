@@ -3,6 +3,8 @@ use std::ops::Deref;
 
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
+use common_time::datetime::DateTime;
+use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use opensrv_mysql::{
@@ -71,11 +73,6 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
         query_result: QueryResult,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        if query_result.recordbatches.is_empty() {
-            writer.completed(OkResponse::default())?;
-            return Ok(());
-        }
-
         match create_mysql_column_def(&query_result.schema) {
             Ok(column_def) => {
                 let mut row_writer = writer.start(&column_def)?;
@@ -111,7 +108,7 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                     Value::Date(v) => row_writer.write_col(v.val())?,
                     Value::DateTime(v) => row_writer.write_col(v.val())?,
                     Value::Timestamp(v) => row_writer
-                        .write_col(v.convert_to(common_time::timestamp::TimeUnit::Second))?, // TODO(hl): Can we also write
+                        .write_col(DateTime::new(v.convert_to(TimeUnit::Second)).to_string())?,
                     Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
@@ -152,6 +149,7 @@ fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
         ConcreteDataType::Binary(_) | ConcreteDataType::String(_) => {
             Ok(ColumnType::MYSQL_TYPE_VARCHAR)
         }
+        ConcreteDataType::Timestamp(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
         _ => error::InternalSnafu {
             err_msg: format!(
                 "not implemented for column datatype {:?}",

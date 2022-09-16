@@ -3,9 +3,11 @@ use arrow::array::{
     MutableUtf8Array, PrimitiveArray, Utf8Array,
 };
 use arrow::datatypes::DataType as ArrowDataType;
+use common_time::timestamp::Timestamp;
 use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result};
+use crate::prelude::ConcreteDataType;
 use crate::value::Value;
 
 pub type BinaryArray = ArrowBinaryArray<i64>;
@@ -58,6 +60,14 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
         }
         ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
             Value::String(cast_array!(array, StringArray).value(idx).into())
+        }
+        ArrowDataType::Timestamp(t, _) => {
+            let value = cast_array!(array, PrimitiveArray::<i64>).value(idx);
+            let unit = match ConcreteDataType::from_arrow_time_unit(t) {
+                ConcreteDataType::Timestamp(t) => t.unit,
+                _ => unreachable!(),
+            };
+            Value::Timestamp(Timestamp::new(value, unit))
         }
         // TODO(sunng87): List
         _ => unimplemented!("Arrow array datatype: {:?}", array.data_type()),

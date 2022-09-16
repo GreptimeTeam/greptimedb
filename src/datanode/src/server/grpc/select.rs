@@ -4,62 +4,61 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::{codec::SelectResult, column::Values, Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::BitVec;
-use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
-use common_recordbatch::{util, RecordBatch, SendableRecordBatchStream};
+use common_recordbatch::{util, RecordBatches, SendableRecordBatchStream};
 use datatypes::arrow_array::{BinaryArray, StringArray};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, ConversionSnafu, Result};
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 
-pub async fn to_object_result(result: Result<Output>) -> ObjectResult {
-    match result {
-        Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
+pub async fn to_object_result(output: Result<Output>) -> ObjectResult {
+    let result = match output {
+        Ok(Output::AffectedRows(rows)) => Ok(ObjectResultBuilder::new()
             .status_code(StatusCode::Success as u32)
             .mutate_result(rows as u32, 0)
-            .build(),
-        Ok(Output::Stream(stream)) => record_batchs(stream).await,
-        Ok(Output::RecordBatches(recordbatches)) => build_result(recordbatches.take()).await,
-        Err(err) => ObjectResultBuilder::new()
-            .status_code(err.status_code() as u32)
-            .err_msg(err.to_string())
-            .build(),
-    }
-}
-
-async fn record_batchs(stream: SendableRecordBatchStream) -> ObjectResult {
-    match util::collect(stream).await {
-        Ok(recordbatches) => build_result(recordbatches).await,
-        Err(err) => build_err_result(&err),
-    }
-}
-
-async fn build_result(recordbatches: Vec<RecordBatch>) -> ObjectResult {
-    match try_convert(recordbatches) {
-        Ok(select_result) => ObjectResultBuilder::new()
-            .status_code(StatusCode::Success as u32)
-            .select_result(select_result)
-            .build(),
-        Err(err) => build_err_result(&err),
-    }
-}
-
-// All schemas of record_batches must be the same.
-fn try_convert(record_batches: Vec<RecordBatch>) -> Result<SelectResult> {
-    let first = if let Some(r) = record_batches.get(0) {
-        r
-    } else {
-        return Ok(SelectResult::default());
+            .build()),
+        Ok(Output::Stream(stream)) => collect(stream).await,
+        Ok(Output::RecordBatches(recordbatches)) => build_result(recordbatches),
+        Err(e) => return build_err_result(&e),
     };
+    match result {
+        Ok(r) => r,
+        Err(e) => build_err_result(&e),
+    }
+}
+async fn collect(stream: SendableRecordBatchStream) -> Result<ObjectResult> {
+    let schema = stream.schema();
+
+    let recordbatches = util::collect(stream)
+        .await
+        .and_then(|batches| RecordBatches::try_new(schema, batches))
+        .context(error::CollectRecordBatchesSnafu)?;
+
+    let object_result = build_result(recordbatches)?;
+    Ok(object_result)
+}
+
+fn build_result(recordbatches: RecordBatches) -> Result<ObjectResult> {
+    let select_result = try_convert(recordbatches)?;
+    let object_result = ObjectResultBuilder::new()
+        .status_code(StatusCode::Success as u32)
+        .select_result(select_result)
+        .build();
+    Ok(object_result)
+}
+
+fn try_convert(record_batches: RecordBatches) -> Result<SelectResult> {
+    let schema = record_batches.schema();
+    let record_batches = record_batches.take();
 
     let row_count: usize = record_batches
         .iter()
         .map(|r| r.df_recordbatch.num_rows())
         .sum();
 
-    let schemas = first.schema.column_schemas();
+    let schemas = schema.column_schemas();
     let mut columns = Vec::with_capacity(schemas.len());
 
     for (idx, schema) in schemas.iter().enumerate() {
@@ -179,7 +178,7 @@ mod tests {
         array::{Array, BooleanArray, PrimitiveArray},
         datatypes::{DataType, Field},
     };
-    use common_recordbatch::RecordBatch;
+    use common_recordbatch::{RecordBatch, RecordBatches};
     use datafusion::field_util::SchemaExt;
     use datatypes::arrow::datatypes::Schema as ArrowSchema;
     use datatypes::{
@@ -193,8 +192,10 @@ mod tests {
     #[test]
     fn test_convert_record_batches_to_select_result() {
         let r1 = mock_record_batch();
+        let schema = r1.schema.clone();
         let r2 = mock_record_batch();
         let record_batches = vec![r1, r2];
+        let record_batches = RecordBatches::try_new(schema, record_batches).unwrap();
 
         let s = try_convert(record_batches).unwrap();
 

@@ -195,9 +195,13 @@ impl TryFrom<ObjectResult> for Output {
                     .collect::<Vec<ColumnSchema>>();
 
                 let schema = Arc::new(Schema::new(column_schemas));
-                let recordbatches = RecordBatch::new(schema, vectors)
-                    .and_then(|batch| RecordBatches::try_new(batch.schema.clone(), vec![batch]))
-                    .context(error::CreateRecordBatchesSnafu)?;
+                let recordbatches = if vectors.is_empty() {
+                    RecordBatches::try_new(schema, vec![])
+                } else {
+                    RecordBatch::new(schema, vectors)
+                        .and_then(|batch| RecordBatches::try_new(batch.schema.clone(), vec![batch]))
+                }
+                .context(error::CreateRecordBatchesSnafu)?;
                 Output::RecordBatches(recordbatches)
             }
             ObjectResult::Mutate(mutate) => {
