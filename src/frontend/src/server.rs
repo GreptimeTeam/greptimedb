@@ -5,6 +5,8 @@ use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::GrpcServer;
 use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
+#[cfg(feature = "postgres")]
+use servers::postgres::PostgresServer;
 use servers::server::Server;
 use snafu::ResultExt;
 use tokio::try_join;
@@ -55,10 +57,32 @@ impl Services {
             None
         };
 
+        #[cfg(feature = "postgres")]
+        let postgres_server_and_addr = if let Some(pg_addr) = &opts.postgres_addr {
+            let pg_addr = parse_addr(pg_addr)?;
+
+            let pg_io_runtime = Arc::new(
+                RuntimeBuilder::default()
+                    .worker_threads(opts.postgres_runtime_size as usize)
+                    .thread_name("pg-io-handlers")
+                    .build()
+                    .context(error::RuntimeResourceSnafu)?,
+            );
+
+            let pg_server =
+                Box::new(PostgresServer::new(instance.clone(), pg_io_runtime)) as Box<dyn Server>;
+
+            Some((pg_server, pg_addr))
+        } else {
+            None
+        };
+
         try_join!(
             start_server(http_server_and_addr),
             start_server(grpc_server_and_addr),
-            start_server(mysql_server_and_addr)
+            start_server(mysql_server_and_addr),
+            #[cfg(feature = "postgres")]
+            start_server(postgres_server_and_addr),
         )
         .context(error::StartServerSnafu)?;
         Ok(())

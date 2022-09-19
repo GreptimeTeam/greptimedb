@@ -13,6 +13,10 @@ pub struct FrontendOptions {
     pub grpc_addr: Option<String>,
     pub mysql_addr: Option<String>,
     pub mysql_runtime_size: u32,
+    #[cfg(feature = "postgres")]
+    pub postgres_addr: Option<String>,
+    #[cfg(feature = "postgres")]
+    pub postgres_runtime_size: u32,
 }
 
 impl Default for FrontendOptions {
@@ -22,6 +26,10 @@ impl Default for FrontendOptions {
             grpc_addr: Some("0.0.0.0:4001".to_string()),
             mysql_addr: Some("0.0.0.0:4002".to_string()),
             mysql_runtime_size: 2,
+            #[cfg(feature = "postgres")]
+            postgres_addr: Some("0.0.0.0:4003".to_string()),
+            #[cfg(feature = "postgres")]
+            postgres_runtime_size: 2,
         }
     }
 }
