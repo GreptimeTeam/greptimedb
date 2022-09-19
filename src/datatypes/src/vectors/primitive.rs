@@ -63,6 +63,10 @@ impl<T: Primitive> PrimitiveVector<T> {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
+
+    fn slice(&self, offset: usize, length: usize) -> Self {
+        Self::from(self.array.slice(offset, length))
+    }
 }
 
 impl<T: PrimitiveElement> Vector for PrimitiveVector<T> {
@@ -103,7 +107,7 @@ impl<T: PrimitiveElement> Vector for PrimitiveVector<T> {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        Arc::new(Self::from(self.array.slice(offset, length)))
+        Arc::new(self.slice(offset, length))
     }
 
     fn get(&self, index: usize) -> Value {
@@ -236,9 +240,7 @@ impl<T: PrimitiveElement> MutableVector for PrimitiveVectorBuilder<T> {
     }
 
     fn to_vector(&mut self) -> VectorRef {
-        Arc::new(PrimitiveVector::<T> {
-            array: std::mem::take(&mut self.mutable_array).into(),
-        })
+        Arc::new(self.finish())
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
@@ -303,7 +305,6 @@ pub(crate) fn replicate_primitive<T: PrimitiveElement>(
     ))
 }
 
-// Remove `data_type` param once https://github.com/GreptimeTeam/greptimedb/issues/228 is fixed.
 pub(crate) fn replicate_primitive_with_type<T: PrimitiveElement>(
     vector: &PrimitiveVector<T>,
     offsets: &[usize],
@@ -312,8 +313,7 @@ pub(crate) fn replicate_primitive_with_type<T: PrimitiveElement>(
     assert_eq!(offsets.len(), vector.len());
 
     if offsets.is_empty() {
-        // Just use `vector.slice()` once https://github.com/GreptimeTeam/greptimedb/issues/228 is fixed.
-        return PrimitiveVector::from(vector.array.slice(0, 0));
+        return vector.slice(0, 0);
     }
 
     let mut builder = PrimitiveVectorBuilder::<T>::with_type_capacity(
