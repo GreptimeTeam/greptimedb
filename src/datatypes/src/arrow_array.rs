@@ -78,9 +78,13 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
 
 #[cfg(test)]
 mod test {
+    use arrow::array::Int64Array as ArrowI64Array;
     use arrow::array::*;
+    use common_time::timestamp::TimeUnit;
 
     use super::*;
+    use crate::prelude::Vector;
+    use crate::vectors::TimestampVector;
 
     #[test]
     fn test_arrow_array_access() {
@@ -98,8 +102,8 @@ mod test {
         assert_eq!(Value::Int32(2), arrow_array_get(&array1, 1).unwrap());
         let array1 = UInt32Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(Value::UInt32(2), arrow_array_get(&array1, 1).unwrap());
-        let array1 = Int64Array::from_vec(vec![1, 2, 3, 4]);
-        assert_eq!(Value::Int64(2), arrow_array_get(&array1, 1).unwrap());
+        let array = ArrowI64Array::from_vec(vec![1, 2, 3, 4]);
+        assert_eq!(Value::Int64(2), arrow_array_get(&array, 1).unwrap());
         let array1 = UInt64Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(Value::UInt64(2), arrow_array_get(&array1, 1).unwrap());
         let array1 = Float32Array::from_vec(vec![1f32, 2f32, 3f32, 4f32]);
@@ -130,5 +134,13 @@ mod test {
             arrow_array_get(&array3, 0).unwrap()
         );
         assert_eq!(Value::Null, arrow_array_get(&array3, 1).unwrap());
+
+        let vector = TimestampVector::new(ArrowI64Array::from_vec(vec![1, 2, 3, 4]));
+        let array = vector.to_boxed_arrow_array();
+        let value = arrow_array_get(&*array, 1).unwrap();
+        assert_eq!(
+            value,
+            Value::Timestamp(Timestamp::new(2, TimeUnit::Millisecond))
+        );
     }
 }
