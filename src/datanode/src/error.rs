@@ -200,6 +200,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: script::error::Error,
     },
+
+    #[snafu(display("Failed to collect RecordBatches, source: {}", source))]
+    CollectRecordBatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -244,6 +250,7 @@ impl ErrorExt for Error {
             Error::StartScriptManager { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
+            Error::CollectRecordBatches { source } => source.status_code(),
         }
     }
 
