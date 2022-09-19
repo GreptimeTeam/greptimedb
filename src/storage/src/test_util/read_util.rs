@@ -30,7 +30,7 @@ pub fn new_projected_schema() -> ProjectedSchemaRef {
 }
 
 /// Build a new batch, with 0 sequence and op_type.
-fn new_kv_batch(key_values: &[(i64, Option<i64>)]) -> Batch {
+pub fn new_kv_batch(key_values: &[(i64, Option<i64>)]) -> Batch {
     let key = Arc::new(TimestampVector::from_values(key_values.iter().map(|v| v.0)));
     let value = Arc::new(Int64Vector::from_iter(key_values.iter().map(|v| v.1)));
     let sequences = Arc::new(UInt64Vector::from_vec(vec![0; key_values.len()]));

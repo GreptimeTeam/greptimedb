@@ -698,8 +698,9 @@ fn build_user_schema(columns: &ColumnsMetadata, version: u32) -> Result<Schema> 
 
 #[cfg(test)]
 mod tests {
+    use datatypes::prelude::ScalarVector;
     use datatypes::type_id::LogicalTypeId;
-    use datatypes::vectors::{Int64Vector, UInt64Vector, UInt8Vector};
+    use datatypes::vectors::{Int64Vector, TimestampVector, UInt64Vector, UInt8Vector};
     use store_api::storage::OpType;
 
     use super::*;
@@ -974,5 +975,34 @@ mod tests {
         assert_eq!(Ordering::Greater, schema.compare_row(&left, 0, &right, 0));
         assert_eq!(Ordering::Less, schema.compare_row(&left, 0, &right, 1));
         assert_eq!(Ordering::Equal, schema.compare_row(&left, 0, &right, 2));
+    }
+
+    #[test]
+    fn test_dedup_batch() {
+        let schema = read_util::new_projected_schema();
+        let batch = read_util::new_kv_batch(&[(1000, Some(1)), (2000, Some(2)), (2000, Some(2))]);
+        let mut selected = MutableBitmap::from_len_zeroed(3);
+
+        schema.dedup(&batch, &mut selected, None);
+        assert_eq!(true, selected.get(0));
+        assert_eq!(true, selected.get(1));
+        assert_eq!(false, selected.get(2));
+
+        let prev = read_util::new_kv_batch(&[(1000, Some(1))]);
+        schema.dedup(&batch, &mut selected, Some(&prev));
+        assert_eq!(false, selected.get(0));
+        assert_eq!(true, selected.get(1));
+        assert_eq!(false, selected.get(2));
+    }
+
+    #[test]
+    fn test_filter_batch() {
+        let schema = read_util::new_projected_schema();
+        let batch = read_util::new_kv_batch(&[(1000, Some(1)), (2000, Some(2)), (3000, Some(3))]);
+        let filter = BooleanVector::from_slice(&[true, false, true]);
+
+        let res = schema.filter(&batch, &filter).unwrap();
+        let expect: VectorRef = Arc::new(TimestampVector::from_values([1000, 3000]));
+        assert_eq!(expect, *res.column(0));
     }
 }
