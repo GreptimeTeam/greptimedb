@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use log_store::fs::log::LocalFileLogStore;
-use store_api::storage::WriteResponse;
+use store_api::storage::{OpenOptions, WriteResponse};
 use tempdir::TempDir;
 
 use crate::engine;
@@ -31,28 +31,51 @@ async fn create_region_for_flush(
 
 /// Tester for region flush.
 struct FlushTester {
-    base: FileTesterBase,
+    base: Option<FileTesterBase>,
+    store_dir: String,
+    flush_strategy: FlushStrategyRef,
 }
 
 impl FlushTester {
     async fn new(store_dir: &str, flush_strategy: FlushStrategyRef) -> FlushTester {
-        let region = create_region_for_flush(store_dir, false, flush_strategy).await;
+        let region = create_region_for_flush(store_dir, false, flush_strategy.clone()).await;
 
         FlushTester {
-            base: FileTesterBase::with_region(region),
+            base: Some(FileTesterBase::with_region(region)),
+            store_dir: store_dir.to_string(),
+            flush_strategy: flush_strategy.clone(),
         }
     }
 
+    async fn reopen(&mut self) {
+        // Close the old region.
+        self.base = None;
+        // Reopen the region.
+        let mut store_config = config_util::new_store_config(REGION_NAME, &self.store_dir).await;
+        store_config.flush_strategy = self.flush_strategy.clone();
+        let opts = OpenOptions::default();
+        let region = RegionImpl::open(REGION_NAME.to_string(), store_config, &opts)
+            .await
+            .unwrap()
+            .unwrap();
+        self.base = Some(FileTesterBase::with_region(region));
+    }
+
+    #[inline]
+    fn base(&self) -> &FileTesterBase {
+        self.base.as_ref().unwrap()
+    }
+
     async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
-        self.base.put(data).await
+        self.base().put(data).await
     }
 
     async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
-        self.base.full_scan().await
+        self.base().full_scan().await
     }
 
     async fn wait_flush_done(&self) {
-        self.base.region.wait_flush_done().await.unwrap();
+        self.base().region.wait_flush_done().await.unwrap();
     }
 }
 
@@ -78,7 +101,18 @@ impl FlushStrategy for FlushSwitch {
     }
 }
 
-// TODO(yingwen): Test replay after flush.
+fn has_parquet_file(sst_dir: &str) -> bool {
+    for entry in std::fs::read_dir(sst_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if !path.is_dir() {
+            assert_eq!("parquet", path.extension().unwrap());
+            return true;
+        }
+    }
+
+    false
+}
 
 #[tokio::test]
 async fn test_flush_and_stall() {
@@ -106,16 +140,38 @@ async fn test_flush_and_stall() {
 
     // Check parquet files.
     let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
-    let mut has_parquet_file = false;
-    for entry in std::fs::read_dir(sst_dir).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if !path.is_dir() {
-            assert_eq!("parquet", path.extension().unwrap());
-            has_parquet_file = true;
-        }
-    }
-    assert!(has_parquet_file);
+    assert!(has_parquet_file(&sst_dir));
+}
+
+#[tokio::test]
+async fn test_flush_empty() {
+    let dir = TempDir::new("flush-empty").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+
+    let flush_switch = Arc::new(FlushSwitch::default());
+    let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
+
+    // Now set should flush to true to trigger flush.
+    flush_switch.set_should_flush(true);
+    let data = [(1000, Some(100))];
+    // Put element to trigger flush.
+    tester.put(&data).await;
+    tester.wait_flush_done().await;
+
+    // Disable flush.
+    flush_switch.set_should_flush(false);
+    // Put again.
+    let data = [(2000, Some(200))];
+    tester.put(&data).await;
+
+    // No parquet file should be flushed.
+    let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
+    assert!(!has_parquet_file(&sst_dir));
+
+    let expect = vec![(1000, Some(100)), (2000, Some(200))];
+
+    let output = tester.full_scan().await;
+    assert_eq!(expect, output);
 }
 
 #[tokio::test]
@@ -142,6 +198,14 @@ async fn test_read_after_flush() {
 
     let expect = vec![(1000, Some(100)), (2000, Some(200)), (3000, Some(300))];
 
+    let output = tester.full_scan().await;
+    assert_eq!(expect, output);
+
+    // Reopen
+    let mut tester = tester;
+    tester.reopen().await;
+
+    // Scan after reopen.
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
 }

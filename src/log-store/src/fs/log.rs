@@ -228,7 +228,7 @@ impl LogStore for LocalFileLogStore {
             for (start_id, file) in files.iter() {
                 // TODO(hl): Use index to lookup file
                 if *start_id <= id {
-                    let s = file.create_stream(&ns, *start_id);
+                    let s = file.create_stream(&ns, id);
                     pin_mut!(s);
                     while let Some(entries) = s.next().await {
                         match entries {
