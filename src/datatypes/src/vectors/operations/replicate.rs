@@ -72,6 +72,11 @@ mod tests {
 
     #[test]
     fn test_replicate_null() {
+        let v = NullVector::new(0);
+        let offsets = [];
+        let v = v.replicate(&offsets);
+        assert!(v.is_empty());
+
         let v = NullVector::new(3);
         let offsets = [1, 3, 5];
 
