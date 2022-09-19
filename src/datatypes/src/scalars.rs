@@ -1,13 +1,10 @@
 use std::any::Any;
 
-use common_time::timestamp::Timestamp;
+use common_time::{Date, DateTime, Timestamp};
 
 use crate::prelude::*;
-use crate::vectors::date::DateVector;
-use crate::vectors::datetime::DateTimeVector;
+use crate::value::{ListValue, ListValueRef};
 use crate::vectors::*;
-
-pub mod common;
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
     match iter.size_hint() {
@@ -244,9 +241,9 @@ impl<'a> ScalarRef<'a> for &'a [u8] {
     }
 }
 
-impl Scalar for common_time::date::Date {
+impl Scalar for Date {
     type VectorType = DateVector;
-    type RefType<'a> = common_time::date::Date;
+    type RefType<'a> = Date;
 
     fn as_scalar_ref(&self) -> Self::RefType<'_> {
         *self
@@ -257,18 +254,18 @@ impl Scalar for common_time::date::Date {
     }
 }
 
-impl<'a> ScalarRef<'a> for common_time::date::Date {
+impl<'a> ScalarRef<'a> for Date {
     type VectorType = DateVector;
-    type ScalarType = common_time::date::Date;
+    type ScalarType = Date;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
         *self
     }
 }
 
-impl Scalar for common_time::datetime::DateTime {
+impl Scalar for DateTime {
     type VectorType = DateTimeVector;
-    type RefType<'a> = common_time::datetime::DateTime;
+    type RefType<'a> = DateTime;
 
     fn as_scalar_ref(&self) -> Self::RefType<'_> {
         *self
@@ -279,9 +276,9 @@ impl Scalar for common_time::datetime::DateTime {
     }
 }
 
-impl<'a> ScalarRef<'a> for common_time::datetime::DateTime {
+impl<'a> ScalarRef<'a> for DateTime {
     type VectorType = DateTimeVector;
-    type ScalarType = common_time::datetime::DateTime;
+    type ScalarType = DateTime;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
         *self
@@ -310,10 +307,41 @@ impl<'a> ScalarRef<'a> for Timestamp {
     }
 }
 
+impl Scalar for ListValue {
+    type VectorType = ListVector;
+    type RefType<'a> = ListValueRef<'a>;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        ListValueRef::Ref { val: self }
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
+
+impl<'a> ScalarRef<'a> for ListValueRef<'a> {
+    type VectorType = ListVector;
+    type ScalarType = ListValue;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        match self {
+            ListValueRef::Indexed { vector, idx } => match vector.get(*idx) {
+                // Normally should not get `Value::Null` if the `ListValueRef` comes
+                // from the iterator of the ListVector, but we avoid panic and just
+                // returns a default list value in such case since `ListValueRef` may
+                // be constructed manually.
+                Value::Null => ListValue::default(),
+                Value::List(v) => v,
+                _ => unreachable!(),
+            },
+            ListValueRef::Ref { val } => (*val).clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use common_time::date::Date;
-
     use super::*;
     use crate::vectors::binary::BinaryVector;
     use crate::vectors::primitive::Int32Vector;
@@ -357,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_build_date_vector() {
+    fn test_build_date_vector() {
         let expect: Vec<Option<Date>> = vec![
             Some(Date::new(0)),
             Some(Date::new(-1)),
@@ -369,14 +397,49 @@ mod tests {
     }
 
     #[test]
-    pub fn test_date_scalar() {
+    fn test_date_scalar() {
         let date = Date::new(1);
         assert_eq!(date, date.as_scalar_ref());
         assert_eq!(date, date.to_owned_scalar());
     }
 
     #[test]
-    pub fn test_build_timestamp_vector() {
+    fn test_datetime_scalar() {
+        let dt = DateTime::new(123);
+        assert_eq!(dt, dt.as_scalar_ref());
+        assert_eq!(dt, dt.to_owned_scalar());
+    }
+
+    #[test]
+    fn test_list_value_scalar() {
+        let list_value = ListValue::new(
+            Some(Box::new(vec![Value::Int32(123)])),
+            ConcreteDataType::int32_datatype(),
+        );
+        let list_ref = ListValueRef::Ref { val: &list_value };
+        assert_eq!(list_ref, list_value.as_scalar_ref());
+        assert_eq!(list_value, list_ref.to_owned_scalar());
+
+        let mut builder =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 1);
+        builder.push(None);
+        builder.push(Some(list_value.as_scalar_ref()));
+        let vector = builder.finish();
+
+        let ref_on_vec = ListValueRef::Indexed {
+            vector: &vector,
+            idx: 0,
+        };
+        assert_eq!(ListValue::default(), ref_on_vec.to_owned_scalar());
+        let ref_on_vec = ListValueRef::Indexed {
+            vector: &vector,
+            idx: 1,
+        };
+        assert_eq!(list_value, ref_on_vec.to_owned_scalar());
+    }
+
+    #[test]
+    fn test_build_timestamp_vector() {
         let expect: Vec<Option<Timestamp>> = vec![Some(10.into()), None, Some(42.into())];
         let vector: TimestampVector = build_vector_from_slice(&expect);
         assert_vector_eq(&expect, &vector);

@@ -48,6 +48,10 @@ impl TimestampVector {
             },
         }
     }
+
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        self.array.as_arrow()
+    }
 }
 
 impl Vector for TimestampVector {
@@ -115,10 +119,6 @@ impl Vector for TimestampVector {
                 unreachable!()
             }
         }
-    }
-
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        self.array.replicate(offsets)
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
@@ -247,6 +247,15 @@ impl ScalarVectorBuilder for TimestampVectorBuilder {
     }
 }
 
+pub(crate) fn replicate_timestamp(vector: &TimestampVector, offsets: &[usize]) -> VectorRef {
+    let array = crate::vectors::primitive::replicate_primitive_with_type(
+        &vector.array,
+        offsets,
+        vector.data_type(),
+    );
+    Arc::new(TimestampVector { array })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +292,14 @@ mod tests {
             ],
             vector.iter_data().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_timestamp_from_arrow() {
+        let vector =
+            TimestampVector::from_slice(&[Timestamp::from_millis(1), Timestamp::from_millis(2)]);
+        let arrow = vector.as_arrow().slice(0, vector.len());
+        let vector2 = TimestampVector::try_from_arrow_array(&arrow).unwrap();
+        assert_eq!(vector, vector2);
     }
 }

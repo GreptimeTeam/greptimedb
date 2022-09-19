@@ -36,6 +36,10 @@ impl DateVector {
                 .clone(),
         ))
     }
+
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        self.array.as_arrow()
+    }
 }
 
 impl Vector for DateVector {
@@ -101,10 +105,6 @@ impl Vector for DateVector {
                 unreachable!()
             }
         }
-    }
-
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        self.array.replicate(offsets)
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
@@ -236,6 +236,15 @@ impl ScalarVectorBuilder for DateVectorBuilder {
     }
 }
 
+pub(crate) fn replicate_date(vector: &DateVector, offsets: &[usize]) -> VectorRef {
+    let array = crate::vectors::primitive::replicate_primitive_with_type(
+        &vector.array,
+        offsets,
+        vector.data_type(),
+    );
+    Arc::new(DateVector { array })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +301,13 @@ mod tests {
             Date::new(3),
         ]));
         assert_eq!(expect, vector);
+    }
+
+    #[test]
+    fn test_date_from_arrow() {
+        let vector = DateVector::from_slice(&[Date::new(1), Date::new(2)]);
+        let arrow = vector.as_arrow().slice(0, vector.len());
+        let vector2 = DateVector::try_from_arrow_array(&arrow).unwrap();
+        assert_eq!(vector, vector2);
     }
 }

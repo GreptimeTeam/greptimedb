@@ -8,7 +8,6 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
-use crate::scalars::common::replicate_scalar_vector;
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
@@ -18,6 +17,16 @@ use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 #[derive(Debug, PartialEq)]
 pub struct BooleanVector {
     array: BooleanArray,
+}
+
+impl BooleanVector {
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        &self.array
+    }
+
+    pub(crate) fn as_boolean_array(&self) -> &BooleanArray {
+        &self.array
+    }
 }
 
 impl From<Vec<bool>> for BooleanVector {
@@ -93,10 +102,6 @@ impl Vector for BooleanVector {
 
     fn get(&self, index: usize) -> Value {
         vectors::impl_get_for_vector!(self.array, index)
-    }
-
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        replicate_scalar_vector(self, offsets)
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {

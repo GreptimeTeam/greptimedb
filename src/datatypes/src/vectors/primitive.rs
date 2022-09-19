@@ -8,7 +8,7 @@ use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
 use snafu::{OptionExt, ResultExt};
 
-use crate::data_type::ConcreteDataType;
+use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::ConversionSnafu;
 use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{Scalar, ScalarRef};
@@ -59,6 +59,14 @@ impl<T: Primitive> PrimitiveVector<T> {
             array: PrimitiveArray::from_values(iter),
         }
     }
+
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        &self.array
+    }
+
+    fn slice(&self, offset: usize, length: usize) -> Self {
+        Self::from(self.array.slice(offset, length))
+    }
 }
 
 impl<T: PrimitiveElement> Vector for PrimitiveVector<T> {
@@ -99,38 +107,11 @@ impl<T: PrimitiveElement> Vector for PrimitiveVector<T> {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        Arc::new(Self::from(self.array.slice(offset, length)))
+        Arc::new(self.slice(offset, length))
     }
 
     fn get(&self, index: usize) -> Value {
         vectors::impl_get_for_vector!(self.array, index)
-    }
-
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        debug_assert!(
-            offsets.len() == self.len(),
-            "Size of offsets must match size of column"
-        );
-
-        if offsets.is_empty() {
-            return self.slice(0, 0);
-        }
-
-        let mut builder =
-            PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap() as usize);
-
-        let mut previous_offset = 0;
-
-        for (i, offset) in offsets.iter().enumerate() {
-            let data = unsafe { self.array.value_unchecked(i) };
-            builder.mutable_array.extend(
-                std::iter::repeat(data)
-                    .take(*offset - previous_offset)
-                    .map(Option::Some),
-            );
-            previous_offset = *offset;
-        }
-        builder.to_vector()
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
@@ -167,9 +148,7 @@ impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for Pr
 
 impl<T> ScalarVector for PrimitiveVector<T>
 where
-    T: Scalar<VectorType = Self> + PrimitiveElement,
-    for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = Self>,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    T: PrimitiveElement,
 {
     type OwnedItem = T;
     type RefItem<'a> = T;
@@ -216,16 +195,18 @@ impl<'a, T: Copy> Iterator for PrimitiveIter<'a, T> {
     }
 }
 
-pub struct PrimitiveVectorBuilder<T: PrimitiveElement> {
-    pub(crate) mutable_array: MutablePrimitiveArray<T>,
+impl<T: PrimitiveElement> Serializable for PrimitiveVector<T> {
+    fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
+        self.array
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<_>>()
+            .context(SerializeSnafu)
+    }
 }
 
-impl<T: PrimitiveElement> PrimitiveVectorBuilder<T> {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            mutable_array: MutablePrimitiveArray::with_capacity(capacity),
-        }
-    }
+pub struct PrimitiveVectorBuilder<T: PrimitiveElement> {
+    pub(crate) mutable_array: MutablePrimitiveArray<T>,
 }
 
 pub type UInt8VectorBuilder = PrimitiveVectorBuilder<u8>;
@@ -259,9 +240,7 @@ impl<T: PrimitiveElement> MutableVector for PrimitiveVectorBuilder<T> {
     }
 
     fn to_vector(&mut self) -> VectorRef {
-        Arc::new(PrimitiveVector::<T> {
-            array: std::mem::take(&mut self.mutable_array).into(),
-        })
+        Arc::new(self.finish())
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
@@ -304,14 +283,56 @@ where
     }
 }
 
-impl<T: PrimitiveElement> Serializable for PrimitiveVector<T> {
-    fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
-        self.array
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<serde_json::Result<_>>()
-            .context(SerializeSnafu)
+impl<T: PrimitiveElement> PrimitiveVectorBuilder<T> {
+    fn with_type_capacity(data_type: ConcreteDataType, capacity: usize) -> Self {
+        Self {
+            mutable_array: MutablePrimitiveArray::with_capacity_from(
+                capacity,
+                data_type.as_arrow_type(),
+            ),
+        }
     }
+}
+
+pub(crate) fn replicate_primitive<T: PrimitiveElement>(
+    vector: &PrimitiveVector<T>,
+    offsets: &[usize],
+) -> VectorRef {
+    Arc::new(replicate_primitive_with_type(
+        vector,
+        offsets,
+        T::build_data_type(),
+    ))
+}
+
+pub(crate) fn replicate_primitive_with_type<T: PrimitiveElement>(
+    vector: &PrimitiveVector<T>,
+    offsets: &[usize],
+    data_type: ConcreteDataType,
+) -> PrimitiveVector<T> {
+    assert_eq!(offsets.len(), vector.len());
+
+    if offsets.is_empty() {
+        return vector.slice(0, 0);
+    }
+
+    let mut builder = PrimitiveVectorBuilder::<T>::with_type_capacity(
+        data_type,
+        *offsets.last().unwrap() as usize,
+    );
+
+    let mut previous_offset = 0;
+
+    for (i, offset) in offsets.iter().enumerate() {
+        let data = unsafe { vector.array.value_unchecked(i) };
+        builder.mutable_array.extend(
+            std::iter::repeat(data)
+                .take(*offset - previous_offset)
+                .map(Option::Some),
+        );
+        previous_offset = *offset;
+    }
+    builder.finish()
 }
 
 #[cfg(test)]
@@ -423,20 +444,6 @@ mod tests {
         let vector = PrimitiveVector::<i32>::from_slice(vec![1, 2, 3, 4]);
         assert_eq!(0, vector.null_count());
         assert_eq!(Validity::AllValid, vector.validity());
-    }
-
-    #[test]
-    fn test_replicate() {
-        let v = PrimitiveVector::<i32>::from_slice((0..5).collect::<Vec<i32>>());
-
-        let offsets = [0usize, 1usize, 2usize, 3usize, 4usize];
-
-        let v = v.replicate(&offsets);
-        assert_eq!(4, v.len());
-
-        for i in 0..4 {
-            assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
-        }
     }
 
     #[test]

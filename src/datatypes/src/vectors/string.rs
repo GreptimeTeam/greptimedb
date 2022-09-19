@@ -9,7 +9,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
 use crate::error::{Result, SerializeSnafu};
-use crate::scalars::{common, ScalarVector, ScalarVectorBuilder};
+use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::StringType;
 use crate::value::{Value, ValueRef};
@@ -19,6 +19,12 @@ use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 #[derive(Debug, Clone, PartialEq)]
 pub struct StringVector {
     array: StringArray,
+}
+
+impl StringVector {
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
+        &self.array
+    }
 }
 
 impl From<StringArray> for StringVector {
@@ -110,10 +116,6 @@ impl Vector for StringVector {
 
     fn get(&self, index: usize) -> Value {
         vectors::impl_get_for_vector!(self.array, index)
-    }
-
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        common::replicate_scalar_vector(self, offsets)
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {

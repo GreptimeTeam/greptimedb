@@ -110,7 +110,7 @@ impl Value {
             Value::Binary(v) => ValueRef::Binary(v),
             Value::Date(v) => ValueRef::Date(*v),
             Value::DateTime(v) => ValueRef::DateTime(*v),
-            Value::List(v) => ValueRef::List(ListValueRef::Ref(v)),
+            Value::List(v) => ValueRef::List(ListValueRef::Ref { val: v }),
             Value::Timestamp(v) => ValueRef::Timestamp(*v),
         }
     }
@@ -279,6 +279,12 @@ impl ListValue {
 
     pub fn datatype(&self) -> &ConcreteDataType {
         &self.datatype
+    }
+}
+
+impl Default for ListValue {
+    fn default() -> ListValue {
+        ListValue::new(None, ConcreteDataType::null_datatype())
     }
 }
 
@@ -464,19 +470,32 @@ impl<'a> From<&'a [u8]> for ValueRef<'a> {
     }
 }
 
+impl<'a> From<Option<ListValueRef<'a>>> for ValueRef<'a> {
+    fn from(list: Option<ListValueRef>) -> ValueRef {
+        match list {
+            Some(v) => ValueRef::List(v),
+            None => ValueRef::Null,
+        }
+    }
+}
+
 /// Reference to a [ListValue].
-// Comparison still requires some allocation (call of `to_value()`) and might be avoidable.
+///
+/// Now comparison still requires some allocation (call of `to_value()`) and
+/// might be avoidable by downcasting and comparing the underlying array slice
+/// if it becomes bottleneck.
 #[derive(Debug, Clone, Copy)]
 pub enum ListValueRef<'a> {
     Indexed { vector: &'a ListVector, idx: usize },
-    Ref(&'a ListValue),
+    Ref { val: &'a ListValue },
 }
 
 impl<'a> ListValueRef<'a> {
+    /// Convert self to [Value]. This method would clone the underlying data.
     fn to_value(self) -> Value {
         match self {
             ListValueRef::Indexed { vector, idx } => vector.get(idx),
-            ListValueRef::Ref(v) => Value::List((*v).clone()),
+            ListValueRef::Ref { val } => Value::List(val.clone()),
         }
     }
 }
@@ -796,7 +815,7 @@ mod tests {
             datatype: ConcreteDataType::int32_datatype(),
         };
         assert_eq!(
-            ValueRef::List(ListValueRef::Ref(&list)),
+            ValueRef::List(ListValueRef::Ref { val: &list }),
             Value::List(list.clone()).as_value_ref()
         );
     }
@@ -831,7 +850,7 @@ mod tests {
             items: None,
             datatype: ConcreteDataType::int32_datatype(),
         };
-        check_as_correct!(ListValueRef::Ref(&list), List, as_list);
+        check_as_correct!(ListValueRef::Ref { val: &list }, List, as_list);
 
         let wrong_value = ValueRef::Int32(12345);
         assert!(wrong_value.as_binary().is_err());

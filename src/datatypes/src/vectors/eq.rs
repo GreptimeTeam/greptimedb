@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::data_type::DataType;
 use crate::vectors::{
     BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, ListVector,
-    PrimitiveVector, StringVector, Vector,
+    PrimitiveVector, StringVector, TimestampVector, Vector,
 };
 use crate::with_match_primitive_type_id;
 
@@ -54,6 +54,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
 
     use crate::data_type::ConcreteDataType::*;
 
+    let lhs_type = lhs.data_type();
     match lhs.data_type() {
         Null(_) => true,
         Boolean(_) => is_vector_eq!(BooleanVector, lhs, rhs),
@@ -61,27 +62,32 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
         String(_) => is_vector_eq!(StringVector, lhs, rhs),
         Date(_) => is_vector_eq!(DateVector, lhs, rhs),
         DateTime(_) => is_vector_eq!(DateTimeVector, lhs, rhs),
+        Timestamp(_) => is_vector_eq!(TimestampVector, lhs, rhs),
         List(_) => is_vector_eq!(ListVector, lhs, rhs),
-        other => with_match_primitive_type_id!(other.logical_type_id(), |$T| {
-            let lhs = lhs.as_any().downcast_ref::<PrimitiveVector<$T>>().unwrap();
-            let rhs = rhs.as_any().downcast_ref::<PrimitiveVector<$T>>().unwrap();
+        UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
+        | Float32(_) | Float64(_) => {
+            with_match_primitive_type_id!(lhs_type.logical_type_id(), |$T| {
+                let lhs = lhs.as_any().downcast_ref::<PrimitiveVector<$T>>().unwrap();
+                let rhs = rhs.as_any().downcast_ref::<PrimitiveVector<$T>>().unwrap();
 
-            lhs == rhs
-        },
-        {
-            unreachable!()
-        }),
+                lhs == rhs
+            },
+            {
+                unreachable!("should not compare {} with {}", lhs.vector_type_name(), rhs.vector_type_name())
+            })
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Int64Array, ListArray, MutableListArray, MutablePrimitiveArray, TryExtend};
+    use arrow::array::{ListArray, MutableListArray, MutablePrimitiveArray, TryExtend};
 
     use super::*;
     use crate::vectors::{
         Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector,
-        NullVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
+        NullVector, TimestampVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector,
+        VectorRef,
     };
 
     fn assert_vector_ref_eq(vector: VectorRef) {
@@ -111,10 +117,8 @@ mod tests {
         )));
         assert_vector_ref_eq(Arc::new(BooleanVector::from(vec![true, false])));
         assert_vector_ref_eq(Arc::new(DateVector::from(vec![Some(100), Some(120)])));
-        assert_vector_ref_eq(Arc::new(DateTimeVector::new(Int64Array::from(vec![
-            Some(100),
-            Some(120),
-        ]))));
+        assert_vector_ref_eq(Arc::new(DateTimeVector::from(vec![Some(100), Some(120)])));
+        assert_vector_ref_eq(Arc::new(TimestampVector::from_values([100, 120])));
 
         let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i64>>::new();
         arrow_array
@@ -171,7 +175,7 @@ mod tests {
                 5,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(BooleanVector::from(vec![true, false])),
+                Arc::new(BooleanVector::from(vec![false])),
                 4,
             )),
         );
@@ -181,7 +185,7 @@ mod tests {
                 5,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(Int32Vector::from_slice(vec![1, 2])),
+                Arc::new(Int32Vector::from_slice(vec![1])),
                 4,
             )),
         );

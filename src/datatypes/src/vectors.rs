@@ -9,9 +9,20 @@ mod helper;
 mod list;
 pub mod mutable;
 pub mod null;
+mod operations;
 pub mod primitive;
 mod string;
 mod timestamp;
+
+pub mod all {
+    //! All vector types.
+    pub use crate::vectors::{
+        BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Float32Vector,
+        Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, ListVector, NullVector,
+        PrimitiveVector, StringVector, TimestampVector, UInt16Vector, UInt32Vector, UInt64Vector,
+        UInt8Vector,
+    };
+}
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -29,6 +40,7 @@ pub use helper::Helper;
 pub use list::*;
 pub use mutable::MutableVector;
 pub use null::*;
+pub use operations::VectorOp;
 pub use primitive::*;
 use snafu::ensure;
 pub use string::*;
@@ -59,7 +71,7 @@ impl<'a> Validity<'a> {
 }
 
 /// Vector of data values.
-pub trait Vector: Send + Sync + Serializable + Debug {
+pub trait Vector: Send + Sync + Serializable + Debug + VectorOp {
     /// Returns the data type of the vector.
     ///
     /// This may require heap allocation.
@@ -139,10 +151,6 @@ pub trait Vector: Send + Sync + Serializable + Debug {
         );
         Ok(self.get(index))
     }
-
-    // Copies each element according offsets parameter.
-    // (i-th element should be copied offsets[i] - offsets[i - 1] times.)
-    fn replicate(&self, offsets: &[usize]) -> VectorRef;
 
     /// Returns the reference of value at `index`.
     ///

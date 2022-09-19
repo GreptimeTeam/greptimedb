@@ -10,6 +10,7 @@ use snafu::OptionExt;
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::scalars::ScalarVectorBuilder;
+use crate::scalars::{Scalar, ScalarRef};
 use crate::type_id::LogicalTypeId;
 use crate::types::primitive_traits::Primitive;
 use crate::value::{Value, ValueRef};
@@ -30,7 +31,13 @@ impl<T: Primitive, U: Primitive> PartialEq<PrimitiveType<U>> for PrimitiveType<T
 impl<T: Primitive> Eq for PrimitiveType<T> {}
 
 /// A trait that provide helper methods for a primitive type to implementing the [PrimitiveVector].
-pub trait PrimitiveElement: Primitive {
+pub trait PrimitiveElement
+where
+    for<'a> Self: Primitive
+        + Scalar<VectorType = PrimitiveVector<Self>>
+        + ScalarRef<'a, ScalarType = Self, VectorType = PrimitiveVector<Self>>
+        + Scalar<RefType<'a> = Self>,
+{
     /// Construct the data type struct.
     fn build_data_type() -> ConcreteDataType;
 
