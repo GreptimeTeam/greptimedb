@@ -21,8 +21,10 @@ pub trait VectorOp {
     /// Dedup elements in `self` and mark `i-th` bit of `selected` to `true` if the `i-th` element
     /// of `self` is retained.
     ///
-    /// The caller should ensure the `selected` bitmap is intialized by setting `[0, vector.len())`
+    /// The caller should ensure
+    /// 1. the `selected` bitmap is intialized by setting `[0, vector.len())`
     /// bits to false.
+    /// 2. `vector` and `prev_vector` are sorted.
     ///
     /// If there are multiple duplicate elements, this function retains the **first** element.
     /// If the first element of `self` is equal to the last element of `prev_vector`, then that
