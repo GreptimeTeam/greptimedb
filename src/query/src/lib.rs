@@ -5,6 +5,7 @@ pub mod executor;
 mod function;
 pub mod logical_optimizer;
 mod metric;
+mod optimizer;
 pub mod physical_optimizer;
 pub mod physical_planner;
 pub mod plan;

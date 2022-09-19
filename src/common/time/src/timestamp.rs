@@ -1,8 +1,12 @@
 use core::default::Default;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
+use std::str::FromStr;
 
+use chrono::{offset::Local, DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::error::{Error, InvalidTimestampRepresentationSnafu, ParseTimestampSnafu};
 
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Timestamp {
@@ -33,6 +37,97 @@ impl Timestamp {
     pub fn convert_to(&self, unit: TimeUnit) -> i64 {
         // TODO(hl): May result into overflow
         self.value * self.unit.factor() / unit.factor()
+    }
+}
+
+impl FromStr for Timestamp {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Fast path:  RFC3339 timestamp (with a T)
+        // Example: 2020-09-08T13:42:29.190855Z
+        if let Ok(ts) = DateTime::parse_from_rfc3339(s) {
+            return Ok(Timestamp::new(ts.timestamp_nanos(), TimeUnit::Nanosecond));
+        }
+
+        // Implement quasi-RFC3339 support by trying to parse the
+        // timestamp with various other format specifiers to to support
+        // separating the date and time with a space ' ' rather than 'T' to be
+        // (more) compatible with Apache Spark SQL
+
+        // timezone offset, using ' ' as a separator
+        // Example: 2020-09-08 13:42:29.190855-05:00
+        if let Ok(ts) = DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%:z") {
+            return Ok(Timestamp::new(ts.timestamp_nanos(), TimeUnit::Nanosecond));
+        }
+
+        // with an explicit Z, using ' ' as a separator
+        // Example: 2020-09-08 13:42:29Z
+        if let Ok(ts) = Utc.datetime_from_str(s, "%Y-%m-%d %H:%M:%S%.fZ") {
+            return Ok(Timestamp::new(ts.timestamp_nanos(), TimeUnit::Nanosecond));
+        }
+
+        // Support timestamps without an explicit timezone offset, again
+        // to be compatible with what Apache Spark SQL does.
+
+        // without a timezone specifier as a local time, using T as a separator
+        // Example: 2020-09-08T13:42:29.190855
+        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S.%f") {
+            return naive_datetime_to_timestamp(s, ts);
+        }
+
+        // without a timezone specifier as a local time, using T as a
+        // separator, no fractional seconds
+        // Example: 2020-09-08T13:42:29
+        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+            return naive_datetime_to_timestamp(s, ts);
+        }
+
+        // without a timezone specifier as a local time, using ' ' as a separator
+        // Example: 2020-09-08 13:42:29.190855
+        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S.%f") {
+            return naive_datetime_to_timestamp(s, ts);
+        }
+
+        // without a timezone specifier as a local time, using ' ' as a
+        // separator, no fractional seconds
+        // Example: 2020-09-08 13:42:29
+        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+            return naive_datetime_to_timestamp(s, ts);
+        }
+
+        // Note we don't pass along the error message from the underlying
+        // chrono parsing because we tried several different format
+        // strings and we don't know which the user was trying to
+        // match. Ths any of the specific error messages is likely to be
+        // be more confusing than helpful
+        ParseTimestampSnafu { raw: s }.fail()
+    }
+}
+
+/// Converts the naive datetime (which has no specific timezone) to a
+/// nanosecond epoch timestamp relative to UTC.
+fn naive_datetime_to_timestamp(
+    s: &str,
+    datetime: NaiveDateTime,
+) -> crate::error::Result<Timestamp> {
+    let l = Local {};
+
+    match l.from_local_datetime(&datetime) {
+        LocalResult::None => InvalidTimestampRepresentationSnafu { raw: s }.fail(),
+        LocalResult::Single(local_datetime) => Ok(Timestamp::new(
+            local_datetime.with_timezone(&Utc).timestamp_nanos(),
+            TimeUnit::Nanosecond,
+        )),
+        // Ambiguous times can happen if the timestamp is exactly when
+        // a daylight savings time transition occurs, for example, and
+        // so the datetime could validly be said to be in two
+        // potential offsets. However, since we are about to convert
+        // to UTC anyways, we can pick one arbitrarily
+        LocalResult::Ambiguous(local_datetime, _) => Ok(Timestamp::new(
+            local_datetime.with_timezone(&Utc).timestamp_nanos(),
+            TimeUnit::Nanosecond,
+        )),
     }
 }
 
