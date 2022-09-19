@@ -7,7 +7,7 @@ use crate::read::{Batch, BatchOp, BatchReader};
 use crate::schema::ProjectedSchemaRef;
 
 /// A reader that dedup rows from inner reader.
-struct DedupReader<R> {
+pub struct DedupReader<R> {
     /// Projected schema to read.
     schema: ProjectedSchemaRef,
     /// The inner reader.
@@ -17,7 +17,7 @@ struct DedupReader<R> {
 }
 
 impl<R> DedupReader<R> {
-    fn new(schema: ProjectedSchemaRef, reader: R) -> DedupReader<R> {
+    pub fn new(schema: ProjectedSchemaRef, reader: R) -> DedupReader<R> {
         DedupReader {
             schema,
             reader,

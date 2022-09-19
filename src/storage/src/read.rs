@@ -10,6 +10,7 @@ use datatypes::arrow::bitmap::MutableBitmap;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{BooleanVector, MutableVector, VectorRef};
+pub use dedup::DedupReader;
 pub use merge::{MergeReader, MergeReaderBuilder};
 use snafu::{ensure, ResultExt};
 

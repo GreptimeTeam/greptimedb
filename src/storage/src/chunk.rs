@@ -8,7 +8,7 @@ use table::predicate::Predicate;
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef, MemtableSet};
-use crate::read::{BoxedBatchReader, MergeReaderBuilder};
+use crate::read::{BoxedBatchReader, DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions, Visitor};
 
@@ -145,6 +145,7 @@ impl ChunkReaderBuilder {
         }
 
         let reader = reader_builder.build();
+        let reader = DedupReader::new(schema.clone(), reader);
 
         Ok(ChunkReaderImpl::new(schema, Box::new(reader)))
     }
