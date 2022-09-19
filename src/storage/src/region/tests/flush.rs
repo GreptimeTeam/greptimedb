@@ -122,7 +122,6 @@ async fn test_flush_and_stall() {
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
-    // Always trigger flush before write.
     let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
 
     let data = [(1000, Some(100))];
@@ -182,7 +181,6 @@ async fn test_read_after_flush() {
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
-    // Always trigger flush before write.
     let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
 
     // Put elements so we have content to flush.
@@ -206,6 +204,42 @@ async fn test_read_after_flush() {
     tester.reopen().await;
 
     // Scan after reopen.
+    let output = tester.full_scan().await;
+    assert_eq!(expect, output);
+}
+
+#[tokio::test]
+async fn test_merge_read_after_flush() {
+    let dir = TempDir::new("merge-read-flush").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+
+    let flush_switch = Arc::new(FlushSwitch::default());
+    let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
+
+    // Put elements so we have content to flush.
+    tester.put(&[(3000, Some(300))]).await;
+    tester.put(&[(2000, Some(200))]).await;
+
+    // Now set should flush to true to trigger flush.
+    flush_switch.set_should_flush(true);
+
+    // Put element to trigger flush.
+    tester.put(&[(2000, Some(201))]).await;
+    tester.wait_flush_done().await;
+
+    // Disable flush.
+    flush_switch.set_should_flush(false);
+    tester.put(&[(2000, Some(202))]).await;
+    tester.put(&[(1000, Some(100))]).await;
+
+    // Enable flush.
+    flush_switch.set_should_flush(true);
+    // Trigger flush and overwrite row.
+    tester.put(&[(2000, Some(203))]).await;
+    tester.wait_flush_done().await;
+
+    let expect = vec![(1000, Some(100)), (2000, Some(203)), (3000, Some(300))];
+
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
 }

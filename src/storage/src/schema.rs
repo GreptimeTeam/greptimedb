@@ -303,14 +303,6 @@ impl StoreSchema {
     fn num_columns(&self) -> usize {
         self.schema.num_columns()
     }
-
-    /// Returns indices of all key columns (row key columns and internal columns).
-    fn full_key_indices(&self) -> impl Iterator<Item = usize> {
-        // row key, sequence, op_type
-        (0..self.row_key_end)
-            .chain(std::iter::once(self.sequence_index()))
-            .chain(std::iter::once(self.op_type_index()))
-    }
 }
 
 impl TryFrom<ArrowSchema> for StoreSchema {
@@ -624,7 +616,8 @@ impl ProjectedSchema {
 
 impl BatchOp for ProjectedSchema {
     fn compare_row(&self, left: &Batch, i: usize, right: &Batch, j: usize) -> Ordering {
-        let indices = self.schema_to_read.full_key_indices();
+        // Order by (row_key asc, sequence desc, op_type desc).
+        let indices = self.schema_to_read.row_key_indices();
         for idx in indices {
             let (left_col, right_col) = (left.column(idx), right.column(idx));
             // Comparision of vector is done by virtual method calls currently. Consider using
@@ -634,7 +627,20 @@ impl BatchOp for ProjectedSchema {
                 return order;
             }
         }
-        Ordering::Equal
+        let (sequence_index, op_type_index) = (
+            self.schema_to_read.sequence_index(),
+            self.schema_to_read.op_type_index(),
+        );
+        right
+            .column(sequence_index)
+            .get_ref(j)
+            .cmp(&left.column(sequence_index).get_ref(i))
+            .then_with(|| {
+                right
+                    .column(op_type_index)
+                    .get_ref(j)
+                    .cmp(&left.column(op_type_index).get_ref(i))
+            })
     }
 
     fn dedup(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>) {
@@ -694,10 +700,11 @@ fn build_user_schema(columns: &ColumnsMetadata, version: u32) -> Result<Schema> 
 mod tests {
     use datatypes::type_id::LogicalTypeId;
     use datatypes::vectors::{Int64Vector, UInt64Vector, UInt8Vector};
+    use store_api::storage::OpType;
 
     use super::*;
     use crate::metadata::RegionMetadata;
-    use crate::test_util::{descriptor_util, schema_util};
+    use crate::test_util::{descriptor_util, read_util, schema_util};
 
     fn new_batch() -> Batch {
         let k0 = Int64Vector::from_slice(&[1, 2, 3]);
@@ -952,5 +959,20 @@ mod tests {
             .err()
             .unwrap();
         assert!(matches!(err, Error::InvalidProjection { .. }));
+    }
+
+    #[test]
+    fn test_compare_batch() {
+        let schema = read_util::new_projected_schema();
+        let left = read_util::new_full_kv_batch(&[(1000, 1, 1000, OpType::Put)]);
+        let right = read_util::new_full_kv_batch(&[
+            (999, 1, 1000, OpType::Put),
+            (1000, 1, 999, OpType::Put),
+            (1000, 1, 1000, OpType::Put),
+        ]);
+
+        assert_eq!(Ordering::Greater, schema.compare_row(&left, 0, &right, 0));
+        assert_eq!(Ordering::Less, schema.compare_row(&left, 0, &right, 1));
+        assert_eq!(Ordering::Equal, schema.compare_row(&left, 0, &right, 2));
     }
 }

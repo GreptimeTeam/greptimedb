@@ -40,7 +40,7 @@ fn new_kv_batch(key_values: &[(i64, Option<i64>)]) -> Batch {
 }
 
 /// Build a new batch from (key, value, sequence, op_type)
-fn new_full_kv_batch(all_values: &[(i64, i64, u64, OpType)]) -> Batch {
+pub fn new_full_kv_batch(all_values: &[(i64, i64, u64, OpType)]) -> Batch {
     let key = Arc::new(TimestampVector::from_values(all_values.iter().map(|v| v.0)));
     let value = Arc::new(Int64Vector::from_values(all_values.iter().map(|v| v.1)));
     let sequences = Arc::new(UInt64Vector::from_values(all_values.iter().map(|v| v.2)));
