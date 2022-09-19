@@ -216,30 +216,39 @@ async fn test_merge_read_after_flush() {
     let flush_switch = Arc::new(FlushSwitch::default());
     let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
 
-    // Put elements so we have content to flush.
+    // Put elements so we have content to flush (In SST1).
     tester.put(&[(3000, Some(300))]).await;
     tester.put(&[(2000, Some(200))]).await;
 
     // Now set should flush to true to trigger flush.
     flush_switch.set_should_flush(true);
 
-    // Put element to trigger flush.
+    // Put element to trigger flush (In SST2).
     tester.put(&[(2000, Some(201))]).await;
     tester.wait_flush_done().await;
 
     // Disable flush.
     flush_switch.set_should_flush(false);
+    // In SST2.
     tester.put(&[(2000, Some(202))]).await;
     tester.put(&[(1000, Some(100))]).await;
 
     // Enable flush.
     flush_switch.set_should_flush(true);
-    // Trigger flush and overwrite row.
+    // Trigger flush and overwrite row (In memtable).
     tester.put(&[(2000, Some(203))]).await;
     tester.wait_flush_done().await;
 
     let expect = vec![(1000, Some(100)), (2000, Some(203)), (3000, Some(300))];
 
+    let output = tester.full_scan().await;
+    assert_eq!(expect, output);
+
+    // Reopen
+    let mut tester = tester;
+    tester.reopen().await;
+
+    // Scan after reopen.
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
 }
