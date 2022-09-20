@@ -66,29 +66,22 @@ impl FromStr for Timestamp {
             return Ok(Timestamp::new(ts.timestamp_nanos(), TimeUnit::Nanosecond));
         }
 
+        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+            return naive_datetime_to_timestamp(s, ts);
+        }
+
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
             return naive_datetime_to_timestamp(s, ts);
         }
 
-        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-            return naive_datetime_to_timestamp(s, ts);
-        }
-        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
-            return naive_datetime_to_timestamp(s, ts);
-        }
-
-        // without a timezone specifier as a local time, using ' ' as a
-        // separator, no fractional seconds
-        // Example: 2020-09-08 13:42:29
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
             return naive_datetime_to_timestamp(s, ts);
         }
 
-        // Note we don't pass along the error message from the underlying
-        // chrono parsing because we tried several different format
-        // strings and we don't know which the user was trying to
-        // match. Ths any of the specific error messages is likely to be
-        // be more confusing than helpful
+        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+            return naive_datetime_to_timestamp(s, ts);
+        }
+
         ParseTimestampSnafu { raw: s }.fail()
     }
 }
@@ -237,6 +230,16 @@ mod tests {
         );
 
         check_from_str(
+            "2020-09-08T13:42:29",
+            &NaiveDateTime::from_timestamp_opt(
+                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                0,
+            )
+            .unwrap()
+            .to_string(),
+        );
+
+        check_from_str(
             "2020-09-08 13:42:29.042",
             &NaiveDateTime::from_timestamp_opt(
                 1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
@@ -246,6 +249,16 @@ mod tests {
             .to_string(),
         );
         check_from_str("2020-09-08 13:42:29.042Z", "2020-09-08 13:42:29.042");
+        check_from_str("2020-09-08 13:42:29.042+08:00", "2020-09-08 05:42:29.042");
+        check_from_str(
+            "2020-09-08T13:42:29.042",
+            &NaiveDateTime::from_timestamp_opt(
+                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                42000000,
+            )
+            .unwrap()
+            .to_string(),
+        );
         check_from_str("2020-09-08T13:42:29+08:00", "2020-09-08 05:42:29");
         check_from_str(
             "2020-09-08T13:42:29.0042+08:00",
