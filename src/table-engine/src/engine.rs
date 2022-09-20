@@ -430,13 +430,13 @@ mod tests {
     use store_api::manifest::Manifest;
     use store_api::storage::ReadContext;
     use table::requests::{AlterKind, InsertRequest};
+    use tempdir::TempDir;
 
     use super::*;
     use crate::table::test_util;
     use crate::table::test_util::{MockRegion, TABLE_NAME};
 
-    #[tokio::test]
-    async fn test_insert_with_column_default_value() {
+    async fn setup_table_with_column_default_value() -> (TempDir, String, TableRef) {
         let table_name = "test_default_value";
         let column_schemas = vec![
             ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
@@ -457,7 +457,7 @@ mod tests {
                 .expect("ts must be timestamp column"),
         );
 
-        let (_dir, object_store) =
+        let (dir, object_store) =
             test_util::new_test_object_store("test_insert_with_column_default_value").await;
 
         let table_engine = MitoEngine::new(
@@ -488,6 +488,13 @@ mod tests {
             .await
             .unwrap();
 
+        (dir, table_name.to_string(), table)
+    }
+
+    #[tokio::test]
+    async fn test_column_default_value() {
+        let (_dir, table_name, table) = setup_table_with_column_default_value().await;
+
         let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
         let names = StringVector::from(vec!["first", "second"]);
         let tss = TimestampVector::from_vec(vec![1, 2]);
@@ -510,11 +517,43 @@ mod tests {
         let columns = record.columns();
         assert_eq!(3, columns.len());
         assert_eq!(names.to_arrow_array(), columns[0]);
-        assert_eq!(tss.to_arrow_array(), columns[2]);
         assert_eq!(
             Int32Vector::from_vec(vec![42, 42]).to_arrow_array(),
             columns[1]
-        )
+        );
+        assert_eq!(tss.to_arrow_array(), columns[2]);
+    }
+
+    #[tokio::test]
+    async fn test_insert_with_column_default_value() {
+        let (_dir, table_name, table) = setup_table_with_column_default_value().await;
+
+        let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
+        let names = StringVector::from(vec!["first", "second"]);
+        let nums = Int32Vector::from(vec![None, Some(66)]);
+        let tss = TimestampVector::from_vec(vec![1, 2]);
+
+        columns_values.insert("name".to_string(), Arc::new(names.clone()));
+        columns_values.insert("n".to_string(), Arc::new(nums.clone()));
+        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
+
+        let insert_req = InsertRequest {
+            table_name: table_name.to_string(),
+            columns_values,
+        };
+        assert_eq!(2, table.insert(insert_req).await.unwrap());
+
+        let stream = table.scan(&None, &[], None).await.unwrap();
+        let batches = util::collect(stream).await.unwrap();
+        assert_eq!(1, batches.len());
+
+        let record = &batches[0].df_recordbatch;
+        assert_eq!(record.num_columns(), 3);
+        let columns = record.columns();
+        assert_eq!(3, columns.len());
+        assert_eq!(names.to_arrow_array(), columns[0]);
+        assert_eq!(nums.to_arrow_array(), columns[1]);
+        assert_eq!(tss.to_arrow_array(), columns[2]);
     }
 
     #[test]

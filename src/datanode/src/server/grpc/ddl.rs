@@ -160,6 +160,7 @@ mod tests {
 
     use catalog::MIN_USER_TABLE_ID;
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::value::Value;
 
     use super::*;
     use crate::tests::test_util;
@@ -231,6 +232,19 @@ mod tests {
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
         assert!(column_schema.is_nullable);
+
+        let default_value = ColumnDefaultValue::Value(Value::from("defaut value"));
+        let column_def = ColumnDef {
+            name: "a".to_string(),
+            datatype: 12, // string
+            is_nullable: true,
+            default_value: Some(default_value.clone().try_into().unwrap()),
+        };
+        let column_schema = create_column_schema(&column_def).unwrap();
+        assert_eq!(column_schema.name, "a");
+        assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
+        assert!(column_schema.is_nullable);
+        assert_eq!(default_value, column_schema.default_value.unwrap());
     }
 
     fn testing_create_expr() -> CreateExpr {

@@ -267,6 +267,8 @@ mod tests {
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
     use datanode::instance::Instance as DatanodeInstance;
+    use datatypes::schema::ColumnDefaultValue;
+    use datatypes::value::Value;
     use servers::grpc::GrpcServer;
     use tempdir::TempDir;
     use tonic::transport::{Endpoint, Server};
@@ -286,6 +288,7 @@ mod tests {
                             ts TIMESTAMP,
                             cpu DOUBLE NULL,
                             memory DOUBLE NULL,
+                            disk_util DOUBLE DEFAULT 9.9,
                             TIME INDEX (ts),
                             PRIMARY KEY(ts, host)
                         ) engine=mito with(regions=1);"#;
@@ -324,13 +327,13 @@ mod tests {
                 let pretty_print = arrow_print::write(&recordbatches);
                 let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
                 let expected = vec![
-                    "+----------------+---------------------+-----+--------+",
-                    "| host           | ts                  | cpu | memory |",
-                    "+----------------+---------------------+-----+--------+",
-                    "| frontend.host1 | 1970-01-01 00:00:01 | 1.1 | 100    |",
-                    "| frontend.host2 | 1970-01-01 00:00:02 |     |        |",
-                    "| frontend.host3 | 1970-01-01 00:00:03 | 3.3 | 300    |",
-                    "+----------------+---------------------+-----+--------+",
+                    "+----------------+---------------------+-----+--------+-----------+",
+                    "| host           | ts                  | cpu | memory | disk_util |",
+                    "+----------------+---------------------+-----+--------+-----------+",
+                    "| frontend.host1 | 1970-01-01 00:00:01 | 1.1 | 100    | 9.9       |",
+                    "| frontend.host2 | 1970-01-01 00:00:02 |     |        | 9.9       |",
+                    "| frontend.host3 | 1970-01-01 00:00:03 | 3.3 | 300    | 9.9       |",
+                    "+----------------+---------------------+-----+--------+-----------+",
                 ];
                 assert_eq!(pretty_print, expected);
             }
@@ -351,12 +354,12 @@ mod tests {
                 let pretty_print = arrow_print::write(&recordbatches);
                 let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
                 let expected = vec![
-                    "+----------------+---------------------+-----+--------+",
-                    "| host           | ts                  | cpu | memory |",
-                    "+----------------+---------------------+-----+--------+",
-                    "| frontend.host2 | 1970-01-01 00:00:02 |     |        |",
-                    "| frontend.host3 | 1970-01-01 00:00:03 | 3.3 | 300    |",
-                    "+----------------+---------------------+-----+--------+",
+                    "+----------------+---------------------+-----+--------+-----------+",
+                    "| host           | ts                  | cpu | memory | disk_util |",
+                    "+----------------+---------------------+-----+--------+-----------+",
+                    "| frontend.host2 | 1970-01-01 00:00:02 |     |        | 9.9       |",
+                    "| frontend.host3 | 1970-01-01 00:00:03 | 3.3 | 300    | 9.9       |",
+                    "+----------------+---------------------+-----+--------+-----------+",
                 ];
                 assert_eq!(pretty_print, expected);
             }
@@ -401,6 +404,15 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![4],
+            datatype: Some(10), // float64
+            ..Default::default()
+        };
+        let expected_disk_col = Column {
+            column_name: "disk_util".to_string(),
+            values: Some(column::Values {
+                f64_values: vec![9.9, 9.9, 9.9, 9.9],
+                ..Default::default()
+            }),
             datatype: Some(10), // float64
             ..Default::default()
         };
@@ -477,13 +489,14 @@ mod tests {
 
                 assert_eq!(4, select_result.row_count);
                 let actual_columns = select_result.columns;
-                assert_eq!(4, actual_columns.len());
+                assert_eq!(5, actual_columns.len());
 
                 // Respect the order in create table schema
                 let expected_columns = vec![
                     expected_host_col,
                     expected_cpu_col,
                     expected_mem_col,
+                    expected_disk_col,
                     expected_ts_col,
                 ];
                 expected_columns
@@ -571,6 +584,16 @@ mod tests {
                 datatype: 10, // float64
                 is_nullable: true,
                 default_value: None,
+            },
+            GrpcColumnDef {
+                name: "disk_util".to_string(),
+                datatype: 10, // float64
+                is_nullable: true,
+                default_value: Some(
+                    ColumnDefaultValue::Value(Value::from(9.9f64))
+                        .try_into()
+                        .unwrap(),
+                ),
             },
             GrpcColumnDef {
                 name: "ts".to_string(),
