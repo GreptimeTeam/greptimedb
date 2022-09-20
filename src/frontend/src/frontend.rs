@@ -17,6 +17,11 @@ pub struct FrontendOptions {
     pub postgres_addr: Option<String>,
     #[cfg(feature = "postgres")]
     pub postgres_runtime_size: u32,
+
+    #[cfg(feature = "opentsdb")]
+    pub opentsdb_addr: Option<String>,
+    #[cfg(feature = "opentsdb")]
+    pub opentsdb_runtime_size: u32,
 }
 
 impl Default for FrontendOptions {
@@ -30,6 +35,11 @@ impl Default for FrontendOptions {
             postgres_addr: Some("0.0.0.0:4003".to_string()),
             #[cfg(feature = "postgres")]
             postgres_runtime_size: 2,
+
+            #[cfg(feature = "opentsdb")]
+            opentsdb_addr: Some("0.0.0.0:4242".to_string()),
+            #[cfg(feature = "opentsdb")]
+            opentsdb_runtime_size: 2,
         }
     }
 }

@@ -1,3 +1,6 @@
+#[cfg(feature = "opentsdb")]
+mod opentsdb;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -258,7 +261,6 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::codec::{InsertBatch, SelectResult};
-    use api::v1::greptime_client::GreptimeClient;
     use api::v1::{
         admin_expr, admin_result, column, object_expr, object_result, select_expr, Column,
         ExprHeader, MutateResult, SelectExpr,
@@ -275,13 +277,11 @@ mod tests {
     use tower::service_fn;
 
     use super::*;
+    use crate::tests;
 
     #[tokio::test]
     async fn test_execute_sql() {
-        common_telemetry::init_default_ut_logging();
-
-        let datanode_instance = create_datanode_instance().await;
-        let frontend_instance = create_frontend_instance(datanode_instance).await;
+        let instance = tests::create_frontend_instance().await;
 
         let sql = r#"CREATE TABLE demo(
                             host STRING,
@@ -292,9 +292,7 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(ts, host)
                         ) engine=mito with(regions=1);"#;
-        let output = SqlQueryHandler::do_query(&*frontend_instance, sql)
-            .await
-            .unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
             _ => unreachable!(),
@@ -305,18 +303,14 @@ mod tests {
                                 ('frontend.host2', null, null, 2000),
                                 ('frontend.host3', 3.3, 300, 3000)
                                 "#;
-        let output = SqlQueryHandler::do_query(&*frontend_instance, sql)
-            .await
-            .unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 3),
             _ => unreachable!(),
         }
 
         let sql = "select * from demo";
-        let output = SqlQueryHandler::do_query(&*frontend_instance, sql)
-            .await
-            .unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
         match output {
             Output::RecordBatches(recordbatches) => {
                 let recordbatches = recordbatches
@@ -369,10 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_grpc() {
-        common_telemetry::init_default_ut_logging();
-
-        let datanode_instance = create_datanode_instance().await;
-        let frontend_instance = create_frontend_instance(datanode_instance).await;
+        let instance = tests::create_frontend_instance().await;
 
         // testing data:
         let expected_host_col = Column {
@@ -432,7 +423,7 @@ mod tests {
             header: Some(ExprHeader::default()),
             expr: Some(admin_expr::Expr::Create(create_expr)),
         };
-        let result = GrpcAdminHandler::exec_admin_request(&*frontend_instance, admin_expr)
+        let result = GrpcAdminHandler::exec_admin_request(&*instance, admin_expr)
             .await
             .unwrap();
         assert_matches!(
@@ -462,7 +453,7 @@ mod tests {
             header: Some(ExprHeader::default()),
             expr: Some(object_expr::Expr::Insert(insert_expr)),
         };
-        let result = GrpcQueryHandler::do_query(&*frontend_instance, object_expr)
+        let result = GrpcQueryHandler::do_query(&*instance, object_expr)
             .await
             .unwrap();
         assert_matches!(
@@ -480,7 +471,7 @@ mod tests {
                 expr: Some(select_expr::Expr::Sql("select * from demo".to_string())),
             })),
         };
-        let result = GrpcQueryHandler::do_query(&*frontend_instance, object_expr)
+        let result = GrpcQueryHandler::do_query(&*instance, object_expr)
             .await
             .unwrap();
         match result.result {
@@ -506,63 +497,6 @@ mod tests {
             }
             _ => unreachable!(),
         }
-    }
-
-    async fn create_datanode_instance() -> Arc<DatanodeInstance> {
-        let wal_tmp_dir = TempDir::new("/tmp/greptimedb_test_wal").unwrap();
-        let data_tmp_dir = TempDir::new("/tmp/greptimedb_test_data").unwrap();
-        let opts = DatanodeOptions {
-            wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
-            storage: ObjectStoreConfig::File {
-                data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
-            },
-            ..Default::default()
-        };
-
-        let instance = Arc::new(DatanodeInstance::new(&opts).await.unwrap());
-        instance.start().await.unwrap();
-        instance
-    }
-
-    async fn create_frontend_instance(datanode_instance: Arc<DatanodeInstance>) -> Arc<Instance> {
-        let (client, server) = tokio::io::duplex(1024);
-
-        // create a mock datanode grpc service, see example here:
-        // https://github.com/hyperium/tonic/blob/master/examples/src/mock/mock.rs
-        let datanode_service =
-            GrpcServer::new(datanode_instance.clone(), datanode_instance).create_service();
-        tokio::spawn(async move {
-            Server::builder()
-                .add_service(datanode_service)
-                .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
-                .await
-        });
-
-        // Move client to an option so we can _move_ the inner value
-        // on the first attempt to connect. All other attempts will fail.
-        let mut client = Some(client);
-        // "http://[::]:50051" is just a placeholder, does not actually connect to it,
-        // see https://github.com/hyperium/tonic/issues/727#issuecomment-881532934
-        let channel = Endpoint::try_from("http://[::]:50051")
-            .unwrap()
-            .connect_with_connector(service_fn(move |_| {
-                let client = client.take();
-
-                async move {
-                    if let Some(client) = client {
-                        Ok(client)
-                    } else {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Client already taken",
-                        ))
-                    }
-                }
-            }))
-            .await
-            .unwrap();
-        let client = Client::with_client(GreptimeClient::new(channel));
-        Arc::new(Instance::with_client(client))
     }
 
     fn create_expr() -> CreateExpr {

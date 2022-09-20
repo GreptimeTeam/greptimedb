@@ -5,6 +5,8 @@ use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::GrpcServer;
 use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
+#[cfg(feature = "opentsdb")]
+use servers::opentsdb::OpentsdbServer;
 #[cfg(feature = "postgres")]
 use servers::postgres::PostgresServer;
 use servers::server::Server;
@@ -22,7 +24,9 @@ impl Services {
         let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
             let http_addr = parse_addr(http_addr)?;
 
-            let http_server = HttpServer::new(instance.clone());
+            let mut http_server = HttpServer::new(instance.clone());
+            #[cfg(feature = "opentsdb")]
+            http_server.set_opentsdb_handler(instance.clone());
 
             Some((Box::new(http_server) as _, http_addr))
         } else {
@@ -77,12 +81,33 @@ impl Services {
             None
         };
 
+        #[cfg(feature = "opentsdb")]
+        let opentsdb_server_and_addr = if let Some(addr) = &opts.opentsdb_addr {
+            let addr = parse_addr(addr)?;
+
+            let io_runtime = Arc::new(
+                RuntimeBuilder::default()
+                    .worker_threads(opts.opentsdb_runtime_size as usize)
+                    .thread_name("opentsdb-io-handlers")
+                    .build()
+                    .context(error::RuntimeResourceSnafu)?,
+            );
+
+            let server = OpentsdbServer::create_server(instance.clone(), io_runtime);
+
+            Some((server, addr))
+        } else {
+            None
+        };
+
         try_join!(
             start_server(http_server_and_addr),
             start_server(grpc_server_and_addr),
             start_server(mysql_server_and_addr),
             #[cfg(feature = "postgres")]
             start_server(postgres_server_and_addr),
+            #[cfg(feature = "opentsdb")]
+            start_server(opentsdb_server_and_addr)
         )
         .context(error::StartServerSnafu)?;
         Ok(())

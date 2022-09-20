@@ -12,6 +12,12 @@ pub enum Error {
         source: client::Error,
     },
 
+    #[snafu(display("Failed to request Datanode, source: {}", source))]
+    RequestDatanode {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
     #[snafu(display("Runtime resource error, source: {}", source))]
     RuntimeResource {
         #[snafu(backtrace)]
@@ -64,6 +70,19 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Incomplete GRPC result: {}", err_msg))]
+    IncompleteGrpcResult {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[cfg(feature = "opentsdb")]
+    #[snafu(display("Failed to execute Opentsdb put, reason: {}", reason))]
+    ExecOpentsdbPut {
+        reason: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -78,8 +97,14 @@ impl ErrorExt for Error {
             Error::StartServer { source, .. } => source.status_code(),
             Error::ParseSql { source } => source.status_code(),
             Error::ConvertColumnDefaultConstraint { source, .. } => source.status_code(),
+            Error::RequestDatanode { source } => source.status_code(),
             Error::ColumnDataType { .. } => StatusCode::Internal,
-            Error::IllegalFrontendState { .. } => StatusCode::Unexpected,
+            Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
+                StatusCode::Unexpected
+            }
+
+            #[cfg(feature = "opentsdb")]
+            Error::ExecOpentsdbPut { .. } => StatusCode::Internal,
         }
     }
 

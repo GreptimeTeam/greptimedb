@@ -196,11 +196,12 @@ impl ErrorExt for Error {
             | BuildTableInfo { .. }
             | BuildRegionDescriptor { .. }
             | TableExists { .. }
-            | ColumnExists { .. }
             | ProjectedColumnNotFound { .. }
             | MissingTimestampIndex { .. }
             | UnsupportedDefaultConstraint { .. }
             | TableNotFound { .. } => StatusCode::InvalidArguments,
+
+            ColumnExists { .. } => StatusCode::TableColumnExists,
 
             TableInfoNotFound { .. } => StatusCode::Unexpected,
 

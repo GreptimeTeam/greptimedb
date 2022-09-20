@@ -1,7 +1,11 @@
 use std::any::Any;
 use std::net::SocketAddr;
 
+use axum::http::StatusCode as HttpStatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use common_error::prelude::*;
+use serde_json::json;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -71,6 +75,26 @@ pub enum Error {
         reason: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("connection reset by peer"))]
+    ConnResetByPeer { backtrace: Backtrace },
+
+    #[snafu(display("Hyper error, source: {}", source))]
+    Hyper { source: hyper::Error },
+
+    #[cfg(feature = "opentsdb")]
+    #[snafu(display("Invalid Opentsdb line, source: {}", source))]
+    InvalidOpentsdbLine {
+        source: std::string::FromUtf8Error,
+        backtrace: Backtrace,
+    },
+
+    #[cfg(feature = "opentsdb")]
+    #[snafu(display("Invalid Opentsdb request , source: {}", source))]
+    InvalidOpentsdbRequest {
+        source: serde_json::error::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -92,7 +116,16 @@ impl ErrorExt for Error {
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. } => source.status_code(),
 
-            NotSupported { .. } | InvalidQuery { .. } => StatusCode::InvalidArguments,
+            NotSupported { .. } | InvalidQuery { .. } | ConnResetByPeer { .. } => {
+                StatusCode::InvalidArguments
+            }
+
+            Hyper { .. } => StatusCode::Unknown,
+
+            #[cfg(feature = "opentsdb")]
+            InvalidOpentsdbLine { .. } | InvalidOpentsdbRequest { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 
@@ -114,5 +147,21 @@ impl From<Error> for tonic::Status {
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::InternalIo { source: e }
+    }
+}
+
+#[cfg(feature = "opentsdb")]
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let (status, error_message) = match self {
+            Error::InvalidOpentsdbLine { .. }
+            | Error::InvalidOpentsdbRequest { .. }
+            | Error::InvalidQuery { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
+            _ => (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+        };
+        let body = Json(json!({
+            "error": error_message,
+        }));
+        (status, body).into_response()
     }
 }

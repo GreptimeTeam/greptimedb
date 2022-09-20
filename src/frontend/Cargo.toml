@@ -8,6 +8,7 @@ api = { path = "../api" }
 async-stream = "0.3"
 async-trait = "0.1"
 catalog = { path = "../catalog" }
+cfg-if = "1.0"
 client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
@@ -19,7 +20,7 @@ common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
 query = { path = "../query" }
 serde = "1.0"
-servers = { path = "../servers" }
+servers = { path = "../servers", features = ["opentsdb"] }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
 tokio = { version = "1.18", features = ["full"] }
@@ -39,5 +40,6 @@ tonic = "0.8"
 tower = "0.4"
 
 [features]
-default = ["postgres"]
+default = ["opentsdb", "postgres"]
 postgres = ["servers/postgres"]
+opentsdb = []

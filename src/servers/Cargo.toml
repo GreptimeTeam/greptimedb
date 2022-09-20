@@ -6,8 +6,10 @@ edition = "2021"
 [dependencies]
 api = { path = "../api" }
 async-trait = "0.1"
-axum = "0.5"
-axum-macros = "0.2"
+axum = "0.6.0-rc.2"
+axum-macros = "0.3.0-rc.1"
+bytes = "1.2"
+cfg-if = "1.0"
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
@@ -33,10 +35,12 @@ tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 
 [features]
-default = ["postgres"]
+default = ["opentsdb", "postgres"]
+opentsdb = []
 postgres = ["hex", "pgwire"]
 
 [dev-dependencies]
+axum-test-helper = "0.1"
 catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
 mysql_async = "0.30"
@@ -44,3 +48,4 @@ rand = "0.8"
 script = { path = "../script", features = ["python"] }
 test-util = { path = "../../test-util" }
 tokio-postgres = "0.7"
+tokio-test = "0.4"

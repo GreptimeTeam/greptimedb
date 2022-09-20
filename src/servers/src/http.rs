@@ -1,4 +1,6 @@
 pub mod handler;
+#[cfg(feature = "opentsdb")]
+pub mod opentsdb;
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -8,8 +10,9 @@ use axum::{
     error_handling::HandleErrorLayer,
     response::IntoResponse,
     response::{Json, Response},
-    routing, BoxError, Extension, Router,
+    routing, BoxError, Router,
 };
+use cfg_if::cfg_if;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
@@ -19,13 +22,22 @@ use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
 use crate::error::{Result, StartHttpSnafu};
+#[cfg(feature = "opentsdb")]
+use crate::query_handler::OpentsdbLineProtocolHandlerRef;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::Server;
 
 const HTTP_API_VERSION: &str = "v1";
 
 pub struct HttpServer {
-    query_handler: SqlQueryHandlerRef,
+    sql_handler: SqlQueryHandlerRef,
+
+    #[cfg(feature = "opentsdb")]
+    // Because of Cargo's [feature unification](https://doc.rust-lang.org/cargo/reference/features.html#feature-unification),
+    // when "opentsdb" feature is used in Frontend (which is enable by default), Datanode also has
+    // to use it, regardless of whether Datanode wants it or not. Making this Opentsdb handler
+    // optional is to bypass the above cargo restriction, letting Frontend set it later.
+    opentsdb_handler: Option<OpentsdbLineProtocolHandlerRef>,
 }
 
 #[derive(Serialize, Debug)]
@@ -114,27 +126,61 @@ async fn shutdown_signal() {
 }
 
 impl HttpServer {
-    pub fn new(query_handler: SqlQueryHandlerRef) -> Self {
-        Self { query_handler }
+    pub fn new(sql_handler: SqlQueryHandlerRef) -> Self {
+        cfg_if! {
+            if #[cfg(feature = "opentsdb")] {
+                Self {
+                    sql_handler,
+                    opentsdb_handler: None,
+                }
+            } else {
+                Self { sql_handler }
+            }
+        }
+    }
+
+    #[cfg(feature = "opentsdb")]
+    pub fn set_opentsdb_handler(&mut self, handler: OpentsdbLineProtocolHandlerRef) {
+        debug_assert!(
+            self.opentsdb_handler.is_none(),
+            "Opentsdb handler can be set only once!"
+        );
+        self.opentsdb_handler.get_or_insert(handler);
     }
 
     pub fn make_app(&self) -> Router {
-        Router::new()
-            .nest(
-                &format!("/{}", HTTP_API_VERSION),
-                Router::new()
-                    // handlers
-                    .route("/sql", routing::get(handler::sql))
-                    .route("/scripts", routing::post(handler::scripts))
-                    .route("/run-script", routing::post(handler::run_script)),
-            )
+        // TODO(LFC): Use released Axum.
+        // Axum version 0.6 introduces state within router, making router methods far more elegant
+        // to write. Though version 0.6 is rc, I think it's worth to upgrade.
+        // Prior to version 0.6, we only have a single "Extension" to share all query
+        // handlers amongst router methods. That requires us to pack all query handlers in a shared
+        // state, and check-then-get the desired query handler in different router methods, which
+        // is a lot of tedious work.
+        let sql_router = Router::with_state(self.sql_handler.clone())
+            .route("/sql", routing::get(handler::sql))
+            .route("/scripts", routing::post(handler::scripts))
+            .route("/run-script", routing::post(handler::run_script));
+
+        let mut router = Router::new().nest(&format!("/{}", HTTP_API_VERSION), sql_router);
+
+        cfg_if! {
+            if #[cfg(feature = "opentsdb")] {
+                let opentsdb_handler = self.opentsdb_handler.clone()
+                    .expect(&format!("Opentsdb handler must be present!"));
+                let opentsdb_router = Router::with_state(opentsdb_handler.clone())
+                    .route("/api/put", routing::post(opentsdb::put));
+
+                router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
+            }
+        }
+
+        router
             .route("/metrics", routing::get(handler::metrics))
             // middlewares
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
-                    .layer(Extension(self.query_handler.clone()))
                     // TODO(LFC): make timeout configurable
                     .layer(TimeoutLayer::new(Duration::from_secs(30))),
             )

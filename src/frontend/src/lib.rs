@@ -4,3 +4,5 @@ pub mod error;
 pub mod frontend;
 pub mod instance;
 mod server;
+#[cfg(test)]
+mod tests;
