@@ -616,7 +616,7 @@ impl ProjectedSchema {
 
 impl BatchOp for ProjectedSchema {
     fn compare_row(&self, left: &Batch, i: usize, right: &Batch, j: usize) -> Ordering {
-        // Order by (row_key asc, sequence desc, op_type desc).
+        // Ordered by (row_key asc, sequence desc, op_type desc).
         let indices = self.schema_to_read.row_key_indices();
         for idx in indices {
             let (left_col, right_col) = (left.column(idx), right.column(idx));
@@ -646,18 +646,14 @@ impl BatchOp for ProjectedSchema {
     fn dedup(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>) {
         if let Some(prev) = prev {
             assert_eq!(batch.num_columns(), prev.num_columns());
-
-            let indices = self.schema_to_read.row_key_indices();
-            for idx in indices {
-                let (current, prev_col) = (batch.column(idx), prev.column(idx));
-                current.dedup(selected, Some(prev_col).map(|v| v.as_ref()));
-            }
-        } else {
-            let indices = self.schema_to_read.row_key_indices();
-            for idx in indices {
-                let current = batch.column(idx);
-                current.dedup(selected, None);
-            }
+        }
+        let indices = self.schema_to_read.row_key_indices();
+        for idx in indices {
+            let (current, prev_col) = (
+                batch.column(idx),
+                prev.map(|prev| prev.column(idx).as_ref()),
+            );
+            current.dedup(selected, prev_col);
         }
     }
 
@@ -984,15 +980,15 @@ mod tests {
         let mut selected = MutableBitmap::from_len_zeroed(3);
 
         schema.dedup(&batch, &mut selected, None);
-        assert_eq!(true, selected.get(0));
-        assert_eq!(true, selected.get(1));
-        assert_eq!(false, selected.get(2));
+        assert!(selected.get(0));
+        assert!(selected.get(1));
+        assert!(!selected.get(2));
 
         let prev = read_util::new_kv_batch(&[(1000, Some(1))]);
         schema.dedup(&batch, &mut selected, Some(&prev));
-        assert_eq!(false, selected.get(0));
-        assert_eq!(true, selected.get(1));
-        assert_eq!(false, selected.get(2));
+        assert!(!selected.get(0));
+        assert!(selected.get(1));
+        assert!(!selected.get(2));
     }
 
     #[test]
