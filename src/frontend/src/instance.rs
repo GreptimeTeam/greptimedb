@@ -21,7 +21,7 @@ use sql::statements::statement::Statement;
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use sql::{dialect::GenericDialect, parser::ParserContext};
 
-use crate::error::{self, Result};
+use crate::error::{self, ConvertColumnDefaultValueSnafu, Result};
 use crate::frontend::FrontendOptions;
 
 pub(crate) type InstanceRef = Arc<Instance>;
@@ -206,15 +206,25 @@ fn columns_to_expr(column_defs: &[ColumnDef]) -> Result<Vec<GrpcColumnDef>> {
         })
         .collect::<Result<Vec<ColumnDataType>>>()?;
 
-    Ok(column_schemas
+    column_schemas
         .iter()
         .zip(column_datatypes.into_iter())
-        .map(|(schema, datatype)| GrpcColumnDef {
-            name: schema.name.clone(),
-            datatype: datatype as i32,
-            is_nullable: schema.is_nullable,
+        .map(|(schema, datatype)| {
+            Ok(GrpcColumnDef {
+                name: schema.name.clone(),
+                datatype: datatype as i32,
+                is_nullable: schema.is_nullable,
+                default_value: match &schema.default_value {
+                    None => None,
+                    Some(v) => Some(v.clone().try_into().context(
+                        ConvertColumnDefaultValueSnafu {
+                            column_name: &schema.name,
+                        },
+                    )?),
+                },
+            })
         })
-        .collect::<Vec<GrpcColumnDef>>())
+        .collect()
 }
 
 #[async_trait]
@@ -548,21 +558,25 @@ mod tests {
                 name: "host".to_string(),
                 datatype: 12, // string
                 is_nullable: false,
+                default_value: None,
             },
             GrpcColumnDef {
                 name: "cpu".to_string(),
                 datatype: 10, // float64
                 is_nullable: true,
+                default_value: None,
             },
             GrpcColumnDef {
                 name: "memory".to_string(),
                 datatype: 10, // float64
                 is_nullable: true,
+                default_value: None,
             },
             GrpcColumnDef {
                 name: "ts".to_string(),
                 datatype: 15, // timestamp
                 is_nullable: true,
+                default_value: None,
             },
         ];
         CreateExpr {

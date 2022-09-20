@@ -151,7 +151,8 @@ fn build_system_catalog_schema() -> Schema {
     ];
 
     // The schema of this table must be valid.
-    SchemaBuilder::from(cols)
+    SchemaBuilder::try_from(cols)
+        .unwrap()
         .timestamp_index(2)
         .build()
         .unwrap()

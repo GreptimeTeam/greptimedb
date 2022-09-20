@@ -421,7 +421,12 @@ mod tests {
     use datafusion_common::field_util::SchemaExt;
     use datatypes::prelude::{ConcreteDataType, ScalarVector};
     use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnDefaultValue, SchemaBuilder};
+    use datatypes::value::Value;
     use datatypes::vectors::*;
+    use log_store::fs::noop::NoopLogStore;
+    use storage::config::EngineConfig as StorageEngineConfig;
+    use storage::EngineImpl;
     use store_api::manifest::Manifest;
     use store_api::storage::ReadContext;
     use table::requests::{AlterKind, InsertRequest};
@@ -429,6 +434,88 @@ mod tests {
     use super::*;
     use crate::table::test_util;
     use crate::table::test_util::{MockRegion, TABLE_NAME};
+
+    #[tokio::test]
+    async fn test_insert_with_column_default_value() {
+        let table_name = "test_default_value";
+        let column_schemas = vec![
+            ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("n", ConcreteDataType::int32_datatype(), true)
+                .with_default_value(Some(ColumnDefaultValue::Value(Value::from(42i32)))),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
+                true,
+            ),
+        ];
+
+        let schema = Arc::new(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .timestamp_index(2)
+                .build()
+                .expect("ts must be timestamp column"),
+        );
+
+        let (_dir, object_store) =
+            test_util::new_test_object_store("test_insert_with_column_default_value").await;
+
+        let table_engine = MitoEngine::new(
+            EngineConfig::default(),
+            EngineImpl::new(
+                StorageEngineConfig::default(),
+                Arc::new(NoopLogStore::default()),
+                object_store.clone(),
+            ),
+            object_store,
+        );
+
+        let table = table_engine
+            .create_table(
+                &EngineContext::default(),
+                CreateTableRequest {
+                    id: 1,
+                    catalog_name: None,
+                    schema_name: None,
+                    table_name: table_name.to_string(),
+                    desc: Some("a test table".to_string()),
+                    schema: schema.clone(),
+                    create_if_not_exists: true,
+                    primary_key_indices: Vec::default(),
+                    table_options: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
+        let names = StringVector::from(vec!["first", "second"]);
+        let tss = TimestampVector::from_vec(vec![1, 2]);
+
+        columns_values.insert("name".to_string(), Arc::new(names.clone()));
+        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
+
+        let insert_req = InsertRequest {
+            table_name: table_name.to_string(),
+            columns_values,
+        };
+        assert_eq!(2, table.insert(insert_req).await.unwrap());
+
+        let stream = table.scan(&None, &[], None).await.unwrap();
+        let batches = util::collect(stream).await.unwrap();
+        assert_eq!(1, batches.len());
+
+        let record = &batches[0].df_recordbatch;
+        assert_eq!(record.num_columns(), 3);
+        let columns = record.columns();
+        assert_eq!(3, columns.len());
+        assert_eq!(names.to_arrow_array(), columns[0]);
+        assert_eq!(tss.to_arrow_array(), columns[2]);
+        assert_eq!(
+            Int32Vector::from_vec(vec![42, 42]).to_arrow_array(),
+            columns[1]
+        )
+    }
 
     #[test]
     fn test_region_name() {

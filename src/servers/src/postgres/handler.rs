@@ -208,7 +208,7 @@ mod test {
             FieldInfo::new("timestamps".into(), None, None, Type::TIMESTAMP),
             FieldInfo::new("dates".into(), None, None, Type::DATE),
         ];
-        let schema = Arc::new(Schema::new(column_schemas));
+        let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
         let fs = schema_to_pg(schema).unwrap();
         assert_eq!(fs, pg_field_info);
     }

@@ -214,7 +214,9 @@ fn build_scripts_schema() -> Schema {
         ),
     ];
 
-    SchemaBuilder::from(cols)
+    // Schema is always valid here
+    SchemaBuilder::try_from(cols)
+        .unwrap()
         .timestamp_index(3)
         .build()
         .unwrap()

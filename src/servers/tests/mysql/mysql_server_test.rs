@@ -106,7 +106,7 @@ async fn test_query_all_datatypes() -> Result<()> {
         columns,
         mysql_text_output_rows,
     } = all_datatype_testing_data();
-    let schema = Arc::new(Schema::new(column_schemas.clone()));
+    let schema = Arc::new(Schema::try_new(column_schemas.clone()).unwrap());
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let table = MemTable::new("all_datatypes", recordbatch);
 

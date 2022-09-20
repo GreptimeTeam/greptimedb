@@ -135,7 +135,8 @@ impl SqlHandler {
             .collect::<Result<Vec<_>>>()?;
 
         let schema = Arc::new(
-            SchemaBuilder::from(columns_schemas)
+            SchemaBuilder::try_from(columns_schemas)
+                .context(CreateSchemaSnafu)?
                 .timestamp_index(ts_index)
                 .build()
                 .context(CreateSchemaSnafu)?,

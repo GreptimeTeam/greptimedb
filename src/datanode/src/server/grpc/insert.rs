@@ -297,7 +297,8 @@ mod tests {
             ];
 
             Arc::new(
-                SchemaBuilder::from(column_schemas)
+                SchemaBuilder::try_from(column_schemas)
+                    .unwrap()
                     .timestamp_index(3)
                     .build()
                     .unwrap(),

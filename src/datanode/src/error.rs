@@ -2,7 +2,6 @@ use std::any::Any;
 
 use api::serde::DecodeError;
 use common_error::prelude::*;
-use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
 
@@ -68,19 +67,10 @@ pub enum Error {
     ))]
     ColumnValuesNumberMismatch { columns: usize, values: usize },
 
-    #[snafu(display("Failed to parse value: {}, {}", msg, backtrace))]
-    ParseSqlValue { msg: String, backtrace: Backtrace },
-
-    #[snafu(display(
-        "Column {} expect type: {:?}, actual: {:?}",
-        column_name,
-        expect,
-        actual
-    ))]
-    ColumnTypeMismatch {
-        column_name: String,
-        expect: ConcreteDataType,
-        actual: ConcreteDataType,
+    #[snafu(display("Failed to parse sql value, source: {}", source))]
+    ParseSqlValue {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
     },
 
     #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
@@ -189,6 +179,12 @@ pub enum Error {
         source: api::error::Error,
     },
 
+    #[snafu(display("Column default value error, source: {}", source))]
+    ColumnDefaultValue {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Failed to parse SQL, source: {}", source))]
     ParseSql {
         #[snafu(backtrace)]
@@ -216,23 +212,32 @@ impl ErrorExt for Error {
             Error::ExecuteSql { source } => source.status_code(),
             Error::ExecutePhysicalPlan { source } => source.status_code(),
             Error::NewCatalog { source } => source.status_code(),
+
             Error::CreateTable { source, .. }
             | Error::GetTable { source, .. }
             | Error::AlterTable { source, .. } => source.status_code(),
+
             Error::Insert { source, .. } => source.status_code(),
-            Error::ConvertSchema { source, .. } => source.status_code(),
+
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
+
+            Error::ParseSqlValue { source, .. } | Error::ParseSql { source, .. } => {
+                source.status_code()
+            }
+
+            Error::ColumnDefaultValue { source, .. }
+            | Error::CreateSchema { source, .. }
+            | Error::ConvertSchema { source, .. } => source.status_code(),
+
             Error::ColumnValuesNumberMismatch { .. }
-            | Error::ParseSqlValue { .. }
-            | Error::ColumnTypeMismatch { .. }
             | Error::IllegalInsertData { .. }
             | Error::DecodeInsert { .. }
             | Error::InvalidSql { .. }
-            | Error::CreateSchema { .. }
             | Error::KeyColumnNotFound { .. }
             | Error::MissingField { .. }
             | Error::ConstraintNotSupported { .. } => StatusCode::InvalidArguments,
+
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }
             | Error::ParseAddr { .. }
@@ -244,7 +249,7 @@ impl ErrorExt for Error {
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }
             | Error::ColumnDataType { .. } => StatusCode::Internal,
-            Error::ParseSql { source } => source.status_code(),
+
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
             Error::StartScriptManager { source } => source.status_code(),

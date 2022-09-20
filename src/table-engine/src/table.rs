@@ -11,7 +11,9 @@ use common_query::logical_plan::Expr;
 use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::logging;
-use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use datatypes::data_type::DataType;
+use datatypes::schema::{ColumnDefaultValue, ColumnSchema, SchemaBuilder};
+use datatypes::vectors::{ConstantVector, VectorRef};
 use futures::task::{Context, Poll};
 use futures::Stream;
 use object_store::ObjectStore;
@@ -34,8 +36,8 @@ use tokio::sync::Mutex;
 
 use crate::engine::{build_column_family, build_row_key_desc, INIT_COLUMN_ID};
 use crate::error::{
-    self, ProjectedColumnNotFoundSnafu, Result, ScanTableManifestSnafu, TableInfoNotFoundSnafu,
-    UpdateTableManifestSnafu,
+    self, ProjectedColumnNotFoundSnafu, Result, ScanTableManifestSnafu, SchemaBuildSnafu,
+    TableInfoNotFoundSnafu, UpdateTableManifestSnafu,
 };
 use crate::manifest::action::*;
 use crate::manifest::TableManifest;
@@ -76,30 +78,40 @@ impl<R: Region> Table for MitoTable<R> {
         let mut columns_values = request.columns_values;
 
         let table_info = self.table_info();
+        let schema = self.schema();
         let key_columns = table_info.meta.row_key_column_names();
         let value_columns = table_info.meta.value_column_names();
 
+        let mut rows_num = 0;
         //Add row key and columns
         for name in key_columns {
+            let vector = if let Some(v) = columns_values.remove(name) {
+                v
+            } else if let Some(v) =
+                Self::try_get_column_default_value_vector(&schema, name, rows_num)?
+            {
+                v
+            } else {
+                return MissingColumnSnafu { name }.fail().map_err(TableError::from);
+            };
+
+            rows_num = vector.len();
             put_op
-                .add_key_column(
-                    name,
-                    columns_values
-                        .get(name)
-                        .context(MissingColumnSnafu { name })?
-                        .clone(),
-                )
+                .add_key_column(name, vector)
                 .map_err(TableError::new)?;
         }
-
         // Add vaue columns
-        let mut rows_num = 0;
         for name in value_columns {
             if let Some(v) = columns_values.remove(name) {
                 rows_num = v.len();
                 put_op.add_value_column(name, v).map_err(TableError::new)?;
+            } else if let Some(v) =
+                Self::try_get_column_default_value_vector(&schema, name, rows_num)?
+            {
+                put_op.add_value_column(name, v).map_err(TableError::new)?;
             }
         }
+
         write_request.put(put_op).map_err(TableError::new)?;
 
         let _resp = self
@@ -267,7 +279,11 @@ fn build_table_schema_with_new_column(
     // Right now we are not support adding the column
     // before or after some column, so just clone a new schema like this.
     // TODO(LFC): support adding column before or after some column
-    let mut builder = SchemaBuilder::from_columns(columns).version(table_schema.version() + 1);
+    let mut builder = SchemaBuilder::try_from_columns(columns)
+        .context(SchemaBuildSnafu {
+            msg: "Failed to convert column schemas into table schema",
+        })?
+        .version(table_schema.version() + 1);
 
     if let Some(index) = table_schema.timestamp_index() {
         builder = builder.timestamp_index(index);
@@ -393,6 +409,35 @@ impl<R: Region> MitoTable<R> {
         Ok(MitoTable::new(table_info, region, manifest))
     }
 
+    fn try_get_column_default_value_vector(
+        schema: &SchemaRef,
+        name: &str,
+        rows_num: usize,
+    ) -> TableResult<Option<VectorRef>> {
+        // TODO(dennis): when we support altering schema, we should check the schemas difference between table and region
+        let column_schema = schema
+            .column_schema_by_name(name)
+            .expect("column schema not found");
+        if let Some(v) = &column_schema.default_value {
+            assert!(rows_num > 0);
+
+            match v {
+                ColumnDefaultValue::Value(v) => {
+                    let mut mutable_vector = column_schema.data_type.create_mutable_vector(1);
+                    mutable_vector
+                        .push_value_ref(v.as_value_ref())
+                        .map_err(TableError::new)?;
+                    let vector =
+                        Arc::new(ConstantVector::new(mutable_vector.to_vector(), rows_num));
+                    Ok(Some(vector))
+                }
+                _ => unimplemented!(),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn open(
         table_name: &str,
         region: R,
@@ -482,6 +527,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
 
     use super::*;
+    use crate::table::test_util;
 
     #[test]
     fn test_table_manifest_dir() {

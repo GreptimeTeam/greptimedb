@@ -56,6 +56,7 @@ message ColumnDef {
   string name = 1;
   ColumnDataType datatype = 2;
   bool is_nullable = 3;
+  optional bytes default_value = 4;
 }
 
 enum ColumnDataType {

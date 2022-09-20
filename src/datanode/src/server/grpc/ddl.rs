@@ -4,12 +4,13 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
+use datatypes::schema::ColumnDefaultValue;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use snafu::prelude::*;
 use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest};
 
-use crate::error::{self, MissingFieldSnafu, Result};
+use crate::error::{self, ColumnDefaultValueSnafu, MissingFieldSnafu, Result};
 use crate::instance::Instance;
 use crate::server::grpc::handler::AdminResultBuilder;
 use crate::sql::SqlRequest;
@@ -131,7 +132,8 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
             name: &expr.time_index,
         })?;
     Ok(Arc::new(
-        SchemaBuilder::from(column_schemas)
+        SchemaBuilder::try_from(column_schemas)
+            .context(error::CreateSchemaSnafu)?
             .timestamp_index(ts_index)
             .build()
             .context(error::CreateSchemaSnafu)?,
@@ -145,6 +147,10 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         name: column_def.name.clone(),
         data_type: data_type.into(),
         is_nullable: column_def.is_nullable,
+        default_value: match &column_def.default_value {
+            None => None,
+            Some(v) => Some(ColumnDefaultValue::try_from(v).context(ColumnDefaultValueSnafu)?),
+        },
     })
 }
 
@@ -206,6 +212,7 @@ mod tests {
             name: "a".to_string(),
             datatype: 1024,
             is_nullable: true,
+            default_value: None,
         };
         let result = create_column_schema(&column_def);
         assert!(result.is_err());
@@ -218,6 +225,7 @@ mod tests {
             name: "a".to_string(),
             datatype: 12, // string
             is_nullable: true,
+            default_value: None,
         };
         let column_schema = create_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
@@ -231,21 +239,25 @@ mod tests {
                 name: "host".to_string(),
                 datatype: 12, // string
                 is_nullable: false,
+                default_value: None,
             },
             ColumnDef {
                 name: "ts".to_string(),
                 datatype: 15, // timestamp
                 is_nullable: false,
+                default_value: None,
             },
             ColumnDef {
                 name: "cpu".to_string(),
                 datatype: 9, // float32
                 is_nullable: true,
+                default_value: None,
             },
             ColumnDef {
                 name: "memory".to_string(),
                 datatype: 10, // float64
                 is_nullable: true,
+                default_value: None,
             },
         ];
         CreateExpr {
@@ -267,25 +279,30 @@ mod tests {
                 name: "host".to_string(),
                 data_type: ConcreteDataType::string_datatype(),
                 is_nullable: false,
+                default_value: None,
             },
             ColumnSchema {
                 name: "ts".to_string(),
                 data_type: ConcreteDataType::timestamp_millis_datatype(),
                 is_nullable: false,
+                default_value: None,
             },
             ColumnSchema {
                 name: "cpu".to_string(),
                 data_type: ConcreteDataType::float32_datatype(),
                 is_nullable: true,
+                default_value: None,
             },
             ColumnSchema {
                 name: "memory".to_string(),
                 data_type: ConcreteDataType::float64_datatype(),
                 is_nullable: true,
+                default_value: None,
             },
         ];
         Arc::new(
-            SchemaBuilder::from(column_schemas)
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
                 .timestamp_index(1)
                 .build()
                 .unwrap(),

@@ -80,12 +80,13 @@ impl TryFrom<Schema> for schema::SchemaRef {
 
         let schema: schema::SchemaRef = match schema.timestamp_index {
             Some(index) => Arc::new(
-                schema::SchemaBuilder::from(column_schemas)
+                schema::SchemaBuilder::try_from(column_schemas)
+                    .context(ConvertSchemaSnafu)?
                     .timestamp_index(index.value as usize)
                     .build()
                     .context(ConvertSchemaSnafu)?,
             ),
-            None => Arc::new(schema::Schema::new(column_schemas)),
+            None => Arc::new(schema::Schema::try_new(column_schemas).context(ConvertSchemaSnafu)?),
         };
 
         Ok(schema)

@@ -66,6 +66,12 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Failed to convert schema, source: {}", source))]
+    ConvertSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Invalid projection, {}", msg))]
     InvalidProjection { msg: String, backtrace: Backtrace },
 }
@@ -267,7 +273,8 @@ impl StoreSchema {
         row_key_end: usize,
         user_column_end: usize,
     ) -> Result<StoreSchema> {
-        let schema = SchemaBuilder::from(column_schemas)
+        let schema = SchemaBuilder::try_from(column_schemas)
+            .context(ConvertSchemaSnafu)?
             .timestamp_index(timestamp_key_index)
             .version(version)
             .add_metadata(ROW_KEY_END_KEY, row_key_end.to_string())
@@ -613,7 +620,9 @@ impl ProjectedSchema {
             .map(|col_idx| ColumnSchema::from(&region_schema.column_metadata(*col_idx).desc))
             .collect();
 
-        let mut builder = SchemaBuilder::from(column_schemas).version(region_schema.version());
+        let mut builder = SchemaBuilder::try_from(column_schemas)
+            .context(ConvertSchemaSnafu)?
+            .version(region_schema.version());
         if let Some(timestamp_index) = timestamp_index {
             builder = builder.timestamp_index(timestamp_index);
         }
@@ -664,7 +673,8 @@ fn build_user_schema(columns: &ColumnsMetadata, version: u32) -> Result<Schema> 
         .map(|col| ColumnSchema::from(&col.desc))
         .collect();
 
-    SchemaBuilder::from(column_schemas)
+    SchemaBuilder::try_from(column_schemas)
+        .context(ConvertSchemaSnafu)?
         .timestamp_index(columns.timestamp_key_index())
         .version(version)
         .build()

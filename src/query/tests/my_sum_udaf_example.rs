@@ -200,7 +200,7 @@ where
         T::build_data_type(),
         true,
     )];
-    let schema = Arc::new(Schema::new(column_schemas.clone()));
+    let schema = Arc::new(Schema::try_new(column_schemas.clone()).unwrap());
     let column: VectorRef = Arc::new(PrimitiveVector::<T>::from_vec(numbers));
     let recordbatch = RecordBatch::new(schema, vec![column]).unwrap();
     let testing_table = MemTable::new(&table_name, recordbatch);
