@@ -335,9 +335,7 @@ mod tests {
         };
 
         let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
-        let output = SqlQueryHandler::do_query(&*frontend_instance, sql)
-            .await
-            .unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
         match output {
             Output::RecordBatches(recordbatches) => {
                 let recordbatches = recordbatches

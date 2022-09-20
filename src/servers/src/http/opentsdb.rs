@@ -44,10 +44,10 @@ pub async fn put(
 
     let query = parts.uri.query();
     let params = query
-        .map(|query| query.split("&").collect::<Vec<&str>>())
+        .map(|query| query.split('&').collect::<Vec<&str>>())
         .unwrap_or_default();
-    let summary = params.iter().find(|&&p| p == "summary").is_some();
-    let details = params.iter().find(|&&p| p == "details").is_some();
+    let summary = params.iter().any(|&p| p == "summary");
+    let details = params.iter().any(|&p| p == "details");
 
     let data_points = parse_data_points(body).await?;
 
@@ -84,7 +84,7 @@ pub async fn put(
             Ok(x) => x,
             Err(e) => {
                 return error::InternalSnafu {
-                    err_msg: format!("Failed to serialize response, cause: {}", e.to_string()),
+                    err_msg: format!("Failed to serialize response, cause: {}", e),
                 }
                 .fail()
             }
@@ -150,12 +150,14 @@ impl OpentsdbDebuggingResponse {
 
     fn on_failed(&mut self, data_point: &OpentsdbDataPointRequest, error: Error) {
         self.failed += 1;
-        self.errors.as_mut().map(|x| {
-            x.push(OpentsdbDetailError {
+
+        if let Some(details) = self.errors.as_mut() {
+            let error = OpentsdbDetailError {
                 datapoint: data_point.clone(),
                 error: error.to_string(),
-            })
-        });
+            };
+            details.push(error);
+        };
     }
 }
 

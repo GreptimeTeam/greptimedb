@@ -165,12 +165,12 @@ impl HttpServer {
 
         cfg_if! {
             if #[cfg(feature = "opentsdb")] {
-                let opentsdb_handler = self.opentsdb_handler.clone()
-                    .expect(&format!("Opentsdb handler must be present!"));
-                let opentsdb_router = Router::with_state(opentsdb_handler.clone())
-                    .route("/api/put", routing::post(opentsdb::put));
+                if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
+                    let opentsdb_router = Router::with_state(opentsdb_handler.clone())
+                        .route("/api/put", routing::post(opentsdb::put));
 
-                router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
+                    router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
+                }
             }
         }
 

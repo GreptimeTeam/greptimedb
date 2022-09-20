@@ -85,7 +85,7 @@ async fn test_shutdown_opentsdb_server() -> Result<()> {
                     Ok(stream) => {
                         let mut connection = Connection::new(stream);
                         connection
-                            .write_line(format!("put {} 1 1", i.to_string()))
+                            .write_line(format!("put {} 1 1", i))
                             .await
                             .unwrap();
                     }

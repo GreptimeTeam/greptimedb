@@ -39,10 +39,10 @@ impl Instance {
             Ok(result) => result,
             Err(ClientError::Datanode { code, .. }) => {
                 let retry = if code == StatusCode::TableNotFound as u32 {
-                    self.create_opentsdb_metric(&data_point).await?;
+                    self.create_opentsdb_metric(data_point).await?;
                     true
                 } else if code == StatusCode::TableColumnNotFound as u32 {
-                    self.create_opentsdb_tags(&data_point).await?;
+                    self.create_opentsdb_tags(data_point).await?;
                     true
                 } else {
                     false
@@ -246,7 +246,7 @@ mod tests {
         match output {
             Output::RecordBatches(recordbatches) => {
                 let recordbatches = recordbatches
-                    .to_vec()
+                    .take()
                     .into_iter()
                     .map(|r| r.df_recordbatch)
                     .collect::<Vec<_>>();

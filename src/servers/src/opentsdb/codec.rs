@@ -26,7 +26,7 @@ impl OpentsdbDataPoint {
 
     pub fn try_create(line: &str) -> Result<Self> {
         let tokens = line.split_whitespace().collect::<Vec<&str>>();
-        let cmd = if tokens.len() == 0 { "" } else { tokens[0] };
+        let cmd = if tokens.is_empty() { "" } else { tokens[0] };
         // Opentsdb command is case sensitive, verified in real Opentsdb.
         if cmd != "put" {
             return error::InvalidQuerySnafu {
@@ -67,17 +67,17 @@ impl OpentsdbDataPoint {
         };
 
         let mut tags = Vec::with_capacity(tokens.len() - 4);
-        for i in 4..tokens.len() {
-            let tag = tokens[i].split("=").collect::<Vec<&str>>();
+        for token in tokens.iter().skip(4) {
+            let tag = token.split('=').collect::<Vec<&str>>();
             if tag.len() != 2 || tag[0].is_empty() || tag[1].is_empty() {
                 return error::InvalidQuerySnafu {
-                    reason: format!("put: invalid tag: {}", tokens[i]),
+                    reason: format!("put: invalid tag: {}", token),
                 }
                 .fail();
             }
             let tagk = tag[0].to_string();
             let tagv = tag[1].to_string();
-            if tags.iter().find(|&(t, _)| t == &tagk).is_some() {
+            if tags.iter().any(|(t, _)| t == &tagk) {
                 return error::InvalidQuerySnafu {
                     reason: format!("put: illegal argument: duplicate tag: {}", tagk),
                 }
