@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn test_string_to_timestamp_ms() {
         assert!(matches!(
-            string_to_timestamp_ms("2022-02-02 19:00:00").unwrap(),
+            string_to_timestamp_ms("2022-02-02 19:00:00+08:00").unwrap(),
             ScalarValue::TimestampMillisecond(Some(1643799600000), None)
         ));
         assert!(matches!(
@@ -355,7 +355,7 @@ mod tests {
             converter
                 .mutate(
                     Expr::Column(Column::from_name("ts")).gt(Expr::Literal(ScalarValue::Utf8(
-                        Some("2020-09-08T05:42:29".to_string()),
+                        Some("2020-09-08T05:42:29+08:00".to_string()),
                     )))
                 )
                 .unwrap()
