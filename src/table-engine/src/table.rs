@@ -246,7 +246,7 @@ impl<R: Region> Table for MitoTable<R> {
     }
 
     fn supports_filter_pushdown(&self, _filter: &Expr) -> table::error::Result<FilterPushDownType> {
-        Ok(FilterPushDownType::Exact)
+        Ok(FilterPushDownType::Inexact)
     }
 }
 

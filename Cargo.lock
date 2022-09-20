@@ -5107,7 +5107,7 @@ dependencies = [
  "store-api",
  "tempdir",
  "tokio",
- "tokio-util 0.7.3",
+ "tokio-util",
 ]
 
 [[package]]

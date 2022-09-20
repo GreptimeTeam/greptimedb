@@ -33,10 +33,7 @@ impl Predicate {
         for expr in &self.exprs {
             match PruningPredicate::try_new(expr.df_expr().clone(), schema.clone()) {
                 Ok(p) => {
-                    let stat = RowGroupPruningStatistics {
-                        schema: &schema,
-                        meta_data: row_groups,
-                    };
+                    let stat = RowGroupPruningStatistics::new(row_groups, &schema);
                     match p.prune(&stat) {
                         Ok(r) => {
                             for (curr_val, res) in r.into_iter().zip(res.iter_mut()) {
