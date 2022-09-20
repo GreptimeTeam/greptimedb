@@ -209,6 +209,8 @@ mod tests {
         assert_eq!(TimeUnit::Millisecond, t.unit());
     }
 
+    // Input timestamp string is regarded as local timezone if no timezone is specified,
+    // but expected timestamp is in UTC timezone
     fn check_from_str(s: &str, expect: &str) {
         let ts = Timestamp::from_str(s).unwrap();
         let time = NaiveDateTime::from_timestamp(
@@ -224,7 +226,6 @@ mod tests {
         check_from_str("2020-09-08 13:42:29Z", "2020-09-08 13:42:29");
         check_from_str("2020-09-08T13:42:29+08:00", "2020-09-08 05:42:29");
 
-        // Input timestamp string is regarded as local timezone, but expected timestamp is in UTC timezone
         check_from_str(
             "2020-09-08 13:42:29",
             &NaiveDateTime::from_timestamp_opt(
@@ -235,7 +236,20 @@ mod tests {
             .to_string(),
         );
 
-        check_from_str("2020-09-08 13:42:29.042", "2020-09-08 05:42:29.042");
+        check_from_str(
+            "2020-09-08 13:42:29.042",
+            &NaiveDateTime::from_timestamp_opt(
+                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                42000000,
+            )
+            .unwrap()
+            .to_string(),
+        );
         check_from_str("2020-09-08 13:42:29.042Z", "2020-09-08 13:42:29.042");
+        check_from_str("2020-09-08T13:42:29+08:00", "2020-09-08 05:42:29");
+        check_from_str(
+            "2020-09-08T13:42:29.0042+08:00",
+            "2020-09-08 05:42:29.004200",
+        );
     }
 }
