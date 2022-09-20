@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package greptime.v1.meta;
+
+import "greptime/v1/meta/common.proto";
+
+service Route {
+  // Fetch routing information for tables. The smallest unit is the complete
+  // routing information(all regions) of a table.
+  // 
+  // table_1
+  //    table_name
+  //    table_schema
+  //    regions
+  //      region_1
+  //        mutate_endpoint
+  //        select_endpoint_1, select_endpoint_2
+  //      region_2
+  //        mutate_endpoint
+  //        select_endpoint_1, select_endpoint_2, select_endpoint_3
+  //      region_xxx
+  // table_2
+  //    ...
+  //
+  rpc Route(RouteRequest) returns (RouteResponse) {}
+}
+
+message RouteRequest {
+  RequestHeader header = 1;
+
+  Tenant tenant = 2;
+  // Routing for multiple DBs is not supported
+  string db_name = 3;
+  repeated string table_names = 4;
+}
+
+message RouteResponse {
+  ResponseHeader header = 1;
+
+  repeated Endpoint endpoints = 2;
+  repeated TableRoute table_routes = 3;
+}
+
+message TableRoute {
+  Table table = 1;
+  repeated RegionRoute region_routes = 2;
+}
+
+message RegionRoute {
+  Region region = 1;
+  // Single node for write task
+  uint64 mutate_endpoint_index = 2;
+  // Multiple nodes for read task
+  repeated uint64 select_endpoint_indexes = 3;
+}

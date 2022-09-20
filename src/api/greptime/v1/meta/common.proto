@@ -54,3 +54,10 @@ message Region {
   string name = 2;
   map<string, string> attrs = 3;
 }
+
+message KeyValue {
+  // key is the key in bytes. An empty key is not allowed.
+  bytes key = 1;
+  // value is the value held by the key, in bytes.
+  bytes value = 2;
+}

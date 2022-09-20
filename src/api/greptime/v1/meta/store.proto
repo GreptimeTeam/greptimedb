@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package greptime.v1.meta;
+
+import "greptime/v1/meta/common.proto";
+
+service KV {
+  // Range gets the keys in the range from the key-value store.
+  rpc Range(RangeRequest) returns (RangeResponse);
+
+  // Put puts the given key into the key-value store.
+  rpc Put(PutRequest) returns (PutResponse);
+
+  // DeleteRange deletes the given range from the key-value store.
+  rpc DeleteRange(DeleteRangeRequest) returns (DeleteRangeResponse);
+}
+
+message RangeRequest {
+  RequestHeader header = 1;
+
+  // key is the first key for the range, If range_end is not given, the
+  // request only looks up key.
+  bytes key = 2;
+  // range_end is the uppoer bound on the requested range [key, range_end).
+  // If range_end is '\0', the range is all keys >= key.
+  // If range_end is key plus one (e.g., "aa"+1 == "ab", "a\xff"+1 == "b"),
+  // then the range request gets all keys prefixed with key.
+  // If both key and range_end are '\0', then the range request returns all
+  // keys.
+  bytes range_end = 3;
+  // limit is a limit on the number of keys returned for the request. When
+  // limit is set to 0, it is treated as no limit.
+  int64 limit = 4;
+  // keys_only when set returns only the keys and not the values.
+  bool keys_only = 5;
+}
+
+message RangeResponse {
+  ResponseHeader header = 1;
+  
+  // kvs is the list of key-value pairs matched by the range request.
+  repeated KeyValue kvs = 2;
+  bool more = 3;
+}
+
+message PutRequest {
+  RequestHeader header = 1;
+
+  // key is the key, in bytes, to put into the key-value store.
+  bytes key = 2;
+  // value is the value, in bytes, to associate with the key in the
+  // key-value store.
+  bytes value = 3;
+  // If prev_kv is set, gets the previous key-value pair before changing it.
+  // The previous key-value pair will be returned in the put response.
+  bool prev_kv = 4;
+}
+
+message PutResponse {
+  ResponseHeader header = 1;
+
+  // If prev_kv is set in the request, the previous key-value pair will be
+  // returned.
+  KeyValue prev_kv = 2;
+}
+
+message DeleteRangeRequest {
+  RequestHeader header = 1;
+
+  // key is the first key to delete in the range.
+  bytes key = 2;
+  // range_end is the key following the last key to delete for the range
+  // [key, range_end).
+  // If range_end is not given, the range is defined to contain only the key
+  // argument.
+  // If range_end is one bit larger than the given key, then the range is all
+  // the keys with the prefix (the given key).
+  // If range_end is '\0', the range is all keys greater than or equal to the
+  // key argument.
+  bytes range_end = 3;
+  // If prev_kv is set, gets the previous key-value pairs before deleting it.
+  // The previous key-value pairs will be returned in the delete response.
+  bool prev_kv = 4;
+}
+
+message DeleteRangeResponse {
+  ResponseHeader header = 1;
+
+  // deleted is the number of keys deleted by the delete range request.
+  int64 deleted = 2;
+  // If prev_kv is set in the request, the previous key-value pairs will be
+  // returned.
+  repeated KeyValue prev_kvs = 3;
+}

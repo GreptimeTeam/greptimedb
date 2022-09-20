@@ -4,33 +4,14 @@ package greptime.v1.meta;
 
 import "greptime/v1/meta/common.proto";
 
-service MetaService {
+service Heartbeat {
   // Heartbeat, there may be many contents of the heartbeat, such as:
   // 1. Metadata to be registered to meta server and discoverable by other nodes.
   // 2. Some performance metrics, such as Load, CPU usage, etc.
   // 3. The number of computing tasks being executed.
   rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse) {}
 
-  // Fetch routing information for tables. The smallest unit is the complete
-  // routing information(all regions) of a table.
-  // 
-  // table_1
-  //    table_name
-  //    table_schema
-  //    regions
-  //      region_1
-  //        mutate_endpoint
-  //        select_endpoint_1, select_endpoint_2
-  //      region_2
-  //        mutate_endpoint
-  //        select_endpoint_1, select_endpoint_2, select_endpoint_3
-  //      region_xxx
-  // table_2
-  //    ...
-  //
-  rpc Route(RouteRequest) returns (RouteResponse) {}
-
-  // Ask leader
+  // Ask leader's endpoint.
   rpc AskLeader(AskLeaderRequest) returns (AskLeaderResponse) {}
 }
 
@@ -87,36 +68,7 @@ message ReplicaStat {
 message HeartbeatResponse {
   ResponseHeader header = 1;
 
-  bytes payload = 2;
-}
-
-message RouteRequest {
-  RequestHeader header = 1;
-
-  Tenant tenant = 2;
-  // Routing for multiple DBs is not supported
-  string db_name = 3;
-  repeated string table_names = 4;
-}
-
-message RouteResponse {
-  ResponseHeader header = 1;
-
-  repeated Endpoint endpoints = 2;
-  repeated TableRoute table_routes = 3;
-}
-
-message TableRoute {
-  Table table = 1;
-  repeated RegionRoute region_routes = 2;
-}
-
-message RegionRoute {
-  Region region = 1;
-  // Single node for write task
-  uint64 mutate_endpoint_index = 2;
-  // Multiple nodes for read task
-  repeated uint64 select_endpoint_indexes = 3;
+  repeated bytes payload = 2;
 }
 
 message AskLeaderRequest {
@@ -125,5 +77,6 @@ message AskLeaderRequest {
 
 message AskLeaderResponse {
   ResponseHeader header = 1;
+
   Endpoint leader = 2;
 }
