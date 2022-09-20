@@ -43,6 +43,8 @@ impl Timestamp {
 impl FromStr for Timestamp {
     type Err = Error;
 
+    /// Accepts a string in RFC3339 / ISO8601 standard format and some variants and converts it to a nanosecond precision timestamp.
+    /// This code is copied from [arrow-datafusion](https://github.com/apache/arrow-datafusion/blob/arrow2/datafusion-physical-expr/src/arrow_temporal_util.rs#L71).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // Fast path:  RFC3339 timestamp (with a T)
         // Example: 2020-09-08T13:42:29.190855Z
@@ -72,7 +74,7 @@ impl FromStr for Timestamp {
 
         // without a timezone specifier as a local time, using T as a separator
         // Example: 2020-09-08T13:42:29.190855
-        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S.%f") {
+        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
             return naive_datetime_to_timestamp(s, ts);
         }
 
@@ -85,7 +87,7 @@ impl FromStr for Timestamp {
 
         // without a timezone specifier as a local time, using ' ' as a separator
         // Example: 2020-09-08 13:42:29.190855
-        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S.%f") {
+        if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
             return naive_datetime_to_timestamp(s, ts);
         }
 
@@ -107,6 +109,7 @@ impl FromStr for Timestamp {
 
 /// Converts the naive datetime (which has no specific timezone) to a
 /// nanosecond epoch timestamp relative to UTC.
+/// This code is copied from [arrow-datafusion](https://github.com/apache/arrow-datafusion/blob/arrow2/datafusion-physical-expr/src/arrow_temporal_util.rs#L137).
 fn naive_datetime_to_timestamp(
     s: &str,
     datetime: NaiveDateTime,
@@ -189,6 +192,8 @@ impl Hash for Timestamp {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Offset;
+
     use super::*;
 
     #[test]
@@ -221,5 +226,35 @@ mod tests {
         let t: Timestamp = 42.into();
         assert_eq!(42, t.value());
         assert_eq!(TimeUnit::Millisecond, t.unit());
+    }
+
+    fn check_from_str(s: &str, expect: &str) {
+        let ts = Timestamp::from_str(s).unwrap();
+        let time = NaiveDateTime::from_timestamp(
+            ts.value / 1_000_000_000,
+            (ts.value % 1_000_000_000) as u32,
+        );
+        assert_eq!(expect, time.to_string());
+    }
+
+    #[test]
+    fn test_from_str() {
+        // Explicit Z means timestamp in UTC
+        check_from_str("2020-09-08 13:42:29Z", "2020-09-08 13:42:29");
+        check_from_str("2020-09-08T13:42:29+08:00", "2020-09-08 05:42:29");
+
+        // Input timestamp string is regarded as local timezone, but expected timestamp is in UTC timezone
+        check_from_str(
+            "2020-09-08 13:42:29",
+            &NaiveDateTime::from_timestamp_opt(
+                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                0,
+            )
+            .unwrap()
+            .to_string(),
+        );
+
+        check_from_str("2020-09-08 13:42:29.042", "2020-09-08 05:42:29.042");
+        check_from_str("2020-09-08 13:42:29.042Z", "2020-09-08 13:42:29.042");
     }
 }

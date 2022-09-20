@@ -213,6 +213,17 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
+    #[snafu(display(
+        "Failed to parse string to timestamp, string: {}, source: {}",
+        raw,
+        source
+    ))]
+    ParseTimestamp {
+        raw: String,
+        #[snafu(backtrace)]
+        source: common_time::error::Error,
+    },
+
     #[snafu(display("Failed to create a new RecordBatch, source: {}", source))]
     NewRecordBatch {
         #[snafu(backtrace)]
@@ -274,8 +285,8 @@ impl ErrorExt for Error {
             | Error::MissingField { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
-            | Error::ConstraintNotSupported { .. } => StatusCode::InvalidArguments,
-
+            | Error::ConstraintNotSupported { .. }
+            | Error::ParseTimestamp { .. } => StatusCode::InvalidArguments,
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }
             | Error::ParseAddr { .. }

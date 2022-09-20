@@ -17,6 +17,12 @@ mod type_conversion;
 use common_telemetry::debug;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion_common::Result;
+
+/// TypeConversionRule converts some literal values in logical plan to other types according
+/// to data type of corresponding columns.
+/// Specifically:
+/// - string literal of timestamp is converted to `Expr::Literal(ScalarValue::TimestampMillis)`
+/// - string literal of boolean is converted to `Expr::Literal(ScalarValue::Boolean)`
 pub struct TypeConversionRule;
 
 impl OptimizerRule for TypeConversionRule {
@@ -101,7 +107,7 @@ struct TypeConverter<'a> {
 }
 
 impl<'a> TypeConverter<'a> {
-    fn column_data_type(&self, expr: &Expr) -> Option<DataType> {
+    fn column_type(&self, expr: &Expr) -> Option<DataType> {
         if let Expr::Column(_) = expr {
             for schema in &self.schemas {
                 if let Ok(v) = expr.get_type(schema) {
@@ -112,37 +118,31 @@ impl<'a> TypeConverter<'a> {
         None
     }
 
-    fn cast_scalar_value(value: &ScalarValue, data_type: &DataType) -> Result<ScalarValue> {
-        if let DataType::Timestamp(_, _) = data_type {
-            if let ScalarValue::Utf8(Some(v)) = value {
-                return string_to_timestamp_ms(v);
+    fn cast_scalar_value(value: &ScalarValue, target_type: &DataType) -> Result<ScalarValue> {
+        match (target_type, value) {
+            (DataType::Timestamp(_, _), ScalarValue::Utf8(Some(v))) => string_to_timestamp_ms(v),
+            (DataType::Boolean, ScalarValue::Utf8(Some(v))) => match v.to_lowercase().as_str() {
+                "true" => Ok(ScalarValue::Boolean(Some(true))),
+                "false" => Ok(ScalarValue::Boolean(Some(false))),
+                _ => Ok(ScalarValue::Boolean(None)),
+            },
+            (target_type, value) => {
+                let value_arr = value.to_array();
+                let arr =
+                    compute::cast::cast(value_arr.as_ref(), target_type, CastOptions::default())
+                        .map_err(DataFusionError::ArrowError)?;
+
+                ScalarValue::try_from_array(
+                    &Arc::from(arr), // index: Converts a value in `array` at `index` into a ScalarValue
+                    0,
+                )
             }
         }
-
-        if let DataType::Boolean = data_type {
-            if let ScalarValue::Utf8(Some(v)) = value {
-                return match v.to_lowercase().as_str() {
-                    "true" => Ok(ScalarValue::Boolean(Some(true))),
-                    "false" => Ok(ScalarValue::Boolean(Some(false))),
-                    _ => Ok(ScalarValue::Boolean(None)),
-                };
-            }
-        }
-
-        let value_arr = value.to_array();
-
-        let arr = compute::cast::cast(value_arr.as_ref(), data_type, CastOptions::default())
-            .map_err(DataFusionError::ArrowError)?;
-
-        ScalarValue::try_from_array(
-            &Arc::from(arr), // index: Converts a value in `array` at `index` into a ScalarValue
-            0,
-        )
     }
 
     fn convert_type<'b>(&self, mut left: &'b Expr, mut right: &'b Expr) -> Result<(Expr, Expr)> {
-        let left_type = self.column_data_type(left);
-        let right_type = self.column_data_type(right);
+        let left_type = self.column_type(left);
+        let right_type = self.column_type(right);
 
         let mut reverse = false;
         let left_type = match (&left_type, &right_type) {
@@ -159,7 +159,7 @@ impl<'a> TypeConverter<'a> {
             (Expr::Column(col), Expr::Literal(value)) => {
                 let casted_right = Self::cast_scalar_value(value, left_type)?;
                 debug!(
-                    "TypeRewriter convert type, origin_left:{:?}, type:{:?}, right:{:?}, casted_right:{:?}",
+                    "Converting type, origin_left:{:?}, type:{:?}, right:{:?}, casted_right:{:?}",
                     col, left_type, value, casted_right
                 );
                 if casted_right.is_null() {
@@ -180,7 +180,7 @@ impl<'a> TypeConverter<'a> {
 }
 
 impl<'a> ExprRewriter for TypeConverter<'a> {
-    fn mutate(&mut self, expr: Expr) -> datafusion_common::Result<Expr> {
+    fn mutate(&mut self, expr: Expr) -> Result<Expr> {
         let new_expr = match expr {
             Expr::BinaryExpr { left, op, right } => match op {
                 Operator::Eq
@@ -271,4 +271,120 @@ fn string_to_timestamp_ms(string: &str) -> Result<ScalarValue> {
         ),
         None,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use datafusion_common::{Column, DFField, DFSchema};
+
+    use super::*;
+
+    #[test]
+    fn test_string_to_timestamp_ms() {
+        assert!(matches!(
+            string_to_timestamp_ms("2022-02-02 19:00:00").unwrap(),
+            ScalarValue::TimestampMillisecond(Some(1643799600000), None)
+        ));
+        assert!(matches!(
+            string_to_timestamp_ms("2009-02-13 23:31:30Z").unwrap(),
+            ScalarValue::TimestampMillisecond(Some(1234567890000), None)
+        ));
+    }
+
+    #[test]
+    fn test_timestamp_to_timestamp_ms_expr() {
+        assert!(matches!(
+            timestamp_to_timestamp_ms_expr(123, TimeUnit::Second),
+            Expr::Literal(ScalarValue::TimestampMillisecond(Some(123000), None))
+        ));
+
+        assert!(matches!(
+            timestamp_to_timestamp_ms_expr(123, TimeUnit::Millisecond),
+            Expr::Literal(ScalarValue::TimestampMillisecond(Some(123), None))
+        ));
+
+        assert!(matches!(
+            timestamp_to_timestamp_ms_expr(123, TimeUnit::Microsecond),
+            Expr::Literal(ScalarValue::TimestampMillisecond(Some(0), None))
+        ));
+
+        assert!(matches!(
+            timestamp_to_timestamp_ms_expr(1230, TimeUnit::Microsecond),
+            Expr::Literal(ScalarValue::TimestampMillisecond(Some(1), None))
+        ));
+
+        assert!(matches!(
+            timestamp_to_timestamp_ms_expr(123000, TimeUnit::Microsecond),
+            Expr::Literal(ScalarValue::TimestampMillisecond(Some(123), None))
+        ));
+
+        assert!(matches!(
+            timestamp_to_timestamp_ms_expr(1230, TimeUnit::Nanosecond),
+            Expr::Literal(ScalarValue::TimestampMillisecond(Some(0), None))
+        ));
+        assert!(matches!(
+            timestamp_to_timestamp_ms_expr(123_000_000, TimeUnit::Nanosecond),
+            Expr::Literal(ScalarValue::TimestampMillisecond(Some(123), None))
+        ));
+    }
+
+    #[test]
+    fn test_convert_timestamp_str() {
+        let schema_ref = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![DFField::new(
+                    None,
+                    "ts",
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    true,
+                )],
+                HashMap::new(),
+            )
+            .unwrap(),
+        );
+        let mut converter = TypeConverter {
+            schemas: vec![&schema_ref],
+        };
+
+        assert_eq!(
+            Expr::Column(Column::from_name("ts")).gt(Expr::Literal(
+                ScalarValue::TimestampMillisecond(Some(1599514949000), None)
+            )),
+            converter
+                .mutate(
+                    Expr::Column(Column::from_name("ts")).gt(Expr::Literal(ScalarValue::Utf8(
+                        Some("2020-09-08T05:42:29".to_string()),
+                    )))
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_convert_bool() {
+        let col_name = "is_valid";
+        let schema_ref = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![DFField::new(None, col_name, DataType::Boolean, false)],
+                HashMap::new(),
+            )
+            .unwrap(),
+        );
+        let mut converter = TypeConverter {
+            schemas: vec![&schema_ref],
+        };
+
+        assert_eq!(
+            Expr::Column(Column::from_name(col_name))
+                .eq(Expr::Literal(ScalarValue::Boolean(Some(true)))),
+            converter
+                .mutate(
+                    Expr::Column(Column::from_name(col_name))
+                        .eq(Expr::Literal(ScalarValue::Utf8(Some("true".to_string()))))
+                )
+                .unwrap()
+        );
+    }
 }
