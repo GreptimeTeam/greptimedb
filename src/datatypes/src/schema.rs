@@ -10,18 +10,17 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, DeserializeSnafu, Error, Result, SerializeSnafu};
 use crate::value::Value;
 
-/// Column's default value.
+/// Column's default constraint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ColumnDefaultValue {
+pub enum ColumnDefaultConstraint {
     // A function invocation
-    // TODO(dennis): we only supports function with zero arguments,
-    // save the function name here.
+    // TODO(dennis): we save the funciton expression here, maybe use a struct in future.
     Function(String),
     // A value
     Value(Value),
 }
 
-impl TryFrom<&Vec<u8>> for ColumnDefaultValue {
+impl TryFrom<&Vec<u8>> for ColumnDefaultConstraint {
     type Error = error::Error;
 
     fn try_from(bytes: &Vec<u8>) -> Result<Self> {
@@ -30,7 +29,7 @@ impl TryFrom<&Vec<u8>> for ColumnDefaultValue {
     }
 }
 
-impl TryInto<Vec<u8>> for ColumnDefaultValue {
+impl TryInto<Vec<u8>> for ColumnDefaultConstraint {
     type Error = error::Error;
 
     fn try_into(self) -> Result<Vec<u8>> {
@@ -54,9 +53,7 @@ pub struct ColumnSchema {
     pub name: String,
     pub data_type: ConcreteDataType,
     pub is_nullable: bool,
-    /// Default value of column, default is None, which means no default value
-    /// for this column, and user must provide value for a not-null column.
-    pub default_value: Option<ColumnDefaultValue>,
+    pub default_constraint: Option<ColumnDefaultConstraint>,
 }
 
 impl ColumnSchema {
@@ -69,12 +66,15 @@ impl ColumnSchema {
             name: name.into(),
             data_type,
             is_nullable,
-            default_value: None,
+            default_constraint: None,
         }
     }
 
-    pub fn with_default_value(mut self, default_value: Option<ColumnDefaultValue>) -> Self {
-        self.default_value = default_value;
+    pub fn with_default_constraint(
+        mut self,
+        default_constraint: Option<ColumnDefaultConstraint>,
+    ) -> Self {
+        self.default_constraint = default_constraint;
         self
     }
 }
@@ -271,14 +271,14 @@ fn validate_timestamp_index(column_schemas: &[ColumnSchema], timestamp_index: us
 }
 
 pub type SchemaRef = Arc<Schema>;
-const ARROW_FIELD_DEFAULT_VALUE_KEY: &str = "greptime::default_value";
+const ARROW_FIELD_DEFAULT_CONSTRAINT_KEY: &str = "greptime::default_constraint";
 
 impl TryFrom<&Field> for ColumnSchema {
     type Error = Error;
 
     fn try_from(field: &Field) -> Result<ColumnSchema> {
         let data_type = ConcreteDataType::try_from(&field.data_type)?;
-        let default_value = match field.metadata.get(ARROW_FIELD_DEFAULT_VALUE_KEY) {
+        let default_constraint = match field.metadata.get(ARROW_FIELD_DEFAULT_CONSTRAINT_KEY) {
             Some(json) => Some(serde_json::from_str(json).context(DeserializeSnafu { json })?),
             None => None,
         };
@@ -287,7 +287,7 @@ impl TryFrom<&Field> for ColumnSchema {
             name: field.name.clone(),
             data_type,
             is_nullable: field.is_nullable,
-            default_value,
+            default_constraint,
         })
     }
 }
@@ -296,10 +296,10 @@ impl TryFrom<&ColumnSchema> for Field {
     type Error = Error;
 
     fn try_from(column_schema: &ColumnSchema) -> Result<Field> {
-        let metadata = if let Some(value) = &column_schema.default_value {
+        let metadata = if let Some(value) = &column_schema.default_constraint {
             let mut m = BTreeMap::new();
             m.insert(
-                ARROW_FIELD_DEFAULT_VALUE_KEY.to_string(),
+                ARROW_FIELD_DEFAULT_CONSTRAINT_KEY.to_string(),
                 serde_json::to_string(&value).context(SerializeSnafu)?,
             );
             m
@@ -390,16 +390,19 @@ mod tests {
     }
 
     #[test]
-    fn test_column_schema_with_default_value() {
+    fn test_column_schema_with_default_constraint() {
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
-            .with_default_value(Some(ColumnDefaultValue::Value(Value::from(99))));
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(99))));
         let field = Field::try_from(&column_schema).unwrap();
         assert_eq!("test", field.name);
         assert_eq!(ArrowDataType::Int32, field.data_type);
         assert!(field.is_nullable);
         assert_eq!(
             "{\"Value\":{\"Int32\":99}}",
-            field.metadata.get(ARROW_FIELD_DEFAULT_VALUE_KEY).unwrap()
+            field
+                .metadata
+                .get(ARROW_FIELD_DEFAULT_CONSTRAINT_KEY)
+                .unwrap()
         );
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
@@ -407,13 +410,13 @@ mod tests {
     }
 
     #[test]
-    fn test_column_default_value_try_into_from() {
-        let default_value = ColumnDefaultValue::Value(Value::from(42i64));
+    fn test_column_default_constraint_try_into_from() {
+        let default_constraint = ColumnDefaultConstraint::Value(Value::from(42i64));
 
-        let bytes: Vec<u8> = default_value.clone().try_into().unwrap();
-        let from_value = ColumnDefaultValue::try_from(&bytes).unwrap();
+        let bytes: Vec<u8> = default_constraint.clone().try_into().unwrap();
+        let from_value = ColumnDefaultConstraint::try_from(&bytes).unwrap();
 
-        assert_eq!(default_value, from_value);
+        assert_eq!(default_constraint, from_value);
     }
 
     #[test]

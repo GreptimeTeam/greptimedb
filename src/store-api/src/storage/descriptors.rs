@@ -1,8 +1,7 @@
-use datatypes::value::Value;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::storage::{consts, ColumnSchema, ConcreteDataType};
+use crate::storage::{consts, ColumnDefaultConstraint, ColumnSchema, ConcreteDataType};
 
 /// Id of column, unique in each region.
 pub type ColumnId = u32;
@@ -23,10 +22,10 @@ pub struct ColumnDescriptor {
     /// Is column nullable, default is true.
     #[builder(default = "true")]
     pub is_nullable: bool,
-    /// Default value of column, default is None, which means no default value
-    /// for this column, and user must provide value for a not-null column.
+    /// Default constraint of column, default is None, which means no default constraint
+    /// for this column, and user must provide a value for a not-null column.
     #[builder(default)]
-    pub default_value: Option<Value>,
+    pub default_constraint: Option<ColumnDefaultConstraint>,
     #[builder(default, setter(into))]
     pub comment: String,
 }
@@ -45,6 +44,7 @@ impl ColumnDescriptorBuilder {
 impl From<&ColumnDescriptor> for ColumnSchema {
     fn from(desc: &ColumnDescriptor) -> ColumnSchema {
         ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable)
+            .with_default_constraint(desc.default_constraint.clone())
     }
 }
 
@@ -116,6 +116,8 @@ impl ColumnFamilyDescriptorBuilder {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::value::Value;
+
     use super::*;
 
     #[inline]
@@ -130,7 +132,7 @@ mod tests {
         assert_eq!("test", desc.name);
         assert_eq!(ConcreteDataType::int32_datatype(), desc.data_type);
         assert!(desc.is_nullable);
-        assert!(desc.default_value.is_none());
+        assert!(desc.default_constraint.is_none());
         assert!(desc.comment.is_empty());
 
         let desc = new_column_desc_builder()
@@ -140,16 +142,22 @@ mod tests {
         assert!(!desc.is_nullable);
 
         let desc = new_column_desc_builder()
-            .default_value(Some(Value::Null))
+            .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Null)))
             .build()
             .unwrap();
-        assert_eq!(Value::Null, desc.default_value.unwrap());
+        assert_eq!(
+            ColumnDefaultConstraint::Value(Value::Null),
+            desc.default_constraint.unwrap()
+        );
 
         let desc = new_column_desc_builder()
-            .default_value(Some(Value::Int32(123)))
+            .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Int32(123))))
             .build()
             .unwrap();
-        assert_eq!(Value::Int32(123), desc.default_value.unwrap());
+        assert_eq!(
+            ColumnDefaultConstraint::Value(Value::Int32(123)),
+            desc.default_constraint.unwrap()
+        );
 
         let desc = new_column_desc_builder()
             .comment("A test column")

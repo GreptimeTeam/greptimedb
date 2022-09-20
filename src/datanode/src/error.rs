@@ -179,8 +179,8 @@ pub enum Error {
         source: api::error::Error,
     },
 
-    #[snafu(display("Column default value error, source: {}", source))]
-    ColumnDefaultValue {
+    #[snafu(display("Column default constraint error, source: {}", source))]
+    ColumnDefaultConstraint {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
@@ -226,7 +226,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::ColumnDefaultValue { source, .. }
+            Error::ColumnDefaultConstraint { source, .. }
             | Error::CreateSchema { source, .. }
             | Error::ConvertSchema { source, .. } => source.status_code(),
 

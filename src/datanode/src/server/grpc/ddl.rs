@@ -4,13 +4,13 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
-use datatypes::schema::ColumnDefaultValue;
+use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use snafu::prelude::*;
 use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest};
 
-use crate::error::{self, ColumnDefaultValueSnafu, MissingFieldSnafu, Result};
+use crate::error::{self, ColumnDefaultConstraintSnafu, MissingFieldSnafu, Result};
 use crate::instance::Instance;
 use crate::server::grpc::handler::AdminResultBuilder;
 use crate::sql::SqlRequest;
@@ -147,9 +147,11 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         name: column_def.name.clone(),
         data_type: data_type.into(),
         is_nullable: column_def.is_nullable,
-        default_value: match &column_def.default_value {
+        default_constraint: match &column_def.default_constraint {
             None => None,
-            Some(v) => Some(ColumnDefaultValue::try_from(v).context(ColumnDefaultValueSnafu)?),
+            Some(v) => {
+                Some(ColumnDefaultConstraint::try_from(v).context(ColumnDefaultConstraintSnafu)?)
+            }
         },
     })
 }
@@ -213,7 +215,7 @@ mod tests {
             name: "a".to_string(),
             datatype: 1024,
             is_nullable: true,
-            default_value: None,
+            default_constraint: None,
         };
         let result = create_column_schema(&column_def);
         assert!(result.is_err());
@@ -226,25 +228,28 @@ mod tests {
             name: "a".to_string(),
             datatype: 12, // string
             is_nullable: true,
-            default_value: None,
+            default_constraint: None,
         };
         let column_schema = create_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
         assert!(column_schema.is_nullable);
 
-        let default_value = ColumnDefaultValue::Value(Value::from("defaut value"));
+        let default_constraint = ColumnDefaultConstraint::Value(Value::from("defaut value"));
         let column_def = ColumnDef {
             name: "a".to_string(),
             datatype: 12, // string
             is_nullable: true,
-            default_value: Some(default_value.clone().try_into().unwrap()),
+            default_constraint: Some(default_constraint.clone().try_into().unwrap()),
         };
         let column_schema = create_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
         assert!(column_schema.is_nullable);
-        assert_eq!(default_value, column_schema.default_value.unwrap());
+        assert_eq!(
+            default_constraint,
+            column_schema.default_constraint.unwrap()
+        );
     }
 
     fn testing_create_expr() -> CreateExpr {
@@ -253,25 +258,25 @@ mod tests {
                 name: "host".to_string(),
                 datatype: 12, // string
                 is_nullable: false,
-                default_value: None,
+                default_constraint: None,
             },
             ColumnDef {
                 name: "ts".to_string(),
                 datatype: 15, // timestamp
                 is_nullable: false,
-                default_value: None,
+                default_constraint: None,
             },
             ColumnDef {
                 name: "cpu".to_string(),
                 datatype: 9, // float32
                 is_nullable: true,
-                default_value: None,
+                default_constraint: None,
             },
             ColumnDef {
                 name: "memory".to_string(),
                 datatype: 10, // float64
                 is_nullable: true,
-                default_value: None,
+                default_constraint: None,
             },
         ];
         CreateExpr {
@@ -293,25 +298,25 @@ mod tests {
                 name: "host".to_string(),
                 data_type: ConcreteDataType::string_datatype(),
                 is_nullable: false,
-                default_value: None,
+                default_constraint: None,
             },
             ColumnSchema {
                 name: "ts".to_string(),
                 data_type: ConcreteDataType::timestamp_millis_datatype(),
                 is_nullable: false,
-                default_value: None,
+                default_constraint: None,
             },
             ColumnSchema {
                 name: "cpu".to_string(),
                 data_type: ConcreteDataType::float32_datatype(),
                 is_nullable: true,
-                default_value: None,
+                default_constraint: None,
             },
             ColumnSchema {
                 name: "memory".to_string(),
                 data_type: ConcreteDataType::float64_datatype(),
                 is_nullable: true,
-                default_value: None,
+                default_constraint: None,
             },
         ];
         Arc::new(

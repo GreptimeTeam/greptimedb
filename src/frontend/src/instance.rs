@@ -21,7 +21,7 @@ use sql::statements::statement::Statement;
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use sql::{dialect::GenericDialect, parser::ParserContext};
 
-use crate::error::{self, ConvertColumnDefaultValueSnafu, Result};
+use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
 
 pub(crate) type InstanceRef = Arc<Instance>;
@@ -214,10 +214,10 @@ fn columns_to_expr(column_defs: &[ColumnDef]) -> Result<Vec<GrpcColumnDef>> {
                 name: schema.name.clone(),
                 datatype: datatype as i32,
                 is_nullable: schema.is_nullable,
-                default_value: match &schema.default_value {
+                default_constraint: match &schema.default_constraint {
                     None => None,
                     Some(v) => Some(v.clone().try_into().context(
-                        ConvertColumnDefaultValueSnafu {
+                        ConvertColumnDefaultConstraintSnafu {
                             column_name: &schema.name,
                         },
                     )?),
@@ -267,7 +267,7 @@ mod tests {
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
     use datanode::instance::Instance as DatanodeInstance;
-    use datatypes::schema::ColumnDefaultValue;
+    use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;
     use servers::grpc::GrpcServer;
     use tempdir::TempDir;
@@ -571,26 +571,26 @@ mod tests {
                 name: "host".to_string(),
                 datatype: 12, // string
                 is_nullable: false,
-                default_value: None,
+                default_constraint: None,
             },
             GrpcColumnDef {
                 name: "cpu".to_string(),
                 datatype: 10, // float64
                 is_nullable: true,
-                default_value: None,
+                default_constraint: None,
             },
             GrpcColumnDef {
                 name: "memory".to_string(),
                 datatype: 10, // float64
                 is_nullable: true,
-                default_value: None,
+                default_constraint: None,
             },
             GrpcColumnDef {
                 name: "disk_util".to_string(),
                 datatype: 10, // float64
                 is_nullable: true,
-                default_value: Some(
-                    ColumnDefaultValue::Value(Value::from(9.9f64))
+                default_constraint: Some(
+                    ColumnDefaultConstraint::Value(Value::from(9.9f64))
                         .try_into()
                         .unwrap(),
                 ),
@@ -599,7 +599,7 @@ mod tests {
                 name: "ts".to_string(),
                 datatype: 15, // timestamp
                 is_nullable: true,
-                default_value: None,
+                default_constraint: None,
             },
         ];
         CreateExpr {

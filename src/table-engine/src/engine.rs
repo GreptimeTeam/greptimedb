@@ -143,6 +143,7 @@ pub(crate) fn build_row_key_desc(
         ts_column_schema.name.clone(),
         ts_column_schema.data_type.clone(),
     )
+    .default_constraint(ts_column_schema.default_constraint.clone())
     .is_nullable(ts_column_schema.is_nullable)
     .build()
     .context(BuildColumnDescriptorSnafu {
@@ -168,6 +169,7 @@ pub(crate) fn build_row_key_desc(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
+        .default_constraint(column_schema.default_constraint.clone())
         .is_nullable(column_schema.is_nullable)
         .build()
         .context(BuildColumnDescriptorSnafu {
@@ -210,6 +212,7 @@ pub(crate) fn build_column_family(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
+        .default_constraint(column_schema.default_constraint.clone())
         .is_nullable(column_schema.is_nullable)
         .build()
         .context(BuildColumnDescriptorSnafu {
@@ -421,7 +424,7 @@ mod tests {
     use datafusion_common::field_util::SchemaExt;
     use datatypes::prelude::{ConcreteDataType, ScalarVector};
     use datatypes::schema::ColumnSchema;
-    use datatypes::schema::{ColumnDefaultValue, SchemaBuilder};
+    use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
     use datatypes::value::Value;
     use datatypes::vectors::*;
     use log_store::fs::noop::NoopLogStore;
@@ -436,12 +439,12 @@ mod tests {
     use crate::table::test_util;
     use crate::table::test_util::{MockRegion, TABLE_NAME};
 
-    async fn setup_table_with_column_default_value() -> (TempDir, String, TableRef) {
-        let table_name = "test_default_value";
+    async fn setup_table_with_column_default_constraint() -> (TempDir, String, TableRef) {
+        let table_name = "test_default_constraint";
         let column_schemas = vec![
             ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("n", ConcreteDataType::int32_datatype(), true)
-                .with_default_value(Some(ColumnDefaultValue::Value(Value::from(42i32)))),
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(42i32)))),
             ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
@@ -458,7 +461,7 @@ mod tests {
         );
 
         let (dir, object_store) =
-            test_util::new_test_object_store("test_insert_with_column_default_value").await;
+            test_util::new_test_object_store("test_insert_with_column_default_constraint").await;
 
         let table_engine = MitoEngine::new(
             EngineConfig::default(),
@@ -492,8 +495,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_column_default_value() {
-        let (_dir, table_name, table) = setup_table_with_column_default_value().await;
+    async fn test_column_default_constraint() {
+        let (_dir, table_name, table) = setup_table_with_column_default_constraint().await;
 
         let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
         let names = StringVector::from(vec!["first", "second"]);
@@ -525,8 +528,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_insert_with_column_default_value() {
-        let (_dir, table_name, table) = setup_table_with_column_default_value().await;
+    async fn test_insert_with_column_default_constraint() {
+        let (_dir, table_name, table) = setup_table_with_column_default_constraint().await;
 
         let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
         let names = StringVector::from(vec!["first", "second"]);

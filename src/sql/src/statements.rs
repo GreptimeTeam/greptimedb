@@ -9,7 +9,7 @@ pub mod statement;
 use std::str::FromStr;
 
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnDefaultValue, ColumnSchema};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::DateTimeType;
 use datatypes::value::Value;
 use snafu::ensure;
@@ -159,21 +159,22 @@ pub fn sql_value_to_value(
     })
 }
 
-fn parse_column_default_value(
+fn parse_column_default_constraint(
     column_name: &str,
     data_type: &ConcreteDataType,
     opts: &[ColumnOptionDef],
-) -> Result<Option<ColumnDefaultValue>> {
+) -> Result<Option<ColumnDefaultConstraint>> {
     if let Some(opt) = opts
         .iter()
         .find(|o| matches!(o.option, ColumnOption::Default(_)))
     {
-        let default_value = match &opt.option {
+        let default_constraint = match &opt.option {
             ColumnOption::Default(Expr::Value(v)) => {
-                ColumnDefaultValue::Value(sql_value_to_value(column_name, data_type, v)?)
+                ColumnDefaultConstraint::Value(sql_value_to_value(column_name, data_type, v)?)
             }
             ColumnOption::Default(Expr::Function(func)) => {
-                ColumnDefaultValue::Function(format!("{}", func))
+                // Always use lowercase for function expression
+                ColumnDefaultConstraint::Function(format!("{}", func).to_lowercase())
             }
             ColumnOption::Default(expr) => {
                 return UnsupportedDefaultValueSnafu {
@@ -185,7 +186,7 @@ fn parse_column_default_value(
             _ => unreachable!(),
         };
 
-        Ok(Some(default_value))
+        Ok(Some(default_constraint))
     } else {
         Ok(None)
     }
@@ -200,13 +201,14 @@ pub fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
 
     let name = column_def.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&column_def.data_type)?;
-    let default_value = parse_column_default_value(&name, &data_type, &column_def.options)?;
+    let default_constraint =
+        parse_column_default_constraint(&name, &data_type, &column_def.options)?;
 
     Ok(ColumnSchema {
         name,
         data_type,
         is_nullable,
-        default_value,
+        default_constraint,
     })
 }
 

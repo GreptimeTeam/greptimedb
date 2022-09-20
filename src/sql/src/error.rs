@@ -33,7 +33,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Unsupported exp in default value: {} for column: {}",
+        "Unsupported exp in default constraint: {} for column: {}",
         expr,
         column_name
     ))]

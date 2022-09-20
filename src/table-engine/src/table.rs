@@ -11,9 +11,12 @@ use common_query::logical_plan::Expr;
 use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::logging;
+use common_time::util;
+use common_time::Timestamp;
 use datatypes::data_type::DataType;
-use datatypes::schema::{ColumnDefaultValue, ColumnSchema, SchemaBuilder};
-use datatypes::vectors::{ConstantVector, VectorRef};
+use datatypes::prelude::ScalarVector;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder};
+use datatypes::vectors::{ConstantVector, TimestampVector, VectorRef};
 use futures::task::{Context, Poll};
 use futures::Stream;
 use object_store::ObjectStore;
@@ -37,7 +40,7 @@ use tokio::sync::Mutex;
 use crate::engine::{build_column_family, build_row_key_desc, INIT_COLUMN_ID};
 use crate::error::{
     self, ProjectedColumnNotFoundSnafu, Result, ScanTableManifestSnafu, SchemaBuildSnafu,
-    TableInfoNotFoundSnafu, UpdateTableManifestSnafu,
+    TableInfoNotFoundSnafu, UnsupportedDefaultConstraintSnafu, UpdateTableManifestSnafu,
 };
 use crate::manifest::action::*;
 use crate::manifest::TableManifest;
@@ -81,21 +84,21 @@ impl<R: Region> Table for MitoTable<R> {
         let schema = self.schema();
         let key_columns = table_info.meta.row_key_column_names();
         let value_columns = table_info.meta.value_column_names();
+        // columns_values is not empty, it's safe to unwrap
+        let rows_num = columns_values.values().next().unwrap().len();
 
-        let mut rows_num = 0;
         //Add row key and columns
         for name in key_columns {
             let vector = if let Some(v) = columns_values.remove(name) {
                 v
             } else if let Some(v) =
-                Self::try_get_column_default_value_vector(&schema, name, rows_num)?
+                Self::try_get_column_default_constraint_vector(&schema, name, rows_num)?
             {
                 v
             } else {
                 return MissingColumnSnafu { name }.fail().map_err(TableError::from);
             };
 
-            rows_num = vector.len();
             put_op
                 .add_key_column(name, vector)
                 .map_err(TableError::new)?;
@@ -103,10 +106,9 @@ impl<R: Region> Table for MitoTable<R> {
         // Add vaue columns
         for name in value_columns {
             if let Some(v) = columns_values.remove(name) {
-                rows_num = v.len();
                 put_op.add_value_column(name, v).map_err(TableError::new)?;
             } else if let Some(v) =
-                Self::try_get_column_default_value_vector(&schema, name, rows_num)?
+                Self::try_get_column_default_constraint_vector(&schema, name, rows_num)?
             {
                 put_op.add_value_column(name, v).map_err(TableError::new)?;
             }
@@ -409,7 +411,7 @@ impl<R: Region> MitoTable<R> {
         Ok(MitoTable::new(table_info, region, manifest))
     }
 
-    fn try_get_column_default_value_vector(
+    fn try_get_column_default_constraint_vector(
         schema: &SchemaRef,
         name: &str,
         rows_num: usize,
@@ -418,11 +420,11 @@ impl<R: Region> MitoTable<R> {
         let column_schema = schema
             .column_schema_by_name(name)
             .expect("column schema not found");
-        if let Some(v) = &column_schema.default_value {
+        if let Some(v) = &column_schema.default_constraint {
             assert!(rows_num > 0);
 
             match v {
-                ColumnDefaultValue::Value(v) => {
+                ColumnDefaultConstraint::Value(v) => {
                     let mut mutable_vector = column_schema.data_type.create_mutable_vector(1);
                     mutable_vector
                         .push_value_ref(v.as_value_ref())
@@ -431,7 +433,22 @@ impl<R: Region> MitoTable<R> {
                         Arc::new(ConstantVector::new(mutable_vector.to_vector(), rows_num));
                     Ok(Some(vector))
                 }
-                _ => unimplemented!(),
+                ColumnDefaultConstraint::Function(expr) => {
+                    match &expr[..] {
+                        // TODO(dennis): we only supports current_timestamp right now,
+                        //   it's better to use a expression framework in future.
+                        "current_timestamp()" => {
+                            let vector =
+                                Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
+                                    util::current_time_millis(),
+                                )]));
+                            Ok(Some(Arc::new(ConstantVector::new(vector, rows_num))))
+                        }
+                        _ => UnsupportedDefaultConstraintSnafu { expr }
+                            .fail()
+                            .map_err(TableError::new),
+                    }
+                }
             }
         } else {
             Ok(None)

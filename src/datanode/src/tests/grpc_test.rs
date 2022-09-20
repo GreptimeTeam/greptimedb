@@ -97,7 +97,7 @@ async fn test_insert_and_select() {
         name: "test_column".to_string(),
         datatype: ColumnDataType::Int64.into(),
         is_nullable: true,
-        default_value: None,
+        default_constraint: None,
     };
     let kind = Kind::AddColumn(AddColumn {
         column_def: Some(add_column),
@@ -163,25 +163,25 @@ fn testing_create_expr() -> CreateExpr {
             name: "host".to_string(),
             datatype: 12, // string
             is_nullable: false,
-            default_value: None,
+            default_constraint: None,
         },
         ColumnDef {
             name: "cpu".to_string(),
             datatype: 10, // float64
             is_nullable: true,
-            default_value: None,
+            default_constraint: None,
         },
         ColumnDef {
             name: "memory".to_string(),
             datatype: 10, // float64
             is_nullable: true,
-            default_value: None,
+            default_constraint: None,
         },
         ColumnDef {
             name: "ts".to_string(),
             datatype: 15, // timestamp
             is_nullable: true,
-            default_value: None,
+            default_constraint: None,
         },
     ];
     CreateExpr {
