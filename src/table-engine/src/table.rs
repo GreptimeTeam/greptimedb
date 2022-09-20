@@ -114,6 +114,12 @@ impl<R: Region> Table for MitoTable<R> {
             }
         }
 
+        logging::debug!(
+            "Insert into taoble {} with put_op: {:?}",
+            self.table_info().name,
+            put_op
+        );
+
         write_request.put(put_op).map_err(TableError::new)?;
 
         let _resp = self

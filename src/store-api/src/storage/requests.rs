@@ -24,7 +24,7 @@ pub trait WriteRequest: Send {
 }
 
 /// Put multiple rows.
-pub trait PutOperation: Send {
+pub trait PutOperation: Send + std::fmt::Debug {
     type Error: ErrorExt + Send + Sync;
 
     fn add_key_column(&mut self, name: &str, vector: VectorRef) -> Result<(), Self::Error>;

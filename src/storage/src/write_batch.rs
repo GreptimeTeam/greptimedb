@@ -9,7 +9,7 @@ use common_error::prelude::*;
 use common_time::{RangeMillis, TimestampMillis};
 use datatypes::vectors::TimestampVector;
 use datatypes::{
-    arrow::error::ArrowError, data_type::ConcreteDataType, prelude::ScalarVector,
+    arrow::error::ArrowError, data_type::ConcreteDataType, prelude::ScalarVector, prelude::Value,
     schema::SchemaRef, vectors::VectorRef,
 };
 use prost::{DecodeError, EncodeError};
@@ -202,11 +202,22 @@ impl WriteRequest for WriteBatch {
                     let column = put_data
                         .column_by_name(ts_col_name)
                         .unwrap_or_else(|| panic!("Cannot find column by name: {}", ts_col_name));
-                    let ts_vector = column.as_any().downcast_ref::<TimestampVector>().unwrap(); // not expected to fail
-                    for ts in ts_vector.iter_data().flatten() {
+                    if column.is_const() {
+                        let ts = match column.get(0) {
+                            Value::Timestamp(ts) => ts,
+                            _ => unreachable!(),
+                        };
                         let aligned = align_timestamp(ts.value(), durations_millis)
                             .context(TimestampOverflowSnafu { ts: ts.value() })?;
+
                         aligned_timestamps.insert(aligned);
+                    } else {
+                        let ts_vector = column.as_any().downcast_ref::<TimestampVector>().unwrap(); // not expected to fail
+                        for ts in ts_vector.iter_data().flatten() {
+                            let aligned = align_timestamp(ts.value(), durations_millis)
+                                .context(TimestampOverflowSnafu { ts: ts.value() })?;
+                            aligned_timestamps.insert(aligned);
+                        }
                     }
                 }
             }
@@ -260,7 +271,7 @@ pub enum Mutation {
     Put(PutData),
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct PutData {
     columns: HashMap<String, VectorRef>,
 }
@@ -806,7 +817,9 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::type_id::LogicalTypeId;
-    use datatypes::vectors::{BooleanVector, Int32Vector, Int64Vector, UInt64Vector};
+    use datatypes::vectors::{
+        BooleanVector, ConstantVector, Int32Vector, Int64Vector, UInt64Vector,
+    };
 
     use super::*;
     use crate::codec::{Decoder, Encoder};
@@ -1029,6 +1042,36 @@ mod tests {
             .unwrap();
         assert_eq!(
             [-40, -20, 0, 20].map(|v| RangeMillis::new(v, v + duration_millis).unwrap()),
+            ranges.as_slice()
+        )
+    }
+
+    #[test]
+    pub fn test_write_batch_time_range_const_vector() {
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3, 4, 5, 6]));
+        let tsv = Arc::new(ConstantVector::new(
+            Arc::new(TimestampVector::from_vec(vec![20])),
+            6,
+        ));
+        let boolv = Arc::new(BooleanVector::from(vec![
+            true, false, true, false, false, false,
+        ]));
+
+        let mut put_data = PutData::new();
+        put_data.add_key_column("k1", intv.clone()).unwrap();
+        put_data.add_version_column(intv).unwrap();
+        put_data.add_value_column("v1", boolv).unwrap();
+        put_data.add_key_column("ts", tsv).unwrap();
+
+        let mut batch = new_test_batch();
+        batch.put(put_data).unwrap();
+
+        let duration_millis = 20i64;
+        let ranges = batch
+            .time_ranges(Duration::from_millis(duration_millis as u64))
+            .unwrap();
+        assert_eq!(
+            [20].map(|v| RangeMillis::new(v, v + duration_millis).unwrap()),
             ranges.as_slice()
         )
     }
