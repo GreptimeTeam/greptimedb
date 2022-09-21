@@ -8,5 +8,6 @@ edition = "2021"
 [dependencies]
 api = { path = "../api" }
 common-error = { path = "../common/error" }
+etcd-client = "0.10"
 snafu = { version = "0.7", features = ["backtraces"] }
 tonic = "0.8"

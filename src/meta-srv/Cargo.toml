@@ -8,10 +8,17 @@ edition = "2021"
 [dependencies]
 api = { path = "../api" }
 async-trait = "0.1"
+common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-telemetry = { path = "../common/telemetry" }
 etcd-client = "0.10"
 futures = "0.3"
+http-body = "0.4"
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.0", features = ["full"] }
 tonic = "0.8"
+url = "2.3"
+
+[dev-dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

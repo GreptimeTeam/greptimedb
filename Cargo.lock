@@ -2733,6 +2733,7 @@ version = "0.1.0"
 dependencies = [
  "api",
  "common-error",
+ "etcd-client",
  "snafu",
  "tonic",
 ]
@@ -2743,13 +2744,18 @@ version = "0.1.0"
 dependencies = [
  "api",
  "async-trait",
+ "common-base",
  "common-error",
  "common-telemetry",
  "etcd-client",
  "futures",
+ "http-body",
  "snafu",
  "tokio",
  "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

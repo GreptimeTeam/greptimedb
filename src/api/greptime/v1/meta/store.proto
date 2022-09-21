@@ -4,7 +4,7 @@ package greptime.v1.meta;
 
 import "greptime/v1/meta/common.proto";
 
-service KV {
+service Store {
   // Range gets the keys in the range from the key-value store.
   rpc Range(RangeRequest) returns (RangeResponse);
 
