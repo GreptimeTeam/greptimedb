@@ -43,6 +43,7 @@ impl Snapshot for SnapshotImpl {
             ChunkReaderBuilder::new(self.version.schema().clone(), self.sst_layer.clone())
                 .reserve_num_memtables(memtable_version.num_memtables())
                 .projection(request.projection)
+                .filters(request.filters)
                 .batch_size(ctx.batch_size)
                 .visible_sequence(visible_sequence)
                 .pick_memtables(mutables);

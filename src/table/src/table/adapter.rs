@@ -1,7 +1,7 @@
+use core::fmt::Formatter;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::any::Any;
-use std::fmt;
 use std::fmt::Debug;
 use std::mem;
 use std::sync::{Arc, Mutex};
@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 ///  Datafusion table adpaters
 use datafusion::datasource::{
@@ -40,9 +41,10 @@ struct ExecutionPlanAdapter {
 }
 
 impl Debug for ExecutionPlanAdapter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        //TODO(dennis) better debug info
-        write!(f, "ExecutionPlan(PlaceHolder)")
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ExecutionPlanAdapter")
+            .field("schema", &self.schema)
+            .finish()
     }
 }
 
@@ -202,7 +204,7 @@ impl Table for TableAdapter {
         limit: Option<usize>,
     ) -> Result<SendableRecordBatchStream> {
         let filters: Vec<DfExpr> = filters.iter().map(|e| e.df_expr().clone()).collect();
-
+        debug!("TableScan filter size: {}", filters.len());
         let execution_plan = self
             .table_provider
             .scan(projection, &filters, limit)

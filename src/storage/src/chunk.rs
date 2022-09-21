@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_query::logical_plan::Expr;
 use snafu::ResultExt;
 use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
+use table::predicate::Predicate;
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef, MemtableSet};
@@ -49,6 +51,7 @@ impl ChunkReaderImpl {
 pub struct ChunkReaderBuilder {
     schema: RegionSchemaRef,
     projection: Option<Vec<usize>>,
+    filters: Vec<Expr>,
     sst_layer: AccessLayerRef,
     iter_ctx: IterContext,
     memtables: Vec<MemtableRef>,
@@ -60,6 +63,7 @@ impl ChunkReaderBuilder {
         ChunkReaderBuilder {
             schema,
             projection: None,
+            filters: vec![],
             sst_layer,
             iter_ctx: IterContext::default(),
             memtables: Vec::new(),
@@ -75,6 +79,11 @@ impl ChunkReaderBuilder {
 
     pub fn projection(mut self, projection: Option<Vec<usize>>) -> Self {
         self.projection = projection;
+        self
+    }
+
+    pub fn filters(mut self, filters: Vec<Expr>) -> Self {
+        self.filters = filters;
         self
     }
 
@@ -121,6 +130,7 @@ impl ChunkReaderBuilder {
         let read_opts = ReadOptions {
             batch_size: self.iter_ctx.batch_size,
             projected_schema: schema.clone(),
+            predicate: Predicate::new(self.filters),
         };
         for file in &self.files_to_read {
             let reader = self

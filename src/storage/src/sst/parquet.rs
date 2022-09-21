@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
+use common_telemetry::debug;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk;
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
@@ -19,6 +20,7 @@ use futures_util::sink::SinkExt;
 use futures_util::{Stream, TryStreamExt};
 use object_store::{ObjectStore, SeekableReader};
 use snafu::ResultExt;
+use table::predicate::Predicate;
 
 use crate::error::{self, Result};
 use crate::memtable::BoxedBatchIterator;
@@ -157,6 +159,7 @@ pub struct ParquetReader<'a> {
     file_path: &'a str,
     object_store: ObjectStore,
     projected_schema: ProjectedSchemaRef,
+    predicate: Predicate,
 }
 
 type ReaderFactoryFuture<'a, R> =
@@ -167,11 +170,13 @@ impl<'a> ParquetReader<'a> {
         file_path: &str,
         object_store: ObjectStore,
         projected_schema: ProjectedSchemaRef,
+        predicate: Predicate,
     ) -> ParquetReader {
         ParquetReader {
             file_path,
             object_store,
             projected_schema,
+            predicate,
         }
     }
 
@@ -191,19 +196,31 @@ impl<'a> ParquetReader<'a> {
         let metadata = read_metadata_async(&mut reader)
             .await
             .context(error::ReadParquetSnafu { file: &file_path })?;
+
         let arrow_schema =
             infer_schema(&metadata).context(error::ReadParquetSnafu { file: &file_path })?;
+
         // Now the StoreSchema is only used to validate metadata of the parquet file, but this schema
         // would be useful once we support altering schema, as this is the actual schema of the SST.
-        let _store_schema = StoreSchema::try_from(arrow_schema)
+        let store_schema = StoreSchema::try_from(arrow_schema)
             .context(error::ConvertStoreSchemaSnafu { file: &file_path })?;
+
+        let pruned_row_groups = self
+            .predicate
+            .prune_row_groups(store_schema.schema().clone(), &metadata.row_groups);
 
         let projected_fields = self.projected_fields().to_vec();
         let chunk_stream = try_stream!({
-            for rg in metadata.row_groups {
+            for (idx, valid) in pruned_row_groups.iter().enumerate() {
+                if !valid {
+                    debug!("Pruned {} row groups", idx);
+                    continue;
+                }
+
+                let rg = &metadata.row_groups[idx];
                 let column_chunks = read_columns_many_async(
                     &reader_factory,
-                    &rg,
+                    rg,
                     projected_fields.clone(),
                     Some(chunk_size),
                 )

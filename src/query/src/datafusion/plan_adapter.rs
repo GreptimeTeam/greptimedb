@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::fmt::{self, Debug};
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
@@ -22,6 +22,7 @@ use crate::executor::Runtime;
 use crate::plan::{Partitioning, PhysicalPlan};
 
 /// Datafusion ExecutionPlan -> greptime PhysicalPlan
+#[derive(Debug)]
 pub struct PhysicalPlanAdapter {
     plan: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
@@ -109,16 +110,10 @@ impl PhysicalPlan for PhysicalPlanAdapter {
 }
 
 /// Greptime PhysicalPlan -> datafusion ExecutionPlan.
+#[derive(Debug)]
 struct ExecutionPlanAdapter {
     plan: Arc<dyn PhysicalPlan>,
     schema: SchemaRef,
-}
-
-impl Debug for ExecutionPlanAdapter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        //TODO(dennis) better debug info
-        write!(f, "ExecutionPlan(PlaceHolder)")
-    }
 }
 
 #[async_trait::async_trait]
@@ -180,5 +175,41 @@ impl ExecutionPlan for ExecutionPlanAdapter {
     fn statistics(&self) -> Statistics {
         //TODO(dennis)
         Statistics::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::datatypes::Field;
+    use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion_common::field_util::SchemaExt;
+    use datatypes::schema::Schema;
+
+    use super::*;
+
+    #[test]
+    fn test_physical_plan_adapter() {
+        let arrow_schema = arrow::datatypes::Schema::new(vec![Field::new(
+            "name",
+            arrow::datatypes::DataType::Utf8,
+            true,
+        )]);
+
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
+        let physical_plan = PhysicalPlanAdapter::new(
+            schema.clone(),
+            Arc::new(EmptyExec::new(true, Arc::new(arrow_schema))),
+        );
+
+        assert!(physical_plan
+            .plan
+            .as_any()
+            .downcast_ref::<EmptyExec>()
+            .is_some());
+        let execution_plan_adapter = ExecutionPlanAdapter {
+            plan: Arc::new(physical_plan),
+            schema: schema.clone(),
+        };
+        assert_eq!(schema, execution_plan_adapter.schema);
     }
 }

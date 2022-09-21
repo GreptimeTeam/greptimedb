@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
@@ -39,7 +40,7 @@ impl Partitioning {
 }
 
 #[async_trait::async_trait]
-pub trait PhysicalPlan: Send + Sync + Any {
+pub trait PhysicalPlan: Send + Sync + Any + Debug {
     /// Get the schema for this execution plan
     fn schema(&self) -> SchemaRef;
 
