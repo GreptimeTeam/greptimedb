@@ -246,6 +246,13 @@ pub enum Error {
 
     #[snafu(display("Failed to build batch, {}", msg))]
     BuildBatch { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to filter column {}, source: {}", name, source))]
+    FilterColumn {
+        name: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -276,7 +283,8 @@ impl ErrorExt for Error {
             | VersionNotFound { .. }
             | SequenceNotMonotonic { .. }
             | ConvertStoreSchema { .. }
-            | InvalidRawRegion { .. } => StatusCode::Unexpected,
+            | InvalidRawRegion { .. }
+            | FilterColumn { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | WriteParquet { .. }

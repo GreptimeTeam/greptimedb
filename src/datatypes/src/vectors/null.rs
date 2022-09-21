@@ -175,6 +175,10 @@ impl MutableVector for NullVectorBuilder {
 pub(crate) fn replicate_null(vector: &NullVector, offsets: &[usize]) -> VectorRef {
     assert_eq!(offsets.len(), vector.len());
 
+    if offsets.is_empty() {
+        return vector.slice(0, 0);
+    }
+
     Arc::new(NullVector::new(*offsets.last().unwrap()))
 }
 
