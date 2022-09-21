@@ -14,7 +14,7 @@ use crate::value::Value;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnDefaultConstraint {
     // A function invocation
-    // TODO(dennis): we save the funciton expression here, maybe use a struct in future.
+    // TODO(dennis): we save the function expression here, maybe use a struct in future.
     Function(String),
     // A value
     Value(Value),
