@@ -115,7 +115,7 @@ impl<R: Region> Table for MitoTable<R> {
         }
 
         logging::debug!(
-            "Insert into taoble {} with put_op: {:?}",
+            "Insert into table {} with put_op: {:?}",
             self.table_info().name,
             put_op
         );
