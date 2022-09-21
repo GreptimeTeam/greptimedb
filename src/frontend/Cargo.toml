@@ -41,5 +41,5 @@ tower = "0.4"
 
 [features]
 default = ["opentsdb", "postgres"]
-postgres = ["servers/postgres"]
 opentsdb = []
+postgres = ["servers/postgres"]

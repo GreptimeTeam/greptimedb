@@ -14,8 +14,6 @@ use snafu::prelude::*;
 use crate::error::{self, Result};
 use crate::instance::Instance;
 
-/// [Implementation Notes](https://greptime.feishu.cn/docx/doxcnbXN6f3C5mMog27Qb0BrcOe)
-
 #[async_trait]
 impl OpentsdbLineProtocolHandler for Instance {
     async fn exec(&self, data_point: &OpentsdbDataPoint) -> server_error::Result<()> {
