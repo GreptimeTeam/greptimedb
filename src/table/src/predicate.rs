@@ -1,12 +1,10 @@
 mod stats;
 
-use std::sync::Arc;
-
 use common_query::logical_plan::Expr;
 use common_telemetry::{error, warn};
 use datafusion::physical_optimizer::pruning::PruningPredicate;
-use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::arrow::io::parquet::read::RowGroupMetaData;
+use datatypes::schema::SchemaRef;
 
 use crate::predicate::stats::RowGroupPruningStatistics;
 
@@ -26,12 +24,12 @@ impl Predicate {
 
     pub fn prune_row_groups(
         &self,
-        schema: Arc<ArrowSchema>,
+        schema: SchemaRef,
         row_groups: &[RowGroupMetaData],
     ) -> Vec<bool> {
         let mut res = vec![true; row_groups.len()];
         for expr in &self.exprs {
-            match PruningPredicate::try_new(expr.df_expr().clone(), schema.clone()) {
+            match PruningPredicate::try_new(expr.df_expr().clone(), schema.arrow_schema().clone()) {
                 Ok(p) => {
                     let stat = RowGroupPruningStatistics::new(row_groups, &schema);
                     match p.prune(&stat) {
@@ -56,6 +54,8 @@ impl Predicate {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     pub use datafusion::parquet::schema::types::{BasicTypeInfo, PhysicalType};
     use datafusion_common::Column;
     use datafusion_expr::Expr;
@@ -138,6 +138,8 @@ mod tests {
         let file_reader =
             FileReader::try_new(std::fs::File::open(path).unwrap(), None, None, None, None)
                 .unwrap();
+
+        let schema = Arc::new(datatypes::schema::Schema::try_from(schema).unwrap());
 
         let vec = file_reader.metadata().row_groups.clone();
         let res = predicate.prune_row_groups(schema, &vec);

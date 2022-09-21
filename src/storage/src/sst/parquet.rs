@@ -200,14 +200,14 @@ impl<'a> ParquetReader<'a> {
         let arrow_schema =
             infer_schema(&metadata).context(error::ReadParquetSnafu { file: &file_path })?;
 
-        let pruned_row_groups = self
-            .predicate
-            .prune_row_groups(Arc::new(arrow_schema.clone()), &metadata.row_groups);
-
         // Now the StoreSchema is only used to validate metadata of the parquet file, but this schema
         // would be useful once we support altering schema, as this is the actual schema of the SST.
-        let _store_schema = StoreSchema::try_from(arrow_schema)
+        let store_schema = StoreSchema::try_from(arrow_schema)
             .context(error::ConvertStoreSchemaSnafu { file: &file_path })?;
+
+        let pruned_row_groups = self
+            .predicate
+            .prune_row_groups(store_schema.schema().clone(), &metadata.row_groups);
 
         let projected_fields = self.projected_fields().to_vec();
         let chunk_stream = try_stream!({
