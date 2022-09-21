@@ -1,6 +1,3 @@
-extern crate alloc;
-extern crate core;
-
 pub mod engine;
 pub mod error;
 pub mod metadata;
