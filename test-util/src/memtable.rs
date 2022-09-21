@@ -41,7 +41,7 @@ impl MemTable {
             ConcreteDataType::uint32_datatype(),
             true,
         )];
-        let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
+        let schema = Arc::new(Schema::new(column_schemas));
         let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(
             (0..100).collect::<Vec<_>>(),
         ))];
@@ -177,7 +177,7 @@ mod test {
             ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true);
         let column_schemas = vec![i32_column_schema, string_column_schema];
 
-        let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
+        let schema = Arc::new(Schema::new(column_schemas));
         let columns: Vec<VectorRef> = vec![
             Arc::new(Int32Vector::from(vec![
                 Some(-100),

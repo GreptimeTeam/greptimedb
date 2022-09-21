@@ -28,8 +28,7 @@ impl Default for NumbersTable {
             false,
         )];
         Self {
-            // It won't fail here
-            schema: Arc::new(Schema::try_new(column_schemas).unwrap()),
+            schema: Arc::new(Schema::new(column_schemas)),
         }
     }
 }

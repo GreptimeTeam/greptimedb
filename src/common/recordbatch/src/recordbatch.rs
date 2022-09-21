@@ -172,7 +172,7 @@ mod tests {
             ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
         ];
-        let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
+        let schema = Arc::new(Schema::new(column_schemas));
         let columns: Vec<VectorRef> = vec![
             Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
             Arc::new(StringVector::from(vec![

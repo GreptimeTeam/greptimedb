@@ -44,7 +44,20 @@ pub fn table_idents_to_full_name(
     }
 }
 
-fn parse_string_to_value(s: String, data_type: &ConcreteDataType) -> Result<Value> {
+fn parse_string_to_value(
+    column_name: &str,
+    s: String,
+    data_type: &ConcreteDataType,
+) -> Result<Value> {
+    ensure!(
+        data_type.is_string(),
+        ColumnTypeMismatchSnafu {
+            column_name,
+            expect: data_type.clone(),
+            actual: ConcreteDataType::string_datatype(),
+        }
+    );
+
     match data_type {
         ConcreteDataType::String(_) => Ok(Value::String(s.into())),
         ConcreteDataType::Date(_) => {
@@ -144,16 +157,7 @@ pub fn sql_value_to_value(
             (*b).into()
         }
         SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
-            ensure!(
-                data_type.is_string(),
-                ColumnTypeMismatchSnafu {
-                    column_name,
-                    expect: data_type.clone(),
-                    actual: ConcreteDataType::string_datatype(),
-                }
-            );
-
-            parse_string_to_value(s.to_owned(), data_type)?
+            parse_string_to_value(column_name, s.to_owned(), data_type)?
         }
         _ => todo!("Other sql value"),
     })

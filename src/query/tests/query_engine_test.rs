@@ -43,7 +43,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
         ConcreteDataType::uint32_datatype(),
         false,
     )];
-    let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
+    let schema = Arc::new(Schema::new(column_schemas));
     let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(
         (0..100).collect::<Vec<_>>(),
     ))];
@@ -169,7 +169,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
     }
     for_all_primitive_types! { create_even_number_table }
 
-    let schema = Arc::new(Schema::try_new(column_schemas.clone()).unwrap());
+    let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let even_number_table = Arc::new(MemTable::new("even_numbers", recordbatch));
     schema_provider
@@ -199,7 +199,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
     }
     for_all_primitive_types! { create_odd_number_table }
 
-    let schema = Arc::new(Schema::try_new(column_schemas.clone()).unwrap());
+    let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let odd_number_table = Arc::new(MemTable::new("odd_numbers", recordbatch));
     schema_provider

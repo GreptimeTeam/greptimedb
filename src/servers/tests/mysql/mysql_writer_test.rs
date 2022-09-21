@@ -13,7 +13,7 @@ fn test_create_mysql_column_def() {
         mysql_columns_def,
         ..
     } = all_datatype_testing_data();
-    let schema = Arc::new(Schema::try_new(column_schemas.clone()).unwrap());
+    let schema = Arc::new(Schema::new(column_schemas.clone()));
     let columns_def = create_mysql_column_def(&schema).unwrap();
     assert_eq!(column_schemas.len(), columns_def.len());
 
@@ -29,6 +29,6 @@ fn test_create_mysql_column_def() {
         ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
         true,
     )];
-    let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
+    let schema = Arc::new(Schema::new(column_schemas));
     assert!(create_mysql_column_def(&schema).is_err());
 }

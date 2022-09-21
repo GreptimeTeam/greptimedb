@@ -40,7 +40,7 @@ pub fn create_query_engine() -> Arc<dyn QueryEngine> {
     }
     for_all_primitive_types! { create_number_table }
 
-    let schema = Arc::new(Schema::try_new(column_schemas.clone()).unwrap());
+    let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let number_table = Arc::new(MemTable::new("numbers", recordbatch));
     schema_provider

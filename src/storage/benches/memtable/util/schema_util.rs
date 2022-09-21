@@ -22,7 +22,7 @@ pub fn new_schema(column_defs: &[ColumnDef], timestamp_index: Option<usize>) -> 
             .build()
             .unwrap()
     } else {
-        Schema::try_new(column_schemas).unwrap()
+        Schema::new(column_schemas)
     }
 }
 

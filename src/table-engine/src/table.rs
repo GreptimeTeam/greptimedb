@@ -89,15 +89,13 @@ impl<R: Region> Table for MitoTable<R> {
 
         //Add row key and columns
         for name in key_columns {
-            let vector = if let Some(v) = columns_values.remove(name) {
-                v
-            } else if let Some(v) =
-                Self::try_get_column_default_constraint_vector(&schema, name, rows_num)?
-            {
-                v
-            } else {
-                return MissingColumnSnafu { name }.fail().map_err(TableError::from);
-            };
+            let vector = columns_values
+                .remove(name)
+                .or_else(|| {
+                    Self::try_get_column_default_constraint_vector(&schema, name, rows_num).ok()?
+                })
+                .context(MissingColumnSnafu { name })
+                .map_err(TableError::from)?;
 
             put_op
                 .add_key_column(name, vector)
@@ -105,11 +103,11 @@ impl<R: Region> Table for MitoTable<R> {
         }
         // Add vaue columns
         for name in value_columns {
-            if let Some(v) = columns_values.remove(name) {
-                put_op.add_value_column(name, v).map_err(TableError::new)?;
-            } else if let Some(v) =
-                Self::try_get_column_default_constraint_vector(&schema, name, rows_num)?
-            {
+            let vector = columns_values.remove(name).or_else(|| {
+                Self::try_get_column_default_constraint_vector(&schema, name, rows_num).ok()?
+            });
+
+            if let Some(v) = vector {
                 put_op.add_value_column(name, v).map_err(TableError::new)?;
             }
         }

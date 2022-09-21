@@ -268,8 +268,7 @@ fn build_schema_for_tables() -> Schema {
             false,
         ),
     ];
-    // The schema is always valid here.
-    Schema::try_new(cols).unwrap()
+    Schema::new(cols)
 }
 
 #[cfg(test)]

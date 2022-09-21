@@ -149,9 +149,9 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         is_nullable: column_def.is_nullable,
         default_constraint: match &column_def.default_constraint {
             None => None,
-            Some(v) => {
-                Some(ColumnDefaultConstraint::try_from(v).context(ColumnDefaultConstraintSnafu)?)
-            }
+            Some(v) => Some(
+                ColumnDefaultConstraint::try_from(&v[..]).context(ColumnDefaultConstraintSnafu)?,
+            ),
         },
     })
 }

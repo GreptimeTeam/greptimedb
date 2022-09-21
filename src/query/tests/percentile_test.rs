@@ -128,7 +128,7 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
     let column: VectorRef = Arc::new(PrimitiveVector::<i32>::from_vec(numbers.to_vec()));
     columns.push(column);
 
-    let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
+    let schema = Arc::new(Schema::new(column_schemas));
     let number_table = Arc::new(MemTable::new(
         "corr_numbers",
         RecordBatch::new(schema, columns).unwrap(),

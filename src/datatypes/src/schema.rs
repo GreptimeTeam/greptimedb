@@ -20,10 +20,10 @@ pub enum ColumnDefaultConstraint {
     Value(Value),
 }
 
-impl TryFrom<&Vec<u8>> for ColumnDefaultConstraint {
+impl TryFrom<&[u8]> for ColumnDefaultConstraint {
     type Error = error::Error;
 
-    fn try_from(bytes: &Vec<u8>) -> Result<Self> {
+    fn try_from(bytes: &[u8]) -> Result<Self> {
         let json = String::from_utf8_lossy(bytes);
         serde_json::from_str(&json).context(DeserializeSnafu { json })
     }
@@ -47,6 +47,8 @@ impl TryInto<Vec<u8>> for ColumnDefaultConstraint {
 const TIMESTAMP_COLUMN_KEY: &str = "greptime:timestamp_column";
 /// Key used to store version number of the schema in metadata.
 const VERSION_KEY: &str = "greptime:version";
+/// Key used to store default constraint in arrow field's metadata.
+const ARROW_FIELD_DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColumnSchema {
@@ -99,6 +101,17 @@ pub struct Schema {
 impl Schema {
     /// Initial version of the schema.
     pub const INITIAL_VERSION: u32 = 0;
+
+    /// Create a schema from a vector of [ColumnSchema].
+    /// # Panics
+    /// Panics when ColumnSchema's `default_constrait` can't be serialized into json.
+    pub fn new(column_schemas: Vec<ColumnSchema>) -> Schema {
+        // Builder won't fail
+        SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
 
     pub fn try_new(column_schemas: Vec<ColumnSchema>) -> Result<Schema> {
         // Builder won't fail
@@ -271,7 +284,6 @@ fn validate_timestamp_index(column_schemas: &[ColumnSchema], timestamp_index: us
 }
 
 pub type SchemaRef = Arc<Schema>;
-const ARROW_FIELD_DEFAULT_CONSTRAINT_KEY: &str = "greptime::default_constraint";
 
 impl TryFrom<&Field> for ColumnSchema {
     type Error = Error;
@@ -414,7 +426,7 @@ mod tests {
         let default_constraint = ColumnDefaultConstraint::Value(Value::from(42i64));
 
         let bytes: Vec<u8> = default_constraint.clone().try_into().unwrap();
-        let from_value = ColumnDefaultConstraint::try_from(&bytes).unwrap();
+        let from_value = ColumnDefaultConstraint::try_from(&bytes[..]).unwrap();
 
         assert_eq!(default_constraint, from_value);
     }
@@ -434,7 +446,7 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), false),
             ColumnSchema::new("col2", ConcreteDataType::float64_datatype(), true),
         ];
-        let schema = Schema::try_new(column_schemas.clone()).unwrap();
+        let schema = Schema::new(column_schemas.clone());
 
         assert_eq!(2, schema.num_columns());
         assert!(!schema.is_empty());

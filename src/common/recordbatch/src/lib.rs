@@ -96,10 +96,10 @@ mod tests {
         let vb: VectorRef = Arc::new(StringVector::from(vec!["hello", "world"]));
         let vc: VectorRef = Arc::new(BooleanVector::from(vec![true, false]));
 
-        let schema1 = Arc::new(Schema::try_new(vec![column_a.clone(), column_b]).unwrap());
+        let schema1 = Arc::new(Schema::new(vec![column_a.clone(), column_b]));
         let batch1 = RecordBatch::new(schema1.clone(), vec![va.clone(), vb]).unwrap();
 
-        let schema2 = Arc::new(Schema::try_new(vec![column_a, column_c]).unwrap());
+        let schema2 = Arc::new(Schema::new(vec![column_a, column_c]));
         let batch2 = RecordBatch::new(schema2.clone(), vec![va, vc]).unwrap();
 
         let result = RecordBatches::try_new(schema1.clone(), vec![batch1.clone(), batch2]);
