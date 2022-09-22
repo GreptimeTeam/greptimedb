@@ -77,12 +77,8 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 #[tokio::test]
 async fn test_fs_backend() -> Result<()> {
     let tmp_dir = TempDir::new("test_fs_backend")?;
-    let store = ObjectStore::new(
-        fs::Backend::build()
-            .root(&tmp_dir.path().to_string_lossy())
-            .finish()
-            .await?,
-    );
+    let mut builder = fs::Builder::default();
+    let store = ObjectStore::new(builder.root(&tmp_dir.path().to_string_lossy()).build()?);
 
     test_object_crud(&store).await?;
     test_object_list(&store).await?;
@@ -95,14 +91,16 @@ async fn test_s3_backend() -> Result<()> {
     logging::init_default_ut_logging();
     if env::var("GT_S3_BUCKET").is_ok() {
         logging::info!("Running s3 test.");
-        let store = ObjectStore::new(
-            s3::Backend::build()
-                .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
-                .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
-                .bucket(&env::var("GT_S3_BUCKET")?)
-                .finish()
-                .await?,
-        );
+
+        let mut builder = s3::Builder::default();
+
+        let accessor = builder
+            .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
+            .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
+            .bucket(&env::var("GT_S3_BUCKET")?)
+            .build()?;
+
+        let store = ObjectStore::new(accessor);
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
     }

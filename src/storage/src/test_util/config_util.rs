@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
-use object_store::{backend::fs::Backend, ObjectStore};
+use object_store::{backend::fs::*, ObjectStore};
 
 use crate::background::JobPoolImpl;
 use crate::engine;
@@ -24,7 +24,8 @@ pub async fn new_store_config(
     let sst_dir = engine::region_sst_dir(parent_dir, region_name);
     let manifest_dir = engine::region_manifest_dir(parent_dir, region_name);
 
-    let accessor = Backend::build().root(store_dir).finish().await.unwrap();
+    let mut builder = Builder::default();
+    let accessor = builder.root(store_dir).build().unwrap();
     let object_store = ObjectStore::new(accessor);
     let sst_layer = Arc::new(FsAccessLayer::new(&sst_dir, object_store.clone()));
     let manifest = RegionManifest::new(&manifest_dir, object_store);

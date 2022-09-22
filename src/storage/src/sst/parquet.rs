@@ -16,6 +16,8 @@ use datatypes::arrow::io::parquet::read::{
 use datatypes::arrow::io::parquet::write::{
     Compression, Encoding, FileSink, Version, WriteOptions,
 };
+use futures::io::Cursor;
+use futures::AsyncReadExt;
 use futures::AsyncWriteExt;
 use futures_util::sink::SinkExt;
 use futures_util::{Stream, TryStreamExt};
@@ -62,16 +64,19 @@ impl<'a> ParquetWriter<'a> {
         let schema = store_schema.arrow_schema();
         let object = self.object_store.object(self.file_path);
 
+        let buffer = Cursor::new(Vec::<u8>::new());
+        let (r, mut w) = buffer.split();
+
+        object.write_from(0, r).await.context(error::FlushIoSnafu)?;
+
         // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
         // but in s3/azblob backend the Content-Length field of HTTP request is set
         // to this value.
-        let mut writer = object.writer(0).await.context(error::FlushIoSnafu)?;
-
         // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
         let encodings = get_encoding_for_schema(schema, |_| Encoding::Plain);
 
         let mut sink = FileSink::try_new(
-            &mut writer,
+            &mut w,
             // The file sink needs the `Schema` instead of a reference.
             (**schema).clone(),
             encodings,
@@ -96,7 +101,6 @@ impl<'a> ParquetWriter<'a> {
             }
         }
         sink.close().await.context(error::WriteParquetSnafu)?;
-
         drop(sink);
         writer.flush().await.context(error::WriteObjectSnafu {
             path: self.file_path,
@@ -287,7 +291,7 @@ mod tests {
     use datatypes::arrow::io::parquet::read::FileReader;
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::vectors::TimestampVector;
-    use object_store::backend::fs::Backend;
+    use object_store::backend::fs::*;
     use store_api::storage::OpType;
     use tempdir::TempDir;
 
@@ -324,7 +328,8 @@ mod tests {
 
         let dir = TempDir::new("write_parquet").unwrap();
         let path = dir.path().to_str().unwrap();
-        let backend = Backend::build().root(path).finish().await.unwrap();
+        let mut builder = Builder::default();
+        let backend = builder.root(path).build().unwrap();
         let object_store = ObjectStore::new(backend);
         let sst_file_name = "test-flush.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();

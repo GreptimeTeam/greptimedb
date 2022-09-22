@@ -98,7 +98,7 @@ mod tests {
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
     use log_store::fs::noop::NoopLogStore;
-    use object_store::{backend::fs::Backend, ObjectStore};
+    use object_store::{services::fs::Builder, ObjectStore};
     use query::QueryEngineFactory;
     use sql::statements::statement::Statement;
     use storage::config::EngineConfig as StorageEngineConfig;
@@ -180,7 +180,8 @@ mod tests {
     async fn test_statement_to_request() {
         let dir = TempDir::new("setup_test_engine_and_table").unwrap();
         let store_dir = dir.path().to_string_lossy();
-        let accessor = Backend::build().root(&store_dir).finish().await.unwrap();
+        let mut builder = Builder::default();
+        let accessor = builder.root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor);
 
         let sql = r#"insert into demo(host, cpu, memory, ts) values

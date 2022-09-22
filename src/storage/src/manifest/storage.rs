@@ -214,9 +214,12 @@ impl ManifestLogStorage for ManifestObjectStore {
         );
 
         let bs = checkpoint_metadata.encode()?;
-        last_checkpoint.write(bs).await.context(WriteObjectSnafu {
-            path: last_checkpoint.path(),
-        })?;
+        last_checkpoint
+            .write(bs.as_ref())
+            .await
+            .context(WriteObjectSnafu {
+                path: last_checkpoint.path(),
+            })?;
 
         Ok(())
     }
@@ -270,11 +273,11 @@ mod tests {
     async fn test_manifest_log_store() {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = TempDir::new("test_manifest_log_store").unwrap();
+        let mut builder = fs::Builder::default();
         let object_store = ObjectStore::new(
-            fs::Backend::build()
+            builder
                 .root(&tmp_dir.path().to_string_lossy())
-                .finish()
-                .await
+                .build()
                 .unwrap(),
         );
 

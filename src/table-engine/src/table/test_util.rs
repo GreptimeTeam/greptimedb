@@ -6,7 +6,7 @@ use std::sync::Arc;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use log_store::fs::noop::NoopLogStore;
-use object_store::{backend::fs::Backend, ObjectStore};
+use object_store::{services::fs::Builder, ObjectStore};
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::engine::EngineContext;
@@ -65,8 +65,8 @@ pub fn build_test_table_info() -> TableInfo {
 pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     let dir = TempDir::new(prefix).unwrap();
     let store_dir = dir.path().to_string_lossy();
-    let accessor = Backend::build().root(&store_dir).finish().await.unwrap();
-
+    let mut builder = Builder::default();
+    let accessor = builder.root(&store_dir).build().unwrap();
     (dir, ObjectStore::new(accessor))
 }
 
