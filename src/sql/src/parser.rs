@@ -1,11 +1,11 @@
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
-use crate::error::{self, Result, SyntaxSnafu, TokenizerSnafu};
+use crate::error::{self, InvalidDatabaseNameSnafu, Result, SyntaxSnafu, TokenizerSnafu};
 use crate::statements::show::{ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
 
@@ -120,13 +120,22 @@ impl<'a> ParserContext<'a> {
             Token::Word(w) => match w.keyword {
                 Keyword::IN | Keyword::FROM => {
                     self.parser.next_token();
-                    Some(self.parser.parse_object_name().with_context(|_| {
+                    let db_name = self.parser.parse_object_name().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
                             expected: "a database name",
                             actual: self.peek_token_as_string(),
                         }
-                    })?)
+                    })?;
+
+                    ensure!(
+                        db_name.0.len() == 1,
+                        InvalidDatabaseNameSnafu {
+                            name: format!("{}", db_name),
+                        }
+                    );
+
+                    Some(format!("{}", db_name))
                 }
 
                 _ => None,

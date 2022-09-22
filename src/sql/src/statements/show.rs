@@ -1,4 +1,6 @@
-use crate::ast::{Expr, Ident, ObjectName};
+use std::fmt;
+
+use crate::ast::{Expr, Ident};
 
 /// Show kind for SQL expressions like `SHOW DATABASE` or `SHOW TABLE`
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,6 +8,16 @@ pub enum ShowKind {
     All,
     Like(Ident),
     Where(Expr),
+}
+
+impl fmt::Display for ShowKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ShowKind::All => write!(f, "ALL"),
+            ShowKind::Like(ident) => write!(f, "LIKE {}", ident),
+            ShowKind::Where(expr) => write!(f, "WHERE {}", expr),
+        }
+    }
 }
 
 /// SQL structure for `SHOW DATABASES`.
@@ -25,18 +37,47 @@ impl ShowDatabases {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowTables {
     pub kind: ShowKind,
-    pub database: Option<ObjectName>,
+    pub database: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use sqlparser::ast::UnaryOperator;
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
     use crate::parser::ParserContext;
     use crate::statements::statement::Statement;
+
+    #[test]
+    fn test_kind_display() {
+        assert_eq!("ALL", format!("{}", ShowKind::All));
+        assert_eq!(
+            "LIKE test",
+            format!(
+                "{}",
+                ShowKind::Like(Ident {
+                    value: "test".to_string(),
+                    quote_style: None,
+                })
+            )
+        );
+        assert_eq!(
+            "WHERE NOT a",
+            format!(
+                "{}",
+                ShowKind::Where(Expr::UnaryOp {
+                    op: UnaryOperator::Not,
+                    expr: Box::new(Expr::Identifier(Ident {
+                        value: "a".to_string(),
+                        quote_style: None,
+                    })),
+                })
+            )
+        );
+    }
 
     #[test]
     pub fn test_show_database() {

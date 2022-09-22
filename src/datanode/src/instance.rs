@@ -159,7 +159,14 @@ impl Instance {
                 let req = self.sql_handler.alter_to_request(alter_table)?;
                 self.sql_handler.execute(SqlRequest::Alter(req)).await
             }
-            _ => unimplemented!(),
+            Statement::ShowDatabases(stmt) => {
+                self.sql_handler
+                    .execute(SqlRequest::ShowDatabases(stmt))
+                    .await
+            }
+            Statement::ShowTables(stmt) => {
+                self.sql_handler.execute(SqlRequest::ShowTables(stmt)).await
+            }
         }
     }
 

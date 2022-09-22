@@ -27,6 +27,12 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Catalog not found: {}", name))]
+    CatalogNotFound { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Schema not found: {}", name))]
+    SchemaNotFound { name: String, backtrace: Backtrace },
+
     #[snafu(display("Failed to create table: {}, source: {}", table_name, source))]
     CreateTable {
         table_name: String,
@@ -205,6 +211,18 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
+
+    #[snafu(display("Failed to create a new RecordBatch, source: {}", source))]
+    NewRecordBatche {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to create a new RecordBatches, source: {}", source))]
+    NewRecordBatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -240,6 +258,8 @@ impl ErrorExt for Error {
             | Error::KeyColumnNotFound { .. }
             | Error::InvalidPrimaryKey { .. }
             | Error::MissingField { .. }
+            | Error::CatalogNotFound { .. }
+            | Error::SchemaNotFound { .. }
             | Error::ConstraintNotSupported { .. } => StatusCode::InvalidArguments,
 
             // TODO(yingwen): Further categorize http error.
@@ -259,7 +279,9 @@ impl ErrorExt for Error {
             Error::StartScriptManager { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
-            Error::CollectRecordBatches { source } => source.status_code(),
+            Error::NewRecordBatche { source }
+            | Error::NewRecordBatches { source }
+            | Error::CollectRecordBatches { source } => source.status_code(),
         }
     }
 
