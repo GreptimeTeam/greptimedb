@@ -147,7 +147,6 @@ impl HttpServer {
         #[cfg(feature = "influxdb")]
         {
             use std::sync::Arc;
-
             use self::influxdb::influxdb_write;
 
             if let Some(handler) = &self.influxdb_handler {
