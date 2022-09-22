@@ -45,11 +45,12 @@ where
     /// Converts statement to logical plan using datafusion planner
     fn statement_to_plan(&self, statement: Statement) -> Result<LogicalPlan> {
         match statement {
-            Statement::ShowDatabases(_) => {
-                todo!("Currently not supported")
-            }
             Statement::Query(qb) => self.query_to_plan(qb),
-            Statement::Create(_) | Statement::Alter(_) | Statement::Insert(_) => unreachable!(),
+            Statement::ShowTables(_)
+            | Statement::ShowDatabases(_)
+            | Statement::Create(_)
+            | Statement::Alter(_)
+            | Statement::Insert(_) => unreachable!(),
         }
     }
 }

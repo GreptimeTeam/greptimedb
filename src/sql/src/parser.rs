@@ -6,8 +6,7 @@ use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::error::{self, Result, SyntaxSnafu, TokenizerSnafu};
-use crate::statements::show_database::SqlShowDatabase;
-use crate::statements::show_kind::ShowKind;
+use crate::statements::show::{ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
@@ -96,13 +95,75 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parses SHOW statements
-    /// todo(hl) support `show table`/`show settings`/`show create`/`show users` ect.
+    /// todo(hl) support `show settings`/`show create`/`show users` ect.
     fn parse_show(&mut self) -> Result<Statement> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
-            Ok(self.parse_show_databases()?)
+            self.parse_show_databases()
+        } else if self.matches_keyword(Keyword::TABLES) {
+            self.parser.next_token();
+            self.parse_show_tables()
         } else {
             self.unsupported(self.peek_token_as_string())
         }
+    }
+
+    fn parse_show_tables(&mut self) -> Result<Statement> {
+        let database = match self.parser.peek_token() {
+            Token::EOF | Token::SemiColon => {
+                return Ok(Statement::ShowTables(ShowTables {
+                    kind: ShowKind::All,
+                    database: None,
+                }));
+            }
+
+            // SHOW TABLES [in | FROM] [DATABSE]
+            Token::Word(w) => match w.keyword {
+                Keyword::IN | Keyword::FROM => {
+                    self.parser.next_token();
+                    Some(self.parser.parse_object_name().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "a database name",
+                            actual: self.peek_token_as_string(),
+                        }
+                    })?)
+                }
+
+                _ => None,
+            },
+            _ => None,
+        };
+
+        let kind = match self.parser.peek_token() {
+            Token::EOF | Token::SemiColon => ShowKind::All,
+            // SHOW TABLES [WHERE | LIKE] [EXPR]
+            Token::Word(w) => match w.keyword {
+                Keyword::LIKE => {
+                    self.parser.next_token();
+                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "LIKE",
+                            actual: self.peek_token_as_string(),
+                        }
+                    })?)
+                }
+                Keyword::WHERE => {
+                    self.parser.next_token();
+                    ShowKind::Where(self.parser.parse_expr().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "some valid expression",
+                            actual: self.peek_token_as_string(),
+                        }
+                    })?)
+                }
+                _ => return self.unsupported(self.peek_token_as_string()),
+            },
+            _ => return self.unsupported(self.peek_token_as_string()),
+        };
+
+        Ok(Statement::ShowTables(ShowTables { kind, database }))
     }
 
     fn parse_explain(&mut self) -> Result<Statement> {
@@ -116,6 +177,13 @@ impl<'a> ParserContext<'a> {
             expected, found
         )))
         .context(SyntaxSnafu { sql: self.sql })
+    }
+
+    pub fn matches_keyword(&mut self, expected: Keyword) -> bool {
+        match self.parser.peek_token() {
+            Token::Word(w) => w.keyword == expected,
+            _ => false,
+        }
     }
 
     pub fn consume_token(&mut self, expected: &str) -> bool {
@@ -136,11 +204,11 @@ impl<'a> ParserContext<'a> {
     pub fn parse_show_databases(&mut self) -> Result<Statement> {
         let tok = self.parser.next_token();
         match &tok {
-            Token::EOF | Token::SemiColon => Ok(Statement::ShowDatabases(SqlShowDatabase::new(
-                ShowKind::All,
-            ))),
+            Token::EOF | Token::SemiColon => {
+                Ok(Statement::ShowDatabases(ShowDatabases::new(ShowKind::All)))
+            }
             Token::Word(w) => match w.keyword {
-                Keyword::LIKE => Ok(Statement::ShowDatabases(SqlShowDatabase::new(
+                Keyword::LIKE => Ok(Statement::ShowDatabases(ShowDatabases::new(
                     ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
@@ -149,7 +217,7 @@ impl<'a> ParserContext<'a> {
                         }
                     })?),
                 ))),
-                Keyword::WHERE => Ok(Statement::ShowDatabases(SqlShowDatabase::new(
+                Keyword::WHERE => Ok(Statement::ShowDatabases(ShowDatabases::new(
                     ShowKind::Where(self.parser.parse_expr().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
@@ -182,7 +250,7 @@ mod tests {
 
         assert_matches!(
             &stmts[0],
-            Statement::ShowDatabases(SqlShowDatabase {
+            Statement::ShowDatabases(ShowDatabases {
                 kind: ShowKind::All
             })
         );
@@ -197,7 +265,7 @@ mod tests {
 
         assert_matches!(
             &stmts[0],
-            Statement::ShowDatabases(SqlShowDatabase {
+            Statement::ShowDatabases(ShowDatabases {
                 kind: ShowKind::Like(sqlparser::ast::Ident {
                     value: _,
                     quote_style: None,
@@ -215,12 +283,100 @@ mod tests {
 
         assert_matches!(
             &stmts[0],
-            Statement::ShowDatabases(SqlShowDatabase {
+            Statement::ShowDatabases(ShowDatabases {
                 kind: ShowKind::Where(sqlparser::ast::Expr::BinaryOp {
                     left: _,
                     right: _,
                     op: sqlparser::ast::BinaryOperator::Or,
                 })
+            })
+        );
+    }
+
+    #[test]
+    pub fn test_show_tables_all() {
+        let sql = "SHOW TABLES";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::All,
+                database: None,
+            })
+        );
+    }
+
+    #[test]
+    pub fn test_show_tables_like() {
+        let sql = "SHOW TABLES LIKE test_table";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::Like(sqlparser::ast::Ident {
+                    value: _,
+                    quote_style: None,
+                }),
+                database: None,
+            })
+        );
+
+        let sql = "SHOW TABLES in test_db LIKE test_table";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::Like(sqlparser::ast::Ident {
+                    value: _,
+                    quote_style: None,
+                }),
+                database: Some(_),
+            })
+        );
+    }
+
+    #[test]
+    pub fn test_show_tables_where() {
+        let sql = "SHOW TABLES where name like test_table";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::Where(sqlparser::ast::Expr::BinaryOp {
+                    left: _,
+                    right: _,
+                    op: sqlparser::ast::BinaryOperator::Like,
+                }),
+                database: None,
+            })
+        );
+
+        let sql = "SHOW TABLES in test_db where name LIKE test_table";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::Where(sqlparser::ast::Expr::BinaryOp {
+                    left: _,
+                    right: _,
+                    op: sqlparser::ast::BinaryOperator::Like,
+                }),
+                database: Some(_),
             })
         );
     }
