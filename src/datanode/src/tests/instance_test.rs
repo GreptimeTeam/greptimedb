@@ -72,7 +72,7 @@ pub async fn test_execute_create() {
                             cpu double default 0,
                             memory double,
                             TIME INDEX (ts),
-                            PRIMARY KEY(ts, host)
+                            PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#,
         )
         .await
@@ -96,7 +96,7 @@ pub async fn test_create_table_illegal_timestamp_type() {
                             cpu double default 0,
                             memory double,
                             TIME INDEX (ts),
-                            PRIMARY KEY(ts, host)
+                            PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#,
         )
         .await;

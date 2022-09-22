@@ -5,7 +5,7 @@ use catalog::RegisterTableRequest;
 use common_query::Output;
 use common_telemetry::tracing::info;
 use datatypes::schema::SchemaBuilder;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::TableConstraint;
 use sql::statements::create_table::CreateTable;
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
@@ -16,7 +16,7 @@ use table::requests::*;
 
 use crate::error::{
     self, ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu,
-    InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu, Result,
+    InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu, Result,
 };
 use crate::sql::SqlHandler;
 
@@ -120,6 +120,13 @@ impl SqlHandler {
             }
         }
 
+        ensure!(
+            !primary_keys.iter().any(|index| *index == ts_index),
+            InvalidPrimaryKeySnafu {
+                msg: "time index column can't be included in primary key"
+            }
+        );
+
         if primary_keys.is_empty() {
             info!(
                 "Creating table: {:?}.{:?}.{} but primary key not set, use time index column: {}",
@@ -184,14 +191,22 @@ mod tests {
     #[tokio::test]
     pub async fn test_create_to_request() {
         let handler = create_mock_sql_handler().await;
-        let parsed_stmt = sql_to_statement("create table demo_table( host string, ts timestamp, cpu double default 0, memory double, TIME INDEX (ts), PRIMARY KEY(ts, host)) engine=mito with(regions=1);");
+        let parsed_stmt = sql_to_statement(
+            r#"create table demo_table(
+                       host string,
+                       ts timestamp,
+                       cpu double default 0,
+                       memory double,
+                       TIME INDEX (ts),
+                       PRIMARY KEY(host)) engine=mito with(regions=1);"#,
+        );
         let c = handler.create_to_request(42, parsed_stmt).unwrap();
         assert_eq!("demo_table", c.table_name);
         assert_eq!(42, c.id);
         assert!(c.schema_name.is_none());
         assert!(c.catalog_name.is_none());
         assert!(!c.create_if_not_exists);
-        assert_eq!(vec![1, 0], c.primary_key_indices);
+        assert_eq!(vec![0], c.primary_key_indices);
         assert_eq!(1, c.schema.timestamp_index().unwrap());
         assert_eq!(4, c.schema.column_schemas().len());
     }
@@ -200,7 +215,14 @@ mod tests {
     #[tokio::test]
     pub async fn test_time_index_not_specified() {
         let handler = create_mock_sql_handler().await;
-        let parsed_stmt = sql_to_statement("create table demo_table( host string, ts bigint, cpu double default 0, memory double, PRIMARY KEY(ts, host)) engine=mito with(regions=1);");
+        let parsed_stmt = sql_to_statement(
+            r#"create table demo_table(
+                      host string,
+                      ts bigint,
+                      cpu double default 0,
+                      memory double,
+                      PRIMARY KEY(host)) engine=mito with(regions=1);"#,
+        );
         let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
         assert_matches!(error, Error::CreateSchema { .. });
     }
@@ -210,8 +232,14 @@ mod tests {
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;
 
-        let parsed_stmt = sql_to_statement("create table demo_table( host string, ts timestamp, cpu double default 0, memory double, TIME INDEX (ts)) engine=mito with(regions=1);");
-
+        let parsed_stmt = sql_to_statement(
+            r#"create table demo_table(
+                      host string,
+                      ts timestamp,
+                      cpu double default 0,
+                      memory double,
+                      TIME INDEX (ts)) engine=mito with(regions=1);"#,
+        );
         let c = handler.create_to_request(42, parsed_stmt).unwrap();
         assert_eq!(1, c.primary_key_indices.len());
         assert_eq!(
@@ -226,11 +254,33 @@ mod tests {
         let handler = create_mock_sql_handler().await;
 
         let parsed_stmt = sql_to_statement(
-            "create table demo_table( host string, TIME INDEX (ts)) engine=mito with(regions=1);",
+            r#"create table demo_table(
+                host string,
+                TIME INDEX (ts)) engine=mito with(regions=1);"#,
         );
 
         let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
         assert_matches!(error, Error::KeyColumnNotFound { .. });
+    }
+
+    #[tokio::test]
+    pub async fn test_invalid_primary_key() {
+        let create_table = sql_to_statement(
+            r"create table c.s.demo(
+                             host string,
+                             ts timestamp,
+                             cpu double default 0,
+                             memory double,
+                             TIME INDEX (ts),
+                             PRIMARY KEY(host, cpu, ts)) engine=mito
+                             with(regions=1);
+         ",
+        );
+
+        let handler = create_mock_sql_handler().await;
+
+        let error = handler.create_to_request(42, create_table).unwrap_err();
+        assert_matches!(error, Error::InvalidPrimaryKey { .. });
     }
 
     #[tokio::test]
@@ -242,7 +292,7 @@ mod tests {
                              cpu double default 0,
                              memory double,
                              TIME INDEX (ts),
-                             PRIMARY KEY(ts, host)) engine=mito
+                             PRIMARY KEY(host)) engine=mito
                              with(regions=1);
          ",
         );
@@ -258,7 +308,7 @@ mod tests {
         assert!(!request.create_if_not_exists);
         assert_eq!(4, request.schema.column_schemas().len());
 
-        assert_eq!(vec![1, 0], request.primary_key_indices);
+        assert_eq!(vec![0], request.primary_key_indices);
         assert_eq!(
             ConcreteDataType::string_datatype(),
             request
