@@ -22,7 +22,10 @@ impl Services {
         let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
             let http_addr = parse_addr(http_addr)?;
 
-            let http_server = HttpServer::new(instance.clone());
+            let mut http_server = HttpServer::new(instance.clone());
+
+            #[cfg(feature = "influxdb")]
+            http_server.set_influxdb_handler(instance.clone());
 
             Some((Box::new(http_server) as _, http_addr))
         } else {

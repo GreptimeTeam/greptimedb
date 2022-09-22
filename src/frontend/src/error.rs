@@ -12,6 +12,12 @@ pub enum Error {
         source: client::Error,
     },
 
+    #[snafu(display("Failed to request Datanode, source: {}", source))]
+    RequestDatanode {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
     #[snafu(display("Runtime resource error, source: {}", source))]
     RuntimeResource {
         #[snafu(backtrace)]
@@ -78,7 +84,7 @@ impl ErrorExt for Error {
             Error::StartServer { source, .. } => source.status_code(),
             Error::ParseSql { source } => source.status_code(),
             Error::ConvertColumnDefaultConstraint { source, .. } => source.status_code(),
-            Error::ColumnDataType { .. } => StatusCode::Internal,
+            Error::ColumnDataType { .. } | Error::RequestDatanode { .. } => StatusCode::Internal,
             Error::IllegalFrontendState { .. } => StatusCode::Unexpected,
         }
     }

@@ -1,6 +1,10 @@
 use std::any::Any;
 use std::net::SocketAddr;
 
+use axum::{
+    response::{IntoResponse, Response},
+    Json,
+};
 use common_error::prelude::*;
 
 #[derive(Debug, Snafu)]
@@ -71,6 +75,17 @@ pub enum Error {
         reason: String,
         backtrace: Backtrace,
     },
+
+    #[cfg(feature = "influxdb")]
+    #[snafu(display("Failed to parse influxdb line protocol, source: {}", source))]
+    InfluxdbLineProtocol {
+        #[snafu(backtrace)]
+        source: crate::influxdb::line_protocol::Error,
+    },
+
+    #[cfg(feature = "influxdb")]
+    #[snafu(display("Write type mismatch, column name: {}", column_name))]
+    TypeMismatch { column_name: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -93,6 +108,9 @@ impl ErrorExt for Error {
             | ExecuteQuery { source, .. } => source.status_code(),
 
             NotSupported { .. } | InvalidQuery { .. } => StatusCode::InvalidArguments,
+
+            #[cfg(feature = "influxdb")]
+            InfluxdbLineProtocol { .. } | TypeMismatch { .. } => StatusCode::InvalidArguments,
         }
     }
 
@@ -114,5 +132,24 @@ impl From<Error> for tonic::Status {
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::InternalIo { source: e }
+    }
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let (status, error_message) = match self {
+            #[cfg(feature = "influxdb")]
+            Error::InfluxdbLineProtocol { .. } | Error::TypeMismatch { .. } => {
+                (axum::http::StatusCode::BAD_REQUEST, self.to_string())
+            }
+            _ => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                self.to_string(),
+            ),
+        };
+        let body = Json(serde_json::json!({
+            "error": error_message,
+        }));
+        (status, body).into_response()
     }
 }
