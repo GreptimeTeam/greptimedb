@@ -17,6 +17,8 @@ use crate::instance::Instance;
 #[async_trait]
 impl OpentsdbLineProtocolHandler for Instance {
     async fn exec(&self, data_point: &OpentsdbDataPoint) -> server_error::Result<()> {
+        // TODO(LFC): Insert metrics in batch, then make OpentsdbLineProtocolHandler::exec received multiple data points, when
+        // metric table and tags can be created upon insertion.
         self.insert_opentsdb_metric(data_point)
             .await
             .map_err(BoxedError::new)
@@ -81,6 +83,7 @@ impl Instance {
             name: OPENTSDB_TIMESTAMP_COLUMN_NAME.to_string(),
             datatype: ColumnDataType::Timestamp as i32,
             is_nullable: false,
+            ..Default::default()
         };
         column_defs.push(ts_column);
 
@@ -88,6 +91,7 @@ impl Instance {
             name: OPENTSDB_VALUE_COLUMN_NAME.to_string(),
             datatype: ColumnDataType::Float64 as i32,
             is_nullable: false,
+            ..Default::default()
         };
         column_defs.push(value_column);
 
@@ -96,6 +100,7 @@ impl Instance {
                 name: tagk.to_string(),
                 datatype: ColumnDataType::String as i32,
                 is_nullable: true,
+                ..Default::default()
             })
         }
 
@@ -141,6 +146,7 @@ impl Instance {
                 name: tagk.to_string(),
                 datatype: ColumnDataType::String as i32,
                 is_nullable: true,
+                ..Default::default()
             };
             let expr = AlterExpr {
                 catalog_name: None,

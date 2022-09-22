@@ -4,12 +4,28 @@ use axum::extract::State;
 use axum::http::Request;
 use axum::http::StatusCode as HttpStatusCode;
 use hyper::Body;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
 use crate::error::{self, Error, Result};
 use crate::http::HttpResponse;
 use crate::opentsdb::codec::OpentsdbDataPoint;
 use crate::query_handler::OpentsdbLineProtocolHandlerRef;
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+enum OneOrMany<T> {
+    One(T),
+    Vec(Vec<T>),
+}
+
+impl<T> From<OneOrMany<T>> for Vec<T> {
+    fn from(from: OneOrMany<T>) -> Self {
+        match from {
+            OneOrMany::One(val) => vec![val],
+            OneOrMany::Vec(vec) => vec,
+        }
+    }
+}
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
 pub struct OpentsdbDataPointRequest {
@@ -103,30 +119,9 @@ async fn parse_data_points(body: Body) -> Result<Vec<OpentsdbDataPointRequest>> 
     let body = hyper::body::to_bytes(body)
         .await
         .context(error::HyperSnafu)?;
-
-    let first = body.first().context(error::InvalidQuerySnafu {
-        reason: "Request is empty.",
-    })?;
-    let data_points = match first {
-        // single data point put
-        b'{' => vec![
-            serde_json::from_slice::<OpentsdbDataPointRequest>(&body[..])
-                .context(error::InvalidOpentsdbRequestSnafu)?,
-        ],
-
-        // multiple data point put
-        b'[' => serde_json::from_slice::<Vec<OpentsdbDataPointRequest>>(&body[..])
-            .context(error::InvalidOpentsdbRequestSnafu)?,
-
-        _ => {
-            let body = String::from_utf8(body.to_vec()).context(error::InvalidOpentsdbLineSnafu)?;
-            return error::InvalidQuerySnafu {
-                reason: format!("Illegal request: {}", body),
-            }
-            .fail();
-        }
-    };
-    Ok(data_points)
+    let data_points = serde_json::from_slice::<OneOrMany<OpentsdbDataPointRequest>>(&body[..])
+        .context(error::InvalidOpentsdbJsonRequestSnafu)?;
+    Ok(data_points.into())
 }
 
 #[derive(serde::Serialize)]
@@ -220,12 +215,20 @@ mod test {
         assert_eq!(data_points[0], data_point1);
         assert_eq!(data_points[1], data_point2);
 
+        let body = Body::from("");
+        let result = parse_data_points(body).await;
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid Opentsdb Json request, source: EOF while parsing a value at line 1 column 0"
+        );
+
         let body = Body::from("hello world");
         let result = parse_data_points(body).await;
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Invalid query: Illegal request: hello world"
+            "Invalid Opentsdb Json request, source: expected value at line 1 column 1"
         );
     }
 }

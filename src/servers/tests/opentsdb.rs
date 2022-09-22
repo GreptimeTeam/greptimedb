@@ -84,12 +84,12 @@ async fn test_shutdown_opentsdb_server() -> Result<()> {
                 match stream {
                     Ok(stream) => {
                         let mut connection = Connection::new(stream);
-                        connection
-                            .write_line(format!("put {} 1 1", i))
-                            .await
-                            .unwrap();
+                        let result = connection.write_line(format!("put {} 1 1", i)).await;
+                        if let Err(e) = result {
+                            return Err(e.to_string());
+                        }
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(e.to_string()),
                 }
             }
             Ok(())
@@ -103,7 +103,7 @@ async fn test_shutdown_opentsdb_server() -> Result<()> {
     for handle in join_handles.iter_mut() {
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        let error = result.unwrap_err().to_string();
+        let error = result.unwrap_err();
         assert!(error.contains("Connection refused") || error.contains("Connection reset by peer"));
     }
     Ok(())

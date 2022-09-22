@@ -267,14 +267,8 @@ mod tests {
     };
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-    use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
-    use datanode::instance::Instance as DatanodeInstance;
     use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;
-    use servers::grpc::GrpcServer;
-    use tempdir::TempDir;
-    use tonic::transport::{Endpoint, Server};
-    use tower::service_fn;
 
     use super::*;
     use crate::tests;

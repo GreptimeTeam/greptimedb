@@ -90,8 +90,8 @@ pub enum Error {
     },
 
     #[cfg(feature = "opentsdb")]
-    #[snafu(display("Invalid Opentsdb request , source: {}", source))]
-    InvalidOpentsdbRequest {
+    #[snafu(display("Invalid Opentsdb Json request, source: {}", source))]
+    InvalidOpentsdbJsonRequest {
         source: serde_json::error::Error,
         backtrace: Backtrace,
     },
@@ -123,7 +123,7 @@ impl ErrorExt for Error {
             Hyper { .. } => StatusCode::Unknown,
 
             #[cfg(feature = "opentsdb")]
-            InvalidOpentsdbLine { .. } | InvalidOpentsdbRequest { .. } => {
+            InvalidOpentsdbLine { .. } | InvalidOpentsdbJsonRequest { .. } => {
                 StatusCode::InvalidArguments
             }
         }
@@ -155,7 +155,7 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
             Error::InvalidOpentsdbLine { .. }
-            | Error::InvalidOpentsdbRequest { .. }
+            | Error::InvalidOpentsdbJsonRequest { .. }
             | Error::InvalidQuery { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
             _ => (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
