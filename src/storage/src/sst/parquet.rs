@@ -64,10 +64,7 @@ impl<'a> ParquetWriter<'a> {
         let schema = store_schema.arrow_schema();
         let object = self.object_store.object(self.file_path);
 
-        let buffer = Cursor::new(Vec::<u8>::new());
-        let (r, mut w) = buffer.split();
-
-        object.write_from(0, r).await.context(error::FlushIoSnafu)?;
+        let mut buffer = Cursor::new(vec![0u8; 100]);
 
         // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
         // but in s3/azblob backend the Content-Length field of HTTP request is set
@@ -75,36 +72,49 @@ impl<'a> ParquetWriter<'a> {
         // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
         let encodings = get_encoding_for_schema(schema, |_| Encoding::Plain);
 
-        let mut sink = FileSink::try_new(
-            &mut w,
-            // The file sink needs the `Schema` instead of a reference.
-            (**schema).clone(),
-            encodings,
-            WriteOptions {
-                write_statistics: true,
-                compression: Compression::Gzip,
-                version: Version::V2,
-            },
-        )
-        .context(error::WriteParquetSnafu)?;
+        {
+            let mut sink = FileSink::try_new(
+                &mut buffer,
+                // The file sink needs the `Schema` instead of a reference.
+                (**schema).clone(),
+                encodings,
+                WriteOptions {
+                    write_statistics: true,
+                    compression: Compression::Gzip,
+                    version: Version::V2,
+                },
+            )
+            .context(error::WriteParquetSnafu)?;
 
-        for batch in self.iter {
-            let batch = batch?;
-            sink.send(store_schema.batch_to_arrow_chunk(&batch))
-                .await
-                .context(error::WriteParquetSnafu)?;
-        }
-
-        if let Some(meta) = extra_meta {
-            for (k, v) in meta {
-                sink.metadata.insert(k, Some(v));
+            for batch in self.iter {
+                let batch = batch?;
+                sink.send(store_schema.batch_to_arrow_chunk(&batch))
+                    .await
+                    .context(error::WriteParquetSnafu)?;
             }
+
+            if let Some(meta) = extra_meta {
+                for (k, v) in meta {
+                    sink.metadata.insert(k, Some(v));
+                }
+            }
+            sink.close().await.context(error::WriteParquetSnafu)?;
+            // FIXME(yingwen): Hack to workaround an [arrow2 BUG](https://github.com/jorgecarleitao/parquet2/issues/162),
+            // upgrading to latest arrow2 can fixed this, but now datafusion is still using an old arrow2 version.
+            sink.flush().await.context(error::WriteParquetSnafu)?;
         }
         sink.close().await.context(error::WriteParquetSnafu)?;
         drop(sink);
         writer.flush().await.context(error::WriteObjectSnafu {
             path: self.file_path,
-        })
+        });
+
+        buffer.set_position(0);
+        object
+            .write_from(0, buffer)
+            .await
+            .context(error::FlushIoSnafu)?;
+        Ok(())
     }
 }
 
