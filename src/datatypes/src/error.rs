@@ -12,6 +12,13 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Failed to deserialize data, source: {}, json: {}", source, json))]
+    Deserialize {
+        source: serde_json::Error,
+        backtrace: Backtrace,
+        json: String,
+    },
+
     #[snafu(display("Failed to convert datafusion type: {}", from))]
     Conversion { from: String, backtrace: Backtrace },
 

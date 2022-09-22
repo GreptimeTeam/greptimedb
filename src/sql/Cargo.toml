@@ -6,6 +6,7 @@ edition = "2021"
 
 [dependencies]
 common-error = { path = "../common/error" }
+common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.15.0"

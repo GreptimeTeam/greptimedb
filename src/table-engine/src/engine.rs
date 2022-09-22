@@ -143,6 +143,7 @@ pub(crate) fn build_row_key_desc(
         ts_column_schema.name.clone(),
         ts_column_schema.data_type.clone(),
     )
+    .default_constraint(ts_column_schema.default_constraint.clone())
     .is_nullable(ts_column_schema.is_nullable)
     .build()
     .context(BuildColumnDescriptorSnafu {
@@ -168,6 +169,7 @@ pub(crate) fn build_row_key_desc(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
+        .default_constraint(column_schema.default_constraint.clone())
         .is_nullable(column_schema.is_nullable)
         .build()
         .context(BuildColumnDescriptorSnafu {
@@ -210,6 +212,7 @@ pub(crate) fn build_column_family(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
+        .default_constraint(column_schema.default_constraint.clone())
         .is_nullable(column_schema.is_nullable)
         .build()
         .context(BuildColumnDescriptorSnafu {
@@ -421,14 +424,140 @@ mod tests {
     use datafusion_common::field_util::SchemaExt;
     use datatypes::prelude::{ConcreteDataType, ScalarVector};
     use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
+    use datatypes::value::Value;
     use datatypes::vectors::*;
+    use log_store::fs::noop::NoopLogStore;
+    use storage::config::EngineConfig as StorageEngineConfig;
+    use storage::EngineImpl;
     use store_api::manifest::Manifest;
     use store_api::storage::ReadContext;
     use table::requests::{AlterKind, InsertRequest};
+    use tempdir::TempDir;
 
     use super::*;
     use crate::table::test_util;
     use crate::table::test_util::{MockRegion, TABLE_NAME};
+
+    async fn setup_table_with_column_default_constraint() -> (TempDir, String, TableRef) {
+        let table_name = "test_default_constraint";
+        let column_schemas = vec![
+            ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("n", ConcreteDataType::int32_datatype(), true)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(42i32)))),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
+                true,
+            ),
+        ];
+
+        let schema = Arc::new(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .timestamp_index(2)
+                .build()
+                .expect("ts must be timestamp column"),
+        );
+
+        let (dir, object_store) =
+            test_util::new_test_object_store("test_insert_with_column_default_constraint").await;
+
+        let table_engine = MitoEngine::new(
+            EngineConfig::default(),
+            EngineImpl::new(
+                StorageEngineConfig::default(),
+                Arc::new(NoopLogStore::default()),
+                object_store.clone(),
+            ),
+            object_store,
+        );
+
+        let table = table_engine
+            .create_table(
+                &EngineContext::default(),
+                CreateTableRequest {
+                    id: 1,
+                    catalog_name: None,
+                    schema_name: None,
+                    table_name: table_name.to_string(),
+                    desc: Some("a test table".to_string()),
+                    schema: schema.clone(),
+                    create_if_not_exists: true,
+                    primary_key_indices: Vec::default(),
+                    table_options: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        (dir, table_name.to_string(), table)
+    }
+
+    #[tokio::test]
+    async fn test_column_default_constraint() {
+        let (_dir, table_name, table) = setup_table_with_column_default_constraint().await;
+
+        let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
+        let names = StringVector::from(vec!["first", "second"]);
+        let tss = TimestampVector::from_vec(vec![1, 2]);
+
+        columns_values.insert("name".to_string(), Arc::new(names.clone()));
+        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
+
+        let insert_req = InsertRequest {
+            table_name: table_name.to_string(),
+            columns_values,
+        };
+        assert_eq!(2, table.insert(insert_req).await.unwrap());
+
+        let stream = table.scan(&None, &[], None).await.unwrap();
+        let batches = util::collect(stream).await.unwrap();
+        assert_eq!(1, batches.len());
+
+        let record = &batches[0].df_recordbatch;
+        assert_eq!(record.num_columns(), 3);
+        let columns = record.columns();
+        assert_eq!(3, columns.len());
+        assert_eq!(names.to_arrow_array(), columns[0]);
+        assert_eq!(
+            Int32Vector::from_vec(vec![42, 42]).to_arrow_array(),
+            columns[1]
+        );
+        assert_eq!(tss.to_arrow_array(), columns[2]);
+    }
+
+    #[tokio::test]
+    async fn test_insert_with_column_default_constraint() {
+        let (_dir, table_name, table) = setup_table_with_column_default_constraint().await;
+
+        let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
+        let names = StringVector::from(vec!["first", "second"]);
+        let nums = Int32Vector::from(vec![None, Some(66)]);
+        let tss = TimestampVector::from_vec(vec![1, 2]);
+
+        columns_values.insert("name".to_string(), Arc::new(names.clone()));
+        columns_values.insert("n".to_string(), Arc::new(nums.clone()));
+        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
+
+        let insert_req = InsertRequest {
+            table_name: table_name.to_string(),
+            columns_values,
+        };
+        assert_eq!(2, table.insert(insert_req).await.unwrap());
+
+        let stream = table.scan(&None, &[], None).await.unwrap();
+        let batches = util::collect(stream).await.unwrap();
+        assert_eq!(1, batches.len());
+
+        let record = &batches[0].df_recordbatch;
+        assert_eq!(record.num_columns(), 3);
+        let columns = record.columns();
+        assert_eq!(3, columns.len());
+        assert_eq!(names.to_arrow_array(), columns[0]);
+        assert_eq!(nums.to_arrow_array(), columns[1]);
+        assert_eq!(tss.to_arrow_array(), columns[2]);
+    }
 
     #[test]
     fn test_region_name() {

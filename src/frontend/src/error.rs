@@ -42,6 +42,17 @@ pub enum Error {
         source: api::error::Error,
     },
 
+    #[snafu(display(
+        "Failed to convert column default constraint, column: {}, source: {}",
+        column_name,
+        source
+    ))]
+    ConvertColumnDefaultConstraint {
+        column_name: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Invalid SQL, error: {}", err_msg))]
     InvalidSql {
         err_msg: String,
@@ -66,6 +77,7 @@ impl ErrorExt for Error {
             Error::RuntimeResource { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
             Error::ParseSql { source } => source.status_code(),
+            Error::ConvertColumnDefaultConstraint { source, .. } => source.status_code(),
             Error::ColumnDataType { .. } => StatusCode::Internal,
             Error::IllegalFrontendState { .. } => StatusCode::Unexpected,
         }

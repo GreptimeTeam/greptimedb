@@ -63,7 +63,8 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
                 table_name: table_name.to_string(),
                 desc: Some(" a test table".to_string()),
                 schema: Arc::new(
-                    SchemaBuilder::from(column_schemas)
+                    SchemaBuilder::try_from(column_schemas)
+                        .unwrap()
                         .timestamp_index(3)
                         .build()
                         .expect("ts is expected to be timestamp column"),

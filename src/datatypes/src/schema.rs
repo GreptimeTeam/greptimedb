@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub use arrow::datatypes::Metadata;
@@ -7,7 +7,36 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error::{self, Error, Result};
+use crate::error::{self, DeserializeSnafu, Error, Result, SerializeSnafu};
+use crate::value::Value;
+
+/// Column's default constraint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColumnDefaultConstraint {
+    // A function invocation
+    // TODO(dennis): we save the function expression here, maybe use a struct in future.
+    Function(String),
+    // A value
+    Value(Value),
+}
+
+impl TryFrom<&[u8]> for ColumnDefaultConstraint {
+    type Error = error::Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        let json = String::from_utf8_lossy(bytes);
+        serde_json::from_str(&json).context(DeserializeSnafu { json })
+    }
+}
+
+impl TryInto<Vec<u8>> for ColumnDefaultConstraint {
+    type Error = error::Error;
+
+    fn try_into(self) -> Result<Vec<u8>> {
+        let s = serde_json::to_string(&self).context(SerializeSnafu)?;
+        Ok(s.into_bytes())
+    }
+}
 
 /// Key used to store column name of the timestamp column in metadata.
 ///
@@ -18,12 +47,15 @@ use crate::error::{self, Error, Result};
 const TIMESTAMP_COLUMN_KEY: &str = "greptime:timestamp_column";
 /// Key used to store version number of the schema in metadata.
 const VERSION_KEY: &str = "greptime:version";
+/// Key used to store default constraint in arrow field's metadata.
+const ARROW_FIELD_DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColumnSchema {
     pub name: String,
     pub data_type: ConcreteDataType,
     pub is_nullable: bool,
+    pub default_constraint: Option<ColumnDefaultConstraint>,
 }
 
 impl ColumnSchema {
@@ -36,7 +68,16 @@ impl ColumnSchema {
             name: name.into(),
             data_type,
             is_nullable,
+            default_constraint: None,
         }
+    }
+
+    pub fn with_default_constraint(
+        mut self,
+        default_constraint: Option<ColumnDefaultConstraint>,
+    ) -> Self {
+        self.default_constraint = default_constraint;
+        self
     }
 }
 
@@ -61,9 +102,20 @@ impl Schema {
     /// Initial version of the schema.
     pub const INITIAL_VERSION: u32 = 0;
 
+    /// Create a schema from a vector of [ColumnSchema].
+    /// # Panics
+    /// Panics when ColumnSchema's `default_constrait` can't be serialized into json.
     pub fn new(column_schemas: Vec<ColumnSchema>) -> Schema {
         // Builder won't fail
-        SchemaBuilder::from(column_schemas).build().unwrap()
+        SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    pub fn try_new(column_schemas: Vec<ColumnSchema>) -> Result<Schema> {
+        // Builder won't fail
+        Ok(SchemaBuilder::try_from(column_schemas)?.build().unwrap())
     }
 
     #[inline]
@@ -137,22 +189,24 @@ pub struct SchemaBuilder {
     metadata: Metadata,
 }
 
-impl From<Vec<ColumnSchema>> for SchemaBuilder {
-    fn from(column_schemas: Vec<ColumnSchema>) -> SchemaBuilder {
-        SchemaBuilder::from_columns(column_schemas)
+impl TryFrom<Vec<ColumnSchema>> for SchemaBuilder {
+    type Error = Error;
+
+    fn try_from(column_schemas: Vec<ColumnSchema>) -> Result<SchemaBuilder> {
+        SchemaBuilder::try_from_columns(column_schemas)
     }
 }
 
 impl SchemaBuilder {
-    pub fn from_columns(column_schemas: Vec<ColumnSchema>) -> Self {
-        let (fields, name_to_index) = collect_fields(&column_schemas);
+    pub fn try_from_columns(column_schemas: Vec<ColumnSchema>) -> Result<Self> {
+        let (fields, name_to_index) = collect_fields(&column_schemas)?;
 
-        Self {
+        Ok(Self {
             column_schemas,
             name_to_index,
             fields,
             ..Default::default()
-        }
+        })
     }
 
     /// Set timestamp index.
@@ -198,16 +252,16 @@ impl SchemaBuilder {
     }
 }
 
-fn collect_fields(column_schemas: &[ColumnSchema]) -> (Vec<Field>, HashMap<String, usize>) {
+fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<(Vec<Field>, HashMap<String, usize>)> {
     let mut fields = Vec::with_capacity(column_schemas.len());
     let mut name_to_index = HashMap::with_capacity(column_schemas.len());
     for (index, column_schema) in column_schemas.iter().enumerate() {
-        let field = Field::from(column_schema);
+        let field = Field::try_from(column_schema)?;
         fields.push(field);
         name_to_index.insert(column_schema.name.clone(), index);
     }
 
-    (fields, name_to_index)
+    Ok((fields, name_to_index))
 }
 
 fn validate_timestamp_index(column_schemas: &[ColumnSchema], timestamp_index: usize) -> Result<()> {
@@ -236,22 +290,41 @@ impl TryFrom<&Field> for ColumnSchema {
 
     fn try_from(field: &Field) -> Result<ColumnSchema> {
         let data_type = ConcreteDataType::try_from(&field.data_type)?;
+        let default_constraint = match field.metadata.get(ARROW_FIELD_DEFAULT_CONSTRAINT_KEY) {
+            Some(json) => Some(serde_json::from_str(json).context(DeserializeSnafu { json })?),
+            None => None,
+        };
 
         Ok(ColumnSchema {
             name: field.name.clone(),
             data_type,
             is_nullable: field.is_nullable,
+            default_constraint,
         })
     }
 }
 
-impl From<&ColumnSchema> for Field {
-    fn from(column_schema: &ColumnSchema) -> Field {
-        Field::new(
+impl TryFrom<&ColumnSchema> for Field {
+    type Error = Error;
+
+    fn try_from(column_schema: &ColumnSchema) -> Result<Field> {
+        let metadata = if let Some(value) = &column_schema.default_constraint {
+            let mut m = BTreeMap::new();
+            m.insert(
+                ARROW_FIELD_DEFAULT_CONSTRAINT_KEY.to_string(),
+                serde_json::to_string(&value).context(SerializeSnafu)?,
+            );
+            m
+        } else {
+            BTreeMap::default()
+        };
+
+        Ok(Field::new(
             column_schema.name.clone(),
             column_schema.data_type.as_arrow_type(),
             column_schema.is_nullable,
         )
+        .with_metadata(metadata))
     }
 }
 
@@ -319,13 +392,43 @@ mod tests {
     #[test]
     fn test_column_schema() {
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true);
-        let field = Field::from(&column_schema);
+        let field = Field::try_from(&column_schema).unwrap();
         assert_eq!("test", field.name);
         assert_eq!(ArrowDataType::Int32, field.data_type);
         assert!(field.is_nullable);
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
         assert_eq!(column_schema, new_column_schema);
+    }
+
+    #[test]
+    fn test_column_schema_with_default_constraint() {
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(99))));
+        let field = Field::try_from(&column_schema).unwrap();
+        assert_eq!("test", field.name);
+        assert_eq!(ArrowDataType::Int32, field.data_type);
+        assert!(field.is_nullable);
+        assert_eq!(
+            "{\"Value\":{\"Int32\":99}}",
+            field
+                .metadata
+                .get(ARROW_FIELD_DEFAULT_CONSTRAINT_KEY)
+                .unwrap()
+        );
+
+        let new_column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!(column_schema, new_column_schema);
+    }
+
+    #[test]
+    fn test_column_default_constraint_try_into_from() {
+        let default_constraint = ColumnDefaultConstraint::Value(Value::from(42i64));
+
+        let bytes: Vec<u8> = default_constraint.clone().try_into().unwrap();
+        let from_value = ColumnDefaultConstraint::try_from(&bytes[..]).unwrap();
+
+        assert_eq!(default_constraint, from_value);
     }
 
     #[test]
@@ -370,7 +473,8 @@ mod tests {
             ConcreteDataType::int32_datatype(),
             false,
         )];
-        let schema = SchemaBuilder::from(column_schemas)
+        let schema = SchemaBuilder::try_from(column_schemas)
+            .unwrap()
             .add_metadata("k1", "v1")
             .build()
             .unwrap();
@@ -384,7 +488,8 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
         ];
-        let schema = SchemaBuilder::from(column_schemas.clone())
+        let schema = SchemaBuilder::try_from(column_schemas.clone())
+            .unwrap()
             .timestamp_index(1)
             .version(123)
             .build()
@@ -405,15 +510,18 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("col2", ConcreteDataType::float64_datatype(), false),
         ];
-        assert!(SchemaBuilder::from(column_schemas.clone())
+        assert!(SchemaBuilder::try_from(column_schemas.clone())
+            .unwrap()
             .timestamp_index(0)
             .build()
             .is_err());
-        assert!(SchemaBuilder::from(column_schemas.clone())
+        assert!(SchemaBuilder::try_from(column_schemas.clone())
+            .unwrap()
             .timestamp_index(1)
             .build()
             .is_err());
-        assert!(SchemaBuilder::from(column_schemas)
+        assert!(SchemaBuilder::try_from(column_schemas)
+            .unwrap()
             .timestamp_index(1)
             .build()
             .is_err());

@@ -65,14 +65,20 @@ async fn test_shutdown_pg_server() -> Result<()> {
             for _ in 0..1000 {
                 match create_connection(server_port).await {
                     Ok(connection) => {
-                        let rows = connection
+                        match connection
                             .simple_query("SELECT uint32s FROM numbers LIMIT 1")
                             .await
-                            .unwrap();
-                        let result_text = unwrap_results(&rows)[0];
-                        let result: i32 = result_text.parse().unwrap();
-                        assert_eq!(result, 0);
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        {
+                            Ok(rows) => {
+                                let result_text = unwrap_results(&rows)[0];
+                                let result: i32 = result_text.parse().unwrap();
+                                assert_eq!(result, 0);
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        }
                     }
                     Err(e) => {
                         return Err(e);
@@ -91,7 +97,11 @@ async fn test_shutdown_pg_server() -> Result<()> {
         let result = handle.await.unwrap();
         assert!(result.is_err());
         let error = result.unwrap_err().to_string();
-        assert!(error.contains("Connection refused") || error.contains("Connection reset by peer"));
+        assert!(
+            error.contains("Connection refused")
+                || error.contains("Connection reset by peer")
+                || error.contains("close")
+        );
     }
 
     Ok(())

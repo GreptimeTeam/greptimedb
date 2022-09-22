@@ -165,6 +165,9 @@ pub enum Error {
         backtrace: Backtrace,
         column_qualified_name: String,
     },
+
+    #[snafu(display("Unsupported column default constraint: {}", expr))]
+    UnsupportedDefaultConstraint { expr: String, backtrace: Backtrace },
 }
 
 impl From<Error> for table::error::Error {
@@ -196,6 +199,7 @@ impl ErrorExt for Error {
             | ColumnExists { .. }
             | ProjectedColumnNotFound { .. }
             | MissingTimestampIndex { .. }
+            | UnsupportedDefaultConstraint { .. }
             | TableNotFound { .. } => StatusCode::InvalidArguments,
 
             TableInfoNotFound { .. } => StatusCode::Unexpected,

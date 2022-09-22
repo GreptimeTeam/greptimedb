@@ -1,8 +1,11 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use datatypes::prelude::ConcreteDataType;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::TokenizerError;
+
+use crate::ast::Expr;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -29,6 +32,17 @@ pub enum Error {
         source: ParserError,
     },
 
+    #[snafu(display(
+        "Unsupported expr in default constraint: {} for column: {}",
+        expr,
+        column_name
+    ))]
+    UnsupportedDefaultValue {
+        column_name: String,
+        expr: Expr,
+        backtrace: Backtrace,
+    },
+
     // Syntax error from sql parser.
     #[snafu(display("Syntax error, sql: {}, source: {}", sql, source))]
     Syntax { sql: String, source: ParserError },
@@ -50,6 +64,21 @@ pub enum Error {
         t: crate::ast::DataType,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to parse value: {}, {}", msg, backtrace))]
+    ParseSqlValue { msg: String, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Column {} expect type: {:?}, actual: {:?}",
+        column_name,
+        expect,
+        actual
+    ))]
+    ColumnTypeMismatch {
+        column_name: String,
+        expect: ConcreteDataType,
+        actual: ConcreteDataType,
+    },
 }
 
 impl ErrorExt for Error {
@@ -57,13 +86,16 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            Unsupported { .. } => StatusCode::Unsupported,
+            UnsupportedDefaultValue { .. } | Unsupported { .. } => StatusCode::Unsupported,
             Unexpected { .. }
             | Syntax { .. }
             | InvalidTimeIndex { .. }
             | Tokenizer { .. }
             | InvalidSql { .. }
+            | ParseSqlValue { .. }
             | SqlTypeNotSupported { .. } => StatusCode::InvalidSyntax,
+
+            ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
         }
     }
 

@@ -23,7 +23,9 @@ pub fn new_schema_with_version(
         })
         .collect();
 
-    let mut builder = SchemaBuilder::from(column_schemas).version(version);
+    let mut builder = SchemaBuilder::try_from(column_schemas)
+        .unwrap()
+        .version(version);
     if let Some(index) = timestamp_index {
         builder = builder.timestamp_index(index);
     }

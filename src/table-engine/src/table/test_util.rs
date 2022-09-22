@@ -36,7 +36,8 @@ pub fn schema_for_test() -> Schema {
         ),
     ];
 
-    SchemaBuilder::from(column_schemas)
+    SchemaBuilder::try_from(column_schemas)
+        .unwrap()
         .timestamp_index(3)
         .build()
         .expect("ts must be timestamp column")

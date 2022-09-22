@@ -23,8 +23,11 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::{
-    error::DatanodeSnafu, error::DecodeSelectSnafu, error::EncodePhysicalSnafu,
-    error::MissingFieldSnafu, Client, Result,
+    error::{
+        ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu,
+        MissingFieldSnafu,
+    },
+    Client, Result,
 };
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -194,7 +197,7 @@ impl TryFrom<ObjectResult> for Output {
                     })
                     .collect::<Vec<ColumnSchema>>();
 
-                let schema = Arc::new(Schema::new(column_schemas));
+                let schema = Arc::new(Schema::try_new(column_schemas).context(ConvertSchemaSnafu)?);
                 let recordbatches = if vectors.is_empty() {
                     RecordBatches::try_new(schema, vec![])
                 } else {

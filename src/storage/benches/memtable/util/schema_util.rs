@@ -16,7 +16,8 @@ pub fn new_schema(column_defs: &[ColumnDef], timestamp_index: Option<usize>) -> 
         .collect();
 
     if let Some(index) = timestamp_index {
-        SchemaBuilder::from(column_schemas)
+        SchemaBuilder::try_from(column_schemas)
+            .unwrap()
             .timestamp_index(index)
             .build()
             .unwrap()

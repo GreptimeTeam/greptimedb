@@ -79,6 +79,12 @@ pub enum Error {
 
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to convert schema, source: {}", source))]
+    ConvertSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -97,7 +103,9 @@ impl ErrorExt for Error {
             | Error::InvalidColumnProto { .. }
             | Error::ColumnDataType { .. }
             | Error::MissingField { .. } => StatusCode::Internal,
-            Error::CreateVector { source } => source.status_code(),
+            Error::ConvertSchema { source } | Error::CreateVector { source } => {
+                source.status_code()
+            }
             Error::CreateRecordBatches { source } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
         }
