@@ -39,6 +39,5 @@ tonic = "0.8"
 tower = "0.4"
 
 [features]
-default = ["postgres", "influxdb"]
-influxdb = ["servers/influxdb"]
+default = ["postgres"]
 postgres = ["servers/postgres"]

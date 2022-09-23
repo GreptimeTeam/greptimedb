@@ -1,3 +1,5 @@
+//! Forked from influxdb_iox https://github.com/influxdata/influxdb_iox/tree/main/influxdb_line_protocol
+
 use std::collections::HashMap;
 
 use api::v1::{

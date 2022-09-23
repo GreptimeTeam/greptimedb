@@ -20,7 +20,6 @@ pub type SqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
 pub type GrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler + Send + Sync>;
 pub type GrpcAdminHandlerRef = Arc<dyn GrpcAdminHandler + Send + Sync>;
 
-#[cfg(feature = "influxdb")]
 pub type InfluxdbProtocolLineHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 
 #[async_trait]
@@ -40,7 +39,6 @@ pub trait GrpcAdminHandler {
     async fn exec_admin_request(&self, expr: AdminExpr) -> Result<AdminResult>;
 }
 
-#[cfg(feature = "influxdb")]
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
     /// A successful request will not return a response.

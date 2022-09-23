@@ -24,8 +24,6 @@ impl Services {
 
             let mut builder = HttpServerBuilder::default();
             builder.query_handler(instance.clone());
-
-            #[cfg(feature = "influxdb")]
             builder.influxdb_handler(Some(instance.clone()));
 
             let http_server = builder.build().unwrap();

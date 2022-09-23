@@ -76,14 +76,12 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[cfg(feature = "influxdb")]
     #[snafu(display("Failed to parse influxdb line protocol, source: {}", source))]
     InfluxdbLineProtocol {
         #[snafu(backtrace)]
         source: crate::influxdb::line_protocol::Error,
     },
 
-    #[cfg(feature = "influxdb")]
     #[snafu(display("Write type mismatch, column name: {}", column_name))]
     TypeMismatch { column_name: String },
 }
@@ -109,7 +107,6 @@ impl ErrorExt for Error {
 
             NotSupported { .. } | InvalidQuery { .. } => StatusCode::InvalidArguments,
 
-            #[cfg(feature = "influxdb")]
             InfluxdbLineProtocol { .. } | TypeMismatch { .. } => StatusCode::InvalidArguments,
         }
     }
@@ -138,7 +135,6 @@ impl From<std::io::Error> for Error {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
-            #[cfg(feature = "influxdb")]
             Error::InfluxdbLineProtocol { .. } | Error::TypeMismatch { .. } => {
                 (axum::http::StatusCode::BAD_REQUEST, self.to_string())
             }

@@ -1,8 +1,8 @@
 pub mod handler;
-#[cfg(feature = "influxdb")]
 pub mod influxdb;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -20,6 +20,7 @@ use snafu::ResultExt;
 use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
+use self::influxdb::influxdb_write;
 use crate::error::{Result, StartHttpSnafu};
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::Server;
@@ -29,7 +30,6 @@ const HTTP_API_VERSION: &str = "v1";
 #[derive(derive_builder::Builder)]
 pub struct HttpServer {
     query_handler: SqlQueryHandlerRef,
-    #[cfg(feature = "influxdb")]
     influxdb_handler: Option<crate::query_handler::InfluxdbProtocolLineHandlerRef>,
 }
 
@@ -122,13 +122,12 @@ impl HttpServer {
     pub fn new(query_handler: SqlQueryHandlerRef) -> Self {
         Self {
             query_handler,
-            #[cfg(feature = "influxdb")]
             influxdb_handler: None,
         }
     }
 
     pub fn make_app(&self) -> Router {
-        let router = Router::new().nest(
+        let mut router = Router::new().nest(
             &format!("/{}", HTTP_API_VERSION),
             Router::new()
                 // handlers
@@ -137,8 +136,16 @@ impl HttpServer {
                 .route("/run-script", routing::post(handler::run_script)),
         );
 
-        #[cfg(feature = "influxdb")]
-        let router = self.influxdb_router(router);
+        if let Some(handler) = &self.influxdb_handler {
+            let handler = Arc::clone(handler);
+            router = router.nest(
+                &format!("/{}/influxdb", HTTP_API_VERSION),
+                Router::new().route(
+                    "/write",
+                    routing::post(move |body| influxdb_write(body, handler)),
+                ),
+            );
+        }
 
         router
             .route("/metrics", routing::get(handler::metrics))
@@ -151,26 +158,6 @@ impl HttpServer {
                     // TODO(LFC): make timeout configurable
                     .layer(TimeoutLayer::new(Duration::from_secs(30))),
             )
-    }
-
-    #[cfg(feature = "influxdb")]
-    fn influxdb_router(&self, router: Router) -> Router {
-        use std::sync::Arc;
-
-        use self::influxdb::influxdb_write;
-
-        let handler = if let Some(handler) = &self.influxdb_handler {
-            Arc::clone(handler)
-        } else {
-            return router;
-        };
-        router.nest(
-            &format!("/{}/influxdb", HTTP_API_VERSION),
-            Router::new().route(
-                "/write",
-                routing::post(move |body| influxdb_write(body, handler)),
-            ),
-        )
     }
 }
 

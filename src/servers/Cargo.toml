@@ -41,7 +41,6 @@ tower-http = { version = "0.3", features = ["full"] }
 
 [features]
 default = ["postgres"]
-influxdb = []
 postgres = ["hex", "pgwire"]
 
 [dev-dependencies]

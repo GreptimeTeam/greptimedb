@@ -1,4 +1,3 @@
-#[cfg(feature = "influxdb")]
 pub mod influxdb;
 
 use std::collections::HashMap;

@@ -1,7 +1,6 @@
 pub mod error;
 pub mod grpc;
 pub mod http;
-#[cfg(feature = "influxdb")]
 pub mod influxdb;
 pub mod mysql;
 #[cfg(feature = "postgres")]
