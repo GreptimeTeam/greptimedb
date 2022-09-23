@@ -42,7 +42,7 @@ tower-http = { version = "0.3", features = ["full"] }
 axum-test-helper = "0.1"
 catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
-mysql_async = "0.30"
+mysql_async = { git = "https://github.com/Morranto/mysql_async.git" }
 rand = "0.8"
 script = { path = "../script", features = ["python"] }
 test-util = { path = "../../test-util" }
