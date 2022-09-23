@@ -39,7 +39,6 @@ struct StartCommand {
     rpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
-    #[cfg(feature = "postgres")]
     #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(short, long)]
@@ -81,7 +80,6 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         if let Some(addr) = cmd.mysql_addr {
             opts.mysql_addr = addr;
         }
-        #[cfg(feature = "postgres")]
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_addr = addr;
         }
@@ -102,7 +100,6 @@ mod tests {
             http_addr: None,
             rpc_addr: None,
             mysql_addr: None,
-            #[cfg(feature = "postgres")]
             postgres_addr: None,
             config_file: Some(format!(
                 "{}/../../config/datanode.example.toml",
@@ -116,11 +113,8 @@ mod tests {
         assert_eq!("0.0.0.0:3306".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
 
-        #[cfg(feature = "postgres")]
-        {
-            assert_eq!("0.0.0.0:5432".to_string(), options.postgres_addr);
-            assert_eq!(4, options.postgres_runtime_size);
-        }
+        assert_eq!("0.0.0.0:5432".to_string(), options.postgres_addr);
+        assert_eq!(4, options.postgres_runtime_size);
 
         match options.storage {
             ObjectStoreConfig::File { data_dir } => {

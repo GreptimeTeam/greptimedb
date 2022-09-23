@@ -18,9 +18,7 @@ use script::{
     engine::{CompileContext, EvalContext, Script, ScriptEngine},
     python::{PyEngine, PyScript},
 };
-#[cfg(feature = "opentsdb")]
 mod opentsdb;
-#[cfg(feature = "postgres")]
 mod postgres;
 
 struct DummyInstance {

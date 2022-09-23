@@ -4,11 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["python", "postgres"]
+default = ["python"]
 python = [
   "dep:script"
 ]
-postgres = ["servers/postgres"]
 
 [dependencies]
 api = { path = "../api" }

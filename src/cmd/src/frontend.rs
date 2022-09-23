@@ -1,6 +1,5 @@
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
-#[cfg(feature = "postgres")]
 use frontend::postgres::PostgresOptions;
 use snafu::ResultExt;
 
@@ -40,7 +39,6 @@ struct StartCommand {
     grpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
-    #[cfg(feature = "postgres")]
     #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(short, long)]
@@ -74,7 +72,6 @@ impl TryFrom<StartCommand> for FrontendOptions {
         if let Some(addr) = cmd.mysql_addr {
             opts.mysql_addr = Some(addr);
         }
-        #[cfg(feature = "postgres")]
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_options = Some(PostgresOptions {
                 addr,
@@ -95,7 +92,6 @@ mod tests {
             http_addr: Some("127.0.0.1:1234".to_string()),
             grpc_addr: None,
             mysql_addr: Some("127.0.0.1:5678".to_string()),
-            #[cfg(feature = "postgres")]
             postgres_addr: Some("127.0.0.1:5432".to_string()),
             config_file: None,
         };
@@ -103,7 +99,6 @@ mod tests {
         let opts: FrontendOptions = command.try_into().unwrap();
         assert_eq!(opts.http_addr, Some("127.0.0.1:1234".to_string()));
         assert_eq!(opts.mysql_addr, Some("127.0.0.1:5678".to_string()));
-        #[cfg(feature = "postgres")]
         assert_eq!(
             opts.postgres_options.as_ref().unwrap().addr,
             "127.0.0.1:5432"
@@ -112,7 +107,6 @@ mod tests {
         let default_opts = FrontendOptions::default();
         assert_eq!(opts.grpc_addr, default_opts.grpc_addr);
         assert_eq!(opts.mysql_runtime_size, default_opts.mysql_runtime_size);
-        #[cfg(feature = "postgres")]
         assert_eq!(
             opts.postgres_options.as_ref().unwrap().runtime_size,
             default_opts.postgres_options.as_ref().unwrap().runtime_size

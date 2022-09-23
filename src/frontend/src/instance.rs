@@ -1,4 +1,3 @@
-#[cfg(feature = "opentsdb")]
 mod opentsdb;
 
 use std::collections::HashMap;

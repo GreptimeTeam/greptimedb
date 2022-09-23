@@ -1,5 +1,4 @@
 pub mod handler;
-#[cfg(feature = "opentsdb")]
 pub mod opentsdb;
 
 use std::net::SocketAddr;
@@ -12,7 +11,6 @@ use axum::{
     response::{Json, Response},
     routing, BoxError, Router,
 };
-use cfg_if::cfg_if;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
@@ -22,7 +20,6 @@ use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
 use crate::error::{Result, StartHttpSnafu};
-#[cfg(feature = "opentsdb")]
 use crate::query_handler::OpentsdbProtocolHandlerRef;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::Server;
@@ -31,12 +28,6 @@ const HTTP_API_VERSION: &str = "v1";
 
 pub struct HttpServer {
     sql_handler: SqlQueryHandlerRef,
-
-    #[cfg(feature = "opentsdb")]
-    // Because of Cargo's [feature unification](https://doc.rust-lang.org/cargo/reference/features.html#feature-unification),
-    // when "opentsdb" feature is used in Frontend (which is enable by default), Datanode also has
-    // to use it, regardless of whether Datanode wants it or not. Making this Opentsdb handler
-    // optional is to bypass the above cargo restriction, letting Frontend set it later.
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
 }
 
@@ -127,19 +118,12 @@ async fn shutdown_signal() {
 
 impl HttpServer {
     pub fn new(sql_handler: SqlQueryHandlerRef) -> Self {
-        cfg_if! {
-            if #[cfg(feature = "opentsdb")] {
-                Self {
-                    sql_handler,
-                    opentsdb_handler: None,
-                }
-            } else {
-                Self { sql_handler }
-            }
+        Self {
+            sql_handler,
+            opentsdb_handler: None,
         }
     }
 
-    #[cfg(feature = "opentsdb")]
     pub fn set_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) {
         debug_assert!(
             self.opentsdb_handler.is_none(),
@@ -163,15 +147,11 @@ impl HttpServer {
 
         let mut router = Router::new().nest(&format!("/{}", HTTP_API_VERSION), sql_router);
 
-        cfg_if! {
-            if #[cfg(feature = "opentsdb")] {
-                if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
-                    let opentsdb_router = Router::with_state(opentsdb_handler.clone())
-                        .route("/api/put", routing::post(opentsdb::put));
+        if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
+            let opentsdb_router = Router::with_state(opentsdb_handler.clone())
+                .route("/api/put", routing::post(opentsdb::put));
 
-                    router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
-                }
-            }
+            router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
         }
 
         router

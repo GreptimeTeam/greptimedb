@@ -82,21 +82,18 @@ pub enum Error {
     #[snafu(display("Hyper error, source: {}", source))]
     Hyper { source: hyper::Error },
 
-    #[cfg(feature = "opentsdb")]
     #[snafu(display("Invalid Opentsdb line, source: {}", source))]
     InvalidOpentsdbLine {
         source: std::string::FromUtf8Error,
         backtrace: Backtrace,
     },
 
-    #[cfg(feature = "opentsdb")]
     #[snafu(display("Invalid Opentsdb Json request, source: {}", source))]
     InvalidOpentsdbJsonRequest {
         source: serde_json::error::Error,
         backtrace: Backtrace,
     },
 
-    #[cfg(feature = "opentsdb")]
     #[snafu(display(
         "Failed to put Opentsdb data point: {:?}, source: {}",
         data_point,
@@ -126,7 +123,8 @@ impl ErrorExt for Error {
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
-            | ExecuteQuery { source, .. } => source.status_code(),
+            | ExecuteQuery { source, .. }
+            | PutOpentsdbDataPoint { source, .. } => source.status_code(),
 
             NotSupported { .. } | InvalidQuery { .. } | ConnResetByPeer { .. } => {
                 StatusCode::InvalidArguments
@@ -134,12 +132,9 @@ impl ErrorExt for Error {
 
             Hyper { .. } => StatusCode::Unknown,
 
-            #[cfg(feature = "opentsdb")]
             InvalidOpentsdbLine { .. } | InvalidOpentsdbJsonRequest { .. } => {
                 StatusCode::InvalidArguments
             }
-            #[cfg(feature = "opentsdb")]
-            PutOpentsdbDataPoint { source, .. } => source.status_code(),
         }
     }
 
@@ -164,7 +159,6 @@ impl From<std::io::Error> for Error {
     }
 }
 
-#[cfg(feature = "opentsdb")]
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {

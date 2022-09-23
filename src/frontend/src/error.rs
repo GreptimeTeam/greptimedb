@@ -77,7 +77,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[cfg(feature = "opentsdb")]
     #[snafu(display("Failed to execute Opentsdb put, reason: {}", reason))]
     ExecOpentsdbPut {
         reason: String,
@@ -102,8 +101,6 @@ impl ErrorExt for Error {
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
                 StatusCode::Unexpected
             }
-
-            #[cfg(feature = "opentsdb")]
             Error::ExecOpentsdbPut { .. } => StatusCode::Internal,
         }
     }
