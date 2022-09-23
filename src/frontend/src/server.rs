@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::GrpcServer;
-use servers::http::HttpServer;
+use servers::http::HttpServerBuilder;
 use servers::mysql::server::MysqlServer;
 #[cfg(feature = "postgres")]
 use servers::postgres::PostgresServer;
@@ -22,10 +22,13 @@ impl Services {
         let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
             let http_addr = parse_addr(http_addr)?;
 
-            let mut http_server = HttpServer::new(instance.clone());
+            let mut builder = HttpServerBuilder::default();
+            builder.query_handler(instance.clone());
 
             #[cfg(feature = "influxdb")]
-            http_server.set_influxdb_handler(instance.clone());
+            builder.influxdb_handler(Some(instance.clone()));
+
+            let http_server = builder.build().unwrap();
 
             Some((Box::new(http_server) as _, http_addr))
         } else {

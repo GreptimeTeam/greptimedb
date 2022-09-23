@@ -26,6 +26,7 @@ use crate::server::Server;
 
 const HTTP_API_VERSION: &str = "v1";
 
+#[derive(derive_builder::Builder)]
 pub struct HttpServer {
     query_handler: SqlQueryHandlerRef,
     #[cfg(feature = "influxdb")]
@@ -126,16 +127,8 @@ impl HttpServer {
         }
     }
 
-    #[cfg(feature = "influxdb")]
-    pub fn set_influxdb_handler(
-        &mut self,
-        handler: crate::query_handler::InfluxdbProtocolLineHandlerRef,
-    ) {
-        self.influxdb_handler = Some(handler);
-    }
-
     pub fn make_app(&self) -> Router {
-        let mut router = Router::new().nest(
+        let router = Router::new().nest(
             &format!("/{}", HTTP_API_VERSION),
             Router::new()
                 // handlers
@@ -145,19 +138,7 @@ impl HttpServer {
         );
 
         #[cfg(feature = "influxdb")]
-        {
-            use std::sync::Arc;
-            use self::influxdb::influxdb_write;
-
-            if let Some(handler) = &self.influxdb_handler {
-                let handler = Arc::clone(handler);
-                let influxdb_router = Router::new().route(
-                    "/write",
-                    routing::post(move |body| influxdb_write(body, handler)),
-                );
-                router = router.nest(&format!("/{}/influxdb", HTTP_API_VERSION), influxdb_router);
-            }
-        }
+        let router = self.influxdb_router(router);
 
         router
             .route("/metrics", routing::get(handler::metrics))
@@ -170,6 +151,26 @@ impl HttpServer {
                     // TODO(LFC): make timeout configurable
                     .layer(TimeoutLayer::new(Duration::from_secs(30))),
             )
+    }
+
+    #[cfg(feature = "influxdb")]
+    fn influxdb_router(&self, router: Router) -> Router {
+        use std::sync::Arc;
+
+        use self::influxdb::influxdb_write;
+
+        let handler = if let Some(handler) = &self.influxdb_handler {
+            Arc::clone(handler)
+        } else {
+            return router;
+        };
+        router.nest(
+            &format!("/{}/influxdb", HTTP_API_VERSION),
+            Router::new().route(
+                "/write",
+                routing::post(move |body| influxdb_write(body, handler)),
+            ),
+        )
     }
 }
 

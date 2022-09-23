@@ -109,7 +109,7 @@ impl Writer {
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         // Convert nanoseconds to milliseconds
-        values.ts_millis_values.push(value/1000000);
+        values.ts_millis_values.push(value / 1000000);
         self.inner.null_mask[idx].push(false);
         Ok(())
     }
