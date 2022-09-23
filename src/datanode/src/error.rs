@@ -2,6 +2,7 @@ use std::any::Any;
 
 use api::serde::DecodeError;
 use common_error::prelude::*;
+use datatypes::arrow::error::ArrowError;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
 
@@ -213,7 +214,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to create a new RecordBatch, source: {}", source))]
-    NewRecordBatche {
+    NewRecordBatch {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
@@ -222,6 +223,15 @@ pub enum Error {
     NewRecordBatches {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Arrow compution error, source: {}", source))]
+    ArrowCompution { source: ArrowError },
+
+    #[snafu(display("Failed to cast an arrow array into vector, source: {}", source))]
+    CastVector {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
     },
 }
 
@@ -247,7 +257,8 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::ColumnDefaultConstraint { source, .. }
+            Error::CastVector { source, .. }
+            | Error::ColumnDefaultConstraint { source, .. }
             | Error::CreateSchema { source, .. }
             | Error::ConvertSchema { source, .. } => source.status_code(),
 
@@ -279,9 +290,11 @@ impl ErrorExt for Error {
             Error::StartScriptManager { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
-            Error::NewRecordBatche { source }
+            Error::NewRecordBatch { source }
             | Error::NewRecordBatches { source }
             | Error::CollectRecordBatches { source } => source.status_code(),
+
+            Error::ArrowCompution { .. } => StatusCode::Unexpected,
         }
     }
 
