@@ -33,7 +33,7 @@ impl ShowDatabases {
     }
 }
 
-/// SQL structure for `SHOW DATABASES`.
+/// SQL structure for `SHOW TABLES`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowTables {
     pub kind: ShowKind,

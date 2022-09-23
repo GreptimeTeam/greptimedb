@@ -76,7 +76,7 @@ impl SqlHandler {
             })?
             .schema(DEFAULT_SCHEMA_NAME)
             .context(SchemaNotFoundSnafu {
-                name: DEFAULT_CATALOG_NAME,
+                name: DEFAULT_SCHEMA_NAME,
             })
     }
 
