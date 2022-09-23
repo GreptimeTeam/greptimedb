@@ -5,6 +5,10 @@ use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::instance::Instance;
+#[cfg(feature = "opentsdb")]
+use crate::opentsdb::OpentsdbOptions;
+#[cfg(feature = "postgres")]
+use crate::postgres::PostgresOptions;
 use crate::server::Services;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -13,15 +17,12 @@ pub struct FrontendOptions {
     pub grpc_addr: Option<String>,
     pub mysql_addr: Option<String>,
     pub mysql_runtime_size: u32,
+
     #[cfg(feature = "postgres")]
-    pub postgres_addr: Option<String>,
-    #[cfg(feature = "postgres")]
-    pub postgres_runtime_size: u32,
+    pub postgres_options: Option<PostgresOptions>,
 
     #[cfg(feature = "opentsdb")]
-    pub opentsdb_addr: Option<String>,
-    #[cfg(feature = "opentsdb")]
-    pub opentsdb_runtime_size: u32,
+    pub opentsdb_options: Option<OpentsdbOptions>,
 }
 
 impl Default for FrontendOptions {
@@ -31,15 +32,12 @@ impl Default for FrontendOptions {
             grpc_addr: Some("0.0.0.0:4001".to_string()),
             mysql_addr: Some("0.0.0.0:4002".to_string()),
             mysql_runtime_size: 2,
+
             #[cfg(feature = "postgres")]
-            postgres_addr: Some("0.0.0.0:4003".to_string()),
-            #[cfg(feature = "postgres")]
-            postgres_runtime_size: 2,
+            postgres_options: Some(PostgresOptions::default()),
 
             #[cfg(feature = "opentsdb")]
-            opentsdb_addr: Some("0.0.0.0:4242".to_string()),
-            #[cfg(feature = "opentsdb")]
-            opentsdb_runtime_size: 2,
+            opentsdb_options: Some(OpentsdbOptions::default()),
         }
     }
 }

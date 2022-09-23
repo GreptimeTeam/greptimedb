@@ -8,8 +8,8 @@ use snafu::ResultExt;
 
 use crate::error::{self, Error, Result};
 use crate::http::HttpResponse;
-use crate::opentsdb::codec::OpentsdbDataPoint;
-use crate::query_handler::OpentsdbLineProtocolHandlerRef;
+use crate::opentsdb::codec::DataPoint;
+use crate::query_handler::OpentsdbProtocolHandlerRef;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(untagged)]
@@ -30,14 +30,14 @@ impl<T> From<OneOrMany<T>> for Vec<T> {
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
 pub struct OpentsdbDataPointRequest {
     metric: String,
-    timestamp: u64,
+    timestamp: i64,
     value: f64,
     tags: HashMap<String, String>,
 }
 
-impl From<&OpentsdbDataPointRequest> for OpentsdbDataPoint {
+impl From<&OpentsdbDataPointRequest> for DataPoint {
     fn from(request: &OpentsdbDataPointRequest) -> Self {
-        let ts_millis = OpentsdbDataPoint::timestamp_to_millis(request.timestamp);
+        let ts_millis = DataPoint::timestamp_to_millis(request.timestamp);
 
         let tags = request
             .tags
@@ -45,7 +45,7 @@ impl From<&OpentsdbDataPointRequest> for OpentsdbDataPoint {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect::<Vec<(String, String)>>();
 
-        OpentsdbDataPoint::new(request.metric.clone(), ts_millis, request.value, tags)
+        DataPoint::new(request.metric.clone(), ts_millis, request.value, tags)
     }
 }
 
@@ -53,7 +53,7 @@ impl From<&OpentsdbDataPointRequest> for OpentsdbDataPoint {
 // for more details.
 #[axum_macros::debug_handler]
 pub async fn put(
-    State(opentsdb_handler): State<OpentsdbLineProtocolHandlerRef>,
+    State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
     request: Request<Body>,
 ) -> Result<(HttpStatusCode, HttpResponse)> {
     let (parts, body) = request.into_parts();
@@ -168,7 +168,7 @@ mod test {
             value: 1.0,
             tags: HashMap::from([("foo".to_string(), "a".to_string())]),
         };
-        let data_point: OpentsdbDataPoint = request.into();
+        let data_point: DataPoint = request.into();
         assert_eq!(data_point.metric(), "hello");
         assert_eq!(data_point.ts_millis(), 1234000);
         assert_eq!(data_point.value(), 1.0);

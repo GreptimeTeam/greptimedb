@@ -6,31 +6,31 @@ use client::{Error as ClientError, ObjectResult};
 use common_error::prelude::{BoxedError, StatusCode};
 use servers::error as server_error;
 use servers::opentsdb::codec::{
-    OpentsdbDataPoint, OPENTSDB_TIMESTAMP_COLUMN_NAME, OPENTSDB_VALUE_COLUMN_NAME,
+    DataPoint, OPENTSDB_TIMESTAMP_COLUMN_NAME, OPENTSDB_VALUE_COLUMN_NAME,
 };
-use servers::query_handler::OpentsdbLineProtocolHandler;
+use servers::query_handler::OpentsdbProtocolHandler;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::instance::Instance;
 
 #[async_trait]
-impl OpentsdbLineProtocolHandler for Instance {
-    async fn exec(&self, data_point: &OpentsdbDataPoint) -> server_error::Result<()> {
+impl OpentsdbProtocolHandler for Instance {
+    async fn exec(&self, data_point: &DataPoint) -> server_error::Result<()> {
         // TODO(LFC): Insert metrics in batch, then make OpentsdbLineProtocolHandler::exec received multiple data points, when
         // metric table and tags can be created upon insertion.
         self.insert_opentsdb_metric(data_point)
             .await
             .map_err(BoxedError::new)
-            .with_context(|_| server_error::ExecuteQuerySnafu {
-                query: format!("{:?}", data_point),
+            .with_context(|_| server_error::PutOpentsdbDataPointSnafu {
+                data_point: format!("{:?}", data_point),
             })?;
         Ok(())
     }
 }
 
 impl Instance {
-    async fn insert_opentsdb_metric(&self, data_point: &OpentsdbDataPoint) -> Result<()> {
+    async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> Result<()> {
         let expr = data_point.as_grpc_insert();
 
         let result = self.db.insert(expr.clone()).await;
@@ -76,7 +76,7 @@ impl Instance {
         Ok(())
     }
 
-    async fn create_opentsdb_metric(&self, data_point: &OpentsdbDataPoint) -> Result<()> {
+    async fn create_opentsdb_metric(&self, data_point: &DataPoint) -> Result<()> {
         let mut column_defs = Vec::with_capacity(2 + data_point.tags().len());
 
         let ts_column = ColumnDef {
@@ -139,7 +139,7 @@ impl Instance {
         }
     }
 
-    async fn create_opentsdb_tags(&self, data_point: &OpentsdbDataPoint) -> Result<()> {
+    async fn create_opentsdb_tags(&self, data_point: &DataPoint) -> Result<()> {
         // TODO(LFC): support adding columns in one request
         for (tagk, _) in data_point.tags().iter() {
             let tag_column = ColumnDef {
@@ -192,7 +192,7 @@ mod tests {
         let instance = tests::create_frontend_instance().await;
         instance
             .exec(
-                &OpentsdbDataPoint::try_create(
+                &DataPoint::try_create(
                     "put sys.if.bytes.out 1479496100 1.3E3 host=web01 interface=eth0",
                 )
                 .unwrap(),
@@ -200,10 +200,7 @@ mod tests {
             .await
             .unwrap();
         instance
-            .exec(
-                &OpentsdbDataPoint::try_create("put sys.procs.running 1479496100 42 host=web01")
-                    .unwrap(),
-            )
+            .exec(&DataPoint::try_create("put sys.procs.running 1479496100 42 host=web01").unwrap())
             .await
             .unwrap();
     }
@@ -212,7 +209,7 @@ mod tests {
     async fn test_insert_opentsdb_metric() {
         let instance = tests::create_frontend_instance().await;
 
-        let data_point1 = OpentsdbDataPoint::new(
+        let data_point1 = DataPoint::new(
             "my_metric_1".to_string(),
             1000,
             1.0,
@@ -225,7 +222,7 @@ mod tests {
         let result = instance.insert_opentsdb_metric(&data_point1).await;
         assert!(result.is_ok());
 
-        let data_point2 = OpentsdbDataPoint::new(
+        let data_point2 = DataPoint::new(
             "my_metric_1".to_string(),
             2000,
             2.0,
@@ -238,7 +235,7 @@ mod tests {
         let result = instance.insert_opentsdb_metric(&data_point2).await;
         assert!(result.is_ok());
 
-        let data_point3 = OpentsdbDataPoint::new("my_metric_1".to_string(), 3000, 3.0, vec![]);
+        let data_point3 = DataPoint::new("my_metric_1".to_string(), 3000, 3.0, vec![]);
         // should handle null tags properly
         let result = instance.insert_opentsdb_metric(&data_point3).await;
         assert!(result.is_ok());

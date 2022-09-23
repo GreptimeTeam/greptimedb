@@ -3,15 +3,15 @@
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::error::Result;
-use crate::opentsdb::codec::OpentsdbDataPoint;
+use crate::opentsdb::codec::DataPoint;
 use crate::opentsdb::connection::Connection;
-use crate::query_handler::OpentsdbLineProtocolHandlerRef;
+use crate::query_handler::OpentsdbProtocolHandlerRef;
 use crate::shutdown::Shutdown;
 
 /// Per-connection handler. Reads requests from `connection` and applies the Opentsdb metric to
 /// [OpentsdbLineProtocolHandler].
 pub(crate) struct Handler<S: AsyncWrite + AsyncRead + Unpin> {
-    query_handler: OpentsdbLineProtocolHandlerRef,
+    query_handler: OpentsdbProtocolHandlerRef,
 
     /// The TCP connection decorated with Opentsdb line protocol encoder / decoder implemented
     /// using a buffered `TcpStream`.
@@ -33,7 +33,7 @@ pub(crate) struct Handler<S: AsyncWrite + AsyncRead + Unpin> {
 
 impl<S: AsyncWrite + AsyncRead + Unpin> Handler<S> {
     pub(crate) fn new(
-        query_handler: OpentsdbLineProtocolHandlerRef,
+        query_handler: OpentsdbProtocolHandlerRef,
         connection: Connection<S>,
         shutdown: Shutdown,
     ) -> Self {
@@ -72,7 +72,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Handler<S> {
                 return Ok(());
             }
 
-            match OpentsdbDataPoint::try_create(&line) {
+            match DataPoint::try_create(&line) {
                 Ok(data_point) => {
                     let result = self.query_handler.exec(&data_point).await;
                     if let Err(e) = result {
@@ -99,15 +99,15 @@ mod tests {
 
     use super::*;
     use crate::error;
-    use crate::query_handler::OpentsdbLineProtocolHandler;
+    use crate::query_handler::OpentsdbProtocolHandler;
 
     struct DummyQueryHandler {
         tx: mpsc::Sender<String>,
     }
 
     #[async_trait]
-    impl OpentsdbLineProtocolHandler for DummyQueryHandler {
-        async fn exec(&self, data_point: &OpentsdbDataPoint) -> Result<()> {
+    impl OpentsdbProtocolHandler for DummyQueryHandler {
+        async fn exec(&self, data_point: &DataPoint) -> Result<()> {
             let metric = data_point.metric();
             if metric == "should_failed" {
                 return error::InternalSnafu {
@@ -159,7 +159,7 @@ mod tests {
     }
 
     async fn start_server(
-        query_handler: OpentsdbLineProtocolHandlerRef,
+        query_handler: OpentsdbProtocolHandlerRef,
         notify_shutdown: broadcast::Sender<()>,
     ) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

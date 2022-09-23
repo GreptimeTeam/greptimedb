@@ -63,12 +63,12 @@ impl Services {
         };
 
         #[cfg(feature = "postgres")]
-        if let Some(addr) = &opts.postgres_addr {
-            let addr = parse_addr(addr)?;
+        if let Some(opts) = &opts.postgres_options {
+            let addr = parse_addr(&opts.addr)?;
 
             let pg_io_runtime = Arc::new(
                 RuntimeBuilder::default()
-                    .worker_threads(opts.postgres_runtime_size as usize)
+                    .worker_threads(opts.runtime_size as usize)
                     .thread_name("pg-io-handlers")
                     .build()
                     .context(error::RuntimeResourceSnafu)?,
@@ -79,12 +79,12 @@ impl Services {
         };
 
         #[cfg(feature = "opentsdb")]
-        if let Some(addr) = &opts.opentsdb_addr {
-            let addr = parse_addr(addr)?;
+        if let Some(opts) = &opts.opentsdb_options {
+            let addr = parse_addr(&opts.addr)?;
 
             let io_runtime = Arc::new(
                 RuntimeBuilder::default()
-                    .worker_threads(opts.opentsdb_runtime_size as usize)
+                    .worker_threads(opts.runtime_size as usize)
                     .thread_name("opentsdb-io-handlers")
                     .build()
                     .context(error::RuntimeResourceSnafu)?,

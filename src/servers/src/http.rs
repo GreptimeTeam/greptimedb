@@ -23,7 +23,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::error::{Result, StartHttpSnafu};
 #[cfg(feature = "opentsdb")]
-use crate::query_handler::OpentsdbLineProtocolHandlerRef;
+use crate::query_handler::OpentsdbProtocolHandlerRef;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::Server;
 
@@ -37,7 +37,7 @@ pub struct HttpServer {
     // when "opentsdb" feature is used in Frontend (which is enable by default), Datanode also has
     // to use it, regardless of whether Datanode wants it or not. Making this Opentsdb handler
     // optional is to bypass the above cargo restriction, letting Frontend set it later.
-    opentsdb_handler: Option<OpentsdbLineProtocolHandlerRef>,
+    opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
 }
 
 #[derive(Serialize, Debug)]
@@ -140,7 +140,7 @@ impl HttpServer {
     }
 
     #[cfg(feature = "opentsdb")]
-    pub fn set_opentsdb_handler(&mut self, handler: OpentsdbLineProtocolHandlerRef) {
+    pub fn set_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) {
         debug_assert!(
             self.opentsdb_handler.is_none(),
             "Opentsdb handler can be set only once!"

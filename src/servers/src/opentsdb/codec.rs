@@ -7,15 +7,15 @@ pub const OPENTSDB_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
 pub const OPENTSDB_VALUE_COLUMN_NAME: &str = "value";
 
 #[derive(Debug)]
-pub struct OpentsdbDataPoint {
+pub struct DataPoint {
     metric: String,
-    ts_millis: u64,
+    ts_millis: i64,
     value: f64,
     tags: Vec<(String, String)>,
 }
 
-impl OpentsdbDataPoint {
-    pub fn new(metric: String, ts_millis: u64, value: f64, tags: Vec<(String, String)>) -> Self {
+impl DataPoint {
+    pub fn new(metric: String, ts_millis: i64, value: f64, tags: Vec<(String, String)>) -> Self {
         Self {
             metric,
             ts_millis,
@@ -46,7 +46,7 @@ impl OpentsdbDataPoint {
 
         let metric = tokens[1];
 
-        let ts_millis = match tokens[2].parse::<u64>() {
+        let ts_millis = match tokens[2].parse::<i64>() {
             Ok(t) => Self::timestamp_to_millis(t),
             Err(_) => {
                 return error::InvalidQuerySnafu {
@@ -86,7 +86,7 @@ impl OpentsdbDataPoint {
             tags.push((tagk, tagv));
         }
 
-        Ok(OpentsdbDataPoint {
+        Ok(DataPoint {
             metric: metric.to_string(),
             ts_millis,
             value,
@@ -102,7 +102,7 @@ impl OpentsdbDataPoint {
         &self.tags
     }
 
-    pub fn ts_millis(&self) -> u64 {
+    pub fn ts_millis(&self) -> i64 {
         self.ts_millis
     }
 
@@ -116,9 +116,7 @@ impl OpentsdbDataPoint {
         let ts_column = Column {
             column_name: OPENTSDB_TIMESTAMP_COLUMN_NAME.to_string(),
             values: Some(column::Values {
-                // i64 is required by our timestamp datatype, and normally is large enough to
-                // represent millisecond, so it's safe to cast here.
-                ts_millis_values: vec![self.ts_millis as i64],
+                ts_millis_values: vec![self.ts_millis],
                 ..Default::default()
             }),
             ..Default::default()
@@ -158,12 +156,12 @@ impl OpentsdbDataPoint {
         }
     }
 
-    pub fn timestamp_to_millis(t: u64) -> u64 {
+    pub fn timestamp_to_millis(t: i64) -> i64 {
         // 9999999999999 (13 digits) is of date "Sat Nov 20 2286 17:46:39 UTC",
         // 999999999999 (12 digits) is "Sun Sep 09 2001 01:46:39 UTC",
         // so timestamp digits less than 13 means we got seconds here.
         // (We are not expecting to store data that is 21 years ago, are we?)
-        if t.to_string().len() < 13 {
+        if t.abs().to_string().len() < 13 {
             t * 1000
         } else {
             t
@@ -178,7 +176,7 @@ mod test {
     #[test]
     fn test_try_create() {
         fn test_illegal_line(line: &str, expected_err: &str) {
-            let result = OpentsdbDataPoint::try_create(line);
+            let result = DataPoint::try_create(line);
             match result.unwrap_err() {
                 error::Error::InvalidQuery { reason, .. } => {
                     assert_eq!(reason, expected_err)
@@ -206,7 +204,7 @@ mod test {
             "put: illegal argument: duplicate tag: host",
         );
 
-        let data_point = OpentsdbDataPoint::try_create(
+        let data_point = DataPoint::try_create(
             "put sys.if.bytes.out 1479496100 1.3E3 host=web01 interface=eth0",
         )
         .unwrap();
@@ -222,8 +220,7 @@ mod test {
         );
 
         let data_point =
-            OpentsdbDataPoint::try_create("put sys.procs.running 1479496100 42 host=web01")
-                .unwrap();
+            DataPoint::try_create("put sys.procs.running 1479496100 42 host=web01").unwrap();
         assert_eq!(data_point.metric, "sys.procs.running");
         assert_eq!(data_point.ts_millis, 1479496100000);
         assert_eq!(data_point.value, 42f64);
@@ -235,7 +232,7 @@ mod test {
 
     #[test]
     fn test_as_grpc_insert() {
-        let data_point = OpentsdbDataPoint {
+        let data_point = DataPoint {
             metric: "my_metric_1".to_string(),
             ts_millis: 1000,
             value: 1.0,

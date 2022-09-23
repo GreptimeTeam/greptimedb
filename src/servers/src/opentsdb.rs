@@ -15,13 +15,13 @@ use tokio::sync::broadcast;
 use crate::error::Result;
 use crate::opentsdb::connection::Connection;
 use crate::opentsdb::handler::Handler;
-use crate::query_handler::OpentsdbLineProtocolHandlerRef;
+use crate::query_handler::OpentsdbProtocolHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::shutdown::Shutdown;
 
 pub struct OpentsdbServer {
     base_server: BaseTcpServer,
-    query_handler: OpentsdbLineProtocolHandlerRef,
+    query_handler: OpentsdbProtocolHandlerRef,
 
     /// Broadcasts a shutdown signal to all active connections.
     ///
@@ -33,7 +33,7 @@ pub struct OpentsdbServer {
 
 impl OpentsdbServer {
     pub fn create_server(
-        query_handler: OpentsdbLineProtocolHandlerRef,
+        query_handler: OpentsdbProtocolHandlerRef,
         io_runtime: Arc<Runtime>,
     ) -> Box<dyn Server> {
         // When the provided `shutdown` future completes, we must send a shutdown

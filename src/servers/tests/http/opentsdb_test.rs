@@ -6,8 +6,8 @@ use axum_test_helper::TestClient;
 use common_query::Output;
 use servers::error::{self, Result};
 use servers::http::HttpServer;
-use servers::opentsdb::codec::OpentsdbDataPoint;
-use servers::query_handler::{OpentsdbLineProtocolHandler, SqlQueryHandler};
+use servers::opentsdb::codec::DataPoint;
+use servers::query_handler::{OpentsdbProtocolHandler, SqlQueryHandler};
 use tokio::sync::mpsc;
 
 struct DummyInstance {
@@ -15,8 +15,8 @@ struct DummyInstance {
 }
 
 #[async_trait]
-impl OpentsdbLineProtocolHandler for DummyInstance {
-    async fn exec(&self, data_point: &OpentsdbDataPoint) -> Result<()> {
+impl OpentsdbProtocolHandler for DummyInstance {
+    async fn exec(&self, data_point: &DataPoint) -> Result<()> {
         if data_point.metric() == "should_failed" {
             return error::InternalSnafu {
                 err_msg: "expected",

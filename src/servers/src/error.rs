@@ -95,6 +95,18 @@ pub enum Error {
         source: serde_json::error::Error,
         backtrace: Backtrace,
     },
+
+    #[cfg(feature = "opentsdb")]
+    #[snafu(display(
+        "Failed to put Opentsdb data point: {:?}, source: {}",
+        data_point,
+        source
+    ))]
+    PutOpentsdbDataPoint {
+        data_point: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -126,6 +138,8 @@ impl ErrorExt for Error {
             InvalidOpentsdbLine { .. } | InvalidOpentsdbJsonRequest { .. } => {
                 StatusCode::InvalidArguments
             }
+            #[cfg(feature = "opentsdb")]
+            PutOpentsdbDataPoint { source, .. } => source.status_code(),
         }
     }
 

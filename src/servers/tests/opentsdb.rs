@@ -7,10 +7,10 @@ use common_runtime::Builder as RuntimeBuilder;
 use rand::rngs::StdRng;
 use rand::Rng;
 use servers::error::{self as server_error, Result};
-use servers::opentsdb::codec::OpentsdbDataPoint;
+use servers::opentsdb::codec::DataPoint;
 use servers::opentsdb::connection::Connection;
 use servers::opentsdb::OpentsdbServer;
-use servers::query_handler::OpentsdbLineProtocolHandler;
+use servers::query_handler::OpentsdbProtocolHandler;
 use servers::server::Server;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -20,8 +20,8 @@ struct DummyOpentsdbInstance {
 }
 
 #[async_trait]
-impl OpentsdbLineProtocolHandler for DummyOpentsdbInstance {
-    async fn exec(&self, data_point: &OpentsdbDataPoint) -> Result<()> {
+impl OpentsdbProtocolHandler for DummyOpentsdbInstance {
+    async fn exec(&self, data_point: &DataPoint) -> Result<()> {
         let metric = data_point.metric();
         if metric == "should_failed" {
             return server_error::InternalSnafu {
