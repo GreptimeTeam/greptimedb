@@ -23,10 +23,10 @@ use common_error::ext::ErrorExt;
 
 use crate::storage::engine::OpenOptions;
 use crate::storage::metadata::RegionMeta;
-use crate::storage::requests::WriteRequest;
+use crate::storage::requests::{AlterRequest, WriteRequest};
 use crate::storage::responses::WriteResponse;
 use crate::storage::snapshot::{ReadContext, Snapshot};
-use crate::storage::{RegionDescriptor, RegionId};
+use crate::storage::RegionId;
 
 /// Chunks of rows in storage engine.
 #[async_trait]
@@ -57,9 +57,7 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// Create write request
     fn write_request(&self) -> Self::WriteRequest;
 
-    fn alter(&self, _descriptor: RegionDescriptor) -> Result<(), Self::Error> {
-        unimplemented!()
-    }
+    async fn alter(&self, request: AlterRequest) -> Result<(), Self::Error>;
 }
 
 /// Context for write operations.

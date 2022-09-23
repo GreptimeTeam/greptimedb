@@ -12,9 +12,9 @@ use datatypes::schema::{ColumnSchema, Schema};
 use storage::metadata::{RegionMetaImpl, RegionMetadata};
 use storage::write_batch::{Mutation, WriteBatch};
 use store_api::storage::{
-    Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse, OpenOptions,
-    ReadContext, Region, RegionDescriptor, RegionId, RegionMeta, ScanRequest, ScanResponse,
-    SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
+    AlterRequest, Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse,
+    OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, RegionMeta, ScanRequest,
+    ScanResponse, SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
@@ -163,10 +163,8 @@ impl Region for MockRegion {
         WriteBatch::new(self.in_memory_metadata().schema().clone())
     }
 
-    fn alter(&self, descriptor: RegionDescriptor) -> Result<()> {
-        let metadata = descriptor.try_into().unwrap();
-        self.inner.update_metadata(metadata);
-        Ok(())
+    async fn alter(&self, _request: AlterRequest) -> Result<()> {
+        unimplemented!("implements add/drop columns and calls update_metadata")
     }
 }
 
@@ -182,7 +180,7 @@ impl MockRegionInner {
         }
     }
 
-    fn update_metadata(&self, metadata: RegionMetadata) {
+    fn _update_metadata(&self, metadata: RegionMetadata) {
         {
             let mut memtable = self.memtable.write().unwrap();
 

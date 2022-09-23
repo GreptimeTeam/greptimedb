@@ -3,6 +3,7 @@ use std::time::Duration;
 use common_error::ext::ErrorExt;
 use common_query::logical_plan::Expr;
 use common_time::RangeMillis;
+use datatypes::schema::ColumnSchema;
 use datatypes::vectors::VectorRef;
 
 use crate::storage::SequenceNumber;
@@ -50,3 +51,36 @@ pub struct ScanRequest {
 
 #[derive(Debug)]
 pub struct GetRequest {}
+
+/// Operation to add a column.
+#[derive(Debug)]
+pub struct AddColumn {
+    /// Schema of the column to add.
+    pub schema: ColumnSchema,
+    /// Is the column a key column.
+    pub is_key: bool,
+}
+
+/// Operation to alter a region.
+#[derive(Debug)]
+pub enum AlterOperation {
+    /// Add columns to the region.
+    AddColumns {
+        /// Columns to add.
+        columns: Vec<AddColumn>,
+    },
+    /// Drop columns from the region, only value columns are allowed to drop.
+    DropColumns {
+        /// Name of columns to drop.
+        names: Vec<String>,
+    },
+}
+
+/// Alter region request.
+#[derive(Debug)]
+pub struct AlterRequest {
+    /// Operation to do.
+    pub operation: AlterOperation,
+    /// The version of the schema before applying the alteration.
+    pub version: u32,
+}

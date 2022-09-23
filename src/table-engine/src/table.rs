@@ -23,7 +23,6 @@ use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::manifest::action::ProtocolAction;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
-use store_api::storage::RegionDescriptorBuilder;
 use store_api::storage::{
     ChunkReader, PutOperation, ReadContext, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot,
     WriteContext, WriteRequest,
@@ -191,13 +190,13 @@ impl<R: Region> Table for MitoTable<R> {
         };
 
         let primary_key_indices = &table_meta.primary_key_indices;
-        let (next_column_id, default_cf) = build_column_family(
+        let (next_column_id, _default_cf) = build_column_family(
             INIT_COLUMN_ID,
             table_name,
             &table_schema,
             primary_key_indices,
         )?;
-        let (next_column_id, row_key) = build_row_key_desc(
+        let (next_column_id, _row_key) = build_row_key_desc(
             next_column_id,
             table_name,
             &table_schema,
@@ -216,25 +215,26 @@ impl<R: Region> Table for MitoTable<R> {
         new_info.ident.version = table_info.ident.version + 1;
         new_info.meta = new_meta;
 
+        // FIXME(yingwen): [alter] Alter the region.
         // first alter region
-        let region = self.region();
-        let region_descriptor = RegionDescriptorBuilder::default()
-            .id(region.id())
-            .name(region.name())
-            .row_key(row_key)
-            .default_cf(default_cf)
-            .build()
-            .context(error::BuildRegionDescriptorSnafu {
-                table_name,
-                region_name: region.name(),
-            })?;
-        logging::debug!(
-            "start altering region {} of table {}, with new region descriptor {:?}",
-            region.name(),
-            table_name,
-            region_descriptor
-        );
-        region.alter(region_descriptor).map_err(TableError::new)?;
+        // let region = self.region();
+        // let region_descriptor = RegionDescriptorBuilder::default()
+        //     .id(region.id())
+        //     .name(region.name())
+        //     .row_key(row_key)
+        //     .default_cf(default_cf)
+        //     .build()
+        //     .context(error::BuildRegionDescriptorSnafu {
+        //         table_name,
+        //         region_name: region.name(),
+        //     })?;
+        // logging::debug!(
+        //     "start altering region {} of table {}, with new region descriptor {:?}",
+        //     region.name(),
+        //     table_name,
+        //     region_descriptor
+        // );
+        // region.alter(region_descriptor).map_err(TableError::new)?;
 
         // then alter table info
         logging::debug!(

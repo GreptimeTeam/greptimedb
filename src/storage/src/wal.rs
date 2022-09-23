@@ -39,6 +39,7 @@ pub type WriteBatchStream<'a> = Pin<
 impl<S: LogStore> Clone for Wal<S> {
     fn clone(&self) -> Self {
         Self {
+            // FIXME(yingwen): [alter] Clone a string is costly, should be replaced by region_id.
             name: self.name.clone(),
             namespace: self.namespace.clone(),
             store: self.store.clone(),

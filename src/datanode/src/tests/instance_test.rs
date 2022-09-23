@@ -1,8 +1,6 @@
 use arrow::array::UInt64Array;
 use common_query::Output;
 use common_recordbatch::util;
-use datafusion::arrow_print;
-use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow_array::StringArray;
 
 use crate::error;

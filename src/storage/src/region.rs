@@ -12,7 +12,8 @@ use store_api::manifest::{
     self, action::ProtocolAction, Manifest, ManifestVersion, MetaActionIterator,
 };
 use store_api::storage::{
-    OpenOptions, ReadContext, Region, RegionId, RegionMeta, WriteContext, WriteResponse,
+    AlterRequest, OpenOptions, ReadContext, Region, RegionId, RegionMeta, WriteContext,
+    WriteResponse,
 };
 
 use crate::error::{self, Error, Result};
@@ -23,7 +24,7 @@ use crate::manifest::{
 };
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
-pub use crate::region::writer::{RegionWriter, RegionWriterRef, WriterContext};
+pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
 use crate::version::VersionEdit;
@@ -74,6 +75,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
 
     fn write_request(&self) -> Self::WriteRequest {
         WriteBatch::new(self.in_memory_metadata().schema().clone())
+    }
+
+    async fn alter(&self, request: AlterRequest) -> Result<()> {
+        self.inner.alter(request).await
     }
 }
 
@@ -343,6 +348,7 @@ impl<S: LogStore> RegionInner<S> {
     }
 
     async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
+        // FIXME(yingwen): [alter] The schema may be outdated.
         let metadata = self.in_memory_metadata();
         let schema = metadata.schema();
         // Only compare column schemas.
@@ -364,5 +370,17 @@ impl<S: LogStore> RegionInner<S> {
         };
         // Now altering schema is not allowed, so it is safe to validate schema outside of the lock.
         self.writer.write(ctx, request, writer_ctx).await
+    }
+
+    async fn alter(&self, request: AlterRequest) -> Result<()> {
+        // TODO(yingwen): [alter] Log the request.
+
+        let alter_ctx = AlterContext {
+            shared: &self.shared,
+            wal: &self.wal,
+            manifest: &self.manifest,
+        };
+
+        self.writer.alter(alter_ctx, request).await
     }
 }
