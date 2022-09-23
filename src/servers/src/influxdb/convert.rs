@@ -262,17 +262,17 @@ mod tests {
         writer.write_tag("host", "host1").unwrap();
         writer.write_f64("cpu", 0.5).unwrap();
         writer.write_f64("memory", 0.4).unwrap();
-        writer.write_time("ts", 100011000).unwrap();
+        writer.write_time("ts", 101011000).unwrap();
         writer.commit();
 
         writer.write_tag("host", "host2").unwrap();
-        writer.write_time("ts", 100011001).unwrap();
+        writer.write_time("ts", 102011001).unwrap();
         writer.commit();
 
         writer.write_tag("host", "host3").unwrap();
         writer.write_f64("cpu", 0.4).unwrap();
         writer.write_u64("cpu_core_num", 16).unwrap();
-        writer.write_time("ts", 100011002).unwrap();
+        writer.write_time("ts", 103011002).unwrap();
         writer.commit();
 
         let insert_batch = writer.finish();
@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(Some(ColumnDataType::Timestamp as i32), column.datatype);
         assert_eq!(SemanticType::Timestamp as i32, column.semantic_type);
         assert_eq!(
-            vec![100011000, 100011001, 100011002],
+            vec![101, 102, 103],
             column.values.as_ref().unwrap().ts_millis_values
         );
         verify_null_mask(&column.null_mask, vec![false, false, false]);
