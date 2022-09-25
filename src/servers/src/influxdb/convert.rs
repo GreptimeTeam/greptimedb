@@ -1,5 +1,3 @@
-//! Forked from influxdb_iox https://github.com/influxdata/influxdb_iox/tree/main/influxdb_line_protocol
-
 use std::collections::HashMap;
 
 use api::v1::{
@@ -9,8 +7,12 @@ use api::v1::{
 use common_base::BitVec;
 use snafu::{ensure, ResultExt};
 
-use crate::error::{InfluxdbLineProtocolSnafu, Result, TypeMismatchSnafu};
+use super::line_protocol::ParsedLine;
 use crate::influxdb::line_protocol::{parse_lines, FieldValue};
+use crate::{
+    error::{InfluxdbLineProtocolSnafu, Result, TypeMismatchSnafu},
+    influxdb::line_protocol,
+};
 
 pub const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
 
@@ -27,13 +29,16 @@ impl TryFrom<&str> for InsertBatches {
     fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
         let mut writers: HashMap<TableName, Writer> = HashMap::new();
 
-        for line in parse_lines(value) {
-            let line = line.context(InfluxdbLineProtocolSnafu)?;
+        let lines: line_protocol::Result<Vec<ParsedLine>> = parse_lines(value).collect();
+        let lines = lines.context(InfluxdbLineProtocolSnafu)?;
+        let to_insert = lines.len();
+        for line in lines {
+            let line = line;
 
             let table_name = line.series.measurement;
             let writer = writers
                 .entry(table_name.to_string())
-                .or_insert_with(Writer::new);
+                .or_insert_with(|| Writer::with_capacity(to_insert));
 
             let tags = line.series.tag_set;
             if let Some(tags) = tags {
@@ -81,20 +86,24 @@ impl TryFrom<&str> for InsertBatches {
 }
 
 pub struct Writer {
-    inner: InsertBatch,
+    inner: Inner,
 }
 
 #[derive(Default)]
-pub struct InsertBatch {
+pub struct Inner {
     column_name_index: HashMap<ColumnName, usize>,
-    null_mask: Vec<BitVec>,
+    null_masks: Vec<BitVec>,
     batch: api::v1::codec::InsertBatch,
+    to_insert: usize,
 }
 
 impl Writer {
-    fn new() -> Self {
+    fn with_capacity(to_insert: usize) -> Self {
         Self {
-            inner: InsertBatch::default(),
+            inner: Inner {
+                to_insert,
+                ..Default::default()
+            },
         }
     }
 
@@ -112,7 +121,7 @@ impl Writer {
         let values = column.values.as_mut().unwrap();
         // Convert nanoseconds to milliseconds
         values.ts_millis_values.push(value / 1000000);
-        self.inner.null_mask[idx].push(false);
+        self.inner.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -125,7 +134,7 @@ impl Writer {
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.string_values.push(value.to_string());
-        self.inner.null_mask[idx].push(false);
+        self.inner.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -139,7 +148,7 @@ impl Writer {
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.u64_values.push(value);
-        self.inner.null_mask[idx].push(false);
+        self.inner.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -153,7 +162,7 @@ impl Writer {
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.i64_values.push(value);
-        self.inner.null_mask[idx].push(false);
+        self.inner.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -167,7 +176,7 @@ impl Writer {
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.f64_values.push(value);
-        self.inner.null_mask[idx].push(false);
+        self.inner.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -178,10 +187,10 @@ impl Writer {
             column.datatype == Some(ColumnDataType::String.into()),
             TypeMismatchSnafu { column_name }
         );
-        // It is safe to use unsafe here, because values has been initialized in mut_column()
+        // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.string_values.push(value.to_string());
-        self.inner.null_mask[idx].push(false);
+        self.inner.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -192,10 +201,10 @@ impl Writer {
             column.datatype == Some(api::v1::ColumnDataType::Boolean.into()),
             TypeMismatchSnafu { column_name }
         );
-        // It is safe to use unsafe here, because values has been initialized in mut_column()
+        // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.bool_values.push(value);
-        self.inner.null_mask[idx].push(false);
+        self.inner.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -204,7 +213,7 @@ impl Writer {
         batch.row_count += 1;
 
         for i in 0..batch.columns.len() {
-            let null_mask = &mut self.inner.null_mask[i];
+            let null_mask = &mut self.inner.null_masks[i];
             if batch.row_count as usize > null_mask.len() {
                 null_mask.push(true);
             }
@@ -212,7 +221,7 @@ impl Writer {
     }
 
     fn finish(mut self) -> api::v1::codec::InsertBatch {
-        let null_masks = self.inner.null_mask;
+        let null_masks = self.inner.null_masks;
         for (i, null_mask) in null_masks.into_iter().enumerate() {
             let columns = &mut self.inner.batch.columns;
             columns[i].null_mask = null_mask.into_vec();
@@ -232,13 +241,14 @@ impl Writer {
             None => {
                 let new_idx = column_names.len();
                 let batch = &mut self.inner.batch;
-                self.inner
-                    .null_mask
-                    .push(BitVec::repeat(true, batch.row_count as usize));
+                let to_insert = self.inner.to_insert;
+                let mut null_mask = BitVec::with_capacity(to_insert);
+                null_mask.extend(BitVec::repeat(true, batch.row_count as usize));
+                self.inner.null_masks.push(null_mask);
                 batch.columns.push(Column {
                     column_name: column_name.to_string(),
                     semantic_type: semantic_type.into(),
-                    values: Some(Values::default()),
+                    values: Some(Values::with_capacity(datatype, to_insert)),
                     datatype: Some(datatype.into()),
                     null_mask: Vec::default(),
                 });
@@ -259,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_writer1() {
-        let mut writer = Writer::new();
+        let mut writer = Writer::with_capacity(3);
 
         writer.write_tag("host", "host1").unwrap();
         writer.write_f64("cpu", 0.5).unwrap();

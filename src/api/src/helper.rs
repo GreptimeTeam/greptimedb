@@ -2,6 +2,7 @@ use datatypes::prelude::ConcreteDataType;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
+use crate::v1::column::Values;
 use crate::v1::ColumnDataType;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -68,6 +69,77 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             }
         });
         Ok(datatype)
+    }
+}
+
+impl Values {
+    pub fn with_capacity(datatye: ColumnDataType, capacity: usize) -> Self {
+        match datatye {
+            ColumnDataType::Boolean => Values {
+                bool_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Int8 => Values {
+                i8_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Int16 => Values {
+                i16_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Int32 => Values {
+                i32_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Int64 => Values {
+                i64_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Uint8 => Values {
+                u8_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Uint16 => Values {
+                u16_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Uint32 => Values {
+                u32_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Uint64 => Values {
+                u64_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Float32 => Values {
+                f32_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Float64 => Values {
+                f64_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Binary => Values {
+                binary_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::String => Values {
+                string_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Date => Values {
+                date_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Datetime => Values {
+                datetime_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Timestamp => Values {
+                ts_millis_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+        }
     }
 }
 
