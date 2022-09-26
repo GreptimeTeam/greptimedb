@@ -1,23 +1,32 @@
 //! sql handler
 
-use catalog::CatalogManagerRef;
+use catalog::{
+    schema::SchemaProviderRef, CatalogManagerRef, CatalogProviderRef, DEFAULT_CATALOG_NAME,
+    DEFAULT_SCHEMA_NAME,
+};
 use common_query::Output;
 use snafu::{OptionExt, ResultExt};
+use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::*;
 use table::TableRef;
 
-use crate::error::{GetTableSnafu, Result, TableNotFoundSnafu};
+use crate::error::{
+    CatalogNotFoundSnafu, GetTableSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
+};
 
 mod alter;
 mod create;
 mod insert;
+mod show;
 
 #[derive(Debug)]
 pub enum SqlRequest {
     Insert(InsertRequest),
     Create(CreateTableRequest),
     Alter(AlterTableRequest),
+    ShowDatabases(ShowDatabases),
+    ShowTables(ShowTables),
 }
 
 // Handler to execute SQL except query
@@ -39,6 +48,8 @@ impl SqlHandler {
             SqlRequest::Insert(req) => self.insert(req).await,
             SqlRequest::Create(req) => self.create(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
+            SqlRequest::ShowDatabases(stmt) => self.show_databases(stmt).await,
+            SqlRequest::ShowTables(stmt) => self.show_tables(stmt).await,
         }
     }
 
@@ -47,6 +58,26 @@ impl SqlHandler {
             .get_table(&EngineContext::default(), table_name)
             .context(GetTableSnafu { table_name })?
             .context(TableNotFoundSnafu { table_name })
+    }
+
+    pub(crate) fn get_default_catalog(&self) -> Result<CatalogProviderRef> {
+        self.catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .context(CatalogNotFoundSnafu {
+                name: DEFAULT_CATALOG_NAME,
+            })
+    }
+
+    pub(crate) fn get_default_schema(&self) -> Result<SchemaProviderRef> {
+        self.catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .context(CatalogNotFoundSnafu {
+                name: DEFAULT_CATALOG_NAME,
+            })?
+            .schema(DEFAULT_SCHEMA_NAME)
+            .context(SchemaNotFoundSnafu {
+                name: DEFAULT_SCHEMA_NAME,
+            })
     }
 
     pub fn table_engine(&self) -> TableEngineRef {

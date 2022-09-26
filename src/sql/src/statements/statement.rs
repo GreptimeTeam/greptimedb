@@ -5,25 +5,23 @@ use crate::statements::alter::AlterTable;
 use crate::statements::create_table::CreateTable;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
-use crate::statements::show_database::SqlShowDatabase;
+use crate::statements::show::{ShowDatabases, ShowTables};
 
 /// Tokens parsed by `DFParser` are converted into these values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
-    // Databases.
-    ShowDatabases(SqlShowDatabase),
-
     // Query
     Query(Box<Query>),
-
     // Insert
     Insert(Box<Insert>),
-
     /// CREATE TABLE
     Create(CreateTable),
-
     /// ALTER TABLE
     Alter(AlterTable),
+    // Databases.
+    ShowDatabases(ShowDatabases),
+    // SHOW TABLES
+    ShowTables(ShowTables),
 }
 
 /// Converts Statement to sqlparser statement
@@ -34,6 +32,9 @@ impl TryFrom<Statement> for SpStatement {
         match value {
             Statement::ShowDatabases(_) => Err(ParserError::ParserError(
                 "sqlparser does not support SHOW DATABASE query.".to_string(),
+            )),
+            Statement::ShowTables(_) => Err(ParserError::ParserError(
+                "sqlparser does not support SHOW TABLES query.".to_string(),
             )),
             Statement::Query(s) => Ok(SpStatement::Query(Box::new(s.inner))),
             Statement::Insert(i) => Ok(i.inner),

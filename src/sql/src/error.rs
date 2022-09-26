@@ -79,6 +79,9 @@ pub enum Error {
         expect: ConcreteDataType,
         actual: ConcreteDataType,
     },
+
+    #[snafu(display("Invalid database name: {}", name))]
+    InvalidDatabaseName { name: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -95,7 +98,7 @@ impl ErrorExt for Error {
             | ParseSqlValue { .. }
             | SqlTypeNotSupported { .. } => StatusCode::InvalidSyntax,
 
-            ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
+            InvalidDatabaseName { .. } | ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
         }
     }
 
