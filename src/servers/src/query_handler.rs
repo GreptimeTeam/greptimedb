@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use common_query::Output;
 
 use crate::error::Result;
+use crate::opentsdb::codec::DataPoint;
 
 /// All query handler traits for various request protocols, like SQL or GRPC.
 /// Instance that wishes to support certain request protocol, just implement the corresponding
@@ -19,6 +20,7 @@ use crate::error::Result;
 pub type SqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
 pub type GrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler + Send + Sync>;
 pub type GrpcAdminHandlerRef = Arc<dyn GrpcAdminHandler + Send + Sync>;
+pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 
 #[async_trait]
 pub trait SqlQueryHandler {
@@ -35,4 +37,11 @@ pub trait GrpcQueryHandler {
 #[async_trait]
 pub trait GrpcAdminHandler {
     async fn exec_admin_request(&self, expr: AdminExpr) -> Result<AdminResult>;
+}
+
+#[async_trait]
+pub trait OpentsdbProtocolHandler {
+    /// A successful request will not return a response.
+    /// Only on error will the socket return a line of data.
+    async fn exec(&self, data_point: &DataPoint) -> Result<()>;
 }

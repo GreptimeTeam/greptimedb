@@ -4,17 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["python", "postgres"]
+default = ["python"]
 python = [
   "dep:script"
 ]
-postgres = ["servers/postgres"]
 
 [dependencies]
 api = { path = "../api" }
 async-trait = "0.1"
-axum = "0.5"
-axum-macros = "0.2"
+axum = "0.6.0-rc.2"
+axum-macros = "0.3.0-rc.1"
 catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }

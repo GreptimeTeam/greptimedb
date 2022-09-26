@@ -37,7 +37,3 @@ futures = "0.3"
 tempdir = "0.3"
 tonic = "0.8"
 tower = "0.4"
-
-[features]
-default = ["postgres"]
-postgres = ["servers/postgres"]

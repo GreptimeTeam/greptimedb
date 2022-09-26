@@ -193,8 +193,6 @@ pub async fn test_create_table_illegal_timestamp_type() {
 
 #[tokio::test]
 async fn test_alter_table() {
-    common_telemetry::init_default_ut_logging();
-
     // TODO(LFC) Use real Mito engine when we can alter its region schema,
     //   and delete the `new_mock` method.
     let instance = Instance::new_mock().await.unwrap();
@@ -237,13 +235,13 @@ async fn test_alter_table() {
             let pretty_print = arrow_print::write(&recordbatch);
             let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
             let expected = vec![
-                "+-------+---------------------+-----+--------+--------+",
-                "| host  | ts                  | cpu | memory | my_tag |",
-                "+-------+---------------------+-----+--------+--------+",
-                "| host1 | 1970-01-01 00:00:01 | 1.1 | 100    |        |",
-                "| host2 | 1970-01-01 00:00:02 | 2.2 | 200    | hello  |",
-                "| host3 | 1970-01-01 00:00:03 | 3.3 | 300    |        |",
-                "+-------+---------------------+-----+--------+--------+",
+                "+-------+-----+--------+---------------------+--------+",
+                "| host  | cpu | memory | ts                  | my_tag |",
+                "+-------+-----+--------+---------------------+--------+",
+                "| host1 | 1.1 | 100    | 1970-01-01 00:00:01 |        |",
+                "| host2 | 2.2 | 200    | 1970-01-01 00:00:02 | hello  |",
+                "| host3 | 3.3 | 300    | 1970-01-01 00:00:03 |        |",
+                "+-------+-----+--------+---------------------+--------+",
             ];
             assert_eq!(pretty_print, expected);
         }

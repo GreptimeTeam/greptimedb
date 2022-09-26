@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use common_error::mock::MockError;
 use common_telemetry::logging;
 use datatypes::prelude::{Value, VectorBuilder, VectorRef};
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, Schema};
 use storage::metadata::{RegionMetaImpl, RegionMetadata};
 use storage::write_batch::{Mutation, WriteBatch};
 use store_api::storage::{
@@ -75,14 +75,31 @@ impl Snapshot for MockSnapshot {
     async fn scan(
         &self,
         _ctx: &ReadContext,
-        _request: ScanRequest,
+        request: ScanRequest,
     ) -> Result<ScanResponse<MockChunkReader>> {
         let memtable = {
             let memtable = self.region.memtable.read().unwrap();
             memtable.clone()
         };
+
+        let schema = self.schema();
+        let projection_schema = if let Some(projection) = request.projection {
+            let mut columns = Vec::with_capacity(projection.len());
+            for idx in projection {
+                columns.push(
+                    schema
+                        .column_schema_by_name(schema.column_name_by_index(idx))
+                        .unwrap()
+                        .clone(),
+                );
+            }
+            Arc::new(Schema::new(columns))
+        } else {
+            schema.clone()
+        };
+
         let reader = MockChunkReader {
-            schema: self.schema().clone(),
+            schema: projection_schema,
             memtable,
             read: false,
         };

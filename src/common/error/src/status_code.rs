@@ -36,6 +36,7 @@ pub enum StatusCode {
     TableAlreadyExists = 4000,
     TableNotFound = 4001,
     TableColumnNotFound = 4002,
+    TableColumnExists = 4003,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
