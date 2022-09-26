@@ -2,8 +2,7 @@ use api::v1::{insert_expr::Expr, InsertExpr};
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use servers::{
-    error::ExecuteQuerySnafu, influxdb::convert::InsertBatches,
-    query_handler::InfluxdbLineProtocolHandler,
+    error::ExecuteQuerySnafu, influxdb::InsertBatches, query_handler::InfluxdbLineProtocolHandler,
 };
 use snafu::ResultExt;
 

@@ -73,8 +73,8 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
 }
 
 impl Values {
-    pub fn with_capacity(datatye: ColumnDataType, capacity: usize) -> Self {
-        match datatye {
+    pub fn with_capacity(datatype: ColumnDataType, capacity: usize) -> Self {
+        match datatype {
             ColumnDataType::Boolean => Values {
                 bool_values: Vec::with_capacity(capacity),
                 ..Default::default()

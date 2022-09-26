@@ -79,11 +79,14 @@ pub enum Error {
     #[snafu(display("Failed to parse influxdb line protocol, source: {}", source))]
     InfluxdbLineProtocol {
         #[snafu(backtrace)]
-        source: crate::influxdb::line_protocol::Error,
+        source: influxdb_line_protocol::Error,
     },
 
-    #[snafu(display("Write type mismatch, column name: {}", column_name))]
-    TypeMismatch { column_name: String },
+    #[snafu(display("Failed to write influxdb line protocol, source: {}", source))]
+    InfluxdbLinesWrite {
+        #[snafu(backtrace)]
+        source: common_grpc::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -105,9 +108,10 @@ impl ErrorExt for Error {
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. } => source.status_code(),
 
-            NotSupported { .. } | InvalidQuery { .. } => StatusCode::InvalidArguments,
-
-            InfluxdbLineProtocol { .. } | TypeMismatch { .. } => StatusCode::InvalidArguments,
+            NotSupported { .. }
+            | InvalidQuery { .. }
+            | InfluxdbLineProtocol { .. }
+            | InfluxdbLinesWrite { .. } => StatusCode::InvalidArguments,
         }
     }
 
@@ -135,7 +139,7 @@ impl From<std::io::Error> for Error {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
-            Error::InfluxdbLineProtocol { .. } | Error::TypeMismatch { .. } => {
+            Error::InfluxdbLineProtocol { .. } | Error::InfluxdbLinesWrite { .. } => {
                 (axum::http::StatusCode::BAD_REQUEST, self.to_string())
             }
             _ => (

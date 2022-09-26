@@ -5,100 +5,26 @@ use api::v1::{
     Column, ColumnDataType,
 };
 use common_base::BitVec;
-use snafu::{ensure, ResultExt};
+use snafu::ensure;
 
-use super::line_protocol::ParsedLine;
-use crate::influxdb::line_protocol::{parse_lines, FieldValue};
-use crate::{
-    error::{InfluxdbLineProtocolSnafu, Result, TypeMismatchSnafu},
-    influxdb::line_protocol,
-};
+use crate::error::{Result, TypeMismatchSnafu};
 
-pub const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
-
-type TableName = String;
-type ColumnName = String;
-
-pub struct InsertBatches {
-    pub data: Vec<(TableName, api::v1::codec::InsertBatch)>,
-}
-
-impl TryFrom<&str> for InsertBatches {
-    type Error = crate::error::Error;
-
-    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
-        let mut writers: HashMap<TableName, Writer> = HashMap::new();
-
-        let lines: line_protocol::Result<Vec<ParsedLine>> = parse_lines(value).collect();
-        let lines = lines.context(InfluxdbLineProtocolSnafu)?;
-        let to_insert = lines.len();
-        for line in lines {
-            let line = line;
-
-            let table_name = line.series.measurement;
-            let writer = writers
-                .entry(table_name.to_string())
-                .or_insert_with(|| Writer::with_capacity(to_insert));
-
-            let tags = line.series.tag_set;
-            if let Some(tags) = tags {
-                for (k, v) in tags {
-                    writer.write_tag(k.as_str(), v.as_str())?;
-                }
-            }
-
-            let fields = line.field_set;
-            for (k, v) in fields {
-                let column_name = k.as_str();
-                match v {
-                    FieldValue::I64(value) => {
-                        writer.write_i64(column_name, value)?;
-                    }
-                    FieldValue::U64(value) => {
-                        writer.write_u64(column_name, value)?;
-                    }
-                    FieldValue::F64(value) => {
-                        writer.write_f64(column_name, value)?;
-                    }
-                    FieldValue::String(value) => {
-                        writer.write_string(column_name, value.as_str())?;
-                    }
-                    FieldValue::Boolean(value) => {
-                        writer.write_bool(column_name, value)?;
-                    }
-                }
-            }
-
-            if let Some(timestamp) = line.timestamp {
-                writer.write_time(INFLUXDB_TIMESTAMP_COLUMN_NAME, timestamp)?;
-            }
-
-            writer.commit();
-        }
-
-        Ok(InsertBatches {
-            data: writers
-                .into_iter()
-                .map(|(table_name, writer)| (table_name, writer.finish()))
-                .collect(),
-        })
-    }
-}
-
-pub struct Writer {
+pub struct LinesWriter {
     inner: Inner,
 }
 
+type ColumnName = String;
+
 #[derive(Default)]
-pub struct Inner {
+struct Inner {
     column_name_index: HashMap<ColumnName, usize>,
     null_masks: Vec<BitVec>,
     batch: api::v1::codec::InsertBatch,
     to_insert: usize,
 }
 
-impl Writer {
-    fn with_capacity(to_insert: usize) -> Self {
+impl LinesWriter {
+    pub fn with_capacity(to_insert: usize) -> Self {
         Self {
             inner: Inner {
                 to_insert,
@@ -107,7 +33,7 @@ impl Writer {
         }
     }
 
-    fn write_time(&mut self, column_name: &str, value: i64) -> Result<()> {
+    pub fn write_time(&mut self, column_name: &str, value: i64) -> Result<()> {
         let (idx, column) = self.mut_column(
             column_name,
             ColumnDataType::Timestamp,
@@ -125,7 +51,7 @@ impl Writer {
         Ok(())
     }
 
-    fn write_tag(&mut self, column_name: &str, value: &str) -> Result<()> {
+    pub fn write_tag(&mut self, column_name: &str, value: &str) -> Result<()> {
         let (idx, column) = self.mut_column(column_name, ColumnDataType::String, SemanticType::Tag);
         ensure!(
             column.datatype == Some(ColumnDataType::String.into()),
@@ -138,7 +64,7 @@ impl Writer {
         Ok(())
     }
 
-    fn write_u64(&mut self, column_name: &str, value: u64) -> Result<()> {
+    pub fn write_u64(&mut self, column_name: &str, value: u64) -> Result<()> {
         let (idx, column) =
             self.mut_column(column_name, ColumnDataType::Uint64, SemanticType::Field);
         ensure!(
@@ -152,7 +78,7 @@ impl Writer {
         Ok(())
     }
 
-    fn write_i64(&mut self, column_name: &str, value: i64) -> Result<()> {
+    pub fn write_i64(&mut self, column_name: &str, value: i64) -> Result<()> {
         let (idx, column) =
             self.mut_column(column_name, ColumnDataType::Int64, SemanticType::Field);
         ensure!(
@@ -166,7 +92,7 @@ impl Writer {
         Ok(())
     }
 
-    fn write_f64(&mut self, column_name: &str, value: f64) -> Result<()> {
+    pub fn write_f64(&mut self, column_name: &str, value: f64) -> Result<()> {
         let (idx, column) =
             self.mut_column(column_name, ColumnDataType::Float64, SemanticType::Field);
         ensure!(
@@ -180,7 +106,7 @@ impl Writer {
         Ok(())
     }
 
-    fn write_string(&mut self, column_name: &str, value: &str) -> Result<()> {
+    pub fn write_string(&mut self, column_name: &str, value: &str) -> Result<()> {
         let (idx, column) =
             self.mut_column(column_name, ColumnDataType::String, SemanticType::Field);
         ensure!(
@@ -194,7 +120,7 @@ impl Writer {
         Ok(())
     }
 
-    fn write_bool(&mut self, column_name: &str, value: bool) -> Result<()> {
+    pub fn write_bool(&mut self, column_name: &str, value: bool) -> Result<()> {
         let (idx, column) =
             self.mut_column(column_name, ColumnDataType::Boolean, SemanticType::Field);
         ensure!(
@@ -208,7 +134,7 @@ impl Writer {
         Ok(())
     }
 
-    fn commit(&mut self) {
+    pub fn commit(&mut self) {
         let batch = &mut self.inner.batch;
         batch.row_count += 1;
 
@@ -220,7 +146,7 @@ impl Writer {
         }
     }
 
-    fn finish(mut self) -> api::v1::codec::InsertBatch {
+    pub fn finish(mut self) -> api::v1::codec::InsertBatch {
         let null_masks = self.inner.null_masks;
         for (i, null_mask) in null_masks.into_iter().enumerate() {
             let columns = &mut self.inner.batch.columns;
@@ -265,11 +191,11 @@ mod tests {
     use api::v1::{column::SemanticType, ColumnDataType};
     use common_base::BitVec;
 
-    use super::Writer;
+    use super::LinesWriter;
 
     #[test]
-    fn test_writer1() {
-        let mut writer = Writer::with_capacity(3);
+    fn test_lines_writer() {
+        let mut writer = LinesWriter::with_capacity(3);
 
         writer.write_tag("host", "host1").unwrap();
         writer.write_f64("cpu", 0.5).unwrap();

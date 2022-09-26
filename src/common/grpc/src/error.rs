@@ -2,6 +2,8 @@ use api::DecodeError;
 use datafusion::error::DataFusionError;
 use snafu::{Backtrace, Snafu};
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -31,4 +33,7 @@ pub enum Error {
         source: DecodeError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Write type mismatch, column name: {}", column_name))]
+    TypeMismatch { column_name: String },
 }
