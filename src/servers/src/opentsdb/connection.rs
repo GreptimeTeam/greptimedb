@@ -1,7 +1,5 @@
 //! Modified from Tokio's mini-redis example.
 
-use std::io::Cursor;
-
 use bytes::{Buf, BytesMut};
 use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
@@ -67,26 +65,11 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Connection<S> {
             return Ok(None);
         }
 
-        let mut buf = Cursor::new(&self.buffer[..]);
+        let buf = &self.buffer[..];
+        if let Some(pos) = buf.windows(2).position(|w| w == [b'\r', b'\n']) {
+            let line = buf[0..pos].to_vec();
 
-        let mut line: Option<&[u8]> = None;
-
-        let start = buf.position() as usize;
-        let end = buf.get_ref().len() - 1;
-        for i in start..end {
-            if buf.get_ref()[i] == b'\r' && buf.get_ref()[i + 1] == b'\n' {
-                // We found a line, update the position to be *after* the \n
-                buf.set_position((i + 2) as u64);
-
-                line = Some(&buf.get_ref()[start..i]);
-                break;
-            }
-        }
-
-        if let Some(line) = line {
-            let line = line.to_vec();
-
-            self.buffer.advance(buf.position() as usize);
+            self.buffer.advance(pos + 2);
 
             Ok(Some(
                 String::from_utf8(line).context(error::InvalidOpentsdbLineSnafu)?,

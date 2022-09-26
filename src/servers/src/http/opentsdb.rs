@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
-use axum::extract::State;
-use axum::http::Request;
+use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::Json;
 use hyper::Body;
@@ -29,24 +28,24 @@ impl<T> From<OneOrMany<T>> for Vec<T> {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct OpentsdbDataPointRequest {
+pub struct DataPointRequest {
     metric: String,
     timestamp: i64,
     value: f64,
     tags: HashMap<String, String>,
 }
 
-impl From<&OpentsdbDataPointRequest> for DataPoint {
-    fn from(request: &OpentsdbDataPointRequest) -> Self {
+impl From<DataPointRequest> for DataPoint {
+    fn from(request: DataPointRequest) -> Self {
         let ts_millis = DataPoint::timestamp_to_millis(request.timestamp);
 
         let tags = request
             .tags
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .into_iter()
+            .map(|(k, v)| (k, v))
             .collect::<Vec<(String, String)>>();
 
-        DataPoint::new(request.metric.clone(), ts_millis, request.value, tags)
+        DataPoint::new(request.metric, ts_millis, request.value, tags)
     }
 }
 
@@ -62,70 +61,65 @@ pub enum OpentsdbPutResponse {
 #[axum_macros::debug_handler]
 pub async fn put(
     State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
-    request: Request<Body>,
+    Query(params): Query<HashMap<String, String>>,
+    RawBody(body): RawBody,
 ) -> Result<(HttpStatusCode, Json<OpentsdbPutResponse>)> {
-    let (parts, body) = request.into_parts();
-
-    let query = parts.uri.query();
-    let params = query
-        .map(|query| query.split('&').collect::<Vec<&str>>())
-        .unwrap_or_default();
-    let summary = params.iter().any(|&p| p == "summary");
-    let details = params.iter().any(|&p| p == "details");
+    let summary = params.contains_key("summary");
+    let details = params.contains_key("details");
 
     let data_points = parse_data_points(body).await?;
 
-    let mut response = OpentsdbDebuggingResponse {
-        success: 0,
-        failed: 0,
-        errors: if details {
-            Some(Vec::with_capacity(data_points.len()))
-        } else {
-            None
-        },
-    };
-
-    for data_point in data_points.iter() {
-        let result = opentsdb_handler.exec(&data_point.into()).await;
-        match result {
-            Ok(()) => response.on_success(),
-            Err(e) => {
-                if !summary && !details {
-                    // Not debugging purpose, failed fast.
-                    return error::InternalSnafu {
-                        err_msg: e.to_string(),
-                    }
-                    .fail();
+    let response = if !summary && !details {
+        for data_point in data_points.into_iter() {
+            if let Err(e) = opentsdb_handler.exec(&data_point.into()).await {
+                // Not debugging purpose, failed fast.
+                return error::InternalSnafu {
+                    err_msg: e.to_string(),
                 }
-
-                response.on_failed(data_point, e);
+                .fail();
             }
         }
-    }
+        (HttpStatusCode::NO_CONTENT, Json(OpentsdbPutResponse::Empty))
+    } else {
+        let mut response = OpentsdbDebuggingResponse {
+            success: 0,
+            failed: 0,
+            errors: if details {
+                Some(Vec::with_capacity(data_points.len()))
+            } else {
+                None
+            },
+        };
 
-    let response = if summary || details {
+        for data_point in data_points.into_iter() {
+            let result = opentsdb_handler.exec(&data_point.clone().into()).await;
+            match result {
+                Ok(()) => response.on_success(),
+                Err(e) => {
+                    response.on_failed(data_point, e);
+                }
+            }
+        }
         (
             HttpStatusCode::OK,
             Json(OpentsdbPutResponse::Debug(response)),
         )
-    } else {
-        (HttpStatusCode::NO_CONTENT, Json(OpentsdbPutResponse::Empty))
     };
     Ok(response)
 }
 
-async fn parse_data_points(body: Body) -> Result<Vec<OpentsdbDataPointRequest>> {
+async fn parse_data_points(body: Body) -> Result<Vec<DataPointRequest>> {
     let body = hyper::body::to_bytes(body)
         .await
         .context(error::HyperSnafu)?;
-    let data_points = serde_json::from_slice::<OneOrMany<OpentsdbDataPointRequest>>(&body[..])
+    let data_points = serde_json::from_slice::<OneOrMany<DataPointRequest>>(&body[..])
         .context(error::InvalidOpentsdbJsonRequestSnafu)?;
     Ok(data_points.into())
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct OpentsdbDetailError {
-    datapoint: OpentsdbDataPointRequest,
+    datapoint: DataPointRequest,
     error: String,
 }
 
@@ -142,12 +136,12 @@ impl OpentsdbDebuggingResponse {
         self.success += 1;
     }
 
-    fn on_failed(&mut self, data_point: &OpentsdbDataPointRequest, error: Error) {
+    fn on_failed(&mut self, datapoint: DataPointRequest, error: Error) {
         self.failed += 1;
 
         if let Some(details) = self.errors.as_mut() {
             let error = OpentsdbDetailError {
-                datapoint: data_point.clone(),
+                datapoint,
                 error: error.to_string(),
             };
             details.push(error);
@@ -161,7 +155,7 @@ mod test {
 
     #[test]
     fn test_into_opentsdb_data_point() {
-        let request = &OpentsdbDataPointRequest {
+        let request = DataPointRequest {
             metric: "hello".to_string(),
             timestamp: 1234,
             value: 1.0,
@@ -188,8 +182,7 @@ mod test {
                     "dc": "lga"
                 }
             }"#;
-        let data_point1 =
-            serde_json::from_str::<OpentsdbDataPointRequest>(raw_data_point1).unwrap();
+        let data_point1 = serde_json::from_str::<DataPointRequest>(raw_data_point1).unwrap();
 
         let raw_data_point2 = r#"{
                 "metric": "sys.cpu.nice",
@@ -200,8 +193,7 @@ mod test {
                     "dc": "lga"
                 }
             }"#;
-        let data_point2 =
-            serde_json::from_str::<OpentsdbDataPointRequest>(raw_data_point2).unwrap();
+        let data_point2 = serde_json::from_str::<DataPointRequest>(raw_data_point2).unwrap();
 
         let body = Body::from(raw_data_point1);
         let data_points = parse_data_points(body).await.unwrap();
