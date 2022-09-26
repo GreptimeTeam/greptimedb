@@ -8,7 +8,7 @@ use snafu::{ensure, OptionExt};
 use store_api::storage::{
     consts::{self, ReservedColumnId},
     ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyId, ColumnId,
-    ColumnSchema, RegionDescriptor, RegionId, RegionMeta, RowKeyDescriptor, Schema, SchemaRef,
+    RegionDescriptor, RegionId, RegionMeta, RowKeyDescriptor, Schema, SchemaRef,
 };
 
 use crate::manifest::action::{RawColumnFamiliesMetadata, RawColumnsMetadata, RawRegionMetadata};
@@ -334,13 +334,9 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
     }
 }
 
-// TODO(yingwen): Add a builder to build ColumnMetadata and refactor this builder.
 #[derive(Default)]
-struct RegionMetadataBuilder {
-    id: RegionId,
-    name: String,
+struct ColumnsMetadataBuilder {
     columns: Vec<ColumnMetadata>,
-    column_schemas: Vec<ColumnSchema>,
     name_to_col_index: HashMap<String, usize>,
     /// Column id set, used to validate column id uniqueness.
     column_ids: HashSet<ColumnId>,
@@ -349,27 +345,10 @@ struct RegionMetadataBuilder {
     row_key_end: usize,
     timestamp_key_index: Option<usize>,
     enable_version_column: bool,
-
-    id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
-    cf_names: HashSet<String>,
 }
 
-impl RegionMetadataBuilder {
-    fn new() -> RegionMetadataBuilder {
-        RegionMetadataBuilder::default()
-    }
-
-    fn name(mut self, name: impl Into<String>) -> Self {
-        self.name = name.into();
-        self
-    }
-
-    fn id(mut self, id: RegionId) -> Self {
-        self.id = id;
-        self
-    }
-
-    fn row_key(mut self, key: RowKeyDescriptor) -> Result<Self> {
+impl ColumnsMetadataBuilder {
+    fn row_key(&mut self, key: RowKeyDescriptor) -> Result<&mut Self> {
         for col in key.columns {
             self.push_row_key_column(col)?;
         }
@@ -389,72 +368,6 @@ impl RegionMetadataBuilder {
 
         Ok(self)
     }
-
-    fn add_column_family(mut self, cf: ColumnFamilyDescriptor) -> Result<Self> {
-        ensure!(
-            !self.id_to_cfs.contains_key(&cf.cf_id),
-            CfIdExistsSnafu { id: cf.cf_id }
-        );
-
-        ensure!(
-            !self.cf_names.contains(&cf.name),
-            CfNameExistsSnafu { name: &cf.name }
-        );
-
-        let column_index_start = self.columns.len();
-        let column_index_end = column_index_start + cf.columns.len();
-        for col in cf.columns {
-            self.push_value_column(cf.cf_id, col)?;
-        }
-
-        let cf_meta = ColumnFamilyMetadata {
-            name: cf.name.clone(),
-            cf_id: cf.cf_id,
-            column_index_start,
-            column_index_end,
-        };
-
-        self.id_to_cfs.insert(cf.cf_id, cf_meta);
-        self.cf_names.insert(cf.name);
-
-        Ok(self)
-    }
-
-    fn build(mut self) -> Result<RegionMetadata> {
-        let timestamp_key_index = self.timestamp_key_index.context(MissingTimestampSnafu)?;
-
-        let user_column_end = self.columns.len();
-        // Setup internal columns.
-        for internal_desc in internal_column_descs() {
-            self.push_new_column(consts::DEFAULT_CF_ID, internal_desc)?;
-        }
-
-        let columns = Arc::new(ColumnsMetadata {
-            columns: self.columns,
-            name_to_col_index: self.name_to_col_index,
-            row_key_end: self.row_key_end,
-            timestamp_key_index,
-            enable_version_column: self.enable_version_column,
-            user_column_end,
-        });
-        let schema = Arc::new(
-            RegionSchema::new(columns.clone(), Schema::INITIAL_VERSION)
-                .context(InvalidSchemaSnafu)?,
-        );
-
-        Ok(RegionMetadata {
-            id: self.id,
-            name: self.name,
-            schema,
-            columns,
-            column_families: ColumnFamiliesMetadata {
-                id_to_cfs: self.id_to_cfs,
-            },
-            version: 0,
-        })
-    }
-
-    // Helper methods:
 
     fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<()> {
         self.push_value_column(consts::KEY_CF_ID, desc)
@@ -479,19 +392,132 @@ impl RegionMetadataBuilder {
             ColIdExistsSnafu { id: desc.id }
         );
 
-        let column_schema = ColumnSchema::from(&desc);
-
         let column_name = desc.name.clone();
         let column_id = desc.id;
         let meta = ColumnMetadata { cf_id, desc };
 
         let column_index = self.columns.len();
         self.columns.push(meta);
-        self.column_schemas.push(column_schema);
         self.name_to_col_index.insert(column_name, column_index);
         self.column_ids.insert(column_id);
 
         Ok(())
+    }
+
+    fn build(mut self) -> Result<ColumnsMetadata> {
+        let timestamp_key_index = self.timestamp_key_index.context(MissingTimestampSnafu)?;
+
+        let user_column_end = self.columns.len();
+        // Setup internal columns.
+        for internal_desc in internal_column_descs() {
+            self.push_new_column(consts::DEFAULT_CF_ID, internal_desc)?;
+        }
+
+        Ok(ColumnsMetadata {
+            columns: self.columns,
+            name_to_col_index: self.name_to_col_index,
+            row_key_end: self.row_key_end,
+            timestamp_key_index,
+            enable_version_column: self.enable_version_column,
+            user_column_end,
+        })
+    }
+}
+
+#[derive(Default)]
+struct ColumnFamiliesMetadataBuilder {
+    id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
+    cf_names: HashSet<String>,
+}
+
+impl ColumnFamiliesMetadataBuilder {
+    fn add_column_family(&mut self, cf: ColumnFamilyMetadata) -> Result<&mut Self> {
+        ensure!(
+            !self.id_to_cfs.contains_key(&cf.cf_id),
+            CfIdExistsSnafu { id: cf.cf_id }
+        );
+
+        ensure!(
+            !self.cf_names.contains(&cf.name),
+            CfNameExistsSnafu { name: &cf.name }
+        );
+
+        self.cf_names.insert(cf.name.clone());
+        self.id_to_cfs.insert(cf.cf_id, cf);
+
+        Ok(self)
+    }
+
+    fn build(self) -> ColumnFamiliesMetadata {
+        ColumnFamiliesMetadata {
+            id_to_cfs: self.id_to_cfs,
+        }
+    }
+}
+
+#[derive(Default)]
+struct RegionMetadataBuilder {
+    id: RegionId,
+    name: String,
+    columns_meta_builder: ColumnsMetadataBuilder,
+    cfs_meta_builder: ColumnFamiliesMetadataBuilder,
+}
+
+impl RegionMetadataBuilder {
+    fn new() -> RegionMetadataBuilder {
+        RegionMetadataBuilder::default()
+    }
+
+    fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    fn id(mut self, id: RegionId) -> Self {
+        self.id = id;
+        self
+    }
+
+    fn row_key(mut self, key: RowKeyDescriptor) -> Result<Self> {
+        self.columns_meta_builder.row_key(key)?;
+
+        Ok(self)
+    }
+
+    fn add_column_family(mut self, cf: ColumnFamilyDescriptor) -> Result<Self> {
+        let column_index_start = self.columns_meta_builder.columns.len();
+        let column_index_end = column_index_start + cf.columns.len();
+        let cf_meta = ColumnFamilyMetadata {
+            name: cf.name.clone(),
+            cf_id: cf.cf_id,
+            column_index_start,
+            column_index_end,
+        };
+
+        self.cfs_meta_builder.add_column_family(cf_meta)?;
+
+        for col in cf.columns {
+            self.columns_meta_builder.push_value_column(cf.cf_id, col)?;
+        }
+
+        Ok(self)
+    }
+
+    fn build(self) -> Result<RegionMetadata> {
+        let columns = Arc::new(self.columns_meta_builder.build()?);
+        let schema = Arc::new(
+            RegionSchema::new(columns.clone(), Schema::INITIAL_VERSION)
+                .context(InvalidSchemaSnafu)?,
+        );
+
+        Ok(RegionMetadata {
+            id: self.id,
+            name: self.name,
+            schema,
+            columns,
+            column_families: self.cfs_meta_builder.build(),
+            version: 0,
+        })
     }
 }
 
