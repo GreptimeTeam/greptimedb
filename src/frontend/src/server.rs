@@ -29,12 +29,12 @@ impl Services {
             None
         };
 
-        let mysql_server_and_addr = if let Some(mysql_addr) = &opts.mysql_addr {
-            let mysql_addr = parse_addr(mysql_addr)?;
+        let mysql_server_and_addr = if let Some(opts) = &opts.mysql_options {
+            let mysql_addr = parse_addr(&opts.addr)?;
 
             let mysql_io_runtime = Arc::new(
                 RuntimeBuilder::default()
-                    .worker_threads(opts.mysql_runtime_size as usize)
+                    .worker_threads(opts.runtime_size)
                     .thread_name("mysql-io-handlers")
                     .build()
                     .context(error::RuntimeResourceSnafu)?,
@@ -52,7 +52,7 @@ impl Services {
 
             let pg_io_runtime = Arc::new(
                 RuntimeBuilder::default()
-                    .worker_threads(opts.runtime_size as usize)
+                    .worker_threads(opts.runtime_size)
                     .thread_name("pg-io-handlers")
                     .build()
                     .context(error::RuntimeResourceSnafu)?,
@@ -71,7 +71,7 @@ impl Services {
 
             let io_runtime = Arc::new(
                 RuntimeBuilder::default()
-                    .worker_threads(opts.runtime_size as usize)
+                    .worker_threads(opts.runtime_size)
                     .thread_name("opentsdb-io-handlers")
                     .build()
                     .context(error::RuntimeResourceSnafu)?,

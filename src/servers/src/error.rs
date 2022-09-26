@@ -76,26 +76,26 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("connection reset by peer"))]
+    #[snafu(display("Connection reset by peer"))]
     ConnResetByPeer { backtrace: Backtrace },
 
     #[snafu(display("Hyper error, source: {}", source))]
     Hyper { source: hyper::Error },
 
-    #[snafu(display("Invalid Opentsdb line, source: {}", source))]
+    #[snafu(display("Invalid OpenTSDB line, source: {}", source))]
     InvalidOpentsdbLine {
         source: std::string::FromUtf8Error,
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Invalid Opentsdb Json request, source: {}", source))]
+    #[snafu(display("Invalid OpenTSDB Json request, source: {}", source))]
     InvalidOpentsdbJsonRequest {
         source: serde_json::error::Error,
         backtrace: Backtrace,
     },
 
     #[snafu(display(
-        "Failed to put Opentsdb data point: {:?}, source: {}",
+        "Failed to put OpenTSDB data point: {:?}, source: {}",
         data_point,
         source
     ))]
@@ -126,15 +126,13 @@ impl ErrorExt for Error {
             | ExecuteQuery { source, .. }
             | PutOpentsdbDataPoint { source, .. } => source.status_code(),
 
-            NotSupported { .. } | InvalidQuery { .. } | ConnResetByPeer { .. } => {
-                StatusCode::InvalidArguments
-            }
+            NotSupported { .. }
+            | InvalidQuery { .. }
+            | ConnResetByPeer { .. }
+            | InvalidOpentsdbLine { .. }
+            | InvalidOpentsdbJsonRequest { .. } => StatusCode::InvalidArguments,
 
             Hyper { .. } => StatusCode::Unknown,
-
-            InvalidOpentsdbLine { .. } | InvalidOpentsdbJsonRequest { .. } => {
-                StatusCode::InvalidArguments
-            }
         }
     }
 

@@ -4,6 +4,7 @@ use api::v1::{alter_expr, AddColumn, AlterExpr, ColumnDataType, ColumnDef, Creat
 use async_trait::async_trait;
 use client::{Error as ClientError, ObjectResult};
 use common_error::prelude::{BoxedError, StatusCode};
+use common_telemetry::info;
 use servers::error as server_error;
 use servers::opentsdb::codec::{
     DataPoint, OPENTSDB_TIMESTAMP_COLUMN_NAME, OPENTSDB_VALUE_COLUMN_NAME,
@@ -109,7 +110,7 @@ impl Instance {
             schema_name: None,
             table_name: data_point.metric().to_string(),
             desc: Some(format!(
-                "Table for Opentsdb metric: {}",
+                "Table for OpenTSDB metric: {}",
                 &data_point.metric()
             )),
             column_defs,
@@ -130,6 +131,10 @@ impl Instance {
         if header.code == (StatusCode::Success as u32)
             || header.code == (StatusCode::TableAlreadyExists as u32)
         {
+            info!(
+                "OpenTSDB metric table for \"{}\" is created!",
+                data_point.metric()
+            );
             Ok(())
         } else {
             error::ExecOpentsdbPutSnafu {
@@ -173,6 +178,11 @@ impl Instance {
                 }
                 .fail();
             }
+            info!(
+                "OpenTSDB tag \"{}\" for metric \"{}\" is added!",
+                tagk,
+                data_point.metric()
+            );
         }
         Ok(())
     }

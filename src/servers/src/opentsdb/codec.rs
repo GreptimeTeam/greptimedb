@@ -27,7 +27,7 @@ impl DataPoint {
     pub fn try_create(line: &str) -> Result<Self> {
         let tokens = line.split_whitespace().collect::<Vec<&str>>();
         let cmd = if tokens.is_empty() { "" } else { tokens[0] };
-        // Opentsdb command is case sensitive, verified in real Opentsdb.
+        // OpenTSDB command is case sensitive, verified in real OpenTSDB.
         if cmd != "put" {
             return error::InvalidQuerySnafu {
                 reason: format!("unknown command {}.", cmd),

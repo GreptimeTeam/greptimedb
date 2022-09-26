@@ -8,12 +8,12 @@ use crate::opentsdb::connection::Connection;
 use crate::query_handler::OpentsdbProtocolHandlerRef;
 use crate::shutdown::Shutdown;
 
-/// Per-connection handler. Reads requests from `connection` and applies the Opentsdb metric to
+/// Per-connection handler. Reads requests from `connection` and applies the OpenTSDB metric to
 /// [OpentsdbLineProtocolHandler].
 pub(crate) struct Handler<S: AsyncWrite + AsyncRead + Unpin> {
     query_handler: OpentsdbProtocolHandlerRef,
 
-    /// The TCP connection decorated with Opentsdb line protocol encoder / decoder implemented
+    /// The TCP connection decorated with OpenTSDB line protocol encoder / decoder implemented
     /// using a buffered `TcpStream`.
     ///
     /// When TCP listener receives an inbound connection, the `TcpStream` is passed to
@@ -63,8 +63,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Handler<S> {
                 None => return Ok(()),
             };
 
-            // Close connection upon receiving "quit" line. With actual Opentsdb, telnet just won't
-            // quit, the connection to Opentsdb server can be closed only via terminating telnet
+            // Close connection upon receiving "quit" line. With actual OpenTSDB, telnet just won't
+            // quit, the connection to OpenTSDB server can be closed only via terminating telnet
             // session manually, for example, close the terminal window. That is a little annoying,
             // so I added "quit" command to the line protocol, to make telnet client able to quit
             // gracefully.

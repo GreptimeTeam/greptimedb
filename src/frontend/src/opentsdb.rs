@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OpentsdbOptions {
     pub addr: String,
-    pub runtime_size: u32,
+    pub runtime_size: usize,
 }
 
 impl Default for OpentsdbOptions {

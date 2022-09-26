@@ -215,7 +215,7 @@ impl Instance {
     }
 
     // This method is used in other crate's testing codes, so move it out of "cfg(test)".
-    // Will be deleted when callers no longer need it (there are todos reminder in caller).
+    // TODO(LFC): Delete it when callers no longer need it.
     pub async fn new_mock() -> Result<Self> {
         use table_engine::table::test_util::new_test_object_store;
         use table_engine::table::test_util::MockEngine;

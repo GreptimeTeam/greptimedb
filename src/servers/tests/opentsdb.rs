@@ -59,7 +59,7 @@ async fn test_start_opentsdb_server() -> Result<()> {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("Opentsdb server has been started."));
+        .contains("OpenTSDB server has been started."));
     Ok(())
 }
 
@@ -71,7 +71,7 @@ async fn test_shutdown_opentsdb_server() -> Result<()> {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("Opentsdb server is not started."));
+        .contains("OpenTSDB server is not started."));
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let addr = server.start(listening).await?;

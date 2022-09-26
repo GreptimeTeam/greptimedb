@@ -3,15 +3,16 @@ use std::collections::HashMap;
 use axum::extract::State;
 use axum::http::Request;
 use axum::http::StatusCode as HttpStatusCode;
+use axum::Json;
 use hyper::Body;
+use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use crate::error::{self, Error, Result};
-use crate::http::HttpResponse;
 use crate::opentsdb::codec::DataPoint;
 use crate::query_handler::OpentsdbProtocolHandlerRef;
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum OneOrMany<T> {
     One(T),
@@ -27,7 +28,7 @@ impl<T> From<OneOrMany<T>> for Vec<T> {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct OpentsdbDataPointRequest {
     metric: String,
     timestamp: i64,
@@ -49,13 +50,20 @@ impl From<&OpentsdbDataPointRequest> for DataPoint {
     }
 }
 
-// Please refer to the Opentsdb documents of ["api/put"](http://opentsdb.net/docs/build/html/api_http/put.html)
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+pub enum OpentsdbPutResponse {
+    Empty,
+    Debug(OpentsdbDebuggingResponse),
+}
+
+// Please refer to the OpenTSDB documents of ["api/put"](http://opentsdb.net/docs/build/html/api_http/put.html)
 // for more details.
 #[axum_macros::debug_handler]
 pub async fn put(
     State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
     request: Request<Body>,
-) -> Result<(HttpStatusCode, HttpResponse)> {
+) -> Result<(HttpStatusCode, Json<OpentsdbPutResponse>)> {
     let (parts, body) = request.into_parts();
 
     let query = parts.uri.query();
@@ -96,21 +104,12 @@ pub async fn put(
     }
 
     let response = if summary || details {
-        let response = match serde_json::to_string::<OpentsdbDebuggingResponse>(&response) {
-            Ok(x) => x,
-            Err(e) => {
-                return error::InternalSnafu {
-                    err_msg: format!("Failed to serialize response, cause: {}", e),
-                }
-                .fail()
-            }
-        };
-        (HttpStatusCode::OK, HttpResponse::Text(response))
-    } else {
         (
-            HttpStatusCode::NO_CONTENT,
-            HttpResponse::Text("".to_string()),
+            HttpStatusCode::OK,
+            Json(OpentsdbPutResponse::Debug(response)),
         )
+    } else {
+        (HttpStatusCode::NO_CONTENT, Json(OpentsdbPutResponse::Empty))
     };
     Ok(response)
 }
@@ -124,14 +123,14 @@ async fn parse_data_points(body: Body) -> Result<Vec<OpentsdbDataPointRequest>> 
     Ok(data_points.into())
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct OpentsdbDetailError {
     datapoint: OpentsdbDataPointRequest,
     error: String,
 }
 
-#[derive(serde::Serialize)]
-struct OpentsdbDebuggingResponse {
+#[derive(Serialize, Deserialize, Debug)]
+pub struct OpentsdbDebuggingResponse {
     success: i32,
     failed: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -220,7 +219,7 @@ mod test {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Invalid Opentsdb Json request, source: EOF while parsing a value at line 1 column 0"
+            "Invalid OpenTSDB Json request, source: EOF while parsing a value at line 1 column 0"
         );
 
         let body = Body::from("hello world");
@@ -228,7 +227,7 @@ mod test {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Invalid Opentsdb Json request, source: expected value at line 1 column 1"
+            "Invalid OpenTSDB Json request, source: expected value at line 1 column 1"
         );
     }
 }

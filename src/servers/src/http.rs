@@ -127,7 +127,7 @@ impl HttpServer {
     pub fn set_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) {
         debug_assert!(
             self.opentsdb_handler.is_none(),
-            "Opentsdb handler can be set only once!"
+            "OpenTSDB handler can be set only once!"
         );
         self.opentsdb_handler.get_or_insert(handler);
     }

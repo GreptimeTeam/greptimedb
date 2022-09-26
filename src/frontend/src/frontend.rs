@@ -5,6 +5,7 @@ use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::instance::Instance;
+use crate::mysql::MysqlOptions;
 use crate::opentsdb::OpentsdbOptions;
 use crate::postgres::PostgresOptions;
 use crate::server::Services;
@@ -13,8 +14,7 @@ use crate::server::Services;
 pub struct FrontendOptions {
     pub http_addr: Option<String>,
     pub grpc_addr: Option<String>,
-    pub mysql_addr: Option<String>,
-    pub mysql_runtime_size: u32,
+    pub mysql_options: Option<MysqlOptions>,
     pub postgres_options: Option<PostgresOptions>,
     pub opentsdb_options: Option<OpentsdbOptions>,
 }
@@ -24,8 +24,7 @@ impl Default for FrontendOptions {
         Self {
             http_addr: Some("0.0.0.0:4000".to_string()),
             grpc_addr: Some("0.0.0.0:4001".to_string()),
-            mysql_addr: Some("0.0.0.0:4002".to_string()),
-            mysql_runtime_size: 2,
+            mysql_options: Some(MysqlOptions::default()),
             postgres_options: Some(PostgresOptions::default()),
             opentsdb_options: Some(OpentsdbOptions::default()),
         }

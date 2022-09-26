@@ -44,7 +44,7 @@ impl OpentsdbServer {
         let (notify_shutdown, _) = broadcast::channel(1);
 
         Box::new(OpentsdbServer {
-            base_server: BaseTcpServer::create_server("Opentsdb", io_runtime),
+            base_server: BaseTcpServer::create_server("OpenTSDB", io_runtime),
             query_handler,
             notify_shutdown: Some(notify_shutdown),
         })
@@ -68,11 +68,11 @@ impl OpentsdbServer {
                 match stream {
                     Ok(stream) => {
                         let connection = Connection::new(stream);
-                        let mut handler = Handler::new(query_handler.clone(), connection, shutdown);
+                        let mut handler = Handler::new(query_handler, connection, shutdown);
 
                         let _ = io_runtime.spawn(async move {
                             if let Err(e) = handler.run().await {
-                                error!(e; "Unexpected error when handling Opentsdb connection");
+                                error!(e; "Unexpected error when handling OpenTSDB connection");
                             }
                         });
                     }

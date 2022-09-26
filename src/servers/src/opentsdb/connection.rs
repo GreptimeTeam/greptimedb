@@ -145,7 +145,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("connection reset by peer"));
+            .contains("Connection reset by peer"));
     }
 
     #[test]
@@ -191,17 +191,17 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Invalid Opentsdb line, source: invalid utf-8 sequence"));
+            .contains("Invalid OpenTSDB line, source: invalid utf-8 sequence"));
     }
 
     #[tokio::test]
     async fn test_write_err() {
         let mock = Builder::new()
-            .write(b"An Opentsdb error.")
+            .write(b"An OpenTSDB error.")
             .write(b"\r\n")
             .build();
         let mut conn = Connection::new(mock);
-        let result = conn.write_line("An Opentsdb error.".to_string()).await;
+        let result = conn.write_line("An OpenTSDB error.".to_string()).await;
         assert!(result.is_ok());
     }
 }

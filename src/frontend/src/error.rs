@@ -77,7 +77,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to execute Opentsdb put, reason: {}", reason))]
+    #[snafu(display("Failed to execute OpenTSDB put, reason: {}", reason))]
     ExecOpentsdbPut {
         reason: String,
         backtrace: Backtrace,
