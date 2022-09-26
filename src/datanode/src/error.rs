@@ -225,8 +225,11 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Arrow compution error, source: {}", source))]
-    ArrowCompution { source: ArrowError },
+    #[snafu(display("Arrow computation error, source: {}", source))]
+    ArrowComputation {
+        backtrace: Backtrace,
+        source: ArrowError,
+    },
 
     #[snafu(display("Failed to cast an arrow array into vector, source: {}", source))]
     CastVector {
@@ -294,7 +297,7 @@ impl ErrorExt for Error {
             | Error::NewRecordBatches { source }
             | Error::CollectRecordBatches { source } => source.status_code(),
 
-            Error::ArrowCompution { .. } => StatusCode::Unexpected,
+            Error::ArrowComputation { .. } => StatusCode::Unexpected,
         }
     }
 
@@ -332,6 +335,10 @@ mod tests {
         })
     }
 
+    fn throw_arrow_error() -> std::result::Result<(), ArrowError> {
+        Err(ArrowError::NotYetImplemented("test".to_string()))
+    }
+
     fn assert_internal_error(err: &Error) {
         assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::Internal, err.status_code());
@@ -340,6 +347,17 @@ mod tests {
     fn assert_tonic_internal_error(err: Error) {
         let s: tonic::Status = err.into();
         assert_eq!(s.code(), tonic::Code::Internal);
+    }
+
+    #[test]
+    fn test_arrow_computation_error() {
+        let err = throw_arrow_error()
+            .context(ArrowComputationSnafu)
+            .unwrap_err();
+
+        assert!(matches!(err, Error::ArrowComputation { .. }));
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::Unexpected, err.status_code());
     }
 
     #[test]

@@ -1,4 +1,3 @@
-use std::iter;
 use std::sync::Arc;
 
 use common_query::Output;
@@ -12,7 +11,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
 
 use crate::error::{
-    ArrowComputionSnafu, CastVectorSnafu, NewRecordBatchSnafu, NewRecordBatchesSnafu, Result,
+    ArrowComputationSnafu, CastVectorSnafu, NewRecordBatchSnafu, NewRecordBatchesSnafu, Result,
     SchemaNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::sql::SqlHandler;
@@ -21,15 +20,14 @@ const TABLES_COLUMN: &str = "Tables";
 const SCHEMAS_COLUMN: &str = "Schemas";
 
 impl SqlHandler {
-    fn like_utf8(schemas: Vec<String>, s: &str) -> Result<VectorRef> {
-        let array = StringArray::from(schemas.into_iter().map(Some).collect::<Vec<_>>());
+    fn like_utf8(names: Vec<String>, s: &str) -> Result<VectorRef> {
+        let array = StringArray::from_slice(&names);
 
-        let target = StringArray::from(iter::repeat(Some(s)).take(array.len()).collect::<Vec<_>>());
         let boolean_array =
-            compute::like::like_utf8(&array, &target).context(ArrowComputionSnafu)?;
+            compute::like::like_utf8_scalar(&array, s).context(ArrowComputationSnafu)?;
 
         Helper::try_into_vector(
-            compute::filter::filter(&array, &boolean_array).context(ArrowComputionSnafu)?,
+            compute::filter::filter(&array, &boolean_array).context(ArrowComputationSnafu)?,
         )
         .context(CastVectorSnafu)
     }
@@ -39,11 +37,12 @@ impl SqlHandler {
         ensure!(
             matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
             UnsupportedExprSnafu {
-                name: format!("{}", stmt.kind),
+                name: stmt.kind.to_string(),
             }
         );
 
         let catalog = self.get_default_catalog()?;
+        // TODO(dennis): return an iterator or stream would be better.
         let schemas = catalog.schema_names();
 
         let column_schemas = vec![ColumnSchema::new(
@@ -72,7 +71,7 @@ impl SqlHandler {
         ensure!(
             matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
             UnsupportedExprSnafu {
-                name: format!("{}", stmt.kind),
+                name: stmt.kind.to_string(),
             }
         );
 

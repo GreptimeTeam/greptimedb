@@ -131,11 +131,11 @@ impl<'a> ParserContext<'a> {
                     ensure!(
                         db_name.0.len() == 1,
                         InvalidDatabaseNameSnafu {
-                            name: format!("{}", db_name),
+                            name: db_name.to_string(),
                         }
                     );
 
-                    Some(format!("{}", db_name))
+                    Some(db_name.to_string())
                 }
 
                 _ => None,
