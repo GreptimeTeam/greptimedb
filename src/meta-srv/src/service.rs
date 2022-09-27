@@ -5,7 +5,7 @@ use tonic::{Response, Status};
 
 use self::{route::RouteRef, store::kv::KvStoreRef};
 
-mod admin;
+pub mod admin;
 mod heartbeat;
 mod route;
 pub mod store;

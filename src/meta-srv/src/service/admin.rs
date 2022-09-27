@@ -2,6 +2,7 @@ mod health;
 
 use std::{
     collections::HashMap,
+    convert::Infallible,
     sync::Arc,
     task::{Context, Poll},
 };
@@ -13,7 +14,6 @@ use tonic::{
 };
 
 use super::MetaServer;
-use crate::error::{Error, Result};
 
 pub fn make_admin_service(_: MetaServer) -> Admin {
     let router = Router::new().route("/health", health::HealthHandler);
@@ -29,10 +29,13 @@ pub trait HttpHandler: Send + Sync {
         &self,
         path: &str,
         params: &HashMap<String, String>,
-    ) -> Result<http::Response<String>>;
+    ) -> crate::Result<http::Response<String>>;
 }
 
-pub struct Admin {
+pub struct Admin
+where
+    Self: Send,
+{
     router: Arc<Router>,
 }
 
@@ -44,15 +47,27 @@ impl Admin {
     }
 }
 
+impl NamedService for Admin {
+    const NAME: &'static str = "admin";
+}
+
+impl Clone for Admin {
+    fn clone(&self) -> Self {
+        Self {
+            router: self.router.clone(),
+        }
+    }
+}
+
 impl<T> Service<http::Request<T>> for Admin
 where
     T: Send,
 {
     type Response = http::Response<tonic::body::BoxBody>;
-    type Error = Error;
+    type Error = Infallible;
     type Future = BoxFuture<Self::Response, Self::Error>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
@@ -72,18 +87,7 @@ where
     }
 }
 
-impl NamedService for Admin {
-    const NAME: &'static str = "admin";
-}
-
-impl Clone for Admin {
-    fn clone(&self) -> Self {
-        Self {
-            router: self.router.clone(),
-        }
-    }
-}
-
+#[derive(Default)]
 pub struct Router {
     handlers: HashMap<String, Box<dyn HttpHandler>>,
 }
@@ -123,7 +127,7 @@ impl Router {
         &self,
         path: &str,
         params: HashMap<String, String>,
-    ) -> Result<http::Response<BoxBody>> {
+    ) -> Result<http::Response<BoxBody>, Infallible> {
         let handler = match self.handlers.get(path) {
             Some(handler) => handler,
             None => {

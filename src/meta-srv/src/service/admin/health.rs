@@ -5,7 +5,7 @@ use tonic::codegen::http;
 use super::HttpHandler;
 use crate::error::Result;
 
-const HTTP_OK: &'static str = "OK\n";
+const HTTP_OK: &str = "OK\n";
 
 pub struct HealthHandler;
 

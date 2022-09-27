@@ -15,6 +15,15 @@ pub enum Error {
 
     #[snafu(display("Failed to connect to Etcd, source: {}", source))]
     ConnectEtcd { source: etcd_client::Error },
+
+    #[snafu(display("Failed to bind address {}, source: {}", addr, source))]
+    TcpBind {
+        addr: String,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("Failed to start gRPC server, source: {}", source))]
+    StartGrpc { source: tonic::transport::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
