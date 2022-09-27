@@ -1,6 +1,5 @@
 use catalog::SchemaProviderRef;
 use common_query::Output;
-use common_time::timestamp::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::prelude::VectorBuilder;
 use snafu::ensure;
@@ -11,8 +10,8 @@ use sql::statements::{self, insert::Insert};
 use table::requests::*;
 
 use crate::error::{
-    ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu, ParseSqlValueSnafu,
-    ParseTimestampSnafu, Result, TableNotFoundSnafu,
+    ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu, ParseSqlValueSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::sql::{SqlHandler, SqlRequest};
 

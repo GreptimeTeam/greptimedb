@@ -254,6 +254,7 @@ fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Concre
 
 #[cfg(test)]
 mod tests {
+    use common_time::timestamp::TimeUnit;
     use datatypes::value::OrderedFloat;
 
     use super::*;
@@ -387,5 +388,72 @@ mod tests {
             &SqlValue::DoubleQuotedString("2022-02-22 00:01:61".to_string()),
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_parse_timestamp_literal() {
+        match parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22 00:01:01".to_string(),
+            &ConcreteDataType::timestamp_millis_datatype(),
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(1645459261000, ts.value());
+                assert_eq!(TimeUnit::Millisecond, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        match parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22 00:01:01".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Second),
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(1645459261, ts.value());
+                assert_eq!(TimeUnit::Second, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        match parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22 00:01:01".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(1645459261000000, ts.value());
+                assert_eq!(TimeUnit::Microsecond, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        match parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22 00:01:01".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(1645459261000000000, ts.value());
+                assert_eq!(TimeUnit::Nanosecond, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
     }
 }
