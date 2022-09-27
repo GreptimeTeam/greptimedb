@@ -24,8 +24,8 @@ use snafu::{OptionExt, ResultExt};
 use store_api::manifest::action::ProtocolAction;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    ChunkReader, PutOperation, ReadContext, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot,
-    WriteContext, WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, ChunkReader, ColumnDescriptorBuilder, PutOperation,
+    ReadContext, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
 use table::metadata::{FilterPushDownType, TableInfoRef, TableMetaBuilder};
@@ -36,7 +36,6 @@ use table::{
 };
 use tokio::sync::Mutex;
 
-use crate::engine::{build_column_family, build_row_key_desc, INIT_COLUMN_ID};
 use crate::error::{
     self, ProjectedColumnNotFoundSnafu, Result, ScanTableManifestSnafu, SchemaBuildSnafu,
     TableInfoNotFoundSnafu, UnsupportedDefaultConstraintSnafu, UpdateTableManifestSnafu,
@@ -183,31 +182,46 @@ impl<R: Region> Table for MitoTable<R> {
         let table_info = self.table_info();
         let table_name = &table_info.name;
         let table_meta = &table_info.meta;
-        let table_schema = match &req.alter_kind {
+        let (alter_op, table_schema) = match &req.alter_kind {
             AlterKind::AddColumn { new_column } => {
-                build_table_schema_with_new_column(table_name, &table_meta.schema, new_column)?
+                let desc = ColumnDescriptorBuilder::new(
+                    table_meta.next_column_id,
+                    &new_column.name,
+                    new_column.data_type.clone(),
+                )
+                .is_nullable(new_column.is_nullable)
+                .default_constraint(new_column.default_constraint.clone())
+                .build()
+                .context(error::BuildColumnDescriptorSnafu {
+                    table_name,
+                    column_name: &new_column.name,
+                })?;
+                let alter_op = AlterOperation::AddColumns {
+                    columns: vec![AddColumn {
+                        desc,
+                        // TODO(yingwen): [alter] AlterTableRequest should be able to add a key column.
+                        is_key: false,
+                    }],
+                };
+
+                // TODO(yingwen): [alter] Better way to alter the schema struct. In fact the column order
+                // in table schema could differ from the region schema, so we could just push this column
+                // to the back of the schema (as last column).
+                let table_schema = build_table_schema_with_new_column(
+                    table_name,
+                    &table_meta.schema,
+                    &new_column,
+                )?;
+
+                (alter_op, table_schema)
             }
         };
-
-        let primary_key_indices = &table_meta.primary_key_indices;
-        let (next_column_id, _default_cf) = build_column_family(
-            INIT_COLUMN_ID,
-            table_name,
-            &table_schema,
-            primary_key_indices,
-        )?;
-        let (next_column_id, _row_key) = build_row_key_desc(
-            next_column_id,
-            table_name,
-            &table_schema,
-            primary_key_indices,
-        )?;
 
         let new_meta = TableMetaBuilder::default()
             .schema(table_schema.clone())
             .engine(&table_meta.engine)
-            .next_column_id(next_column_id)
-            .primary_key_indices(primary_key_indices.clone())
+            .next_column_id(table_meta.next_column_id + 1) // Bump next column id.
+            .primary_key_indices(table_meta.primary_key_indices.clone())
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
 
@@ -215,26 +229,21 @@ impl<R: Region> Table for MitoTable<R> {
         new_info.ident.version = table_info.ident.version + 1;
         new_info.meta = new_meta;
 
-        // FIXME(yingwen): [alter] Alter the region.
-        // first alter region
-        // let region = self.region();
-        // let region_descriptor = RegionDescriptorBuilder::default()
-        //     .id(region.id())
-        //     .name(region.name())
-        //     .row_key(row_key)
-        //     .default_cf(default_cf)
-        //     .build()
-        //     .context(error::BuildRegionDescriptorSnafu {
-        //         table_name,
-        //         region_name: region.name(),
-        //     })?;
-        // logging::debug!(
-        //     "start altering region {} of table {}, with new region descriptor {:?}",
-        //     region.name(),
-        //     table_name,
-        //     region_descriptor
-        // );
-        // region.alter(region_descriptor).map_err(TableError::new)?;
+        // FIXME(yingwen): [alter] Alter the region, now this is a temporary implementation.
+        let region = self.region();
+        let region_meta = region.in_memory_metadata();
+        let alter_req = AlterRequest {
+            operation: alter_op,
+            version: region_meta.version(),
+        };
+
+        logging::debug!(
+            "start altering region {} of table {}, with request {:?}",
+            region.name(),
+            table_name,
+            alter_req,
+        );
+        region.alter(alter_req).await.map_err(TableError::new)?;
 
         // then alter table info
         logging::debug!(

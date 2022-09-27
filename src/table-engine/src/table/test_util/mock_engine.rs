@@ -115,13 +115,12 @@ impl Snapshot for MockSnapshot {
 // purpose the cost should be acceptable.
 #[derive(Debug, Clone)]
 pub struct MockRegion {
-    // FIXME(yingwen): Remove this once name is provided by metadata.
-    name: String,
     pub inner: Arc<MockRegionInner>,
 }
 
 #[derive(Debug)]
 pub struct MockRegionInner {
+    name: String,
     pub metadata: ArcSwap<RegionMetadata>,
     memtable: Arc<RwLock<MockMemtable>>,
 }
@@ -140,7 +139,7 @@ impl Region for MockRegion {
     }
 
     fn name(&self) -> &str {
-        &self.name
+        &self.inner.name
     }
 
     fn in_memory_metadata(&self) -> RegionMetaImpl {
@@ -163,8 +162,13 @@ impl Region for MockRegion {
         WriteBatch::new(self.in_memory_metadata().schema().clone())
     }
 
-    async fn alter(&self, _request: AlterRequest) -> Result<()> {
-        unimplemented!("implements add/drop columns and calls update_metadata")
+    async fn alter(&self, request: AlterRequest) -> Result<()> {
+        let current = self.inner.metadata.load();
+        // Mock engine just panic if failed to create a new metadata.
+        let metadata = current.alter(&request).unwrap();
+        self.inner.update_metadata(metadata);
+
+        Ok(())
     }
 }
 
@@ -175,12 +179,13 @@ impl MockRegionInner {
             memtable.insert(column.name.clone(), vec![]);
         }
         Self {
+            name: metadata.name().to_string(),
             metadata: ArcSwap::new(Arc::new(metadata)),
             memtable: Arc::new(RwLock::new(memtable)),
         }
     }
 
-    fn _update_metadata(&self, metadata: RegionMetadata) {
+    fn update_metadata(&self, metadata: RegionMetadata) {
         {
             let mut memtable = self.memtable.write().unwrap();
 
@@ -275,7 +280,6 @@ impl StorageEngine for MockEngine {
         let name = descriptor.name.clone();
         let metadata = descriptor.try_into().unwrap();
         let region = MockRegion {
-            name: name.clone(),
             inner: Arc::new(MockRegionInner::new(metadata)),
         };
         regions.opened_regions.insert(name, region.clone());

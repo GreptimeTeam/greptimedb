@@ -71,6 +71,10 @@ impl RegionMeta for RegionMetaImpl {
     fn schema(&self) -> &SchemaRef {
         self.metadata.user_schema()
     }
+
+    fn version(&self) -> u32 {
+        self.metadata.version
+    }
 }
 
 pub type VersionNumber = u32;
@@ -119,7 +123,7 @@ impl RegionMetadata {
     }
 
     /// Returns a new [RegionMetadata] after alteration, leave `self` unchanged.
-    fn alter(&self, req: &AlterRequest) -> Result<RegionMetadata> {
+    pub fn alter(&self, req: &AlterRequest) -> Result<RegionMetadata> {
         ensure!(
             req.version == self.version,
             InvalidVersionSnafu {
