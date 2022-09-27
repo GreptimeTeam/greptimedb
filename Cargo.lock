@@ -4713,7 +4713,6 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datatypes",
- "derive_builder",
  "futures",
  "hex",
  "hyper",

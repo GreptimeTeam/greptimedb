@@ -33,7 +33,7 @@ impl LinesWriter {
         }
     }
 
-    pub fn write_time(&mut self, column_name: &str, value: i64) -> Result<()> {
+    pub fn write_ms_ts(&mut self, column_name: &str, value: i64) -> Result<()> {
         let (idx, column) = self.mut_column(
             column_name,
             ColumnDataType::Timestamp,
@@ -46,7 +46,7 @@ impl LinesWriter {
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         // Convert nanoseconds to milliseconds
-        values.ts_millis_values.push(value / 1000000);
+        values.ts_millis_values.push(value);
         self.inner.null_masks[idx].push(false);
         Ok(())
     }
@@ -200,17 +200,17 @@ mod tests {
         writer.write_tag("host", "host1").unwrap();
         writer.write_f64("cpu", 0.5).unwrap();
         writer.write_f64("memory", 0.4).unwrap();
-        writer.write_time("ts", 101011000).unwrap();
+        writer.write_ms_ts("ts", 101011000).unwrap();
         writer.commit();
 
         writer.write_tag("host", "host2").unwrap();
-        writer.write_time("ts", 102011001).unwrap();
+        writer.write_ms_ts("ts", 102011001).unwrap();
         writer.commit();
 
         writer.write_tag("host", "host3").unwrap();
         writer.write_f64("cpu", 0.4).unwrap();
         writer.write_u64("cpu_core_num", 16).unwrap();
-        writer.write_time("ts", 103011002).unwrap();
+        writer.write_ms_ts("ts", 103011002).unwrap();
         writer.commit();
 
         let insert_batch = writer.finish();
@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(Some(ColumnDataType::Timestamp as i32), column.datatype);
         assert_eq!(SemanticType::Timestamp as i32, column.semantic_type);
         assert_eq!(
-            vec![101, 102, 103],
+            vec![101011000, 102011001, 103011002],
             column.values.as_ref().unwrap().ts_millis_values
         );
         verify_null_mask(&column.null_mask, vec![false, false, false]);

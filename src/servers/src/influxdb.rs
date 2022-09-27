@@ -74,7 +74,7 @@ impl TryFrom<&str> for InsertBatches {
 
             if let Some(timestamp) = line.timestamp {
                 writer
-                    .write_time(INFLUXDB_TIMESTAMP_COLUMN_NAME, timestamp)
+                    .write_ms_ts(INFLUXDB_TIMESTAMP_COLUMN_NAME, timestamp / 1000000)
                     .context(InfluxdbLinesWriteSnafu)?;
             }
 

@@ -31,7 +31,6 @@ use crate::{
 
 const HTTP_API_VERSION: &str = "v1";
 
-#[derive(derive_builder::Builder)]
 pub struct HttpServer {
     sql_handler: SqlQueryHandlerRef,
     influxdb_handler: Option<crate::query_handler::InfluxdbProtocolLineHandlerRef>,
