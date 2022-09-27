@@ -148,6 +148,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_values_with_capacity() {
+        let values = Values::with_capacity(ColumnDataType::Int8, 2);
+        let values = values.i8_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Int32, 2);
+        let values = values.i32_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Int64, 2);
+        let values = values.i64_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Uint8, 2);
+        let values = values.u8_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Uint32, 2);
+        let values = values.u32_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Uint64, 2);
+        let values = values.u64_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Float32, 2);
+        let values = values.f32_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Float64, 2);
+        let values = values.f64_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Binary, 2);
+        let values = values.binary_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Boolean, 2);
+        let values = values.bool_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::String, 2);
+        let values = values.string_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Date, 2);
+        let values = values.date_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Datetime, 2);
+        let values = values.datetime_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Timestamp, 2);
+        let values = values.ts_millis_values;
+        assert_eq!(2, values.capacity());
+    }
+
+    #[test]
     fn test_concrete_datatype_from_column_datatype() {
         assert_eq!(
             ConcreteDataType::boolean_datatype(),

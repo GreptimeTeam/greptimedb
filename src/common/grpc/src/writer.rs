@@ -199,11 +199,15 @@ mod tests {
         writer.write_tag("host", "host1").unwrap();
         writer.write_f64("cpu", 0.5).unwrap();
         writer.write_f64("memory", 0.4).unwrap();
+        writer.write_string("name", "name1").unwrap();
         writer.write_ms_ts("ts", 101011000).unwrap();
         writer.commit();
 
         writer.write_tag("host", "host2").unwrap();
         writer.write_ms_ts("ts", 102011001).unwrap();
+        writer.write_bool("enable_reboot", true).unwrap();
+        writer.write_u64("year_of_service", 2).unwrap();
+        writer.write_i64("temperature", 4).unwrap();
         writer.commit();
 
         writer.write_tag("host", "host3").unwrap();
@@ -216,7 +220,7 @@ mod tests {
         assert_eq!(3, insert_batch.row_count);
 
         let columns = insert_batch.columns;
-        assert_eq!(5, columns.len());
+        assert_eq!(9, columns.len());
 
         let column = &columns[0];
         assert_eq!("host", columns[0].column_name);
@@ -243,6 +247,13 @@ mod tests {
         verify_null_mask(&column.null_mask, vec![false, true, true]);
 
         let column = &columns[3];
+        assert_eq!("name", column.column_name);
+        assert_eq!(Some(ColumnDataType::String as i32), column.datatype);
+        assert_eq!(SemanticType::Field as i32, column.semantic_type);
+        assert_eq!(vec!["name1"], column.values.as_ref().unwrap().string_values);
+        verify_null_mask(&column.null_mask, vec![false, true, true]);
+
+        let column = &columns[4];
         assert_eq!("ts", column.column_name);
         assert_eq!(Some(ColumnDataType::Timestamp as i32), column.datatype);
         assert_eq!(SemanticType::Timestamp as i32, column.semantic_type);
@@ -252,7 +263,28 @@ mod tests {
         );
         verify_null_mask(&column.null_mask, vec![false, false, false]);
 
-        let column = &columns[4];
+        let column = &columns[5];
+        assert_eq!("enable_reboot", column.column_name);
+        assert_eq!(Some(ColumnDataType::Boolean as i32), column.datatype);
+        assert_eq!(SemanticType::Field as i32, column.semantic_type);
+        assert_eq!(vec![true], column.values.as_ref().unwrap().bool_values);
+        verify_null_mask(&column.null_mask, vec![true, false, true]);
+
+        let column = &columns[6];
+        assert_eq!("year_of_service", column.column_name);
+        assert_eq!(Some(ColumnDataType::Uint64 as i32), column.datatype);
+        assert_eq!(SemanticType::Field as i32, column.semantic_type);
+        assert_eq!(vec![2], column.values.as_ref().unwrap().u64_values);
+        verify_null_mask(&column.null_mask, vec![true, false, true]);
+
+        let column = &columns[7];
+        assert_eq!("temperature", column.column_name);
+        assert_eq!(Some(ColumnDataType::Int64 as i32), column.datatype);
+        assert_eq!(SemanticType::Field as i32, column.semantic_type);
+        assert_eq!(vec![4], column.values.as_ref().unwrap().i64_values);
+        verify_null_mask(&column.null_mask, vec![true, false, true]);
+
+        let column = &columns[8];
         assert_eq!("cpu_core_num", column.column_name);
         assert_eq!(Some(ColumnDataType::Uint64 as i32), column.datatype);
         assert_eq!(SemanticType::Field as i32, column.semantic_type);
