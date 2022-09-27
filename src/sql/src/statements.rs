@@ -7,6 +7,7 @@ pub mod statement;
 
 use std::str::FromStr;
 
+use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::DateTimeType;
@@ -75,6 +76,19 @@ fn parse_string_to_value(
             } else {
                 ParseSqlValueSnafu {
                     msg: format!("Failed to parse {} to DateTime value", s),
+                }
+                .fail()
+            }
+        }
+        ConcreteDataType::Timestamp(t) => {
+            if let Ok(ts) = Timestamp::from_str(&s) {
+                Ok(Value::Timestamp(Timestamp::new(
+                    ts.convert_to(t.unit),
+                    t.unit,
+                )))
+            } else {
+                ParseSqlValueSnafu {
+                    msg: format!("Failed to parse {} to Timestamp value", s),
                 }
                 .fail()
             }

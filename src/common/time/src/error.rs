@@ -26,7 +26,7 @@ mod tests {
         assert!(matches!(result.err().unwrap(), Error::ParseDateStr { .. }));
 
         assert_eq!(
-            "Failed to parse string to Timestamp, raw: 2020-09-08T13:42:29.190855Z",
+            "Failed to parse a string into Timestamp, raw string: 2020-09-08T13:42:29.190855Z",
             ParseTimestampSnafu { raw }.build().to_string()
         );
     }
