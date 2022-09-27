@@ -6,7 +6,7 @@ use snafu::{Backtrace, Snafu};
 pub enum Error {
     #[snafu(display("Failed to parse string to date, raw: {}, source: {}", raw, source))]
     ParseDateStr { raw: String, source: ParseError },
-    #[snafu(display("Failed to parse string to Timestamp, raw: {}", raw))]
+    #[snafu(display("Failed to parse a string into Timestamp, raw string: {}", raw))]
     ParseTimestamp { raw: String, backtrace: Backtrace },
 }
 

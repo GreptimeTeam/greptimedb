@@ -4,6 +4,8 @@ use std::sync::Arc;
 use arrow::compute;
 use arrow::compute::cast::CastOptions;
 use arrow::datatypes::DataType;
+use common_telemetry::debug;
+use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::execution::context::ExecutionProps;
 use datafusion::logical_plan::plan::Filter;
 use datafusion::logical_plan::{
@@ -11,12 +13,8 @@ use datafusion::logical_plan::{
 };
 use datafusion::optimizer::optimizer::OptimizerRule;
 use datafusion::optimizer::utils;
-use datafusion_common::{DFSchemaRef, DataFusionError, ScalarValue};
-
-mod type_conversion;
-use common_telemetry::debug;
-use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion_common::Result;
+use datafusion_common::{DFSchemaRef, DataFusionError, ScalarValue};
 
 /// TypeConversionRule converts some literal values in logical plan to other types according
 /// to data type of corresponding columns.
