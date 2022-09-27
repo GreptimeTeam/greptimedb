@@ -1,12 +1,12 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use common_error::ext::ErrorExt;
 use common_query::logical_plan::Expr;
 use common_time::RangeMillis;
-use datatypes::schema::ColumnSchema;
 use datatypes::vectors::VectorRef;
 
-use crate::storage::SequenceNumber;
+use crate::storage::{ColumnDescriptor, RegionDescriptor, SequenceNumber};
 
 /// Write request holds a collection of updates to apply to a region.
 pub trait WriteRequest: Send {
@@ -55,8 +55,8 @@ pub struct GetRequest {}
 /// Operation to add a column.
 #[derive(Debug)]
 pub struct AddColumn {
-    /// Schema of the column to add.
-    pub schema: ColumnSchema,
+    /// Descriptor of the column to add.
+    pub desc: ColumnDescriptor,
     /// Is the column a key column.
     pub is_key: bool,
 }
@@ -74,6 +74,49 @@ pub enum AlterOperation {
         /// Name of columns to drop.
         names: Vec<String>,
     },
+}
+
+impl AlterOperation {
+    /// Apply the operation to the [RegionDescriptor].
+    pub fn apply(&self, descriptor: &mut RegionDescriptor) {
+        match self {
+            AlterOperation::AddColumns { columns } => {
+                Self::apply_add(&columns, descriptor);
+            }
+            AlterOperation::DropColumns { names } => {
+                Self::apply_drop(&names, descriptor);
+            }
+        }
+    }
+
+    /// Add `columns` to the [RegionDescriptor].
+    ///
+    /// Value columns would be added to the default column family.
+    fn apply_add(columns: &[AddColumn], descriptor: &mut RegionDescriptor) {
+        for col in columns {
+            if col.is_key {
+                descriptor.row_key.columns.push(col.desc.clone());
+            } else {
+                descriptor.default_cf.columns.push(col.desc.clone());
+            }
+        }
+    }
+
+    /// Drop columns from the [RegionDescriptor] by their `names`.
+    ///
+    /// Only value columns would be removed, non-value columns in `names` would be ignored.
+    fn apply_drop(names: &[String], descriptor: &mut RegionDescriptor) {
+        let name_set: HashSet<_> = names.iter().collect();
+        // Remove columns in the default cf.
+        descriptor
+            .default_cf
+            .columns
+            .retain(|col| !name_set.contains(&col.name));
+        // Remove columns in other cfs.
+        for cf in &mut descriptor.extra_cfs {
+            cf.columns.retain(|col| !name_set.contains(&col.name));
+        }
+    }
 }
 
 /// Alter region request.

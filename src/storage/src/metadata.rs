@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 use store_api::storage::{
     consts::{self, ReservedColumnId},
-    ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyId, ColumnId,
-    RegionDescriptor, RegionId, RegionMeta, RowKeyDescriptor, Schema, SchemaRef,
+    AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor,
+    ColumnFamilyDescriptorBuilder, ColumnFamilyId, ColumnId, RegionDescriptor,
+    RegionDescriptorBuilder, RegionId, RegionMeta, RowKeyDescriptor, RowKeyDescriptorBuilder,
+    Schema, SchemaRef,
 };
 
 use crate::manifest::action::{RawColumnFamiliesMetadata, RawColumnsMetadata, RawRegionMetadata};
@@ -40,6 +42,13 @@ pub enum Error {
 
     #[snafu(display("Missing timestamp key column"))]
     MissingTimestamp { backtrace: Backtrace },
+
+    #[snafu(display("Expect altering metadata with version {}, given {}", expect, given))]
+    InvalidVersion {
+        expect: VersionNumber,
+        given: VersionNumber,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -107,6 +116,52 @@ impl RegionMetadata {
     #[inline]
     pub fn version(&self) -> u32 {
         self.schema.version()
+    }
+
+    /// Returns a new [RegionMetadata] after alteration, leave `self` unchanged.
+    fn alter(&self, req: &AlterRequest) -> Result<RegionMetadata> {
+        ensure!(
+            req.version == self.version,
+            InvalidVersionSnafu {
+                expect: req.version,
+                given: self.version,
+            }
+        );
+
+        let mut desc = self.to_descriptor();
+        // Apply the alter operation to the descriptor.
+        req.operation.apply(&mut desc);
+
+        RegionMetadataBuilder::try_from(desc)?
+            .version(self.version + 1) // Bump the metadata version.
+            .build()
+    }
+
+    fn to_descriptor(&self) -> RegionDescriptor {
+        let row_key = self.columns.to_row_key_descriptor();
+        let mut builder = RegionDescriptorBuilder::default()
+            .id(self.id)
+            .name(&self.name)
+            .row_key(row_key);
+
+        for (cf_id, cf) in &self.column_families.id_to_cfs {
+            let mut cf_builder = ColumnFamilyDescriptorBuilder::default()
+                .cf_id(*cf_id)
+                .name(&cf.name);
+            for column in &self.columns.columns[cf.column_index_start..cf.column_index_end] {
+                cf_builder = cf_builder.push_column(column.desc.clone());
+            }
+            // It should always be able to build the descriptor back.
+            let desc = cf_builder.build().unwrap();
+            if *cf_id == consts::DEFAULT_CF_ID {
+                builder = builder.default_cf(desc);
+            } else {
+                builder = builder.push_extra_column_family(desc);
+            }
+        }
+
+        // We could ensure all fields are set here.
+        builder.build().unwrap()
     }
 }
 
@@ -238,6 +293,20 @@ impl ColumnsMetadata {
     pub fn column_metadata(&self, idx: usize) -> &ColumnMetadata {
         &self.columns[idx]
     }
+
+    fn to_row_key_descriptor(&self) -> RowKeyDescriptor {
+        let mut builder =
+            RowKeyDescriptorBuilder::default().enable_version_column(self.enable_version_column);
+        for (idx, column) in self.iter_row_key_columns().enumerate() {
+            // Not a timestamp column.
+            if idx != self.timestamp_key_index {
+                builder = builder.push_column(column.desc.clone());
+            }
+        }
+        builder = builder.timestamp(self.column_metadata(self.timestamp_key_index).desc.clone());
+        // Since the metadata is built from descriptor, so it should always be able to build the descriptor back.
+        builder.build().unwrap()
+    }
 }
 
 pub type ColumnsMetadataRef = Arc<ColumnsMetadata>;
@@ -315,12 +384,10 @@ pub struct ColumnFamilyMetadata {
     pub column_index_end: usize,
 }
 
-impl TryFrom<RegionDescriptor> for RegionMetadata {
+impl TryFrom<RegionDescriptor> for RegionMetadataBuilder {
     type Error = Error;
 
-    fn try_from(desc: RegionDescriptor) -> Result<RegionMetadata> {
-        // Doesn't set version explicitly here, because this is a new region meta
-        // created from descriptor, using initial version is reasonable.
+    fn try_from(desc: RegionDescriptor) -> Result<RegionMetadataBuilder> {
         let mut builder = RegionMetadataBuilder::new()
             .name(desc.name)
             .id(desc.id)
@@ -329,6 +396,18 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
         for cf in desc.extra_cfs {
             builder = builder.add_column_family(cf)?;
         }
+
+        Ok(builder)
+    }
+}
+
+impl TryFrom<RegionDescriptor> for RegionMetadata {
+    type Error = Error;
+
+    fn try_from(desc: RegionDescriptor) -> Result<RegionMetadata> {
+        // Doesn't set version explicitly here, because this is a new region meta
+        // created from descriptor, using initial version is reasonable.
+        let builder = RegionMetadataBuilder::try_from(desc)?;
 
         builder.build()
     }
@@ -455,17 +534,29 @@ impl ColumnFamiliesMetadataBuilder {
     }
 }
 
-#[derive(Default)]
 struct RegionMetadataBuilder {
     id: RegionId,
     name: String,
     columns_meta_builder: ColumnsMetadataBuilder,
     cfs_meta_builder: ColumnFamiliesMetadataBuilder,
+    version: VersionNumber,
+}
+
+impl Default for RegionMetadataBuilder {
+    fn default() -> RegionMetadataBuilder {
+        RegionMetadataBuilder::new()
+    }
 }
 
 impl RegionMetadataBuilder {
     fn new() -> RegionMetadataBuilder {
-        RegionMetadataBuilder::default()
+        RegionMetadataBuilder {
+            id: 0,
+            name: String::new(),
+            columns_meta_builder: ColumnsMetadataBuilder::default(),
+            cfs_meta_builder: ColumnFamiliesMetadataBuilder::default(),
+            version: Schema::INITIAL_VERSION,
+        }
     }
 
     fn name(mut self, name: impl Into<String>) -> Self {
@@ -475,6 +566,11 @@ impl RegionMetadataBuilder {
 
     fn id(mut self, id: RegionId) -> Self {
         self.id = id;
+        self
+    }
+
+    fn version(mut self, version: VersionNumber) -> Self {
+        self.version = version;
         self
     }
 
@@ -505,10 +601,8 @@ impl RegionMetadataBuilder {
 
     fn build(self) -> Result<RegionMetadata> {
         let columns = Arc::new(self.columns_meta_builder.build()?);
-        let schema = Arc::new(
-            RegionSchema::new(columns.clone(), Schema::INITIAL_VERSION)
-                .context(InvalidSchemaSnafu)?,
-        );
+        let schema =
+            Arc::new(RegionSchema::new(columns.clone(), self.version).context(InvalidSchemaSnafu)?);
 
         Ok(RegionMetadata {
             id: self.id,
@@ -516,7 +610,7 @@ impl RegionMetadataBuilder {
             schema,
             columns,
             column_families: self.cfs_meta_builder.build(),
-            version: 0,
+            version: self.version,
         })
     }
 }
