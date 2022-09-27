@@ -1,8 +1,8 @@
 pub mod handler;
 pub mod influxdb;
+pub mod opentsdb;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,7 +10,7 @@ use axum::{
     error_handling::HandleErrorLayer,
     response::IntoResponse,
     response::{Json, Response},
-    routing, BoxError, Extension, Router,
+    routing, BoxError, Router,
 };
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
@@ -21,16 +21,21 @@ use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
 use self::influxdb::influxdb_write;
-use crate::error::{Result, StartHttpSnafu};
+use crate::query_handler::OpentsdbProtocolHandlerRef;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::Server;
+use crate::{
+    error::{Result, StartHttpSnafu},
+    query_handler::InfluxdbProtocolLineHandlerRef,
+};
 
 const HTTP_API_VERSION: &str = "v1";
 
 #[derive(derive_builder::Builder)]
 pub struct HttpServer {
-    query_handler: SqlQueryHandlerRef,
+    sql_handler: SqlQueryHandlerRef,
     influxdb_handler: Option<crate::query_handler::InfluxdbProtocolLineHandlerRef>,
+    opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
 }
 
 #[derive(Serialize, Debug)]
@@ -119,32 +124,57 @@ async fn shutdown_signal() {
 }
 
 impl HttpServer {
-    pub fn new(query_handler: SqlQueryHandlerRef) -> Self {
+    pub fn new(sql_handler: SqlQueryHandlerRef) -> Self {
         Self {
-            query_handler,
+            sql_handler,
+            opentsdb_handler: None,
             influxdb_handler: None,
         }
     }
 
-    pub fn make_app(&self) -> Router {
-        let mut router = Router::new().nest(
-            &format!("/{}", HTTP_API_VERSION),
-            Router::new()
-                // handlers
-                .route("/sql", routing::get(handler::sql))
-                .route("/scripts", routing::post(handler::scripts))
-                .route("/run-script", routing::post(handler::run_script)),
+    pub fn set_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) {
+        debug_assert!(
+            self.opentsdb_handler.is_none(),
+            "OpenTSDB handler can be set only once!"
         );
+        self.opentsdb_handler.get_or_insert(handler);
+    }
 
-        if let Some(handler) = &self.influxdb_handler {
-            let handler = Arc::clone(handler);
-            router = router.nest(
-                &format!("/{}/influxdb", HTTP_API_VERSION),
-                Router::new().route(
-                    "/write",
-                    routing::post(move |body| influxdb_write(body, handler)),
-                ),
-            );
+    pub fn set_influxdb_handler(&mut self, handler: InfluxdbProtocolLineHandlerRef) {
+        debug_assert!(
+            self.influxdb_handler.is_none(),
+            "Influxdb line protocol handler can be set only once!"
+        );
+        self.influxdb_handler.get_or_insert(handler);
+    }
+
+    pub fn make_app(&self) -> Router {
+        // TODO(LFC): Use released Axum.
+        // Axum version 0.6 introduces state within router, making router methods far more elegant
+        // to write. Though version 0.6 is rc, I think it's worth to upgrade.
+        // Prior to version 0.6, we only have a single "Extension" to share all query
+        // handlers amongst router methods. That requires us to pack all query handlers in a shared
+        // state, and check-then-get the desired query handler in different router methods, which
+        // is a lot of tedious work.
+        let sql_router = Router::with_state(self.sql_handler.clone())
+            .route("/sql", routing::get(handler::sql))
+            .route("/scripts", routing::post(handler::scripts))
+            .route("/run-script", routing::post(handler::run_script));
+
+        let mut router = Router::new().nest(&format!("/{}", HTTP_API_VERSION), sql_router);
+
+        if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
+            let opentsdb_router = Router::with_state(opentsdb_handler.clone())
+                .route("/api/put", routing::post(opentsdb::put));
+
+            router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
+        }
+
+        if let Some(influxdb_handler) = self.influxdb_handler.clone() {
+            let influxdb_router = Router::with_state(influxdb_handler.clone())
+                .route("/write", routing::post(influxdb_write));
+
+            router = router.nest(&format!("/{}/influxdb", HTTP_API_VERSION), influxdb_router);
         }
 
         router
@@ -154,7 +184,6 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
-                    .layer(Extension(self.query_handler.clone()))
                     // TODO(LFC): make timeout configurable
                     .layer(TimeoutLayer::new(Duration::from_secs(30))),
             )

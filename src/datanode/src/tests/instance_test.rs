@@ -3,6 +3,7 @@ use common_query::Output;
 use common_recordbatch::util;
 use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use datatypes::arrow_array::StringArray;
 
 use crate::error;
 use crate::instance::Instance;
@@ -57,6 +58,93 @@ async fn test_execute_query() {
 }
 
 #[tokio::test]
+async fn test_execute_show_databases_tables() {
+    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let instance = Instance::new(&opts).await.unwrap();
+    instance.start().await.unwrap();
+
+    let output = instance.execute_sql("show databases").await.unwrap();
+    match output {
+        Output::RecordBatches(databases) => {
+            let databases = databases.take();
+            let columns = databases[0].df_recordbatch.columns();
+            assert_eq!(1, columns.len());
+            assert_eq!(columns[0].len(), 1);
+
+            assert_eq!(
+                *columns[0].as_any().downcast_ref::<StringArray>().unwrap(),
+                StringArray::from(vec![Some("public")])
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let output = instance
+        .execute_sql("show databases like '%bl%'")
+        .await
+        .unwrap();
+    match output {
+        Output::RecordBatches(databases) => {
+            let databases = databases.take();
+            let columns = databases[0].df_recordbatch.columns();
+            assert_eq!(1, columns.len());
+            assert_eq!(columns[0].len(), 1);
+
+            assert_eq!(
+                *columns[0].as_any().downcast_ref::<StringArray>().unwrap(),
+                StringArray::from(vec![Some("public")])
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let output = instance.execute_sql("show tables").await.unwrap();
+    match output {
+        Output::RecordBatches(databases) => {
+            let databases = databases.take();
+            let columns = databases[0].df_recordbatch.columns();
+            assert_eq!(1, columns.len());
+            assert_eq!(columns[0].len(), 2);
+        }
+        _ => unreachable!(),
+    }
+
+    // creat a table
+    test_util::create_test_table(&instance).await.unwrap();
+
+    let output = instance.execute_sql("show tables").await.unwrap();
+    match output {
+        Output::RecordBatches(databases) => {
+            let databases = databases.take();
+            let columns = databases[0].df_recordbatch.columns();
+            assert_eq!(1, columns.len());
+            assert_eq!(columns[0].len(), 3);
+        }
+        _ => unreachable!(),
+    }
+
+    // show tables like [string]
+    let output = instance
+        .execute_sql("show tables like 'de%'")
+        .await
+        .unwrap();
+    match output {
+        Output::RecordBatches(databases) => {
+            let databases = databases.take();
+            let columns = databases[0].df_recordbatch.columns();
+            assert_eq!(1, columns.len());
+            assert_eq!(columns[0].len(), 1);
+
+            assert_eq!(
+                *columns[0].as_any().downcast_ref::<StringArray>().unwrap(),
+                StringArray::from(vec![Some("demo")])
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
 pub async fn test_execute_create() {
     common_telemetry::init_default_ut_logging();
 
@@ -72,7 +160,7 @@ pub async fn test_execute_create() {
                             cpu double default 0,
                             memory double,
                             TIME INDEX (ts),
-                            PRIMARY KEY(ts, host)
+                            PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#,
         )
         .await
@@ -96,7 +184,7 @@ pub async fn test_create_table_illegal_timestamp_type() {
                             cpu double default 0,
                             memory double,
                             TIME INDEX (ts),
-                            PRIMARY KEY(ts, host)
+                            PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#,
         )
         .await;
@@ -105,8 +193,6 @@ pub async fn test_create_table_illegal_timestamp_type() {
 
 #[tokio::test]
 async fn test_alter_table() {
-    common_telemetry::init_default_ut_logging();
-
     // TODO(LFC) Use real Mito engine when we can alter its region schema,
     //   and delete the `new_mock` method.
     let instance = Instance::new_mock().await.unwrap();
@@ -149,13 +235,13 @@ async fn test_alter_table() {
             let pretty_print = arrow_print::write(&recordbatch);
             let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
             let expected = vec![
-                "+-------+---------------------+-----+--------+--------+",
-                "| host  | ts                  | cpu | memory | my_tag |",
-                "+-------+---------------------+-----+--------+--------+",
-                "| host1 | 1970-01-01 00:00:01 | 1.1 | 100    |        |",
-                "| host2 | 1970-01-01 00:00:02 | 2.2 | 200    | hello  |",
-                "| host3 | 1970-01-01 00:00:03 | 3.3 | 300    |        |",
-                "+-------+---------------------+-----+--------+--------+",
+                "+-------+-----+--------+---------------------+--------+",
+                "| host  | cpu | memory | ts                  | my_tag |",
+                "+-------+-----+--------+---------------------+--------+",
+                "| host1 | 1.1 | 100    | 1970-01-01 00:00:01 |        |",
+                "| host2 | 2.2 | 200    | 1970-01-01 00:00:02 | hello  |",
+                "| host3 | 3.3 | 300    | 1970-01-01 00:00:03 |        |",
+                "+-------+-----+--------+---------------------+--------+",
             ];
             assert_eq!(pretty_print, expected);
         }

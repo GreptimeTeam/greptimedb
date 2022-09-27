@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::GrpcServer;
-use servers::http::HttpServerBuilder;
+use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
-#[cfg(feature = "postgres")]
+use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
 use servers::server::Server;
 use snafu::ResultExt;
@@ -19,20 +19,6 @@ pub(crate) struct Services;
 
 impl Services {
     pub(crate) async fn start(opts: &FrontendOptions, instance: InstanceRef) -> Result<()> {
-        let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
-            let http_addr = parse_addr(http_addr)?;
-
-            let mut builder = HttpServerBuilder::default();
-            builder.query_handler(instance.clone());
-            builder.influxdb_handler(Some(instance.clone()));
-
-            let http_server = builder.build().unwrap();
-
-            Some((Box::new(http_server) as _, http_addr))
-        } else {
-            None
-        };
-
         let grpc_server_and_addr = if let Some(grpc_addr) = &opts.grpc_addr {
             let grpc_addr = parse_addr(grpc_addr)?;
 
@@ -43,12 +29,12 @@ impl Services {
             None
         };
 
-        let mysql_server_and_addr = if let Some(mysql_addr) = &opts.mysql_addr {
-            let mysql_addr = parse_addr(mysql_addr)?;
+        let mysql_server_and_addr = if let Some(opts) = &opts.mysql_options {
+            let mysql_addr = parse_addr(&opts.addr)?;
 
             let mysql_io_runtime = Arc::new(
                 RuntimeBuilder::default()
-                    .worker_threads(opts.mysql_runtime_size as usize)
+                    .worker_threads(opts.runtime_size)
                     .thread_name("mysql-io-handlers")
                     .build()
                     .context(error::RuntimeResourceSnafu)?,
@@ -61,13 +47,12 @@ impl Services {
             None
         };
 
-        #[cfg(feature = "postgres")]
-        let postgres_server_and_addr = if let Some(pg_addr) = &opts.postgres_addr {
-            let pg_addr = parse_addr(pg_addr)?;
+        let postgres_server_and_addr = if let Some(opts) = &opts.postgres_options {
+            let pg_addr = parse_addr(&opts.addr)?;
 
             let pg_io_runtime = Arc::new(
                 RuntimeBuilder::default()
-                    .worker_threads(opts.postgres_runtime_size as usize)
+                    .worker_threads(opts.runtime_size)
                     .thread_name("pg-io-handlers")
                     .build()
                     .context(error::RuntimeResourceSnafu)?,
@@ -81,12 +66,44 @@ impl Services {
             None
         };
 
+        let opentsdb_server_and_addr = if let Some(opts) = &opts.opentsdb_options {
+            let addr = parse_addr(&opts.addr)?;
+
+            let io_runtime = Arc::new(
+                RuntimeBuilder::default()
+                    .worker_threads(opts.runtime_size)
+                    .thread_name("opentsdb-io-handlers")
+                    .build()
+                    .context(error::RuntimeResourceSnafu)?,
+            );
+
+            let server = OpentsdbServer::create_server(instance.clone(), io_runtime);
+
+            Some((server, addr))
+        } else {
+            None
+        };
+
+        let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
+            let http_addr = parse_addr(http_addr)?;
+
+            let mut http_server = HttpServer::new(instance.clone());
+            if opentsdb_server_and_addr.is_some() {
+                http_server.set_opentsdb_handler(instance.clone());
+            }
+            http_server.set_influxdb_handler(instance.clone());
+
+            Some((Box::new(http_server) as _, http_addr))
+        } else {
+            None
+        };
+
         try_join!(
             start_server(http_server_and_addr),
             start_server(grpc_server_and_addr),
             start_server(mysql_server_and_addr),
-            #[cfg(feature = "postgres")]
             start_server(postgres_server_and_addr),
+            start_server(opentsdb_server_and_addr)
         )
         .context(error::StartServerSnafu)?;
         Ok(())

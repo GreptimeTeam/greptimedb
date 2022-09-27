@@ -21,7 +21,3 @@ toml = "0.5"
 [dev-dependencies]
 serde = "1.0"
 tempdir = "0.3"
-
-[features]
-default = ["postgres"]
-postgres = ["datanode/postgres"]

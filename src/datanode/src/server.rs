@@ -21,7 +21,6 @@ pub struct Services {
     http_server: HttpServer,
     grpc_server: GrpcServer,
     mysql_server: Box<dyn Server>,
-    #[cfg(feature = "postgres")]
     postgres_server: Box<dyn Server>,
 }
 
@@ -34,7 +33,6 @@ impl Services {
                 .build()
                 .context(error::RuntimeResourceSnafu)?,
         );
-        #[cfg(feature = "postgres")]
         let postgres_io_runtime = Arc::new(
             RuntimeBuilder::default()
                 .worker_threads(opts.postgres_runtime_size as usize)
@@ -46,7 +44,6 @@ impl Services {
             http_server: HttpServer::new(instance.clone()),
             grpc_server: GrpcServer::new(instance.clone(), instance.clone()),
             mysql_server: MysqlServer::create_server(instance.clone(), mysql_io_runtime),
-            #[cfg(feature = "postgres")]
             postgres_server: Box::new(PostgresServer::new(instance, postgres_io_runtime)),
         })
     }
@@ -65,7 +62,6 @@ impl Services {
             addr: &opts.mysql_addr,
         })?;
 
-        #[cfg(feature = "postgres")]
         let postgres_addr: SocketAddr =
             opts.postgres_addr.parse().context(error::ParseAddrSnafu {
                 addr: &opts.postgres_addr,
@@ -75,7 +71,6 @@ impl Services {
             self.http_server.start(http_addr),
             self.grpc_server.start(grpc_addr),
             self.mysql_server.start(mysql_addr),
-            #[cfg(feature = "postgres")]
             self.postgres_server.start(postgres_addr),
         )
         .context(error::StartServerSnafu)?;

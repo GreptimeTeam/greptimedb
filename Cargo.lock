@@ -286,7 +286,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9e3356844c4d6a6d6467b8da2cffb4a2820be256f50a3a386c9d152bab31043"
 dependencies = [
  "async-trait",
- "axum-core",
+ "axum-core 0.2.8",
  "bitflags",
  "bytes",
  "futures-util",
@@ -294,7 +294,38 @@ dependencies = [
  "http-body",
  "hyper",
  "itoa 1.0.3",
- "matchit",
+ "matchit 0.5.0",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
+name = "axum"
+version = "0.6.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2628a243073c55aef15a1c1fe45c87f21b84f9e89ca9e7b262a180d3d03543d"
+dependencies = [
+ "async-trait",
+ "axum-core 0.3.0-rc.2",
+ "bitflags",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "hyper",
+ "itoa 1.0.3",
+ "matchit 0.6.0",
  "memchr",
  "mime",
  "percent-encoding",
@@ -327,10 +358,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-macros"
-version = "0.2.3"
+name = "axum-core"
+version = "0.3.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6293dae2ec708e679da6736e857cf8532886ef258e92930f38279c12641628b8"
+checksum = "473bd0762170028bb6b5068be9e97de2a9f0af3bf2084498d840498f47194d3d"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "mime",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
+name = "axum-macros"
+version = "0.3.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "247a599903eb2e02abbaf2facc6396140df7af6dcc84e64ce3b71d117702fa22"
 dependencies = [
  "heck 0.4.0",
  "proc-macro2",
@@ -344,7 +391,7 @@ version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f0c689f3a3cb707ea097813153343b74dcf73b3e46dedb25be91a24050913"
 dependencies = [
- "axum",
+ "axum 0.5.16",
  "bytes",
  "http",
  "http-body",
@@ -1373,7 +1420,7 @@ dependencies = [
  "api",
  "arrow2",
  "async-trait",
- "axum",
+ "axum 0.6.0-rc.2",
  "axum-macros",
  "axum-test-helper",
  "catalog",
@@ -2617,6 +2664,12 @@ name = "matchit"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73cbba799671b762df5a175adf59ce145165747bb891505c43d09aefbbf38beb"
+
+[[package]]
+name = "matchit"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3dfc802da7b1cf80aefffa0c7b2f77247c8b32206cc83c270b61264f5b360a80"
 
 [[package]]
 name = "matrixmultiply"
@@ -4645,8 +4698,10 @@ version = "0.1.0"
 dependencies = [
  "api",
  "async-trait",
- "axum",
+ "axum 0.6.0-rc.2",
  "axum-macros",
+ "axum-test-helper",
+ "bytes",
  "catalog",
  "client",
  "common-base",
@@ -4679,6 +4734,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-stream",
+ "tokio-test",
  "tonic",
  "tower",
  "tower-http",
@@ -5499,7 +5555,7 @@ checksum = "11cd56bdb54ef93935a6a79dbd1d91f1ebd4c64150fd61654031fd6b8b775c91"
 dependencies = [
  "async-stream",
  "async-trait",
- "axum",
+ "axum 0.5.16",
  "base64",
  "bytes",
  "futures-core",

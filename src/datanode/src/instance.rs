@@ -159,7 +159,14 @@ impl Instance {
                 let req = self.sql_handler.alter_to_request(alter_table)?;
                 self.sql_handler.execute(SqlRequest::Alter(req)).await
             }
-            _ => unimplemented!(),
+            Statement::ShowDatabases(stmt) => {
+                self.sql_handler
+                    .execute(SqlRequest::ShowDatabases(stmt))
+                    .await
+            }
+            Statement::ShowTables(stmt) => {
+                self.sql_handler.execute(SqlRequest::ShowTables(stmt)).await
+            }
         }
     }
 
@@ -213,10 +220,9 @@ impl Instance {
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
-}
 
-#[cfg(test)]
-impl Instance {
+    // This method is used in other crate's testing codes, so move it out of "cfg(test)".
+    // TODO(LFC): Delete it when callers no longer need it.
     pub async fn new_mock() -> Result<Self> {
         use table_engine::table::test_util::new_test_object_store;
         use table_engine::table::test_util::MockEngine;

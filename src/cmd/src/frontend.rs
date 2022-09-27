@@ -1,5 +1,8 @@
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::mysql::MysqlOptions;
+use frontend::opentsdb::OpentsdbOptions;
+use frontend::postgres::PostgresOptions;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -38,9 +41,10 @@ struct StartCommand {
     grpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
-    #[cfg(feature = "postgres")]
     #[clap(long)]
     postgres_addr: Option<String>,
+    #[clap(long)]
+    opentsdb_addr: Option<String>,
     #[clap(short, long)]
     config_file: Option<String>,
 }
@@ -70,11 +74,22 @@ impl TryFrom<StartCommand> for FrontendOptions {
             opts.grpc_addr = Some(addr);
         }
         if let Some(addr) = cmd.mysql_addr {
-            opts.mysql_addr = Some(addr);
+            opts.mysql_options = Some(MysqlOptions {
+                addr,
+                ..Default::default()
+            });
         }
-        #[cfg(feature = "postgres")]
         if let Some(addr) = cmd.postgres_addr {
-            opts.postgres_addr = Some(addr);
+            opts.postgres_options = Some(PostgresOptions {
+                addr,
+                ..Default::default()
+            });
+        }
+        if let Some(addr) = cmd.opentsdb_addr {
+            opts.opentsdb_options = Some(OpentsdbOptions {
+                addr,
+                ..Default::default()
+            });
         }
         Ok(opts)
     }
@@ -90,24 +105,36 @@ mod tests {
             http_addr: Some("127.0.0.1:1234".to_string()),
             grpc_addr: None,
             mysql_addr: Some("127.0.0.1:5678".to_string()),
-            #[cfg(feature = "postgres")]
             postgres_addr: Some("127.0.0.1:5432".to_string()),
+            opentsdb_addr: Some("127.0.0.1:4321".to_string()),
             config_file: None,
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();
         assert_eq!(opts.http_addr, Some("127.0.0.1:1234".to_string()));
-        assert_eq!(opts.mysql_addr, Some("127.0.0.1:5678".to_string()));
-        #[cfg(feature = "postgres")]
-        assert_eq!(opts.postgres_addr, Some("127.0.0.1:5432".to_string()));
+        assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
+        assert_eq!(
+            opts.postgres_options.as_ref().unwrap().addr,
+            "127.0.0.1:5432"
+        );
+        assert_eq!(
+            opts.opentsdb_options.as_ref().unwrap().addr,
+            "127.0.0.1:4321"
+        );
 
         let default_opts = FrontendOptions::default();
         assert_eq!(opts.grpc_addr, default_opts.grpc_addr);
-        assert_eq!(opts.mysql_runtime_size, default_opts.mysql_runtime_size);
-        #[cfg(feature = "postgres")]
         assert_eq!(
-            opts.postgres_runtime_size,
-            default_opts.postgres_runtime_size
+            opts.mysql_options.as_ref().unwrap().runtime_size,
+            default_opts.mysql_options.as_ref().unwrap().runtime_size
+        );
+        assert_eq!(
+            opts.postgres_options.as_ref().unwrap().runtime_size,
+            default_opts.postgres_options.as_ref().unwrap().runtime_size
+        );
+        assert_eq!(
+            opts.opentsdb_options.as_ref().unwrap().runtime_size,
+            default_opts.opentsdb_options.as_ref().unwrap().runtime_size
         );
     }
 }

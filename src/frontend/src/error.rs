@@ -70,6 +70,18 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Incomplete GRPC result: {}", err_msg))]
+    IncompleteGrpcResult {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to execute OpenTSDB put, reason: {}", reason))]
+    ExecOpentsdbPut {
+        reason: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -84,8 +96,12 @@ impl ErrorExt for Error {
             Error::StartServer { source, .. } => source.status_code(),
             Error::ParseSql { source } => source.status_code(),
             Error::ConvertColumnDefaultConstraint { source, .. } => source.status_code(),
-            Error::ColumnDataType { .. } | Error::RequestDatanode { .. } => StatusCode::Internal,
-            Error::IllegalFrontendState { .. } => StatusCode::Unexpected,
+            Error::RequestDatanode { source } => source.status_code(),
+            Error::ColumnDataType { .. } => StatusCode::Internal,
+            Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
+                StatusCode::Unexpected
+            }
+            Error::ExecOpentsdbPut { .. } => StatusCode::Internal,
         }
     }
 

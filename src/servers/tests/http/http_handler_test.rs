@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
-use axum::extract::{Json, Query};
-use axum::Extension;
+use axum::extract::{Json, Query, State};
 use common_telemetry::metric;
 use metrics::counter;
 use servers::http::handler as http_handler;
@@ -14,9 +13,7 @@ use crate::create_testing_sql_query_handler;
 #[tokio::test]
 async fn test_sql_not_provided() {
     let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let extension = Extension(query_handler);
-
-    let json = http_handler::sql(extension, Query(HashMap::default())).await;
+    let json = http_handler::sql(State(query_handler), Query(HashMap::default())).await;
     match json {
         HttpResponse::Json(json) => {
             assert!(!json.success());
@@ -36,9 +33,8 @@ async fn test_sql_output_rows() {
 
     let query = create_query();
     let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let extension = Extension(query_handler);
 
-    let json = http_handler::sql(extension, query).await;
+    let json = http_handler::sql(State(query_handler), query).await;
     match json {
         HttpResponse::Json(json) => {
             assert!(json.success(), "{:?}", json);
@@ -61,10 +57,7 @@ async fn test_metrics() {
     counter!("test_metrics", 1);
 
     let query = create_query();
-    let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let extension = Extension(query_handler);
-
-    let text = http_handler::metrics(extension, query).await;
+    let text = http_handler::metrics(query).await;
     match text {
         HttpResponse::Text(s) => assert!(s.contains("test_metrics counter")),
         _ => unreachable!(),
@@ -77,9 +70,8 @@ async fn test_scripts() {
 
     let exec = create_script_payload();
     let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let extension = Extension(query_handler);
 
-    let json = http_handler::scripts(extension, exec).await;
+    let json = http_handler::scripts(State(query_handler), exec).await;
     match json {
         HttpResponse::Json(json) => {
             assert!(json.success(), "{:?}", json);

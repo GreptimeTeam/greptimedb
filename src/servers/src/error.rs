@@ -1,11 +1,13 @@
 use std::any::Any;
 use std::net::SocketAddr;
 
+use axum::http::StatusCode as HttpStatusCode;
 use axum::{
     response::{IntoResponse, Response},
     Json,
 };
 use common_error::prelude::*;
+use serde_json::json;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -87,6 +89,35 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc::error::Error,
     },
+
+    #[snafu(display("Connection reset by peer"))]
+    ConnResetByPeer { backtrace: Backtrace },
+
+    #[snafu(display("Hyper error, source: {}", source))]
+    Hyper { source: hyper::Error },
+
+    #[snafu(display("Invalid OpenTSDB line, source: {}", source))]
+    InvalidOpentsdbLine {
+        source: std::string::FromUtf8Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid OpenTSDB Json request, source: {}", source))]
+    InvalidOpentsdbJsonRequest {
+        source: serde_json::error::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to put OpenTSDB data point: {:?}, source: {}",
+        data_point,
+        source
+    ))]
+    PutOpentsdbDataPoint {
+        data_point: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -106,12 +137,18 @@ impl ErrorExt for Error {
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
-            | ExecuteQuery { source, .. } => source.status_code(),
+            | ExecuteQuery { source, .. }
+            | PutOpentsdbDataPoint { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidQuery { .. }
             | InfluxdbLineProtocol { .. }
-            | InfluxdbLinesWrite { .. } => StatusCode::InvalidArguments,
+            | InfluxdbLinesWrite { .. }
+            | ConnResetByPeer { .. }
+            | InvalidOpentsdbLine { .. }
+            | InvalidOpentsdbJsonRequest { .. } => StatusCode::InvalidArguments,
+
+            Hyper { .. } => StatusCode::Unknown,
         }
     }
 
@@ -139,15 +176,14 @@ impl From<std::io::Error> for Error {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
-            Error::InfluxdbLineProtocol { .. } | Error::InfluxdbLinesWrite { .. } => {
-                (axum::http::StatusCode::BAD_REQUEST, self.to_string())
-            }
-            _ => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                self.to_string(),
-            ),
+            Error::InfluxdbLineProtocol { .. }
+            | Error::InfluxdbLinesWrite { .. }
+            | Error::InvalidOpentsdbLine { .. }
+            | Error::InvalidOpentsdbJsonRequest { .. }
+            | Error::InvalidQuery { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
+            _ => (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
-        let body = Json(serde_json::json!({
+        let body = Json(json!({
             "error": error_message,
         }));
         (status, body).into_response()
