@@ -81,10 +81,10 @@ impl AlterOperation {
     pub fn apply(&self, descriptor: &mut RegionDescriptor) {
         match self {
             AlterOperation::AddColumns { columns } => {
-                Self::apply_add(&columns, descriptor);
+                Self::apply_add(columns, descriptor);
             }
             AlterOperation::DropColumns { names } => {
-                Self::apply_drop(&names, descriptor);
+                Self::apply_drop(names, descriptor);
             }
         }
     }

@@ -207,11 +207,8 @@ impl<R: Region> Table for MitoTable<R> {
                 // TODO(yingwen): [alter] Better way to alter the schema struct. In fact the column order
                 // in table schema could differ from the region schema, so we could just push this column
                 // to the back of the schema (as last column).
-                let table_schema = build_table_schema_with_new_column(
-                    table_name,
-                    &table_meta.schema,
-                    &new_column,
-                )?;
+                let table_schema =
+                    build_table_schema_with_new_column(table_name, &table_meta.schema, new_column)?;
 
                 (alter_op, table_schema)
             }
