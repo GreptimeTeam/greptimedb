@@ -127,3 +127,81 @@ pub struct AlterRequest {
     /// The version of the schema before applying the alteration.
     pub version: u32,
 }
+
+#[cfg(test)]
+mod tests {
+    use datatypes::prelude::*;
+
+    use super::*;
+    use crate::storage::{
+        ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder, ColumnId, RegionDescriptorBuilder,
+        RowKeyDescriptorBuilder,
+    };
+
+    fn new_column_desc(id: ColumnId) -> ColumnDescriptor {
+        ColumnDescriptorBuilder::new(id, id.to_string(), ConcreteDataType::int64_datatype())
+            .is_nullable(false)
+            .build()
+            .unwrap()
+    }
+
+    fn new_region_descriptor() -> RegionDescriptor {
+        let row_key = RowKeyDescriptorBuilder::default()
+            .timestamp(new_column_desc(1))
+            .build()
+            .unwrap();
+        let default_cf = ColumnFamilyDescriptorBuilder::default()
+            .push_column(new_column_desc(2))
+            .build()
+            .unwrap();
+
+        RegionDescriptorBuilder::default()
+            .id(1)
+            .name("test")
+            .row_key(row_key)
+            .default_cf(default_cf)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_alter_operation() {
+        let mut desc = new_region_descriptor();
+
+        let op = AlterOperation::AddColumns {
+            columns: vec![
+                AddColumn {
+                    desc: new_column_desc(3),
+                    is_key: true,
+                },
+                AddColumn {
+                    desc: new_column_desc(4),
+                    is_key: false,
+                },
+            ],
+        };
+        op.apply(&mut desc);
+
+        assert_eq!(1, desc.row_key.columns.len());
+        assert_eq!("3", desc.row_key.columns[0].name);
+        assert_eq!(2, desc.default_cf.columns.len());
+        assert_eq!("2", desc.default_cf.columns[0].name);
+        assert_eq!("4", desc.default_cf.columns[1].name);
+
+        let op = AlterOperation::DropColumns {
+            names: vec![String::from("2")],
+        };
+        op.apply(&mut desc);
+        assert_eq!(1, desc.row_key.columns.len());
+        assert_eq!(1, desc.default_cf.columns.len());
+        assert_eq!("4", desc.default_cf.columns[0].name);
+
+        // Key columns are ignored.
+        let op = AlterOperation::DropColumns {
+            names: vec![String::from("1"), String::from("3")],
+        };
+        op.apply(&mut desc);
+        assert_eq!(1, desc.row_key.columns.len());
+        assert_eq!(1, desc.default_cf.columns.len());
+    }
+}

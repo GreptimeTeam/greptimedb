@@ -665,7 +665,8 @@ fn is_internal_value_column(column_name: &str) -> bool {
 mod tests {
     use datatypes::type_id::LogicalTypeId;
     use store_api::storage::{
-        ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder, RowKeyDescriptorBuilder,
+        AddColumn, AlterOperation, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder,
+        RowKeyDescriptorBuilder,
     };
 
     use super::*;
@@ -918,5 +919,97 @@ mod tests {
 
         let converted = RegionMetadata::try_from(raw).unwrap();
         assert_eq!(metadata, converted);
+    }
+
+    #[test]
+    fn test_alter_metadata_add_columns() {
+        let region_name = "region-0";
+        let builder = RegionDescBuilder::new(region_name)
+            .enable_version_column(false)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_value_column(("v1", LogicalTypeId::Float32, true));
+        let last_column_id = builder.last_column_id();
+        let metadata: RegionMetadata = builder.build().try_into().unwrap();
+
+        let req = AlterRequest {
+            operation: AlterOperation::AddColumns {
+                columns: vec![
+                    AddColumn {
+                        desc: ColumnDescriptorBuilder::new(
+                            last_column_id + 1,
+                            "k2",
+                            ConcreteDataType::int32_datatype(),
+                        )
+                        .is_nullable(false)
+                        .build()
+                        .unwrap(),
+                        is_key: true,
+                    },
+                    AddColumn {
+                        desc: ColumnDescriptorBuilder::new(
+                            last_column_id + 2,
+                            "v2",
+                            ConcreteDataType::float32_datatype(),
+                        )
+                        .build()
+                        .unwrap(),
+                        is_key: false,
+                    },
+                ],
+            },
+            version: 0,
+        };
+        let metadata = metadata.alter(&req).unwrap();
+
+        let builder: RegionMetadataBuilder = RegionDescBuilder::new(region_name)
+            .enable_version_column(false)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_key_column(("k2", LogicalTypeId::Int32, false))
+            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .build()
+            .try_into()
+            .unwrap();
+        let expect = builder.version(1).build().unwrap();
+        assert_eq!(expect, metadata);
+    }
+
+    #[test]
+    fn test_alter_metadata_drop_columns() {
+        let region_name = "region-0";
+        let metadata: RegionMetadata = RegionDescBuilder::new(region_name)
+            .enable_version_column(false)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_key_column(("k2", LogicalTypeId::Int32, false))
+            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .build()
+            .try_into()
+            .unwrap();
+
+        let req = AlterRequest {
+            operation: AlterOperation::DropColumns {
+                names: vec![
+                    String::from("k1"), // k1 would be ignored.
+                    String::from("v1"),
+                ],
+            },
+            version: 0,
+        };
+        let metadata = metadata.alter(&req).unwrap();
+
+        let builder = RegionDescBuilder::new(region_name)
+            .enable_version_column(false)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_key_column(("k2", LogicalTypeId::Int32, false));
+        let last_column_id = builder.last_column_id() + 1;
+        let builder: RegionMetadataBuilder = builder
+            .set_last_column_id(last_column_id) // This id is reserved for v1
+            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .build()
+            .try_into()
+            .unwrap();
+        let expect = builder.version(1).build().unwrap();
+        assert_eq!(expect, metadata);
     }
 }
