@@ -126,7 +126,7 @@ struct MitoEngineInner<S: StorageEngine> {
     table_mutex: Mutex<()>,
 }
 
-pub(crate) fn build_row_key_desc(
+fn build_row_key_desc(
     mut column_id: ColumnId,
     table_name: &str,
     table_schema: &SchemaRef,
@@ -189,7 +189,7 @@ pub(crate) fn build_row_key_desc(
     ))
 }
 
-pub(crate) fn build_column_family(
+fn build_column_family(
     mut column_id: ColumnId,
     table_name: &str,
     table_schema: &SchemaRef,
