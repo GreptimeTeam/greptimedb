@@ -45,7 +45,6 @@ impl LinesWriter {
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
-        // Convert nanoseconds to milliseconds
         values.ts_millis_values.push(value);
         self.inner.null_masks[idx].push(false);
         Ok(())
