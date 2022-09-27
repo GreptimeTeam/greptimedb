@@ -26,7 +26,7 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Wal<S: LogStore> {
-    name: String,
+    region_id: RegionId,
     namespace: S::Namespace,
     store: Arc<S>,
 }
@@ -35,12 +35,11 @@ pub type WriteBatchStream<'a> = Pin<
     Box<dyn Stream<Item = Result<(SequenceNumber, WalHeader, Option<WriteBatch>)>> + Send + 'a>,
 >;
 
-// wal should be cheap to clone
+// Wal should be cheap to clone, so avoid holding things like String, Vec.
 impl<S: LogStore> Clone for Wal<S> {
     fn clone(&self) -> Self {
         Self {
-            // FIXME(yingwen): [alter] Clone a string is costly, should be replaced by region_id.
-            name: self.name.clone(),
+            region_id: self.region_id,
             namespace: self.namespace.clone(),
             store: self.store.clone(),
         }
@@ -51,15 +50,15 @@ impl<S: LogStore> Wal<S> {
     pub fn new(region_id: RegionId, store: Arc<S>) -> Self {
         let namespace = store.namespace(region_id);
         Self {
-            name: region_id.to_string(),
+            region_id,
             namespace,
             store,
         }
     }
 
     #[inline]
-    pub fn name(&self) -> &str {
-        &self.name
+    pub fn region_id(&self) -> RegionId {
+        self.region_id
     }
 }
 
@@ -103,7 +102,9 @@ impl<S: LogStore> Wal<S> {
             encoder
                 .encode(batch, &mut buf)
                 .map_err(BoxedError::new)
-                .context(error::WriteWalSnafu { name: self.name() })?;
+                .context(error::WriteWalSnafu {
+                    region_id: self.region_id(),
+                })?;
         } else if let Payload::WriteBatchProto(batch) = payload {
             // entry
             let encoder = WriteBatchProtobufEncoder {};
@@ -111,7 +112,9 @@ impl<S: LogStore> Wal<S> {
             encoder
                 .encode(batch, &mut buf)
                 .map_err(BoxedError::new)
-                .context(error::WriteWalSnafu { name: self.name() })?;
+                .context(error::WriteWalSnafu {
+                    region_id: self.region_id(),
+                })?;
         }
 
         // write bytes to wal
@@ -124,9 +127,12 @@ impl<S: LogStore> Wal<S> {
             .read(&self.namespace, start_seq)
             .await
             .map_err(BoxedError::new)
-            .context(error::ReadWalSnafu { name: self.name() })?
+            .context(error::ReadWalSnafu {
+                region_id: self.region_id(),
+            })?
+            // Handle the error when reading from the stream.
             .map_err(|e| Error::ReadWal {
-                name: self.name().to_string(),
+                region_id: self.region_id(),
                 source: BoxedError::new(e),
             })
             .and_then(|entries| async {
@@ -147,7 +153,9 @@ impl<S: LogStore> Wal<S> {
             .append(e)
             .await
             .map_err(BoxedError::new)
-            .context(error::WriteWalSnafu { name: self.name() })?;
+            .context(error::WriteWalSnafu {
+                region_id: self.region_id(),
+            })?;
 
         Ok((res.entry_id(), res.offset()))
     }
@@ -165,7 +173,7 @@ impl<S: LogStore> Wal<S> {
         ensure!(
             data_pos <= input.len(),
             error::WalDataCorruptedSnafu {
-                name: self.name(),
+                region_id: self.region_id(),
                 message: format!(
                     "Not enough input buffer, expected data position={}, actual buffer length={}",
                     data_pos,
@@ -182,7 +190,9 @@ impl<S: LogStore> Wal<S> {
                 let write_batch = decoder
                     .decode(&input[data_pos..])
                     .map_err(BoxedError::new)
-                    .context(error::ReadWalSnafu { name: self.name() })?;
+                    .context(error::ReadWalSnafu {
+                        region_id: self.region_id(),
+                    })?;
 
                 Ok((seq_num, header, Some(write_batch)))
             }
@@ -192,12 +202,14 @@ impl<S: LogStore> Wal<S> {
                 let write_batch = decoder
                     .decode(&input[data_pos..])
                     .map_err(BoxedError::new)
-                    .context(error::ReadWalSnafu { name: self.name() })?;
+                    .context(error::ReadWalSnafu {
+                        region_id: self.region_id(),
+                    })?;
 
                 Ok((seq_num, header, Some(write_batch)))
             }
             _ => error::WalDataCorruptedSnafu {
-                name: self.name(),
+                region_id: self.region_id(),
                 message: format!("invalid payload type={}", header.payload_type),
             }
             .fail(),
