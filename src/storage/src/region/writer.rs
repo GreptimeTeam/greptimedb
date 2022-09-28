@@ -5,6 +5,7 @@ use common_time::RangeMillis;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::manifest::ManifestVersion;
 use store_api::storage::{AlterRequest, SequenceNumber, WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
@@ -71,17 +72,19 @@ impl RegionWriter {
         let version_control = &shared.version_control;
 
         let _lock = self.version_mutex.lock().await;
-        let next_sequence = version_control.committed_sequence() + 1;
-
-        self.persist_manifest_version(wal, next_sequence, &edit)
-            .await?;
-
+        let manifest_version = edit.manifest_version;
+        // We could tolerate failure during persisting manifest version to the wal, since it won't
+        // affect we applying the edit to the version.
         version_control.apply_edit(edit);
-
-        version_control.set_committed_sequence(next_sequence);
-
         // TODO(yingwen): We should set the flush handle to `None`, but we can't acquire
         // write lock here.
+
+        // Persist the manifest version to notify subscriber of the wal that the manifest has been
+        // updated. This should be done at the end of the method.
+        let next_sequence = version_control.committed_sequence() + 1;
+        self.persist_manifest_version(wal, next_sequence, manifest_version)
+            .await?;
+        version_control.set_committed_sequence(next_sequence);
 
         Ok(())
     }
@@ -102,7 +105,7 @@ impl RegionWriter {
         // 1. acquire version lock
         // 2. validate request
         // 3. build schema based on new request
-        // 4. persist it into the region manifest
+        // 4. persist it into the region manifest, and write wal
         // 5. update version in VersionControl
 
         unimplemented!()
@@ -112,9 +115,9 @@ impl RegionWriter {
         &self,
         wal: &Wal<S>,
         seq: SequenceNumber,
-        edit: &VersionEdit,
+        manifest_version: ManifestVersion,
     ) -> Result<()> {
-        let header = WalHeader::with_last_manifest_version(edit.manifest_version);
+        let header = WalHeader::with_last_manifest_version(manifest_version);
 
         wal.write_to_wal(seq, header, Payload::None).await?;
 
