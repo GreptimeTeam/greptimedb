@@ -452,11 +452,15 @@ impl ColumnsMetadataBuilder {
         Ok(self)
     }
 
-    fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<()> {
+    fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<&mut Self> {
         self.push_value_column(consts::KEY_CF_ID, desc)
     }
 
-    fn push_value_column(&mut self, cf_id: ColumnFamilyId, desc: ColumnDescriptor) -> Result<()> {
+    fn push_value_column(
+        &mut self,
+        cf_id: ColumnFamilyId,
+        desc: ColumnDescriptor,
+    ) -> Result<&mut Self> {
         ensure!(
             !is_internal_value_column(&desc.name),
             ReservedColumnSnafu { name: &desc.name }
@@ -465,7 +469,11 @@ impl ColumnsMetadataBuilder {
         self.push_new_column(cf_id, desc)
     }
 
-    fn push_new_column(&mut self, cf_id: ColumnFamilyId, desc: ColumnDescriptor) -> Result<()> {
+    fn push_new_column(
+        &mut self,
+        cf_id: ColumnFamilyId,
+        desc: ColumnDescriptor,
+    ) -> Result<&mut Self> {
         ensure!(
             !self.name_to_col_index.contains_key(&desc.name),
             ColNameExistsSnafu { name: &desc.name }
@@ -484,7 +492,7 @@ impl ColumnsMetadataBuilder {
         self.name_to_col_index.insert(column_name, column_index);
         self.column_ids.insert(column_id);
 
-        Ok(())
+        Ok(self)
     }
 
     fn build(mut self) -> Result<ColumnsMetadata> {
