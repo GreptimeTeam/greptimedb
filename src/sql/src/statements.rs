@@ -7,6 +7,7 @@ pub mod statement;
 
 use std::str::FromStr;
 
+use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::DateTimeType;
@@ -75,6 +76,19 @@ fn parse_string_to_value(
             } else {
                 ParseSqlValueSnafu {
                     msg: format!("Failed to parse {} to DateTime value", s),
+                }
+                .fail()
+            }
+        }
+        ConcreteDataType::Timestamp(t) => {
+            if let Ok(ts) = Timestamp::from_str(&s) {
+                Ok(Value::Timestamp(Timestamp::new(
+                    ts.convert_to(t.unit),
+                    t.unit,
+                )))
+            } else {
+                ParseSqlValueSnafu {
+                    msg: format!("Failed to parse {} to Timestamp value", s),
                 }
                 .fail()
             }
@@ -254,6 +268,7 @@ fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Concre
 
 #[cfg(test)]
 mod tests {
+    use common_time::timestamp::TimeUnit;
     use datatypes::value::OrderedFloat;
 
     use super::*;
@@ -385,6 +400,80 @@ mod tests {
             "datetime_col",
             &ConcreteDataType::datetime_datatype(),
             &SqlValue::DoubleQuotedString("2022-02-22 00:01:61".to_string()),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_parse_timestamp_literal() {
+        match parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22T00:01:01+08:00".to_string(),
+            &ConcreteDataType::timestamp_millis_datatype(),
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(1645459261000, ts.value());
+                assert_eq!(TimeUnit::Millisecond, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        match parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22T00:01:01+08:00".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Second),
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(1645459261, ts.value());
+                assert_eq!(TimeUnit::Second, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        match parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22T00:01:01+08:00".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(1645459261000000, ts.value());
+                assert_eq!(TimeUnit::Microsecond, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        match parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22T00:01:01+08:00".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(1645459261000000000, ts.value());
+                assert_eq!(TimeUnit::Nanosecond, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        assert!(parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22T00:01:01+08".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
         )
         .is_err());
     }

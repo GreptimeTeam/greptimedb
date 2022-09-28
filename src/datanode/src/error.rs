@@ -213,6 +213,17 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
+    #[snafu(display(
+        "Failed to parse string to timestamp, string: {}, source: {}",
+        raw,
+        source
+    ))]
+    ParseTimestamp {
+        raw: String,
+        #[snafu(backtrace)]
+        source: common_time::error::Error,
+    },
+
     #[snafu(display("Failed to create a new RecordBatch, source: {}", source))]
     NewRecordBatch {
         #[snafu(backtrace)]
@@ -274,8 +285,8 @@ impl ErrorExt for Error {
             | Error::MissingField { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
-            | Error::ConstraintNotSupported { .. } => StatusCode::InvalidArguments,
-
+            | Error::ConstraintNotSupported { .. }
+            | Error::ParseTimestamp { .. } => StatusCode::InvalidArguments,
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }
             | Error::ParseAddr { .. }
@@ -318,6 +329,8 @@ impl From<Error> for tonic::Status {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use common_error::ext::BoxedError;
     use common_error::mock::MockError;
 
@@ -371,5 +384,13 @@ mod tests {
             .unwrap();
         assert_internal_error(&err);
         assert_tonic_internal_error(err);
+    }
+
+    #[test]
+    fn test_parse_timestamp() {
+        let err = common_time::timestamp::Timestamp::from_str("test")
+            .context(ParseTimestampSnafu { raw: "test" })
+            .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 }

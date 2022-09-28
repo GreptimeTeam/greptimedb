@@ -59,7 +59,10 @@ impl ConcreteDataType {
     pub fn is_string(&self) -> bool {
         matches!(
             self,
-            ConcreteDataType::String(_) | ConcreteDataType::Date(_) | ConcreteDataType::DateTime(_)
+            ConcreteDataType::String(_)
+                | ConcreteDataType::Date(_)
+                | ConcreteDataType::DateTime(_)
+                | ConcreteDataType::Timestamp(_)
         )
     }
 

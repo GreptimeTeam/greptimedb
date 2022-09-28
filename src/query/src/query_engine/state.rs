@@ -9,6 +9,7 @@ use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 
 use crate::datafusion::DfCatalogListAdapter;
 use crate::executor::Runtime;
+use crate::optimizer::TypeConversionRule;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -30,10 +31,13 @@ impl fmt::Debug for QueryEngineState {
 
 impl QueryEngineState {
     pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
-        let config = ExecutionConfig::new().with_default_catalog_and_schema(
-            catalog::DEFAULT_CATALOG_NAME,
-            catalog::DEFAULT_SCHEMA_NAME,
-        );
+        let config = ExecutionConfig::new()
+            .with_default_catalog_and_schema(
+                catalog::DEFAULT_CATALOG_NAME,
+                catalog::DEFAULT_SCHEMA_NAME,
+            )
+            .add_optimizer_rule(Arc::new(TypeConversionRule {}));
+
         let df_context = ExecutionContext::with_config(config);
 
         df_context.state.lock().catalog_list = Arc::new(DfCatalogListAdapter::new(
