@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 use store_api::storage::{
     consts::{self, ReservedColumnId},
-    AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor,
-    ColumnFamilyDescriptorBuilder, ColumnFamilyId, ColumnId, RegionDescriptor,
-    RegionDescriptorBuilder, RegionId, RegionMeta, RowKeyDescriptor, RowKeyDescriptorBuilder,
-    Schema, SchemaRef,
+    AddColumn, AlterOperation, AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder,
+    ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnFamilyId, ColumnId,
+    RegionDescriptor, RegionDescriptorBuilder, RegionId, RegionMeta, RowKeyDescriptor,
+    RowKeyDescriptorBuilder, Schema, SchemaRef,
 };
 
 use crate::manifest::action::{RawColumnFamiliesMetadata, RawColumnsMetadata, RawRegionMetadata};
@@ -43,15 +43,45 @@ pub enum Error {
     #[snafu(display("Missing timestamp key column"))]
     MissingTimestamp { backtrace: Backtrace },
 
+    // Variants for validating `AlterRequest`, which won't have a backtrace.
     #[snafu(display("Expect altering metadata with version {}, given {}", expect, given))]
-    InvalidVersion {
+    InvalidAlterVersion {
         expect: VersionNumber,
         given: VersionNumber,
-        backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to add column as there is already a column named {}", name))]
+    AddExistColumn { name: String },
+
+    #[snafu(display("Failed to add a non null column {}", name))]
+    AddNonNullColumn { name: String },
+
+    #[snafu(display("Failed to remove column as there is no column named {}", name))]
+    RemoveAbsentColumn { name: String },
+
+    #[snafu(display("Failed to remove column {} as it is part of key", name))]
+    RemoveKeyColumn { name: String },
+
+    #[snafu(display("Failed to remove column {} as it is an internal column", name))]
+    RemoveInternalColumn { name: String },
+    // End of variants for validating `AlterRequest`.
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        StatusCode::InvalidArguments
+    }
+
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
 
 /// Implementation of [RegionMeta].
 ///
@@ -122,15 +152,42 @@ impl RegionMetadata {
         self.schema.version()
     }
 
-    /// Returns a new [RegionMetadata] after alteration, leave `self` unchanged.
-    pub fn alter(&self, req: &AlterRequest) -> Result<RegionMetadata> {
+    /// Checks whether the `req` is valid, returns `Err` if it is invalid.
+    pub fn validate_alter(&self, req: &AlterRequest) -> Result<()> {
         ensure!(
             req.version == self.version,
-            InvalidVersionSnafu {
+            InvalidAlterVersionSnafu {
                 expect: req.version,
                 given: self.version,
             }
         );
+
+        match &req.operation {
+            AlterOperation::AddColumns { columns } => {
+                for col in columns {
+                    self.validate_add_column(col)?;
+                }
+            }
+            AlterOperation::DropColumns { names } => {
+                for name in names {
+                    self.validate_remove_column(name)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns a new [RegionMetadata] after alteration, leave `self` unchanged.
+    ///
+    /// Caller should use [RegionMetadata::validate_alter] to validate the `req` and
+    /// ensure the version of the `req` is equal to the version of the metadata.
+    ///
+    /// # Panics
+    /// Panics if `req.version != self.version`.
+    pub fn alter(&self, req: &AlterRequest) -> Result<RegionMetadata> {
+        // The req should have been validated before.
+        assert_eq!(req.version, self.version);
 
         let mut desc = self.to_descriptor();
         // Apply the alter operation to the descriptor.
@@ -139,6 +196,46 @@ impl RegionMetadata {
         RegionMetadataBuilder::try_from(desc)?
             .version(self.version + 1) // Bump the metadata version.
             .build()
+    }
+
+    fn validate_add_column(&self, add_column: &AddColumn) -> Result<()> {
+        // We don't check the case that the column is not nullable but default constraint is null. The
+        // caller should guarantee this.
+        ensure!(
+            add_column.desc.is_nullable || add_column.desc.default_constraint.is_some(),
+            AddNonNullColumnSnafu {
+                name: &add_column.desc.name,
+            }
+        );
+
+        // Use the store schema to check the column as it contains all internal columns.
+        let store_schema = self.schema.store_schema();
+        ensure!(
+            !store_schema.contains_column(&add_column.desc.name),
+            AddExistColumnSnafu {
+                name: &add_column.desc.name,
+            }
+        );
+
+        Ok(())
+    }
+
+    fn validate_remove_column(&self, name: &str) -> Result<()> {
+        let store_schema = self.schema.store_schema();
+        ensure!(
+            store_schema.contains_column(name),
+            RemoveAbsentColumnSnafu { name }
+        );
+        ensure!(
+            !store_schema.is_key_column(name),
+            RemoveKeyColumnSnafu { name }
+        );
+        ensure!(
+            store_schema.is_user_column(name),
+            RemoveInternalColumnSnafu { name }
+        );
+
+        Ok(())
     }
 
     fn to_descriptor(&self) -> RegionDescriptor {

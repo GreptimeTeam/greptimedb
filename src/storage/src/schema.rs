@@ -239,6 +239,24 @@ impl StoreSchema {
         Ok(Batch::new(columns))
     }
 
+    pub(crate) fn contains_column(&self, name: &str) -> bool {
+        self.schema.column_schema_by_name(name).is_some()
+    }
+
+    pub(crate) fn is_key_column(&self, name: &str) -> bool {
+        self.schema
+            .column_index_by_name(name)
+            .map(|idx| idx < self.row_key_end)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn is_user_column(&self, name: &str) -> bool {
+        self.schema
+            .column_index_by_name(name)
+            .map(|idx| idx < self.user_column_end)
+            .unwrap_or(false)
+    }
+
     fn from_columns_metadata(columns: &ColumnsMetadata, version: u32) -> Result<StoreSchema> {
         let column_schemas: Vec<_> = columns
             .iter_all_columns()
