@@ -10,3 +10,14 @@ impl Default for InfluxdbOptions {
         Self { enable: true }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::InfluxdbOptions;
+
+    #[test]
+    fn test_influxdb_options() {
+        let default = InfluxdbOptions::default();
+        assert!(default.enable);
+    }
+}
