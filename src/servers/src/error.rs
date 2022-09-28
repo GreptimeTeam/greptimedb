@@ -90,6 +90,9 @@ pub enum Error {
         source: common_grpc::error::Error,
     },
 
+    #[snafu(display("Failed to convert time precision, name: {}", name))]
+    TimePrecision { name: String, backtrace: Backtrace },
+
     #[snafu(display("Connection reset by peer"))]
     ConnResetByPeer { backtrace: Backtrace },
 
@@ -146,7 +149,8 @@ impl ErrorExt for Error {
             | InfluxdbLinesWrite { .. }
             | ConnResetByPeer { .. }
             | InvalidOpentsdbLine { .. }
-            | InvalidOpentsdbJsonRequest { .. } => StatusCode::InvalidArguments,
+            | InvalidOpentsdbJsonRequest { .. }
+            | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             Hyper { .. } => StatusCode::Unknown,
         }
@@ -180,7 +184,8 @@ impl IntoResponse for Error {
             | Error::InfluxdbLinesWrite { .. }
             | Error::InvalidOpentsdbLine { .. }
             | Error::InvalidOpentsdbJsonRequest { .. }
-            | Error::InvalidQuery { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
+            | Error::InvalidQuery { .. }
+            | Error::TimePrecision { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
             _ => (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
         let body = Json(json!({

@@ -20,20 +20,20 @@ struct Inner {
     column_name_index: HashMap<ColumnName, usize>,
     null_masks: Vec<BitVec>,
     batch: api::v1::codec::InsertBatch,
-    to_insert: usize,
+    lines: usize,
 }
 
 impl LinesWriter {
-    pub fn with_capacity(to_insert: usize) -> Self {
+    pub fn with_lines(lines: usize) -> Self {
         Self {
             inner: Inner {
-                to_insert,
+                lines,
                 ..Default::default()
             },
         }
     }
 
-    pub fn write_ms_ts(&mut self, column_name: &str, value: i64) -> Result<()> {
+    pub fn write_ts(&mut self, column_name: &str, value: (i64, Precision)) -> Result<()> {
         let (idx, column) = self.mut_column(
             column_name,
             ColumnDataType::Timestamp,
@@ -45,7 +45,7 @@ impl LinesWriter {
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
-        values.ts_millis_values.push(value);
+        values.ts_millis_values.push(to_ms_ts(value.1, value.0));
         self.inner.null_masks[idx].push(false);
         Ok(())
     }
@@ -166,7 +166,7 @@ impl LinesWriter {
             None => {
                 let new_idx = column_names.len();
                 let batch = &mut self.inner.batch;
-                let to_insert = self.inner.to_insert;
+                let to_insert = self.inner.lines;
                 let mut null_mask = BitVec::with_capacity(to_insert);
                 null_mask.extend(BitVec::repeat(true, batch.row_count as usize));
                 self.inner.null_masks.push(null_mask);
@@ -185,26 +185,52 @@ impl LinesWriter {
     }
 }
 
+fn to_ms_ts(p: Precision, ts: i64) -> i64 {
+    match p {
+        Precision::NANOSECOND => ts / 1_000_000,
+        Precision::MICROSECOND => ts / 1000,
+        Precision::MILLISECOND => ts,
+        Precision::SECOND => ts * 1000,
+        Precision::MINUTE => ts * 1000 * 60,
+        Precision::HOUR => ts * 1000 * 60 * 60,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    NANOSECOND,
+    MICROSECOND,
+    MILLISECOND,
+    SECOND,
+    MINUTE,
+    HOUR,
+}
+
 #[cfg(test)]
 mod tests {
     use api::v1::{column::SemanticType, ColumnDataType};
     use common_base::BitVec;
 
     use super::LinesWriter;
+    use crate::writer::{to_ms_ts, Precision};
 
     #[test]
     fn test_lines_writer() {
-        let mut writer = LinesWriter::with_capacity(3);
+        let mut writer = LinesWriter::with_lines(3);
 
         writer.write_tag("host", "host1").unwrap();
         writer.write_f64("cpu", 0.5).unwrap();
         writer.write_f64("memory", 0.4).unwrap();
         writer.write_string("name", "name1").unwrap();
-        writer.write_ms_ts("ts", 101011000).unwrap();
+        writer
+            .write_ts("ts", (101011000, Precision::MILLISECOND))
+            .unwrap();
         writer.commit();
 
         writer.write_tag("host", "host2").unwrap();
-        writer.write_ms_ts("ts", 102011001).unwrap();
+        writer
+            .write_ts("ts", (102011001, Precision::MILLISECOND))
+            .unwrap();
         writer.write_bool("enable_reboot", true).unwrap();
         writer.write_u64("year_of_service", 2).unwrap();
         writer.write_i64("temperature", 4).unwrap();
@@ -213,7 +239,9 @@ mod tests {
         writer.write_tag("host", "host3").unwrap();
         writer.write_f64("cpu", 0.4).unwrap();
         writer.write_u64("cpu_core_num", 16).unwrap();
-        writer.write_ms_ts("ts", 103011002).unwrap();
+        writer
+            .write_ts("ts", (103011002, Precision::MILLISECOND))
+            .unwrap();
         writer.commit();
 
         let insert_batch = writer.finish();
@@ -297,5 +325,20 @@ mod tests {
         for (idx, b) in expected.iter().enumerate() {
             assert_eq!(b, bitvec.get(idx).unwrap())
         }
+    }
+
+    #[test]
+    fn test_to_ms() {
+        assert_eq!(100, to_ms_ts(Precision::NANOSECOND, 100110000));
+        assert_eq!(100110, to_ms_ts(Precision::MICROSECOND, 100110000));
+        assert_eq!(100110000, to_ms_ts(Precision::MILLISECOND, 100110000));
+        assert_eq!(
+            100110000 * 1000 * 60,
+            to_ms_ts(Precision::MINUTE, 100110000)
+        );
+        assert_eq!(
+            100110000 * 1000 * 60 * 60,
+            to_ms_ts(Precision::HOUR, 100110000)
+        );
     }
 }

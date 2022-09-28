@@ -21,19 +21,16 @@ use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
 use self::influxdb::influxdb_write;
-use crate::query_handler::OpentsdbProtocolHandlerRef;
+use crate::error::{Result, StartHttpSnafu};
 use crate::query_handler::SqlQueryHandlerRef;
+use crate::query_handler::{InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef};
 use crate::server::Server;
-use crate::{
-    error::{Result, StartHttpSnafu},
-    query_handler::InfluxdbProtocolLineHandlerRef,
-};
 
 const HTTP_API_VERSION: &str = "v1";
 
 pub struct HttpServer {
     sql_handler: SqlQueryHandlerRef,
-    influxdb_handler: Option<crate::query_handler::InfluxdbProtocolLineHandlerRef>,
+    influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
 }
 
@@ -139,7 +136,7 @@ impl HttpServer {
         self.opentsdb_handler.get_or_insert(handler);
     }
 
-    pub fn set_influxdb_handler(&mut self, handler: InfluxdbProtocolLineHandlerRef) {
+    pub fn set_influxdb_handler(&mut self, handler: InfluxdbLineProtocolHandlerRef) {
         debug_assert!(
             self.influxdb_handler.is_none(),
             "Influxdb line protocol handler can be set only once!"
@@ -163,15 +160,16 @@ impl HttpServer {
         let mut router = Router::new().nest(&format!("/{}", HTTP_API_VERSION), sql_router);
 
         if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
-            let opentsdb_router = Router::with_state(opentsdb_handler.clone())
+            let opentsdb_router = Router::with_state(opentsdb_handler)
                 .route("/api/put", routing::post(opentsdb::put));
 
             router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
         }
 
+        // TODO(fys): Creating influxdb's database when we can create greptime schema.
         if let Some(influxdb_handler) = self.influxdb_handler.clone() {
-            let influxdb_router = Router::with_state(influxdb_handler.clone())
-                .route("/write", routing::post(influxdb_write));
+            let influxdb_router =
+                Router::with_state(influxdb_handler).route("/write", routing::post(influxdb_write));
 
             router = router.nest(&format!("/{}/influxdb", HTTP_API_VERSION), influxdb_router);
         }

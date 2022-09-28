@@ -1,12 +1,18 @@
 use std::collections::HashMap;
 
-use common_grpc::writer::LinesWriter;
-use influxdb_line_protocol::{parse_lines, FieldValue, ParsedLine};
+use common_grpc::writer::{LinesWriter, Precision};
+use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
 
-use crate::error::{InfluxdbLineProtocolSnafu, InfluxdbLinesWriteSnafu};
+use crate::error::{Error, InfluxdbLineProtocolSnafu, InfluxdbLinesWriteSnafu};
 
 pub const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
+pub const DEFAULT_TIME_PRECISION: Precision = Precision::NANOSECOND;
+
+pub struct InfluxdbRequest {
+    pub precision: Option<Precision>,
+    pub lines: String,
+}
 
 type TableName = String;
 
@@ -14,22 +20,21 @@ pub struct InsertBatches {
     pub data: Vec<(TableName, api::v1::codec::InsertBatch)>,
 }
 
-impl TryFrom<&str> for InsertBatches {
-    type Error = crate::error::Error;
+impl TryFrom<&InfluxdbRequest> for InsertBatches {
+    type Error = Error;
 
-    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: &InfluxdbRequest) -> std::result::Result<Self, Self::Error> {
         let mut writers: HashMap<TableName, LinesWriter> = HashMap::new();
+        let lines = parse_lines(&value.lines)
+            .collect::<influxdb_line_protocol::Result<Vec<_>>>()
+            .context(InfluxdbLineProtocolSnafu)?;
+        let line_len = lines.len();
 
-        let lines: influxdb_line_protocol::Result<Vec<ParsedLine>> = parse_lines(value).collect();
-        let lines = lines.context(InfluxdbLineProtocolSnafu)?;
-        let to_insert = lines.len();
         for line in lines {
-            let line = line;
-
             let table_name = line.series.measurement;
             let writer = writers
                 .entry(table_name.to_string())
-                .or_insert_with(|| LinesWriter::with_capacity(to_insert));
+                .or_insert_with(|| LinesWriter::with_lines(line_len));
 
             let tags = line.series.tag_set;
             if let Some(tags) = tags {
@@ -73,8 +78,13 @@ impl TryFrom<&str> for InsertBatches {
             }
 
             if let Some(timestamp) = line.timestamp {
+                let precision = if let Some(val) = &value.precision {
+                    *val
+                } else {
+                    DEFAULT_TIME_PRECISION
+                };
                 writer
-                    .write_ms_ts(INFLUXDB_TIMESTAMP_COLUMN_NAME, timestamp / 1000000)
+                    .write_ts(INFLUXDB_TIMESTAMP_COLUMN_NAME, (timestamp, precision))
                     .context(InfluxdbLinesWriteSnafu)?;
             }
 
@@ -100,6 +110,7 @@ mod tests {
     use common_base::BitVec;
 
     use super::InsertBatches;
+    use crate::influxdb::InfluxdbRequest;
 
     #[test]
     fn test_convert_influxdb_lines() {
@@ -109,7 +120,12 @@ monitor1,host=host2 memory=1027 1663840496400340001
 monitor2,host=host3 cpu=66.5 1663840496100023102
 monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
 
-        let insert_batches: InsertBatches = lines.try_into().unwrap();
+        let influxdb_req = &InfluxdbRequest {
+            precision: None,
+            lines: lines.to_string(),
+        };
+
+        let insert_batches: InsertBatches = influxdb_req.try_into().unwrap();
         let insert_batches = insert_batches.data;
 
         assert_eq!(2, insert_batches.len());

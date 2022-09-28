@@ -35,5 +35,8 @@ pub enum Error {
     },
 
     #[snafu(display("Write type mismatch, column name: {}", column_name))]
-    TypeMismatch { column_name: String },
+    TypeMismatch {
+        column_name: String,
+        backtrace: Backtrace,
+    },
 }

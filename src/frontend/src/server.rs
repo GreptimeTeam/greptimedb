@@ -84,6 +84,12 @@ impl Services {
             None
         };
 
+        let influxdb_enable = opts
+            .influxdb_options
+            .as_ref()
+            .map(|opts| opts.enable)
+            .unwrap_or(true);
+
         let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
             let http_addr = parse_addr(http_addr)?;
 
@@ -91,7 +97,9 @@ impl Services {
             if opentsdb_server_and_addr.is_some() {
                 http_server.set_opentsdb_handler(instance.clone());
             }
-            http_server.set_influxdb_handler(instance.clone());
+            if influxdb_enable {
+                http_server.set_influxdb_handler(instance.clone());
+            }
 
             Some((Box::new(http_server) as _, http_addr))
         } else {
