@@ -408,7 +408,7 @@ mod tests {
     fn test_parse_timestamp_literal() {
         match parse_string_to_value(
             "timestamp_col",
-            "2022-02-22 00:01:01".to_string(),
+            "2022-02-22T00:01:01+08:00".to_string(),
             &ConcreteDataType::timestamp_millis_datatype(),
         )
         .unwrap()
@@ -424,7 +424,7 @@ mod tests {
 
         match parse_string_to_value(
             "timestamp_col",
-            "2022-02-22 00:01:01".to_string(),
+            "2022-02-22T00:01:01+08:00".to_string(),
             &ConcreteDataType::timestamp_datatype(TimeUnit::Second),
         )
         .unwrap()
@@ -440,7 +440,7 @@ mod tests {
 
         match parse_string_to_value(
             "timestamp_col",
-            "2022-02-22 00:01:01".to_string(),
+            "2022-02-22T00:01:01+08:00".to_string(),
             &ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
         )
         .unwrap()
@@ -456,7 +456,7 @@ mod tests {
 
         match parse_string_to_value(
             "timestamp_col",
-            "2022-02-22 00:01:01".to_string(),
+            "2022-02-22T00:01:01+08:00".to_string(),
             &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
         )
         .unwrap()
