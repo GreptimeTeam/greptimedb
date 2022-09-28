@@ -329,6 +329,8 @@ impl From<Error> for tonic::Status {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use common_error::ext::BoxedError;
     use common_error::mock::MockError;
 
@@ -382,5 +384,13 @@ mod tests {
             .unwrap();
         assert_internal_error(&err);
         assert_tonic_internal_error(err);
+    }
+
+    #[test]
+    fn test_parse_timestamp() {
+        let err = common_time::timestamp::Timestamp::from_str("test")
+            .context(ParseTimestampSnafu { raw: "test" })
+            .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 }

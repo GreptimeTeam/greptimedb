@@ -469,5 +469,12 @@ mod tests {
                 unreachable!()
             }
         }
+
+        assert!(parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22T00:01:01+08".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+        )
+        .is_err());
     }
 }
