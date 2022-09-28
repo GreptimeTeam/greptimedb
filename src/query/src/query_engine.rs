@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn test_query_engine_factory() {
-        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
         let factory = QueryEngineFactory::new(catalog_list);
 
         let engine = factory.query_engine();

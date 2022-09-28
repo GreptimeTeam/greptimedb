@@ -283,7 +283,9 @@ mod tests {
     use table::table::numbers::NumbersTable;
 
     use super::*;
-    use crate::memory::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
+    use crate::local::memory::{
+        new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider,
+    };
     use crate::CatalogList;
 
     #[tokio::test]

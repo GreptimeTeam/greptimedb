@@ -118,7 +118,7 @@ mod tests {
         ));
 
         let catalog_manager = Arc::new(
-            catalog::LocalCatalogManager::try_new(mock_engine.clone())
+            catalog::local::LocalCatalogManager::try_new(mock_engine.clone())
                 .await
                 .unwrap(),
         );

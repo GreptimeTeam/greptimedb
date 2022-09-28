@@ -3,7 +3,7 @@ mod pow;
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
-use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{
     CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
@@ -34,7 +34,7 @@ use crate::pow::pow;
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    let catalog_list = catalog::memory::new_memory_catalog_list()?;
+    let catalog_list = catalog::local::new_memory_catalog_list()?;
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
 
@@ -90,7 +90,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
 #[tokio::test]
 async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    let catalog_list = catalog::memory::new_memory_catalog_list()?;
+    let catalog_list = catalog::local::new_memory_catalog_list()?;
 
     let default_schema = Arc::new(MemorySchemaProvider::new());
     default_schema
