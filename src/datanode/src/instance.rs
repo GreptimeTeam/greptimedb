@@ -47,7 +47,7 @@ impl Instance {
             object_store,
         ));
         let catalog_manager = Arc::new(
-            catalog::LocalCatalogManager::try_new(table_engine.clone())
+            catalog::local::LocalCatalogManager::try_new(table_engine.clone())
                 .await
                 .context(NewCatalogSnafu)?,
         );
@@ -96,7 +96,7 @@ impl Instance {
         ));
 
         let catalog_manager = Arc::new(
-            catalog::LocalCatalogManager::try_new(mock_engine.clone())
+            catalog::local::manager::LocalCatalogManager::try_new(mock_engine.clone())
                 .await
                 .unwrap(),
         );

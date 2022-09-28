@@ -8,13 +8,11 @@ use table::requests::CreateTableRequest;
 use table::TableRef;
 
 pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
-pub use crate::manager::LocalCatalogManager;
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
 pub mod consts;
 pub mod error;
-mod manager;
-pub mod memory;
+pub mod local;
 pub mod schema;
 mod system;
 pub mod tables;

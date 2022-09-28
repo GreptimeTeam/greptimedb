@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{
     CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };

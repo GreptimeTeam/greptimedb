@@ -199,7 +199,7 @@ mod tests {
         ));
 
         let catalog_list = Arc::new(
-            catalog::LocalCatalogManager::try_new(table_engine.clone())
+            catalog::local::LocalCatalogManager::try_new(table_engine.clone())
                 .await
                 .unwrap(),
         );

@@ -97,7 +97,7 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
         object_store,
     ));
     let catalog_manager = Arc::new(
-        catalog::LocalCatalogManager::try_new(mock_engine.clone())
+        catalog::local::LocalCatalogManager::try_new(mock_engine.clone())
             .await
             .unwrap(),
     );

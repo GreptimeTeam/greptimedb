@@ -15,16 +15,16 @@ use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
 use table::TableRef;
 
-use super::error::Result;
 use crate::consts::{
     INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
 };
+use crate::error::Result;
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, IllegalManagerStateSnafu, OpenTableSnafu,
     ReadSystemCatalogSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
     SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
-use crate::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use crate::local::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
     decode_system_catalog, Entry, SystemCatalogTable, TableEntry, ENTRY_TYPE_INDEX, KEY_INDEX,
     VALUE_INDEX,
@@ -50,7 +50,7 @@ impl LocalCatalogManager {
     /// Create a new [CatalogManager] with given user catalogs and table engine
     pub async fn try_new(engine: TableEngineRef) -> Result<Self> {
         let table = SystemCatalogTable::new(engine.clone()).await?;
-        let memory_catalog_list = crate::memory::new_memory_catalog_list()?;
+        let memory_catalog_list = crate::local::memory::new_memory_catalog_list()?;
         let system_catalog = Arc::new(SystemCatalog::new(
             table,
             memory_catalog_list.clone(),

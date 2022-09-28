@@ -247,7 +247,7 @@ impl SchemaProvider for SchemaProviderAdapter {
 
 #[cfg(test)]
 mod tests {
-    use catalog::memory::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
+    use catalog::local::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
     use table::table::numbers::NumbersTable;
 
     use super::*;

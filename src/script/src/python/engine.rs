@@ -133,7 +133,7 @@ impl ScriptEngine for PyEngine {
 
 #[cfg(test)]
 mod tests {
-    use catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
+    use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
     use catalog::{
         CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
     };
@@ -149,7 +149,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compile_execute() {
-        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
         default_schema
