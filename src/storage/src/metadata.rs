@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 use store_api::storage::{
     consts::{self, ReservedColumnId},
-    ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyId, ColumnId,
-    ColumnSchema, RegionDescriptor, RegionId, RegionMeta, RowKeyDescriptor, Schema, SchemaRef,
+    AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder, ColumnFamilyDescriptor,
+    ColumnFamilyDescriptorBuilder, ColumnFamilyId, ColumnId, RegionDescriptor,
+    RegionDescriptorBuilder, RegionId, RegionMeta, RowKeyDescriptor, RowKeyDescriptorBuilder,
+    Schema, SchemaRef,
 };
 
 use crate::manifest::action::{RawColumnFamiliesMetadata, RawColumnsMetadata, RawRegionMetadata};
@@ -40,6 +42,13 @@ pub enum Error {
 
     #[snafu(display("Missing timestamp key column"))]
     MissingTimestamp { backtrace: Backtrace },
+
+    #[snafu(display("Expect altering metadata with version {}, given {}", expect, given))]
+    InvalidVersion {
+        expect: VersionNumber,
+        given: VersionNumber,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -61,6 +70,10 @@ impl RegionMetaImpl {
 impl RegionMeta for RegionMetaImpl {
     fn schema(&self) -> &SchemaRef {
         self.metadata.user_schema()
+    }
+
+    fn version(&self) -> u32 {
+        self.metadata.version
     }
 }
 
@@ -107,6 +120,52 @@ impl RegionMetadata {
     #[inline]
     pub fn version(&self) -> u32 {
         self.schema.version()
+    }
+
+    /// Returns a new [RegionMetadata] after alteration, leave `self` unchanged.
+    pub fn alter(&self, req: &AlterRequest) -> Result<RegionMetadata> {
+        ensure!(
+            req.version == self.version,
+            InvalidVersionSnafu {
+                expect: req.version,
+                given: self.version,
+            }
+        );
+
+        let mut desc = self.to_descriptor();
+        // Apply the alter operation to the descriptor.
+        req.operation.apply(&mut desc);
+
+        RegionMetadataBuilder::try_from(desc)?
+            .version(self.version + 1) // Bump the metadata version.
+            .build()
+    }
+
+    fn to_descriptor(&self) -> RegionDescriptor {
+        let row_key = self.columns.to_row_key_descriptor();
+        let mut builder = RegionDescriptorBuilder::default()
+            .id(self.id)
+            .name(&self.name)
+            .row_key(row_key);
+
+        for (cf_id, cf) in &self.column_families.id_to_cfs {
+            let mut cf_builder = ColumnFamilyDescriptorBuilder::default()
+                .cf_id(*cf_id)
+                .name(&cf.name);
+            for column in &self.columns.columns[cf.column_index_start..cf.column_index_end] {
+                cf_builder = cf_builder.push_column(column.desc.clone());
+            }
+            // It should always be able to build the descriptor back.
+            let desc = cf_builder.build().unwrap();
+            if *cf_id == consts::DEFAULT_CF_ID {
+                builder = builder.default_cf(desc);
+            } else {
+                builder = builder.push_extra_column_family(desc);
+            }
+        }
+
+        // We could ensure all fields are set here.
+        builder.build().unwrap()
     }
 }
 
@@ -238,6 +297,20 @@ impl ColumnsMetadata {
     pub fn column_metadata(&self, idx: usize) -> &ColumnMetadata {
         &self.columns[idx]
     }
+
+    fn to_row_key_descriptor(&self) -> RowKeyDescriptor {
+        let mut builder =
+            RowKeyDescriptorBuilder::default().enable_version_column(self.enable_version_column);
+        for (idx, column) in self.iter_row_key_columns().enumerate() {
+            // Not a timestamp column.
+            if idx != self.timestamp_key_index {
+                builder = builder.push_column(column.desc.clone());
+            }
+        }
+        builder = builder.timestamp(self.column_metadata(self.timestamp_key_index).desc.clone());
+        // Since the metadata is built from descriptor, so it should always be able to build the descriptor back.
+        builder.build().unwrap()
+    }
 }
 
 pub type ColumnsMetadataRef = Arc<ColumnsMetadata>;
@@ -315,12 +388,10 @@ pub struct ColumnFamilyMetadata {
     pub column_index_end: usize,
 }
 
-impl TryFrom<RegionDescriptor> for RegionMetadata {
+impl TryFrom<RegionDescriptor> for RegionMetadataBuilder {
     type Error = Error;
 
-    fn try_from(desc: RegionDescriptor) -> Result<RegionMetadata> {
-        // Doesn't set version explicitly here, because this is a new region meta
-        // created from descriptor, using initial version is reasonable.
+    fn try_from(desc: RegionDescriptor) -> Result<RegionMetadataBuilder> {
         let mut builder = RegionMetadataBuilder::new()
             .name(desc.name)
             .id(desc.id)
@@ -330,17 +401,25 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
             builder = builder.add_column_family(cf)?;
         }
 
+        Ok(builder)
+    }
+}
+
+impl TryFrom<RegionDescriptor> for RegionMetadata {
+    type Error = Error;
+
+    fn try_from(desc: RegionDescriptor) -> Result<RegionMetadata> {
+        // Doesn't set version explicitly here, because this is a new region meta
+        // created from descriptor, using initial version is reasonable.
+        let builder = RegionMetadataBuilder::try_from(desc)?;
+
         builder.build()
     }
 }
 
-// TODO(yingwen): Add a builder to build ColumnMetadata and refactor this builder.
 #[derive(Default)]
-struct RegionMetadataBuilder {
-    id: RegionId,
-    name: String,
+struct ColumnsMetadataBuilder {
     columns: Vec<ColumnMetadata>,
-    column_schemas: Vec<ColumnSchema>,
     name_to_col_index: HashMap<String, usize>,
     /// Column id set, used to validate column id uniqueness.
     column_ids: HashSet<ColumnId>,
@@ -349,27 +428,10 @@ struct RegionMetadataBuilder {
     row_key_end: usize,
     timestamp_key_index: Option<usize>,
     enable_version_column: bool,
-
-    id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
-    cf_names: HashSet<String>,
 }
 
-impl RegionMetadataBuilder {
-    fn new() -> RegionMetadataBuilder {
-        RegionMetadataBuilder::default()
-    }
-
-    fn name(mut self, name: impl Into<String>) -> Self {
-        self.name = name.into();
-        self
-    }
-
-    fn id(mut self, id: RegionId) -> Self {
-        self.id = id;
-        self
-    }
-
-    fn row_key(mut self, key: RowKeyDescriptor) -> Result<Self> {
+impl ColumnsMetadataBuilder {
+    fn row_key(&mut self, key: RowKeyDescriptor) -> Result<&mut Self> {
         for col in key.columns {
             self.push_row_key_column(col)?;
         }
@@ -390,7 +452,77 @@ impl RegionMetadataBuilder {
         Ok(self)
     }
 
-    fn add_column_family(mut self, cf: ColumnFamilyDescriptor) -> Result<Self> {
+    fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<&mut Self> {
+        self.push_value_column(consts::KEY_CF_ID, desc)
+    }
+
+    fn push_value_column(
+        &mut self,
+        cf_id: ColumnFamilyId,
+        desc: ColumnDescriptor,
+    ) -> Result<&mut Self> {
+        ensure!(
+            !is_internal_value_column(&desc.name),
+            ReservedColumnSnafu { name: &desc.name }
+        );
+
+        self.push_new_column(cf_id, desc)
+    }
+
+    fn push_new_column(
+        &mut self,
+        cf_id: ColumnFamilyId,
+        desc: ColumnDescriptor,
+    ) -> Result<&mut Self> {
+        ensure!(
+            !self.name_to_col_index.contains_key(&desc.name),
+            ColNameExistsSnafu { name: &desc.name }
+        );
+        ensure!(
+            !self.column_ids.contains(&desc.id),
+            ColIdExistsSnafu { id: desc.id }
+        );
+
+        let column_name = desc.name.clone();
+        let column_id = desc.id;
+        let meta = ColumnMetadata { cf_id, desc };
+
+        let column_index = self.columns.len();
+        self.columns.push(meta);
+        self.name_to_col_index.insert(column_name, column_index);
+        self.column_ids.insert(column_id);
+
+        Ok(self)
+    }
+
+    fn build(mut self) -> Result<ColumnsMetadata> {
+        let timestamp_key_index = self.timestamp_key_index.context(MissingTimestampSnafu)?;
+
+        let user_column_end = self.columns.len();
+        // Setup internal columns.
+        for internal_desc in internal_column_descs() {
+            self.push_new_column(consts::DEFAULT_CF_ID, internal_desc)?;
+        }
+
+        Ok(ColumnsMetadata {
+            columns: self.columns,
+            name_to_col_index: self.name_to_col_index,
+            row_key_end: self.row_key_end,
+            timestamp_key_index,
+            enable_version_column: self.enable_version_column,
+            user_column_end,
+        })
+    }
+}
+
+#[derive(Default)]
+struct ColumnFamiliesMetadataBuilder {
+    id_to_cfs: HashMap<ColumnFamilyId, ColumnFamilyMetadata>,
+    cf_names: HashSet<String>,
+}
+
+impl ColumnFamiliesMetadataBuilder {
+    fn add_column_family(&mut self, cf: ColumnFamilyMetadata) -> Result<&mut Self> {
         ensure!(
             !self.id_to_cfs.contains_key(&cf.cf_id),
             CfIdExistsSnafu { id: cf.cf_id }
@@ -401,12 +533,68 @@ impl RegionMetadataBuilder {
             CfNameExistsSnafu { name: &cf.name }
         );
 
-        let column_index_start = self.columns.len();
-        let column_index_end = column_index_start + cf.columns.len();
-        for col in cf.columns {
-            self.push_value_column(cf.cf_id, col)?;
-        }
+        self.cf_names.insert(cf.name.clone());
+        self.id_to_cfs.insert(cf.cf_id, cf);
 
+        Ok(self)
+    }
+
+    fn build(self) -> ColumnFamiliesMetadata {
+        ColumnFamiliesMetadata {
+            id_to_cfs: self.id_to_cfs,
+        }
+    }
+}
+
+struct RegionMetadataBuilder {
+    id: RegionId,
+    name: String,
+    columns_meta_builder: ColumnsMetadataBuilder,
+    cfs_meta_builder: ColumnFamiliesMetadataBuilder,
+    version: VersionNumber,
+}
+
+impl Default for RegionMetadataBuilder {
+    fn default() -> RegionMetadataBuilder {
+        RegionMetadataBuilder::new()
+    }
+}
+
+impl RegionMetadataBuilder {
+    fn new() -> RegionMetadataBuilder {
+        RegionMetadataBuilder {
+            id: 0,
+            name: String::new(),
+            columns_meta_builder: ColumnsMetadataBuilder::default(),
+            cfs_meta_builder: ColumnFamiliesMetadataBuilder::default(),
+            version: Schema::INITIAL_VERSION,
+        }
+    }
+
+    fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    fn id(mut self, id: RegionId) -> Self {
+        self.id = id;
+        self
+    }
+
+    fn version(mut self, version: VersionNumber) -> Self {
+        self.version = version;
+        self
+    }
+
+    fn row_key(mut self, key: RowKeyDescriptor) -> Result<Self> {
+        self.columns_meta_builder.row_key(key)?;
+
+        Ok(self)
+    }
+
+    fn add_column_family(mut self, cf: ColumnFamilyDescriptor) -> Result<Self> {
+        let column_index_start = self.columns_meta_builder.columns.len();
+        let column_index_end = column_index_start + cf.columns.len();
         let cf_meta = ColumnFamilyMetadata {
             name: cf.name.clone(),
             cf_id: cf.cf_id,
@@ -414,84 +602,28 @@ impl RegionMetadataBuilder {
             column_index_end,
         };
 
-        self.id_to_cfs.insert(cf.cf_id, cf_meta);
-        self.cf_names.insert(cf.name);
+        self.cfs_meta_builder.add_column_family(cf_meta)?;
+
+        for col in cf.columns {
+            self.columns_meta_builder.push_value_column(cf.cf_id, col)?;
+        }
 
         Ok(self)
     }
 
-    fn build(mut self) -> Result<RegionMetadata> {
-        let timestamp_key_index = self.timestamp_key_index.context(MissingTimestampSnafu)?;
-
-        let user_column_end = self.columns.len();
-        // Setup internal columns.
-        for internal_desc in internal_column_descs() {
-            self.push_new_column(consts::DEFAULT_CF_ID, internal_desc)?;
-        }
-
-        let columns = Arc::new(ColumnsMetadata {
-            columns: self.columns,
-            name_to_col_index: self.name_to_col_index,
-            row_key_end: self.row_key_end,
-            timestamp_key_index,
-            enable_version_column: self.enable_version_column,
-            user_column_end,
-        });
-        let schema = Arc::new(
-            RegionSchema::new(columns.clone(), Schema::INITIAL_VERSION)
-                .context(InvalidSchemaSnafu)?,
-        );
+    fn build(self) -> Result<RegionMetadata> {
+        let columns = Arc::new(self.columns_meta_builder.build()?);
+        let schema =
+            Arc::new(RegionSchema::new(columns.clone(), self.version).context(InvalidSchemaSnafu)?);
 
         Ok(RegionMetadata {
             id: self.id,
             name: self.name,
             schema,
             columns,
-            column_families: ColumnFamiliesMetadata {
-                id_to_cfs: self.id_to_cfs,
-            },
-            version: 0,
+            column_families: self.cfs_meta_builder.build(),
+            version: self.version,
         })
-    }
-
-    // Helper methods:
-
-    fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<()> {
-        self.push_value_column(consts::KEY_CF_ID, desc)
-    }
-
-    fn push_value_column(&mut self, cf_id: ColumnFamilyId, desc: ColumnDescriptor) -> Result<()> {
-        ensure!(
-            !is_internal_value_column(&desc.name),
-            ReservedColumnSnafu { name: &desc.name }
-        );
-
-        self.push_new_column(cf_id, desc)
-    }
-
-    fn push_new_column(&mut self, cf_id: ColumnFamilyId, desc: ColumnDescriptor) -> Result<()> {
-        ensure!(
-            !self.name_to_col_index.contains_key(&desc.name),
-            ColNameExistsSnafu { name: &desc.name }
-        );
-        ensure!(
-            !self.column_ids.contains(&desc.id),
-            ColIdExistsSnafu { id: desc.id }
-        );
-
-        let column_schema = ColumnSchema::from(&desc);
-
-        let column_name = desc.name.clone();
-        let column_id = desc.id;
-        let meta = ColumnMetadata { cf_id, desc };
-
-        let column_index = self.columns.len();
-        self.columns.push(meta);
-        self.column_schemas.push(column_schema);
-        self.name_to_col_index.insert(column_name, column_index);
-        self.column_ids.insert(column_id);
-
-        Ok(())
     }
 }
 
@@ -541,7 +673,8 @@ fn is_internal_value_column(column_name: &str) -> bool {
 mod tests {
     use datatypes::type_id::LogicalTypeId;
     use store_api::storage::{
-        ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder, RowKeyDescriptorBuilder,
+        AddColumn, AlterOperation, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder,
+        RowKeyDescriptorBuilder,
     };
 
     use super::*;
@@ -794,5 +927,97 @@ mod tests {
 
         let converted = RegionMetadata::try_from(raw).unwrap();
         assert_eq!(metadata, converted);
+    }
+
+    #[test]
+    fn test_alter_metadata_add_columns() {
+        let region_name = "region-0";
+        let builder = RegionDescBuilder::new(region_name)
+            .enable_version_column(false)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_value_column(("v1", LogicalTypeId::Float32, true));
+        let last_column_id = builder.last_column_id();
+        let metadata: RegionMetadata = builder.build().try_into().unwrap();
+
+        let req = AlterRequest {
+            operation: AlterOperation::AddColumns {
+                columns: vec![
+                    AddColumn {
+                        desc: ColumnDescriptorBuilder::new(
+                            last_column_id + 1,
+                            "k2",
+                            ConcreteDataType::int32_datatype(),
+                        )
+                        .is_nullable(false)
+                        .build()
+                        .unwrap(),
+                        is_key: true,
+                    },
+                    AddColumn {
+                        desc: ColumnDescriptorBuilder::new(
+                            last_column_id + 2,
+                            "v2",
+                            ConcreteDataType::float32_datatype(),
+                        )
+                        .build()
+                        .unwrap(),
+                        is_key: false,
+                    },
+                ],
+            },
+            version: 0,
+        };
+        let metadata = metadata.alter(&req).unwrap();
+
+        let builder: RegionMetadataBuilder = RegionDescBuilder::new(region_name)
+            .enable_version_column(false)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_key_column(("k2", LogicalTypeId::Int32, false))
+            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .build()
+            .try_into()
+            .unwrap();
+        let expect = builder.version(1).build().unwrap();
+        assert_eq!(expect, metadata);
+    }
+
+    #[test]
+    fn test_alter_metadata_drop_columns() {
+        let region_name = "region-0";
+        let metadata: RegionMetadata = RegionDescBuilder::new(region_name)
+            .enable_version_column(false)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_key_column(("k2", LogicalTypeId::Int32, false))
+            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .build()
+            .try_into()
+            .unwrap();
+
+        let req = AlterRequest {
+            operation: AlterOperation::DropColumns {
+                names: vec![
+                    String::from("k1"), // k1 would be ignored.
+                    String::from("v1"),
+                ],
+            },
+            version: 0,
+        };
+        let metadata = metadata.alter(&req).unwrap();
+
+        let builder = RegionDescBuilder::new(region_name)
+            .enable_version_column(false)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_key_column(("k2", LogicalTypeId::Int32, false));
+        let last_column_id = builder.last_column_id() + 1;
+        let builder: RegionMetadataBuilder = builder
+            .set_last_column_id(last_column_id) // This id is reserved for v1
+            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .build()
+            .try_into()
+            .unwrap();
+        let expect = builder.version(1).build().unwrap();
+        assert_eq!(expect, metadata);
     }
 }

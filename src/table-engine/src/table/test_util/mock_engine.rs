@@ -12,9 +12,9 @@ use datatypes::schema::{ColumnSchema, Schema};
 use storage::metadata::{RegionMetaImpl, RegionMetadata};
 use storage::write_batch::{Mutation, WriteBatch};
 use store_api::storage::{
-    Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse, OpenOptions,
-    ReadContext, Region, RegionDescriptor, RegionId, RegionMeta, ScanRequest, ScanResponse,
-    SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
+    AlterRequest, Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse,
+    OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, RegionMeta, ScanRequest,
+    ScanResponse, SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
@@ -115,13 +115,12 @@ impl Snapshot for MockSnapshot {
 // purpose the cost should be acceptable.
 #[derive(Debug, Clone)]
 pub struct MockRegion {
-    // FIXME(yingwen): Remove this once name is provided by metadata.
-    name: String,
     pub inner: Arc<MockRegionInner>,
 }
 
 #[derive(Debug)]
 pub struct MockRegionInner {
+    name: String,
     pub metadata: ArcSwap<RegionMetadata>,
     memtable: Arc<RwLock<MockMemtable>>,
 }
@@ -140,7 +139,7 @@ impl Region for MockRegion {
     }
 
     fn name(&self) -> &str {
-        &self.name
+        &self.inner.name
     }
 
     fn in_memory_metadata(&self) -> RegionMetaImpl {
@@ -163,9 +162,12 @@ impl Region for MockRegion {
         WriteBatch::new(self.in_memory_metadata().schema().clone())
     }
 
-    fn alter(&self, descriptor: RegionDescriptor) -> Result<()> {
-        let metadata = descriptor.try_into().unwrap();
+    async fn alter(&self, request: AlterRequest) -> Result<()> {
+        let current = self.inner.metadata.load();
+        // Mock engine just panic if failed to create a new metadata.
+        let metadata = current.alter(&request).unwrap();
         self.inner.update_metadata(metadata);
+
         Ok(())
     }
 }
@@ -177,6 +179,7 @@ impl MockRegionInner {
             memtable.insert(column.name.clone(), vec![]);
         }
         Self {
+            name: metadata.name().to_string(),
             metadata: ArcSwap::new(Arc::new(metadata)),
             memtable: Arc::new(RwLock::new(memtable)),
         }
@@ -277,7 +280,6 @@ impl StorageEngine for MockEngine {
         let name = descriptor.name.clone();
         let metadata = descriptor.try_into().unwrap();
         let region = MockRegion {
-            name: name.clone(),
             inner: Arc::new(MockRegionInner::new(metadata)),
         };
         regions.opened_regions.insert(name, region.clone());

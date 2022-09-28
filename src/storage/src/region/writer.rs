@@ -5,7 +5,7 @@ use common_time::RangeMillis;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::storage::{SequenceNumber, WriteContext, WriteRequest, WriteResponse};
+use store_api::storage::{AlterRequest, SequenceNumber, WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
@@ -92,6 +92,22 @@ impl RegionWriter {
         inner.replay(&self.version_mutex, writer_ctx).await
     }
 
+    /// Alter schema of the region.
+    pub async fn alter<S: LogStore>(
+        &self,
+        _alter_ctx: AlterContext<'_, S>,
+        _request: AlterRequest,
+    ) -> Result<()> {
+        // TODO(yingwen): [alter] implements alter:
+        // 1. acquire version lock
+        // 2. validate request
+        // 3. build schema based on new request
+        // 4. persist it into the region manifest
+        // 5. update version in VersionControl
+
+        unimplemented!()
+    }
+
     async fn persist_manifest_version<S: LogStore>(
         &self,
         wal: &Wal<S>,
@@ -134,6 +150,12 @@ impl<'a, S: LogStore> WriterContext<'a, S> {
     fn version_control(&self) -> &VersionControlRef {
         &self.shared.version_control
     }
+}
+
+pub struct AlterContext<'a, S: LogStore> {
+    pub shared: &'a SharedDataRef,
+    pub wal: &'a Wal<S>,
+    pub manifest: &'a RegionManifest,
 }
 
 #[derive(Debug)]

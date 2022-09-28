@@ -21,7 +21,9 @@ pub use self::descriptors::*;
 pub use self::engine::{CreateOptions, EngineContext, OpenOptions, StorageEngine};
 pub use self::metadata::RegionMeta;
 pub use self::region::{Region, WriteContext};
-pub use self::requests::{GetRequest, PutOperation, ScanRequest, WriteRequest};
+pub use self::requests::{
+    AddColumn, AlterOperation, AlterRequest, GetRequest, PutOperation, ScanRequest, WriteRequest,
+};
 pub use self::responses::{GetResponse, ScanResponse, WriteResponse};
 pub use self::snapshot::{ReadContext, Snapshot};
 pub use self::types::{OpType, SequenceNumber};

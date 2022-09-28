@@ -20,7 +20,7 @@ impl RegionDescBuilder {
     pub fn new<T: Into<String>>(name: T) -> Self {
         let key_builder = RowKeyDescriptorBuilder::new(
             ColumnDescriptorBuilder::new(
-                2,
+                1,
                 test_util::TIMESTAMP_NAME,
                 ConcreteDataType::timestamp_millis_datatype(),
             )
@@ -32,7 +32,7 @@ impl RegionDescBuilder {
         Self {
             id: 0,
             name: name.into(),
-            last_column_id: 2,
+            last_column_id: 1,
             key_builder,
             default_cf_builder: ColumnFamilyDescriptorBuilder::default(),
         }
@@ -43,20 +43,9 @@ impl RegionDescBuilder {
         self
     }
 
-    // This will reset the row key builder, so should be called before `push_key_column()`
-    // and `enable_version_column()`, or just call after `new()`.
-    //
-    // NOTE(ning): it's now possible to change this function to:
-    //
-    // ```
-    // self.key_builder.timestamp(self.new_column(column_def))
-    // ```
-    // to resolve the constraint above
-
     pub fn timestamp(mut self, column_def: ColumnDef) -> Self {
-        let builder = RowKeyDescriptorBuilder::new(self.new_column(column_def));
-
-        self.key_builder = builder;
+        let column = self.new_column(column_def);
+        self.key_builder = self.key_builder.timestamp(column);
         self
     }
 
@@ -77,6 +66,11 @@ impl RegionDescBuilder {
         self
     }
 
+    pub fn set_last_column_id(mut self, column_id: ColumnId) -> Self {
+        self.last_column_id = column_id;
+        self
+    }
+
     pub fn build(self) -> RegionDescriptor {
         RegionDescriptor {
             id: self.id,
@@ -85,6 +79,10 @@ impl RegionDescBuilder {
             default_cf: self.default_cf_builder.build().unwrap(),
             extra_cfs: Vec::new(),
         }
+    }
+
+    pub fn last_column_id(&self) -> ColumnId {
+        self.last_column_id
     }
 
     fn alloc_column_id(&mut self) -> ColumnId {

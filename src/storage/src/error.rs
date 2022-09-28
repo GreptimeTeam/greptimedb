@@ -8,7 +8,7 @@ use datatypes::arrow::error::ArrowError;
 use serde_json::error::Error as JsonError;
 use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
-use store_api::storage::SequenceNumber;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::metadata::Error as MetadataError;
 
@@ -102,9 +102,13 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to write WAL, WAL name: {}, source: {}", name, source))]
+    #[snafu(display(
+        "Failed to write WAL, WAL region_id: {}, source: {}",
+        region_id,
+        source
+    ))]
     WriteWal {
-        name: String,
+        region_id: RegionId,
         #[snafu(backtrace)]
         source: BoxedError,
     },
@@ -187,16 +191,16 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to read WAL, name: {}, source: {}", name, source))]
+    #[snafu(display("Failed to read WAL, region_id: {}, source: {}", region_id, source))]
     ReadWal {
-        name: String,
+        region_id: RegionId,
         #[snafu(backtrace)]
         source: BoxedError,
     },
 
-    #[snafu(display("WAL data corrupted, name: {}, message: {}", name, message))]
+    #[snafu(display("WAL data corrupted, region_id: {}, message: {}", region_id, message))]
     WalDataCorrupted {
-        name: String,
+        region_id: RegionId,
         message: String,
         backtrace: Backtrace,
     },
