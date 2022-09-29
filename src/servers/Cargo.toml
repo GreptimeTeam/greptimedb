@@ -22,7 +22,7 @@ hyper = { version = "0.14", features = ["full"] }
 metrics = "0.20"
 num_cpus = "1.13"
 opensrv-mysql = "0.1"
-pgwire = { version = "0.3" }
+pgwire = { version = "0.4" }
 query = { path = "../query" }
 serde = "1.0"
 serde_json = "1.0"
