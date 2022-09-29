@@ -1,5 +1,6 @@
 //! Region tests.
 
+mod alter;
 mod basic;
 mod flush;
 mod projection;
@@ -24,16 +25,16 @@ use crate::test_util::{
 };
 use crate::write_batch::PutData;
 
-/// Create metadata of a region with schema: (timestamp, v1).
+/// Create metadata of a region with schema: (timestamp, v0).
 pub fn new_metadata(region_name: &str, enable_version_column: bool) -> RegionMetadata {
     let desc = RegionDescBuilder::new(region_name)
         .enable_version_column(enable_version_column)
-        .push_value_column(("v1", LogicalTypeId::Int64, true))
+        .push_value_column(("v0", LogicalTypeId::Int64, true))
         .build();
     desc.try_into().unwrap()
 }
 
-/// Test region with schema (timestamp, v1).
+/// Test region with schema (timestamp, v0).
 pub struct TesterBase<S: LogStore> {
     pub region: RegionImpl<S>,
     write_ctx: WriteContext,
@@ -51,7 +52,7 @@ impl<S: LogStore> TesterBase<S> {
 
     /// Put without version specified.
     ///
-    /// Format of data: (timestamp, v1), timestamp is key, v1 is value.
+    /// Format of data: (timestamp, v0), timestamp is key, v0 is value.
     pub async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
         let data: Vec<(Timestamp, Option<i64>)> =
             data.iter().map(|(l, r)| ((*l).into(), *r)).collect();
@@ -98,7 +99,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
             &[
                 (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
                 (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                ("v1", LogicalTypeId::Int64, true),
+                ("v0", LogicalTypeId::Int64, true),
             ],
             Some(0),
         )
@@ -106,7 +107,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
         write_batch_util::new_write_batch(
             &[
                 (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
-                ("v1", LogicalTypeId::Int64, true),
+                ("v0", LogicalTypeId::Int64, true),
             ],
             Some(0),
         )
@@ -122,7 +123,7 @@ fn new_put_data(data: &[(Timestamp, Option<i64>)]) -> PutData {
     put_data
         .add_key_column(test_util::TIMESTAMP_NAME, Arc::new(timestamps))
         .unwrap();
-    put_data.add_value_column("v1", Arc::new(values)).unwrap();
+    put_data.add_value_column("v0", Arc::new(values)).unwrap();
 
     put_data
 }
@@ -149,7 +150,7 @@ async fn test_new_region() {
     let desc = RegionDescBuilder::new(region_name)
         .enable_version_column(true)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
-        .push_value_column(("v1", LogicalTypeId::Float32, true))
+        .push_value_column(("v0", LogicalTypeId::Float32, true))
         .build();
     let metadata = desc.try_into().unwrap();
 
@@ -168,7 +169,7 @@ async fn test_new_region() {
             ("k1", LogicalTypeId::Int32, false),
             (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
             (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-            ("v1", LogicalTypeId::Float32, true),
+            ("v0", LogicalTypeId::Float32, true),
         ],
         Some(1),
     );
