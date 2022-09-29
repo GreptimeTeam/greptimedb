@@ -146,12 +146,12 @@ impl ErrorExt for Error {
             NotSupported { .. }
             | InvalidQuery { .. }
             | InfluxdbLineProtocol { .. }
-            | InfluxdbLinesWrite { .. }
             | ConnResetByPeer { .. }
             | InvalidOpentsdbLine { .. }
             | InvalidOpentsdbJsonRequest { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
+            InfluxdbLinesWrite { source, .. } => source.status_code(),
             Hyper { .. } => StatusCode::Unknown,
         }
     }

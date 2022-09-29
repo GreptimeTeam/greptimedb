@@ -10,14 +10,10 @@ use snafu::ensure;
 
 use crate::error::{Result, TypeMismatchSnafu};
 
-pub struct LinesWriter {
-    inner: Inner,
-}
-
 type ColumnName = String;
 
 #[derive(Default)]
-struct Inner {
+pub struct LinesWriter {
     column_name_index: HashMap<ColumnName, usize>,
     null_masks: Vec<BitVec>,
     batch: InsertBatch,
@@ -27,10 +23,8 @@ struct Inner {
 impl LinesWriter {
     pub fn with_lines(lines: usize) -> Self {
         Self {
-            inner: Inner {
-                lines,
-                ..Default::default()
-            },
+            lines,
+            ..Default::default()
         }
     }
 
@@ -42,12 +36,16 @@ impl LinesWriter {
         );
         ensure!(
             column.datatype == Some(ColumnDataType::Timestamp.into()),
-            TypeMismatchSnafu { column_name }
+            TypeMismatchSnafu {
+                column_name,
+                expected: "timestamp",
+                actual: format!("{:?}", column.datatype)
+            }
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.ts_millis_values.push(to_ms_ts(value.1, value.0));
-        self.inner.null_masks[idx].push(false);
+        self.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -55,12 +53,16 @@ impl LinesWriter {
         let (idx, column) = self.mut_column(column_name, ColumnDataType::String, SemanticType::Tag);
         ensure!(
             column.datatype == Some(ColumnDataType::String.into()),
-            TypeMismatchSnafu { column_name }
+            TypeMismatchSnafu {
+                column_name,
+                expected: "string",
+                actual: format!("{:?}", column.datatype)
+            }
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.string_values.push(value.to_string());
-        self.inner.null_masks[idx].push(false);
+        self.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -69,12 +71,16 @@ impl LinesWriter {
             self.mut_column(column_name, ColumnDataType::Uint64, SemanticType::Field);
         ensure!(
             column.datatype == Some(ColumnDataType::Uint64.into()),
-            TypeMismatchSnafu { column_name }
+            TypeMismatchSnafu {
+                column_name,
+                expected: "u64",
+                actual: format!("{:?}", column.datatype)
+            }
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.u64_values.push(value);
-        self.inner.null_masks[idx].push(false);
+        self.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -83,12 +89,16 @@ impl LinesWriter {
             self.mut_column(column_name, ColumnDataType::Int64, SemanticType::Field);
         ensure!(
             column.datatype == Some(ColumnDataType::Int64.into()),
-            TypeMismatchSnafu { column_name }
+            TypeMismatchSnafu {
+                column_name,
+                expected: "i64",
+                actual: format!("{:?}", column.datatype)
+            }
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.i64_values.push(value);
-        self.inner.null_masks[idx].push(false);
+        self.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -97,12 +107,16 @@ impl LinesWriter {
             self.mut_column(column_name, ColumnDataType::Float64, SemanticType::Field);
         ensure!(
             column.datatype == Some(ColumnDataType::Float64.into()),
-            TypeMismatchSnafu { column_name }
+            TypeMismatchSnafu {
+                column_name,
+                expected: "f64",
+                actual: format!("{:?}", column.datatype)
+            }
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.f64_values.push(value);
-        self.inner.null_masks[idx].push(false);
+        self.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -111,12 +125,16 @@ impl LinesWriter {
             self.mut_column(column_name, ColumnDataType::String, SemanticType::Field);
         ensure!(
             column.datatype == Some(ColumnDataType::String.into()),
-            TypeMismatchSnafu { column_name }
+            TypeMismatchSnafu {
+                column_name,
+                expected: "string",
+                actual: format!("{:?}", column.datatype)
+            }
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.string_values.push(value.to_string());
-        self.inner.null_masks[idx].push(false);
+        self.null_masks[idx].push(false);
         Ok(())
     }
 
@@ -125,21 +143,25 @@ impl LinesWriter {
             self.mut_column(column_name, ColumnDataType::Boolean, SemanticType::Field);
         ensure!(
             column.datatype == Some(ColumnDataType::Boolean.into()),
-            TypeMismatchSnafu { column_name }
+            TypeMismatchSnafu {
+                column_name,
+                expected: "boolean",
+                actual: format!("{:?}", column.datatype)
+            }
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
         values.bool_values.push(value);
-        self.inner.null_masks[idx].push(false);
+        self.null_masks[idx].push(false);
         Ok(())
     }
 
     pub fn commit(&mut self) {
-        let batch = &mut self.inner.batch;
+        let batch = &mut self.batch;
         batch.row_count += 1;
 
         for i in 0..batch.columns.len() {
-            let null_mask = &mut self.inner.null_masks[i];
+            let null_mask = &mut self.null_masks[i];
             if batch.row_count as usize > null_mask.len() {
                 null_mask.push(true);
             }
@@ -147,12 +169,12 @@ impl LinesWriter {
     }
 
     pub fn finish(mut self) -> InsertBatch {
-        let null_masks = self.inner.null_masks;
+        let null_masks = self.null_masks;
         for (i, null_mask) in null_masks.into_iter().enumerate() {
-            let columns = &mut self.inner.batch.columns;
+            let columns = &mut self.batch.columns;
             columns[i].null_mask = null_mask.into_vec();
         }
-        self.inner.batch
+        self.batch
     }
 
     fn mut_column(
@@ -161,16 +183,16 @@ impl LinesWriter {
         datatype: ColumnDataType,
         semantic_type: SemanticType,
     ) -> (usize, &mut Column) {
-        let column_names = &mut self.inner.column_name_index;
+        let column_names = &mut self.column_name_index;
         let column_idx = match column_names.get(column_name) {
             Some(i) => *i,
             None => {
                 let new_idx = column_names.len();
-                let batch = &mut self.inner.batch;
-                let to_insert = self.inner.lines;
+                let batch = &mut self.batch;
+                let to_insert = self.lines;
                 let mut null_mask = BitVec::with_capacity(to_insert);
                 null_mask.extend(BitVec::repeat(true, batch.row_count as usize));
-                self.inner.null_masks.push(null_mask);
+                self.null_masks.push(null_mask);
                 batch.columns.push(Column {
                     column_name: column_name.to_string(),
                     semantic_type: semantic_type.into(),
@@ -182,7 +204,7 @@ impl LinesWriter {
                 new_idx
             }
         };
-        (column_idx, &mut self.inner.batch.columns[column_idx])
+        (column_idx, &mut self.batch.columns[column_idx])
     }
 }
 

@@ -919,6 +919,7 @@ dependencies = [
  "arrow2",
  "async-trait",
  "common-base",
+ "common-error",
  "datafusion",
  "snafu",
 ]
