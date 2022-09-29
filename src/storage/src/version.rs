@@ -102,9 +102,30 @@ impl VersionControl {
         version_to_update.commit();
     }
 
+    /// Apply [VersionEdit] to the version.
     pub fn apply_edit(&self, edit: VersionEdit) {
         let mut version_to_update = self.version.lock();
         version_to_update.apply_edit(edit);
+        version_to_update.commit();
+    }
+
+    /// Freeze all mutable memtables and then apply the new metadata to the version.
+    pub fn freeze_mutable_and_apply_metadata(
+        &self,
+        metadata: RegionMetadataRef,
+        manifest_version: ManifestVersion,
+    ) {
+        let mut version_to_update = self.version.lock();
+
+        let memtable_version = version_to_update.memtables();
+        // When applying metadata, mutable memtable set might be empty and there is no
+        // need to freeze it.
+        if !memtable_version.mutable_memtables().is_empty() {
+            let freezed = memtable_version.freeze_mutable();
+            version_to_update.memtables = Arc::new(freezed);
+        }
+
+        version_to_update.apply_metadata(metadata, manifest_version);
         version_to_update.commit();
     }
 }
@@ -225,6 +246,29 @@ impl Version {
         let merged_ssts = self.ssts.merge(handles_to_add);
 
         self.ssts = Arc::new(merged_ssts);
+    }
+
+    /// Updates metadata of the version.
+    ///
+    /// # Panics
+    /// Panics if `metadata.version() <= self.metadata.version()`.
+    pub fn apply_metadata(
+        &mut self,
+        metadata: RegionMetadataRef,
+        manifest_version: ManifestVersion,
+    ) {
+        assert!(
+            metadata.version() > self.metadata.version(),
+            "Updating metadata from version {} to {} is not allowed",
+            self.metadata.version(),
+            metadata.version()
+        );
+
+        if self.manifest_version < manifest_version {
+            self.manifest_version = manifest_version;
+        }
+
+        self.metadata = metadata;
     }
 
     #[inline]

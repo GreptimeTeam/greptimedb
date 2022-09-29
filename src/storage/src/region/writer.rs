@@ -94,6 +94,7 @@ impl RegionWriter {
         let files_to_add = edit.files_to_add.clone();
         let flushed_sequence = edit.flushed_sequence;
 
+        // Persist the meta action.
         let mut action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
         action_list.set_prev_version(prev_version);
         let manifest_version = manifest.update(action_list).await?;
@@ -114,9 +115,7 @@ impl RegionWriter {
         // Persist the manifest version to notify subscriber of the wal that the manifest has been
         // updated. This should be done at the end of the method.
         self.persist_manifest_version(wal, version_control, manifest_version)
-            .await?;
-
-        Ok(())
+            .await
     }
 
     /// Alter schema of the region.
@@ -129,8 +128,41 @@ impl RegionWriter {
         // avoid other writers write to the region and switch the memtable safely.
         // Another potential benefit is that the write lock also protect against concurrent
         // alter request to the region.
-        let mut inner = self.inner.lock().await;
-        inner.alter(&self.version_mutex, alter_ctx, request).await
+        let _inner = self.inner.lock().await;
+
+        let version_control = alter_ctx.version_control();
+
+        let old_metadata = version_control.metadata();
+        old_metadata
+            .validate_alter(&request)
+            .context(error::InvalidAlterRequestSnafu)?;
+
+        // The write lock protects us against other alter request, so we could build the new
+        // metadata struct outside of the version mutex.
+        let new_metadata = old_metadata
+            .alter(&request)
+            .context(error::AlterMetadataSnafu)?;
+
+        let raw = RawRegionMetadata::from(&new_metadata);
+        let mut action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata: raw,
+            }));
+        let new_metadata = Arc::new(new_metadata);
+
+        // Acquire the version lock before altering the metadata.
+        let _lock = self.version_mutex.lock().await;
+
+        // Persist the meta action.
+        let prev_version = version_control.current_manifest_version();
+        action_list.set_prev_version(prev_version);
+        let manifest_version = alter_ctx.manifest.update(action_list).await?;
+
+        // Now we could switch memtables and apply the new metadata to the version.
+        version_control.freeze_mutable_and_apply_metadata(new_metadata, manifest_version);
+
+        self.persist_manifest_version(alter_ctx.wal, version_control, manifest_version)
+            .await
     }
 
     /// Allocate a sequence and persist the manifest version using that sequence to the wal.
@@ -322,42 +354,6 @@ impl WriterInner {
         );
 
         Ok(())
-    }
-
-    async fn alter<S: LogStore>(
-        &mut self,
-        version_mutex: &Mutex<()>,
-        alter_ctx: AlterContext<'_, S>,
-        request: AlterRequest,
-    ) -> Result<()> {
-        let version_control = alter_ctx.version_control();
-
-        let old_metadata = version_control.metadata();
-        old_metadata
-            .validate_alter(&request)
-            .context(error::InvalidAlterRequestSnafu)?;
-
-        // The write lock protects us against other alter request, so we could build the new
-        // metadata struct outside of the version mutex.
-        let new_metadata = old_metadata
-            .alter(&request)
-            .context(error::AlterMetadataSnafu)?;
-
-        // Persist the new metadata to the region.
-        let raw = RawRegionMetadata::from(&new_metadata);
-        let action_list =
-            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
-                metadata: raw,
-            }));
-
-        // TODO(yingwen): [alter] implements alter:
-        // 1. acquire write + version lock
-        // 2. validate request
-        // 3. build schema based on new request
-        // 4. persist it into the region manifest, and write wal
-        // 5. update version in VersionControl
-
-        unimplemented!()
     }
 
     /// Preprocess before write.
