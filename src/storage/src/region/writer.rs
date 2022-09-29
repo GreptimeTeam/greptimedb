@@ -5,13 +5,16 @@ use common_time::RangeMillis;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::manifest::ManifestVersion;
-use store_api::storage::{AlterRequest, SequenceNumber, WriteContext, WriteRequest, WriteResponse};
+use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
+use store_api::storage::{AlterRequest, WriteContext, WriteRequest, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
 use crate::error::{self, Result};
 use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
+use crate::manifest::action::{
+    RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
+};
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
 use crate::proto::wal::WalHeader;
 use crate::region::RegionManifest;
@@ -28,6 +31,7 @@ pub type RegionWriterRef = Arc<RegionWriter>;
 /// Region writer manages all write operations to the region.
 #[derive(Debug)]
 pub struct RegionWriter {
+    // To avoid dead lock, we need to ensure the lock order is: inner -> version_mutex.
     /// Inner writer guarded by write lock, the write lock is used to ensure
     /// all write operations are serialized.
     inner: Mutex<WriterInner>,
@@ -58,68 +62,93 @@ impl RegionWriter {
             .await
     }
 
-    /// Apply version edit.
-    pub async fn apply_version_edit<S: LogStore>(
-        &self,
-        wal: &Wal<S>,
-        edit: VersionEdit,
-        shared: &SharedDataRef,
-    ) -> Result<()> {
-        // HACK: We won't acquire the write lock here because write stall would hold
-        // write lock thus we have no chance to get the lock and apply the version edit.
-        // So we add a version lock to ensure modification to `VersionControl` is
-        // serialized.
-        let version_control = &shared.version_control;
-
-        let _lock = self.version_mutex.lock().await;
-        let manifest_version = edit.manifest_version;
-        // We could tolerate failure during persisting manifest version to the wal, since it won't
-        // affect we applying the edit to the version.
-        version_control.apply_edit(edit);
-        // TODO(yingwen): We should set the flush handle to `None`, but we can't acquire
-        // write lock here.
-
-        // Persist the manifest version to notify subscriber of the wal that the manifest has been
-        // updated. This should be done at the end of the method.
-        let next_sequence = version_control.committed_sequence() + 1;
-        self.persist_manifest_version(wal, next_sequence, manifest_version)
-            .await?;
-        version_control.set_committed_sequence(next_sequence);
-
-        Ok(())
-    }
-
     /// Replay data to memtables.
     pub async fn replay<S: LogStore>(&self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.replay(&self.version_mutex, writer_ctx).await
     }
 
+    /// Write and apply the region edit.
+    pub(crate) async fn write_edit_and_apply<S: LogStore>(
+        &self,
+        wal: &Wal<S>,
+        shared: &SharedDataRef,
+        manifest: &RegionManifest,
+        edit: RegionEdit,
+        max_memtable_id: MemtableId,
+    ) -> Result<()> {
+        let _lock = self.version_mutex.lock().await;
+        // HACK: We won't acquire the write lock here because write stall would hold
+        // write lock thus we have no chance to get the lock and apply the version edit.
+        // So we add a version lock to ensure modification to `VersionControl` is
+        // serialized.
+        let version_control = &shared.version_control;
+        let prev_version = version_control.current_manifest_version();
+
+        logging::debug!(
+            "Write region edit: {:?} to manifest, prev_version: {}.",
+            edit,
+            prev_version,
+        );
+
+        let files_to_add = edit.files_to_add.clone();
+        let flushed_sequence = edit.flushed_sequence;
+
+        let mut action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+        action_list.set_prev_version(prev_version);
+        let manifest_version = manifest.update(action_list).await?;
+
+        let version_edit = VersionEdit {
+            files_to_add,
+            flushed_sequence: Some(flushed_sequence),
+            manifest_version,
+            max_memtable_id: Some(max_memtable_id),
+        };
+
+        // We could tolerate failure during persisting manifest version to the wal, since it won't
+        // affect we applying the edit to the version.
+        version_control.apply_edit(version_edit);
+        // TODO(yingwen): We should set the flush handle to `None`, but we can't acquire
+        // write lock here.
+
+        // Persist the manifest version to notify subscriber of the wal that the manifest has been
+        // updated. This should be done at the end of the method.
+        self.persist_manifest_version(wal, version_control, manifest_version)
+            .await?;
+
+        Ok(())
+    }
+
     /// Alter schema of the region.
     pub async fn alter<S: LogStore>(
         &self,
-        _alter_ctx: AlterContext<'_, S>,
-        _request: AlterRequest,
+        alter_ctx: AlterContext<'_, S>,
+        request: AlterRequest,
     ) -> Result<()> {
-        // TODO(yingwen): [alter] implements alter:
-        // 1. acquire version lock
-        // 2. validate request
-        // 3. build schema based on new request
-        // 4. persist it into the region manifest, and write wal
-        // 5. update version in VersionControl
-
-        unimplemented!()
+        // To alter the schema, we need to acquire the write lock first, so we could
+        // avoid other writers write to the region and switch the memtable safely.
+        // Another potential benefit is that the write lock also protect against concurrent
+        // alter request to the region.
+        let mut inner = self.inner.lock().await;
+        inner.alter(&self.version_mutex, alter_ctx, request).await
     }
 
+    /// Allocate a sequence and persist the manifest version using that sequence to the wal.
+    ///
+    /// This method should be protected by the `version_mutex`.
     async fn persist_manifest_version<S: LogStore>(
         &self,
         wal: &Wal<S>,
-        seq: SequenceNumber,
+        version_control: &VersionControlRef,
         manifest_version: ManifestVersion,
     ) -> Result<()> {
-        let header = WalHeader::with_last_manifest_version(manifest_version);
+        let next_sequence = version_control.committed_sequence() + 1;
 
-        wal.write_to_wal(seq, header, Payload::None).await?;
+        let header = WalHeader::with_last_manifest_version(manifest_version);
+        wal.write_to_wal(next_sequence, header, Payload::None)
+            .await?;
+
+        version_control.set_committed_sequence(next_sequence);
 
         Ok(())
     }
@@ -159,6 +188,13 @@ pub struct AlterContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub wal: &'a Wal<S>,
     pub manifest: &'a RegionManifest,
+}
+
+impl<'a, S: LogStore> AlterContext<'a, S> {
+    #[inline]
+    fn version_control(&self) -> &VersionControlRef {
+        &self.shared.version_control
+    }
 }
 
 #[derive(Debug)]
@@ -286,6 +322,42 @@ impl WriterInner {
         );
 
         Ok(())
+    }
+
+    async fn alter<S: LogStore>(
+        &mut self,
+        version_mutex: &Mutex<()>,
+        alter_ctx: AlterContext<'_, S>,
+        request: AlterRequest,
+    ) -> Result<()> {
+        let version_control = alter_ctx.version_control();
+
+        let old_metadata = version_control.metadata();
+        old_metadata
+            .validate_alter(&request)
+            .context(error::InvalidAlterRequestSnafu)?;
+
+        // The write lock protects us against other alter request, so we could build the new
+        // metadata struct outside of the version mutex.
+        let new_metadata = old_metadata
+            .alter(&request)
+            .context(error::AlterMetadataSnafu)?;
+
+        // Persist the new metadata to the region.
+        let raw = RawRegionMetadata::from(&new_metadata);
+        let action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata: raw,
+            }));
+
+        // TODO(yingwen): [alter] implements alter:
+        // 1. acquire write + version lock
+        // 2. validate request
+        // 3. build schema based on new request
+        // 4. persist it into the region manifest, and write wal
+        // 5. update version in VersionControl
+
+        unimplemented!()
     }
 
     /// Preprocess before write.
