@@ -67,12 +67,10 @@ pub fn insertion_expr_to_request(
 }
 
 fn insert_batches(bytes_vec: Vec<Vec<u8>>) -> Result<Vec<InsertBatch>> {
-    let mut insert_batches = Vec::with_capacity(bytes_vec.len());
-
-    for bytes in bytes_vec {
-        insert_batches.push(bytes.deref().try_into().context(DecodeInsertSnafu)?);
-    }
-    Ok(insert_batches)
+    bytes_vec
+        .iter()
+        .map(|bytes| bytes.deref().try_into().context(DecodeInsertSnafu))
+        .collect()
 }
 
 fn add_values_to_builder(

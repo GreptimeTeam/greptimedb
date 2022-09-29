@@ -2,8 +2,10 @@ use std::any::Any;
 use std::net::SocketAddr;
 
 use axum::http::StatusCode as HttpStatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{
+    response::{IntoResponse, Response},
+    Json,
+};
 use common_error::prelude::*;
 use serde_json::json;
 
@@ -76,6 +78,21 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Failed to parse InfluxDB line protocol, source: {}", source))]
+    InfluxdbLineProtocol {
+        #[snafu(backtrace)]
+        source: influxdb_line_protocol::Error,
+    },
+
+    #[snafu(display("Failed to write InfluxDB line protocol, source: {}", source))]
+    InfluxdbLinesWrite {
+        #[snafu(backtrace)]
+        source: common_grpc::error::Error,
+    },
+
+    #[snafu(display("Failed to convert time precision, name: {}", name))]
+    TimePrecision { name: String, backtrace: Backtrace },
+
     #[snafu(display("Connection reset by peer"))]
     ConnResetByPeer { backtrace: Backtrace },
 
@@ -128,10 +145,13 @@ impl ErrorExt for Error {
 
             NotSupported { .. }
             | InvalidQuery { .. }
+            | InfluxdbLineProtocol { .. }
             | ConnResetByPeer { .. }
             | InvalidOpentsdbLine { .. }
-            | InvalidOpentsdbJsonRequest { .. } => StatusCode::InvalidArguments,
+            | InvalidOpentsdbJsonRequest { .. }
+            | TimePrecision { .. } => StatusCode::InvalidArguments,
 
+            InfluxdbLinesWrite { source, .. } => source.status_code(),
             Hyper { .. } => StatusCode::Unknown,
         }
     }
@@ -160,9 +180,12 @@ impl From<std::io::Error> for Error {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
-            Error::InvalidOpentsdbLine { .. }
+            Error::InfluxdbLineProtocol { .. }
+            | Error::InfluxdbLinesWrite { .. }
+            | Error::InvalidOpentsdbLine { .. }
             | Error::InvalidOpentsdbJsonRequest { .. }
-            | Error::InvalidQuery { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
+            | Error::InvalidQuery { .. }
+            | Error::TimePrecision { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
             _ => (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
         let body = Json(json!({

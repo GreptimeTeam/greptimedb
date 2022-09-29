@@ -1,3 +1,4 @@
+mod influxdb;
 mod opentsdb;
 
 use std::collections::HashMap;

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
+use crate::influxdb::InfluxdbOptions;
 use crate::instance::Instance;
 use crate::mysql::MysqlOptions;
 use crate::opentsdb::OpentsdbOptions;
@@ -17,6 +18,7 @@ pub struct FrontendOptions {
     pub mysql_options: Option<MysqlOptions>,
     pub postgres_options: Option<PostgresOptions>,
     pub opentsdb_options: Option<OpentsdbOptions>,
+    pub influxdb_options: Option<InfluxdbOptions>,
 }
 
 impl Default for FrontendOptions {
@@ -27,6 +29,7 @@ impl Default for FrontendOptions {
             mysql_options: Some(MysqlOptions::default()),
             postgres_options: Some(PostgresOptions::default()),
             opentsdb_options: Some(OpentsdbOptions::default()),
+            influxdb_options: Some(InfluxdbOptions::default()),
         }
     }
 }

@@ -918,6 +918,8 @@ dependencies = [
  "api",
  "arrow2",
  "async-trait",
+ "common-base",
+ "common-error",
  "datafusion",
  "snafu",
 ]
@@ -2255,6 +2257,17 @@ checksum = "10a35a97730320ffe8e2d410b5d3b69279b98d2c14bdb8b70ea89ecf7888d41e"
 dependencies = [
  "autocfg",
  "hashbrown",
+]
+
+[[package]]
+name = "influxdb_line_protocol"
+version = "0.1.0"
+source = "git+https://github.com/evenyag/influxdb_iox?branch=feat/line-protocol#10ef0d0b02705ac7518717390939fa3a9bcfcacc"
+dependencies = [
+ "bytes",
+ "nom",
+ "smallvec",
+ "snafu",
 ]
 
 [[package]]
@@ -4693,8 +4706,10 @@ dependencies = [
  "axum-test-helper",
  "bytes",
  "catalog",
+ "client",
  "common-base",
  "common-error",
+ "common-grpc",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -4704,6 +4719,7 @@ dependencies = [
  "futures",
  "hex",
  "hyper",
+ "influxdb_line_protocol",
  "metrics 0.20.1",
  "mysql_async",
  "num_cpus",
@@ -4715,6 +4731,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "table",
  "test-util",
  "tokio",
  "tokio-postgres",

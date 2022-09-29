@@ -13,6 +13,7 @@ use tokio::try_join;
 
 use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
+use crate::influxdb::InfluxdbOptions;
 use crate::instance::InstanceRef;
 
 pub(crate) struct Services;
@@ -90,6 +91,12 @@ impl Services {
             let mut http_server = HttpServer::new(instance.clone());
             if opentsdb_server_and_addr.is_some() {
                 http_server.set_opentsdb_handler(instance.clone());
+            }
+            if matches!(
+                opts.influxdb_options,
+                Some(InfluxdbOptions { enable: true })
+            ) {
+                http_server.set_influxdb_handler(instance.clone());
             }
 
             Some((Box::new(http_server) as _, http_addr))

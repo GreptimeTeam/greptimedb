@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use common_query::Output;
 
 use crate::error::Result;
+use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
 
 /// All query handler traits for various request protocols, like SQL or GRPC.
@@ -21,6 +22,7 @@ pub type SqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
 pub type GrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler + Send + Sync>;
 pub type GrpcAdminHandlerRef = Arc<dyn GrpcAdminHandler + Send + Sync>;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
+pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 
 #[async_trait]
 pub trait SqlQueryHandler {
@@ -37,6 +39,13 @@ pub trait GrpcQueryHandler {
 #[async_trait]
 pub trait GrpcAdminHandler {
     async fn exec_admin_request(&self, expr: AdminExpr) -> Result<AdminResult>;
+}
+
+#[async_trait]
+pub trait InfluxdbLineProtocolHandler {
+    /// A successful request will not return a response.
+    /// Only on error will the socket return a line of data.
+    async fn exec(&self, request: &InfluxdbRequest) -> Result<()>;
 }
 
 #[async_trait]

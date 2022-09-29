@@ -2,6 +2,7 @@ use datatypes::prelude::ConcreteDataType;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
+use crate::v1::column::Values;
 use crate::v1::ColumnDataType;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -71,9 +72,139 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
     }
 }
 
+impl Values {
+    pub fn with_capacity(datatype: ColumnDataType, capacity: usize) -> Self {
+        match datatype {
+            ColumnDataType::Boolean => Values {
+                bool_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Int8 => Values {
+                i8_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Int16 => Values {
+                i16_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Int32 => Values {
+                i32_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Int64 => Values {
+                i64_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Uint8 => Values {
+                u8_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Uint16 => Values {
+                u16_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Uint32 => Values {
+                u32_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Uint64 => Values {
+                u64_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Float32 => Values {
+                f32_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Float64 => Values {
+                f64_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Binary => Values {
+                binary_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::String => Values {
+                string_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Date => Values {
+                date_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Datetime => Values {
+                datetime_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::Timestamp => Values {
+                ts_millis_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_values_with_capacity() {
+        let values = Values::with_capacity(ColumnDataType::Int8, 2);
+        let values = values.i8_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Int32, 2);
+        let values = values.i32_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Int64, 2);
+        let values = values.i64_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Uint8, 2);
+        let values = values.u8_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Uint32, 2);
+        let values = values.u32_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Uint64, 2);
+        let values = values.u64_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Float32, 2);
+        let values = values.f32_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Float64, 2);
+        let values = values.f64_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Binary, 2);
+        let values = values.binary_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Boolean, 2);
+        let values = values.bool_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::String, 2);
+        let values = values.string_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Date, 2);
+        let values = values.date_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Datetime, 2);
+        let values = values.datetime_values;
+        assert_eq!(2, values.capacity());
+
+        let values = Values::with_capacity(ColumnDataType::Timestamp, 2);
+        let values = values.ts_millis_values;
+        assert_eq!(2, values.capacity());
+    }
 
     #[test]
     fn test_concrete_datatype_from_column_datatype() {

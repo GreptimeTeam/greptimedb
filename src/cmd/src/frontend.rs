@@ -1,5 +1,6 @@
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::influxdb::InfluxdbOptions;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
@@ -47,6 +48,8 @@ struct StartCommand {
     opentsdb_addr: Option<String>,
     #[clap(short, long)]
     config_file: Option<String>,
+    #[clap(short, long)]
+    influxdb_enable: Option<bool>,
 }
 
 impl StartCommand {
@@ -91,6 +94,9 @@ impl TryFrom<StartCommand> for FrontendOptions {
                 ..Default::default()
             });
         }
+        if let Some(enable) = cmd.influxdb_enable {
+            opts.influxdb_options = Some(InfluxdbOptions { enable });
+        }
         Ok(opts)
     }
 }
@@ -107,6 +113,7 @@ mod tests {
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
             opentsdb_addr: Some("127.0.0.1:4321".to_string()),
+            influxdb_enable: Some(false),
             config_file: None,
         };
 
@@ -136,5 +143,7 @@ mod tests {
             opts.opentsdb_options.as_ref().unwrap().runtime_size,
             default_opts.opentsdb_options.as_ref().unwrap().runtime_size
         );
+
+        assert!(!opts.influxdb_options.unwrap().enable);
     }
 }

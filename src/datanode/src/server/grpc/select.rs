@@ -129,7 +129,6 @@ macro_rules! convert_arrow_array_to_grpc_vals {
             _ => unimplemented!(),
         }
     };
-
 }
 
 pub fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {

@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod frontend;
+pub mod influxdb;
 pub mod instance;
 pub mod mysql;
 pub mod opentsdb;
