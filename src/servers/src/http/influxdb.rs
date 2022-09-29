@@ -14,16 +14,13 @@ use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 pub async fn influxdb_write(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
-    payload: String,
+    lines: String,
 ) -> Result<(StatusCode, HttpResponse)> {
-    let precision = match params.get("precision") {
-        Some(p) => Some(parse_time_precision(p)?),
-        None => None,
-    };
-    let request = InfluxdbRequest {
-        precision,
-        lines: payload,
-    };
+    let precision = params
+        .get("precision")
+        .map(|val| parse_time_precision(val))
+        .transpose()?;
+    let request = InfluxdbRequest { precision, lines };
     handler.exec(&request).await?;
     Ok((StatusCode::NO_CONTENT, HttpResponse::Text("".to_string())))
 }

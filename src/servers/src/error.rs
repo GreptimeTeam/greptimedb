@@ -78,13 +78,13 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to parse influxdb line protocol, source: {}", source))]
+    #[snafu(display("Failed to parse InfluxDB line protocol, source: {}", source))]
     InfluxdbLineProtocol {
         #[snafu(backtrace)]
         source: influxdb_line_protocol::Error,
     },
 
-    #[snafu(display("Failed to write influxdb line protocol, source: {}", source))]
+    #[snafu(display("Failed to write InfluxDB line protocol, source: {}", source))]
     InfluxdbLinesWrite {
         #[snafu(backtrace)]
         source: common_grpc::error::Error,

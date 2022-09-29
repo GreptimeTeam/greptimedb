@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use api::v1::{
+    codec::InsertBatch,
     column::{SemanticType, Values},
     Column, ColumnDataType,
 };
@@ -19,7 +20,7 @@ type ColumnName = String;
 struct Inner {
     column_name_index: HashMap<ColumnName, usize>,
     null_masks: Vec<BitVec>,
-    batch: api::v1::codec::InsertBatch,
+    batch: InsertBatch,
     lines: usize,
 }
 
@@ -123,7 +124,7 @@ impl LinesWriter {
         let (idx, column) =
             self.mut_column(column_name, ColumnDataType::Boolean, SemanticType::Field);
         ensure!(
-            column.datatype == Some(api::v1::ColumnDataType::Boolean.into()),
+            column.datatype == Some(ColumnDataType::Boolean.into()),
             TypeMismatchSnafu { column_name }
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
@@ -145,7 +146,7 @@ impl LinesWriter {
         }
     }
 
-    pub fn finish(mut self) -> api::v1::codec::InsertBatch {
+    pub fn finish(mut self) -> InsertBatch {
         let null_masks = self.inner.null_masks;
         for (i, null_mask) in null_masks.into_iter().enumerate() {
             let columns = &mut self.inner.batch.columns;
