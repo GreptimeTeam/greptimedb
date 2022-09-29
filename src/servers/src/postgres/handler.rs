@@ -27,7 +27,7 @@ impl PostgresServerHandler {
 
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandler {
-    async fn do_query<C>(&self, _client: &C, query: &str) -> PgWireResult<Response>
+    async fn do_query<C>(&self, _client: &C, query: &str) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
@@ -38,10 +38,10 @@ impl SimpleQueryHandler for PostgresServerHandler {
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
         match output {
-            Output::AffectedRows(rows) => Ok(Response::Execution(Tag::new_for_execution(
+            Output::AffectedRows(rows) => Ok(vec![Response::Execution(Tag::new_for_execution(
                 "OK",
                 Some(rows),
-            ))),
+            ))]),
             Output::Stream(record_stream) => {
                 let schema = record_stream.schema();
                 let recordbatches = util::collect(record_stream)
@@ -60,7 +60,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
 fn recordbatches_to_query_response<'a, I>(
     recordbatches: I,
     schema: SchemaRef,
-) -> PgWireResult<Response>
+) -> PgWireResult<Vec<Response>>
 where
     I: Iterator<Item = &'a RecordBatch>,
 {
@@ -77,7 +77,7 @@ where
         }
     }
 
-    Ok(Response::Query(builder.build()))
+    Ok(vec![Response::Query(builder.build())])
 }
 
 fn schema_to_pg(origin: SchemaRef) -> Result<Vec<FieldInfo>> {
