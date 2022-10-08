@@ -81,7 +81,7 @@ impl<R: Region> Table for MitoTable<R> {
         // columns_values is not empty, it's safe to unwrap
         let rows_num = columns_values.values().next().unwrap().len();
 
-        //Add row key and columns
+        // Add row key columns
         for name in key_columns {
             let column_schema = schema
                 .column_schema_by_name(name)
