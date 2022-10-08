@@ -173,8 +173,11 @@ pub enum Error {
         column_qualified_name: String,
     },
 
-    #[snafu(display("Unsupported column default constraint: {}", expr))]
-    UnsupportedDefaultConstraint { expr: String, backtrace: Backtrace },
+    #[snafu(display("Unsupported column default constraint, source: {}", source))]
+    UnsupportedDefaultConstraint {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 impl From<Error> for table::error::Error {

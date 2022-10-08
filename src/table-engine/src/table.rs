@@ -11,12 +11,8 @@ use common_query::logical_plan::Expr;
 use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::logging;
-use common_time::util;
-use common_time::Timestamp;
-use datatypes::data_type::DataType;
-use datatypes::prelude::ScalarVector;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder};
-use datatypes::vectors::{ConstantVector, TimestampVector, VectorRef};
+use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use datatypes::vectors::VectorRef;
 use futures::task::{Context, Poll};
 use futures::Stream;
 use object_store::ObjectStore;
@@ -470,36 +466,11 @@ impl<R: Region> MitoTable<R> {
         rows_num: usize,
     ) -> TableResult<Option<VectorRef>> {
         // TODO(dennis): when we support altering schema, we should check the schemas difference between table and region
-        if let Some(v) = &column_schema.default_constraint {
-            assert!(rows_num > 0);
-
-            match v {
-                ColumnDefaultConstraint::Value(v) => {
-                    let mut mutable_vector = column_schema.data_type.create_mutable_vector(1);
-                    mutable_vector
-                        .push_value_ref(v.as_value_ref())
-                        .map_err(TableError::new)?;
-                    let vector =
-                        Arc::new(ConstantVector::new(mutable_vector.to_vector(), rows_num));
-                    Ok(Some(vector))
-                }
-                ColumnDefaultConstraint::Function(expr) => {
-                    match &expr[..] {
-                        // TODO(dennis): we only supports current_timestamp right now,
-                        //   it's better to use a expression framework in future.
-                        "current_timestamp()" => {
-                            let vector =
-                                Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
-                                    util::current_time_millis(),
-                                )]));
-                            Ok(Some(Arc::new(ConstantVector::new(vector, rows_num))))
-                        }
-                        _ => UnsupportedDefaultConstraintSnafu { expr }
-                            .fail()
-                            .map_err(TableError::new),
-                    }
-                }
-            }
+        if let Some(c) = &column_schema.default_constraint {
+            let vector = c
+                .create_default_vector(&column_schema.data_type, rows_num)
+                .context(UnsupportedDefaultConstraintSnafu)?;
+            Ok(Some(vector))
         } else {
             Ok(None)
         }

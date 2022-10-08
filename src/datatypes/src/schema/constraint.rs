@@ -43,7 +43,7 @@ impl ColumnDefaultConstraint {
     ///
     /// # Panics
     /// Panics if `num_rows == 0`.
-    fn create_default_vector(
+    pub fn create_default_vector(
         &self,
         data_type: &ConcreteDataType,
         num_rows: usize,
