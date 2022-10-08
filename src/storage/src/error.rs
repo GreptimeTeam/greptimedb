@@ -257,6 +257,18 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Invalid alter request, source: {}", source))]
+    InvalidAlterRequest {
+        #[snafu(backtrace)]
+        source: MetadataError,
+    },
+
+    #[snafu(display("Failed to alter metadata, source: {}", source))]
+    AlterMetadata {
+        #[snafu(backtrace)]
+        source: MetadataError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -267,7 +279,6 @@ impl ErrorExt for Error {
 
         match self {
             InvalidScanIndex { .. }
-            | InvalidRegionDesc { .. }
             | InvalidInputSchema { .. }
             | BatchMissingColumn { .. }
             | BatchMissingTimestamp { .. }
@@ -288,7 +299,8 @@ impl ErrorExt for Error {
             | SequenceNotMonotonic { .. }
             | ConvertStoreSchema { .. }
             | InvalidRawRegion { .. }
-            | FilterColumn { .. } => StatusCode::Unexpected,
+            | FilterColumn { .. }
+            | AlterMetadata { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | WriteParquet { .. }
@@ -306,6 +318,9 @@ impl ErrorExt for Error {
             | InvalidRegionState { .. }
             | ReadWal { .. } => StatusCode::StorageUnavailable,
 
+            InvalidAlterRequest { source, .. } | InvalidRegionDesc { source, .. } => {
+                source.status_code()
+            }
             PushBatch { source, .. } => source.status_code(),
         }
     }

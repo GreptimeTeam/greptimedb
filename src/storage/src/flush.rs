@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use common_time::RangeMillis;
 use store_api::logstore::LogStore;
-use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
 use store_api::storage::SequenceNumber;
 use uuid::Uuid;
 
@@ -16,7 +15,6 @@ use crate::memtable::{IterContext, MemtableId, MemtableRef};
 use crate::region::RegionWriterRef;
 use crate::region::SharedDataRef;
 use crate::sst::{AccessLayerRef, FileMeta, WriteOptions};
-use crate::version::VersionEdit;
 use crate::wal::Wal;
 
 /// Default write buffer size (32M).
@@ -195,25 +193,23 @@ impl<S: LogStore> FlushJob<S> {
         Ok(metas)
     }
 
-    async fn write_to_manifest(&self, file_metas: &[FileMeta]) -> Result<ManifestVersion> {
+    async fn write_manifest_and_apply(&self, file_metas: &[FileMeta]) -> Result<()> {
         let edit = RegionEdit {
             region_version: self.shared.version_control.metadata().version(),
             flushed_sequence: self.flush_sequence,
             files_to_add: file_metas.to_vec(),
             files_to_remove: Vec::default(),
         };
-        let prev_version = self.shared.version_control.current_manifest_version();
 
-        logging::debug!(
-            "Write region edit: {:?} to manifest, prev_version: {}.",
-            edit,
-            prev_version,
-        );
-
-        let mut action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
-        action_list.set_prev_version(prev_version);
-
-        self.manifest.update(action_list).await
+        self.writer
+            .write_edit_and_apply(
+                &self.wal,
+                &self.shared,
+                &self.manifest,
+                edit,
+                self.max_memtable_id,
+            )
+            .await
     }
 
     /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`
@@ -228,18 +224,7 @@ impl<S: LogStore> Job for FlushJob<S> {
     async fn run(&mut self, ctx: &Context) -> Result<()> {
         let file_metas = self.write_memtables_to_layer(ctx).await?;
 
-        let manifest_version = self.write_to_manifest(&file_metas).await?;
-
-        let edit = VersionEdit {
-            files_to_add: file_metas,
-            flushed_sequence: Some(self.flush_sequence),
-            manifest_version,
-            max_memtable_id: Some(self.max_memtable_id),
-        };
-
-        self.writer
-            .apply_version_edit(&self.wal, edit, &self.shared)
-            .await?;
+        self.write_manifest_and_apply(&file_metas).await?;
 
         Ok(())
     }
