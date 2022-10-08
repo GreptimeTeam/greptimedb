@@ -106,8 +106,8 @@ impl RegionWriter {
             max_memtable_id: Some(max_memtable_id),
         };
 
-        // We could tolerate failure during persisting manifest version to the wal, since it won't
-        // affect we applying the edit to the version.
+        // We could tolerate failure during persisting manifest version to the WAL, since it won't
+        // affect how we applying the edit to the version.
         version_control.apply_edit(version_edit);
         // TODO(yingwen): We should set the flush handle to `None`, but we can't acquire
         // write lock here.
