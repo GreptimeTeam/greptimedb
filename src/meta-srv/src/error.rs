@@ -33,3 +33,24 @@ impl From<Error> for Status {
         Status::new(Code::Internal, err.to_string())
     }
 }
+
+impl ErrorExt for Error {
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Error::StreamNone { .. }
+            | Error::EtcdFailed { .. }
+            | Error::ConnectEtcd { .. }
+            | Error::TcpBind { .. }
+            | Error::StartGrpc { .. } => StatusCode::Internal,
+            Error::EmptyKey { .. } => StatusCode::InvalidArguments,
+        }
+    }
+}

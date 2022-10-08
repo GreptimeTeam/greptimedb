@@ -13,9 +13,9 @@ use tonic::{
     transport::NamedService,
 };
 
-use super::MetaServer;
+use crate::metasrv::MetaSrv;
 
-pub fn make_admin_service(_: MetaServer) -> Admin {
+pub fn make_admin_service(_: MetaSrv) -> Admin {
     let router = Router::new().route("/health", health::HealthHandler);
 
     let router = Router::nest("/admin", router);
@@ -100,7 +100,7 @@ impl Router {
     }
 
     pub fn nest(path: &str, router: Router) -> Self {
-        if path.is_empty() || path.starts_with('/') {
+        if path.is_empty() || !path.starts_with('/') {
             panic!("paths must start with a `/`")
         }
 
@@ -114,7 +114,7 @@ impl Router {
     }
 
     pub fn route(mut self, path: &str, handler: impl HttpHandler + 'static) -> Self {
-        if path.is_empty() || path.starts_with('/') {
+        if path.is_empty() || !path.starts_with('/') {
             panic!("paths must start with a `/`")
         }
 

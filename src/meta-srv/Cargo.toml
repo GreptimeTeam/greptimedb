@@ -15,6 +15,7 @@ etcd-client = "0.10"
 futures = "0.3"
 http-body = "0.4"
 snafu = { version = "0.7", features = ["backtraces"] }
+serde = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"

@@ -6,11 +6,12 @@ use futures::{StreamExt, TryFutureExt};
 use snafu::OptionExt;
 use tonic::{Request, Response, Streaming};
 
-use super::{GrpcResult, GrpcStream, MetaServer, PROTOCOL_VERSION};
+use super::{GrpcResult, GrpcStream, PROTOCOL_VERSION};
 use crate::error::{self, Result};
+use crate::metasrv::MetaSrv;
 
 #[async_trait::async_trait]
-impl heartbeat_server::Heartbeat for MetaServer {
+impl heartbeat_server::Heartbeat for MetaSrv {
     type HeartbeatStream = GrpcStream<HeartbeatResponse>;
 
     async fn heartbeat(
