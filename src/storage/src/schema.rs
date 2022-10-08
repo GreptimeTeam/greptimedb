@@ -1,3 +1,5 @@
+mod compat;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -327,6 +329,11 @@ impl StoreSchema {
     #[inline]
     fn num_columns(&self) -> usize {
         self.schema.num_columns()
+    }
+
+    #[inline]
+    fn row_key_columns(&self) -> &[ColumnSchema] {
+        &self.schema.column_schemas()[..self.row_key_end]
     }
 }
 

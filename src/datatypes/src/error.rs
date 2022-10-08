@@ -63,6 +63,9 @@ pub enum Error {
         source: arrow::error::ArrowError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Unsupported column default constraint expression: {}", expr))]
+    UnsupportedDefaultExpr { expr: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {

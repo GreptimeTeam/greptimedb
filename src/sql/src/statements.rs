@@ -209,6 +209,8 @@ fn parse_column_default_constraint(
     }
 }
 
+// TODO(yingwen): Make column nullable by default, and checks invalid case like
+// a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
 pub fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let is_nullable = column_def

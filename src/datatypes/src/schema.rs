@@ -1,3 +1,5 @@
+mod constraint;
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -8,35 +10,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, DeserializeSnafu, Error, Result, SerializeSnafu};
-use crate::value::Value;
-
-/// Column's default constraint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ColumnDefaultConstraint {
-    // A function invocation
-    // TODO(dennis): we save the function expression here, maybe use a struct in future.
-    Function(String),
-    // A value
-    Value(Value),
-}
-
-impl TryFrom<&[u8]> for ColumnDefaultConstraint {
-    type Error = error::Error;
-
-    fn try_from(bytes: &[u8]) -> Result<Self> {
-        let json = String::from_utf8_lossy(bytes);
-        serde_json::from_str(&json).context(DeserializeSnafu { json })
-    }
-}
-
-impl TryInto<Vec<u8>> for ColumnDefaultConstraint {
-    type Error = error::Error;
-
-    fn try_into(self) -> Result<Vec<u8>> {
-        let s = serde_json::to_string(&self).context(SerializeSnafu)?;
-        Ok(s.into_bytes())
-    }
-}
+pub use crate::schema::constraint::ColumnDefaultConstraint;
 
 /// Key used to store column name of the timestamp column in metadata.
 ///
@@ -393,6 +367,7 @@ mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
 
     use super::*;
+    use crate::value::Value;
 
     #[test]
     fn test_column_schema() {

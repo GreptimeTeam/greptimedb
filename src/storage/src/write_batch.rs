@@ -155,16 +155,6 @@ pub struct WriteBatch {
     num_rows: usize,
 }
 
-impl WriteBatch {
-    pub fn new(schema: SchemaRef) -> Self {
-        Self {
-            schema,
-            mutations: Vec::new(),
-            num_rows: 0,
-        }
-    }
-}
-
 impl WriteRequest for WriteBatch {
     type Error = Error;
     type PutOp = PutData;
@@ -254,6 +244,14 @@ fn align_timestamp(ts: i64, duration: i64) -> Option<i64> {
 
 // WriteBatch pub methods.
 impl WriteBatch {
+    pub fn new(schema: SchemaRef) -> Self {
+        Self {
+            schema,
+            mutations: Vec::new(),
+            num_rows: 0,
+        }
+    }
+
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
     }
@@ -262,11 +260,16 @@ impl WriteBatch {
         self.mutations.iter()
     }
 
+    pub fn iter_mut(&mut self) -> slice::IterMut<'_, Mutation> {
+        self.mutations.iter_mut()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.mutations.is_empty()
     }
 }
 
+/// Enum to wrap different operations.
 pub enum Mutation {
     Put(PutData),
 }
