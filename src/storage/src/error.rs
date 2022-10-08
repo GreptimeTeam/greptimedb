@@ -258,7 +258,7 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to alter, source: {}", source))]
+    #[snafu(display("Invalid alter request, source: {}", source))]
     InvalidAlterRequest {
         #[snafu(backtrace)]
         source: MetadataError,
