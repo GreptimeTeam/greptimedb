@@ -65,6 +65,24 @@ impl Database {
         self.object(expr).await?.try_into()
     }
 
+    pub async fn batch_insert(&self, insert_exprs: Vec<InsertExpr>) -> Result<Vec<ObjectResult>> {
+        let header = ExprHeader {
+            version: PROTOCOL_VERSION,
+        };
+        let obj_exprs = insert_exprs
+            .into_iter()
+            .map(|expr| ObjectExpr {
+                header: Some(header.clone()),
+                expr: Some(object_expr::Expr::Insert(expr)),
+            })
+            .collect();
+        self.objects(obj_exprs)
+            .await?
+            .into_iter()
+            .map(|result| result.try_into())
+            .collect()
+    }
+
     pub async fn select(&self, expr: Select) -> Result<ObjectResult> {
         let select_expr = match expr {
             Select::Sql(sql) => SelectExpr {
