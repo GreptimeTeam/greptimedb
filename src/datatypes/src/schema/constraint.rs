@@ -39,6 +39,18 @@ impl TryInto<Vec<u8>> for ColumnDefaultConstraint {
 }
 
 impl ColumnDefaultConstraint {
+    /// Returns a default null constraint.
+    pub fn null_value() -> ColumnDefaultConstraint {
+        ColumnDefaultConstraint::Value(Value::Null)
+    }
+
+    /// Returns true if this constraint might creates NULL.
+    pub fn maybe_null(&self) -> bool {
+        // Once we support more functions, we may return true if given function
+        // could return null.
+        matches!(self, ColumnDefaultConstraint::Value(Value::Null))
+    }
+
     /// Create a vector that contains `num_rows` default values for given `data_type`.
     ///
     /// If `is_nullable` is `true`, then this method would returns error if the created

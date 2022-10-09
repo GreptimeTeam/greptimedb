@@ -147,17 +147,19 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
 fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let data_type =
         ColumnDataTypeWrapper::try_new(column_def.datatype).context(error::ColumnDataTypeSnafu)?;
-    Ok(ColumnSchema {
-        name: column_def.name.clone(),
-        data_type: data_type.into(),
-        is_nullable: column_def.is_nullable,
-        default_constraint: match &column_def.default_constraint {
-            None => None,
-            Some(v) => Some(
-                ColumnDefaultConstraint::try_from(&v[..]).context(ColumnDefaultConstraintSnafu)?,
-            ),
-        },
-    })
+    let default_constraint = match &column_def.default_constraint {
+        None => None,
+        Some(v) => {
+            Some(ColumnDefaultConstraint::try_from(&v[..]).context(ColumnDefaultConstraintSnafu)?)
+        }
+    };
+    ColumnSchema::new(
+        column_def.name.clone(),
+        data_type.into(),
+        column_def.is_nullable,
+    )
+    .with_default_constraint(default_constraint)
+    .context(ColumnDefaultConstraintSnafu)
 }
 
 #[cfg(test)]
@@ -237,7 +239,7 @@ mod tests {
         let column_schema = create_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
-        assert!(column_schema.is_nullable);
+        assert!(column_schema.is_nullable());
 
         let default_constraint = ColumnDefaultConstraint::Value(Value::from("defaut value"));
         let column_def = ColumnDef {
@@ -249,10 +251,10 @@ mod tests {
         let column_schema = create_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
-        assert!(column_schema.is_nullable);
+        assert!(column_schema.is_nullable());
         assert_eq!(
             default_constraint,
-            column_schema.default_constraint.unwrap()
+            *column_schema.default_constraint().unwrap()
         );
     }
 
@@ -298,30 +300,10 @@ mod tests {
 
     fn expected_table_schema() -> SchemaRef {
         let column_schemas = vec![
-            ColumnSchema {
-                name: "host".to_string(),
-                data_type: ConcreteDataType::string_datatype(),
-                is_nullable: false,
-                default_constraint: None,
-            },
-            ColumnSchema {
-                name: "ts".to_string(),
-                data_type: ConcreteDataType::timestamp_millis_datatype(),
-                is_nullable: false,
-                default_constraint: None,
-            },
-            ColumnSchema {
-                name: "cpu".to_string(),
-                data_type: ConcreteDataType::float32_datatype(),
-                is_nullable: true,
-                default_constraint: None,
-            },
-            ColumnSchema {
-                name: "memory".to_string(),
-                data_type: ConcreteDataType::float64_datatype(),
-                is_nullable: true,
-                default_constraint: None,
-            },
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), true),
+            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ];
         Arc::new(
             SchemaBuilder::try_from(column_schemas)

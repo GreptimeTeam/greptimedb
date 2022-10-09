@@ -12,7 +12,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::DateTimeType;
 use datatypes::value::Value;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 
 use crate::ast::{
     ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, ObjectName,
@@ -223,12 +223,11 @@ pub fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let default_constraint =
         parse_column_default_constraint(&name, &data_type, &column_def.options)?;
 
-    Ok(ColumnSchema {
-        name,
-        data_type,
-        is_nullable,
-        default_constraint,
-    })
+    ColumnSchema::new(name, data_type, is_nullable)
+        .with_default_constraint(default_constraint)
+        .context(error::InvalidDefaultSnafu {
+            column: &column_def.name.value,
+        })
 }
 
 fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {

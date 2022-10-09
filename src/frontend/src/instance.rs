@@ -216,8 +216,8 @@ fn columns_to_expr(column_defs: &[ColumnDef]) -> Result<Vec<GrpcColumnDef>> {
             Ok(GrpcColumnDef {
                 name: schema.name.clone(),
                 datatype: datatype as i32,
-                is_nullable: schema.is_nullable,
-                default_constraint: match &schema.default_constraint {
+                is_nullable: schema.is_nullable(),
+                default_constraint: match schema.default_constraint() {
                     None => None,
                     Some(v) => Some(v.clone().try_into().context(
                         ConvertColumnDefaultConstraintSnafu {

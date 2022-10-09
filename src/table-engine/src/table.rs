@@ -95,7 +95,7 @@ impl<R: Region> Table for MitoTable<R> {
                 put_op
                     .add_key_column(name, vector)
                     .map_err(TableError::new)?;
-            } else if !column_schema.is_nullable {
+            } else if !column_schema.is_nullable() {
                 return MissingColumnSnafu { name }.fail()?;
             }
         }
@@ -111,7 +111,7 @@ impl<R: Region> Table for MitoTable<R> {
 
             if let Some(v) = vector {
                 put_op.add_value_column(name, v).map_err(TableError::new)?;
-            } else if !column_schema.is_nullable {
+            } else if !column_schema.is_nullable() {
                 return MissingColumnSnafu { name }.fail()?;
             }
         }
@@ -216,8 +216,8 @@ impl<R: Region> Table for MitoTable<R> {
                             &new_column.name,
                             new_column.data_type.clone(),
                         )
-                        .is_nullable(new_column.is_nullable)
-                        .default_constraint(new_column.default_constraint.clone())
+                        .is_nullable(new_column.is_nullable())
+                        .default_constraint(new_column.default_constraint().cloned())
                         .build()
                         .context(error::BuildColumnDescriptorSnafu {
                             table_name,
@@ -466,18 +466,9 @@ impl<R: Region> MitoTable<R> {
         rows_num: usize,
     ) -> TableResult<Option<VectorRef>> {
         // TODO(dennis): when we support altering schema, we should check the schemas difference between table and region
-        if let Some(c) = &column_schema.default_constraint {
-            let vector = c
-                .create_default_vector(
-                    &column_schema.data_type,
-                    column_schema.is_nullable,
-                    rows_num,
-                )
-                .context(UnsupportedDefaultConstraintSnafu)?;
-            Ok(Some(vector))
-        } else {
-            Ok(None)
-        }
+        Ok(column_schema
+            .create_default_vector(rows_num)
+            .context(UnsupportedDefaultConstraintSnafu)?)
     }
 
     pub async fn open(

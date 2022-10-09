@@ -29,11 +29,10 @@ const ARROW_FIELD_DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 pub struct ColumnSchema {
     pub name: String,
     pub data_type: ConcreteDataType,
-    pub is_nullable: bool,
-    pub default_constraint: Option<ColumnDefaultConstraint>,
+    is_nullable: bool,
+    default_constraint: Option<ColumnDefaultConstraint>,
 }
 
-// TODO(yingwen): 1. Set default constraint to null if is_nullable; 2. make default_constraint private and validate it.
 impl ColumnSchema {
     pub fn new<T: Into<String>>(
         name: T,
@@ -48,21 +47,48 @@ impl ColumnSchema {
         }
     }
 
+    #[inline]
+    pub fn is_nullable(&self) -> bool {
+        self.is_nullable
+    }
+
+    #[inline]
+    pub fn default_constraint(&self) -> Option<&ColumnDefaultConstraint> {
+        self.default_constraint.as_ref()
+    }
+
     pub fn with_default_constraint(
         mut self,
         default_constraint: Option<ColumnDefaultConstraint>,
-    ) -> Self {
+    ) -> Result<Self> {
+        if let Some(constraint) = &default_constraint {
+            ensure!(
+                self.is_nullable || !constraint.maybe_null(),
+                error::NullDefaultSnafu
+            );
+        }
+
         self.default_constraint = default_constraint;
-        self
+        Ok(self)
     }
 
     pub fn create_default_vector(&self, num_rows: usize) -> Result<Option<VectorRef>> {
-        // TODO(yingwen): We need to set default constraint to null value if is_nullable is true, otherwise
-        // we should also check that field here.
-        self.default_constraint
-            .as_ref()
-            .map(|v| v.create_default_vector(&self.data_type, self.is_nullable, num_rows))
-            .transpose()
+        match &self.default_constraint {
+            Some(c) => c
+                .create_default_vector(&self.data_type, self.is_nullable, num_rows)
+                .map(Some),
+            None => {
+                if self.is_nullable {
+                    // For nullable column without explicit default value, use null as default
+                    // value.
+                    ColumnDefaultConstraint::null_value()
+                        .create_default_vector(&self.data_type, self.is_nullable, num_rows)
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
     }
 }
 
@@ -312,7 +338,7 @@ impl TryFrom<&ColumnSchema> for Field {
         Ok(Field::new(
             column_schema.name.clone(),
             column_schema.data_type.as_arrow_type(),
-            column_schema.is_nullable,
+            column_schema.is_nullable(),
         )
         .with_metadata(metadata))
     }
@@ -395,7 +421,8 @@ mod tests {
     #[test]
     fn test_column_schema_with_default_constraint() {
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
-            .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(99))));
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(99))))
+            .unwrap();
         let field = Field::try_from(&column_schema).unwrap();
         assert_eq!("test", field.name);
         assert_eq!(ArrowDataType::Int32, field.data_type);

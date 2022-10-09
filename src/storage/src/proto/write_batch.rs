@@ -98,7 +98,7 @@ impl From<&schema::ColumnSchema> for ColumnSchema {
         Self {
             name: cs.name.clone(),
             data_type: DataType::from(&cs.data_type).into(),
-            is_nullable: cs.is_nullable,
+            is_nullable: cs.is_nullable(),
         }
     }
 }

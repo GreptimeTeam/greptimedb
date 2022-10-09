@@ -13,7 +13,7 @@ pub type RegionId = u64;
 // TODO(yingwen): Validate default value has same type with column, and name is a valid column name.
 /// A [ColumnDescriptor] contains information to create a column.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
-#[builder(pattern = "owned")]
+#[builder(pattern = "owned", build_fn(validate = "Self::validate"))]
 pub struct ColumnDescriptor {
     pub id: ColumnId,
     #[builder(setter(into))]
@@ -25,9 +25,16 @@ pub struct ColumnDescriptor {
     /// Default constraint of column, default is None, which means no default constraint
     /// for this column, and user must provide a value for a not-null column.
     #[builder(default)]
-    pub default_constraint: Option<ColumnDefaultConstraint>,
+    default_constraint: Option<ColumnDefaultConstraint>,
     #[builder(default, setter(into))]
     pub comment: String,
+}
+
+impl ColumnDescriptor {
+    #[inline]
+    pub fn default_constraint(&self) -> Option<&ColumnDefaultConstraint> {
+        self.default_constraint.as_ref()
+    }
 }
 
 impl ColumnDescriptorBuilder {
@@ -39,12 +46,25 @@ impl ColumnDescriptorBuilder {
             ..Default::default()
         }
     }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(Some(constraint)) = &self.default_constraint {
+            let is_nullable = self.is_nullable.unwrap_or(true);
+
+            if !is_nullable && constraint.maybe_null() {
+                return Err("column is not nullable but has default null constraint".to_string());
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl From<&ColumnDescriptor> for ColumnSchema {
     fn from(desc: &ColumnDescriptor) -> ColumnSchema {
         ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable)
             .with_default_constraint(desc.default_constraint.clone())
+            .expect("ColumnDescriptor should validate default constraint")
     }
 }
 

@@ -366,7 +366,7 @@ impl WriteBatch {
                     );
 
                     ensure!(
-                        column_schema.is_nullable || col.null_count() == 0,
+                        column_schema.is_nullable() || col.null_count() == 0,
                         HasNullSnafu {
                             name: &column_schema.name,
                         }
@@ -374,7 +374,7 @@ impl WriteBatch {
                 }
                 None => {
                     ensure!(
-                        column_schema.is_nullable,
+                        column_schema.is_nullable(),
                         MissingColumnSnafu {
                             name: &column_schema.name,
                         }
