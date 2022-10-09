@@ -461,7 +461,6 @@ impl<R: Region> MitoTable<R> {
         Ok(MitoTable::new(table_info, region, manifest))
     }
 
-    // TODO(yingwen): Use ColumnSchema::create_default_vector
     fn try_get_column_default_constraint_vector(
         column_schema: &ColumnSchema,
         rows_num: usize,
@@ -469,7 +468,11 @@ impl<R: Region> MitoTable<R> {
         // TODO(dennis): when we support altering schema, we should check the schemas difference between table and region
         if let Some(c) = &column_schema.default_constraint {
             let vector = c
-                .create_default_vector(&column_schema.data_type, rows_num)
+                .create_default_vector(
+                    &column_schema.data_type,
+                    column_schema.is_nullable,
+                    rows_num,
+                )
                 .context(UnsupportedDefaultConstraintSnafu)?;
             Ok(Some(vector))
         } else {

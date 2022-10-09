@@ -61,7 +61,7 @@ impl ColumnSchema {
         // we should also check that field here.
         self.default_constraint
             .as_ref()
-            .map(|v| v.create_default_vector(&self.data_type, num_rows))
+            .map(|v| v.create_default_vector(&self.data_type, self.is_nullable, num_rows))
             .transpose()
     }
 }

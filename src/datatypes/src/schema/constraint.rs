@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use common_time::{util, Timestamp};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
@@ -41,17 +41,23 @@ impl TryInto<Vec<u8>> for ColumnDefaultConstraint {
 impl ColumnDefaultConstraint {
     /// Create a vector that contains `num_rows` default values for given `data_type`.
     ///
+    /// If `is_nullable` is `true`, then this method would returns error if the created
+    /// default value is null.
+    ///
     /// # Panics
     /// Panics if `num_rows == 0`.
     pub fn create_default_vector(
         &self,
         data_type: &ConcreteDataType,
+        is_nullable: bool,
         num_rows: usize,
     ) -> Result<VectorRef> {
         assert!(num_rows > 0);
 
         match self {
             ColumnDefaultConstraint::Function(expr) => {
+                // Functions should also ensure its return value is not null when
+                // is_nullable is true.
                 match &expr[..] {
                     // TODO(dennis): we only supports current_timestamp right now,
                     //   it's better to use a expression framework in future.
@@ -66,6 +72,8 @@ impl ColumnDefaultConstraint {
                 }
             }
             ColumnDefaultConstraint::Value(v) => {
+                ensure!(is_nullable || !v.is_null(), error::NullDefaultSnafu);
+
                 let mut mutable_vector = data_type.create_mutable_vector(1);
                 mutable_vector.push_value_ref(v.as_value_ref())?;
                 let vector = Arc::new(ConstantVector::new(mutable_vector.to_vector(), num_rows));

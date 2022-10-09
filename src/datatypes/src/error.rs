@@ -66,6 +66,9 @@ pub enum Error {
 
     #[snafu(display("Unsupported column default constraint expression: {}", expr))]
     UnsupportedDefaultExpr { expr: String, backtrace: Backtrace },
+
+    #[snafu(display("Default value should not be null for non null column"))]
+    NullDefault { backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {

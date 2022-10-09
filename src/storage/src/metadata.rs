@@ -201,7 +201,6 @@ impl RegionMetadata {
     fn validate_add_column(&self, add_column: &AddColumn) -> Result<()> {
         // We don't check the case that the column is not nullable but default constraint is null. The
         // caller should guarantee this.
-        // TODO(yingwen): Maybe check non null but with default value null.
         ensure!(
             add_column.desc.is_nullable || add_column.desc.default_constraint.is_some(),
             AddNonNullColumnSnafu {
