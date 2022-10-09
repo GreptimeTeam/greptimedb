@@ -117,6 +117,7 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                             ),
                         })
                     }
+                    Value::Geometry(_) => todo!(),
                 }
             }
             row_writer.end_row()?;

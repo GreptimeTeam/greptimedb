@@ -67,6 +67,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::Null(_) | ConcreteDataType::List(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
             }
+            ConcreteDataType::Geometry(_) => todo!(),
         });
         Ok(datatype)
     }

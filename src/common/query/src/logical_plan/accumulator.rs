@@ -194,6 +194,7 @@ fn try_into_scalar_value(value: Value, datatype: &ConcreteDataType) -> Result<Sc
         Value::Null => try_convert_null_value(datatype)?,
         Value::List(list) => try_convert_list_value(list)?,
         Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
+        Value::Geometry(_) => todo!(),
     })
 }
 

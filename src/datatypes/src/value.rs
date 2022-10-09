@@ -44,6 +44,7 @@ pub enum Value {
     Timestamp(Timestamp),
 
     List(ListValue),
+    Geometry(GeometryValue),
 }
 
 impl Value {
@@ -71,6 +72,7 @@ impl Value {
             Value::Date(_) => ConcreteDataType::date_datatype(),
             Value::DateTime(_) => ConcreteDataType::date_datatype(),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
+            Value::Geometry(_) => todo!(),
         }
     }
 
@@ -112,6 +114,7 @@ impl Value {
             Value::DateTime(v) => ValueRef::DateTime(*v),
             Value::List(v) => ValueRef::List(ListValueRef::Ref { val: v }),
             Value::Timestamp(v) => ValueRef::Timestamp(*v),
+            Value::Geometry(_) => todo!(),
         }
     }
 }
@@ -249,6 +252,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
             Value::Timestamp(v) => serde_json::to_value(v.value())?,
+            Value::Geometry(_) => todo!(),
         };
 
         Ok(json_value)
@@ -304,6 +308,16 @@ impl Ord for ListValue {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize,)]
+pub enum GeometryValue {
+    Point(f64, f64),
+}
+
+impl Default for GeometryValue {
+    fn default() -> Self {
+        GeometryValue::Point(0.0, 0.0)
+    }
+}
 /// Reference to [Value].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueRef<'a> {
@@ -331,6 +345,7 @@ pub enum ValueRef<'a> {
     DateTime(DateTime),
     Timestamp(Timestamp),
     List(ListValueRef<'a>),
+    Geometry(&'a GeometryValue),
 }
 
 macro_rules! impl_as_for_value_ref {

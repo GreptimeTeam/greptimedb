@@ -119,3 +119,16 @@ where
         filter::filter_non_constant!(self, PrimitiveVector<T>, filter)
     }
 }
+impl VectorOp for GeometryVector {
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        todo!()
+    }
+
+    fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+        todo!()
+    }
+
+    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+        todo!()
+    }
+}

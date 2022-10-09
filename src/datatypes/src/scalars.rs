@@ -3,7 +3,8 @@ use std::any::Any;
 use common_time::{Date, DateTime, Timestamp};
 
 use crate::prelude::*;
-use crate::value::{ListValue, ListValueRef};
+use crate::value::{GeometryValue, ListValue, ListValueRef};
+use crate::vectors::all::GeometryVector;
 use crate::vectors::*;
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
@@ -337,6 +338,30 @@ impl<'a> ScalarRef<'a> for ListValueRef<'a> {
             },
             ListValueRef::Ref { val } => (*val).clone(),
         }
+    }
+}
+
+impl Scalar for GeometryValue {
+    type VectorType = GeometryVector;
+
+    type RefType<'a> = &'a GeometryValue;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        todo!()
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        todo!()
+    }
+}
+
+impl<'a> ScalarRef<'a> for &'a GeometryValue {
+    type VectorType = GeometryVector;
+
+    type ScalarType = GeometryValue;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        todo!()
     }
 }
 

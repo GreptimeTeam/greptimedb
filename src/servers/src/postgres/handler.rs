@@ -120,6 +120,7 @@ fn encode_value(value: &Value, builder: &mut TextQueryResponseBuilder) -> PgWire
                 &value
             ),
         }))),
+        Value::Geometry(_) => todo!(),
     }
 }
 
@@ -142,6 +143,7 @@ fn type_translate(origin: &ConcreteDataType) -> Result<Type> {
             err_msg: format!("not implemented for column datatype {:?}", origin),
         }
         .fail(),
+        &ConcreteDataType::Geometry(_) => todo!(),
     }
 }
 

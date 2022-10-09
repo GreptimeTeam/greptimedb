@@ -186,6 +186,7 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .collect(),
         ConcreteDataType::Null(_) => unreachable!(),
         ConcreteDataType::List(_) => unreachable!(),
+        ConcreteDataType::Geometry(_) => todo!(),
     }
 }
 

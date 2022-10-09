@@ -882,6 +882,7 @@ pub fn pyobj_try_to_typed_val(
                     None
                 }
             }
+            ConcreteDataType::Geometry(_) => todo!(),
         }
     } else if is_instance::<PyNone>(&obj, vm) {
         // if Untyped then by default return types with highest precision
@@ -940,6 +941,7 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         // FIXME(dennis): lose the timestamp unit here
         Value::Timestamp(v) => vm.ctx.new_int(v.value()).into(),
         value::Value::List(_) => unreachable!(),
+        Value::Geometry(_) => todo!(),
     }
 }
 

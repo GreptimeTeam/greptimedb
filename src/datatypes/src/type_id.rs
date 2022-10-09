@@ -31,6 +31,8 @@ pub enum LogicalTypeId {
     Timestamp,
 
     List,
+
+    Geometry,
 }
 
 impl LogicalTypeId {
@@ -64,6 +66,7 @@ impl LogicalTypeId {
             LogicalTypeId::List => {
                 ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
             }
+            LogicalTypeId::Geometry => todo!(),
         }
     }
 }
