@@ -332,8 +332,8 @@ impl StoreSchema {
     }
 
     #[inline]
-    fn row_key_columns(&self) -> &[ColumnSchema] {
-        &self.schema.column_schemas()[..self.row_key_end]
+    fn user_columns(&self) -> &[ColumnSchema] {
+        &self.schema.column_schemas()[..self.user_column_end]
     }
 }
 

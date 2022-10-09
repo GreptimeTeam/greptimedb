@@ -299,7 +299,6 @@ impl PutOperation for PutData {
     }
 
     fn add_version_column(&mut self, vector: VectorRef) -> Result<()> {
-        // TODO(yingwen): Maybe ensure that version column must be a uint64 vector.
         self.add_column_by_name(consts::VERSION_COLUMN_NAME, vector)
     }
 
@@ -416,7 +415,7 @@ impl<'a> IntoIterator for &'a WriteBatch {
 }
 
 impl PutData {
-    fn add_column_by_name(&mut self, name: &str, vector: VectorRef) -> Result<()> {
+    pub(crate) fn add_column_by_name(&mut self, name: &str, vector: VectorRef) -> Result<()> {
         ensure!(
             !self.columns.contains_key(name),
             DuplicateColumnSnafu { name }
@@ -436,6 +435,10 @@ impl PutData {
         self.columns.insert(name.to_string(), vector);
 
         Ok(())
+    }
+
+    pub(crate) fn remove_column_by_name(&mut self, name: &str) {
+        self.columns.remove(name);
     }
 }
 

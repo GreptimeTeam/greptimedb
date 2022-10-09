@@ -11,6 +11,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, DeserializeSnafu, Error, Result, SerializeSnafu};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
+use crate::vectors::VectorRef;
 
 /// Key used to store column name of the timestamp column in metadata.
 ///
@@ -32,6 +33,7 @@ pub struct ColumnSchema {
     pub default_constraint: Option<ColumnDefaultConstraint>,
 }
 
+// TODO(yingwen): 1. Set default constraint to null if is_nullable; 2. make default_constraint private and validate it.
 impl ColumnSchema {
     pub fn new<T: Into<String>>(
         name: T,
@@ -52,6 +54,15 @@ impl ColumnSchema {
     ) -> Self {
         self.default_constraint = default_constraint;
         self
+    }
+
+    pub fn create_default_vector(&self, num_rows: usize) -> Result<Option<VectorRef>> {
+        // TODO(yingwen): We need to set default constraint to null value if is_nullable is true, otherwise
+        // we should also check that field here.
+        self.default_constraint
+            .as_ref()
+            .map(|v| v.create_default_vector(&self.data_type, num_rows))
+            .transpose()
     }
 }
 

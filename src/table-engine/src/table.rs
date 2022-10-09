@@ -461,6 +461,7 @@ impl<R: Region> MitoTable<R> {
         Ok(MitoTable::new(table_info, region, manifest))
     }
 
+    // TODO(yingwen): Use ColumnSchema::create_default_vector
     fn try_get_column_default_constraint_vector(
         column_schema: &ColumnSchema,
         rows_num: usize,
