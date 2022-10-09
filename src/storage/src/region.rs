@@ -404,7 +404,12 @@ impl<S: LogStore> RegionInner<S> {
     }
 
     async fn alter(&self, request: AlterRequest) -> Result<()> {
-        // TODO(yingwen): [alter] Log the request.
+        logging::info!(
+            "Alter region {}, name: {}, request: {:?}",
+            self.shared.id,
+            self.shared.name,
+            request
+        );
 
         let alter_ctx = AlterContext {
             shared: &self.shared,
