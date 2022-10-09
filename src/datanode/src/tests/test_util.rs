@@ -81,7 +81,9 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
         .catalog_manager()
         .catalog(DEFAULT_CATALOG_NAME)
         .unwrap()
+        .unwrap()
         .schema(DEFAULT_SCHEMA_NAME)
+        .unwrap()
         .unwrap();
     schema_provider
         .register_table(table_name.to_string(), table)

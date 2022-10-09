@@ -210,7 +210,7 @@ impl LocalCatalogManager {
                 Entry::Schema(s) => {
                     let catalog =
                         self.catalogs
-                            .catalog(&s.catalog_name)
+                            .catalog(&s.catalog_name)?
                             .context(CatalogNotFoundSnafu {
                                 catalog_name: &s.catalog_name,
                             })?;
@@ -234,12 +234,12 @@ impl LocalCatalogManager {
     async fn open_and_register_table(&self, t: &TableEntry) -> Result<()> {
         let catalog = self
             .catalogs
-            .catalog(&t.catalog_name)
+            .catalog(&t.catalog_name)?
             .context(CatalogNotFoundSnafu {
                 catalog_name: &t.catalog_name,
             })?;
         let schema = catalog
-            .schema(&t.schema_name)
+            .schema(&t.schema_name)?
             .context(SchemaNotFoundSnafu {
                 schema_info: format!("{}.{}", &t.catalog_name, &t.schema_name),
             })?;
@@ -283,19 +283,19 @@ impl CatalogList for LocalCatalogManager {
         &self,
         name: String,
         catalog: CatalogProviderRef,
-    ) -> Option<Arc<dyn CatalogProvider>> {
+    ) -> Result<Option<CatalogProviderRef>> {
         self.catalogs.register_catalog(name, catalog)
     }
 
-    fn catalog_names(&self) -> Vec<String> {
-        let mut res = self.catalogs.catalog_names();
+    fn catalog_names(&self) -> Result<Vec<String>> {
+        let mut res = self.catalogs.catalog_names()?;
         res.push(SYSTEM_CATALOG_NAME.to_string());
-        res
+        Ok(res)
     }
 
-    fn catalog(&self, name: &str) -> Option<Arc<dyn CatalogProvider>> {
+    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
         if name.eq_ignore_ascii_case(SYSTEM_CATALOG_NAME) {
-            Some(self.system.clone())
+            Ok(Some(self.system.clone()))
         } else {
             self.catalogs.catalog(name)
         }
@@ -334,12 +334,12 @@ impl CatalogManager for LocalCatalogManager {
 
         let catalog = self
             .catalogs
-            .catalog(&catalog_name)
+            .catalog(&catalog_name)?
             .context(CatalogNotFoundSnafu {
                 catalog_name: &catalog_name,
             })?;
         let schema = catalog
-            .schema(&schema_name)
+            .schema(&schema_name)?
             .with_context(|| SchemaNotFoundSnafu {
                 schema_info: format!("{}.{}", catalog_name, schema_name),
             })?;
@@ -389,10 +389,10 @@ impl CatalogManager for LocalCatalogManager {
 
         let catalog = self
             .catalogs
-            .catalog(catalog_name)
+            .catalog(catalog_name)?
             .context(CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
-            .schema(schema_name)
+            .schema(schema_name)?
             .with_context(|| SchemaNotFoundSnafu {
                 schema_info: format!("{}.{}", catalog_name, schema_name),
             })?;

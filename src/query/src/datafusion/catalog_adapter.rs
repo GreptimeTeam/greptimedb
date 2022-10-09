@@ -51,6 +51,7 @@ impl DfCatalogList for DfCatalogListAdapter {
         });
         self.catalog_list
             .register_catalog(name, catalog_adapter)
+            .expect("datafusion does not accept fallible catalog access") // TODO(hl): datafusion register catalog does not handles errors
             .map(|catalog_provider| {
                 Arc::new(DfCatalogProviderAdapter {
                     catalog_provider,
@@ -60,16 +61,22 @@ impl DfCatalogList for DfCatalogListAdapter {
     }
 
     fn catalog_names(&self) -> Vec<String> {
-        self.catalog_list.catalog_names()
+        // TODO(hl): datafusion register catalog does not handles errors
+        self.catalog_list
+            .catalog_names()
+            .expect("datafusion does not accept fallible catalog access")
     }
 
     fn catalog(&self, name: &str) -> Option<Arc<dyn DfCatalogProvider>> {
-        self.catalog_list.catalog(name).map(|catalog_provider| {
-            Arc::new(DfCatalogProviderAdapter {
-                catalog_provider,
-                runtime: self.runtime.clone(),
-            }) as _
-        })
+        self.catalog_list
+            .catalog(name)
+            .expect("datafusion does not accept fallible catalog access") // TODO(hl): datafusion register catalog does not handles errors
+            .map(|catalog_provider| {
+                Arc::new(DfCatalogProviderAdapter {
+                    catalog_provider,
+                    runtime: self.runtime.clone(),
+                }) as _
+            })
     }
 }
 
@@ -84,27 +91,28 @@ impl CatalogProvider for CatalogProviderAdapter {
         self
     }
 
-    fn schema_names(&self) -> Vec<String> {
-        self.df_catalog_provider.schema_names()
+    fn schema_names(&self) -> Result<Vec<String>, catalog::error::Error> {
+        Ok(self.df_catalog_provider.schema_names())
     }
 
     fn register_schema(
         &self,
         _name: String,
         _schema: SchemaProviderRef,
-    ) -> Option<SchemaProviderRef> {
+    ) -> Result<Option<SchemaProviderRef>, catalog::error::Error> {
         todo!("register_schema is not supported in Datafusion catalog provider")
     }
 
-    fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.df_catalog_provider
+    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>, catalog::error::Error> {
+        Ok(self
+            .df_catalog_provider
             .schema(name)
             .map(|df_schema_provider| {
                 Arc::new(SchemaProviderAdapter {
                     df_schema_provider,
                     runtime: self.runtime.clone(),
                 }) as _
-            })
+            }))
     }
 }
 
@@ -120,16 +128,21 @@ impl DfCatalogProvider for DfCatalogProviderAdapter {
     }
 
     fn schema_names(&self) -> Vec<String> {
-        self.catalog_provider.schema_names()
+        self.catalog_provider
+            .schema_names()
+            .expect("datafusion does not accept fallible catalog access")
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn DfSchemaProvider>> {
-        self.catalog_provider.schema(name).map(|schema_provider| {
-            Arc::new(DfSchemaProviderAdapter {
-                schema_provider,
-                runtime: self.runtime.clone(),
-            }) as _
-        })
+        self.catalog_provider
+            .schema(name)
+            .expect("datafusion does not accept fallible catalog access")
+            .map(|schema_provider| {
+                Arc::new(DfSchemaProviderAdapter {
+                    schema_provider,
+                    runtime: self.runtime.clone(),
+                }) as _
+            })
     }
 }
 

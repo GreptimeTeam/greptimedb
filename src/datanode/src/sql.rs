@@ -12,7 +12,8 @@ use table::requests::*;
 use table::TableRef;
 
 use crate::error::{
-    CatalogNotFoundSnafu, GetTableSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
+    CatalogNotFoundSnafu, CatalogSnafu, GetTableSnafu, Result, SchemaNotFoundSnafu,
+    TableNotFoundSnafu,
 };
 
 mod alter;
@@ -63,6 +64,7 @@ impl SqlHandler {
     pub(crate) fn get_default_catalog(&self) -> Result<CatalogProviderRef> {
         self.catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
+            .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 name: DEFAULT_CATALOG_NAME,
             })
@@ -71,10 +73,12 @@ impl SqlHandler {
     pub(crate) fn get_default_schema(&self) -> Result<SchemaProviderRef> {
         self.catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
+            .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 name: DEFAULT_CATALOG_NAME,
             })?
             .schema(DEFAULT_SCHEMA_NAME)
+            .context(CatalogSnafu)?
             .context(SchemaNotFoundSnafu {
                 name: DEFAULT_SCHEMA_NAME,
             })
