@@ -156,8 +156,12 @@ mod tests {
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema);
-        catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
+        default_catalog
+            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+            .unwrap();
+        catalog_list
+            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+            .unwrap();
 
         let factory = QueryEngineFactory::new(catalog_list);
         let query_engine = factory.query_engine();

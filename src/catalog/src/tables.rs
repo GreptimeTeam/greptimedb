@@ -69,7 +69,7 @@ impl Table for Tables {
 
         let convert_err = |e: Error| {
             common_recordbatch::error::CreateRecordBatchesSnafu {
-                reason: format!("Failed to access catalog, cause: {}", e.to_string()),
+                reason: format!("Failed to access catalog, cause: {}", e),
             }
             .build()
         };
@@ -84,7 +84,7 @@ impl Table for Tables {
                     let mut tables_in_schema =
                         Vec::with_capacity(catalog.schema_names().map_err(convert_err)?.len());
                     let schema = catalog.schema(&schema_name).map_err(convert_err)?.unwrap();
-                    for table_name in schema.table_names() {
+                    for table_name in schema.table_names().map_err(convert_err)? {
                         tables_in_schema.push(table_name);
                     }
 
@@ -167,17 +167,20 @@ impl SchemaProvider for InformationSchema {
         self
     }
 
-    fn table_names(&self) -> Vec<String> {
-        vec!["tables".to_string(), SYSTEM_CATALOG_TABLE_NAME.to_string()]
+    fn table_names(&self) -> Result<Vec<String>, Error> {
+        Ok(vec![
+            "tables".to_string(),
+            SYSTEM_CATALOG_TABLE_NAME.to_string(),
+        ])
     }
 
-    fn table(&self, name: &str) -> Option<TableRef> {
+    fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {
         if name.eq_ignore_ascii_case("tables") {
-            Some(self.tables.clone())
+            Ok(Some(self.tables.clone()))
         } else if name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME) {
-            Some(self.system.clone())
+            Ok(Some(self.system.clone()))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -193,8 +196,9 @@ impl SchemaProvider for InformationSchema {
         panic!("System catalog & schema does not support deregister table")
     }
 
-    fn table_exist(&self, name: &str) -> bool {
-        name.eq_ignore_ascii_case("tables") || name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME)
+    fn table_exist(&self, name: &str) -> Result<bool, Error> {
+        Ok(name.eq_ignore_ascii_case("tables")
+            || name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME))
     }
 }
 
@@ -307,8 +311,12 @@ mod tests {
         schema
             .register_table("test_table".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
-        catalog_provider.register_schema("test_schema".to_string(), schema);
-        catalog_list.register_catalog("test_catalog".to_string(), catalog_provider);
+        catalog_provider
+            .register_schema("test_schema".to_string(), schema)
+            .unwrap();
+        catalog_list
+            .register_catalog("test_catalog".to_string(), catalog_provider)
+            .unwrap();
         let tables = Tables::new(catalog_list, "test_engine".to_string());
 
         let mut tables_stream = tables.scan(&None, &[], None).await.unwrap();

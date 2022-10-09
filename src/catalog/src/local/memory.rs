@@ -1,7 +1,6 @@
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::io::Error;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -133,18 +132,18 @@ impl SchemaProvider for MemorySchemaProvider {
         self
     }
 
-    fn table_names(&self) -> Vec<String> {
+    fn table_names(&self) -> Result<Vec<String>> {
         let tables = self.tables.read().unwrap();
-        tables.keys().cloned().collect()
+        Ok(tables.keys().cloned().collect())
     }
 
-    fn table(&self, name: &str) -> Option<TableRef> {
+    fn table(&self, name: &str) -> Result<Option<TableRef>> {
         let tables = self.tables.read().unwrap();
-        tables.get(name).cloned()
+        Ok(tables.get(name).cloned())
     }
 
     fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
-        if self.table_exist(name.as_str()) {
+        if self.table_exist(name.as_str())? {
             return TableExistsSnafu { table: name }.fail()?;
         }
         let mut tables = self.tables.write().unwrap();
@@ -156,9 +155,9 @@ impl SchemaProvider for MemorySchemaProvider {
         Ok(tables.remove(name))
     }
 
-    fn table_exist(&self, name: &str) -> bool {
+    fn table_exist(&self, name: &str) -> Result<bool> {
         let tables = self.tables.read().unwrap();
-        tables.contains_key(name)
+        Ok(tables.contains_key(name))
     }
 }
 
@@ -185,30 +184,34 @@ mod tests {
             .unwrap()
             .is_none());
         let default_catalog = Arc::new(MemoryCatalogProvider::default());
-        catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog.clone());
+        catalog_list
+            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog.clone())
+            .unwrap();
 
         assert!(default_catalog
             .schema(DEFAULT_SCHEMA_NAME)
             .unwrap()
             .is_none());
         let default_schema = Arc::new(MemorySchemaProvider::default());
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema.clone());
+        default_catalog
+            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema.clone())
+            .unwrap();
 
         default_schema
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
 
-        let table = default_schema.table("numbers");
+        let table = default_schema.table("numbers").unwrap();
         assert!(table.is_some());
 
-        assert!(default_schema.table("not_exists").is_none());
+        assert!(default_schema.table("not_exists").unwrap().is_none());
     }
 
     #[tokio::test]
     async fn test_mem_provider() {
         let provider = MemorySchemaProvider::new();
         let table_name = "numbers";
-        assert!(!provider.table_exist(table_name));
+        assert!(!provider.table_exist(table_name).unwrap());
         assert!(provider.deregister_table(table_name).unwrap().is_none());
         let test_table = NumbersTable::default();
         // register table successfully
@@ -216,7 +219,7 @@ mod tests {
             .register_table(table_name.to_string(), Arc::new(test_table))
             .unwrap()
             .is_none());
-        assert!(provider.table_exist(table_name));
+        assert!(provider.table_exist(table_name).unwrap());
         let other_table = NumbersTable::default();
         let result = provider.register_table(table_name.to_string(), Arc::new(other_table));
         let err = result.err().unwrap();

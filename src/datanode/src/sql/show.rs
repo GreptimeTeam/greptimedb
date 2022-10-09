@@ -84,7 +84,7 @@ impl SqlHandler {
         } else {
             self.get_default_schema()?
         };
-        let tables = schema.table_names();
+        let tables = schema.table_names().context(CatalogSnafu)?;
 
         let column_schemas = vec![ColumnSchema::new(
             TABLES_COLUMN,

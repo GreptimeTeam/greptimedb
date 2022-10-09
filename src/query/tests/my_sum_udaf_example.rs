@@ -246,8 +246,12 @@ fn new_query_engine_factory(table: MemTable) -> QueryEngineFactory {
     let catalog_list = Arc::new(MemoryCatalogList::default());
 
     schema_provider.register_table(table_name, table).unwrap();
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
-    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
+    catalog_provider
+        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
+        .unwrap();
+    catalog_list
+        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .unwrap();
 
     QueryEngineFactory::new(catalog_list)
 }

@@ -11,7 +11,11 @@ use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
-use crate::error::{self, NewCatalogSnafu, Result};
+use crate::error::{
+    self, CatalogSnafu, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result, TableNotFoundSnafu,
+    UnsupportedExprSnafu,
+};
+use crate::metric;
 use crate::script::ScriptExecutor;
 use crate::server::grpc::plan::PhysicalPlanner;
 use crate::sql::SqlHandler;
@@ -150,6 +154,7 @@ impl Instance {
 
             schema_provider
                 .table(table_name)
+                .context(CatalogSnafu)?
                 .context(TableNotFoundSnafu { table_name })?
         };
 

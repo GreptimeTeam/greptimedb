@@ -3,7 +3,7 @@ mod state;
 
 use std::sync::Arc;
 
-use catalog::{CatalogList, CatalogListRef};
+use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::prelude::ScalarUdf;

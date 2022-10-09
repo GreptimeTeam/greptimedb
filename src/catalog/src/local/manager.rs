@@ -140,9 +140,9 @@ impl LocalCatalogManager {
             self.system.information_schema.system.clone(),
         )?;
         let system_catalog = Arc::new(MemoryCatalogProvider::new());
-        system_catalog.register_schema(INFORMATION_SCHEMA_NAME.to_string(), system_schema);
+        system_catalog.register_schema(INFORMATION_SCHEMA_NAME.to_string(), system_schema)?;
         self.catalogs
-            .register_catalog(SYSTEM_CATALOG_NAME.to_string(), system_catalog);
+            .register_catalog(SYSTEM_CATALOG_NAME.to_string(), system_catalog)?;
 
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         let default_schema = Arc::new(MemorySchemaProvider::new());
@@ -152,9 +152,9 @@ impl LocalCatalogManager {
         let table = Arc::new(NumbersTable::default());
         default_schema.register_table("numbers".to_string(), table)?;
 
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema);
+        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)?;
         self.catalogs
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
+            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)?;
         Ok(())
     }
 
@@ -217,7 +217,7 @@ impl LocalCatalogManager {
                     catalog.register_schema(
                         s.schema_name.clone(),
                         Arc::new(MemorySchemaProvider::new()),
-                    );
+                    )?;
                     info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
@@ -344,7 +344,7 @@ impl CatalogManager for LocalCatalogManager {
                 schema_info: format!("{}.{}", catalog_name, schema_name),
             })?;
 
-        if schema.table_exist(&request.table_name) {
+        if schema.table_exist(&request.table_name)? {
             return TableExistsSnafu {
                 table: format_full_table_name(&catalog_name, &schema_name, &request.table_name),
             }
@@ -396,6 +396,6 @@ impl CatalogManager for LocalCatalogManager {
             .with_context(|| SchemaNotFoundSnafu {
                 schema_info: format!("{}.{}", catalog_name, schema_name),
             })?;
-        Ok(schema.table(table_name))
+        schema.table(table_name)
     }
 }

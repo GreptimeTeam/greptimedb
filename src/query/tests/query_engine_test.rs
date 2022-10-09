@@ -97,8 +97,12 @@ async fn test_udf() -> Result<()> {
         .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
         .unwrap();
     let default_catalog = Arc::new(MemoryCatalogProvider::new());
-    default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema);
-    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
+    default_catalog
+        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+        .unwrap();
+    catalog_list
+        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+        .unwrap();
 
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
@@ -206,8 +210,12 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
         .register_table(odd_number_table.table_name().to_string(), odd_number_table)
         .unwrap();
 
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
-    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
+    catalog_provider
+        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
+        .unwrap();
+    catalog_list
+        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .unwrap();
 
     let factory = QueryEngineFactory::new(catalog_list);
     factory.query_engine().clone()

@@ -137,8 +137,12 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
         .register_table(number_table.table_name().to_string(), number_table)
         .unwrap();
 
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
-    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
+    catalog_provider
+        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
+        .unwrap();
+    catalog_list
+        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .unwrap();
 
     let factory = QueryEngineFactory::new(catalog_list);
     factory.query_engine().clone()
