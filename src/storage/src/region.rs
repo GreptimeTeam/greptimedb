@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
@@ -23,6 +23,7 @@ use crate::manifest::{
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
+use crate::schema::compat;
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
 use crate::version::VersionEdit;
@@ -377,18 +378,13 @@ impl<S: LogStore> RegionInner<S> {
         SnapshotImpl::new(version, sequence, self.sst_layer.clone())
     }
 
-    async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
-        // FIXME(yingwen): [alter] The schema may be outdated.
-        let metadata = self.in_memory_metadata();
+    async fn write(&self, ctx: &WriteContext, mut request: WriteBatch) -> Result<WriteResponse> {
+        let metadata = self.version_control().metadata();
         let schema = metadata.schema();
 
-        // Only compare column schemas.
-        ensure!(
-            schema.column_schemas() == request.schema().column_schemas(),
-            error::InvalidInputSchemaSnafu {
-                region: &self.shared.name
-            }
-        );
+        // Try to make request schema compatible with region's outside of write lock. Note that
+        // schema might be altered after this step.
+        compat::compat_write(schema.store_schema(), &mut request)?;
 
         let writer_ctx = WriterContext {
             shared: &self.shared,

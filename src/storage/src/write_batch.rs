@@ -436,10 +436,6 @@ impl PutData {
 
         Ok(())
     }
-
-    pub(crate) fn remove_column_by_name(&mut self, name: &str) {
-        self.columns.remove(name);
-    }
 }
 
 pub mod codec {

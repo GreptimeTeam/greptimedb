@@ -1,4 +1,4 @@
-mod compat;
+pub mod compat;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};

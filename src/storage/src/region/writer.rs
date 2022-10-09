@@ -18,6 +18,7 @@ use crate::manifest::action::{
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
 use crate::proto::wal::WalHeader;
 use crate::region::{RecoveredMetadataMap, RegionManifest, SharedDataRef};
+use crate::schema::compat;
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControlRef, VersionEdit};
 use crate::wal::{Payload, Wal};
@@ -261,20 +262,23 @@ impl WriterInner {
         &mut self,
         version_mutex: &Mutex<()>,
         _ctx: &WriteContext,
-        request: WriteBatch,
+        mut request: WriteBatch,
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<WriteResponse> {
         let time_ranges = self.preprocess_write(&request, &writer_ctx).await?;
-
-        // TODO(yingwen): Write wal and get sequence.
         let version_control = writer_ctx.version_control();
-        let version = version_control.current();
 
         let _lock = version_mutex.lock().await;
+
+        let metadata = version_control.metadata();
+        // We need to check the schema again since it might has been altered.
+        compat::compat_write(metadata.schema().store_schema(), &mut request)?;
+
         let committed_sequence = version_control.committed_sequence();
         // Sequence for current write batch.
         let next_sequence = committed_sequence + 1;
 
+        let version = version_control.current();
         let wal_header = WalHeader::with_last_manifest_version(version.manifest_version());
         writer_ctx
             .wal

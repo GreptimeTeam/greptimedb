@@ -14,9 +14,10 @@ use crate::write_batch::{Mutation, PutData, WriteBatch};
 /// vector with default value to the `write_batch`.
 ///
 /// If there are columns not in `dest_schema`, an error would be returned.
-fn compat_write(dest_schema: &StoreSchema, write_batch: &mut WriteBatch) -> Result<()> {
+pub fn compat_write(dest_schema: &StoreSchema, write_batch: &mut WriteBatch) -> Result<()> {
     let (data_version, schema_version) = (dest_schema.version(), write_batch.schema().version());
-    // Nothing to do if schema version of the write batch is equal to version of destination.
+    // Fast path, nothing to do if schema version of the write batch is equal to version
+    // of destination.
     if data_version == schema_version {
         debug_assert_eq!(
             dest_schema.user_columns(),

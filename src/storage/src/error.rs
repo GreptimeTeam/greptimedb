@@ -22,12 +22,6 @@ pub enum Error {
         source: MetadataError,
     },
 
-    #[snafu(display("Invalid schema of input data, region: {}", region))]
-    InvalidInputSchema {
-        region: String,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Missing column {} in write batch", column))]
     BatchMissingColumn {
         column: String,
@@ -328,7 +322,6 @@ impl ErrorExt for Error {
 
         match self {
             InvalidScanIndex { .. }
-            | InvalidInputSchema { .. }
             | BatchMissingColumn { .. }
             | BatchMissingTimestamp { .. }
             | InvalidTimestamp { .. }
