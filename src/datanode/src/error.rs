@@ -261,6 +261,12 @@ pub enum Error {
         duplicated: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to access catalog, source: {}", source))]
+    Catalog {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -314,7 +320,8 @@ impl ErrorExt for Error {
             | Error::Conversion { .. }
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }
-            | Error::ColumnDataType { .. } => StatusCode::Internal,
+            | Error::ColumnDataType { .. }
+            | Error::Catalog { .. } => StatusCode::Internal,
 
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),

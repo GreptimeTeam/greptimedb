@@ -3,11 +3,13 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use common_error::prelude::ErrorExt;
 use table::metadata::TableId;
 use table::requests::CreateTableRequest;
 use table::TableRef;
 
 pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use crate::error::Error;
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
 pub mod consts;
@@ -29,13 +31,13 @@ pub trait CatalogList: Sync + Send {
         &self,
         name: String,
         catalog: CatalogProviderRef,
-    ) -> Option<CatalogProviderRef>;
+    ) -> Result<Option<CatalogProviderRef>, Error>;
 
     /// Retrieves the list of available catalog names
-    fn catalog_names(&self) -> Vec<String>;
+    fn catalog_names(&self) -> Result<Vec<String>, Error>;
 
     /// Retrieves a specific catalog by name, provided it exists.
-    fn catalog(&self, name: &str) -> Option<CatalogProviderRef>;
+    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>, Error>;
 }
 
 /// Represents a catalog, comprising a number of named schemas.
@@ -45,14 +47,17 @@ pub trait CatalogProvider: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
     /// Retrieves the list of available schema names in this catalog.
-    fn schema_names(&self) -> Vec<String>;
+    fn schema_names(&self) -> Result<Vec<String>, Error>;
 
     /// Registers schema to this catalog.
-    fn register_schema(&self, name: String, schema: SchemaProviderRef)
-        -> Option<SchemaProviderRef>;
+    fn register_schema(
+        &self,
+        name: String,
+        schema: SchemaProviderRef,
+    ) -> Result<Option<SchemaProviderRef>, Error>;
 
     /// Retrieves a specific schema from the catalog by name, provided it exists.
-    fn schema(&self, name: &str) -> Option<SchemaProviderRef>;
+    fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>, Error>;
 }
 
 pub type CatalogListRef = Arc<dyn CatalogList>;

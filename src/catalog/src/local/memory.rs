@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::io::Error;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -23,7 +24,7 @@ impl MemoryCatalogList {
     pub fn register_catalog_if_absent(
         &self,
         name: String,
-        catalog: Arc<dyn CatalogProvider>,
+        catalog: CatalogProviderRef,
     ) -> Option<CatalogProviderRef> {
         let mut catalogs = self.catalogs.write().unwrap();
         let entry = catalogs.entry(name);
@@ -46,19 +47,19 @@ impl CatalogList for MemoryCatalogList {
         &self,
         name: String,
         catalog: CatalogProviderRef,
-    ) -> Option<CatalogProviderRef> {
+    ) -> Result<Option<CatalogProviderRef>> {
         let mut catalogs = self.catalogs.write().unwrap();
-        catalogs.insert(name, catalog)
+        Ok(catalogs.insert(name, catalog))
     }
 
-    fn catalog_names(&self) -> Vec<String> {
+    fn catalog_names(&self) -> Result<Vec<String>> {
         let catalogs = self.catalogs.read().unwrap();
-        catalogs.keys().map(|s| s.to_string()).collect()
+        Ok(catalogs.keys().map(|s| s.to_string()).collect())
     }
 
-    fn catalog(&self, name: &str) -> Option<CatalogProviderRef> {
+    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
         let catalogs = self.catalogs.read().unwrap();
-        catalogs.get(name).cloned()
+        Ok(catalogs.get(name).cloned())
     }
 }
 
@@ -87,23 +88,23 @@ impl CatalogProvider for MemoryCatalogProvider {
         self
     }
 
-    fn schema_names(&self) -> Vec<String> {
+    fn schema_names(&self) -> Result<Vec<String>> {
         let schemas = self.schemas.read().unwrap();
-        schemas.keys().cloned().collect()
+        Ok(schemas.keys().cloned().collect())
     }
 
     fn register_schema(
         &self,
         name: String,
         schema: SchemaProviderRef,
-    ) -> Option<SchemaProviderRef> {
+    ) -> Result<Option<SchemaProviderRef>> {
         let mut schemas = self.schemas.write().unwrap();
-        schemas.insert(name, schema)
+        Ok(schemas.insert(name, schema))
     }
 
-    fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
+    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
         let schemas = self.schemas.read().unwrap();
-        schemas.get(name).cloned()
+        Ok(schemas.get(name).cloned())
     }
 }
 
@@ -179,11 +180,17 @@ mod tests {
     fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_list().unwrap();
 
-        assert!(catalog_list.catalog(DEFAULT_CATALOG_NAME).is_none());
+        assert!(catalog_list
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .is_none());
         let default_catalog = Arc::new(MemoryCatalogProvider::default());
         catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog.clone());
 
-        assert!(default_catalog.schema(DEFAULT_SCHEMA_NAME).is_none());
+        assert!(default_catalog
+            .schema(DEFAULT_SCHEMA_NAME)
+            .unwrap()
+            .is_none());
         let default_schema = Arc::new(MemorySchemaProvider::default());
         default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema.clone());
 

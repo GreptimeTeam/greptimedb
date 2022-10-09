@@ -20,7 +20,7 @@ use table::metadata::TableId;
 use table::{Table, TableRef};
 
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
-use crate::error::InsertTableRecordSnafu;
+use crate::error::{Error, InsertTableRecordSnafu};
 use crate::system::{build_table_insert_request, SystemCatalogTable};
 use crate::{
     format_full_table_name, CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef,
@@ -63,12 +63,23 @@ impl Table for Tables {
         let schema_ref = self.schema.clone();
         let engine_name = self.engine_name.clone();
 
+        let convert_err = |e: Error| {
+            common_recordbatch::error::CreateRecordBatchesSnafu {
+                reason: format!("Failed to access catalog, cause: {}", e.to_string()),
+            }
+            .build()
+        };
+
         let stream = stream!({
-            for catalog_name in catalogs.catalog_names() {
-                let catalog = catalogs.catalog(&catalog_name).unwrap();
-                for schema_name in catalog.schema_names() {
-                    let mut tables_in_schema = Vec::with_capacity(catalog.schema_names().len());
-                    let schema = catalog.schema(&schema_name).unwrap();
+            for catalog_name in catalogs.catalog_names().map_err(convert_err)? {
+                let catalog = catalogs
+                    .catalog(&catalog_name)
+                    .map_err(convert_err)?
+                    .unwrap();
+                for schema_name in catalog.schema_names().map_err(convert_err)? {
+                    let mut tables_in_schema =
+                        Vec::with_capacity(catalog.schema_names().map_err(convert_err)?.len());
+                    let schema = catalog.schema(&schema_name).map_err(convert_err)?.unwrap();
                     for table_name in schema.table_names() {
                         tables_in_schema.push(table_name);
                     }
@@ -224,23 +235,23 @@ impl CatalogProvider for SystemCatalog {
         self
     }
 
-    fn schema_names(&self) -> Vec<String> {
-        vec![INFORMATION_SCHEMA_NAME.to_string()]
+    fn schema_names(&self) -> Result<Vec<String>, Error> {
+        Ok(vec![INFORMATION_SCHEMA_NAME.to_string()])
     }
 
     fn register_schema(
         &self,
         _name: String,
         _schema: SchemaProviderRef,
-    ) -> Option<SchemaProviderRef> {
+    ) -> Result<Option<SchemaProviderRef>, Error> {
         panic!("System catalog does not support registering schema!")
     }
 
-    fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
+    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>, Error> {
         if name.eq_ignore_ascii_case(INFORMATION_SCHEMA_NAME) {
-            Some(self.information_schema.clone())
+            Ok(Some(self.information_schema.clone()))
         } else {
-            None
+            Ok(None)
         }
     }
 }

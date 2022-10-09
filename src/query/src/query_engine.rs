@@ -3,7 +3,7 @@ mod state;
 
 use std::sync::Arc;
 
-use catalog::CatalogList;
+use catalog::{CatalogList, CatalogListRef};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::prelude::ScalarUdf;
@@ -42,7 +42,7 @@ pub struct QueryEngineFactory {
 }
 
 impl QueryEngineFactory {
-    pub fn new(catalog_list: Arc<dyn CatalogList>) -> Self {
+    pub fn new(catalog_list: CatalogListRef) -> Self {
         let query_engine = Arc::new(DatafusionQueryEngine::new(catalog_list));
 
         for func in FUNCTION_REGISTRY.functions() {
