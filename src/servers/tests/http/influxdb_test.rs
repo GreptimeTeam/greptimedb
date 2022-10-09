@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
+use api::v1::InsertExpr;
 use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
 use servers::error::Result;
 use servers::http::HttpServer;
-use servers::influxdb::{InfluxdbRequest, InsertBatches};
+use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::{InfluxdbLineProtocolHandler, SqlQueryHandler};
 use tokio::sync::mpsc;
 
@@ -17,10 +18,10 @@ struct DummyInstance {
 #[async_trait]
 impl InfluxdbLineProtocolHandler for DummyInstance {
     async fn exec(&self, request: &InfluxdbRequest) -> Result<()> {
-        let batches: InsertBatches = request.try_into()?;
+        let exprs: Vec<InsertExpr> = request.try_into()?;
 
-        for (table_name, _) in batches.data {
-            let _ = self.tx.send(table_name).await;
+        for expr in exprs {
+            let _ = self.tx.send(expr.table_name).await;
         }
 
         Ok(())

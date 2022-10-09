@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+use api::v1::{
+    insert_expr::{self, Expr},
+    InsertExpr,
+};
 use common_grpc::writer::{LinesWriter, Precision};
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
@@ -16,14 +20,10 @@ pub struct InfluxdbRequest {
 
 type TableName = String;
 
-pub struct InsertBatches {
-    pub data: Vec<(TableName, api::v1::codec::InsertBatch)>,
-}
-
-impl TryFrom<&InfluxdbRequest> for InsertBatches {
+impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
     type Error = Error;
 
-    fn try_from(value: &InfluxdbRequest) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: &InfluxdbRequest) -> Result<Self, Self::Error> {
         let mut writers: HashMap<TableName, LinesWriter> = HashMap::new();
         let lines = parse_lines(&value.lines)
             .collect::<influxdb_line_protocol::Result<Vec<_>>>()
@@ -91,25 +91,30 @@ impl TryFrom<&InfluxdbRequest> for InsertBatches {
             writer.commit();
         }
 
-        Ok(InsertBatches {
-            data: writers
-                .into_iter()
-                .map(|(table_name, writer)| (table_name, writer.finish()))
-                .collect(),
-        })
+        Ok(writers
+            .into_iter()
+            .map(|(table_name, writer)| InsertExpr {
+                table_name,
+                expr: Some(Expr::Values(insert_expr::Values {
+                    values: vec![writer.finish().into()],
+                })),
+            })
+            .collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Deref;
+
     use api::v1::{
         codec::InsertBatch,
         column::{SemanticType, Values},
-        Column, ColumnDataType,
+        insert_expr::Expr,
+        Column, ColumnDataType, InsertExpr,
     };
     use common_base::BitVec;
 
-    use super::InsertBatches;
     use crate::influxdb::InfluxdbRequest;
 
     #[test]
@@ -125,18 +130,21 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
             lines: lines.to_string(),
         };
 
-        let insert_batches: InsertBatches = influxdb_req.try_into().unwrap();
-        let insert_batches = insert_batches.data;
+        let insert_exprs: Vec<InsertExpr> = influxdb_req.try_into().unwrap();
 
-        assert_eq!(2, insert_batches.len());
+        assert_eq!(2, insert_exprs.len());
 
-        for (table_name, insert_batch) in &insert_batches {
-            if table_name == "monitor1" {
-                assert_monitor_1(insert_batch);
-            } else if table_name == "monitor2" {
-                assert_monitor_2(insert_batch);
-            } else {
-                panic!()
+        for expr in insert_exprs {
+            let values = match expr.expr.unwrap() {
+                Expr::Values(vals) => vals,
+                Expr::Sql(_) => panic!(),
+            };
+            let raw_batch = values.values.get(0).unwrap();
+            let batch: InsertBatch = raw_batch.deref().try_into().unwrap();
+            match &expr.table_name[..] {
+                "monitor1" => assert_monitor_1(&batch),
+                "monitor2" => assert_monitor_2(&batch),
+                _ => panic!(),
             }
         }
     }
