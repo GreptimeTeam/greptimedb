@@ -156,13 +156,13 @@ mod tests {
             self
         }
 
-        fn table_names(&self) -> Vec<String> {
-            vec!["demo".to_string()]
+        fn table_names(&self) -> catalog::error::Result<Vec<String>> {
+            Ok(vec!["demo".to_string()])
         }
 
-        fn table(&self, name: &str) -> Option<TableRef> {
+        fn table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
             assert_eq!(name, "demo");
-            Some(Arc::new(DemoTable {}))
+            Ok(Some(Arc::new(DemoTable {})))
         }
 
         fn register_table(
@@ -175,8 +175,8 @@ mod tests {
         fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {
             unimplemented!();
         }
-        fn table_exist(&self, name: &str) -> bool {
-            name == "demo"
+        fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
+            Ok(name == "demo")
         }
     }
 

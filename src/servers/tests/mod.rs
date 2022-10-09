@@ -73,8 +73,12 @@ fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
     let catalog_list = Arc::new(MemoryCatalogList::default());
     schema_provider.register_table(table_name, table).unwrap();
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
-    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
+    catalog_provider
+        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
+        .unwrap();
+    catalog_list
+        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .unwrap();
 
     let factory = QueryEngineFactory::new(catalog_list);
     let query_engine = factory.query_engine().clone();

@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use catalog::error::Error;
 use catalog::{
     CatalogListRef, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
 };
@@ -158,12 +159,15 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
     }
 
     fn table_names(&self) -> Vec<String> {
-        self.schema_provider.table_names()
+        self.schema_provider
+            .table_names()
+            .expect("datafusion does not accept fallible catalog access")
     }
 
     fn table(&self, name: &str) -> Option<Arc<dyn DfTableProvider>> {
         self.schema_provider
             .table(name)
+            .expect("datafusion does not accept fallible catalog access")
             .map(|table| Arc::new(DfTableProviderAdapter::new(table)) as _)
     }
 
@@ -187,7 +191,9 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
     }
 
     fn table_exist(&self, name: &str) -> bool {
-        self.schema_provider.table_exist(name)
+        self.schema_provider
+            .table_exist(name)
+            .expect("datafusion does not accept fallible catalog access")
     }
 }
 
@@ -203,12 +209,12 @@ impl SchemaProvider for SchemaProviderAdapter {
     }
 
     /// Retrieves the list of available table names in this schema.
-    fn table_names(&self) -> Vec<String> {
-        self.df_schema_provider.table_names()
+    fn table_names(&self) -> Result<Vec<String>, Error> {
+        Ok(self.df_schema_provider.table_names())
     }
 
-    fn table(&self, name: &str) -> Option<TableRef> {
-        self.df_schema_provider.table(name).map(|table_provider| {
+    fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {
+        let table = self.df_schema_provider.table(name).map(|table_provider| {
             match table_provider
                 .as_any()
                 .downcast_ref::<DfTableProviderAdapter>()
@@ -221,7 +227,8 @@ impl SchemaProvider for SchemaProviderAdapter {
                     Arc::new(adapter) as _
                 }
             }
-        })
+        });
+        Ok(table)
     }
 
     fn register_table(
@@ -253,8 +260,8 @@ impl SchemaProvider for SchemaProviderAdapter {
             .transpose()
     }
 
-    fn table_exist(&self, name: &str) -> bool {
-        self.df_schema_provider.table_exist(name)
+    fn table_exist(&self, name: &str) -> Result<bool, Error> {
+        Ok(self.df_schema_provider.table_exist(name))
     }
 }
 
@@ -275,10 +282,12 @@ mod tests {
             runtime: Arc::new(RuntimeEnv::default()),
         };
 
-        adapter.register_schema(
-            "whatever".to_string(),
-            Arc::new(MemorySchemaProvider::new()),
-        );
+        adapter
+            .register_schema(
+                "whatever".to_string(),
+                Arc::new(MemorySchemaProvider::new()),
+            )
+            .unwrap();
     }
 
     #[test]

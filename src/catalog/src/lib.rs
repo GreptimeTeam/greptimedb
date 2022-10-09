@@ -3,7 +3,6 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_error::prelude::ErrorExt;
 use table::metadata::TableId;
 use table::requests::CreateTableRequest;
 use table::TableRef;
