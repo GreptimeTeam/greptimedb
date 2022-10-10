@@ -205,6 +205,7 @@ async fn test_recover_region_manifets() {
             .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
                 RegionChange {
                     metadata: region_meta.as_ref().into(),
+                    committed_sequence: 42,
                 },
             )))
             .await

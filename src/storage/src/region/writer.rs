@@ -144,14 +144,16 @@ impl RegionWriter {
             .context(error::AlterMetadataSnafu)?;
 
         let raw = RawRegionMetadata::from(&new_metadata);
-        let mut action_list =
-            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
-                metadata: raw,
-            }));
-        let new_metadata = Arc::new(new_metadata);
 
         // Acquire the version lock before altering the metadata.
         let _lock = self.version_mutex.lock().await;
+
+        let mut action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata: raw,
+                committed_sequence: version_control.committed_sequence(),
+            }));
+        let new_metadata = Arc::new(new_metadata);
 
         // Persist the meta action.
         let prev_version = version_control.current_manifest_version();

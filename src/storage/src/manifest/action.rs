@@ -45,6 +45,7 @@ pub struct RawColumnFamiliesMetadata {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RegionChange {
+    pub committed_sequence: SequenceNumber,
     pub metadata: RawRegionMetadata,
 }
 

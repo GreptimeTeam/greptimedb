@@ -45,6 +45,7 @@ mod tests {
             .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
                 RegionChange {
                     metadata: region_meta.as_ref().into(),
+                    committed_sequence: 99,
                 },
             )))
             .await
@@ -63,6 +64,7 @@ mod tests {
                     RegionMetadata::try_from(c.metadata.clone()).unwrap(),
                     *region_meta
                 );
+                assert_eq!(c.committed_sequence, 99);
             }
             _ => unreachable!(),
         }
@@ -87,6 +89,7 @@ mod tests {
                     RegionMetadata::try_from(c.metadata.clone()).unwrap(),
                     *region_meta
                 );
+                assert_eq!(c.committed_sequence, 99);
             }
             _ => unreachable!(),
         }

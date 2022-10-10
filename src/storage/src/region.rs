@@ -28,7 +28,7 @@ pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, Wri
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
 use crate::version::VersionEdit;
-use crate::version::{Version, VersionControl, VersionControlRef};
+use crate::version::{Version, VersionControl, VersionControlRef, INIT_COMMITTED_SEQUENCE};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
@@ -112,6 +112,7 @@ impl<S: LogStore> RegionImpl<S> {
                 RegionMetaAction::Protocol(ProtocolAction::new()),
                 RegionMetaAction::Change(RegionChange {
                     metadata: metadata.as_ref().into(),
+                    committed_sequence: INIT_COMMITTED_SEQUENCE,
                 }),
             ]))
             .await?;
