@@ -4,7 +4,9 @@ use crate::data_type::DataType;
 use crate::prelude::{DataTypeRef, LogicalTypeId, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GeometryType {}
+pub enum GeometryType {
+    Point,
+}
 
 impl DataType for GeometryType {
     fn name(&self) -> &str {

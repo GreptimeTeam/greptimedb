@@ -188,6 +188,10 @@ impl ConcreteDataType {
         ConcreteDataType::Timestamp(TimestampType::new(TimeUnit::Millisecond))
     }
 
+    pub fn geometry_datatype() -> Self {
+        ConcreteDataType::Geometry(GeometryType::Point)
+    }
+
     /// Converts from arrow timestamp unit to
     // TODO(hl): maybe impl From<ArrowTimestamp> for our timestamp ?
     pub fn from_arrow_time_unit(t: &arrow::datatypes::TimeUnit) -> Self {

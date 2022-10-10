@@ -1,9 +1,12 @@
-use arrow::array::Array;
+use std::sync::Arc;
+
+use arrow::array::{Array, MutableArray};
 use snafu::ensure;
 
-use self::point::PointVector;
+use self::point::{PointVector, PointVectorBuilder};
 use super::{MutableVector, Vector};
 use crate::{
+    data_type::ConcreteDataType,
     error,
     prelude::{ScalarVector, ScalarVectorBuilder},
     serialize::Serializable,
@@ -18,27 +21,33 @@ pub enum GeometryVector {
 
 impl Vector for GeometryVector {
     fn data_type(&self) -> crate::data_type::ConcreteDataType {
-        todo!()
+        ConcreteDataType::geometry_datatype()
     }
 
     fn vector_type_name(&self) -> String {
-        todo!()
+        "GeometryVector".to_string()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
-        todo!()
+        self
     }
 
     fn len(&self) -> usize {
-        todo!()
+        match self {
+            GeometryVector::PointVector(vec) => vec.array.len(),
+        }
     }
 
     fn to_arrow_array(&self) -> arrow::array::ArrayRef {
-        todo!()
+        match self {
+            GeometryVector::PointVector(vec) => Arc::new(vec.array.clone()),
+        }
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn arrow::array::Array> {
-        todo!()
+        match self {
+            GeometryVector::PointVector(vec) => Box::new(vec.array.clone()),
+        }
     }
 
     fn validity(&self) -> super::Validity {
@@ -100,32 +109,40 @@ impl<'a> Iterator for GeometryVectorIter<'a> {
 }
 
 pub enum GeometryVectorBuilder {
-    
+    PointVectorBuilder(PointVectorBuilder),
 }
 
 impl MutableVector for GeometryVectorBuilder {
     fn data_type(&self) -> crate::data_type::ConcreteDataType {
-        todo!()
+        ConcreteDataType::geometry_datatype()
     }
 
     fn len(&self) -> usize {
-        todo!()
+        match self {
+            GeometryVectorBuilder::PointVectorBuilder(builder) => builder.array_x.len(),
+        }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
-        todo!()
+        self
     }
 
     fn as_mut_any(&mut self) -> &mut dyn std::any::Any {
-        todo!()
+        self
     }
 
     fn to_vector(&mut self) -> super::VectorRef {
-        todo!()
+        Arc::new(self.finish())
     }
 
     fn push_value_ref(&mut self, value: crate::value::ValueRef) -> crate::Result<()> {
-        todo!()
+        match value {
+            crate::value::ValueRef::Geometry(value) => {
+                self.push(Some(value));
+                Ok(())
+            }
+            _ => todo!(),
+        }
     }
 
     fn extend_slice_of(
@@ -146,11 +163,17 @@ impl ScalarVectorBuilder for GeometryVectorBuilder {
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        todo!()
+        match self {
+            GeometryVectorBuilder::PointVectorBuilder(builder) => builder.push(value),
+        }
     }
 
     fn finish(&mut self) -> Self::VectorType {
-        todo!()
+        match self {
+            GeometryVectorBuilder::PointVectorBuilder(builder) => {
+                GeometryVector::PointVector(builder.finish())
+            }
+        }
     }
 }
 
