@@ -230,7 +230,7 @@ pub fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         })
 }
 
-fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
+pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
     match data_type {
         SqlDataType::BigInt(_) => Ok(ConcreteDataType::int64_datatype()),
         SqlDataType::Int(_) => Ok(ConcreteDataType::int32_datatype()),

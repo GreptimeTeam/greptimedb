@@ -8,6 +8,7 @@ edition = "2021"
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
+once_cell = "1.10"
 snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.15.0"
 table-engine = { path = "../table-engine" }
