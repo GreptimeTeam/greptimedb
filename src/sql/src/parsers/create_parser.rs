@@ -88,7 +88,7 @@ impl<'a> ParserContext<'a> {
             .entries
             .iter()
             .map(|x| &x.name.value)
-            .collect::<HashSet<&String>>();
+            .collect::<HashSet<_>>();
         if partition_names.len() != partitions.entries.len() {
             return error::InvalidSqlSnafu {
                 msg: "Duplicate partition names.",
