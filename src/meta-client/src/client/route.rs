@@ -8,7 +8,7 @@ use api::v1::meta::RouteResponse;
 use common_grpc::channel_manager::ChannelManager;
 use rand::Rng;
 use snafu::ResultExt;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
 use crate::error;
@@ -16,7 +16,7 @@ use crate::error::Result;
 
 #[derive(Clone, Debug)]
 pub struct Client {
-    inner: Arc<Mutex<Inner>>,
+    inner: Arc<RwLock<Inner>>,
 }
 
 impl Client {
@@ -27,7 +27,7 @@ impl Client {
         };
 
         Self {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(RwLock::new(inner)),
         }
     }
 
@@ -36,17 +36,17 @@ impl Client {
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         inner.start(urls).await
     }
 
     pub async fn create(&self, req: CreateRequest) -> Result<CreateResponse> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.create(req).await
     }
 
     pub async fn route(&self, req: RouteRequest) -> Result<RouteResponse> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.route(req).await
     }
 }
@@ -86,11 +86,15 @@ impl Inner {
     }
 
     async fn create(&self, req: CreateRequest) -> Result<CreateResponse> {
-        let mut client = self.make_client(self.random_peer())?;
+        let mut client = self.random_client()?;
 
         let res = client.create(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
+    }
+
+    fn random_client(&self) -> Result<RouteClient<Channel>> {
+        self.make_client(self.random_peer())
     }
 
     fn random_peer(&self) -> &str {

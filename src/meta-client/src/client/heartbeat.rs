@@ -1,4 +1,3 @@
-#![allow(unused)] // TODO(jiachun) rmove this
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -7,7 +6,7 @@ use api::v1::meta::AskLeaderRequest;
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::debug;
 use snafu::ResultExt;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
 use crate::error;
@@ -15,7 +14,7 @@ use crate::error::Result;
 
 #[derive(Clone, Debug)]
 pub struct Client {
-    inner: Arc<Mutex<Inner>>,
+    inner: Arc<RwLock<Inner>>,
 }
 
 impl Client {
@@ -27,7 +26,7 @@ impl Client {
         };
 
         Self {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(RwLock::new(inner)),
         }
     }
 
@@ -36,12 +35,12 @@ impl Client {
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         inner.start(urls).await
     }
 
     pub async fn ask_leader(&mut self) -> Result<()> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         inner.ask_leader().await
     }
 

@@ -157,7 +157,7 @@ impl Default for ChannelManager {
         let pool = Arc::new(Mutex::new(pool));
         let cloned_pool = pool.clone();
 
-        // TODO: graceful shutdown
+        // TODO(jiachun): graceful shutdown
         tokio::spawn(async move {
             recycle_channel(cloned_pool).await;
         });
