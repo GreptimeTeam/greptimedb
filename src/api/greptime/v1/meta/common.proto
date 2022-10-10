@@ -52,10 +52,9 @@ message Table {
 message Region {
   uint64 id = 1;
   string name = 2;
-  // [start, end)
-  bytes start = 3;
-  bytes end = 4;
-  map<string, string> attrs = 5;
+  // less than
+  repeated bytes value_list = 3;
+  map<string, string> attrs = 4;
 }
 
 message KeyValue {

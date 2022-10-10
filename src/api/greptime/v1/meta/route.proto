@@ -23,6 +23,8 @@ service Route {
   //    ...
   //
   rpc Route(RouteRequest) returns (RouteResponse) {}
+
+  // rpc Create(CreateRequest) returns (CreateResponse) {}
 }
 
 message RouteRequest {
@@ -52,4 +54,12 @@ message RegionRoute {
   uint64 mutate_endpoint_index = 2;
   // Multiple nodes for read task
   repeated uint64 select_endpoint_indexes = 3;
+}
+
+message CreateRequest {
+  RequestHeader header = 1;
+
+  Tenant tenant = 2;
+  // Routing for multiple DBs is not supported
+  string db_name = 3;
 }

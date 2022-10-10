@@ -1,2 +1,2 @@
+pub mod client;
 mod error;
-mod meta_client;
