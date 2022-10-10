@@ -19,6 +19,9 @@ debug/
 # JetBrains IDE config directory
 .idea/
 
+# VSCode IDE config directory
+.vscode/
+
 # Logs
 **/__unittest_logs
 logs/
