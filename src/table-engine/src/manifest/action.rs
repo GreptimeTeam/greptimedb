@@ -39,6 +39,13 @@ pub struct TableMetaActionList {
 }
 
 impl TableMetaActionList {
+    pub fn with_action(action: TableMetaAction) -> Self {
+        Self {
+            actions: vec![action],
+            prev_version: 0,
+        }
+    }
+
     pub fn new(actions: Vec<TableMetaAction>) -> Self {
         Self {
             actions,
@@ -49,6 +56,13 @@ impl TableMetaActionList {
 
 impl MetaAction for TableMetaActionList {
     type Error = StorageError;
+
+    fn set_protocol(&mut self, action: ProtocolAction) {
+        let mut actions = Vec::with_capacity(self.actions.len() + 1);
+        actions.push(TableMetaAction::Protocol(action));
+        actions.append(&mut self.actions);
+        self.actions = actions;
+    }
 
     fn set_prev_version(&mut self, version: ManifestVersion) {
         self.prev_version = version;

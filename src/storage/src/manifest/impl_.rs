@@ -138,7 +138,7 @@ impl<M: MetaAction<Error = Error>> ManifestImplInner<M> {
         self.version.load(Ordering::Relaxed)
     }
 
-    async fn save(&self, action_list: M) -> Result<ManifestVersion> {
+    async fn save(&self, mut action_list: M) -> Result<ManifestVersion> {
         let protocol = self.protocol.load();
 
         ensure!(
@@ -150,6 +150,18 @@ impl<M: MetaAction<Error = Error>> ManifestImplInner<M> {
         );
 
         let version = self.inc_version();
+
+        if version == 0 || protocol.min_writer_version < self.supported_writer_version {
+            let new_protocol = ProtocolAction {
+                min_reader_version: self
+                    .supported_reader_version
+                    .min(protocol.min_reader_version),
+                min_writer_version: self.supported_writer_version,
+            };
+            action_list.set_protocol(new_protocol.clone());
+
+            self.protocol.store(Arc::new(new_protocol));
+        }
 
         logging::debug!(
             "Save region metadata action: {:?}, version: {}",

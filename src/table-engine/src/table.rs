@@ -21,7 +21,6 @@ use futures::task::{Context, Poll};
 use futures::Stream;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
-use store_api::manifest::action::ProtocolAction;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, ChunkReader, ColumnDescriptorBuilder, PutOperation,
@@ -249,12 +248,11 @@ impl<R: Region> Table for MitoTable<R> {
             new_info
         );
         self.manifest
-            .update(TableMetaActionList::new(vec![
-                TableMetaAction::Protocol(ProtocolAction::new()),
-                TableMetaAction::Change(Box::new(TableChange {
+            .update(TableMetaActionList::with_action(TableMetaAction::Change(
+                Box::new(TableChange {
                     table_info: new_info.clone(),
-                })),
-            ]))
+                }),
+            )))
             .await
             .context(UpdateTableManifestSnafu {
                 table_name: &self.table_info().name,
@@ -414,12 +412,11 @@ impl<R: Region> MitoTable<R> {
 
         // TODO(dennis): save  manifest version into catalog?
         let _manifest_version = manifest
-            .update(TableMetaActionList::new(vec![
-                TableMetaAction::Protocol(ProtocolAction::new()),
-                TableMetaAction::Change(Box::new(TableChange {
+            .update(TableMetaActionList::with_action(TableMetaAction::Change(
+                Box::new(TableChange {
                     table_info: table_info.clone(),
-                })),
-            ]))
+                }),
+            )))
             .await
             .context(UpdateTableManifestSnafu { table_name })?;
 

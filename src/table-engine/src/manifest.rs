@@ -50,12 +50,10 @@ mod tests {
 
         let protocol = ProtocolAction::new();
         let table_info = test_util::build_test_table_info();
-        let action_list = TableMetaActionList::new(vec![
-            TableMetaAction::Protocol(protocol.clone()),
-            TableMetaAction::Change(Box::new(TableChange {
+        let action_list =
+            TableMetaActionList::new(vec![TableMetaAction::Change(Box::new(TableChange {
                 table_info: table_info.clone(),
-            })),
-        ]);
+            }))]);
 
         assert_eq!(0, manifest.update(action_list).await.unwrap());
 

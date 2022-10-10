@@ -95,6 +95,13 @@ impl RegionMetaActionList {
 impl MetaAction for RegionMetaActionList {
     type Error = error::Error;
 
+    fn set_protocol(&mut self, action: ProtocolAction) {
+        let mut actions = Vec::with_capacity(self.actions.len() + 1);
+        actions.push(RegionMetaAction::Protocol(action));
+        actions.append(&mut self.actions);
+        self.actions = actions;
+    }
+
     fn set_prev_version(&mut self, version: ManifestVersion) {
         self.prev_version = version;
     }

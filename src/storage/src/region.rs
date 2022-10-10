@@ -8,9 +8,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::manifest::{
-    self, action::ProtocolAction, Manifest, ManifestVersion, MetaActionIterator,
-};
+use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
     AlterRequest, OpenOptions, ReadContext, Region, RegionId, RegionMeta, WriteContext,
     WriteResponse,
@@ -108,13 +106,12 @@ impl<S: LogStore> RegionImpl<S> {
         // the manifest.
         let manifest_version = store_config
             .manifest
-            .update(RegionMetaActionList::new(vec![
-                RegionMetaAction::Protocol(ProtocolAction::new()),
-                RegionMetaAction::Change(RegionChange {
+            .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
+                RegionChange {
                     metadata: metadata.as_ref().into(),
                     committed_sequence: INIT_COMMITTED_SEQUENCE,
-                }),
-            ]))
+                },
+            )))
             .await?;
 
         let version = Version::with_manifest_version(metadata, manifest_version);

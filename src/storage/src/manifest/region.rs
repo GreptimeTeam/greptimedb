@@ -9,6 +9,7 @@ mod tests {
     use std::sync::Arc;
 
     use object_store::{backend::fs, ObjectStore};
+    use store_api::manifest::action::ProtocolAction;
     use store_api::manifest::{Manifest, MetaActionIterator, MAX_VERSION};
     use tempdir::TempDir;
 
@@ -55,8 +56,14 @@ mod tests {
 
         let (v, action_list) = iter.next_action().await.unwrap().unwrap();
         assert_eq!(0, v);
-        assert_eq!(1, action_list.actions.len());
-        let action = &action_list.actions[0];
+        assert_eq!(2, action_list.actions.len());
+        let protocol = &action_list.actions[0];
+        assert!(matches!(
+            protocol,
+            RegionMetaAction::Protocol(ProtocolAction { .. })
+        ));
+
+        let action = &action_list.actions[1];
 
         match action {
             RegionMetaAction::Change(c) => {
@@ -81,8 +88,14 @@ mod tests {
         let mut iter = manifest.scan(0, MAX_VERSION).await.unwrap();
         let (v, action_list) = iter.next_action().await.unwrap().unwrap();
         assert_eq!(0, v);
-        assert_eq!(1, action_list.actions.len());
-        let action = &action_list.actions[0];
+        assert_eq!(2, action_list.actions.len());
+        let protocol = &action_list.actions[0];
+        assert!(matches!(
+            protocol,
+            RegionMetaAction::Protocol(ProtocolAction { .. })
+        ));
+
+        let action = &action_list.actions[1];
         match action {
             RegionMetaAction::Change(c) => {
                 assert_eq!(
