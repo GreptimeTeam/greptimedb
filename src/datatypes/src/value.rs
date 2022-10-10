@@ -308,14 +308,14 @@ impl Ord for ListValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize,)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq)]
 pub enum GeometryValue {
-    Point(f64, f64),
+    Point(geo::Point<OrderedF64>),
 }
 
 impl Default for GeometryValue {
     fn default() -> Self {
-        GeometryValue::Point(0.0, 0.0)
+        todo!()
     }
 }
 /// Reference to [Value].

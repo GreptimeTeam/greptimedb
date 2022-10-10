@@ -1,5 +1,7 @@
+use arrow::array::Array;
 use snafu::ensure;
 
+use self::point::PointVector;
 use super::{MutableVector, Vector};
 use crate::{
     error,
@@ -10,7 +12,9 @@ use crate::{
 
 mod point;
 #[derive(Debug, Clone, PartialEq)]
-pub enum GeometryVector {}
+pub enum GeometryVector {
+    PointVector(PointVector),
+}
 
 impl Vector for GeometryVector {
     fn data_type(&self) -> crate::data_type::ConcreteDataType {
@@ -42,11 +46,15 @@ impl Vector for GeometryVector {
     }
 
     fn memory_size(&self) -> usize {
-        todo!()
+        match self {
+            GeometryVector::PointVector(point_vector) => point_vector.memory_size(),
+        }
     }
 
     fn is_null(&self, row: usize) -> bool {
-        todo!()
+        match self {
+            GeometryVector::PointVector(point_vector) => point_vector.array.is_null(row),
+        }
     }
 
     fn slice(&self, offset: usize, length: usize) -> super::VectorRef {
@@ -59,37 +67,6 @@ impl Vector for GeometryVector {
 
     fn get_ref(&self, index: usize) -> crate::value::ValueRef {
         todo!()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    fn null_count(&self) -> usize {
-        match self.validity() {
-            super::Validity::Slots(bitmap) => bitmap.null_count(),
-            super::Validity::AllValid => 0,
-            super::Validity::AllNull => self.len(),
-        }
-    }
-
-    fn is_const(&self) -> bool {
-        false
-    }
-
-    fn only_null(&self) -> bool {
-        self.null_count() == self.len()
-    }
-
-    fn try_get(&self, index: usize) -> crate::Result<crate::value::Value> {
-        ensure!(
-            index < self.len(),
-            error::BadArrayAccessSnafu {
-                index,
-                size: self.len()
-            }
-        );
-        Ok(self.get(index))
     }
 }
 
@@ -122,7 +99,9 @@ impl<'a> Iterator for GeometryVectorIter<'a> {
     }
 }
 
-pub enum GeometryVectorBuilder {}
+pub enum GeometryVectorBuilder {
+    
+}
 
 impl MutableVector for GeometryVectorBuilder {
     fn data_type(&self) -> crate::data_type::ConcreteDataType {

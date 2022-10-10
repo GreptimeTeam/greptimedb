@@ -20,7 +20,7 @@ paste = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-geo = { version = "0.23.0", features = ["serde"] }
+geo = { version = "0.23.0", features = ["use-serde"] }
 
 [dependencies.arrow]
 package = "arrow2"
