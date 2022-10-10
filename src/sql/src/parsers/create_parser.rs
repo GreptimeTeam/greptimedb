@@ -111,7 +111,7 @@ impl<'a> ParserContext<'a> {
             .entries
             .iter()
             .map(|x| &x.value_list)
-            .collect::<Vec<&Vec<SqlValue>>>();
+            .collect::<Vec<_>>();
         for i in 1..value_lists.len() {
             let mut equal_tuples = 0;
             for (n, (x, y)) in value_lists[i - 1]
