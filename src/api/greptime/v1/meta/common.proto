@@ -52,9 +52,16 @@ message Table {
 message Region {
   uint64 id = 1;
   string name = 2;
-  // less than
-  repeated bytes value_list = 3;
-  map<string, string> attrs = 4;
+  Peer peer = 3;
+
+  // PARTITION `region_name` VALUES LESS THAN (value_list)
+  message Partition {
+    repeated bytes column_list = 1;
+    repeated bytes value_list = 2;
+  }
+  Partition partition = 4;
+
+  map<string, string> attrs = 5;
 }
 
 message KeyValue {

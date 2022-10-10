@@ -1,14 +1,22 @@
 use std::sync::Arc;
 
-use api::v1::meta::{
-    DeleteRangeRequest, DeleteRangeResponse, KeyValue, PutRequest, PutResponse, RangeRequest,
-    RangeResponse,
-};
+use api::v1::meta::DeleteRangeRequest;
+use api::v1::meta::DeleteRangeResponse;
+use api::v1::meta::KeyValue;
+use api::v1::meta::PutRequest;
+use api::v1::meta::PutResponse;
+use api::v1::meta::RangeRequest;
+use api::v1::meta::RangeResponse;
 use common_error::prelude::*;
-use etcd_client::{Client, DeleteOptions, GetOptions, PutOptions};
+use etcd_client::Client;
+use etcd_client::DeleteOptions;
+use etcd_client::GetOptions;
+use etcd_client::PutOptions;
 
-use super::kv::{KvStore, KvStoreRef};
-use crate::error::{self, Result};
+use super::kv::KvStore;
+use super::kv::KvStoreRef;
+use crate::error;
+use crate::error::Result;
 
 #[derive(Clone)]
 pub struct EtcdStore {

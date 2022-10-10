@@ -1,6 +1,10 @@
-use api::v1::meta::{DeleteRangeRequest, PutRequest, RangeRequest};
+use api::v1::meta::DeleteRangeRequest;
+use api::v1::meta::PutRequest;
+use api::v1::meta::RangeRequest;
 use meta_srv::service::store::etcd::EtcdStore;
-use tracing::{event, subscriber, Level};
+use tracing::event;
+use tracing::subscriber;
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 fn main() {

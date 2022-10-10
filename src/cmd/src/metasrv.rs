@@ -1,9 +1,12 @@
 use clap::Parser;
 use common_telemetry::logging;
-use meta_srv::{bootstrap, metasrv::MetaSrvOptions};
+use meta_srv::bootstrap;
+use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
-use crate::error::{self, Error, Result};
+use crate::error;
+use crate::error::Error;
+use crate::error::Result;
 use crate::toml_loader;
 
 #[derive(Parser)]

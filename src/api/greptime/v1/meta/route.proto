@@ -24,7 +24,7 @@ service Route {
   //
   rpc Route(RouteRequest) returns (RouteResponse) {}
 
-  // rpc Create(CreateRequest) returns (CreateResponse) {}
+  rpc Create(CreateRequest) returns (CreateResponse) {}
 }
 
 message RouteRequest {
@@ -62,4 +62,12 @@ message CreateRequest {
   Tenant tenant = 2;
   // Routing for multiple DBs is not supported
   string db_name = 3;
+  string table_name = 4;
+  repeated Region regions = 5;
+}
+
+message CreateResponse {
+  ResponseHeader header = 1;
+
+  repeated Region regions = 2; 
 }

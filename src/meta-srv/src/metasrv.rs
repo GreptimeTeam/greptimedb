@@ -1,6 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
-use crate::service::{route::RouteRef, store::kv::KvStoreRef};
+use crate::service::store::kv::KvStoreRef;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetaSrvOptions {
@@ -20,19 +21,14 @@ impl Default for MetaSrvOptions {
 #[derive(Clone)]
 pub struct MetaSrv {
     kv_store: KvStoreRef,
-    route: RouteRef,
 }
 
 impl MetaSrv {
-    pub fn new(kv_store: KvStoreRef, route: RouteRef) -> Self {
-        Self { kv_store, route }
+    pub fn new(kv_store: KvStoreRef) -> Self {
+        Self { kv_store }
     }
 
     pub fn kv_store(&self) -> KvStoreRef {
         self.kv_store.clone()
-    }
-
-    pub fn route(&self) -> RouteRef {
-        self.route.clone()
     }
 }

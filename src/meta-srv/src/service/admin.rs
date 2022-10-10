@@ -1,17 +1,17 @@
 mod health;
 
-use std::{
-    collections::HashMap,
-    convert::Infallible,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 
-use tonic::{
-    body::BoxBody,
-    codegen::{empty_body, http, BoxFuture, Service},
-    transport::NamedService,
-};
+use tonic::body::BoxBody;
+use tonic::codegen::empty_body;
+use tonic::codegen::http;
+use tonic::codegen::BoxFuture;
+use tonic::codegen::Service;
+use tonic::transport::NamedService;
 
 use crate::metasrv::MetaSrv;
 

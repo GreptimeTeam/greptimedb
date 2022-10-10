@@ -1,12 +1,16 @@
-use std::{collections::HashMap, sync::Arc};
+#![allow(unused)] // TODO(jiachun) rmove this
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use api::v1::meta::{heartbeat_client::HeartbeatClient, AskLeaderRequest};
+use api::v1::meta::heartbeat_client::HeartbeatClient;
+use api::v1::meta::AskLeaderRequest;
 use common_telemetry::debug;
 use snafu::ResultExt;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
-use crate::error::{self, Result};
+use crate::error;
+use crate::error::Result;
 
 #[derive(Clone, Debug)]
 pub struct Heartbeat {
@@ -27,6 +31,8 @@ impl Heartbeat {
         let mut inner = self.inner.lock().await;
         inner.ask_leader().await
     }
+
+    // TODO(jiachun) send heartbeat
 }
 
 type HeartbeatChannel = HeartbeatClient<Channel>;

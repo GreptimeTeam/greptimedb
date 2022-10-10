@@ -1,9 +1,13 @@
 use std::fmt;
 
 use clap::Parser;
+use cmd::datanode;
+use cmd::error::Result;
+use cmd::frontend;
 use cmd::metasrv;
-use cmd::{datanode, error::Result, frontend};
-use common_telemetry::{self, logging::error, logging::info};
+use common_telemetry;
+use common_telemetry::logging::error;
+use common_telemetry::logging::info;
 
 #[derive(Parser)]
 #[clap(name = "greptimedb")]
