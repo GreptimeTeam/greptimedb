@@ -182,7 +182,7 @@ fn clone_put_data_column_to(
     } else {
         // The write batch should have been validated before.
         ensure!(
-            desc.is_nullable,
+            desc.is_nullable(),
             error::BatchMissingColumnSnafu { column: &desc.name }
         );
 

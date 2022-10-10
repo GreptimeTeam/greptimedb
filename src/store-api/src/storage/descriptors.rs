@@ -10,7 +10,6 @@ pub type ColumnFamilyId = u32;
 /// Id of the region.
 pub type RegionId = u64;
 
-// TODO(yingwen): Validate default value has same type with column, and name is a valid column name.
 /// A [ColumnDescriptor] contains information to create a column.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
 #[builder(pattern = "owned", build_fn(validate = "Self::validate"))]
@@ -21,7 +20,7 @@ pub struct ColumnDescriptor {
     pub data_type: ConcreteDataType,
     /// Is column nullable, default is true.
     #[builder(default = "true")]
-    pub is_nullable: bool,
+    is_nullable: bool,
     /// Default constraint of column, default is None, which means no default constraint
     /// for this column, and user must provide a value for a not-null column.
     #[builder(default)]
@@ -31,6 +30,11 @@ pub struct ColumnDescriptor {
 }
 
 impl ColumnDescriptor {
+    #[inline]
+    pub fn is_nullable(&self) -> bool {
+        self.is_nullable
+    }
+
     #[inline]
     pub fn default_constraint(&self) -> Option<&ColumnDefaultConstraint> {
         self.default_constraint.as_ref()
@@ -48,6 +52,12 @@ impl ColumnDescriptorBuilder {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if let Some(name) = &self.name {
+            if name.is_empty() {
+                return Err("name should not be empty".to_string());
+            }
+        }
+
         if let Some(Some(constraint)) = &self.default_constraint {
             let is_nullable = self.is_nullable.unwrap_or(true);
 
