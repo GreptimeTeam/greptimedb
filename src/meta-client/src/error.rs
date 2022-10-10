@@ -16,8 +16,20 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Tonic internal error, source: {}", source))]
+    TonicStatus {
+        source: tonic::Status,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Fail to ask leader from all endpoints"))]
     AskLeader { backtrace: Backtrace },
+
+    #[snafu(display("Failed to create gRPC channel, source: {}", source))]
+    CreateChannel {
+        source: common_grpc::error::Error,
+        backtrace: Backtrace,
+    },
 }
 
 #[allow(dead_code)]

@@ -8,8 +8,10 @@ edition = "2021"
 [dependencies]
 api = { path = "../api" }
 common-error = { path = "../common/error" }
+common-grpc = { path = "../common/grpc" }
 common-telemetry = { path = "../common/telemetry" }
 etcd-client = "0.10"
+rand = "0.8"
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.18", features = ["full"] }
 tonic = "0.8"

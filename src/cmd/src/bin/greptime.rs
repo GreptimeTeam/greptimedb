@@ -5,7 +5,6 @@ use cmd::datanode;
 use cmd::error::Result;
 use cmd::frontend;
 use cmd::metasrv;
-use common_telemetry;
 use common_telemetry::logging::error;
 use common_telemetry::logging::info;
 

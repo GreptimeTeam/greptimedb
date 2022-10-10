@@ -1,9 +1,10 @@
 #![allow(unused)] // TODO(jiachun) rmove this
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::AskLeaderRequest;
+use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::debug;
 use snafu::ResultExt;
 use tokio::sync::Mutex;
@@ -13,11 +14,23 @@ use crate::error;
 use crate::error::Result;
 
 #[derive(Clone, Debug)]
-pub struct Heartbeat {
+pub struct Client {
     inner: Arc<Mutex<Inner>>,
 }
 
-impl Heartbeat {
+impl Client {
+    pub fn new(channel_manager: ChannelManager) -> Self {
+        let inner = Inner {
+            channel_manager,
+            peers: HashSet::default(),
+            leader: None,
+        };
+
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+
     pub async fn start<U, A>(&mut self, urls: A) -> Result<()>
     where
         U: AsRef<str>,
@@ -35,32 +48,20 @@ impl Heartbeat {
     // TODO(jiachun) send heartbeat
 }
 
-type HeartbeatChannel = HeartbeatClient<Channel>;
-
-// Sending a request on a tonic channel requires a `&mut self`
-// and thus can only send one request in flight.
-// We implement a `Clone` for `Inner` since tonic channel provides
-// a `Clone` implementation that is cheap.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 struct Inner {
-    clients: HashMap<String, HeartbeatChannel>,
-    leader: Option<HeartbeatChannel>,
+    channel_manager: ChannelManager,
+    peers: HashSet<String>,
+    leader: Option<String>,
 }
 
 impl Inner {
-    fn new() -> Self {
-        Self {
-            clients: HashMap::new(),
-            leader: None,
-        }
-    }
-
     async fn start<U, A>(&mut self, urls: A) -> Result<()>
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
-        if self.is_start() {
+        if !self.peers.is_empty() {
             return error::IllegalGrpcClientStateSnafu {
                 err_msg: "Heartbeat client already started",
             }
@@ -68,67 +69,52 @@ impl Inner {
         }
 
         for url in urls.as_ref() {
-            self.add_client_if_absent(url.as_ref());
+            self.peers.insert(url.as_ref().to_string());
         }
 
         Ok(())
     }
 
-    async fn add_client_if_absent(&mut self, url: impl AsRef<str>) -> Result<HeartbeatChannel> {
-        let url = url.as_ref();
-        match self.clients.get(url) {
-            Some(client) => Ok(client.clone()),
-            None => {
-                let client = HeartbeatClient::connect(url.to_string())
-                    .await
-                    .context(error::ConnectFailedSnafu { url })?;
-                self.clients.insert(url.to_string(), client.clone());
-                Ok(client)
-            }
-        }
-    }
-
     async fn ask_leader(&mut self) -> Result<()> {
-        if !self.is_start() {
+        if self.peers.is_empty() {
             return error::IllegalGrpcClientStateSnafu {
                 err_msg: "Heartbeat client not start",
             }
             .fail();
         }
 
-        let mut addr = None;
-        for (url, client) in &self.clients {
+        let mut leader = None;
+        for addr in &self.peers {
             let req = AskLeaderRequest::default();
-            let mut client = client.clone();
+            let mut client = self.make_client(addr)?;
             match client.ask_leader(req).await {
                 Ok(res) => {
                     if let Some(endpoint) = res.into_inner().leader {
-                        addr = Some(endpoint.addr);
+                        leader = Some(endpoint.addr);
                         break;
                     }
                 }
                 Err(status) => {
-                    debug!("Fail to ask leader from: {}, {}", url, status);
+                    debug!("Fail to ask leader from: {}, {}", addr, status);
                 }
             }
         }
 
-        match addr {
-            Some(addr) => {
-                self.leader = Some(self.add_client_if_absent(&addr).await?);
+        match leader {
+            Some(leader) => {
+                self.leader = Some(leader);
                 Ok(())
             }
             None => error::AskLeaderSnafu {}.fail(),
         }
     }
 
-    #[inline]
-    fn has_leader(&self) -> bool {
-        self.leader.is_some()
-    }
+    fn make_client(&self, addr: impl AsRef<str>) -> Result<HeartbeatClient<Channel>> {
+        let channel = self
+            .channel_manager
+            .get(addr)
+            .context(error::CreateChannelSnafu)?;
 
-    #[inline]
-    fn is_start(&self) -> bool {
-        !self.clients.is_empty()
+        Ok(HeartbeatClient::new(channel))
     }
 }

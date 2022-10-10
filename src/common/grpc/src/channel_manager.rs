@@ -70,7 +70,7 @@ struct Channel {
 
 impl ChannelManager {
     pub fn new() -> Self {
-        ChannelManager::default()
+        Default::default()
     }
 
     pub fn with_config(config: Config) -> Self {
