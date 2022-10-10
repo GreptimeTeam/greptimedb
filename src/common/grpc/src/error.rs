@@ -49,6 +49,12 @@ pub enum Error {
         actual: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to create gRPC channel, source: {}", source))]
+    CreateChannel {
+        source: tonic::transport::Error,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {
@@ -61,9 +67,9 @@ impl ErrorExt for Error {
             Error::UnsupportedDfPlan { .. } | Error::UnsupportedDfExpr { .. } => {
                 StatusCode::Unsupported
             }
-            Error::NewProjection { .. } | Error::DecodePhysicalPlanNode { .. } => {
-                StatusCode::Internal
-            }
+            Error::NewProjection { .. }
+            | Error::DecodePhysicalPlanNode { .. }
+            | Error::CreateChannel { .. } => StatusCode::Internal,
         }
     }
 

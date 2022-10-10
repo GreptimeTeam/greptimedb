@@ -19,7 +19,7 @@ impl route_server::Route for MetaSrv {
     async fn create(&self, req: Request<CreateRequest>) -> GrpcResult<CreateResponse> {
         let CreateRequest { mut regions, .. } = req.into_inner();
 
-        // TODO(jiachun)
+        // TODO(jiachun): route table
         for r in &mut regions {
             r.peer = Some(Peer {
                 endpoint: Some(Endpoint {
