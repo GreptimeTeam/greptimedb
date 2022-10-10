@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::cmp::Ordering;
 
+use itertools::Itertools;
 use once_cell::sync::Lazy;
 use snafu::ensure;
 use snafu::ResultExt;
@@ -88,12 +89,15 @@ impl<'a> ParserContext<'a> {
             .entries
             .iter()
             .map(|x| &x.name.value)
-            .collect::<HashSet<_>>();
-        if partition_names.len() != partitions.entries.len() {
-            return error::InvalidSqlSnafu {
-                msg: "Duplicate partition names.",
+            .sorted()
+            .collect::<Vec<&String>>();
+        for w in partition_names.windows(2) {
+            if w[0] == w[1] {
+                return error::InvalidSqlSnafu {
+                    msg: format!("Duplicate partition names: {}", w[0]),
+                }
+                .fail();
             }
-            .fail();
         }
 
         // Ensure that value list matches the column list.
@@ -131,10 +135,10 @@ impl<'a> ParserContext<'a> {
                         let cdt = sql_data_type_to_concrete_data_type(&column.data_type)?;
                         let x = sql_value_to_value(column_name, &cdt, x)?;
                         let y = sql_value_to_value(column_name, &cdt, y)?;
-                        if x == y {
-                            equal_tuples += 1;
-                        } else if x > y {
-                            return error::InvalidSqlSnafu {
+                        match x.cmp(&y) {
+                            Ordering::Less => break,
+                            Ordering::Equal => equal_tuples += 1,
+                            Ordering::Greater => return error::InvalidSqlSnafu {
                                 msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
                             }.fail()
                         }
@@ -144,14 +148,15 @@ impl<'a> ParserContext<'a> {
                             msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
                         }.fail()
                     },
-                    (false, true) => ()
-                }
-                if equal_tuples == partition_columns.len() {
-                    return error::InvalidSqlSnafu {
-                        msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
-                    }.fail();
+                    (false, true) => break,
                 }
             }
+            ensure!(
+                equal_tuples < partition_columns.len(),
+                error::InvalidSqlSnafu {
+                    msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
+                }
+            );
         }
 
         Ok(())
@@ -392,6 +397,7 @@ CREATE TABLE rcx ( a INT, b STRING, c INT )
 PARTITION BY RANGE COLUMNS(b, a) (
   PARTITION r0 VALUES LESS THAN ('hz', 1000),
   PARTITION r1 VALUES LESS THAN ('sh', 2000),
+  PARTITION r2 VALUES LESS THAN ('sz', 3000),
   PARTITION r1 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 )
 ENGINE=mito";
@@ -399,7 +405,7 @@ ENGINE=mito";
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Duplicate partition names"));
+            .contains("Duplicate partition names: r1"));
 
         let sql = r"
 CREATE TABLE rcx ( a INT, b STRING, c INT )
