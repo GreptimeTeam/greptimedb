@@ -18,7 +18,7 @@ use crate::manifest::action::{
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
 use crate::proto::wal::WalHeader;
 use crate::region::{RecoveredMetadataMap, RegionManifest, SharedDataRef};
-use crate::schema::compat;
+use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControlRef, VersionEdit};
 use crate::wal::{Payload, Wal};
@@ -272,7 +272,7 @@ impl WriterInner {
 
         let metadata = version_control.metadata();
         // We need to check the schema again since it might has been altered.
-        compat::compat_write(metadata.schema().store_schema(), &mut request)?;
+        request.compat_write(metadata.schema().user_schema())?;
 
         let committed_sequence = version_control.committed_sequence();
         // Sequence for current write batch.

@@ -149,6 +149,11 @@ impl RegionSchema {
     }
 
     #[inline]
+    pub fn user_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+        self.columns.iter_user_columns()
+    }
+
+    #[inline]
     pub fn num_row_key_columns(&self) -> usize {
         self.columns.num_row_key_columns()
     }
@@ -329,11 +334,6 @@ impl StoreSchema {
     #[inline]
     fn num_columns(&self) -> usize {
         self.schema.num_columns()
-    }
-
-    #[inline]
-    fn user_columns(&self) -> &[ColumnSchema] {
-        &self.schema.column_schemas()[..self.user_column_end]
     }
 }
 

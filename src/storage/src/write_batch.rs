@@ -1,3 +1,5 @@
+mod compat;
+
 use std::{
     any::Any,
     collections::{BTreeSet, HashMap},
@@ -7,13 +9,14 @@ use std::{
 
 use common_error::prelude::*;
 use common_time::{RangeMillis, TimestampMillis};
+use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::vectors::TimestampVector;
 use datatypes::{
     arrow::error::ArrowError, data_type::ConcreteDataType, prelude::ScalarVector, prelude::Value,
-    schema::SchemaRef, vectors::VectorRef,
+    vectors::VectorRef,
 };
 use prost::{DecodeError, EncodeError};
-use snafu::ensure;
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{consts, PutOperation, WriteRequest};
 
 use crate::proto;
@@ -127,6 +130,17 @@ pub enum Error {
         source: proto::write_batch::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Failed to create default value for column {}, source: {}",
+        name,
+        source
+    ))]
+    CreateDefault {
+        name: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -159,12 +173,12 @@ impl WriteRequest for WriteBatch {
     type Error = Error;
     type PutOp = PutData;
 
-    fn put(&mut self, data: PutData) -> Result<()> {
+    fn put(&mut self, mut data: PutData) -> Result<()> {
         if data.is_empty() {
             return Ok(());
         }
 
-        self.validate_put(&data)?;
+        self.preprocess_put_data(&mut data)?;
 
         self.add_num_rows(data.num_rows())?;
         self.mutations.push(Mutation::Put(data));
@@ -260,10 +274,6 @@ impl WriteBatch {
         self.mutations.iter()
     }
 
-    pub fn iter_mut(&mut self) -> slice::IterMut<'_, Mutation> {
-        self.mutations.iter_mut()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.mutations.is_empty()
     }
@@ -288,6 +298,47 @@ impl PutData {
         PutData {
             columns: HashMap::with_capacity(num_columns),
         }
+    }
+
+    fn add_column_by_name(&mut self, name: &str, vector: VectorRef) -> Result<()> {
+        ensure!(
+            !self.columns.contains_key(name),
+            DuplicateColumnSnafu { name }
+        );
+
+        if let Some(col) = self.columns.values().next() {
+            ensure!(
+                col.len() == vector.len(),
+                LenNotEqualsSnafu {
+                    name,
+                    expect: col.len(),
+                    given: vector.len(),
+                }
+            );
+        }
+
+        self.columns.insert(name.to_string(), vector);
+
+        Ok(())
+    }
+
+    /// Add columns by its default value.
+    fn add_default_by_name(&mut self, column_schema: &ColumnSchema) -> Result<()> {
+        let num_rows = self.num_rows();
+
+        // If column is not provided, fills it by default value.
+        let vector = column_schema
+            .create_default_vector(num_rows)
+            .context(CreateDefaultSnafu {
+                name: &column_schema.name,
+            })?
+            .context(MissingColumnSnafu {
+                name: &column_schema.name,
+            })?;
+
+        validate_column(column_schema, &vector)?;
+
+        self.add_column_by_name(&column_schema.name, vector)
     }
 }
 
@@ -351,34 +402,41 @@ impl PutData {
     }
 }
 
+fn validate_column(column_schema: &ColumnSchema, col: &VectorRef) -> Result<()> {
+    if !col.data_type().is_null() {
+        // FIXME(yingwen): Let NullVector supports different logical type so we could
+        // check data type directly.
+        ensure!(
+            col.data_type() == column_schema.data_type,
+            TypeMismatchSnafu {
+                name: &column_schema.name,
+                expect: column_schema.data_type.clone(),
+                given: col.data_type(),
+            }
+        );
+    }
+
+    ensure!(
+        column_schema.is_nullable() || col.null_count() == 0,
+        HasNullSnafu {
+            name: &column_schema.name,
+        }
+    );
+
+    Ok(())
+}
+
 impl WriteBatch {
-    fn validate_put(&self, data: &PutData) -> Result<()> {
+    /// Validate [PutData] and fill missing columns by default value.
+    fn preprocess_put_data(&self, data: &mut PutData) -> Result<()> {
         for column_schema in self.schema.column_schemas() {
             match data.column_by_name(&column_schema.name) {
                 Some(col) => {
-                    ensure!(
-                        col.data_type() == column_schema.data_type,
-                        TypeMismatchSnafu {
-                            name: &column_schema.name,
-                            expect: column_schema.data_type.clone(),
-                            given: col.data_type(),
-                        }
-                    );
-
-                    ensure!(
-                        column_schema.is_nullable() || col.null_count() == 0,
-                        HasNullSnafu {
-                            name: &column_schema.name,
-                        }
-                    );
+                    validate_column(column_schema, col)?;
                 }
                 None => {
-                    ensure!(
-                        column_schema.is_nullable(),
-                        MissingColumnSnafu {
-                            name: &column_schema.name,
-                        }
-                    );
+                    // If column is not provided, fills it by default value.
+                    data.add_default_by_name(column_schema)?;
                 }
             }
         }
@@ -411,30 +469,6 @@ impl<'a> IntoIterator for &'a WriteBatch {
 
     fn into_iter(self) -> slice::Iter<'a, Mutation> {
         self.iter()
-    }
-}
-
-impl PutData {
-    pub(crate) fn add_column_by_name(&mut self, name: &str, vector: VectorRef) -> Result<()> {
-        ensure!(
-            !self.columns.contains_key(name),
-            DuplicateColumnSnafu { name }
-        );
-
-        if let Some(col) = self.columns.values().next() {
-            ensure!(
-                col.len() == vector.len(),
-                LenNotEqualsSnafu {
-                    name,
-                    expect: col.len(),
-                    given: vector.len(),
-                }
-            );
-        }
-
-        self.columns.insert(name.to_string(), vector);
-
-        Ok(())
     }
 }
 

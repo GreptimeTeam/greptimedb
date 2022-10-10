@@ -23,7 +23,7 @@ use crate::manifest::{
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
-use crate::schema::compat;
+use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
 use crate::version::VersionEdit;
@@ -384,7 +384,7 @@ impl<S: LogStore> RegionInner<S> {
 
         // Try to make request schema compatible with region's outside of write lock. Note that
         // schema might be altered after this step.
-        compat::compat_write(schema.store_schema(), &mut request)?;
+        request.compat_write(schema.user_schema())?;
 
         let writer_ctx = WriterContext {
             shared: &self.shared,

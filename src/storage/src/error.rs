@@ -268,23 +268,6 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to create default value for column {}, source:{}",
-        column,
-        source
-    ))]
-    CreateDefault {
-        column: String,
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
-    #[snafu(display("No default value for column {}", column))]
-    NoDefault {
-        column: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display(
         "Failed to add default value for column {}, source: {}",
         column,
         source
@@ -327,7 +310,6 @@ impl ErrorExt for Error {
             | InvalidTimestamp { .. }
             | InvalidProjection { .. }
             | BuildBatch { .. }
-            | NoDefault { .. }
             | NotInSchemaToCompat { .. }
             | WriteToOldVersion { .. } => StatusCode::InvalidArguments,
 
@@ -366,7 +348,7 @@ impl ErrorExt for Error {
             InvalidAlterRequest { source, .. } | InvalidRegionDesc { source, .. } => {
                 source.status_code()
             }
-            PushBatch { source, .. } | CreateDefault { source, .. } => source.status_code(),
+            PushBatch { source, .. } => source.status_code(),
             AddDefault { source, .. } => source.status_code(),
         }
     }

@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use common_time::{RangeMillis, TimestampMillis};
 use datatypes::prelude::ScalarVector;
 use datatypes::schema::SchemaRef;
-use datatypes::vectors::{NullVector, TimestampVector, VectorRef};
-use snafu::{ensure, OptionExt};
+use datatypes::vectors::{TimestampVector, VectorRef};
+use snafu::OptionExt;
 use store_api::storage::{ColumnDescriptor, OpType, SequenceNumber};
 
 use crate::error::{self, Result};
@@ -177,18 +176,10 @@ fn clone_put_data_column_to(
     desc: &ColumnDescriptor,
     target: &mut Vec<VectorRef>,
 ) -> Result<()> {
-    if let Some(vector) = put_data.column_by_name(&desc.name) {
-        target.push(vector.clone());
-    } else {
-        // The write batch should have been validated before.
-        ensure!(
-            desc.is_nullable(),
-            error::BatchMissingColumnSnafu { column: &desc.name }
-        );
-
-        let num_rows = put_data.num_rows();
-        target.push(Arc::new(NullVector::new(num_rows)));
-    }
+    let vector = put_data
+        .column_by_name(&desc.name)
+        .context(error::BatchMissingColumnSnafu { column: &desc.name })?;
+    target.push(vector.clone());
 
     Ok(())
 }
@@ -289,6 +280,8 @@ fn compute_slice_indexes(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use common_time::timestamp::Timestamp;
     use datatypes::prelude::ScalarVectorBuilder;
     use datatypes::vectors::{Int64Vector, TimestampVector, TimestampVectorBuilder};
