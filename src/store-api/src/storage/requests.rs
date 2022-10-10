@@ -35,13 +35,13 @@ pub trait WriteRequest: Send {
 pub trait PutOperation: Send + std::fmt::Debug {
     type Error: ErrorExt + Send + Sync;
 
-    /// Put data for the same key column.
+    /// Put data to the key column.
     fn add_key_column(&mut self, name: &str, vector: VectorRef) -> Result<(), Self::Error>;
 
-    /// Put data for the version column.
+    /// Put data to the version column.
     fn add_version_column(&mut self, vector: VectorRef) -> Result<(), Self::Error>;
 
-    /// Put data for the same value column.
+    /// Put data to the value column.
     fn add_value_column(&mut self, name: &str, vector: VectorRef) -> Result<(), Self::Error>;
 }
 
