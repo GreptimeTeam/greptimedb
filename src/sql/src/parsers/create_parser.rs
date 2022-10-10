@@ -113,22 +113,40 @@ impl<'a> ParserContext<'a> {
             .map(|x| &x.value_list)
             .collect::<Vec<&Vec<SqlValue>>>();
         for i in 1..value_lists.len() {
-            let tuple = value_lists[i - 1].iter().zip(value_lists[i].iter());
-            for (n, (x, y)) in tuple.enumerate() {
+            let mut equal_tuples = 0;
+            for (n, (x, y)) in value_lists[i - 1]
+                .iter()
+                .zip(value_lists[i].iter())
+                .enumerate()
+            {
                 let column = partition_columns[n];
                 let is_x_maxvalue = matches!(x, SqlValue::Number(s, _) if s == MAXVALUE);
                 let is_y_maxvalue = matches!(y, SqlValue::Number(s, _) if s == MAXVALUE);
-                let is_strictly_increasing = match (is_x_maxvalue, is_y_maxvalue) {
-                    (true, _) => false,
-                    (false, true) => true,
+                match (is_x_maxvalue, is_y_maxvalue) {
+                    (true, true) => {
+                        equal_tuples += 1;
+                    },
                     (false, false) => {
+                        let column_name = &column.name.value;
                         let cdt = sql_data_type_to_concrete_data_type(&column.data_type)?;
-                        let x = sql_value_to_value(&column.name.value, &cdt, x)?;
-                        let y = sql_value_to_value(&column.name.value, &cdt, y)?;
-                        x < y
+                        let x = sql_value_to_value(column_name, &cdt, x)?;
+                        let y = sql_value_to_value(column_name, &cdt, y)?;
+                        if x == y {
+                            equal_tuples += 1;
+                        } else if x > y {
+                            return error::InvalidSqlSnafu {
+                                msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
+                            }.fail()
+                        }
                     }
-                };
-                if !is_strictly_increasing {
+                    (true, false) => {
+                        return error::InvalidSqlSnafu {
+                            msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
+                        }.fail()
+                    },
+                    (false, true) => ()
+                }
+                if equal_tuples == partition_columns.len() {
                     return error::InvalidSqlSnafu {
                         msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
                     }.fail();
@@ -418,6 +436,14 @@ ENGINE=mito",
 CREATE TABLE rcx ( a INT, b STRING, c INT )
 PARTITION BY RANGE COLUMNS(b, a) (
   PARTITION r0 VALUES LESS THAN ('hz', 1000),
+  PARTITION r1 VALUES LESS THAN ('hz', 1000),
+  PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
+)
+ENGINE=mito",
+            r"
+CREATE TABLE rcx ( a INT, b STRING, c INT )
+PARTITION BY RANGE COLUMNS(b, a) (
+  PARTITION r0 VALUES LESS THAN ('hz', 1000),
   PARTITION r3 VALUES LESS THAN (MAXVALUE, 2000),
   PARTITION r1 VALUES LESS THAN ('sh', 3000),
 )
@@ -447,6 +473,7 @@ CREATE TABLE monitor (
 PARTITION BY RANGE COLUMNS(idc, host_id) (
   PARTITION r0 VALUES LESS THAN ('hz', 1000),
   PARTITION r1 VALUES LESS THAN ('sh', 2000),
+  PARTITION r2 VALUES LESS THAN ('sh', 3000),
   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 )
 ENGINE=mito";
@@ -469,7 +496,7 @@ ENGINE=mito";
                     .iter()
                     .map(|x| &x.name.value)
                     .collect::<Vec<&String>>();
-                assert_eq!(partition_names, vec!["r0", "r1", "r3"]);
+                assert_eq!(partition_names, vec!["r0", "r1", "r2", "r3"]);
 
                 assert_eq!(
                     entries[0].value_list,
@@ -487,6 +514,13 @@ ENGINE=mito";
                 );
                 assert_eq!(
                     entries[2].value_list,
+                    vec![
+                        SqlValue::SingleQuotedString("sh".to_string()),
+                        SqlValue::Number("3000".to_string(), false)
+                    ]
+                );
+                assert_eq!(
+                    entries[3].value_list,
                     vec![
                         SqlValue::Number(MAXVALUE.to_string(), false),
                         SqlValue::Number(MAXVALUE.to_string(), false)
