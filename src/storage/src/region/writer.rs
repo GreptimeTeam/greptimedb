@@ -17,8 +17,7 @@ use crate::manifest::action::{
 };
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
 use crate::proto::wal::WalHeader;
-use crate::region::RegionManifest;
-use crate::region::SharedDataRef;
+use crate::region::{ChangedMetadataMap, RegionManifest, SharedDataRef};
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControlRef, VersionEdit};
 use crate::wal::{Payload, Wal};
@@ -63,9 +62,15 @@ impl RegionWriter {
     }
 
     /// Replay data to memtables.
-    pub async fn replay<S: LogStore>(&self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
+    pub async fn replay<S: LogStore>(
+        &self,
+        changed_metadata: ChangedMetadataMap,
+        writer_ctx: WriterContext<'_, S>,
+    ) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        inner.replay(&self.version_mutex, writer_ctx).await
+        inner
+            .replay(&self.version_mutex, changed_metadata, writer_ctx)
+            .await
     }
 
     /// Write and apply the region edit.
@@ -293,12 +298,14 @@ impl WriterInner {
     async fn replay<S: LogStore>(
         &mut self,
         version_mutex: &Mutex<()>,
+        mut changed_metadata: ChangedMetadataMap,
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<()> {
         let version_control = writer_ctx.version_control();
 
         let (flushed_sequence, mut last_sequence);
         let mut num_requests = 0;
+        let mut next_apply_metadata = changed_metadata.pop_first();
         {
             let _lock = version_mutex.lock().await;
 
@@ -309,6 +316,23 @@ impl WriterInner {
             // should be flushed_sequence + 1.
             let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence + 1).await?;
             while let Some((req_sequence, _header, request)) = stream.try_next().await? {
+                // Apply metadata which it's committed sequence is before request sequence
+                while let Some((next_apply_sequence, (manifest_version, metadata))) =
+                    &next_apply_metadata
+                {
+                    if req_sequence >= *next_apply_sequence {
+                        version_control.freeze_mutable_and_apply_metadata(
+                            Arc::new(metadata.clone().try_into().context(
+                                error::InvalidRawRegionSnafu {
+                                    region: &writer_ctx.shared.name,
+                                },
+                            )?),
+                            *manifest_version,
+                        );
+                        next_apply_metadata = changed_metadata.pop_first();
+                    }
+                }
+
                 if let Some(request) = request {
                     num_requests += 1;
                     let time_ranges = self.prepare_memtables(&request, version_control)?;

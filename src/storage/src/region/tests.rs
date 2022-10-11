@@ -197,6 +197,7 @@ async fn test_recover_region_manifets() {
     assert!(RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest)
         .await
         .unwrap()
+        .0
         .is_none());
 
     {
@@ -224,6 +225,7 @@ async fn test_recover_region_manifets() {
     let version = RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest)
         .await
         .unwrap()
+        .0
         .unwrap();
     assert_eq!(*version.metadata(), region_meta);
     assert_eq!(version.flushed_sequence(), 2);
