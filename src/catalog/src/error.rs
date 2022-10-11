@@ -103,6 +103,9 @@ pub enum Error {
 
     #[snafu(display("Illegal catalog manager state: {}", msg))]
     IllegalManagerState { backtrace: Backtrace, msg: String },
+
+    #[snafu(display("Invalid catalog info: {}", key))]
+    InvalidCatalog { key: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -115,7 +118,8 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. }
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
-            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
+            | Error::InvalidEntryType { .. }
+            | Error::InvalidCatalog { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. } | Error::EmptyValue | Error::ValueDeserialize { .. } => {
                 StatusCode::StorageUnavailable
