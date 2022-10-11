@@ -30,17 +30,28 @@ service Route {
 message RouteRequest {
   RequestHeader header = 1;
 
-  Tenant tenant = 2;
-  // Routing for multiple DBs is not supported
-  string db_name = 3;
-  repeated string table_names = 4;
+  repeated TableName table_names = 2;
 }
 
 message RouteResponse {
   ResponseHeader header = 1;
 
-  repeated Endpoint endpoints = 2;
+  repeated Peer peers = 2;
   repeated TableRoute table_routes = 3;
+}
+
+message CreateRequest {
+  RequestHeader header = 1;
+
+  Tenant tenant = 2;
+  TableName table_name = 3;
+  repeated Region regions = 4;
+}
+
+message CreateResponse {
+  ResponseHeader header = 1;
+
+  repeated Region regions = 2; 
 }
 
 message TableRoute {
@@ -50,24 +61,40 @@ message TableRoute {
 
 message RegionRoute {
   Region region = 1;
-  // Single node for write task
-  uint64 mutate_endpoint_index = 2;
-  // Multiple nodes for read task
-  repeated uint64 select_endpoint_indexes = 3;
+  // Single leader node for write task
+  uint64 leader_peer_index = 2;
+  // Multiple follower nodes for read task
+  repeated uint64 follower_peer_indexes = 3;
 }
 
-message CreateRequest {
-  RequestHeader header = 1;
-
-  Tenant tenant = 2;
-  // Routing for multiple DBs is not supported
-  string db_name = 3;
-  string table_name = 4;
-  repeated Region regions = 5;
+message Tenant {
+  uint64 id = 1;
+  string name = 2;
+  map<string, string> attrs = 3;
 }
 
-message CreateResponse {
-  ResponseHeader header = 1;
+message TableName {
+  string catalog_name = 1;
+  string schema_name = 2;
+  string table_name = 3;
+}
 
-  repeated Region regions = 2; 
+message Table {
+  TableName table_name = 1;
+  bytes table_schema = 2;
+}
+
+message Region {
+  uint64 id = 1;
+  string region_name = 2;
+  Peer peer = 3;
+
+  // PARTITION `region_name` VALUES LESS THAN (value_list)
+  message Partition {
+    repeated bytes column_list = 1;
+    repeated bytes value_list = 2;
+  }
+  Partition partition = 4;
+
+  map<string, string> attrs = 5;
 }

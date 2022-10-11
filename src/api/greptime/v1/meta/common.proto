@@ -38,32 +38,6 @@ message TimeInterval {
   uint64 end_timestamp_secs = 2;
 }
 
-message Tenant {
-  uint64 id = 1;
-  string name = 2;
-  map<string, string> attrs = 3;
-}
-
-message Table {
-  string name = 1;
-  bytes schema = 2;
-}
-
-message Region {
-  uint64 id = 1;
-  string name = 2;
-  Peer peer = 3;
-
-  // PARTITION `region_name` VALUES LESS THAN (value_list)
-  message Partition {
-    repeated bytes column_list = 1;
-    repeated bytes value_list = 2;
-  }
-  Partition partition = 4;
-
-  map<string, string> attrs = 5;
-}
-
 message KeyValue {
   // key is the key in bytes. An empty key is not allowed.
   bytes key = 1;

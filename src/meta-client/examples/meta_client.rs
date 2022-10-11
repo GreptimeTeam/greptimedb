@@ -1,9 +1,10 @@
+use api::v1::meta::region::Partition;
 use api::v1::meta::CreateRequest;
 use api::v1::meta::DeleteRangeRequest;
-use api::v1::meta::Peer;
 use api::v1::meta::PutRequest;
 use api::v1::meta::RangeRequest;
 use api::v1::meta::Region;
+use api::v1::meta::TableName;
 use common_grpc::channel_manager::ChannelManager;
 use meta_client::client::MetaClient;
 use tracing::event;
@@ -23,23 +24,27 @@ async fn run() {
     meta_client.start(&["127.0.0.1:3002"]).await.unwrap();
 
     let create_req = CreateRequest {
-        db_name: "test_db".to_string(),
+        table_name: Some(TableName {
+            catalog_name: "test_catlog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "test_table".to_string(),
+        }),
         regions: vec![
             Region {
                 id: 0,
-                name: "test_region1".to_string(),
-                peer: Some(Peer {
-                    id: 0,
-                    ..Default::default()
+                region_name: "test_region1".to_string(),
+                partition: Some(Partition {
+                    column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
+                    value_list: vec![b"k1".to_vec(), b"k2".to_vec()],
                 }),
                 ..Default::default()
             },
             Region {
                 id: 1,
-                name: "test_region2".to_string(),
-                peer: Some(Peer {
-                    id: 1,
-                    ..Default::default()
+                region_name: "test_region2".to_string(),
+                partition: Some(Partition {
+                    column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
+                    value_list: vec![b"Max1".to_vec(), b"Max2".to_vec()],
                 }),
                 ..Default::default()
             },
