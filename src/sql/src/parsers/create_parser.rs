@@ -159,6 +159,27 @@ impl<'a> ParserContext<'a> {
             );
         }
 
+        // Ensure that partition ranges fully cover all values.
+        // Simply check the last partition is bounded by "MAXVALUE"s.
+        // MySQL does not have this restriction. However, I think we'd better have it because:
+        //   - It might save user from adding more partitions in the future by hand, which is often
+        //     a tedious task. Why not provide an extra partition at the beginning and leave all
+        //     other partition related jobs to us? I think it's a reasonable argument to user.
+        //   - It might save us from some ugly designs and codings. The "MAXVALUE" bound is natural
+        //     in dealing with values that are unspecified upfront. Without it, we have to store
+        //     and use the user defined max bound everywhere, starting from calculating regions by
+        //     partition rule in Frontend, to automatically split and merge regions in Meta.
+        let is_bound_by_maxvalue = value_lists.last().map(|v| {
+            v.iter()
+                .all(|x| matches!(x, SqlValue::Number(s, _) if s == MAXVALUE))
+        });
+        ensure!(
+            matches!(is_bound_by_maxvalue, Some(true)),
+            error::InvalidSqlSnafu {
+                msg: "Please provide an extra partition that is bounded by 'MAXVALUE'."
+            }
+        );
+
         Ok(())
     }
 
@@ -462,6 +483,20 @@ ENGINE=mito",
                 .to_string()
                 .contains("VALUES LESS THAN value must be strictly increasing for each partition"));
         }
+
+        let sql = r"
+CREATE TABLE rcx ( a INT, b STRING, c INT )
+PARTITION BY RANGE COLUMNS(b, a) (
+  PARTITION r0 VALUES LESS THAN ('hz', 1000),
+  PARTITION r1 VALUES LESS THAN ('sh', 2000),
+  PARTITION r3 VALUES LESS THAN (MAXVALUE, 9999),
+)
+ENGINE=mito";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Please provide an extra partition that is bounded by 'MAXVALUE'."));
     }
 
     #[test]
