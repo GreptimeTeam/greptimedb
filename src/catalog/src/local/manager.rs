@@ -304,14 +304,14 @@ impl CatalogList for LocalCatalogManager {
 
 #[async_trait::async_trait]
 impl CatalogManager for LocalCatalogManager {
-    /// Start [MemoryCatalogManager] to load all information from system catalog table.
+    /// Start [LocalCatalogManager] to load all information from system catalog table.
     /// Make sure table engine is initialized before starting [MemoryCatalogManager].
     async fn start(&self) -> Result<()> {
         self.init().await
     }
 
     #[inline]
-    fn next_table_id(&self) -> TableId {
+    async fn next_table_id(&self) -> TableId {
         self.next_table_id.fetch_add(1, Ordering::Relaxed)
     }
 

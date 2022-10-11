@@ -18,7 +18,7 @@ use crate::sql::SqlRequest;
 
 impl Instance {
     pub(crate) async fn handle_create(&self, expr: CreateExpr) -> AdminResult {
-        let request = self.create_expr_to_request(expr);
+        let request = self.create_expr_to_request(expr).await;
         let result = futures::future::ready(request)
             .and_then(|request| self.sql_handler().execute(SqlRequest::Create(request)))
             .await;
@@ -63,7 +63,7 @@ impl Instance {
         }
     }
 
-    fn create_expr_to_request(&self, expr: CreateExpr) -> Result<CreateTableRequest> {
+    async fn create_expr_to_request(&self, expr: CreateExpr) -> Result<CreateTableRequest> {
         let schema = create_table_schema(&expr)?;
 
         let primary_key_indices = expr
@@ -76,7 +76,7 @@ impl Instance {
             })
             .collect::<Result<Vec<usize>>>()?;
 
-        let table_id = self.catalog_manager().next_table_id();
+        let table_id = self.catalog_manager().next_table_id().await;
 
         let catalog_name = expr
             .catalog_name
@@ -187,7 +187,7 @@ mod tests {
         instance.start().await.unwrap();
 
         let expr = testing_create_expr();
-        let request = instance.create_expr_to_request(expr).unwrap();
+        let request = instance.create_expr_to_request(expr).await.unwrap();
         assert_eq!(request.id, MIN_USER_TABLE_ID);
         assert_eq!(request.catalog_name, "greptime".to_string());
         assert_eq!(request.schema_name, "public".to_string());
@@ -199,7 +199,7 @@ mod tests {
 
         let mut expr = testing_create_expr();
         expr.primary_keys = vec!["host".to_string(), "not-exist-column".to_string()];
-        let result = instance.create_expr_to_request(expr);
+        let result = instance.create_expr_to_request(expr).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

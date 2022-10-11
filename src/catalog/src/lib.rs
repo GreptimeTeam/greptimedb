@@ -14,6 +14,7 @@ pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 pub mod consts;
 pub mod error;
 pub mod local;
+pub mod remote;
 pub mod schema;
 mod system;
 pub mod tables;
@@ -68,7 +69,7 @@ pub trait CatalogManager: CatalogList {
     async fn start(&self) -> error::Result<()>;
 
     /// Returns next available table id.
-    fn next_table_id(&self) -> TableId;
+    async fn next_table_id(&self) -> TableId;
 
     /// Registers a table given given catalog/schema to catalog manager,
     /// returns table registered.
@@ -112,4 +113,12 @@ pub struct RegisterTableRequest {
 /// Formats table fully-qualified name
 pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {
     format!("{}.{}.{}", catalog, schema, table)
+}
+
+pub trait CatalogProviderFactory {
+    fn create(&self, catalog_name: String) -> CatalogProviderRef;
+}
+
+pub trait SchemaProviderFactory {
+    fn create(&self, catalog_name: String, schema_name: String) -> SchemaProviderRef;
 }
