@@ -44,11 +44,39 @@ impl ColumnDefaultConstraint {
         ColumnDefaultConstraint::Value(Value::Null)
     }
 
-    /// Returns true if this constraint might creates NULL.
-    pub fn maybe_null(&self) -> bool {
-        // Once we support more functions, we may return true if given function
-        // could return null.
-        matches!(self, ColumnDefaultConstraint::Value(Value::Null))
+    /// Check whether the constraint is valid for columns with given `data_type`
+    /// and `is_nullable` attributes.
+    pub fn validate(&self, data_type: &ConcreteDataType, is_nullable: bool) -> Result<()> {
+        ensure!(is_nullable || !self.maybe_null(), error::NullDefaultSnafu);
+
+        match self {
+            ColumnDefaultConstraint::Function(_) => {
+                ensure!(
+                    data_type.is_timestamp(),
+                    error::DefaultValueTypeSnafu {
+                        reason: "return value of the function must has timestamp type",
+                    }
+                );
+            }
+            ColumnDefaultConstraint::Value(v) => {
+                if !v.is_null() {
+                    // Whether the value could be nullable has been checked before, only need
+                    // to check the type compatibility here.
+                    ensure!(
+                        data_type.logical_type_id() == v.logical_type_id(),
+                        error::DefaultValueTypeSnafu {
+                            reason: format!(
+                                "column has type {:?} but default value has type {:?}",
+                                data_type.logical_type_id(),
+                                v.logical_type_id()
+                            ),
+                        }
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Create a vector that contains `num_rows` default values for given `data_type`.
@@ -74,6 +102,8 @@ impl ColumnDefaultConstraint {
                     // TODO(dennis): we only supports current_timestamp right now,
                     //   it's better to use a expression framework in future.
                     "current_timestamp()" => {
+                        // TODO(yingwen): We should coerce the type to the physical type of
+                        // input `data_type`.
                         let vector =
                             Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
                                 util::current_time_millis(),
@@ -92,5 +122,12 @@ impl ColumnDefaultConstraint {
                 Ok(vector)
             }
         }
+    }
+
+    /// Returns true if this constraint might creates NULL.
+    fn maybe_null(&self) -> bool {
+        // Once we support more functions, we may return true if given function
+        // could return null.
+        matches!(self, ColumnDefaultConstraint::Value(Value::Null))
     }
 }

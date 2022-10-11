@@ -62,10 +62,7 @@ impl ColumnSchema {
         default_constraint: Option<ColumnDefaultConstraint>,
     ) -> Result<Self> {
         if let Some(constraint) = &default_constraint {
-            ensure!(
-                self.is_nullable || !constraint.maybe_null(),
-                error::NullDefaultSnafu
-            );
+            constraint.validate(&self.data_type, self.is_nullable)?;
         }
 
         self.default_constraint = default_constraint;

@@ -58,12 +58,16 @@ impl ColumnDescriptorBuilder {
             }
         }
 
-        if let Some(Some(constraint)) = &self.default_constraint {
+        if let (Some(Some(constraint)), Some(data_type)) =
+            (&self.default_constraint, &self.data_type)
+        {
+            // The default value of unwrap_or should be same as the default value
+            // defined in the `#[builder(default = "xxx")]` attribute.
             let is_nullable = self.is_nullable.unwrap_or(true);
 
-            if !is_nullable && constraint.maybe_null() {
-                return Err("column is not nullable but has default null constraint".to_string());
-            }
+            constraint
+                .validate(data_type, is_nullable)
+                .map_err(|e| e.to_string())?;
         }
 
         Ok(())
