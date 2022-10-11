@@ -2743,6 +2743,8 @@ dependencies = [
  "snafu",
  "tokio",
  "tonic",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

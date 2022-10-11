@@ -1,6 +1,7 @@
 use api::v1::meta::heartbeat_server;
 use api::v1::meta::AskLeaderRequest;
 use api::v1::meta::AskLeaderResponse;
+use api::v1::meta::Endpoint;
 use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::HeartbeatResponse;
 use api::v1::meta::ResponseHeader;
@@ -39,8 +40,24 @@ impl heartbeat_server::Heartbeat for MetaSrv {
         Ok(Response::new(Box::pin(output)))
     }
 
-    async fn ask_leader(&self, _req: Request<AskLeaderRequest>) -> GrpcResult<AskLeaderResponse> {
-        todo!()
+    async fn ask_leader(&self, req: Request<AskLeaderRequest>) -> GrpcResult<AskLeaderResponse> {
+        let AskLeaderRequest { header, .. } = req.into_inner();
+
+        let res_header = ResponseHeader {
+            protocol_version: PROTOCOL_VERSION,
+            cluster_id: header.map_or(0u64, |h| h.cluster_id),
+            ..Default::default()
+        };
+
+        // TODO(jiachun): return leader
+        let res = AskLeaderResponse {
+            header: Some(res_header),
+            leader: Some(Endpoint {
+                addr: "127.0.0.1:3002".to_string(),
+            }),
+        };
+
+        Ok(Response::new(res))
     }
 }
 

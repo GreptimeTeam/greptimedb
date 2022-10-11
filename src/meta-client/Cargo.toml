@@ -15,3 +15,7 @@ rand = "0.8"
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.18", features = ["full"] }
 tonic = "0.8"
+
+[dev-dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

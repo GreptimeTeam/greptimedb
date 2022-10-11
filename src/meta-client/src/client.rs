@@ -52,6 +52,10 @@ impl MetaClient {
         Ok(())
     }
 
+    pub async fn refresh_members(&mut self) {
+        todo!()
+    }
+
     pub async fn create_route(&self, req: CreateRequest) -> Result<CreateResponse> {
         self.route_client.create(req).await
     }
