@@ -387,7 +387,7 @@ mod tests {
             &SqlValue::DoubleQuotedString("2022-02-22 00:01:03".to_string()),
         )
         .unwrap();
-        assert_eq!(ConcreteDataType::date_datatype(), value.data_type());
+        assert_eq!(ConcreteDataType::datetime_datatype(), value.data_type());
         if let Value::DateTime(d) = value {
             assert_eq!("2022-02-22 00:01:03", d.to_string());
         } else {

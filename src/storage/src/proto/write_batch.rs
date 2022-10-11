@@ -140,7 +140,12 @@ impl From<&ConcreteDataType> for DataType {
             ConcreteDataType::Null(_) => DataType::Null,
             ConcreteDataType::Binary(_) => DataType::Binary,
             ConcreteDataType::Timestamp(_) => DataType::Timestamp,
-            _ => unimplemented!(), // TODO(jiachun): Maybe support some composite types in the future , such as list, struct, etc.
+            ConcreteDataType::Date(_)
+            | ConcreteDataType::DateTime(_)
+            | ConcreteDataType::List(_) => {
+                // TODO(jiachun): Maybe support some composite types in the future , such as list, struct, etc.
+                unimplemented!("data type {:?} is not supported", data_type)
+            }
         }
     }
 }
@@ -276,7 +281,8 @@ gen_put_data!(string, StringVectorBuilder, v, v.as_str());
 gen_put_data!(timestamp, TimestampVectorBuilder, v, (*v).into());
 
 pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
-    match vector.data_type() {
+    let data_type = vector.data_type();
+    match data_type {
         ConcreteDataType::Boolean(_) => gen_columns_bool(vector),
         ConcreteDataType::Int8(_) => gen_columns_i8(vector),
         ConcreteDataType::Int16(_) => gen_columns_i16(vector),
@@ -291,8 +297,12 @@ pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
         ConcreteDataType::Binary(_) => gen_columns_binary(vector),
         ConcreteDataType::String(_) => gen_columns_string(vector),
         ConcreteDataType::Timestamp(_) => gen_columns_timestamp(vector),
-        _ => {
-            unimplemented!() // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
+        ConcreteDataType::Null(_)
+        | ConcreteDataType::Date(_)
+        | ConcreteDataType::DateTime(_)
+        | ConcreteDataType::List(_) => {
+            // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
+            unimplemented!("data type {:?} is not supported", data_type)
         }
     }
 }
@@ -313,6 +323,12 @@ pub fn gen_put_data_vector(data_type: ConcreteDataType, column: Column) -> Resul
         ConcreteDataType::Binary(_) => gen_put_data_binary(column),
         ConcreteDataType::String(_) => gen_put_data_string(column),
         ConcreteDataType::Timestamp(_) => gen_put_data_timestamp(column),
-        _ => unimplemented!(), // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
+        ConcreteDataType::Null(_)
+        | ConcreteDataType::Date(_)
+        | ConcreteDataType::DateTime(_)
+        | ConcreteDataType::List(_) => {
+            // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
+            unimplemented!("data type {:?} is not supported", data_type)
+        }
     }
 }
