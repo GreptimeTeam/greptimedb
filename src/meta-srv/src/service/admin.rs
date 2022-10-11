@@ -32,6 +32,7 @@ pub trait HttpHandler: Send + Sync {
     ) -> crate::Result<http::Response<String>>;
 }
 
+#[derive(Clone)]
 pub struct Admin
 where
     Self: Send,
@@ -49,14 +50,6 @@ impl Admin {
 
 impl NamedService for Admin {
     const NAME: &'static str = "admin";
-}
-
-impl Clone for Admin {
-    fn clone(&self) -> Self {
-        Self {
-            router: self.router.clone(),
-        }
-    }
 }
 
 impl<T> Service<http::Request<T>> for Admin
@@ -100,9 +93,7 @@ impl Router {
     }
 
     pub fn nest(path: &str, router: Router) -> Self {
-        if path.is_empty() || !path.starts_with('/') {
-            panic!("paths must start with a `/`")
-        }
+        check_path(path);
 
         let handlers = router
             .handlers
@@ -114,9 +105,7 @@ impl Router {
     }
 
     pub fn route(mut self, path: &str, handler: impl HttpHandler + 'static) -> Self {
-        if path.is_empty() || !path.starts_with('/') {
-            panic!("paths must start with a `/`")
-        }
+        check_path(path);
 
         self.handlers.insert(path.to_owned(), Box::new(handler));
 
@@ -150,8 +139,110 @@ impl Router {
     }
 }
 
+fn check_path(path: &str) {
+    if path.is_empty() || !path.starts_with('/') {
+        panic!("paths must start with a `/`")
+    }
+}
+
 fn boxed(body: String) -> BoxBody {
     use http_body::Body;
 
     body.map_err(|_| panic!("")).boxed_unsync()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error;
+
+    struct MockOkHandler;
+
+    #[async_trait::async_trait]
+    impl HttpHandler for MockOkHandler {
+        async fn handle(
+            &self,
+            _: &str,
+            _: &HashMap<String, String>,
+        ) -> crate::Result<http::Response<String>> {
+            Ok(http::Response::builder()
+                .status(http::StatusCode::OK)
+                .body("Ok".to_string())
+                .unwrap())
+        }
+    }
+    struct MockEmptyKeyErrorHandler;
+
+    #[async_trait::async_trait]
+    impl HttpHandler for MockEmptyKeyErrorHandler {
+        async fn handle(
+            &self,
+            _: &str,
+            _: &HashMap<String, String>,
+        ) -> crate::Result<http::Response<String>> {
+            error::EmptyKeySnafu {}.fail()
+        }
+    }
+
+    #[test]
+    fn test_route_nest() {
+        let mock_handler = MockOkHandler {};
+        let router = Router::new().route("/test_node", mock_handler);
+        let router = Router::nest("/test_root", router);
+
+        assert_eq!(1, router.handlers.len());
+        assert!(router.handlers.contains_key("/test_root/test_node"));
+    }
+
+    #[should_panic]
+    #[test]
+    fn test_invalid_path() {
+        check_path("test_node")
+    }
+
+    #[should_panic]
+    #[test]
+    fn test_empty_path() {
+        check_path("")
+    }
+
+    #[tokio::test]
+    async fn test_route_call_ok() {
+        let mock_handler = MockOkHandler {};
+        let router = Router::new().route("/test_node", mock_handler);
+        let router = Router::nest("/test_root", router);
+
+        let res = router
+            .call("/test_root/test_node", HashMap::default())
+            .await
+            .unwrap();
+
+        assert!(res.status().is_success());
+    }
+
+    #[tokio::test]
+    async fn test_route_call_no_handler() {
+        let router = Router::new();
+
+        let res = router
+            .call("/test_root/test_node", HashMap::default())
+            .await
+            .unwrap();
+
+        assert_eq!(http::StatusCode::NOT_FOUND, res.status());
+    }
+
+    #[tokio::test]
+    async fn test_route_call_err() {
+        let mock_handler = MockEmptyKeyErrorHandler {};
+        let router = Router::new().route("/test_node", mock_handler);
+        let router = Router::nest("/test_root", router);
+
+        let res = router
+            .call("/test_root/test_node", HashMap::default())
+            .await
+            .unwrap();
+
+        assert_eq!(http::StatusCode::INTERNAL_SERVER_ERROR, res.status());
+    }
 }

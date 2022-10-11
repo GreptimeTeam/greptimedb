@@ -28,14 +28,14 @@ message Peer {
 }
 
 message Endpoint {
-  string addr = 2;
+  string addr = 1;
 }
 
 message TimeInterval {
-  // The unix timestamp in seconds of the start of this period.
-  uint64 start_timestamp_secs = 1;
-  // The unix timestamp in seconds of the end of this period.
-  uint64 end_timestamp_secs = 2;
+  // The unix timestamp in millis of the start of this period.
+  uint64 start_timestamp_millis = 1;
+  // The unix timestamp in millis of the end of this period.
+  uint64 end_timestamp_millis = 2;
 }
 
 message KeyValue {

@@ -5,6 +5,8 @@ use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::AskLeaderRequest;
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::debug;
+use snafu::ensure;
+use snafu::OptionExt;
 use snafu::ResultExt;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
@@ -60,27 +62,29 @@ impl Inner {
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
-        if !self.peers.is_empty() {
-            return error::IllegalGrpcClientStateSnafu {
-                err_msg: "Heartbeat client already started",
+        ensure!(
+            !self.is_started(),
+            error::IllegalGrpcClientStateSnafu {
+                err_msg: "Heartbeat client already started"
             }
-            .fail();
-        }
+        );
 
-        for url in urls.as_ref() {
-            self.peers.insert(url.as_ref().to_string());
-        }
+        self.peers = urls
+            .as_ref()
+            .iter()
+            .map(|url| url.as_ref().to_string())
+            .collect();
 
         Ok(())
     }
 
     async fn ask_leader(&mut self) -> Result<()> {
-        if self.peers.is_empty() {
-            return error::IllegalGrpcClientStateSnafu {
-                err_msg: "Heartbeat client not start",
+        ensure!(
+            self.is_started(),
+            error::IllegalGrpcClientStateSnafu {
+                err_msg: "Heartbeat client not start"
             }
-            .fail();
-        }
+        );
 
         let mut leader = None;
         for addr in &self.peers {
@@ -94,18 +98,12 @@ impl Inner {
                     }
                 }
                 Err(status) => {
-                    debug!("Fail to ask leader from: {}, {}", addr, status);
+                    debug!("Failed to ask leader from: {}, {}", addr, status);
                 }
             }
         }
-
-        match leader {
-            Some(leader) => {
-                self.leader = Some(leader);
-                Ok(())
-            }
-            None => error::AskLeaderSnafu {}.fail(),
-        }
+        self.leader = Some(leader.context(error::AskLeaderSnafu)?);
+        Ok(())
     }
 
     fn make_client(&self, addr: impl AsRef<str>) -> Result<HeartbeatClient<Channel>> {
@@ -115,5 +113,10 @@ impl Inner {
             .context(error::CreateChannelSnafu)?;
 
         Ok(HeartbeatClient::new(channel))
+    }
+
+    #[inline]
+    fn is_started(&self) -> bool {
+        !self.peers.is_empty()
     }
 }

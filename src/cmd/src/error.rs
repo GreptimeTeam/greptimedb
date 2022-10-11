@@ -25,12 +25,16 @@ pub enum Error {
 
     #[snafu(display("Failed to read config file: {}, source: {}", path, source))]
     ReadConfig {
-        source: std::io::Error,
         path: String,
+        source: std::io::Error,
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Failed to parse config, source: {}", source))]
-    ParseConfig { source: toml::de::Error },
+    ParseConfig {
+        source: toml::de::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -58,18 +62,68 @@ impl ErrorExt for Error {
 mod tests {
     use super::*;
 
-    fn raise_read_config_error() -> std::result::Result<(), std::io::Error> {
-        Err(std::io::ErrorKind::NotFound.into())
+    type StdResult<E> = std::result::Result<(), E>;
+
+    #[test]
+    fn test_start_node_error() {
+        fn throw_datanode_error() -> StdResult<datanode::error::Error> {
+            datanode::error::MissingFieldSnafu {
+                field: "test_field",
+            }
+            .fail()
+        }
+
+        let e = throw_datanode_error()
+            .context(StartDatanodeSnafu)
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::InvalidArguments);
     }
 
     #[test]
-    fn test_error() {
-        let e = raise_read_config_error()
+    fn test_start_frontend_error() {
+        fn throw_frontend_error() -> StdResult<frontend::error::Error> {
+            frontend::error::InvalidSqlSnafu { err_msg: "failed" }.fail()
+        }
+
+        let e = throw_frontend_error()
+            .context(StartFrontendSnafu)
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_start_metasrv_error() {
+        fn throw_metasrv_error() -> StdResult<meta_srv::error::Error> {
+            meta_srv::error::StreamNoneSnafu {}.fail()
+        }
+
+        let e = throw_metasrv_error()
+            .context(StartMetaServerSnafu)
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Internal);
+    }
+
+    #[test]
+    fn test_read_config_error() {
+        fn throw_read_config_error() -> StdResult<std::io::Error> {
+            Err(std::io::ErrorKind::NotFound.into())
+        }
+
+        let e = throw_read_config_error()
             .context(ReadConfigSnafu { path: "test" })
             .err()
             .unwrap();
 
-        assert!(e.backtrace_opt().is_none());
+        assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::InvalidArguments);
     }
 }

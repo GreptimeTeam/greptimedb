@@ -4,7 +4,7 @@ package greptime.v1.meta;
 
 import "greptime/v1/meta/common.proto";
 
-service Route {
+service Router {
   // Fetch routing information for tables. The smallest unit is the complete
   // routing information(all regions) of a table.
   // 
@@ -61,9 +61,9 @@ message TableRoute {
 
 message RegionRoute {
   Region region = 1;
-  // Single leader node for write task
+  // single leader node for write task
   uint64 leader_peer_index = 2;
-  // Multiple follower nodes for read task
+  // multiple follower nodes for read task
   repeated uint64 follower_peer_indexes = 3;
 }
 

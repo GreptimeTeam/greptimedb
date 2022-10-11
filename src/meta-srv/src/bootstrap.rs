@@ -1,5 +1,5 @@
 use api::v1::meta::heartbeat_server::HeartbeatServer;
-use api::v1::meta::route_server::RouteServer;
+use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
@@ -26,7 +26,7 @@ pub async fn bootstrap_meta_srv(opts: MetaSrvOptions) -> crate::Result<()> {
     tonic::transport::Server::builder()
         .accept_http1(true) // for admin services
         .add_service(HeartbeatServer::new(meta_srv.clone()))
-        .add_service(RouteServer::new(meta_srv.clone()))
+        .add_service(RouterServer::new(meta_srv.clone()))
         .add_service(StoreServer::new(meta_srv.clone()))
         .add_service(admin::make_admin_service(meta_srv.clone()))
         .serve_with_incoming(listener)

@@ -21,7 +21,7 @@ message RangeRequest {
   // key is the first key for the range, If range_end is not given, the
   // request only looks up key.
   bytes key = 2;
-  // range_end is the uppoer bound on the requested range [key, range_end).
+  // range_end is the upper bound on the requested range [key, range_end).
   // If range_end is '\0', the range is all keys >= key.
   // If range_end is key plus one (e.g., "aa"+1 == "ab", "a\xff"+1 == "b"),
   // then the range request gets all keys prefixed with key.

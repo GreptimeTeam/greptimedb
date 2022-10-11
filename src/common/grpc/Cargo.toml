@@ -8,6 +8,7 @@ api = { path = "../../api" }
 async-trait = "0.1"
 common-base = { path = "../base" }
 common-error = { path = "../error" }
+common-runtime = { path = "../runtime" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.0", features = ["full"] }

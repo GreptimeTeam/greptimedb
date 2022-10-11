@@ -1,5 +1,6 @@
 mod heartbeat;
-mod route;
+mod load_balance;
+mod router;
 mod store;
 
 use api::v1::meta::CreateRequest;
@@ -14,7 +15,7 @@ use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
 use common_grpc::channel_manager::ChannelManager;
 use heartbeat::Client as HeartbeatClient;
-use route::Client as RouteClient;
+use router::Client as RouterClient;
 use store::Client as StoreClient;
 
 use crate::error::Result;
@@ -22,18 +23,18 @@ use crate::error::Result;
 #[derive(Clone, Debug)]
 pub struct MetaClient {
     heartbeat_client: HeartbeatClient,
-    route_client: RouteClient,
+    router_client: RouterClient,
     store_client: StoreClient,
 }
 
 impl MetaClient {
     pub fn new(channel_manager: ChannelManager) -> Self {
         let heartbeat_client = HeartbeatClient::new(channel_manager.clone());
-        let route_client = RouteClient::new(channel_manager.clone());
+        let router_client = RouterClient::new(channel_manager.clone());
         let store_client = StoreClient::new(channel_manager);
         Self {
             heartbeat_client,
-            route_client,
+            router_client,
             store_client,
         }
     }
@@ -44,7 +45,7 @@ impl MetaClient {
         A: AsRef<[U]> + Clone,
     {
         self.heartbeat_client.start(urls.clone()).await?;
-        self.route_client.start(urls.clone()).await?;
+        self.router_client.start(urls.clone()).await?;
         self.store_client.start(urls).await?;
 
         self.heartbeat_client.ask_leader().await?;
@@ -57,7 +58,7 @@ impl MetaClient {
     }
 
     pub async fn create_route(&self, req: CreateRequest) -> Result<CreateResponse> {
-        self.route_client.create(req).await
+        self.router_client.create(req).await
     }
 
     /// Fetch routing information for tables. The smallest unit is the complete
@@ -78,7 +79,7 @@ impl MetaClient {
     ///    ...
     ///
     pub async fn route(&self, req: RouteRequest) -> Result<RouteResponse> {
-        self.route_client.route(req).await
+        self.router_client.route(req).await
     }
 
     /// Range gets the keys in the range from the key-value store.

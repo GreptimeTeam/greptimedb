@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::store_client::StoreClient;
@@ -8,11 +9,13 @@ use api::v1::meta::PutResponse;
 use api::v1::meta::RangeRequest;
 use api::v1::meta::RangeResponse;
 use common_grpc::channel_manager::ChannelManager;
-use rand::Rng;
+use snafu::ensure;
+use snafu::OptionExt;
 use snafu::ResultExt;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
+use crate::client::load_balance as lb;
 use crate::error;
 use crate::error::Result;
 
@@ -70,16 +73,20 @@ impl Inner {
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
-        if !self.peers.is_empty() {
-            return error::IllegalGrpcClientStateSnafu {
+        ensure!(
+            !self.is_started(),
+            error::IllegalGrpcClientStateSnafu {
                 err_msg: "Store client already started",
             }
-            .fail();
-        }
+        );
 
-        for url in urls.as_ref() {
-            self.peers.push(url.as_ref().to_string());
-        }
+        self.peers = urls
+            .as_ref()
+            .iter()
+            .map(|url| url.as_ref().to_string())
+            .collect::<HashSet<_>>()
+            .drain()
+            .collect::<Vec<_>>();
 
         Ok(())
     }
@@ -112,13 +119,14 @@ impl Inner {
     }
 
     fn random_client(&self) -> Result<StoreClient<Channel>> {
-        self.make_client(self.random_peer())
-    }
+        let len = self.peers.len();
+        let peer = lb::random_get(len, |i| Some(&self.peers[i])).context(
+            error::IllegalGrpcClientStateSnafu {
+                err_msg: "Empty peers, store client may not start yet",
+            },
+        )?;
 
-    fn random_peer(&self) -> &str {
-        let mut rng = rand::thread_rng();
-        let i = rng.gen_range(0..self.peers.len());
-        &self.peers[i]
+        self.make_client(peer)
     }
 
     fn make_client(&self, addr: impl AsRef<str>) -> Result<StoreClient<Channel>> {
@@ -128,5 +136,10 @@ impl Inner {
             .context(error::CreateChannelSnafu)?;
 
         Ok(StoreClient::new(channel))
+    }
+
+    #[inline]
+    fn is_started(&self) -> bool {
+        !self.peers.is_empty()
     }
 }

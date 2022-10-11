@@ -1,16 +1,19 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use api::v1::meta::route_client::RouteClient;
+use api::v1::meta::router_client::RouterClient;
 use api::v1::meta::CreateRequest;
 use api::v1::meta::CreateResponse;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
 use common_grpc::channel_manager::ChannelManager;
-use rand::Rng;
+use snafu::ensure;
+use snafu::OptionExt;
 use snafu::ResultExt;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
+use crate::client::load_balance as lb;
 use crate::error;
 use crate::error::Result;
 
@@ -63,22 +66,26 @@ impl Inner {
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
-        if !self.peers.is_empty() {
-            return error::IllegalGrpcClientStateSnafu {
-                err_msg: "Route client already started",
+        ensure!(
+            !self.is_started(),
+            error::IllegalGrpcClientStateSnafu {
+                err_msg: "Router client already started",
             }
-            .fail();
-        }
+        );
 
-        for url in urls.as_ref() {
-            self.peers.push(url.as_ref().to_string());
-        }
+        self.peers = urls
+            .as_ref()
+            .iter()
+            .map(|url| url.as_ref().to_string())
+            .collect::<HashSet<_>>()
+            .drain()
+            .collect::<Vec<_>>();
 
         Ok(())
     }
 
     async fn route(&self, req: RouteRequest) -> Result<RouteResponse> {
-        let mut client = self.make_client(self.random_peer())?;
+        let mut client = self.random_client()?;
 
         let res = client.route(req).await.context(error::TonicStatusSnafu)?;
 
@@ -93,22 +100,28 @@ impl Inner {
         Ok(res.into_inner())
     }
 
-    fn random_client(&self) -> Result<RouteClient<Channel>> {
-        self.make_client(self.random_peer())
+    fn random_client(&self) -> Result<RouterClient<Channel>> {
+        let len = self.peers.len();
+        let peer = lb::random_get(len, |i| Some(&self.peers[i])).context(
+            error::IllegalGrpcClientStateSnafu {
+                err_msg: "Empty peers, router client may not start yet",
+            },
+        )?;
+
+        self.make_client(peer)
     }
 
-    fn random_peer(&self) -> &str {
-        let mut rng = rand::thread_rng();
-        let i = rng.gen_range(0..self.peers.len());
-        &self.peers[i]
-    }
-
-    fn make_client(&self, addr: impl AsRef<str>) -> Result<RouteClient<Channel>> {
+    fn make_client(&self, addr: impl AsRef<str>) -> Result<RouterClient<Channel>> {
         let channel = self
             .channel_manager
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        Ok(RouteClient::new(channel))
+        Ok(RouterClient::new(channel))
+    }
+
+    #[inline]
+    fn is_started(&self) -> bool {
+        !self.peers.is_empty()
     }
 }

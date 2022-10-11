@@ -6,7 +6,7 @@ use tonic::Status;
 
 pub mod admin;
 mod heartbeat;
-pub mod route;
+pub mod router;
 pub mod store;
 
 pub const PROTOCOL_VERSION: u64 = 1;

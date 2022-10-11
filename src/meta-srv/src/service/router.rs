@@ -1,7 +1,6 @@
-use api::v1::meta::route_server;
+use api::v1::meta::router_server;
 use api::v1::meta::CreateRequest;
 use api::v1::meta::CreateResponse;
-use api::v1::meta::Endpoint;
 use api::v1::meta::Peer;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
@@ -11,7 +10,7 @@ use super::GrpcResult;
 use crate::metasrv::MetaSrv;
 
 #[async_trait::async_trait]
-impl route_server::Route for MetaSrv {
+impl router_server::Router for MetaSrv {
     async fn route(&self, _req: Request<RouteRequest>) -> GrpcResult<RouteResponse> {
         todo!()
     }
@@ -21,12 +20,7 @@ impl route_server::Route for MetaSrv {
 
         // TODO(jiachun): route table
         for r in &mut regions {
-            r.peer = Some(Peer {
-                endpoint: Some(Endpoint {
-                    addr: "127.0.0.1:3000".to_string(),
-                }),
-                ..Default::default()
-            });
+            r.peer = Some(Peer::new(0, "127.0.0.1:3000"));
         }
 
         Ok(tonic::Response::new(CreateResponse {

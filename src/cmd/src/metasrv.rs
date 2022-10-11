@@ -84,6 +84,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_read_from_cmd() {
+        let cmd = StartCommand {
+            server_addr: Some("0.0.0.0:3002".to_string()),
+            store_addr: Some("127.0.0.1:2380".to_string()),
+            config_file: None,
+        };
+        let options: MetaSrvOptions = cmd.try_into().unwrap();
+        assert_eq!("0.0.0.0:3002".to_string(), options.server_addr);
+        assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
+    }
+
+    #[test]
     fn test_read_from_config_file() {
         let cmd = StartCommand {
             server_addr: None,

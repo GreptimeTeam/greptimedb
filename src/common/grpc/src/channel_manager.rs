@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use snafu::ResultExt;
@@ -19,41 +20,41 @@ pub struct ChannelManager {
 
 #[derive(Clone, Debug, Default)]
 pub struct Config {
-    // A timeout to each request.
+    /// A timeout to each request.
     pub timeout: Option<Duration>,
-    // A timeout to connecting to the uri.
-    //
-    // Defaults to no timeout.
+    /// A timeout to connecting to the uri.
+    ///
+    /// Defaults to no timeout.
     pub connect_timeout: Option<Duration>,
-    // A concurrency limit to each request.
+    /// A concurrency limit to each request.
     pub concurrency_limit: Option<usize>,
-    // A rate limit to each request.
+    /// A rate limit to each request.
     pub rate_limit: Option<(u64, Duration)>,
-    // Sets the SETTINGS_INITIAL_WINDOW_SIZE option for HTTP2 stream-level flow control.
-    // Default is 65,535
+    /// Sets the SETTINGS_INITIAL_WINDOW_SIZE option for HTTP2 stream-level flow control.
+    /// Default is 65,535
     pub initial_stream_window_size: Option<u32>,
-    // Sets the max connection-level flow control for HTTP2
-    //
-    // Default is 65,535
+    /// Sets the max connection-level flow control for HTTP2
+    ///
+    /// Default is 65,535
     pub initial_connection_window_size: Option<u32>,
-    // Set http2 KEEP_ALIVE_INTERVAL. Uses hyper’s default otherwise.
+    /// Set http2 KEEP_ALIVE_INTERVAL. Uses hyper’s default otherwise.
     pub http2_keep_alive_interval: Option<Duration>,
-    // Set http2 KEEP_ALIVE_TIMEOUT. Uses hyper’s default otherwise.
+    /// Set http2 KEEP_ALIVE_TIMEOUT. Uses hyper’s default otherwise.
     pub http2_keep_alive_timeout: Option<Duration>,
-    // Set http2 KEEP_ALIVE_WHILE_IDLE. Uses hyper’s default otherwise.
+    /// Set http2 KEEP_ALIVE_WHILE_IDLE. Uses hyper’s default otherwise.
     pub http2_keep_alive_while_idle: Option<bool>,
-    // Sets whether to use an adaptive flow control. Uses hyper’s default otherwise.
+    /// Sets whether to use an adaptive flow control. Uses hyper’s default otherwise.
     pub http2_adaptive_window: Option<bool>,
-    // Set whether TCP keepalive messages are enabled on accepted connections.
-    //
-    // If None is specified, keepalive is disabled, otherwise the duration specified
-    // will be the time to remain idle before sending TCP keepalive probes.
-    //
-    // Default is no keepalive (None)
+    /// Set whether TCP keepalive messages are enabled on accepted connections.
+    ///
+    /// If None is specified, keepalive is disabled, otherwise the duration specified
+    /// will be the time to remain idle before sending TCP keepalive probes.
+    ///
+    /// Default is no keepalive (None)
     pub tcp_keepalive: Option<Duration>,
-    // Set the value of TCP_NODELAY option for accepted connections.
-    //
-    // Enabled by default.
+    /// Set the value of TCP_NODELAY option for accepted connections.
+    ///
+    /// Enabled by default.
     pub tcp_nodelay: bool,
 }
 
@@ -147,6 +148,14 @@ impl Pool {
     fn put(&mut self, addr: &str, channel: Channel) {
         self.channels.insert(addr.to_string(), channel);
     }
+
+    #[inline]
+    fn retain_channel<F>(&mut self, f: F)
+    where
+        F: FnMut(&String, &mut Channel) -> bool,
+    {
+        self.channels.retain(f);
+    }
 }
 
 impl Default for ChannelManager {
@@ -157,22 +166,21 @@ impl Default for ChannelManager {
         let pool = Arc::new(Mutex::new(pool));
         let cloned_pool = pool.clone();
 
-        // TODO(jiachun): graceful shutdown
-        tokio::spawn(async move {
-            recycle_channel(cloned_pool).await;
+        common_runtime::spawn_bg(async move {
+            recycle_channel_in_loop(cloned_pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
         });
 
         Self { pool, config: None }
     }
 }
 
-async fn recycle_channel(pool: Arc<Mutex<Pool>>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(RECYCLE_CHANNEL_INTERVAL_SECS));
+async fn recycle_channel_in_loop(pool: Arc<Mutex<Pool>>, interval_secs: u64) {
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
 
     loop {
         interval.tick().await;
         let mut pool = pool.lock().unwrap();
-        pool.channels.retain(|_, c| {
+        pool.retain_channel(|_, c| {
             if c.access == 0 {
                 false
             } else {
@@ -180,5 +188,56 @@ async fn recycle_channel(pool: Arc<Mutex<Pool>>) {
                 true
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[should_panic]
+    #[test]
+    fn test_invalid_addr() {
+        let pool = Pool {
+            channels: HashMap::default(),
+        };
+        let pool = Arc::new(Mutex::new(pool));
+        let mgr = ChannelManager { pool, config: None };
+        let addr = "http://test";
+
+        let _ = mgr.get(addr).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_access_count() {
+        let pool = Pool {
+            channels: HashMap::default(),
+        };
+        let pool = Arc::new(Mutex::new(pool));
+        let mgr = ChannelManager { pool, config: None };
+        let addr = "test_uri";
+
+        for i in 0..10 {
+            {
+                let _ = mgr.get(addr).unwrap();
+                let mut pool = mgr.pool.lock().unwrap();
+                assert_eq!(i + 1, pool.get_mut(addr).unwrap().access);
+            }
+        }
+
+        let mut pool = mgr.pool.lock().unwrap();
+
+        assert_eq!(10, pool.get_mut(addr).unwrap().access);
+
+        pool.retain_channel(|_, c| {
+            if c.access == 0 {
+                false
+            } else {
+                c.access = 0;
+                true
+            }
+        });
+
+        assert_eq!(0, pool.get_mut(addr).unwrap().access);
     }
 }

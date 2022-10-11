@@ -66,7 +66,7 @@ async fn handle_heartbeat(msg: HeartbeatRequest) -> Result<HeartbeatResponse> {
 
     let res_header = ResponseHeader {
         protocol_version: PROTOCOL_VERSION,
-        cluster_id: header.map_or(0u64, |h| h.cluster_id),
+        cluster_id: header.map_or(0, |h| h.cluster_id),
         ..Default::default()
     };
 

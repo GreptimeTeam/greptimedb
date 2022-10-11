@@ -921,6 +921,7 @@ dependencies = [
  "async-trait",
  "common-base",
  "common-error",
+ "common-runtime",
  "datafusion",
  "snafu",
  "tokio",
