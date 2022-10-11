@@ -4,6 +4,7 @@ use common_base::bytes::{Bytes, StringBytes};
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
+use geo::Point;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
@@ -308,9 +309,9 @@ impl Ord for ListValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq, Copy)]
 pub enum GeometryValue {
-    Point(geo::Point<OrderedF64>),
+    Point(Point<OrderedF64>),
 }
 
 impl Default for GeometryValue {
@@ -345,7 +346,7 @@ pub enum ValueRef<'a> {
     DateTime(DateTime),
     Timestamp(Timestamp),
     List(ListValueRef<'a>),
-    Geometry(&'a GeometryValue),
+    Geometry(GeometryValue),
 }
 
 macro_rules! impl_as_for_value_ref {

@@ -344,7 +344,7 @@ impl<'a> ScalarRef<'a> for ListValueRef<'a> {
 impl Scalar for GeometryValue {
     type VectorType = GeometryVector;
 
-    type RefType<'a> = &'a GeometryValue;
+    type RefType<'a> = GeometryValue;
 
     fn as_scalar_ref(&self) -> Self::RefType<'_> {
         todo!()
@@ -355,7 +355,7 @@ impl Scalar for GeometryValue {
     }
 }
 
-impl<'a> ScalarRef<'a> for &'a GeometryValue {
+impl<'a> ScalarRef<'a> for GeometryValue {
     type VectorType = GeometryVector;
 
     type ScalarType = GeometryValue;
