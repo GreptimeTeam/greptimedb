@@ -404,7 +404,8 @@ impl PutData {
 
 fn validate_column(column_schema: &ColumnSchema, col: &VectorRef) -> Result<()> {
     if !col.data_type().is_null() {
-        // FIXME(yingwen): Let NullVector supports different logical type so we could
+        // This allow us to use NullVector for columns that only have null value.
+        // TODO(yingwen): Let NullVector supports different logical type so we could
         // check data type directly.
         ensure!(
             col.data_type() == column_schema.data_type,

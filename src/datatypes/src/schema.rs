@@ -11,7 +11,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, DeserializeSnafu, Error, Result, SerializeSnafu};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
-use crate::vectors::VectorRef;
+use crate::vectors::{NullVector, VectorRef};
 
 /// Key used to store column name of the timestamp column in metadata.
 ///
@@ -76,11 +76,11 @@ impl ColumnSchema {
                 .map(Some),
             None => {
                 if self.is_nullable {
-                    // For nullable column without explicit default value, use null as default
-                    // value.
-                    ColumnDefaultConstraint::null_value()
-                        .create_default_vector(&self.data_type, self.is_nullable, num_rows)
-                        .map(Some)
+                    // No default constraint, use null as default value.
+                    // TODO(yingwen): Assign correct data type to the NullVector once it supports
+                    // setting logical type.
+                    let vector = Arc::new(NullVector::new(num_rows));
+                    Ok(Some(vector))
                 } else {
                     Ok(None)
                 }
