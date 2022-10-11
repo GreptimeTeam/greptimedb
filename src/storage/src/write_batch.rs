@@ -1210,8 +1210,7 @@ mod tests {
 
         let encoder = codec::WriteBatchProtobufEncoder {};
         let mut dst = vec![];
-        let result = encoder.encode(&batch, &mut dst);
-        assert!(result.is_ok());
+        encoder.encode(&batch, &mut dst).unwrap();
 
         let decoder = codec::WriteBatchProtobufDecoder::new(mutation_extras);
         let result = decoder.decode(&dst);
