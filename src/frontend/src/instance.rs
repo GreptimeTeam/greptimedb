@@ -367,7 +367,7 @@ mod tests {
                     .collect(),
                 ..Default::default()
             }),
-            datatype: Some(12), // string
+            datatype: 12, // string
             ..Default::default()
         };
         let expected_cpu_col = Column {
@@ -377,7 +377,7 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![2],
-            datatype: Some(10), // float64
+            datatype: 10, // float64
             ..Default::default()
         };
         let expected_mem_col = Column {
@@ -387,7 +387,7 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![4],
-            datatype: Some(10), // float64
+            datatype: 10, // float64
             ..Default::default()
         };
         let expected_disk_col = Column {
@@ -396,7 +396,7 @@ mod tests {
                 f64_values: vec![9.9, 9.9, 9.9, 9.9],
                 ..Default::default()
             }),
-            datatype: Some(10), // float64
+            datatype: 10, // float64
             ..Default::default()
         };
         let expected_ts_col = Column {
@@ -405,7 +405,7 @@ mod tests {
                 ts_millis_values: vec![1000, 2000, 3000, 4000],
                 ..Default::default()
             }),
-            datatype: Some(15), // timestamp
+            datatype: 15, // timestamp
             ..Default::default()
         };
 

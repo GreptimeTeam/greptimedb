@@ -73,11 +73,9 @@ fn try_convert(record_batches: RecordBatches) -> Result<SelectResult> {
             column_name,
             values: Some(values(&arrays)?),
             null_mask: null_mask(&arrays, row_count),
-            datatype: Some(
-                ColumnDataTypeWrapper::try_from(schema.data_type.clone())
-                    .context(error::ColumnDataTypeSnafu)?
-                    .datatype() as i32,
-            ),
+            datatype: ColumnDataTypeWrapper::try_from(schema.data_type.clone())
+                .context(error::ColumnDataTypeSnafu)?
+                .datatype() as i32,
             ..Default::default()
         };
         columns.push(column);

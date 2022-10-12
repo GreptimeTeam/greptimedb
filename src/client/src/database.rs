@@ -23,10 +23,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::{
-    error::{
-        ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu,
-        MissingFieldSnafu,
-    },
+    error::{ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu},
     Client, Result,
 };
 
@@ -240,12 +237,8 @@ impl TryFrom<ObjectResult> for Output {
 }
 
 fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
-    let wrapper = ColumnDataTypeWrapper::try_new(
-        column
-            .datatype
-            .context(MissingFieldSnafu { field: "datatype" })?,
-    )
-    .context(error::ColumnDataTypeSnafu)?;
+    let wrapper =
+        ColumnDataTypeWrapper::try_new(column.datatype).context(error::ColumnDataTypeSnafu)?;
     let column_datatype = wrapper.datatype();
 
     let rows = rows as usize;
@@ -348,7 +341,7 @@ mod tests {
     #[test]
     fn test_column_to_vector() {
         let mut column = create_test_column(Arc::new(BooleanVector::from(vec![true])));
-        column.datatype = Some(-100);
+        column.datatype = -100;
         let result = column_to_vector(&column, 1);
         assert!(result.is_err());
         assert_eq!(
@@ -426,7 +419,7 @@ mod tests {
             semantic_type: 1,
             values: Some(values(&[array.clone()]).unwrap()),
             null_mask: null_mask(&vec![array], vector.len()),
-            datatype: Some(wrapper.datatype() as i32),
+            datatype: wrapper.datatype() as i32,
         }
     }
 }

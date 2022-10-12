@@ -262,7 +262,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         vals: Values,
     ) {
         assert_eq!(name, column.column_name);
-        assert_eq!(Some(datatype as i32), column.datatype);
+        assert_eq!(datatype as i32, column.datatype);
         assert_eq!(semantic_type as i32, column.semantic_type);
         verify_null_mask(&column.null_mask, null_mask);
         assert_eq!(Some(vals), column.values);
