@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Result};
 use crate::prelude::*;
+use crate::vectors::all::GeometryVector;
 use crate::vectors::ListVector;
 
 pub type OrderedF32 = OrderedFloat<f32>;
@@ -73,7 +74,7 @@ impl Value {
             Value::Date(_) => ConcreteDataType::date_datatype(),
             Value::DateTime(_) => ConcreteDataType::date_datatype(),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
-            Value::Geometry(_) => todo!(),
+            Value::Geometry(_) => ConcreteDataType::geometry_datatype(),
         }
     }
 
@@ -115,7 +116,7 @@ impl Value {
             Value::DateTime(v) => ValueRef::DateTime(*v),
             Value::List(v) => ValueRef::List(ListValueRef::Ref { val: v }),
             Value::Timestamp(v) => ValueRef::Timestamp(*v),
-            Value::Geometry(_) => todo!(),
+            Value::Geometry(v) => ValueRef::Geometry(GeometryValueRef::Ref { val: v }),
         }
     }
 }
@@ -253,7 +254,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
             Value::Timestamp(v) => serde_json::to_value(v.value())?,
-            Value::Geometry(_) => todo!(),
+            Value::Geometry(_) => unimplemented!(),
         };
 
         Ok(json_value)
@@ -346,7 +347,7 @@ pub enum ValueRef<'a> {
     DateTime(DateTime),
     Timestamp(Timestamp),
     List(ListValueRef<'a>),
-    Geometry(GeometryValue),
+    Geometry(GeometryValueRef<'a>),
 }
 
 macro_rules! impl_as_for_value_ref {
@@ -532,6 +533,47 @@ impl<'a> Ord for ListValueRef<'a> {
 }
 
 impl<'a> PartialOrd for ListValueRef<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum GeometryValueRef<'a> {
+    Indexed {
+        vector: &'a GeometryVector,
+        idx: usize,
+    },
+    Ref {
+        val: &'a GeometryValue,
+    },
+}
+
+impl<'a> GeometryValueRef<'a> {
+    /// Convert self to [Value]. This method would clone the underlying data.
+    fn to_value(self) -> Value {
+        match self {
+            GeometryValueRef::Indexed { vector, idx } => vector.get(idx),
+            GeometryValueRef::Ref { val } => Value::Geometry(val.clone()),
+        }
+    }
+}
+
+impl<'a> PartialEq for GeometryValueRef<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_value().eq(&other.to_value())
+    }
+}
+
+impl<'a> Eq for GeometryValueRef<'a> {}
+
+impl<'a> Ord for GeometryValueRef<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        unreachable!()
+    }
+}
+
+impl<'a> PartialOrd for GeometryValueRef<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }

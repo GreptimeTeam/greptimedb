@@ -1,9 +1,10 @@
 use std::any::Any;
+use std::default;
 
 use common_time::{Date, DateTime, Timestamp};
 
 use crate::prelude::*;
-use crate::value::{GeometryValue, ListValue, ListValueRef};
+use crate::value::{GeometryValue, GeometryValueRef, ListValue, ListValueRef};
 use crate::vectors::all::GeometryVector;
 use crate::vectors::*;
 
@@ -344,24 +345,30 @@ impl<'a> ScalarRef<'a> for ListValueRef<'a> {
 impl Scalar for GeometryValue {
     type VectorType = GeometryVector;
 
-    type RefType<'a> = GeometryValue;
+    type RefType<'a> = GeometryValueRef<'a>;
 
     fn as_scalar_ref(&self) -> Self::RefType<'_> {
-        todo!()
+        GeometryValueRef::Ref { val: self }
     }
 
     fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
-        todo!()
+        long
     }
 }
 
-impl<'a> ScalarRef<'a> for GeometryValue {
+impl<'a> ScalarRef<'a> for GeometryValueRef<'a> {
     type VectorType = GeometryVector;
 
     type ScalarType = GeometryValue;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
-        todo!()
+        match self {
+            GeometryValueRef::Indexed { vector, idx } => match vector.get(*idx) {
+                Value::Geometry(value) => value,
+                _ => unreachable!(),
+            },
+            GeometryValueRef::Ref { val } => (*val).clone(),
+        }
     }
 }
 

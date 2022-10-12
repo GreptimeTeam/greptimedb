@@ -5,7 +5,8 @@ use snafu::{ensure, OptionExt};
 
 use self::point::{PointVector, PointVectorBuilder};
 use super::{MutableVector, Validity, Value, Vector};
-use crate::value::ValueRef;
+use crate::prelude::ScalarRef;
+use crate::value::{GeometryValueRef, ValueRef};
 use crate::vectors::{impl_try_from_arrow_array_for_vector, impl_validity_for_vector};
 use crate::{
     data_type::ConcreteDataType,
@@ -86,27 +87,34 @@ impl Vector for GeometryVector {
 
     fn get_ref(&self, index: usize) -> crate::value::ValueRef {
         match self {
-            GeometryVector::PointVector(vec) => vec.get_ref(index),
+            GeometryVector::PointVector(vector) => {
+                if vector.is_null(index) {
+                    return ValueRef::Null;
+                }
+            }
         }
+
+        ValueRef::Geometry(GeometryValueRef::Indexed {
+            vector: self,
+            idx: index,
+        })
     }
 }
 
 impl ScalarVector for GeometryVector {
     type OwnedItem = GeometryValue;
 
-    type RefItem<'a> = GeometryValue;
+    type RefItem<'a> = GeometryValueRef<'a>;
 
     type Iter<'a> = GeometryVectorIter<'a>;
 
     type Builder = GeometryVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        match self {
-            GeometryVector::PointVector(vec) => match self.get(idx) {
-                Value::Null => None,
-                Value::Geometry(geo_value) => Some(geo_value),
-                _ => unreachable!(),
-            },
+        match self.get_ref(idx) {
+            ValueRef::Null => None,
+            ValueRef::Geometry(geo_ref) => Some(geo_ref),
+            _ => unreachable!(),
         }
     }
 
@@ -124,7 +132,7 @@ pub struct GeometryVectorIter<'a> {
 }
 
 impl<'a> Iterator for GeometryVectorIter<'a> {
-    type Item = Option<GeometryValue>;
+    type Item = Option<GeometryValueRef<'a>>;
     fn next(&mut self) -> Option<Self::Item> {
         let pos = self.pos;
         self.pos = self.pos + 1;
@@ -133,13 +141,10 @@ impl<'a> Iterator for GeometryVectorIter<'a> {
             return None;
         }
 
-        match self.vector {
-            GeometryVector::PointVector(vec) => match vec.get(pos) {
-                Value::Null => Some(None),
-                Value::Geometry(geo_value) => Some(Some(geo_value)),
-                _ => unreachable!(),
-            },
-        }
+        Some(Some(GeometryValueRef::Indexed {
+            vector: self.vector,
+            idx: pos,
+        }))
     }
 }
 
@@ -171,17 +176,14 @@ impl MutableVector for GeometryVectorBuilder {
     }
 
     fn push_value_ref(&mut self, value: crate::value::ValueRef) -> crate::Result<()> {
-        match value {
-            ValueRef::Geometry(value) => {
-                self.push(Some(value));
-                Ok(())
-            }
-            ValueRef::Null => {
-                self.push(None);
-                Ok(())
-            }
-            _ => unimplemented!(),
+        match self {
+            GeometryVectorBuilder::PointVectorBuilder(builder) => match value {
+                ValueRef::Null => builder.push(None),
+                ValueRef::Geometry(geo_ref) => builder.push(Some(geo_ref.to_owned_scalar())),
+                _ => unreachable!(),
+            },
         }
+        Ok(())
     }
 
     fn extend_slice_of(
@@ -217,8 +219,9 @@ impl ScalarVectorBuilder for GeometryVectorBuilder {
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        match self {
-            GeometryVectorBuilder::PointVectorBuilder(builder) => builder.push(value),
+        match value {
+            Some(geo_ref) => self.push_value_ref(ValueRef::Geometry(geo_ref)).unwrap(),
+            None => self.push_value_ref(ValueRef::Null).unwrap(),
         }
     }
 

@@ -8,7 +8,7 @@ use arrow::datatypes::DataType::{self, Float64, List};
 use arrow::datatypes::Field;
 use geo::Point;
 
-use crate::value::{GeometryValue, OrderedF64, Value, ValueRef};
+use crate::value::{GeometryValue, GeometryValueRef, OrderedF64, Value, ValueRef};
 use crate::vectors::impl_validity_for_vector;
 use crate::{
     prelude::{ScalarVector, ScalarVectorBuilder, Validity, Vector},
@@ -66,13 +66,8 @@ impl PointVector {
         Value::Geometry(geo_value)
     }
 
-    pub fn get_ref(&self, index: usize) -> ValueRef {
-        if let Value::Geometry(geo_value) = self.get(index) {
-            ValueRef::Geometry(geo_value)
-        } else {
-            //NUll case
-            ValueRef::Null
-        }
+    pub fn is_null(&self, index: usize) -> bool {
+        self.get(index).is_null()
     }
 }
 
