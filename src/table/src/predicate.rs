@@ -68,9 +68,10 @@ mod tests {
     use datatypes::arrow::io::parquet::write::{
         Compression, Encoding, FileSink, Version, WriteOptions,
     };
+    use futures::AsyncWriteExt;
     use futures::SinkExt;
     use tempdir::TempDir;
-    use tokio_util::compat::TokioAsyncReadCompatExt;
+    use tokio_util::compat::TokioAsyncWriteCompatExt;
 
     use super::*;
 
@@ -89,16 +90,16 @@ mod tests {
         // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
         let encodings = vec![Encoding::Plain].repeat(schema.fields.len());
 
-        let writer = tokio::fs::OpenOptions::new()
+        let mut writer = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .open(&path)
             .await
             .unwrap()
-            .compat();
+            .compat_write();
 
         let mut sink = FileSink::try_new(
-            writer,
+            &mut writer,
             schema.clone(),
             encodings,
             WriteOptions {
@@ -129,6 +130,10 @@ mod tests {
             .unwrap();
         }
         sink.close().await.unwrap();
+
+        drop(sink);
+        writer.flush().await.unwrap();
+
         (path, Arc::new(schema))
     }
 
