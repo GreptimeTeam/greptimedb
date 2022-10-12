@@ -40,6 +40,24 @@ struct AlterTester {
     base: Option<FileTesterBase>,
 }
 
+struct DataRow {
+    key: Option<i64>,
+    ts: Timestamp,
+    v0: Option<i64>,
+    v1: Option<i64>,
+}
+
+impl DataRow {
+    fn new(key: Option<i64>, ts: i64, v0: Option<i64>, v1: Option<i64>) -> Self {
+        DataRow {
+            key,
+            ts: ts.into(),
+            v0,
+            v1,
+        }
+    }
+}
+
 fn new_write_batch_for_test() -> WriteBatch {
     write_batch_util::new_write_batch(
         &[
@@ -69,24 +87,6 @@ fn new_put_data(data: &[DataRow]) -> PutData {
     put_data.add_value_column("v1", Arc::new(values2)).unwrap();
 
     put_data
-}
-
-struct DataRow {
-    key: Option<i64>,
-    ts: Timestamp,
-    v0: Option<i64>,
-    v1: Option<i64>,
-}
-
-impl DataRow {
-    fn new(key: Option<i64>, ts: i64, v0: Option<i64>, v1: Option<i64>) -> Self {
-        DataRow {
-            key,
-            ts: ts.into(),
-            v0,
-            v1,
-        }
-    }
 }
 
 impl AlterTester {
