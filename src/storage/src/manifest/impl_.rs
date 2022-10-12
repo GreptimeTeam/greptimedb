@@ -153,9 +153,7 @@ impl<M: MetaAction<Error = Error>> ManifestImplInner<M> {
 
         if version == 0 || protocol.min_writer_version < self.supported_writer_version {
             let new_protocol = ProtocolAction {
-                min_reader_version: self
-                    .supported_reader_version
-                    .min(protocol.min_reader_version),
+                min_reader_version: self.supported_reader_version,
                 min_writer_version: self.supported_writer_version,
             };
             action_list.set_protocol(new_protocol.clone());
