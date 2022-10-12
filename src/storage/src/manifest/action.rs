@@ -96,10 +96,8 @@ impl MetaAction for RegionMetaActionList {
     type Error = error::Error;
 
     fn set_protocol(&mut self, action: ProtocolAction) {
-        let mut actions = Vec::with_capacity(self.actions.len() + 1);
-        actions.push(RegionMetaAction::Protocol(action));
-        actions.append(&mut self.actions);
-        self.actions = actions;
+        // The protocol action should be the first action in action list by convention.
+        self.actions.insert(0, RegionMetaAction::Protocol(action));
     }
 
     fn set_prev_version(&mut self, version: ManifestVersion) {

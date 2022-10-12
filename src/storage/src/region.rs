@@ -173,20 +173,21 @@ impl<S: LogStore> RegionImpl<S> {
 
         let recovered_metadata_after_flushed =
             recovered_metadata.split_off(&(flushed_sequence + 1));
-        logging::debug!(
-            "Applying {} recovered to region: {}, ready to be applied when replay: {}",
-            recovered_metadata.len(),
-            name,
-            recovered_metadata_after_flushed.len(),
-        );
-        // apply metadata already flushed
-        for (_, (manifest_version, metadata)) in recovered_metadata.into_iter() {
+        // apply the last flushed metadata
+        if let Some((sequence, (manifest_version, metadata))) = recovered_metadata.pop_last() {
             let metadata = Arc::new(
                 metadata
                     .try_into()
                     .context(error::InvalidRawRegionSnafu { region: &name })?,
             );
             version_control.freeze_mutable_and_apply_metadata(metadata, manifest_version);
+
+            logging::debug!(
+                "Applied the last flushed metadata to region: {}, sequence: {}, manifest: {}",
+                name,
+                sequence,
+                manifest_version,
+            );
         }
 
         let wal = Wal::new(metadata.id(), store_config.log_store);

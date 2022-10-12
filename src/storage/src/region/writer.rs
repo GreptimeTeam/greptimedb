@@ -319,7 +319,7 @@ impl WriterInner {
             while let Some((req_sequence, _header, request)) = stream.try_next().await? {
                 while let Some((next_apply_sequence, _)) = next_apply_metadata {
                     if req_sequence >= next_apply_sequence {
-                        // It's safe to unwrap here,it's checked above.
+                        // It's safe to unwrap here. It's checked above.
                         // Move out metadata to avoid cloning it.
                         let (_, (manifest_version, metadata)) = next_apply_metadata.take().unwrap();
                         version_control.freeze_mutable_and_apply_metadata(
