@@ -64,7 +64,7 @@ impl VersionControl {
 
     #[inline]
     pub fn committed_sequence(&self) -> SequenceNumber {
-        self.committed_sequence.load(Ordering::Acquire)
+        self.committed_sequence.load(Ordering::Relaxed)
     }
 
     /// Set committed sequence to `value`.
@@ -73,8 +73,8 @@ impl VersionControl {
     /// last sequence.
     #[inline]
     pub fn set_committed_sequence(&self, value: SequenceNumber) {
-        // Release ordering should be enough to guarantee sequence is updated at last.
-        self.committed_sequence.store(value, Ordering::Release);
+        // Relaxed ordering is enough for this update as this method requires external synchoronization.
+        self.committed_sequence.store(value, Ordering::Relaxed);
     }
 
     /// Add mutable memtables and commit.
