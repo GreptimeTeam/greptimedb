@@ -78,3 +78,13 @@ fn column_not_in_schema(schema: &SchemaRef, column_schemas: &[ColumnSchema]) -> 
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_put_data_compat_write() {
+        //
+    }
+}

@@ -173,7 +173,7 @@ mod tests {
             .is_nullable(false)
             .build()
             .unwrap();
-        assert!(!desc.is_nullable);
+        assert!(!desc.is_nullable());
 
         let desc = new_column_desc_builder()
             .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Null)))
@@ -181,7 +181,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ColumnDefaultConstraint::Value(Value::Null),
-            desc.default_constraint.unwrap()
+            *desc.default_constraint().unwrap()
         );
 
         let desc = new_column_desc_builder()
@@ -198,6 +198,12 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!("A test column", desc.comment);
+
+        new_column_desc_builder()
+            .is_nullable(false)
+            .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Null)))
+            .build()
+            .unwrap_err();
     }
 
     fn new_timestamp_desc() -> ColumnDescriptor {
