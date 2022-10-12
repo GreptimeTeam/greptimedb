@@ -1,19 +1,24 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use common_telemetry::info;
 use futures_util::StreamExt;
+use snafu::ResultExt;
+use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
+use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::TableRef;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
-use crate::error::Error;
+use crate::error::{CreateTableSnafu, Error, OpenTableSnafu};
 use crate::remote::client::MetaKvBackend;
 use crate::remote::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_prefix, CatalogKey, SchemaKey, TableKey,
+    TableValue,
 };
-use crate::remote::KvBackend;
+use crate::remote::{Kv, KvBackend};
 use crate::{
     CatalogManager, CatalogProviderRef, RegisterSystemTableRequest, RegisterTableRequest,
     SchemaProvider, SchemaProviderRef,
@@ -24,7 +29,8 @@ pub struct RemoteCatalogManager {
     backend: Arc<MetaKvBackend>,
     catalogs: Arc<RwLock<HashMap<String, CatalogProviderRef>>>,
     #[allow(unused)]
-    table_id: Mutex<AtomicU32>, // table id should be calculated on startup
+    next_table_id: AtomicU32, // table id should be calculated on startup
+    engine: TableEngineRef,
 }
 
 impl RemoteCatalogManager {
@@ -33,6 +39,175 @@ impl RemoteCatalogManager {
             catalog_name: catalog_name.as_ref().to_string(),
             node_id: self.node_id.clone(),
         }
+    }
+
+    fn new_catalog_provider(&self, catalog_name: &str) -> CatalogProviderRef {
+        Arc::new(RemoteCatalogProvider {
+            catalog_name: catalog_name.to_string(),
+            schemas: Default::default(),
+            node_id: self.node_id.clone(),
+            backend: self.backend.clone(),
+        }) as _
+    }
+
+    fn new_schema_provider(&self, catalog_name: &str, schema_name: &str) -> SchemaProviderRef {
+        Arc::new(RemoteSchemaProvider {
+            catalog_name: catalog_name.to_string(),
+            schema_name: schema_name.to_string(),
+            tables: Default::default(),
+            node_id: self.node_id.clone(),
+            backend: self.backend.clone(),
+        }) as _
+    }
+
+    /// Fetch catalogs/schemas/tables from remote catalog manager along with max table id allocated.
+    async fn initiate_catalogs(
+        &self,
+    ) -> Result<(HashMap<String, CatalogProviderRef>, TableId), Error> {
+        let mut res = HashMap::new();
+        let mut max_table_id = TableId::MIN;
+
+        let mut catalogs = self.backend.range(build_catalog_prefix().as_bytes());
+        while let Some(r) = catalogs.next().await {
+            let CatalogKey { catalog_name, .. } =
+                CatalogKey::parse(&String::from_utf8_lossy(&r?.0))?;
+
+            info!("Fetch catalog from metasrv: {}", &catalog_name);
+            let catalog = res
+                .entry(catalog_name.clone())
+                .or_insert_with(|| self.new_catalog_provider(&catalog_name));
+
+            let mut schemas = self
+                .backend
+                .range(build_schema_prefix(&catalog_name).as_bytes());
+            while let Some(r) = schemas.next().await {
+                let SchemaKey { schema_name, .. } =
+                    SchemaKey::parse(&String::from_utf8_lossy(&r?.0))?;
+
+                let schema = match catalog.schema(&schema_name)? {
+                    None => {
+                        let schema = self.new_schema_provider(&catalog_name, &schema_name);
+                        catalog.register_schema(schema_name.clone(), schema.clone())?;
+                        schema
+                    }
+                    Some(schema) => schema,
+                };
+
+                info!(
+                    "Fetch schema from metasrv: {}.{}",
+                    &catalog_name, &schema_name
+                );
+
+                let mut tables = self
+                    .backend
+                    .range(build_table_prefix(&catalog_name, &schema_name).as_bytes());
+                while let Some(r) = tables.next().await {
+                    let Kv(k, v) = r?;
+                    let table_key = TableKey::parse(&String::from_utf8_lossy(&k))?;
+                    let table_value = TableValue::parse(&String::from_utf8_lossy(&v))?;
+
+                    let table_ref = self.open_or_create_table(&table_key, &table_value).await?;
+                    schema.register_table(table_key.table_name.to_string(), table_ref)?;
+                    max_table_id = max_table_id.max(table_value.id);
+                }
+            }
+        }
+
+        Ok((res, max_table_id))
+    }
+
+    async fn open_or_create_table(
+        &self,
+        table_key: &TableKey,
+        table_value: &TableValue,
+    ) -> Result<TableRef, Error> {
+        let context = EngineContext {};
+
+        let request = OpenTableRequest {
+            catalog_name: table_key.catalog_name.clone(),
+            schema_name: table_key.schema_name.clone(),
+            table_name: table_key.table_name.clone(),
+            table_id: table_value.id,
+        };
+        match self
+            .engine
+            .open_table(&context, request)
+            .await
+            .with_context(|_| OpenTableSnafu {
+                table_info: format!(
+                    "{}.{}.{}, id:{}",
+                    &table_key.catalog_name, &table_key.schema_name, &table_key.table_name, 1
+                ),
+            })? {
+            Some(table) => Ok(table),
+            None => {
+                let req = CreateTableRequest {
+                    id: table_value.id,
+                    catalog_name: Some(table_key.catalog_name.clone()),
+                    schema_name: Some(table_key.schema_name.clone()),
+                    table_name: table_key.table_name.clone(),
+                    desc: None,
+                    schema: table_value.meta.schema.clone(),
+                    primary_key_indices: table_value.meta.primary_key_indices.clone(),
+                    create_if_not_exists: true,
+                    table_options: table_value.meta.options.clone(),
+                };
+
+                self.engine
+                    .create_table(&context, req)
+                    .await
+                    .context(CreateTableSnafu {
+                        table_info: format!(
+                            "{}.{}.{}, id:{}",
+                            &table_key.catalog_name,
+                            &table_key.schema_name,
+                            &table_key.table_name,
+                            table_value.id
+                        ),
+                    })
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CatalogManager for RemoteCatalogManager {
+    async fn start(&self) -> crate::error::Result<()> {
+        let (catalogs, max_table_id) = self.initiate_catalogs().await?;
+        info!("Max table id allocated: {}", max_table_id);
+        *(self.catalogs.write().await) = catalogs;
+        self.next_table_id
+            .store(max_table_id + 1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn next_table_id(&self) -> TableId {
+        self.next_table_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    async fn register_table(&self, request: RegisterTableRequest) -> crate::error::Result<usize> {
+        let _ = request;
+        todo!()
+    }
+
+    async fn register_system_table(
+        &self,
+        request: RegisterSystemTableRequest,
+    ) -> crate::error::Result<()> {
+        let _ = request;
+        todo!()
+    }
+
+    fn table(
+        &self,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table_name: &str,
+    ) -> crate::error::Result<Option<TableRef>> {
+        let _ = catalog;
+        let _ = schema;
+        let _ = table_name;
+        todo!()
     }
 }
 
@@ -96,42 +271,6 @@ impl crate::CatalogList for RemoteCatalogManager {
                 Some(_) => Ok(self.catalogs.read().await.get(name).cloned()),
             }
         })
-    }
-}
-
-#[async_trait::async_trait]
-impl CatalogManager for RemoteCatalogManager {
-    async fn start(&self) -> crate::error::Result<()> {
-        todo!()
-    }
-
-    async fn next_table_id(&self) -> TableId {
-        todo!()
-    }
-
-    async fn register_table(&self, request: RegisterTableRequest) -> crate::error::Result<usize> {
-        let _ = request;
-        todo!()
-    }
-
-    async fn register_system_table(
-        &self,
-        request: RegisterSystemTableRequest,
-    ) -> crate::error::Result<()> {
-        let _ = request;
-        todo!()
-    }
-
-    fn table(
-        &self,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table_name: &str,
-    ) -> crate::error::Result<Option<TableRef>> {
-        let _ = catalog;
-        let _ = schema;
-        let _ = table_name;
-        todo!()
     }
 }
 
