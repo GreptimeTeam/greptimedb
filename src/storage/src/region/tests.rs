@@ -206,7 +206,7 @@ async fn test_recover_region_manifets() {
             .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
                 RegionChange {
                     metadata: region_meta.as_ref().into(),
-                    committed_sequence: 42,
+                    committed_sequence: 40,
                 },
             )))
             .await
@@ -219,14 +219,26 @@ async fn test_recover_region_manifets() {
             ]))
             .await
             .unwrap();
+
+        manifest
+            .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
+                RegionChange {
+                    metadata: region_meta.as_ref().into(),
+                    committed_sequence: 42,
+                },
+            )))
+            .await
+            .unwrap();
     }
 
     // try to recover
-    let version = RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest)
-        .await
-        .unwrap()
-        .0
-        .unwrap();
+    let (version, recovered_metadata) =
+        RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest)
+            .await
+            .unwrap();
+
+    assert_eq!(42, *recovered_metadata.first_key_value().unwrap().0);
+    let version = version.unwrap();
     assert_eq!(*version.metadata(), region_meta);
     assert_eq!(version.flushed_sequence(), 2);
     assert_eq!(version.manifest_version(), 1);
@@ -239,5 +251,5 @@ async fn test_recover_region_manifets() {
     assert!(version.mutable_memtables().is_empty());
 
     // check manifest state
-    assert_eq!(2, manifest.last_version());
+    assert_eq!(3, manifest.last_version());
 }
