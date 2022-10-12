@@ -323,13 +323,20 @@ pub(crate) fn replicate_primitive_with_type<T: PrimitiveElement>(
 
     let mut previous_offset = 0;
 
-    for (i, offset) in offsets.iter().enumerate() {
-        let data = unsafe { vector.array.value_unchecked(i) };
-        builder.mutable_array.extend(
-            std::iter::repeat(data)
-                .take(*offset - previous_offset)
-                .map(Option::Some),
-        );
+    for (offset, value) in offsets.iter().zip(vector.array.iter()) {
+        let repeat_times = *offset - previous_offset;
+        match value {
+            Some(data) => {
+                builder.mutable_array.extend_trusted_len(
+                    std::iter::repeat(*data)
+                        .take(repeat_times)
+                        .map(Option::Some),
+                );
+            }
+            None => {
+                builder.mutable_array.extend_constant(repeat_times, None);
+            }
+        }
         previous_offset = *offset;
     }
     builder.finish()
