@@ -34,4 +34,5 @@ opendal = "0.17"
 storage = { path = "../storage" }
 table-engine = { path = "../table-engine" }
 tempdir = "0.3"
+chrono = "0.4"
 tokio = { version = "1.0", features = ["full"] }

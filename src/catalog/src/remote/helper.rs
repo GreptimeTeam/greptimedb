@@ -1,13 +1,12 @@
 use std::fmt::{Display, Formatter};
 
-use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize, Serializer};
-use snafu::{ensure, OptionExt};
-use table::metadata::TableId;
+use snafu::{ensure, OptionExt, ResultExt};
+use table::metadata::{TableId, TableMeta};
 
-use crate::error::InvalidCatalogSnafu;
+use crate::error::{DeserializeTableValueSnafu, InvalidCatalogSnafu};
 use crate::remote::consts::{CATALOG_PREFIX, SCHEMA_PREFIX, TABLE_ID_PREFIX, TABLE_PREFIX};
 use crate::Error;
 
@@ -97,8 +96,13 @@ impl TableKey {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableValue {
-    table_id: TableId,
-    schema: SchemaRef,
+    pub id: TableId,
+    pub meta: TableMeta,
+}
+impl TableValue {
+    pub(crate) fn parse(s: impl AsRef<str>) -> Result<Self, Error> {
+        serde_json::from_str(s.as_ref()).context(DeserializeTableValueSnafu { raw: s.as_ref() })
+    }
 }
 
 pub struct CatalogKey {
@@ -221,12 +225,20 @@ mod tests {
             true,
         )]));
 
-        let value = TableValue {
-            table_id: 42,
+        let meta = TableMeta {
             schema: schema_ref,
+            engine: "mito".to_string(),
+            created_on: chrono::DateTime::default(),
+            primary_key_indices: vec![0, 1],
+            next_column_id: 3,
+            engine_options: Default::default(),
+            value_indices: vec![2, 3],
+            options: Default::default(),
         };
+
+        let value = TableValue { id: 42, meta };
         let serialized = serde_json::to_string(&value).unwrap();
-        let deserialized: TableValue = serde_json::from_str(&serialized).unwrap();
+        let deserialized = TableValue::parse(&serialized).unwrap();
         assert_eq!(value, deserialized);
     }
 }
