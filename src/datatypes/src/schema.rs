@@ -437,6 +437,13 @@ mod tests {
     }
 
     #[test]
+    fn test_column_schema_invalid_default_constraint() {
+        ColumnSchema::new("test", ConcreteDataType::int32_datatype(), false)
+            .with_default_constraint(Some(ColumnDefaultConstraint::null_value()))
+            .unwrap_err();
+    }
+
+    #[test]
     fn test_column_default_constraint_try_into_from() {
         let default_constraint = ColumnDefaultConstraint::Value(Value::from(42i64));
 
@@ -444,6 +451,29 @@ mod tests {
         let from_value = ColumnDefaultConstraint::try_from(&bytes[..]).unwrap();
 
         assert_eq!(default_constraint, from_value);
+    }
+
+    #[test]
+    fn test_column_schema_create_default_null() {
+        // Implicit default null.
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true);
+        let v = column_schema.create_default_vector(5).unwrap().unwrap();
+        assert_eq!(5, v.len());
+        assert!(v.only_null());
+
+        // Explicit default null.
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
+            .with_default_constraint(Some(ColumnDefaultConstraint::null_value()))
+            .unwrap();
+        let v = column_schema.create_default_vector(5).unwrap().unwrap();
+        assert_eq!(5, v.len());
+        assert!(v.only_null());
+    }
+
+    #[test]
+    fn test_column_schema_no_default() {
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), false);
+        assert!(column_schema.create_default_vector(5).unwrap().is_none());
     }
 
     #[test]
