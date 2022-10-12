@@ -46,6 +46,26 @@ mod tests {
     }
 
     #[test]
+    fn test_replicate_nullable_primitive() {
+        let v = Int32Vector::from(vec![None, Some(1), None, Some(2)]);
+        let offsets = [2, 4, 6, 8];
+        let v = v.replicate(&offsets);
+        assert_eq!(8, v.len());
+
+        let expect: VectorRef = Arc::new(Int32Vector::from(vec![
+            None,
+            None,
+            Some(1),
+            Some(1),
+            None,
+            None,
+            Some(2),
+            Some(2),
+        ]));
+        assert_eq!(expect, v);
+    }
+
+    #[test]
     fn test_replicate_scalar() {
         let v = StringVector::from_slice(&["0", "1", "2", "3"]);
         let offsets = [1, 3, 5, 6];
