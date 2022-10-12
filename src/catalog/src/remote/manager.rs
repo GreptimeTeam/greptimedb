@@ -28,12 +28,11 @@ pub struct RemoteCatalogManager {
 }
 
 impl RemoteCatalogManager {
-    pub fn new_catalog_provider(&self, catalog_name: String) -> CatalogProviderRef {
-        Arc::new(RemoteCatalogProvider {
-            catalog_name,
-            backend: self.backend.clone(),
+    fn catalog_key(&self, catalog_name: impl AsRef<str>) -> CatalogKey {
+        CatalogKey {
+            catalog_name: catalog_name.as_ref().to_string(),
             node_id: self.node_id.clone(),
-        }) as _
+        }
     }
 }
 
@@ -48,17 +47,11 @@ impl crate::CatalogList for RemoteCatalogManager {
         catalog: CatalogProviderRef,
     ) -> Result<Option<CatalogProviderRef>, Error> {
         futures::executor::block_on(async move {
-            let key = CatalogKey {
-                catalog_name: name.clone(),
-                node_id: self.node_id.clone(),
-            }
-            .to_string();
-
-            let prev = self
-                .backend
-                .get(key.as_bytes())
-                .await?
-                .map(|_| self.new_catalog_provider(name.clone()));
+            let key = self.catalog_key(&name).to_string();
+            let prev = match self.backend.get(key.as_bytes()).await? {
+                None => None,
+                Some(_) => self.catalogs.read().await.get(&name).cloned(),
+            };
 
             // TODO(hl): change value
             self.backend.set(key.as_bytes(), "".as_bytes()).await?;
@@ -98,11 +91,10 @@ impl crate::CatalogList for RemoteCatalogManager {
             }
             .to_string();
 
-            Ok(self
-                .backend
-                .get(key.as_bytes())
-                .await?
-                .map(|_| self.new_catalog_provider(name.to_string())))
+            match self.backend.get(key.as_bytes()).await? {
+                None => Ok(None),
+                Some(_) => Ok(self.catalogs.read().await.get(name).cloned()),
+            }
         })
     }
 }
@@ -147,17 +139,16 @@ pub struct RemoteCatalogProvider {
     catalog_name: String,
     node_id: String,
     backend: Arc<MetaKvBackend>,
+    schemas: Arc<RwLock<HashMap<String, SchemaProviderRef>>>,
 }
 
 impl RemoteCatalogProvider {
-    pub fn new_schema_provider(&self, schema_name: String) -> SchemaProviderRef {
-        Arc::new(RemoteSchemaProvider {
-            backend: self.backend.clone(),
-            schema_name,
+    fn schema_key(&self, schema_name: impl AsRef<str>) -> SchemaKey {
+        SchemaKey {
             catalog_name: self.catalog_name.clone(),
+            schema_name: schema_name.as_ref().to_string(),
             node_id: self.node_id.clone(),
-            tables: Default::default(),
-        }) as _
+        }
     }
 }
 
@@ -194,19 +185,14 @@ impl crate::CatalogProvider for RemoteCatalogProvider {
         schema: SchemaProviderRef,
     ) -> Result<Option<SchemaProviderRef>, Error> {
         let _ = schema;
-        let key = SchemaKey {
-            schema_name: name.clone(),
-            node_id: self.node_id.clone(),
-            catalog_name: self.catalog_name.clone(),
-        }
-        .to_string();
+        let key = self.schema_key(&name).to_string();
         futures::executor::block_on(async move {
-            let prev = self
-                .backend
-                .get(key.as_bytes())
-                .await?
-                .map(|_| self.new_schema_provider(name));
+            let prev = match self.backend.get(key.as_bytes()).await? {
+                None => None,
+                Some(_) => self.schemas.read().await.get(&name).cloned(),
+            };
 
+            // TODO(hl): Schema entry value
             self.backend.set(key.as_bytes(), "".as_bytes()).await?;
             Ok(prev)
         })
@@ -214,18 +200,11 @@ impl crate::CatalogProvider for RemoteCatalogProvider {
 
     fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>, Error> {
         futures::executor::block_on(async move {
-            let key = SchemaKey {
-                catalog_name: self.catalog_name.clone(),
-                schema_name: name.to_string(),
-                node_id: self.node_id.clone(),
+            let key = self.schema_key(name).to_string();
+            match self.backend.get(key.as_bytes()).await? {
+                None => Ok(None),
+                Some(_) => Ok(self.schemas.read().await.get(name).cloned()),
             }
-            .to_string();
-            let schema_provider = self
-                .backend
-                .get(key.as_bytes())
-                .await?
-                .map(|_| self.new_schema_provider(name.to_string()));
-            Ok(schema_provider)
         })
     }
 }
@@ -239,11 +218,11 @@ pub struct RemoteSchemaProvider {
 }
 
 impl RemoteSchemaProvider {
-    pub fn table_key(&self, table_name: String) -> TableKey {
+    pub fn table_key(&self, table_name: impl AsRef<str>) -> TableKey {
         TableKey {
             catalog_name: self.catalog_name.clone(),
             schema_name: self.schema_name.clone(),
-            table_name,
+            table_name: table_name.as_ref().to_string(),
             node_id: self.node_id.clone(),
         }
     }
@@ -281,8 +260,13 @@ impl SchemaProvider for RemoteSchemaProvider {
     }
 
     fn table(&self, name: &str) -> crate::error::Result<Option<TableRef>> {
-        let _ = name;
-        futures::executor::block_on(async move { todo!() })
+        futures::executor::block_on(async move {
+            let key = self.table_key(&name).to_string();
+            match self.backend.get(key.as_bytes()).await? {
+                None => Ok(None),
+                Some(_) => Ok(self.tables.read().await.get(name).cloned()),
+            }
+        })
     }
 
     fn register_table(
@@ -306,10 +290,10 @@ impl SchemaProvider for RemoteSchemaProvider {
 
     fn deregister_table(&self, name: &str) -> crate::error::Result<Option<TableRef>> {
         futures::executor::block_on(async move {
-            let key = self.table_key(name.to_string()).to_string();
+            let key = self.table_key(&name).to_string();
             let table_ref = match self.backend.get(key.as_bytes()).await? {
                 None => None,
-                Some(_) => self.tables.read().await.get(name).cloned(),
+                Some(_) => self.tables.write().await.remove(name),
             };
             self.backend.delete_range(key.as_bytes(), &[]).await?;
             Ok(table_ref)
@@ -318,7 +302,7 @@ impl SchemaProvider for RemoteSchemaProvider {
 
     fn table_exist(&self, name: &str) -> Result<bool, Error> {
         futures::executor::block_on(async move {
-            let key = self.table_key(name.to_string()).to_string();
+            let key = self.table_key(&name).to_string();
             Ok(self.backend.get(key.as_bytes()).await?.is_some())
         })
     }
