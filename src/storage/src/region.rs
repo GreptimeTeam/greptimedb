@@ -93,7 +93,7 @@ pub struct StoreConfig<S> {
     pub flush_strategy: FlushStrategyRef,
 }
 
-pub type ChangedMetadataMap = BTreeMap<SequenceNumber, (ManifestVersion, RawRegionMetadata)>;
+pub type RecoveredMetadataMap = BTreeMap<SequenceNumber, (ManifestVersion, RawRegionMetadata)>;
 
 impl<S: LogStore> RegionImpl<S> {
     /// Create a new region and also persist the region metadata to manifest.
@@ -156,7 +156,7 @@ impl<S: LogStore> RegionImpl<S> {
         _opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
-        let (version, mut changed_metadata) =
+        let (version, mut recovered_metadata) =
             match Self::recover_from_manifest(&store_config.manifest).await? {
                 (None, _) => return Ok(None),
                 (Some(v), m) => (v, m),
@@ -171,9 +171,16 @@ impl<S: LogStore> RegionImpl<S> {
         let flushed_sequence = version.flushed_sequence();
         let version_control = Arc::new(VersionControl::with_version(version));
 
-        let changed_metadata_after_flushed = changed_metadata.split_off(&(flushed_sequence + 1));
+        let recovered_metadata_after_flushed =
+            recovered_metadata.split_off(&(flushed_sequence + 1));
+        logging::debug!(
+            "Applying {} recovered to region: {}, ready to be applied when replay: {}",
+            recovered_metadata.len(),
+            name,
+            recovered_metadata_after_flushed.len(),
+        );
         // apply metadata already flushed
-        for (_, (manifest_version, metadata)) in changed_metadata.into_iter() {
+        for (_, (manifest_version, metadata)) in recovered_metadata.into_iter() {
             let metadata = Arc::new(
                 metadata
                     .try_into()
@@ -201,7 +208,7 @@ impl<S: LogStore> RegionImpl<S> {
         };
         // Replay all unflushed data.
         writer
-            .replay(changed_metadata_after_flushed, writer_ctx)
+            .replay(recovered_metadata_after_flushed, writer_ctx)
             .await?;
 
         let inner = Arc::new(RegionInner {
@@ -219,14 +226,14 @@ impl<S: LogStore> RegionImpl<S> {
 
     async fn recover_from_manifest(
         manifest: &RegionManifest,
-    ) -> Result<(Option<Version>, ChangedMetadataMap)> {
+    ) -> Result<(Option<Version>, RecoveredMetadataMap)> {
         let (start, end) = Self::manifest_scan_range();
         let mut iter = manifest.scan(start, end).await?;
 
         let mut version = None;
         let mut actions = Vec::new();
         let mut last_manifest_version = manifest::MIN_VERSION;
-        let mut changed_metadata = BTreeMap::new();
+        let mut recovered_metadata = BTreeMap::new();
 
         while let Some((manifest_version, action_list)) = iter.next_action().await? {
             last_manifest_version = manifest_version;
@@ -248,7 +255,7 @@ impl<S: LogStore> RegionImpl<S> {
                         }
                     }
                     (RegionMetaAction::Change(c), Some(v)) => {
-                        changed_metadata
+                        recovered_metadata
                             .insert(c.committed_sequence, (manifest_version, c.metadata));
                         version = Some(v);
                     }
@@ -271,7 +278,7 @@ impl<S: LogStore> RegionImpl<S> {
             manifest.update_state(last_manifest_version + 1, protocol.clone());
         }
 
-        Ok((version, changed_metadata))
+        Ok((version, recovered_metadata))
     }
 
     fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
@@ -373,6 +380,7 @@ impl<S: LogStore> RegionInner<S> {
         // FIXME(yingwen): [alter] The schema may be outdated.
         let metadata = self.in_memory_metadata();
         let schema = metadata.schema();
+
         // Only compare column schemas.
         ensure!(
             schema.column_schemas() == request.schema().column_schemas(),

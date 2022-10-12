@@ -17,7 +17,7 @@ use crate::manifest::action::{
 };
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
 use crate::proto::wal::WalHeader;
-use crate::region::{ChangedMetadataMap, RegionManifest, SharedDataRef};
+use crate::region::{RecoveredMetadataMap, RegionManifest, SharedDataRef};
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControlRef, VersionEdit};
 use crate::wal::{Payload, Wal};
@@ -64,12 +64,12 @@ impl RegionWriter {
     /// Replay data to memtables.
     pub async fn replay<S: LogStore>(
         &self,
-        changed_metadata: ChangedMetadataMap,
+        recovered_metadata: RecoveredMetadataMap,
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner
-            .replay(&self.version_mutex, changed_metadata, writer_ctx)
+            .replay(&self.version_mutex, recovered_metadata, writer_ctx)
             .await
     }
 
@@ -298,14 +298,15 @@ impl WriterInner {
     async fn replay<S: LogStore>(
         &mut self,
         version_mutex: &Mutex<()>,
-        mut changed_metadata: ChangedMetadataMap,
+        mut recovered_metadata: RecoveredMetadataMap,
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<()> {
         let version_control = writer_ctx.version_control();
 
         let (flushed_sequence, mut last_sequence);
         let mut num_requests = 0;
-        let mut next_apply_metadata = changed_metadata.pop_first();
+        let mut num_recovered_metadata = 0;
+        let mut next_apply_metadata = recovered_metadata.pop_first();
         {
             let _lock = version_mutex.lock().await;
 
@@ -316,20 +317,25 @@ impl WriterInner {
             // should be flushed_sequence + 1.
             let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence + 1).await?;
             while let Some((req_sequence, _header, request)) = stream.try_next().await? {
-                // Apply metadata which it's committed sequence is before request sequence
-                while let Some((next_apply_sequence, (manifest_version, metadata))) =
-                    &next_apply_metadata
-                {
-                    if req_sequence >= *next_apply_sequence {
+                while let Some((next_apply_sequence, _)) = next_apply_metadata {
+                    if req_sequence >= next_apply_sequence {
+                        // It's safe to unwrap here,it's checked above.
+                        // Move out metadata to avoid cloning it.
+                        let (_, (manifest_version, metadata)) = next_apply_metadata.take().unwrap();
                         version_control.freeze_mutable_and_apply_metadata(
-                            Arc::new(metadata.clone().try_into().context(
+                            Arc::new(metadata.try_into().context(
                                 error::InvalidRawRegionSnafu {
                                     region: &writer_ctx.shared.name,
                                 },
                             )?),
-                            *manifest_version,
+                            manifest_version,
                         );
-                        next_apply_metadata = changed_metadata.pop_first();
+                        num_recovered_metadata += 1;
+                        logging::debug!("Applied metadata to region: {} when replaying WAL: sequence={} manifest={} ",
+                                        writer_ctx.shared.name,
+                                        next_apply_sequence,
+                                        manifest_version);
+                        next_apply_metadata = recovered_metadata.pop_first();
                     }
                 }
 
@@ -371,12 +377,13 @@ impl WriterInner {
         }
 
         logging::info!(
-            "Region replay finished, region_id: {}, region_name: {}, flushed_sequence: {}, last_sequence: {}, num_requests: {}",
+            "Region replay finished, region_id: {}, region_name: {}, flushed_sequence: {}, last_sequence: {}, num_requests: {}, num_recovered_metadata: {}",
             writer_ctx.shared.id,
             writer_ctx.shared.name,
             flushed_sequence,
             last_sequence,
             num_requests,
+            num_recovered_metadata,
         );
 
         Ok(())

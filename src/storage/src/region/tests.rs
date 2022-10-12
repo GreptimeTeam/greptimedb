@@ -37,7 +37,7 @@ pub fn new_metadata(region_name: &str, enable_version_column: bool) -> RegionMet
 /// Test region with schema (timestamp, v0).
 pub struct TesterBase<S: LogStore> {
     pub region: RegionImpl<S>,
-    write_ctx: WriteContext,
+    pub write_ctx: WriteContext,
     pub read_ctx: ReadContext,
 }
 
