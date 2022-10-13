@@ -234,6 +234,26 @@ async fn test_alter_region_with_reopen() {
         DataRow::new(Some(10004), 1007, Some(107), Some(205)),
         DataRow::new(Some(10005), 1008, Some(108), Some(206)),
     ];
+
+    tester.put(&data).await;
+
+    // add a column,then remove it.
+    let req = add_column_req(&[
+        (new_column_desc(6, "v2"), false), // key column k0
+        (new_column_desc(7, "v3"), false), // value column v1
+    ]);
+    tester.alter(req).await;
+
+    let req = drop_column_req(&["v2", "v3"]);
+    tester.alter(req).await;
+
+    // reopen and write again
+    tester.reopen().await;
+    let schema = tester.schema();
+    check_schema_names(&schema, &["k0", "timestamp", "v0", "v1"]);
+
+    let data = vec![DataRow::new(Some(10006), 1009, Some(109), Some(207))];
+
     tester.put(&data).await;
 }
 

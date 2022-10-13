@@ -182,6 +182,7 @@ impl RegionWriter {
         manifest_version: ManifestVersion,
     ) -> Result<()> {
         let next_sequence = version_control.committed_sequence() + 1;
+        version_control.set_committed_sequence(next_sequence);
 
         let header = WalHeader::with_last_manifest_version(manifest_version);
         wal.write_to_wal(next_sequence, header, Payload::None)
@@ -336,6 +337,9 @@ impl WriterInner {
                                         next_apply_sequence,
                                         manifest_version);
                         next_apply_metadata = recovered_metadata.pop_first();
+                    } else {
+                        // Keep the next_apply_metadata until req_sequence >= next_apply_sequence
+                        break;
                     }
                 }
 
