@@ -11,7 +11,6 @@ GreptimeDB: the next-generation hybrid timeseries/analytics processing database 
 To compile GreptimeDB from source, you'll need the following:
 - Rust
 - Protobuf
-- OpenSSL
 
 #### Rust
 
@@ -22,23 +21,6 @@ The easiest way to install Rust is to use [`rustup`](https://rustup.rs/), which 
 `protoc` is required for compiling `.proto` files. `protobuf` is available from
 major package manager on macos and linux distributions. You can find an
 installation instructions [here](https://grpc.io/docs/protoc-installation/).
-
-#### OpenSSL
-
-For Ubuntu:
-```bash
-sudo apt install libssl-dev
-```
-
-For RedHat-based: Fedora, Oracle Linux, etc:
-```bash
-sudo dnf install openssl-devel
-```
-
-For macOS:
-```bash
-brew install openssl
-```
 
 ### Build the Docker Image
 
