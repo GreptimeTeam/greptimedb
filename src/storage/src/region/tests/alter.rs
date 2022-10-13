@@ -237,7 +237,7 @@ async fn test_alter_region_with_reopen() {
 
     tester.put(&data).await;
 
-    // add a column,then remove it.
+    // add columns,then remove them without writing data.
     let req = add_column_req(&[
         (new_column_desc(6, "v2"), false), // key column k0
         (new_column_desc(7, "v3"), false), // value column v1
