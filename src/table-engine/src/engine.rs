@@ -432,7 +432,7 @@ mod tests {
     use storage::EngineImpl;
     use store_api::manifest::Manifest;
     use store_api::storage::ReadContext;
-    use table::requests::{AlterKind, InsertRequest};
+    use table::requests::{AddColumnRequest, AlterKind, InsertRequest};
     use tempdir::TempDir;
 
     use super::*;
@@ -831,8 +831,11 @@ mod tests {
             catalog_name: None,
             schema_name: None,
             table_name: TABLE_NAME.to_string(),
-            alter_kind: AlterKind::AddColumn {
-                new_column: new_column.clone(),
+            alter_kind: AlterKind::AddColumns {
+                columns: vec![AddColumnRequest {
+                    column_schema: new_column.clone(),
+                    is_key: false,
+                }],
             },
         };
         let table = table_engine

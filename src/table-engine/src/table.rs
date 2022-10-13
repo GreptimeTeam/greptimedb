@@ -92,7 +92,7 @@ impl<R: Region> Table for MitoTable<R> {
                 .expect("column schema not found");
 
             let vector = columns_values.remove(name).or_else(|| {
-                Self::try_get_column_default_constraint_vector(&column_schema, rows_num).ok()?
+                Self::try_get_column_default_constraint_vector(column_schema, rows_num).ok()?
             });
 
             if let Some(vector) = vector {
@@ -110,7 +110,7 @@ impl<R: Region> Table for MitoTable<R> {
                 .expect("column schema not found");
 
             let vector = columns_values.remove(name).or_else(|| {
-                Self::try_get_column_default_constraint_vector(&column_schema, rows_num).ok()?
+                Self::try_get_column_default_constraint_vector(column_schema, rows_num).ok()?
             });
 
             if let Some(v) = vector {
@@ -243,7 +243,7 @@ impl<R: Region> Table for MitoTable<R> {
                 let table_schema = build_table_schema_with_new_columns(
                     table_name,
                     &table_meta.schema,
-                    &new_columns,
+                    new_columns,
                 )?;
 
                 (alter_op, table_schema, new_columns.len() as u32)
@@ -609,7 +609,12 @@ mod tests {
         let table_schema = &table_meta.schema;
 
         let new_column = ColumnSchema::new("host", ConcreteDataType::string_datatype(), true);
-        let result = build_table_schema_with_new_column(table_name, table_schema, &new_column);
+
+        let new_columns = vec![AddColumnRequest {
+            column_schema: new_column,
+            is_key: false,
+        }];
+        let result = build_table_schema_with_new_columns(table_name, table_schema, &new_columns);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -617,8 +622,12 @@ mod tests {
             .contains("Column host already exists in table demo"));
 
         let new_column = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_columns = vec![AddColumnRequest {
+            column_schema: new_column.clone(),
+            is_key: false,
+        }];
         let new_schema =
-            build_table_schema_with_new_column(table_name, table_schema, &new_column).unwrap();
+            build_table_schema_with_new_columns(table_name, table_schema, &new_columns).unwrap();
 
         assert_eq!(new_schema.num_columns(), table_schema.num_columns() + 1);
         assert_eq!(

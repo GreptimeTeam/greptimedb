@@ -130,8 +130,6 @@ pub fn build_create_table_request(
             error::MissingTimestampColumnSnafu
         );
 
-        println!("{:?}", column_schemas);
-
         let schema = Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()

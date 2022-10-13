@@ -85,13 +85,16 @@ mod tests {
         assert_eq!(req.table_name, "my_metric_1");
 
         let alter_kind = req.alter_kind;
-        assert_matches!(alter_kind, AlterKind::AddColumn { .. });
+        assert_matches!(alter_kind, AlterKind::AddColumns { .. });
         match alter_kind {
-            AlterKind::AddColumn { new_column } => {
+            AlterKind::AddColumns { columns } => {
+                let new_column = &columns[0].column_schema;
+
                 assert_eq!(new_column.name, "tagk_i");
                 assert!(new_column.is_nullable);
                 assert_eq!(new_column.data_type, ConcreteDataType::string_datatype());
             }
+            _ => unreachable!(),
         }
     }
 }
