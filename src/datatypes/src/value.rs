@@ -315,9 +315,19 @@ pub enum GeometryValue {
     Point(Point<OrderedF64>),
 }
 
+impl GeometryValue {
+    pub fn new_point(x: f64, y: f64) -> Self {
+        let point = Point::<OrderedF64>::new(x.into(), y.into());
+        GeometryValue::Point(point)
+    }
+    pub fn to_value(self) -> Value {
+        Value::Geometry(self)
+    }
+}
+
 impl Default for GeometryValue {
     fn default() -> Self {
-        todo!()
+        unimplemented!() //lack of type info
     }
 }
 /// Reference to [Value].

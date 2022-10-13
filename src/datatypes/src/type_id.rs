@@ -66,7 +66,7 @@ impl LogicalTypeId {
             LogicalTypeId::List => {
                 ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
             }
-            LogicalTypeId::Geometry => todo!(),
+            LogicalTypeId::Geometry => ConcreteDataType::geometry_datatype(),
         }
     }
 }

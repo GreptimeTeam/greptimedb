@@ -86,14 +86,9 @@ impl Vector for GeometryVector {
     }
 
     fn get_ref(&self, index: usize) -> crate::value::ValueRef {
-        match self {
-            GeometryVector::PointVector(vector) => {
-                if vector.is_null(index) {
-                    return ValueRef::Null;
-                }
-            }
+        if self.is_null(index) {
+            return ValueRef::Null;
         }
-
         ValueRef::Geometry(GeometryValueRef::Indexed {
             vector: self,
             idx: index,
@@ -140,7 +135,9 @@ impl<'a> Iterator for GeometryVectorIter<'a> {
         if self.vector.len() <= pos {
             return None;
         }
-
+        if self.vector.is_null(pos) {
+            return Some(None);
+        }
         Some(Some(GeometryValueRef::Indexed {
             vector: self.vector,
             idx: pos,
@@ -150,6 +147,15 @@ impl<'a> Iterator for GeometryVectorIter<'a> {
 
 pub enum GeometryVectorBuilder {
     PointVectorBuilder(PointVectorBuilder),
+}
+
+impl GeometryVectorBuilder {
+    pub fn new_point_vector_builder() -> Self {
+        Self::PointVectorBuilder(PointVectorBuilder::new())
+    }
+    pub fn with_capacity_point_vector_builder(capacity: usize) -> Self {
+        Self::PointVectorBuilder(PointVectorBuilder::with_capacity(capacity))
+    }
 }
 
 impl MutableVector for GeometryVectorBuilder {
@@ -237,5 +243,50 @@ impl ScalarVectorBuilder for GeometryVectorBuilder {
 impl Serializable for GeometryVector {
     fn serialize_to_json(&self) -> crate::Result<Vec<serde_json::Value>> {
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_geometry_vector() {
+        let mut builder = GeometryVectorBuilder::with_capacity_point_vector_builder(0);
+
+        let value = GeometryValue::new_point(2.0, 1.0);
+
+        builder.push(Some(GeometryValueRef::Ref { val: &value }));
+        builder.push(None);
+        assert_eq!(builder.len(), 2);
+
+        let vector = builder.finish();
+        assert_eq!(vector.len(), 2);
+
+        assert!(vector.get(1).is_null());
+        assert!(vector.get_data(1).is_none());
+
+        assert_eq!(vector.get(0), value.to_value());
+        assert_eq!(vector.get_data(0).unwrap().to_owned_scalar(), value);
+
+        assert_eq!(vector.data_type(), ConcreteDataType::geometry_datatype());
+
+        let iter = vector.iter_data();
+        let mut cnt: usize = 0;
+
+        for i in iter {
+            assert_eq!(i, vector.get_data(cnt));
+            cnt = cnt + 1;
+        }
+        assert_eq!(cnt, vector.len());
+
+        //slice
+
+        //extend_slice_of
+
+        //memory_size
+
+
+
     }
 }

@@ -35,6 +35,9 @@ impl PointVector {
     }
 
     pub fn get(&self, index: usize) -> Value {
+        if self.array.is_null(index) {
+            return Value::Null;
+        }
         let ref_x_array = self
             .array
             .values()
@@ -43,14 +46,6 @@ impl PointVector {
             .as_any()
             .downcast_ref::<PrimitiveArray<f64>>()
             .unwrap();
-
-        let validity = ref_x_array.validity();
-
-        if let Some(bm) = validity {
-            if !bm.get_bit(index) {
-                return Value::Null;
-            }
-        }
 
         let ref_y_array = self
             .array
@@ -61,13 +56,8 @@ impl PointVector {
             .downcast_ref::<PrimitiveArray<f64>>()
             .unwrap();
 
-        let (x, y) = (ref_x_array.value(index), ref_x_array.value(index));
-        let geo_value = GeometryValue::Point(Point::<OrderedF64>::new(x.into(), y.into()));
-        Value::Geometry(geo_value)
-    }
-
-    pub fn is_null(&self, index: usize) -> bool {
-        self.get(index).is_null()
+        let (x, y) = (ref_x_array.value(index), ref_y_array.value(index));
+        GeometryValue::new_point(x, y).to_value()
     }
 }
 
@@ -78,6 +68,20 @@ pub struct PointVectorBuilder {
 }
 
 impl PointVectorBuilder {
+    pub fn new() -> Self {
+        Self {
+            array_x: Float64Vec::new(),
+            array_y: Float64Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            array_x: Float64Vec::with_capacity(capacity),
+            array_y: Float64Vec::with_capacity(capacity),
+        }
+    }
+
     pub fn push(&mut self, value: Option<GeometryValue>) {
         match value {
             Some(val) => match val {
@@ -98,9 +102,8 @@ impl PointVectorBuilder {
             Field::new("x", Float64, true),
             Field::new("y", Float64, true),
         ];
-
-        let array = StructArray::new(DataType::Struct(fields), vec![x, y], None);
-        //how to get validity of struct?
+        let validity = x.validity().map(|validity| validity.clone());
+        let array = StructArray::new(DataType::Struct(fields), vec![x, y], validity);
 
         PointVector { array }
     }

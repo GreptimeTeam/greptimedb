@@ -5,7 +5,7 @@ pub mod constant;
 pub mod date;
 pub mod datetime;
 mod eq;
-mod geometry;
+pub mod geometry;
 mod helper;
 mod list;
 pub mod mutable;
@@ -18,10 +18,10 @@ mod timestamp;
 pub mod all {
     //! All vector types.
     pub use crate::vectors::{
-        BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Float32Vector,
-        Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, ListVector, NullVector,
-        PrimitiveVector, StringVector, TimestampVector, UInt16Vector, UInt32Vector, UInt64Vector,
-        UInt8Vector,geometry::GeometryVector
+        geometry::GeometryVector, BinaryVector, BooleanVector, ConstantVector, DateTimeVector,
+        DateVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
+        Int8Vector, ListVector, NullVector, PrimitiveVector, StringVector, TimestampVector,
+        UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector,
     };
 }
 

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::data_type::DataType;
 use crate::prelude::{DataTypeRef, LogicalTypeId, Value};
+use crate::value::GeometryValue;
+use crate::vectors::geometry::GeometryVectorBuilder;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GeometryType {
@@ -18,14 +20,20 @@ impl DataType for GeometryType {
     }
 
     fn default_value(&self) -> crate::value::Value {
-        todo!()
+        match self {
+            GeometryType::Point => GeometryValue::new_point(0.0, 0.0).to_value(),
+        }
     }
 
     fn as_arrow_type(&self) -> arrow::datatypes::DataType {
-        unimplemented!()
+        unreachable!()
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn crate::vectors::MutableVector> {
-        todo!()
+        match self {
+            GeometryType::Point => Box::new(
+                GeometryVectorBuilder::with_capacity_point_vector_builder(capacity),
+            ),
+        }
     }
 }
