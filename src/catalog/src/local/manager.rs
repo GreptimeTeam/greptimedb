@@ -20,9 +20,9 @@ use crate::consts::{
 };
 use crate::error::Result;
 use crate::error::{
-    CatalogNotFoundSnafu, CreateTableSnafu, IllegalManagerStateSnafu, OpenTableSnafu,
-    ReadSystemCatalogSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
-    SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu,
+    SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu,
+    TableNotFoundSnafu,
 };
 use crate::local::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
@@ -31,9 +31,9 @@ use crate::system::{
 };
 use crate::tables::SystemCatalog;
 use crate::{
-    format_full_table_name, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
-    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, DEFAULT_CATALOG_NAME,
-    DEFAULT_SCHEMA_NAME,
+    format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
+    CatalogProvider, CatalogProviderRef, RegisterSystemTableRequest, RegisterTableRequest,
+    SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -90,49 +90,7 @@ impl LocalCatalogManager {
 
         // Processing system table hooks
         let mut sys_table_requests = self.system_table_requests.lock().await;
-        for req in sys_table_requests.drain(..) {
-            let catalog_name = &req.create_table_request.catalog_name;
-            let schema_name = &req.create_table_request.schema_name;
-            let table_name = &req.create_table_request.table_name;
-            let table_id = req.create_table_request.id;
-
-            let table = if let Some(table) =
-                self.table(catalog_name.as_deref(), schema_name.as_deref(), table_name)?
-            {
-                table
-            } else {
-                let table = self
-                    .engine
-                    .create_table(&EngineContext::default(), req.create_table_request.clone())
-                    .await
-                    .with_context(|_| CreateTableSnafu {
-                        table_info: format!(
-                            "{}.{}.{}, id: {}",
-                            catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME),
-                            schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME),
-                            table_name,
-                            table_id,
-                        ),
-                    })?;
-                self.register_table(RegisterTableRequest {
-                    catalog: catalog_name.clone(),
-                    schema: schema_name.clone(),
-                    table_name: table_name.clone(),
-                    table_id,
-                    table: table.clone(),
-                })
-                .await?;
-
-                info!("Created and registered system table: {}", table_name);
-
-                table
-            };
-
-            if let Some(hook) = req.open_hook {
-                (hook)(table)?;
-            }
-        }
-
+        handle_system_table_request(self, self.engine.clone(), &mut sys_table_requests).await?;
         Ok(())
     }
 

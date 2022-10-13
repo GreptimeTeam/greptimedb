@@ -5,14 +5,17 @@ use std::sync::Arc;
 
 use common_telemetry::info;
 use futures_util::StreamExt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::TableRef;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
-use crate::error::{CreateTableSnafu, Error, OpenTableSnafu};
+use crate::error::{
+    CatalogNotFoundSnafu, CreateTableSnafu, Error, OpenTableSnafu, SchemaNotFoundSnafu,
+    TableExistsSnafu,
+};
 use crate::remote::client::MetaKvBackend;
 use crate::remote::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_prefix, CatalogKey, SchemaKey, TableKey,
@@ -20,8 +23,9 @@ use crate::remote::helper::{
 };
 use crate::remote::{Kv, KvBackend};
 use crate::{
-    CatalogManager, CatalogProviderRef, RegisterSystemTableRequest, RegisterTableRequest,
-    SchemaProvider, SchemaProviderRef,
+    handle_system_table_request, CatalogList, CatalogManager, CatalogProviderRef,
+    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 
 pub struct RemoteCatalogManager {
@@ -31,6 +35,7 @@ pub struct RemoteCatalogManager {
     #[allow(unused)]
     next_table_id: AtomicU32, // table id should be calculated on startup
     engine: TableEngineRef,
+    system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
 }
 
 impl RemoteCatalogManager {
@@ -83,7 +88,6 @@ impl RemoteCatalogManager {
             while let Some(r) = schemas.next().await {
                 let SchemaKey { schema_name, .. } =
                     SchemaKey::parse(&String::from_utf8_lossy(&r?.0))?;
-
                 let schema = match catalog.schema(&schema_name)? {
                     None => {
                         let schema = self.new_schema_provider(&catalog_name, &schema_name);
@@ -178,6 +182,9 @@ impl CatalogManager for RemoteCatalogManager {
         *(self.catalogs.write().await) = catalogs;
         self.next_table_id
             .store(max_table_id + 1, Ordering::Relaxed);
+
+        let mut system_table_requests = self.system_table_requests.lock().await;
+        handle_system_table_request(self, self.engine.clone(), &mut system_table_requests).await?;
         Ok(())
     }
 
@@ -186,16 +193,38 @@ impl CatalogManager for RemoteCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> crate::error::Result<usize> {
-        let _ = request;
-        todo!()
+        let catalog_name = request
+            .catalog
+            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
+        let schema_name = request
+            .schema
+            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+        let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
+            catalog_name: &catalog_name,
+        })?;
+        let schema_provider =
+            catalog_provider
+                .schema(&schema_name)?
+                .with_context(|| SchemaNotFoundSnafu {
+                    schema_info: format!("{}.{}", &catalog_name, &schema_name),
+                })?;
+        if schema_provider.table_exist(&request.table_name)? {
+            return TableExistsSnafu {
+                table: format!("{}.{}.{}", &catalog_name, &schema_name, &request.table_name),
+            }
+            .fail();
+        }
+        schema_provider.register_table(request.table_name, request.table)?;
+        Ok(1)
     }
 
     async fn register_system_table(
         &self,
         request: RegisterSystemTableRequest,
     ) -> crate::error::Result<()> {
-        let _ = request;
-        todo!()
+        let mut requests = self.system_table_requests.lock().await;
+        requests.push(request);
+        Ok(())
     }
 
     fn table(
@@ -204,14 +233,22 @@ impl CatalogManager for RemoteCatalogManager {
         schema: Option<&str>,
         table_name: &str,
     ) -> crate::error::Result<Option<TableRef>> {
-        let _ = catalog;
-        let _ = schema;
-        let _ = table_name;
-        todo!()
+        let catalog_name = catalog.unwrap_or(DEFAULT_CATALOG_NAME);
+        let schema_name = schema.unwrap_or(DEFAULT_SCHEMA_NAME);
+
+        let catalog = self
+            .catalog(catalog_name)?
+            .with_context(|| CatalogNotFoundSnafu { catalog_name })?;
+        let schema = catalog
+            .schema(schema_name)?
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", catalog_name, schema_name),
+            })?;
+        schema.table(table_name)
     }
 }
 
-impl crate::CatalogList for RemoteCatalogManager {
+impl CatalogList for RemoteCatalogManager {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -236,6 +273,7 @@ impl crate::CatalogList for RemoteCatalogManager {
         })
     }
 
+    /// List all catalogs from metasrv
     fn catalog_names(&self) -> Result<Vec<String>, Error> {
         futures::executor::block_on(async move {
             let mut res = HashSet::new();
@@ -258,6 +296,7 @@ impl crate::CatalogList for RemoteCatalogManager {
         })
     }
 
+    /// Read catalog info of given name from metsrv.
     fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>, Error> {
         futures::executor::block_on(async move {
             let key = CatalogKey {
