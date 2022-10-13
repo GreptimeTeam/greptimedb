@@ -10,6 +10,8 @@ name: Code coverage
 
 env:
   RUST_TOOLCHAIN: nightly-2022-07-14
+  ACTIONS_RUNNER_DEBUG: true
+  ACTIONS_STEP_DEBUG: true
 
 jobs:
   grcov:
