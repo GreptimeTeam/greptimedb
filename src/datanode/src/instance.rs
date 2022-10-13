@@ -1,8 +1,8 @@
 use std::{fs, path, sync::Arc};
 
 use api::v1::{
-    admin_expr, insert_expr, object_expr, select_expr, AdminExpr, AdminResult, ObjectExpr,
-    ObjectResult, SelectExpr,
+    admin_expr, codec::InsertBatch, insert_expr, object_expr, select_expr, AdminExpr, AdminResult,
+    ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -18,6 +18,7 @@ use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
+use table::requests::AddColumnRequest;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
@@ -38,10 +39,8 @@ type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 
 // An abstraction to read/write services.
 pub struct Instance {
-    // Query service
     query_engine: QueryEngineRef,
     sql_handler: SqlHandler,
-    // Catalog list
     catalog_manager: CatalogManagerRef,
     physical_planner: PhysicalPlanner,
     script_executor: ScriptExecutor,
@@ -82,6 +81,49 @@ impl Instance {
         })
     }
 
+    async fn add_new_columns_to_table(
+        &self,
+        table_name: &str,
+        add_columns: Vec<AddColumnRequest>,
+    ) -> Result<()> {
+        let alter_request = insert::build_alter_table_request(table_name, add_columns)?;
+
+        debug!("Adding new columns: {} to table: {}", 1, 1);
+
+        let _result = self
+            .sql_handler()
+            .execute(SqlRequest::Alter(alter_request))
+            .await?;
+
+        info!("Added new columns: {} to table: {}", 1, table_name);
+        Ok(())
+    }
+
+    async fn create_table_by_insert_batches(
+        &self,
+        table_name: &str,
+        insert_batches: &[InsertBatch],
+    ) -> Result<()> {
+        // Create table automatically, build schema from data.
+        let table_id = self.catalog_manager.next_table_id();
+        let create_table_request =
+            insert::build_create_table_request(table_id, table_name, insert_batches)?;
+
+        info!(
+            "Try to create table: {} automatically with request: {:?}",
+            table_name, create_table_request,
+        );
+
+        let _result = self
+            .sql_handler()
+            .execute(SqlRequest::Create(create_table_request))
+            .await?;
+
+        info!("Success to create table: {} automatically", table_name);
+
+        Ok(())
+    }
+
     pub async fn execute_grpc_insert(
         &self,
         table_name: &str,
@@ -96,52 +138,22 @@ impl Instance {
 
         let insert_batches = insert::insert_batches(values.values)?;
         ensure!(!insert_batches.is_empty(), error::IllegalInsertDataSnafu);
+
         let table = if let Some(table) = schema_provider.table(table_name) {
             let schema = table.schema();
-
-            // Checking whether if the request contains new columns.
             if let Some(add_columns) = insert::find_new_columns(&schema, &insert_batches)? {
-                let alter_request = insert::build_alter_table_request(table_name, add_columns)?;
-
-                debug!("Adding new columns: {} to table: {}", 1, 1);
-
-                let result = self
-                    .sql_handler()
-                    .execute(SqlRequest::Alter(alter_request))
-                    .await;
-
-                if result.is_err() {
-                    return result;
-                } else {
-                    info!("Added new columns: {} to table: {}", 1, 1);
-                }
+                self.add_new_columns_to_table(table_name, add_columns)
+                    .await?;
             }
 
             table
         } else {
-            // Create table automatically, build schema from data.
-            let table_id = self.catalog_manager.next_table_id();
-            let create_table_request =
-                insert::build_create_table_request(table_id, table_name, &insert_batches)?;
+            self.create_table_by_insert_batches(table_name, &insert_batches)
+                .await?;
 
-            info!(
-                "Try to create table: {} automatically with request: {:?}",
-                table_name, create_table_request,
-            );
-
-            let result = self
-                .sql_handler()
-                .execute(SqlRequest::Create(create_table_request))
-                .await;
-
-            if let Ok(Output::AffectedRows(_)) = result {
-                info!("Success to create table: {} automatically", table_name);
-                schema_provider
-                    .table(table_name)
-                    .context(TableNotFoundSnafu { table_name })?
-            } else {
-                return result;
-            }
+            schema_provider
+                .table(table_name)
+                .context(TableNotFoundSnafu { table_name })?
         };
 
         let insert = insertion_expr_to_request(table_name, insert_batches, table.clone())?;

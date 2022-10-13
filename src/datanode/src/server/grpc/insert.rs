@@ -13,6 +13,7 @@ use common_base::BitVec;
 use common_time::timestamp::Timestamp;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
+use servers::opentsdb::codec::{TAG_SEMANTIC_TYPE, TIMESTAMP_SEMANTIC_TYPE};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 use table::{
@@ -21,6 +22,17 @@ use table::{
 };
 
 use crate::error::{self, ColumnNotFoundSnafu, DecodeInsertSnafu, IllegalInsertDataSnafu, Result};
+
+#[inline]
+fn build_column_schema(column_name: &str, datatype: i32, nullable: bool) -> Result<ColumnSchema> {
+    let datatype_wrapper =
+        ColumnDataTypeWrapper::try_new(datatype).context(error::ColumnDataTypeSnafu)?;
+    Ok(ColumnSchema::new(
+        column_name,
+        datatype_wrapper.into(),
+        nullable,
+    ))
+}
 
 pub fn find_new_columns(
     schema: &SchemaRef,
@@ -44,13 +56,11 @@ pub fn find_new_columns(
             if schema.column_schema_by_name(column_name).is_none()
                 && !new_columns.contains(column_name)
             {
-                let datatype_wrapper = ColumnDataTypeWrapper::try_new(*datatype)
-                    .context(error::ColumnDataTypeSnafu)?;
-                let column_schema = ColumnSchema::new(column_name, datatype_wrapper.into(), true);
+                let column_schema = build_column_schema(column_name, *datatype, true)?;
 
                 requests.push(AddColumnRequest {
                     column_schema,
-                    is_key: *semantic_type == 0, // It's tag
+                    is_key: *semantic_type == TAG_SEMANTIC_TYPE,
                 });
                 new_columns.insert(column_name.to_string());
             }
@@ -100,17 +110,14 @@ pub fn build_create_table_request(
         } in columns
         {
             if !new_columns.contains(column_name) {
-                let datatype_wrapper = ColumnDataTypeWrapper::try_new(*datatype)
-                    .context(error::ColumnDataTypeSnafu)?;
-                let column_schema = ColumnSchema::new(column_name, datatype_wrapper.into(), true);
+                let column_schema = build_column_schema(column_name, *datatype, true)?;
+
                 column_schemas.push(column_schema);
                 new_columns.insert(column_name.to_string());
 
                 match *semantic_type {
-                    // Tag
-                    0 => primary_key_indices.push(column_schemas.len() - 1),
-                    // Timestamp
-                    2 => {
+                    TAG_SEMANTIC_TYPE => primary_key_indices.push(column_schemas.len() - 1),
+                    TIMESTAMP_SEMANTIC_TYPE => {
                         ensure!(
                             timestamp_index == usize::MAX,
                             error::DuplicatedTimestampColumnSnafu {

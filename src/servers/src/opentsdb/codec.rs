@@ -14,9 +14,9 @@ pub struct DataPoint {
     tags: Vec<(String, String)>,
 }
 
-const TAG_SEMANTIC_TYPE: i32 = 0;
-const FIELD_SEMANTIC_TYPE: i32 = 1;
-const TIMESTAMP_SEMANTIC_TYPE: i32 = 2;
+pub const TAG_SEMANTIC_TYPE: i32 = 0;
+pub const FIELD_SEMANTIC_TYPE: i32 = 1;
+pub const TIMESTAMP_SEMANTIC_TYPE: i32 = 2;
 
 impl DataPoint {
     pub fn new(metric: String, ts_millis: i64, value: f64, tags: Vec<(String, String)>) -> Self {
