@@ -24,6 +24,8 @@ use crate::sync::CowCell;
 /// Default bucket duration: 2 Hours.
 const DEFAULT_BUCKET_DURATION: Duration = Duration::from_secs(3600 * 2);
 
+pub const INIT_COMMITTED_SEQUENCE: u64 = 0;
+
 /// Controls version of in memory state for a region.
 #[derive(Debug)]
 pub struct VersionControl {
@@ -41,7 +43,7 @@ impl VersionControl {
     pub fn with_version(version: Version) -> VersionControl {
         VersionControl {
             version: CowCell::new(version),
-            committed_sequence: AtomicU64::new(0),
+            committed_sequence: AtomicU64::new(INIT_COMMITTED_SEQUENCE),
         }
     }
 

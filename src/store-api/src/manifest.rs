@@ -17,6 +17,9 @@ pub const MAX_VERSION: u64 = u64::MAX;
 pub trait MetaAction: Serialize + DeserializeOwned + Send + Sync + Clone + std::fmt::Debug {
     type Error: ErrorExt + Send + Sync;
 
+    /// Set a protocol action into meta action
+    fn set_protocol(&mut self, action: ProtocolAction);
+
     /// Set previous valid manifest version.
     fn set_prev_version(&mut self, version: ManifestVersion);
 
