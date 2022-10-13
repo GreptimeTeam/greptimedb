@@ -148,6 +148,11 @@ impl Schema {
     }
 
     #[inline]
+    pub fn contains_column(&self, name: &str) -> bool {
+        self.name_to_index.contains_key(name)
+    }
+
+    #[inline]
     pub fn num_columns(&self) -> usize {
         self.column_schemas.len()
     }

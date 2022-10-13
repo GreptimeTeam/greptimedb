@@ -14,6 +14,10 @@ pub struct DataPoint {
     tags: Vec<(String, String)>,
 }
 
+const TAG_SEMANTIC_TYPE: i32 = 0;
+const FIELD_SEMANTIC_TYPE: i32 = 1;
+const TIMESTAMP_SEMANTIC_TYPE: i32 = 2;
+
 impl DataPoint {
     pub fn new(metric: String, ts_millis: i64, value: f64, tags: Vec<(String, String)>) -> Self {
         Self {
@@ -119,6 +123,8 @@ impl DataPoint {
                 ts_millis_values: vec![self.ts_millis],
                 ..Default::default()
             }),
+            semantic_type: TIMESTAMP_SEMANTIC_TYPE,
+            datatype: 15, // timestamp
             ..Default::default()
         };
         columns.push(ts_column);
@@ -129,6 +135,8 @@ impl DataPoint {
                 f64_values: vec![self.value],
                 ..Default::default()
             }),
+            semantic_type: FIELD_SEMANTIC_TYPE,
+            datatype: 10, // float64
             ..Default::default()
         };
         columns.push(value_column);
@@ -140,6 +148,8 @@ impl DataPoint {
                     string_values: vec![tagv.to_string()],
                     ..Default::default()
                 }),
+                semantic_type: TAG_SEMANTIC_TYPE,
+                datatype: 12, // string,
                 ..Default::default()
             });
         }

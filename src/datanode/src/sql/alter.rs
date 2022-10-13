@@ -3,7 +3,7 @@ use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use table::engine::EngineContext;
-use table::requests::{AlterKind, AlterTableRequest};
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
 
 use crate::error::{self, Result};
 use crate::sql::SqlHandler;
@@ -34,8 +34,13 @@ impl SqlHandler {
                 }
                 .fail()
             }
-            AlterTableOperation::AddColumn { column_def } => AlterKind::AddColumn {
-                new_column: column_def_to_schema(column_def).context(error::ParseSqlSnafu)?,
+            AlterTableOperation::AddColumn { column_def } => AlterKind::AddColumns {
+                columns: vec![AddColumnRequest {
+                    column_schema: column_def_to_schema(column_def)
+                        .context(error::ParseSqlSnafu)?,
+                    // FIXME(dennis): supports adding key column
+                    is_key: false,
+                }],
             },
         };
         Ok(AlterTableRequest {

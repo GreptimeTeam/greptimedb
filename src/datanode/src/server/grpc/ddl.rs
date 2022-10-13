@@ -8,7 +8,7 @@ use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use snafu::prelude::*;
-use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest};
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
 
 use crate::error::{self, ColumnDefaultConstraintSnafu, MissingFieldSnafu, Result};
 use crate::instance::Instance;
@@ -96,8 +96,12 @@ impl Instance {
                 let column_def = add_column.column_def.context(MissingFieldSnafu {
                     field: "column_def",
                 })?;
-                let alter_kind = AlterKind::AddColumn {
-                    new_column: create_column_schema(&column_def)?,
+                let alter_kind = AlterKind::AddColumns {
+                    columns: vec![AddColumnRequest {
+                        column_schema: create_column_schema(&column_def)?,
+                        // FIXME(dennis): supports adding key column
+                        is_key: false,
+                    }],
                 };
                 let request = AlterTableRequest {
                     catalog_name: expr.catalog_name,

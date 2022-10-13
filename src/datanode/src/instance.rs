@@ -9,7 +9,7 @@ use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
 use common_query::Output;
-use common_telemetry::logging::{error, info};
+use common_telemetry::logging::{debug, error, info};
 use common_telemetry::timer;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
@@ -29,7 +29,7 @@ use crate::error::{
 use crate::metric;
 use crate::script::ScriptExecutor;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
-use crate::server::grpc::insert::insertion_expr_to_request;
+use crate::server::grpc::insert::{self, insertion_expr_to_request};
 use crate::server::grpc::plan::PhysicalPlanner;
 use crate::server::grpc::select::to_object_result;
 use crate::sql::{SqlHandler, SqlRequest};
@@ -94,11 +94,57 @@ impl Instance {
             .schema(DEFAULT_SCHEMA_NAME)
             .unwrap();
 
-        let table = schema_provider
-            .table(table_name)
-            .context(TableNotFoundSnafu { table_name })?;
+        let insert_batches = insert::insert_batches(values.values)?;
+        ensure!(!insert_batches.is_empty(), error::IllegalInsertDataSnafu);
+        let table = if let Some(table) = schema_provider.table(table_name) {
+            let schema = table.schema();
 
-        let insert = insertion_expr_to_request(table_name, values, table.clone())?;
+            // Checking whether if the request contains new columns.
+            if let Some(add_columns) = insert::find_new_columns(&schema, &insert_batches)? {
+                let alter_request = insert::build_alter_table_request(table_name, add_columns)?;
+
+                debug!("Adding new columns: {} to table: {}", 1, 1);
+
+                let result = self
+                    .sql_handler()
+                    .execute(SqlRequest::Alter(alter_request))
+                    .await;
+
+                if result.is_err() {
+                    return result;
+                } else {
+                    info!("Added new columns: {} to table: {}", 1, 1);
+                }
+            }
+
+            table
+        } else {
+            // Create table automatically, build schema from data.
+            let table_id = self.catalog_manager.next_table_id();
+            let create_table_request =
+                insert::build_create_table_request(table_id, table_name, &insert_batches)?;
+
+            info!(
+                "Try to create table: {} automatically with request: {:?}",
+                table_name, create_table_request,
+            );
+
+            let result = self
+                .sql_handler()
+                .execute(SqlRequest::Create(create_table_request))
+                .await;
+
+            if let Ok(Output::AffectedRows(_)) = result {
+                info!("Success to create table: {} automatically", table_name);
+                schema_provider
+                    .table(table_name)
+                    .context(TableNotFoundSnafu { table_name })?
+            } else {
+                return result;
+            }
+        };
+
+        let insert = insertion_expr_to_request(table_name, insert_batches, table.clone())?;
 
         let affected_rows = table
             .insert(insert)

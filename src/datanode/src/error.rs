@@ -67,6 +67,9 @@ pub enum Error {
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, backtrace: Backtrace },
 
+    #[snafu(display("Missing timestamp column in request"))]
+    MissingTimestampColumn { backtrace: Backtrace },
+
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
         columns,
@@ -247,6 +250,17 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display(
+        "Duplicated timestamp column in gRPC requests, exists {}, duplicated: {}",
+        exists,
+        duplicated
+    ))]
+    DuplicatedTimestampColumn {
+        exists: String,
+        duplicated: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -283,10 +297,13 @@ impl ErrorExt for Error {
             | Error::KeyColumnNotFound { .. }
             | Error::InvalidPrimaryKey { .. }
             | Error::MissingField { .. }
+            | Error::MissingTimestampColumn { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::ConstraintNotSupported { .. }
-            | Error::ParseTimestamp { .. } => StatusCode::InvalidArguments,
+            | Error::ParseTimestamp { .. }
+            | Error::DuplicatedTimestampColumn { .. } => StatusCode::InvalidArguments,
+
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }
             | Error::ParseAddr { .. }

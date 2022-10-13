@@ -1,26 +1,168 @@
+use std::collections::HashSet;
 use std::{
     collections::{hash_map::Entry, HashMap},
     ops::Deref,
     sync::Arc,
 };
 
-use api::v1::{codec::InsertBatch, column::Values, insert_expr, Column};
+use api::{
+    helper::ColumnDataTypeWrapper,
+    v1::{codec::InsertBatch, column::Values, Column},
+};
 use common_base::BitVec;
 use common_time::timestamp::Timestamp;
+use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
-use table::{requests::InsertRequest, Table};
+use table::metadata::TableId;
+use table::{
+    requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest, InsertRequest},
+    Table,
+};
 
-use crate::error::{ColumnNotFoundSnafu, DecodeInsertSnafu, IllegalInsertDataSnafu, Result};
+use crate::error::{self, ColumnNotFoundSnafu, DecodeInsertSnafu, IllegalInsertDataSnafu, Result};
+
+pub fn find_new_columns(
+    schema: &SchemaRef,
+    insert_batches: &[InsertBatch],
+) -> Result<Option<Vec<AddColumnRequest>>> {
+    let mut requests = Vec::default();
+    let mut new_columns: HashSet<String> = HashSet::default();
+
+    for InsertBatch { columns, row_count } in insert_batches {
+        if *row_count == 0 || columns.is_empty() {
+            continue;
+        }
+
+        for Column {
+            column_name,
+            semantic_type,
+            datatype,
+            ..
+        } in columns
+        {
+            if schema.column_schema_by_name(column_name).is_none()
+                && !new_columns.contains(column_name)
+            {
+                let datatype_wrapper = ColumnDataTypeWrapper::try_new(*datatype)
+                    .context(error::ColumnDataTypeSnafu)?;
+                let column_schema = ColumnSchema::new(column_name, datatype_wrapper.into(), true);
+
+                requests.push(AddColumnRequest {
+                    column_schema,
+                    is_key: *semantic_type == 0, // It's tag
+                });
+                new_columns.insert(column_name.to_string());
+            }
+        }
+    }
+
+    if requests.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(requests))
+    }
+}
+
+pub fn build_alter_table_request(
+    table_name: &str,
+    columns: Vec<AddColumnRequest>,
+) -> Result<AlterTableRequest> {
+    Ok(AlterTableRequest {
+        catalog_name: None,
+        schema_name: None,
+        table_name: table_name.to_string(),
+        alter_kind: AlterKind::AddColumns { columns },
+    })
+}
+
+/// Try to build create table request from insert data.
+pub fn build_create_table_request(
+    table_id: TableId,
+    table_name: &str,
+    insert_batches: &[InsertBatch],
+) -> Result<CreateTableRequest> {
+    let mut new_columns: HashSet<String> = HashSet::default();
+    let mut column_schemas = Vec::default();
+    let mut primary_key_indices = Vec::default();
+    let mut timestamp_index = usize::MAX;
+
+    for InsertBatch { columns, row_count } in insert_batches {
+        if *row_count == 0 || columns.is_empty() {
+            continue;
+        }
+
+        for Column {
+            column_name,
+            semantic_type,
+            datatype,
+            ..
+        } in columns
+        {
+            if !new_columns.contains(column_name) {
+                let datatype_wrapper = ColumnDataTypeWrapper::try_new(*datatype)
+                    .context(error::ColumnDataTypeSnafu)?;
+                let column_schema = ColumnSchema::new(column_name, datatype_wrapper.into(), true);
+                column_schemas.push(column_schema);
+                new_columns.insert(column_name.to_string());
+
+                match *semantic_type {
+                    // Tag
+                    0 => primary_key_indices.push(column_schemas.len() - 1),
+                    // Timestamp
+                    2 => {
+                        ensure!(
+                            timestamp_index == usize::MAX,
+                            error::DuplicatedTimestampColumnSnafu {
+                                exists: &columns[timestamp_index].column_name,
+                                duplicated: column_name,
+                            }
+                        );
+                        timestamp_index = column_schemas.len() - 1;
+                    }
+                    _ => continue,
+                }
+            }
+        }
+
+        ensure!(
+            timestamp_index != usize::MAX,
+            error::MissingTimestampColumnSnafu
+        );
+
+        println!("{:?}", column_schemas);
+
+        let schema = Arc::new(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .timestamp_index(timestamp_index)
+                .build()
+                .context(error::CreateSchemaSnafu)?,
+        );
+
+        return Ok(CreateTableRequest {
+            id: table_id,
+            catalog_name: None,
+            schema_name: None,
+            table_name: table_name.to_string(),
+            desc: None,
+            schema,
+            create_if_not_exists: true,
+            primary_key_indices,
+            table_options: HashMap::new(),
+        });
+    }
+
+    error::IllegalInsertDataSnafu.fail()
+}
 
 pub fn insertion_expr_to_request(
     table_name: &str,
-    values: insert_expr::Values,
+    insert_batches: Vec<InsertBatch>,
     table: Arc<dyn Table>,
 ) -> Result<InsertRequest> {
     let schema = table.schema();
     let mut columns_builders = HashMap::with_capacity(schema.column_schemas().len());
-    let insert_batches = insert_batches(values.values)?;
 
     for InsertBatch { columns, row_count } in insert_batches {
         for Column {
@@ -66,7 +208,8 @@ pub fn insertion_expr_to_request(
     })
 }
 
-fn insert_batches(bytes_vec: Vec<Vec<u8>>) -> Result<Vec<InsertBatch>> {
+#[inline]
+pub fn insert_batches(bytes_vec: Vec<Vec<u8>>) -> Result<Vec<InsertBatch>> {
     bytes_vec
         .iter()
         .map(|bytes| bytes.deref().try_into().context(DecodeInsertSnafu))
@@ -214,7 +357,7 @@ mod tests {
     use table::error::Result as TableResult;
     use table::Table;
 
-    use crate::server::grpc::insert::{convert_values, insertion_expr_to_request, is_null};
+    use super::{convert_values, insert_batches, insertion_expr_to_request, is_null};
 
     #[test]
     fn test_insertion_expr_to_request() {
@@ -223,7 +366,8 @@ mod tests {
         let values = insert_expr::Values {
             values: mock_insert_batches(),
         };
-        let insert_req = insertion_expr_to_request("demo", values, table).unwrap();
+        let insert_batches = insert_batches(values.values).unwrap();
+        let insert_req = insertion_expr_to_request("demo", insert_batches, table).unwrap();
 
         assert_eq!("demo", insert_req.table_name);
 

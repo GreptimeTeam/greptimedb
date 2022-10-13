@@ -143,6 +143,13 @@ pub enum Error {
         table_name: String,
     },
 
+    #[snafu(display("Columns {} not exists in table {}", column_names.join(","), table_name))]
+    ColumnsNotExists {
+        backtrace: Backtrace,
+        column_names: Vec<String>,
+        table_name: String,
+    },
+
     #[snafu(display("Failed to build schema, msg: {}, source: {}", msg, source))]
     SchemaBuild {
         #[snafu(backtrace)]
@@ -202,6 +209,8 @@ impl ErrorExt for Error {
             | TableNotFound { .. } => StatusCode::InvalidArguments,
 
             ColumnExists { .. } => StatusCode::TableColumnExists,
+
+            ColumnsNotExists { .. } => StatusCode::TableColumnNotFound,
 
             TableInfoNotFound { .. } => StatusCode::Unexpected,
 
