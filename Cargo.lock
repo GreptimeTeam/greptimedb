@@ -283,7 +283,38 @@ dependencies = [
  "http-body",
  "hyper",
  "itoa 1.0.3",
- "matchit",
+ "matchit 0.5.0",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
+name = "axum"
+version = "0.6.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2628a243073c55aef15a1c1fe45c87f21b84f9e89ca9e7b262a180d3d03543d"
+dependencies = [
+ "async-trait",
+ "axum-core 0.3.0-rc.2",
+ "bitflags",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "hyper",
+ "itoa 1.0.3",
+ "matchit 0.6.0",
  "memchr",
  "mime",
  "percent-encoding",
@@ -316,10 +347,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-macros"
-version = "0.2.3"
+name = "axum-core"
+version = "0.3.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6293dae2ec708e679da6736e857cf8532886ef258e92930f38279c12641628b8"
+checksum = "473bd0762170028bb6b5068be9e97de2a9f0af3bf2084498d840498f47194d3d"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "mime",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
+name = "axum-macros"
+version = "0.3.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "247a599903eb2e02abbaf2facc6396140df7af6dcc84e64ce3b71d117702fa22"
 dependencies = [
  "heck 0.4.0",
  "proc-macro2",
@@ -1702,6 +1749,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "foreign-types"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
+dependencies = [
+ "foreign-types-shared",
+]
+
+[[package]]
+name = "foreign-types-shared"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1951,6 +2013,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "getset"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e45727250e75cc04ff2846a66397da8ef2b3db8e40e0cef4df67950a07621eb9"
+dependencies = [
+ "proc-macro-error",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "gimli"
 version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2156,6 +2230,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyper-tls"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6183ddfa99b85da61a140bea0efc93fdf56ceaa041b37d553518030827f9905"
+dependencies = [
+ "bytes",
+ "hyper",
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2192,6 +2279,17 @@ checksum = "10a35a97730320ffe8e2d410b5d3b69279b98d2c14bdb8b70ea89ecf7888d41e"
 dependencies = [
  "autocfg",
  "hashbrown",
+]
+
+[[package]]
+name = "influxdb_line_protocol"
+version = "0.1.0"
+source = "git+https://github.com/evenyag/influxdb_iox?branch=feat/line-protocol#10ef0d0b02705ac7518717390939fa3a9bcfcacc"
+dependencies = [
+ "bytes",
+ "nom",
+ "smallvec",
+ "snafu",
 ]
 
 [[package]]
@@ -2831,6 +2929,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "native-tls"
+version = "0.2.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd7e2f3618557f980e0b17e8856252eee3c97fa12c54dff0ca290fb6266ca4a9"
+dependencies = [
+ "lazy_static",
+ "libc",
+ "log",
+ "openssl",
+ "openssl-probe",
+ "openssl-sys",
+ "schannel",
+ "security-framework",
+ "security-framework-sys",
+ "tempfile",
+]
+
+[[package]]
 name = "nibble_vec"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3060,10 +3176,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "openssl"
+version = "0.10.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12fc0523e3bd51a692c8850d075d74dc062ccf251c0110668cbd921917118a13"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "foreign-types",
+ "libc",
+ "once_cell",
+ "openssl-macros",
+ "openssl-sys",
+]
+
+[[package]]
+name = "openssl-macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b501e44f11665960c7e7fcf062c7d96a14ade4aa98116c004b2e37b5be7d736c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff011a302c396a5197692431fc1948019154afc178baf7d8e37367442a4601cf"
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.76"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5230151e44c0f05157effb743e8d517472843121cf9243e8b81393edb5acd9ce"
+dependencies = [
+ "autocfg",
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "opentelemetry"
@@ -3451,6 +3606,35 @@ name = "portable-atomic"
 version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15eb2c6e362923af47e13c23ca5afb859e83d54452c55b0b9ac763b8f7c1ac16"
+
+[[package]]
+name = "postgres-protocol"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "878c6cbf956e03af9aa8204b407b9cbf47c072164800aa918c516cd4b056c50c"
+dependencies = [
+ "base64",
+ "byteorder",
+ "bytes",
+ "fallible-iterator",
+ "hmac",
+ "md-5",
+ "memchr",
+ "rand 0.8.5",
+ "sha2",
+ "stringprep",
+]
+
+[[package]]
+name = "postgres-types"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73d946ec7d256b04dfadc4e6a3292324e6f417124750fc5c0950f981b703a0f1"
+dependencies = [
+ "bytes",
+ "fallible-iterator",
+ "postgres-protocol",
+]
 
 [[package]]
 name = "ppv-lite86"
@@ -3885,6 +4069,7 @@ dependencies = [
  "log",
  "mime",
  "mime_guess",
+ "native-tls",
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
@@ -4499,6 +4684,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-stream",
+ "tokio-test",
  "tonic",
  "tower",
  "tower-http",
@@ -5239,6 +5425,40 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tokio-native-tls"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7d995660bd2b7f8c1568414c1126076c13fbb725c40112dc0120b78eb9b717b"
+dependencies = [
+ "native-tls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-postgres"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29a12c1b3e0704ae7dfc25562629798b29c72e6b1d0a681b6f29ab4ae5e7f7bf"
+dependencies = [
+ "async-trait",
+ "byteorder",
+ "bytes",
+ "fallible-iterator",
+ "futures-channel",
+ "futures-util",
+ "log",
+ "parking_lot",
+ "percent-encoding",
+ "phf 0.11.1",
+ "pin-project-lite",
+ "postgres-protocol",
+ "postgres-types",
+ "socket2",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
