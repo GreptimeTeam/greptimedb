@@ -3,7 +3,6 @@ use std::sync::Arc;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::prelude::ScalarVector;
-use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::Int64Vector;
 use datatypes::vectors::TimestampVector;
 use log_store::fs::log::LocalFileLogStore;
@@ -18,10 +17,9 @@ use tempdir::TempDir;
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::OpenOptions;
 use crate::region::RegionImpl;
+use crate::test_util;
 use crate::test_util::config_util;
-use crate::test_util::{self, write_batch_util};
 use crate::write_batch::PutData;
-use crate::write_batch::WriteBatch;
 
 const REGION_NAME: &str = "region-alter-0";
 
@@ -56,18 +54,6 @@ impl DataRow {
             v1,
         }
     }
-}
-
-fn new_write_batch_for_test() -> WriteBatch {
-    write_batch_util::new_write_batch(
-        &[
-            ("k0", LogicalTypeId::Int64, true),
-            (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
-            ("v0", LogicalTypeId::Int64, true),
-            ("v1", LogicalTypeId::Int64, true),
-        ],
-        Some(1),
-    )
 }
 
 fn new_put_data(data: &[DataRow]) -> PutData {
@@ -122,8 +108,9 @@ impl AlterTester {
         metadata.schema().clone()
     }
 
+    // Put with schema k0, ts, v0, v1
     async fn put(&self, data: &[DataRow]) -> WriteResponse {
-        let mut batch = new_write_batch_for_test();
+        let mut batch = self.base().region.write_request();
         let put_data = new_put_data(data);
         batch.put(put_data).unwrap();
 
@@ -207,6 +194,7 @@ fn check_schema_names(schema: &SchemaRef, names: &[&str]) {
 #[tokio::test]
 async fn test_alter_region_with_reopen() {
     common_telemetry::init_default_ut_logging();
+
     let dir = TempDir::new("alter-region").unwrap();
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = AlterTester::new(store_dir).await;

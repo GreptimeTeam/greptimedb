@@ -154,16 +154,25 @@ impl RegionWriter {
         // Acquire the version lock before altering the metadata.
         let _lock = self.version_mutex.lock().await;
 
+        let committed_sequence = version_control.committed_sequence();
         let mut action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: raw,
-                committed_sequence: version_control.committed_sequence(),
+                committed_sequence,
             }));
         let new_metadata = Arc::new(new_metadata);
 
         // Persist the meta action.
         let prev_version = version_control.current_manifest_version();
         action_list.set_prev_version(prev_version);
+
+        logging::debug!(
+            "Try to alter schema of region {}, region_id: {}, action_list: {:?}",
+            new_metadata.name(),
+            new_metadata.id(),
+            action_list
+        );
+
         let manifest_version = alter_ctx.manifest.update(action_list).await?;
 
         // Now we could switch memtables and apply the new metadata to the version.
@@ -182,14 +191,14 @@ impl RegionWriter {
         version_control: &VersionControlRef,
         manifest_version: ManifestVersion,
     ) -> Result<()> {
+        // We always bump the committed sequence regardless whether persisting the manifest version
+        // to wal is success, to avoid RegionMetaAction use same committed sequence in accident.
         let next_sequence = version_control.committed_sequence() + 1;
         version_control.set_committed_sequence(next_sequence);
 
         let header = WalHeader::with_last_manifest_version(manifest_version);
         wal.write_to_wal(next_sequence, header, Payload::None)
             .await?;
-
-        version_control.set_committed_sequence(next_sequence);
 
         Ok(())
     }
@@ -322,10 +331,10 @@ impl WriterInner {
             // should be flushed_sequence + 1.
             let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence + 1).await?;
             while let Some((req_sequence, _header, request)) = stream.try_next().await? {
-                while let Some((next_apply_sequence, _)) = next_apply_metadata {
-                    if req_sequence >= next_apply_sequence {
-                        // It's safe to unwrap here. It's checked above.
-                        // Move out metadata to avoid cloning it.
+                while let Some((sequence_before_alter, _)) = next_apply_metadata {
+                    if req_sequence > sequence_before_alter {
+                        // This is the first request that use the new metadata.
+                        // It's safe to unwrap here. It's checked above. Move out metadata to avoid cloning it.
                         let (_, (manifest_version, metadata)) = next_apply_metadata.take().unwrap();
                         version_control.freeze_mutable_and_apply_metadata(
                             Arc::new(metadata.try_into().context(
@@ -336,13 +345,15 @@ impl WriterInner {
                             manifest_version,
                         );
                         num_recovered_metadata += 1;
-                        logging::debug!("Applied metadata to region: {} when replaying WAL: sequence={} manifest={} ",
-                                        writer_ctx.shared.name,
-                                        next_apply_sequence,
-                                        manifest_version);
+                        logging::debug!(
+                            "Applied metadata to region: {} when replaying WAL: sequence={} manifest={} ",
+                            writer_ctx.shared.name,
+                            sequence_before_alter,
+                            manifest_version
+                        );
                         next_apply_metadata = recovered_metadata.pop_first();
                     } else {
-                        // Keep the next_apply_metadata until req_sequence >= next_apply_sequence
+                        // Keep the next_apply_metadata until req_sequence >= sequence_before_alter
                         break;
                     }
                 }
