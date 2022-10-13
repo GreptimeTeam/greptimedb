@@ -26,6 +26,8 @@ jobs:
           profile: minimal
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.0.0
+        with:
+          key: "coverage"
       - name: Cleanup disk
         uses: curoky/cleanup-disk-action@v2.0
         with:

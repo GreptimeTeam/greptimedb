@@ -22,6 +22,8 @@ jobs:
           override: true
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.0.0
+        with:
+          key: "cargo-check"
       - uses: actions-rs/cargo@v1
         with:
           command: check
@@ -41,6 +43,8 @@ jobs:
           override: true
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.0.0
+        with:
+          key: "cargo-test"
       - uses: actions-rs/cargo@v1
         with:
           command: test
@@ -66,6 +70,8 @@ jobs:
           override: true
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.0.0
+        with:
+          key: "cargo-fmt"
       - run: rustup component add rustfmt
       - uses: actions-rs/cargo@v1
         with:
@@ -86,6 +92,8 @@ jobs:
           override: true
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.0.0
+        with:
+          key: "cargo-clippy"
       - run: rustup component add clippy
       - uses: actions-rs/cargo@v1
         with:
