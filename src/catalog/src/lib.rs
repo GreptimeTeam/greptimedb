@@ -3,12 +3,15 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use common_telemetry::info;
+use snafu::ResultExt;
+use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::CreateTableRequest;
 use table::TableRef;
 
 pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
-use crate::error::Error;
+use crate::error::{CreateTableSnafu, Error};
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
 pub mod consts;
@@ -121,4 +124,51 @@ pub trait CatalogProviderFactory {
 
 pub trait SchemaProviderFactory {
     fn create(&self, catalog_name: String, schema_name: String) -> SchemaProviderRef;
+}
+
+pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
+    manager: &'a M,
+    engine: TableEngineRef,
+    sys_table_requests: &'a mut Vec<RegisterSystemTableRequest>,
+) -> Result<(), Error> {
+    for req in sys_table_requests.drain(..) {
+        let catalog_name = &req.create_table_request.catalog_name;
+        let schema_name = &req.create_table_request.schema_name;
+        let table_name = &req.create_table_request.table_name;
+        let table_id = req.create_table_request.id;
+
+        let table = if let Some(table) =
+            manager.table(catalog_name.as_deref(), schema_name.as_deref(), table_name)?
+        {
+            table
+        } else {
+            let table = engine
+                .create_table(&EngineContext::default(), req.create_table_request.clone())
+                .await
+                .with_context(|_| CreateTableSnafu {
+                    table_info: format!(
+                        "{}.{}.{}, id: {}",
+                        catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME),
+                        schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME),
+                        table_name,
+                        table_id,
+                    ),
+                })?;
+            manager
+                .register_table(RegisterTableRequest {
+                    catalog: catalog_name.clone(),
+                    schema: schema_name.clone(),
+                    table_name: table_name.clone(),
+                    table_id,
+                    table: table.clone(),
+                })
+                .await?;
+            info!("Created and registered system table: {}", table_name);
+            table
+        };
+        if let Some(hook) = req.open_hook {
+            (hook)(table)?;
+        }
+    }
+    Ok(())
 }
