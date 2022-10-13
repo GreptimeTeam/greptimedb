@@ -59,6 +59,9 @@ impl Inserter {
             return Ok(());
         }
 
+        // Only validate schema in debug mod.
+        validate_input_and_memtable_schemas(batch, memtables);
+
         // Enough to hold all key or value columns.
         let total_column_num = batch.schema().num_columns();
         // Reusable KeyValues buffer.
@@ -160,6 +163,15 @@ impl Inserter {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(debug_assertions)]
+fn validate_input_and_memtable_schemas(batch: &WriteBatch, memtables: &MemtableSet) {
+    let batch_schema = batch.schema();
+    for (_, memtable) in memtables.iter() {
+        let memtable_schema = memtable.schema();
+        assert_eq!(batch_schema, memtable_schema.user_schema());
     }
 }
 

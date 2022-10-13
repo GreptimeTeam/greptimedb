@@ -64,7 +64,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
         self.inner.in_memory_metadata()
     }
 
-    async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
+    async fn write(&self, ctx: &WriteContext, mut request: WriteBatch) -> Result<WriteResponse> {
+        // Compat the schema of the write batch outside of the write lock.
+        self.inner.compat_write_batch(&mut request)?;
+
         self.inner.write(ctx, request).await
     }
 
@@ -321,6 +324,11 @@ impl<S: LogStore> RegionImpl<S> {
     async fn wait_flush_done(&self) -> Result<()> {
         self.inner.writer.wait_flush_done().await
     }
+
+    /// Write to inner, also the `RegionWriter` directly.
+    async fn write_inner(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
+        self.inner.write(ctx, request).await
+    }
 }
 
 /// Shared data of region.
@@ -378,14 +386,17 @@ impl<S: LogStore> RegionInner<S> {
         SnapshotImpl::new(version, sequence, self.sst_layer.clone())
     }
 
-    async fn write(&self, ctx: &WriteContext, mut request: WriteBatch) -> Result<WriteResponse> {
+    fn compat_write_batch(&self, request: &mut WriteBatch) -> Result<()> {
         let metadata = self.version_control().metadata();
         let schema = metadata.schema();
 
         // Try to make request schema compatible with region's outside of write lock. Note that
         // schema might be altered after this step.
-        request.compat_write(schema.user_schema())?;
+        request.compat_write(schema.user_schema())
+    }
 
+    /// Write to writer directly.
+    async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
         let writer_ctx = WriterContext {
             shared: &self.shared,
             flush_strategy: &self.flush_strategy,
@@ -395,7 +406,8 @@ impl<S: LogStore> RegionInner<S> {
             writer: &self.writer,
             manifest: &self.manifest,
         };
-        // Now altering schema is not allowed, so it is safe to validate schema outside of the lock.
+        // The writer would also try to compat the schema of write batch if it finds out the
+        // schema version of request is less than current schema version.
         self.writer.write(ctx, request, writer_ctx).await
     }
 

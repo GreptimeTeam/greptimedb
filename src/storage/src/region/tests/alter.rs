@@ -135,8 +135,15 @@ impl AlterTester {
     }
 
     /// Put data with initial schema.
-    async fn put_before_alter(&self, data: &[(i64, Option<i64>)]) {
+    async fn put_with_init_schema(&self, data: &[(i64, Option<i64>)]) {
+        // put of FileTesterBase always use initial schema version.
         self.base().put(data).await;
+    }
+
+    /// Put data to inner writer with initial schema.
+    async fn put_inner_with_init_schema(&self, data: &[(i64, Option<i64>)]) {
+        // put of FileTesterBase always use initial schema version.
+        self.base().put_inner(data).await;
     }
 
     async fn alter(&self, mut req: AlterRequest) {
@@ -206,7 +213,7 @@ async fn test_alter_region_with_reopen() {
 
     let data = vec![(1000, Some(100)), (1001, Some(101)), (1002, Some(102))];
 
-    tester.put_before_alter(&data).await;
+    tester.put_with_init_schema(&data).await;
     assert_eq!(3, tester.full_scan().await.len());
 
     let schema = tester.schema();
@@ -265,7 +272,7 @@ async fn test_alter_region() {
 
     let data = vec![(1000, Some(100)), (1001, Some(101)), (1002, Some(102))];
 
-    tester.put_before_alter(&data).await;
+    tester.put_with_init_schema(&data).await;
 
     let schema = tester.schema();
     check_schema_names(&schema, &["timestamp", "v0"]);
@@ -294,4 +301,30 @@ async fn test_alter_region() {
 
     let schema = tester.schema();
     check_schema_names(&schema, &["k0", "timestamp", "v2", "v3"]);
+}
+
+#[tokio::test]
+async fn test_put_old_schema_after_alter() {
+    let dir = TempDir::new("put-old").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+    let tester = AlterTester::new(store_dir).await;
+
+    let data = vec![(1000, Some(100)), (1001, Some(101)), (1002, Some(102))];
+
+    tester.put_with_init_schema(&data).await;
+
+    let req = add_column_req(&[
+        (new_column_desc(4, "k0"), true),  // key column k0
+        (new_column_desc(5, "v1"), false), // value column v1
+    ]);
+    tester.alter(req).await;
+
+    // Put with old schema.
+    let data = vec![(1003, Some(103)), (1004, Some(104))];
+    tester.put_with_init_schema(&data).await;
+
+    // Put data with old schema directly to the inner writer, to check that the region
+    // writer could compat the schema of write batch.
+    let data = vec![(1003, Some(103)), (1004, Some(104))];
+    tester.put_inner_with_init_schema(&data).await;
 }
