@@ -36,7 +36,7 @@ use table::{
 use tokio::sync::Mutex;
 
 use crate::error::{
-    self, ColumnsNotExistsSnafu, ProjectedColumnNotFoundSnafu, Result, ScanTableManifestSnafu,
+    self, ColumnsNotExistSnafu, ProjectedColumnNotFoundSnafu, Result, ScanTableManifestSnafu,
     SchemaBuildSnafu, TableInfoNotFoundSnafu, UnsupportedDefaultConstraintSnafu,
     UpdateTableManifestSnafu,
 };
@@ -122,7 +122,7 @@ impl<R: Region> Table for MitoTable<R> {
 
         ensure!(
             columns_values.is_empty(),
-            ColumnsNotExistsSnafu {
+            ColumnsNotExistSnafu {
                 table_name: &table_info.name,
                 column_names: columns_values
                     .keys()

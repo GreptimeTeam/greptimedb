@@ -210,7 +210,7 @@ impl ErrorExt for Error {
 
             ColumnExists { .. } => StatusCode::TableColumnExists,
 
-            ColumnsNotExists { .. } => StatusCode::TableColumnNotFound,
+            ColumnsNotExist { .. } => StatusCode::TableColumnNotFound,
 
             TableInfoNotFound { .. } => StatusCode::Unexpected,
 

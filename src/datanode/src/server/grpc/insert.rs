@@ -26,6 +26,9 @@ use table::{
 
 use crate::error::{self, ColumnNotFoundSnafu, DecodeInsertSnafu, IllegalInsertDataSnafu, Result};
 
+const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
+const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
+
 #[inline]
 fn build_column_schema(column_name: &str, datatype: i32, nullable: bool) -> Result<ColumnSchema> {
     let datatype_wrapper =
@@ -64,7 +67,7 @@ pub fn find_new_columns(
 
                 requests.push(AddColumnRequest {
                     column_schema,
-                    is_key: *semantic_type == (SemanticType::Tag as i32),
+                    is_key: *semantic_type == TAG_SEMANTIC_TYPE,
                 });
                 new_columns.insert(column_name.to_string());
             }
@@ -90,9 +93,6 @@ pub fn build_alter_table_request(
         alter_kind: AlterKind::AddColumns { columns },
     })
 }
-
-const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
-const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
 
 /// Try to build create table request from insert data.
 pub fn build_create_table_request(
@@ -374,7 +374,8 @@ mod tests {
 
     use super::{
         build_column_schema, build_create_table_request, convert_values, find_new_columns,
-        insert_batches, insertion_expr_to_request, is_null,
+        insert_batches, insertion_expr_to_request, is_null, TAG_SEMANTIC_TYPE,
+        TIMESTAMP_SEMANTIC_TYPE,
     };
 
     #[test]
@@ -557,7 +558,7 @@ mod tests {
         };
         let host_column = Column {
             column_name: "host".to_string(),
-            semantic_type: SemanticType::Tag as i32,
+            semantic_type: TAG_SEMANTIC_TYPE,
             values: Some(host_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::String as i32,
@@ -593,7 +594,7 @@ mod tests {
         };
         let ts_column = Column {
             column_name: "ts".to_string(),
-            semantic_type: SemanticType::Timestamp as i32,
+            semantic_type: TIMESTAMP_SEMANTIC_TYPE,
             values: Some(ts_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::Timestamp as i32,
