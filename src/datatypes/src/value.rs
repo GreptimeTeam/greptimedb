@@ -5,6 +5,8 @@ use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
 use geo::Point;
+use geojson::de::deserialize_geometry;
+use geojson::ser::serialize_geometry;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
@@ -254,7 +256,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
             Value::Timestamp(v) => serde_json::to_value(v.value())?,
-            Value::Geometry(_) => unimplemented!(),
+            Value::Geometry(v) => serde_json::to_value(v.to_value())?,
         };
 
         Ok(json_value)
@@ -312,6 +314,10 @@ impl Ord for ListValue {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq, Copy)]
 pub enum GeometryValue {
+    #[serde(
+        serialize_with = "serialize_geometry",
+        deserialize_with = "deserialize_geometry"
+    )]
     Point(Point<OrderedF64>),
 }
 

@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, MutableArray};
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use self::point::{PointVector, PointVectorBuilder};
 use super::{MutableVector, Validity, Value, Vector};
+use crate::error::SerializeSnafu;
 use crate::prelude::ScalarRef;
 use crate::value::{GeometryValueRef, ValueRef};
 use crate::vectors::{impl_try_from_arrow_array_for_vector, impl_validity_for_vector};
@@ -242,7 +243,13 @@ impl ScalarVectorBuilder for GeometryVectorBuilder {
 
 impl Serializable for GeometryVector {
     fn serialize_to_json(&self) -> crate::Result<Vec<serde_json::Value>> {
-        todo!()
+        self.iter_data()
+            .map(|v| match v {
+                None => Ok(serde_json::Value::Null),
+                Some(s) => serde_json::to_value(s.to_owned_scalar()),
+            })
+            .collect::<serde_json::Result<_>>()
+            .context(SerializeSnafu)
     }
 }
 
@@ -251,7 +258,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_geometry_vector() {
+    fn test_geo_point_vector() {
         let mut builder = GeometryVectorBuilder::with_capacity_point_vector_builder(0);
 
         let value = GeometryValue::new_point(2.0, 1.0);
@@ -280,13 +287,25 @@ mod tests {
         }
         assert_eq!(cnt, vector.len());
 
-        //slice
+        let slice = vector.slice(0, 2);
+        let mut builder = GeometryVectorBuilder::new_point_vector_builder();
 
-        //extend_slice_of
+        builder.extend_slice_of(slice.as_ref(), 0, 2).unwrap();
 
-        //memory_size
+        let another = builder.finish();
+
+        assert_eq!(vector.get(0), another.get(0));
+        assert_eq!(vector.get(1), another.get(1));
+
+        assert_eq!(vector.get_data(0), another.get_data(0));
+
+        assert_eq!(vector.memory_size(), 32); //2 elements (f64,f64)=2*2*8
 
 
+        assert_eq!(
+            format!("{:?}",vector.serialize_to_json().unwrap()),
+            "[Object {\"Point\": Object {\"type\": String(\"Point\"), \"coordinates\": Array [Number(2.0), Number(1.0)]}}, Null]".to_string()
+        )
 
     }
 }

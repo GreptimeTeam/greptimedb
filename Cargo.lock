@@ -1532,6 +1532,7 @@ dependencies = [
  "datafusion-common",
  "enum_dispatch",
  "geo",
+ "geojson",
  "num",
  "num-traits",
  "ordered-float 3.0.0",
@@ -2094,6 +2095,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fdbd3cdc1856ca7736763d2784671c2c9b0093f0ee47e2bed0059feed6afca89"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "geojson"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff2cc39a555a57b2a5514e223d76e23779f853840cc3c67767f77f58dc2272b7"
+dependencies = [
+ "geo-types",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
