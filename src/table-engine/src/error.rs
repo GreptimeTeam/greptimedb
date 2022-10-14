@@ -143,8 +143,8 @@ pub enum Error {
         table_name: String,
     },
 
-    #[snafu(display("Columns {} not exists in table {}", column_names.join(","), table_name))]
-    ColumnsNotExists {
+    #[snafu(display("Columns {} not exist in table {}", column_names.join(","), table_name))]
+    ColumnsNotExist {
         backtrace: Backtrace,
         column_names: Vec<String>,
         table_name: String,
