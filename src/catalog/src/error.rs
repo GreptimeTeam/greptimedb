@@ -107,11 +107,14 @@ pub enum Error {
     #[snafu(display("Invalid catalog info: {}", key))]
     InvalidCatalog { key: String },
 
-    #[snafu(display("Failed to deserialize table entry value: {}", raw))]
-    DeserializeTableValue {
+    #[snafu(display("Failed to deserialize catalog entry value: {}", raw))]
+    DeserializeCatalogEntryValue {
         raw: String,
         source: serde_json::error::Error,
     },
+
+    #[snafu(display("Failed to serialize catalog entry value"))]
+    SerializeCatalogEntryValue { source: serde_json::error::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -126,7 +129,8 @@ impl ErrorExt for Error {
             | Error::CatalogNotFound { .. }
             | Error::InvalidEntryType { .. }
             | Error::InvalidCatalog { .. }
-            | Error::DeserializeTableValue { .. } => StatusCode::Unexpected,
+            | Error::DeserializeCatalogEntryValue { .. }
+            | Error::SerializeCatalogEntryValue { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. } | Error::EmptyValue | Error::ValueDeserialize { .. } => {
                 StatusCode::StorageUnavailable

@@ -18,8 +18,8 @@ use crate::error::{
 };
 use crate::remote::client::MetaKvBackend;
 use crate::remote::helper::{
-    build_catalog_prefix, build_schema_prefix, build_table_prefix, CatalogKey, SchemaKey, TableKey,
-    TableValue,
+    build_catalog_prefix, build_schema_prefix, build_table_prefix, CatalogKey, CatalogValue,
+    SchemaKey, SchemaValue, TableKey, TableValue,
 };
 use crate::remote::{Kv, KvBackend};
 use crate::{
@@ -32,8 +32,7 @@ pub struct RemoteCatalogManager {
     node_id: String,
     backend: Arc<MetaKvBackend>,
     catalogs: Arc<RwLock<HashMap<String, CatalogProviderRef>>>,
-    #[allow(unused)]
-    next_table_id: AtomicU32, // table id should be calculated on startup
+    next_table_id: Arc<AtomicU32>,
     engine: TableEngineRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
 }
@@ -264,9 +263,9 @@ impl CatalogList for RemoteCatalogManager {
                 None => None,
                 Some(_) => self.catalogs.read().await.get(&name).cloned(),
             };
-
-            // TODO(hl): change value
-            self.backend.set(key.as_bytes(), "".as_bytes()).await?;
+            self.backend
+                .set(key.as_bytes(), &CatalogValue {}.to_bytes()?)
+                .await?;
             let mut catalogs = self.catalogs.write().await;
             catalogs.insert(name, catalog);
             Ok(prev)
@@ -370,8 +369,9 @@ impl crate::CatalogProvider for RemoteCatalogProvider {
                 Some(_) => self.schemas.read().await.get(&name).cloned(),
             };
 
-            // TODO(hl): Schema entry value
-            self.backend.set(key.as_bytes(), "".as_bytes()).await?;
+            self.backend
+                .set(key.as_bytes(), &SchemaValue {}.to_bytes()?)
+                .await?;
             Ok(prev)
         })
     }
@@ -458,7 +458,6 @@ impl SchemaProvider for RemoteSchemaProvider {
                 None => None,
                 Some(_) => self.tables.read().await.get(&key).cloned(),
             };
-            // TODO(hl): table values
             self.backend.set(key.as_bytes(), "".as_bytes()).await?;
             let mut tables = self.tables.write().await;
             tables.insert(name, table);
