@@ -280,7 +280,10 @@ impl WriterInner {
         let _lock = version_mutex.lock().await;
 
         let metadata = version_control.metadata();
-        // We need to check the schema again since it might has been altered.
+        // We need to check the schema again since it might has been altered. We need
+        // to compat request's schema before writing it into the WAL otherwise some
+        // default constraint like `current_timestamp()` would yield different value
+        // during replay.
         request.compat_write(metadata.schema().user_schema())?;
 
         let committed_sequence = version_control.committed_sequence();
