@@ -248,6 +248,7 @@ impl<R: Region> Table for MitoTable<R> {
 
                 (alter_op, table_schema, new_columns.len() as u32)
             }
+            // TODO(dennis): supports removing columns etc.
             _ => unimplemented!(),
         };
 

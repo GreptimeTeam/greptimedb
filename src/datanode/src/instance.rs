@@ -86,16 +86,27 @@ impl Instance {
         table_name: &str,
         add_columns: Vec<AddColumnRequest>,
     ) -> Result<()> {
+        let column_names = add_columns
+            .iter()
+            .map(|req| req.column_schema.name.clone())
+            .collect::<Vec<_>>();
+
         let alter_request = insert::build_alter_table_request(table_name, add_columns)?;
 
-        debug!("Adding new columns: {} to table: {}", 1, 1);
+        debug!(
+            "Adding new columns: {:?} to table: {}",
+            column_names, table_name
+        );
 
         let _result = self
             .sql_handler()
             .execute(SqlRequest::Alter(alter_request))
             .await?;
 
-        info!("Added new columns: {} to table: {}", 1, table_name);
+        info!(
+            "Added new columns: {:?} to table: {}",
+            column_names, table_name
+        );
         Ok(())
     }
 

@@ -367,7 +367,7 @@ mod tests {
                     .collect(),
                 ..Default::default()
             }),
-            datatype: 12, // string
+            datatype: ColumnDataType::String as i32,
             ..Default::default()
         };
         let expected_cpu_col = Column {
@@ -377,7 +377,7 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![2],
-            datatype: 10, // float64
+            datatype: ColumnDataType::Float64 as i32,
             ..Default::default()
         };
         let expected_mem_col = Column {
@@ -387,7 +387,7 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![4],
-            datatype: 10, // float64
+            datatype: ColumnDataType::Float64 as i32,
             ..Default::default()
         };
         let expected_disk_col = Column {
@@ -396,7 +396,7 @@ mod tests {
                 f64_values: vec![9.9, 9.9, 9.9, 9.9],
                 ..Default::default()
             }),
-            datatype: 10, // float64
+            datatype: ColumnDataType::Float64 as i32,
             ..Default::default()
         };
         let expected_ts_col = Column {
@@ -495,25 +495,25 @@ mod tests {
         let column_defs = vec![
             GrpcColumnDef {
                 name: "host".to_string(),
-                datatype: 12, // string
+                datatype: ColumnDataType::String as i32,
                 is_nullable: false,
                 default_constraint: None,
             },
             GrpcColumnDef {
                 name: "cpu".to_string(),
-                datatype: 10, // float64
+                datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
                 default_constraint: None,
             },
             GrpcColumnDef {
                 name: "memory".to_string(),
-                datatype: 10, // float64
+                datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
                 default_constraint: None,
             },
             GrpcColumnDef {
                 name: "disk_util".to_string(),
-                datatype: 10, // float64
+                datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
                 default_constraint: Some(
                     ColumnDefaultConstraint::Value(Value::from(9.9f64))

@@ -55,7 +55,7 @@ pub struct AddColumnRequest {
 #[derive(Debug)]
 pub enum AlterKind {
     AddColumns { columns: Vec<AddColumnRequest> },
-    RemoveColumns { columns: Vec<String> },
+    RemoveColumns { names: Vec<String> },
 }
 
 /// Drop table request

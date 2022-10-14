@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{codec::SelectResult, column::Values, Column, ObjectResult};
+use api::v1::{codec::SelectResult, column::SemanticType, column::Values, Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::BitVec;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatches, SendableRecordBatchStream};
 use datatypes::arrow_array::{BinaryArray, StringArray};
+use datatypes::schema::SchemaRef;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, ConversionSnafu, Result};
@@ -49,6 +50,17 @@ fn build_result(recordbatches: RecordBatches) -> Result<ObjectResult> {
     Ok(object_result)
 }
 
+#[inline]
+fn get_semantic_type(schema: &SchemaRef, idx: usize) -> i32 {
+    if Some(idx) == schema.timestamp_index() {
+        SemanticType::Timestamp as i32
+    } else {
+        // FIXME(dennis): set primary key's columns semantic type as Tag,
+        // but we can't get the table's schema here right now.
+        SemanticType::Field as i32
+    }
+}
+
 fn try_convert(record_batches: RecordBatches) -> Result<SelectResult> {
     let schema = record_batches.schema();
     let record_batches = record_batches.take();
@@ -61,8 +73,8 @@ fn try_convert(record_batches: RecordBatches) -> Result<SelectResult> {
     let schemas = schema.column_schemas();
     let mut columns = Vec::with_capacity(schemas.len());
 
-    for (idx, schema) in schemas.iter().enumerate() {
-        let column_name = schema.name.clone();
+    for (idx, column_schema) in schemas.iter().enumerate() {
+        let column_name = column_schema.name.clone();
 
         let arrays: Vec<Arc<dyn Array>> = record_batches
             .iter()
@@ -73,10 +85,10 @@ fn try_convert(record_batches: RecordBatches) -> Result<SelectResult> {
             column_name,
             values: Some(values(&arrays)?),
             null_mask: null_mask(&arrays, row_count),
-            datatype: ColumnDataTypeWrapper::try_from(schema.data_type.clone())
+            datatype: ColumnDataTypeWrapper::try_from(column_schema.data_type.clone())
                 .context(error::ColumnDataTypeSnafu)?
                 .datatype() as i32,
-            ..Default::default()
+            semantic_type: get_semantic_type(&schema, idx),
         };
         columns.push(column);
     }
