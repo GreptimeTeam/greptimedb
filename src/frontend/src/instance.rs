@@ -262,8 +262,8 @@ mod tests {
 
     use api::v1::codec::{InsertBatch, SelectResult};
     use api::v1::{
-        admin_expr, admin_result, column, object_expr, object_result, select_expr, Column,
-        ExprHeader, MutateResult, SelectExpr,
+        admin_expr, admin_result, column, column::SemanticType, object_expr, object_result,
+        select_expr, Column, ExprHeader, MutateResult, SelectExpr,
     };
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
@@ -367,6 +367,7 @@ mod tests {
                     .collect(),
                 ..Default::default()
             }),
+            semantic_type: SemanticType::Field as i32,
             datatype: ColumnDataType::String as i32,
             ..Default::default()
         };
@@ -377,8 +378,8 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![2],
+            semantic_type: SemanticType::Field as i32,
             datatype: ColumnDataType::Float64 as i32,
-            ..Default::default()
         };
         let expected_mem_col = Column {
             column_name: "memory".to_string(),
@@ -387,8 +388,8 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![4],
+            semantic_type: SemanticType::Field as i32,
             datatype: ColumnDataType::Float64 as i32,
-            ..Default::default()
         };
         let expected_disk_col = Column {
             column_name: "disk_util".to_string(),
@@ -396,6 +397,7 @@ mod tests {
                 f64_values: vec![9.9, 9.9, 9.9, 9.9],
                 ..Default::default()
             }),
+            semantic_type: SemanticType::Field as i32,
             datatype: ColumnDataType::Float64 as i32,
             ..Default::default()
         };
@@ -405,7 +407,9 @@ mod tests {
                 ts_millis_values: vec![1000, 2000, 3000, 4000],
                 ..Default::default()
             }),
-            datatype: 15, // timestamp
+            // FIXME(dennis): looks like the read schema in table scan doesn't have timestamp index, we have to investigate it.
+            semantic_type: SemanticType::Field as i32,
+            datatype: ColumnDataType::Timestamp as i32,
             ..Default::default()
         };
 
@@ -523,7 +527,7 @@ mod tests {
             },
             GrpcColumnDef {
                 name: "ts".to_string(),
-                datatype: 15, // timestamp
+                datatype: ColumnDataType::Timestamp as i32,
                 is_nullable: true,
                 default_constraint: None,
             },
@@ -533,6 +537,7 @@ mod tests {
             column_defs,
             time_index: "ts".to_string(),
             primary_keys: vec!["ts".to_string(), "host".to_string()],
+            create_if_not_exists: true,
             ..Default::default()
         }
     }
