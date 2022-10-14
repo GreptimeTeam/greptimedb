@@ -103,7 +103,7 @@ impl<R: Region> Table for MitoTable<R> {
                 return MissingColumnSnafu { name }.fail().map_err(TableError::from);
             }
         }
-        // Add vaue columns
+        // Add value columns
         for name in value_columns {
             let column_schema = schema
                 .column_schema_by_name(name)
