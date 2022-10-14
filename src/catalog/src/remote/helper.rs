@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::{TableId, TableMeta};
 
-use crate::error::{DeserializeTableValueSnafu, InvalidCatalogSnafu};
+use crate::error::{
+    DeserializeCatalogEntryValueSnafu, InvalidCatalogSnafu, SerializeCatalogEntryValueSnafu,
+};
 use crate::remote::consts::{CATALOG_PREFIX, SCHEMA_PREFIX, TABLE_ID_PREFIX, TABLE_PREFIX};
 use crate::Error;
 
@@ -101,7 +103,8 @@ pub struct TableValue {
 }
 impl TableValue {
     pub(crate) fn parse(s: impl AsRef<str>) -> Result<Self, Error> {
-        serde_json::from_str(s.as_ref()).context(DeserializeTableValueSnafu { raw: s.as_ref() })
+        serde_json::from_str(s.as_ref())
+            .context(DeserializeCatalogEntryValueSnafu { raw: s.as_ref() })
     }
 }
 
@@ -131,6 +134,17 @@ impl CatalogKey {
             catalog_name: captures[1].to_string(),
             node_id: captures[2].to_string(),
         })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct CatalogValue;
+
+impl CatalogValue {
+    pub(crate) fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        Ok(serde_json::to_string(self)
+            .context(SerializeCatalogEntryValueSnafu)?
+            .into_bytes())
     }
 }
 
@@ -165,6 +179,17 @@ impl SchemaKey {
             schema_name: captures[2].to_string(),
             node_id: captures[3].to_string(),
         })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SchemaValue;
+
+impl SchemaValue {
+    pub(crate) fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        Ok(serde_json::to_string(self)
+            .context(SerializeCatalogEntryValueSnafu)?
+            .into_bytes())
     }
 }
 

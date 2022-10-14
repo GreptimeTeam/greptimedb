@@ -108,6 +108,7 @@ mod tests {
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use table::error::Result as TableResult;
+    use table::metadata::TableInfoRef;
     use table::{Table, TableRef};
     use table_engine::config::EngineConfig as TableEngineConfig;
     use table_engine::engine::MitoEngine;
@@ -139,6 +140,11 @@ mod tests {
                     .unwrap(),
             )
         }
+
+        fn table_info(&self) -> TableInfoRef {
+            unimplemented!()
+        }
+
         async fn scan(
             &self,
             _projection: &Option<Vec<usize>>,

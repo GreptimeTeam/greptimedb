@@ -13,7 +13,7 @@ use datatypes::vectors::{BinaryVector, TimestampVector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
-use table::metadata::TableId;
+use table::metadata::{TableId, TableInfoRef};
 use table::requests::{CreateTableRequest, InsertRequest, OpenTableRequest};
 use table::{Table, TableRef};
 
@@ -58,6 +58,10 @@ impl Table for SystemCatalogTable {
     /// Insert values into table.
     async fn insert(&self, request: InsertRequest) -> table::error::Result<usize> {
         self.table.insert(request).await
+    }
+
+    fn table_info(&self) -> TableInfoRef {
+        unreachable!("System catalog table does not support table_info method")
     }
 }
 

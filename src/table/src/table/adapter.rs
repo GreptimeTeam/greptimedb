@@ -32,6 +32,7 @@ use futures::Stream;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
+use crate::metadata::TableInfoRef;
 use crate::table::{FilterPushDownType, Table, TableRef, TableType};
 
 /// Greptime SendableRecordBatchStream -> datafusion ExecutionPlan.
@@ -187,6 +188,10 @@ impl Table for TableAdapter {
 
     fn schema(&self) -> TableSchemaRef {
         self.schema.clone()
+    }
+
+    fn table_info(&self) -> TableInfoRef {
+        unreachable!("Should not call table_info of TableAdaptor directly")
     }
 
     fn table_type(&self) -> TableType {

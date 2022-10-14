@@ -16,7 +16,7 @@ use datatypes::vectors::VectorRef;
 use futures::Stream;
 use snafu::ResultExt;
 use table::engine::TableEngineRef;
-use table::metadata::TableId;
+use table::metadata::{TableId, TableInfoRef};
 use table::{Table, TableRef};
 
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
@@ -51,6 +51,10 @@ impl Table for Tables {
 
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn table_info(&self) -> TableInfoRef {
+        unreachable!("Tables does not support table_info method")
     }
 
     async fn scan(
