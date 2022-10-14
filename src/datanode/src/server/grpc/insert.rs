@@ -371,6 +371,7 @@ mod tests {
         value::Value,
     };
     use table::error::Result as TableResult;
+    use table::metadata::TableInfoRef;
     use table::Table;
 
     use super::{
@@ -540,6 +541,11 @@ mod tests {
                     .unwrap(),
             )
         }
+
+        fn table_info(&self) -> TableInfoRef {
+            unimplemented!()
+        }
+
         async fn scan(
             &self,
             _projection: &Option<Vec<usize>>,

@@ -12,6 +12,7 @@ use futures::task::{Context, Poll};
 use futures::Stream;
 
 use crate::error::Result;
+use crate::metadata::TableInfoRef;
 use crate::table::{Expr, Table};
 
 /// numbers table for test
@@ -41,6 +42,10 @@ impl Table for NumbersTable {
 
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn table_info(&self) -> TableInfoRef {
+        unimplemented!()
     }
 
     async fn scan(

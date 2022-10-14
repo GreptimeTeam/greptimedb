@@ -9,7 +9,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 
 use crate::error::Result;
-use crate::metadata::{FilterPushDownType, TableType};
+use crate::metadata::{FilterPushDownType, TableInfoRef, TableType};
 use crate::requests::{AlterTableRequest, InsertRequest};
 
 /// Table abstraction.
@@ -21,6 +21,9 @@ pub trait Table: Send + Sync {
 
     /// Get a reference to the schema for this table
     fn schema(&self) -> SchemaRef;
+
+    /// Get table info reference.
+    fn table_info(&self) -> TableInfoRef;
 
     /// Get the type of this table for metadata/catalog purposes.
     fn table_type(&self) -> TableType {
