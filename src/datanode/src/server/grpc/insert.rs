@@ -82,16 +82,17 @@ pub fn find_new_columns(
 }
 
 /// Build a alter table rqeusts that adding new columns.
+#[inline]
 pub fn build_alter_table_request(
     table_name: &str,
     columns: Vec<AddColumnRequest>,
-) -> Result<AlterTableRequest> {
-    Ok(AlterTableRequest {
+) -> AlterTableRequest {
+    AlterTableRequest {
         catalog_name: None,
         schema_name: None,
         table_name: table_name.to_string(),
         alter_kind: AlterKind::AddColumns { columns },
-    })
+    }
 }
 
 /// Try to build create table request from insert data.

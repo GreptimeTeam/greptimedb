@@ -91,7 +91,7 @@ impl Instance {
             .map(|req| req.column_schema.name.clone())
             .collect::<Vec<_>>();
 
-        let alter_request = insert::build_alter_table_request(table_name, add_columns)?;
+        let alter_request = insert::build_alter_table_request(table_name, add_columns);
 
         debug!(
             "Adding new columns: {:?} to table: {}",
