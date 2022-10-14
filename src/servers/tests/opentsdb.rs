@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use common_runtime::Builder as RuntimeBuilder;
@@ -76,36 +76,31 @@ async fn test_shutdown_opentsdb_server() -> Result<()> {
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let addr = server.start(listening).await?;
 
-    let mut join_handles = vec![];
-    for _ in 0..2 {
-        join_handles.push(tokio::spawn(async move {
-            for i in 0..1000 {
-                let stream = TcpStream::connect(addr).await;
-                match stream {
-                    Ok(stream) => {
-                        let mut connection = Connection::new(stream);
-                        let result = connection.write_line(format!("put {} 1 1", i)).await;
-                        if let Err(e) = result {
-                            return Err(e.to_string());
-                        }
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_task = stop.clone();
+    let join_handle = tokio::spawn(async move {
+        let mut i = 1;
+        while !stop.load(Ordering::Relaxed) {
+            let stream = TcpStream::connect(addr).await;
+            match stream {
+                Ok(stream) => {
+                    let mut connection = Connection::new(stream);
+                    let result = connection.write_line(format!("put {} 1 1", i)).await;
+                    i += 1;
+                    if result.is_err() {
+                        break;
                     }
-                    Err(e) => return Err(e.to_string()),
                 }
+                Err(_) => break,
             }
-            Ok(())
-        }))
-    }
+        }
+    });
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    let result = server.shutdown().await;
-    assert!(result.is_ok());
+    server.shutdown().await.unwrap();
 
-    for handle in join_handles.iter_mut() {
-        let result = handle.await.unwrap();
-        assert!(result.is_err());
-        let error = result.unwrap_err();
-        assert!(error.contains("Connection refused") || error.contains("Connection reset by peer"));
-    }
+    stop_task.store(true, Ordering::Relaxed);
+    join_handle.await.unwrap();
+
     Ok(())
 }
 
