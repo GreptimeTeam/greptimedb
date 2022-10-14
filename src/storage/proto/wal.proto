@@ -16,7 +16,6 @@ enum PayloadType {
 
 message MutationExtra {
   MutationType mutation_type = 1;
-  bytes column_null_mask = 2;
 }
 
 enum MutationType {

@@ -19,7 +19,7 @@ rows |  protobuf    |    arrow       |
 */
 
 fn codec_arrow(batch: &WriteBatch, mutation_extras: &[storage::proto::wal::MutationExtra]) {
-    let encoder = codec::WriteBatchArrowEncoder::new(mutation_extras.to_vec());
+    let encoder = codec::WriteBatchArrowEncoder::new();
     let mut dst = vec![];
     let result = encoder.encode(batch, &mut dst);
     assert!(result.is_ok());

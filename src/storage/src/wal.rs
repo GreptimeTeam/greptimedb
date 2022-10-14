@@ -84,7 +84,6 @@ impl<S: LogStore> Wal<S> {
         payload: Payload<'_>,
     ) -> Result<(u64, usize)> {
         header.payload_type = payload.payload_type();
-
         if let Payload::WriteBatchArrow(batch) = payload {
             header.mutation_extras = wal::gen_mutation_extras(batch);
         }
@@ -97,7 +96,7 @@ impl<S: LogStore> Wal<S> {
 
         if let Payload::WriteBatchArrow(batch) = payload {
             // entry
-            let encoder = WriteBatchArrowEncoder::new(header.mutation_extras);
+            let encoder = WriteBatchArrowEncoder::new();
             // TODO(jiachun): provide some way to compute data size before encode, so we can preallocate an exactly sized buf.
             encoder
                 .encode(batch, &mut buf)

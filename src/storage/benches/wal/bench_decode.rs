@@ -18,12 +18,8 @@ rows |  protobuf    |    arrow       |
 ------------------------------------
 */
 
-fn encode_arrow(
-    batch: &WriteBatch,
-    mutation_extras: &[storage::proto::wal::MutationExtra],
-    dst: &mut Vec<u8>,
-) {
-    let encoder = codec::WriteBatchArrowEncoder::new(mutation_extras.to_vec());
+fn encode_arrow(batch: &WriteBatch, dst: &mut Vec<u8>) {
+    let encoder = codec::WriteBatchArrowEncoder::new();
     let result = encoder.encode(batch, dst);
     assert!(result.is_ok());
 }
@@ -62,9 +58,9 @@ fn bench_wal_decode(c: &mut Criterion) {
     encode_protobuf(&batch_100, &mut dst_protobuf_100);
     encode_protobuf(&batch_10000, &mut dst_protobuf_10000);
 
-    encode_arrow(&batch_10, &extras_10, &mut dst_arrow_10);
-    encode_arrow(&batch_100, &extras_100, &mut dst_arrow_100);
-    encode_arrow(&batch_10000, &extras_10000, &mut dst_arrow_10000);
+    encode_arrow(&batch_10, &mut dst_arrow_10);
+    encode_arrow(&batch_100, &mut dst_arrow_100);
+    encode_arrow(&batch_10000, &mut dst_arrow_10000);
 
     let mut group = c.benchmark_group("wal_decode");
     group.bench_function("protobuf_decode_with_10_num_rows", |b| {
