@@ -75,8 +75,7 @@ impl<'a> ParquetWriter<'a> {
                 object
                     .write_from(0, reader)
                     .await
-                    .context(error::FlushIoSnafu)?;
-                Ok(())
+                    .context(error::FlushIoSnafu)
             },
             async {
                 let mut sink = FileSink::try_new(
@@ -109,12 +108,10 @@ impl<'a> ParquetWriter<'a> {
 
                 writer.close().await.context(error::WriteObjectSnafu {
                     path: self.file_path,
-                })?;
-                Ok(())
+                })
             }
-        )?;
-
-        Ok(())
+        )
+        .map(|_| ())
     }
 }
 
