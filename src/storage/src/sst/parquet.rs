@@ -16,7 +16,6 @@ use datatypes::arrow::io::parquet::read::{
 use datatypes::arrow::io::parquet::write::{
     Compression, Encoding, FileSink, Version, WriteOptions,
 };
-use futures::AsyncReadExt;
 use futures::AsyncWriteExt;
 use futures_util::sink::SinkExt;
 use futures_util::{try_join, Stream, TryStreamExt};
@@ -64,7 +63,7 @@ impl<'a> ParquetWriter<'a> {
         let schema = store_schema.arrow_schema();
         let object = self.object_store.object(self.file_path);
 
-        let (reader, writer) = pipe::pipe();
+        let (reader, mut writer) = pipe::pipe();
 
         // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
         let encodings = get_encoding_for_schema(schema, |_| Encoding::Plain);
@@ -81,7 +80,7 @@ impl<'a> ParquetWriter<'a> {
             },
             async {
                 let mut sink = FileSink::try_new(
-                    writer,
+                    &mut writer,
                     // The file sink needs the `Schema` instead of a reference.
                     (**schema).clone(),
                     encodings,
@@ -106,12 +105,11 @@ impl<'a> ParquetWriter<'a> {
                     }
                 }
                 sink.close().await.context(error::WriteParquetSnafu)?;
-
                 drop(sink);
-                writer.flush().await.context(error::WriteObjectSnafu {
-                    path: self.file_path,
-                });
 
+                writer.close().await.context(error::WriteObjectSnafu {
+                    path: self.file_path,
+                })?;
                 Ok(())
             }
         )?;
