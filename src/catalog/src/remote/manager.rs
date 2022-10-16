@@ -368,6 +368,15 @@ pub struct RemoteCatalogProvider {
 }
 
 impl RemoteCatalogProvider {
+    pub fn new(catalog_name: String, node_id: String, backend: KvBackendRef) -> Self {
+        Self {
+            catalog_name,
+            node_id,
+            backend,
+            schemas: Default::default(),
+        }
+    }
+
     fn schema_key(&self, schema_name: impl AsRef<str>) -> SchemaKey {
         SchemaKey {
             catalog_name: self.catalog_name.clone(),
@@ -449,6 +458,21 @@ pub struct RemoteSchemaProvider {
 }
 
 impl RemoteSchemaProvider {
+    pub fn new(
+        catalog_name: String,
+        schema_name: String,
+        node_id: String,
+        backend: KvBackendRef,
+    ) -> Self {
+        Self {
+            catalog_name,
+            schema_name,
+            node_id,
+            backend,
+            tables: Default::default(),
+        }
+    }
+
     pub fn table_key(&self, table_name: impl AsRef<str>) -> TableKey {
         TableKey {
             catalog_name: self.catalog_name.clone(),
