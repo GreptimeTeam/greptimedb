@@ -105,6 +105,7 @@ pub struct RegisterSystemTableRequest {
     pub open_hook: Option<OpenSystemTableHook>,
 }
 
+#[derive(Clone)]
 pub struct RegisterTableRequest {
     pub catalog: Option<String>,
     pub schema: Option<String>,
