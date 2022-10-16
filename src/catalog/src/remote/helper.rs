@@ -101,10 +101,17 @@ pub struct TableValue {
     pub id: TableId,
     pub meta: TableMeta,
 }
+
 impl TableValue {
     pub(crate) fn parse(s: impl AsRef<str>) -> Result<Self, Error> {
         serde_json::from_str(s.as_ref())
             .context(DeserializeCatalogEntryValueSnafu { raw: s.as_ref() })
+    }
+
+    pub(crate) fn as_bytes(&self) -> Result<Vec<u8>, Error> {
+        Ok(serde_json::to_string(self)
+            .context(SerializeCatalogEntryValueSnafu)?
+            .into_bytes())
     }
 }
 
@@ -138,10 +145,10 @@ impl CatalogKey {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct CatalogValue;
+pub struct CatalogValue;
 
 impl CatalogValue {
-    pub(crate) fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         Ok(serde_json::to_string(self)
             .context(SerializeCatalogEntryValueSnafu)?
             .into_bytes())
@@ -183,10 +190,10 @@ impl SchemaKey {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct SchemaValue;
+pub struct SchemaValue;
 
 impl SchemaValue {
-    pub(crate) fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         Ok(serde_json::to_string(self)
             .context(SerializeCatalogEntryValueSnafu)?
             .into_bytes())
@@ -201,6 +208,7 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema};
 
     use super::*;
+    use crate::remote::helper::CatalogKey;
 
     #[test]
     fn test_parse_catalog_key() {

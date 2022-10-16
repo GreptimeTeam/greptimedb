@@ -13,25 +13,42 @@ use futures::task::{Context, Poll};
 use futures::Stream;
 use snafu::prelude::*;
 use table::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
-use table::metadata::TableInfoRef;
+use table::metadata::{TableIdent, TableInfo, TableInfoRef, TableMeta, TableType};
 use table::Table;
 
 #[derive(Debug, Clone)]
 pub struct MemTable {
-    table_name: String,
+    info: TableInfoRef,
     recordbatch: RecordBatch,
 }
 
 impl MemTable {
     pub fn new(table_name: impl Into<String>, recordbatch: RecordBatch) -> Self {
-        Self {
-            table_name: table_name.into(),
-            recordbatch,
-        }
+        let schema = recordbatch.schema.clone();
+        let info = Arc::new(TableInfo {
+            ident: TableIdent {
+                table_id: 0,
+                version: 0,
+            },
+            name: table_name.into(),
+            desc: None,
+            meta: TableMeta {
+                schema,
+                primary_key_indices: vec![],
+                value_indices: vec![],
+                engine: "mock".to_string(),
+                next_column_id: 0,
+                engine_options: Default::default(),
+                options: Default::default(),
+                created_on: Default::default(),
+            },
+            table_type: TableType::Base,
+        });
+        Self { info, recordbatch }
     }
 
     pub fn table_name(&self) -> &str {
-        &self.table_name
+        &self.info.name
     }
 
     /// Creates a 1 column 100 rows table, with table name "numbers", column name "uint32s" and
@@ -62,7 +79,7 @@ impl Table for MemTable {
     }
 
     fn table_info(&self) -> TableInfoRef {
-        unimplemented!()
+        self.info.clone()
     }
 
     async fn scan(

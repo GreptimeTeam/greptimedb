@@ -1,24 +1,30 @@
+use std::fmt::Debug;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use common_error::ext::ErrorExt;
 use futures::Stream;
 use futures_util::StreamExt;
+pub use manager::{RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider};
 
 mod client;
 mod consts;
-mod helper;
+pub mod helper;
+
 mod manager;
 
 #[derive(Debug, Clone)]
-pub struct Kv(Vec<u8>, Vec<u8>);
+pub struct Kv(pub Vec<u8>, pub Vec<u8>);
 
-pub type ValueIter<E> = Pin<Box<dyn Stream<Item = Result<Kv, E>> + Send + Sync>>;
+pub type ValueIter<'a, E> = Pin<Box<dyn Stream<Item = Result<Kv, E>> + Send + Sync + 'a>>;
 
 #[async_trait::async_trait]
-pub trait KvBackend {
+pub trait KvBackend: Send + Sync {
     type Error: ErrorExt;
 
-    fn range(&self, key: &[u8]) -> ValueIter<Self::Error>;
+    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Self::Error>
+    where
+        'a: 'b;
 
     async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Self::Error>;
 
@@ -37,6 +43,8 @@ pub trait KvBackend {
     }
 }
 
+pub type KvBackendRef = Arc<dyn KvBackend<Error = crate::error::Error> + Send + Sync>;
+
 #[cfg(test)]
 mod tests {
     use async_stream::stream;
@@ -49,7 +57,10 @@ mod tests {
     impl KvBackend for MockKvBackend {
         type Error = crate::error::Error;
 
-        fn range(&self, _key: &[u8]) -> ValueIter<Self::Error> {
+        fn range<'a, 'b>(&'a self, _key: &[u8]) -> ValueIter<'b, Self::Error>
+        where
+            'a: 'b,
+        {
             Box::pin(stream!({
                 for i in 0..3 {
                     yield Ok(Kv(

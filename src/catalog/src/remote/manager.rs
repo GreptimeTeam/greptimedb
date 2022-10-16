@@ -16,21 +16,21 @@ use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, Error, OpenTableSnafu, SchemaNotFoundSnafu,
     TableExistsSnafu,
 };
-use crate::remote::client::MetaKvBackend;
 use crate::remote::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_prefix, CatalogKey, CatalogValue,
     SchemaKey, SchemaValue, TableKey, TableValue,
 };
-use crate::remote::{Kv, KvBackend};
+use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogList, CatalogManager, CatalogProviderRef,
     RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 
+/// Catalog manager based on metasrv.
 pub struct RemoteCatalogManager {
     node_id: String,
-    backend: Arc<MetaKvBackend>,
+    pub backend: KvBackendRef,
     catalogs: Arc<RwLock<HashMap<String, CatalogProviderRef>>>,
     next_table_id: Arc<AtomicU32>,
     engine: TableEngineRef,
@@ -38,7 +38,18 @@ pub struct RemoteCatalogManager {
 }
 
 impl RemoteCatalogManager {
-    fn catalog_key(&self, catalog_name: impl AsRef<str>) -> CatalogKey {
+    pub fn new(engine: TableEngineRef, node_id: String, backend: KvBackendRef) -> Self {
+        Self {
+            engine,
+            node_id,
+            backend,
+            catalogs: Arc::new(Default::default()),
+            next_table_id: Arc::new(Default::default()),
+            system_table_requests: Default::default(),
+        }
+    }
+
+    fn build_catalog_key(&self, catalog_name: impl AsRef<str>) -> CatalogKey {
         CatalogKey {
             catalog_name: catalog_name.as_ref().to_string(),
             node_id: self.node_id.clone(),
@@ -71,6 +82,10 @@ impl RemoteCatalogManager {
         let mut res = HashMap::new();
         let mut max_table_id = TableId::MIN;
 
+        // initiate default catalog and schema
+        self.initiate_default_catalog().await?;
+        info!("Default catalog and schema registered");
+
         let mut catalogs = self.backend.range(build_catalog_prefix().as_bytes());
         while let Some(r) = catalogs.next().await {
             let CatalogKey { catalog_name, .. } =
@@ -80,17 +95,23 @@ impl RemoteCatalogManager {
             let catalog = res
                 .entry(catalog_name.clone())
                 .or_insert_with(|| self.new_catalog_provider(&catalog_name));
+            info!("Found catalog: {}", &catalog_name);
 
             let mut schemas = self
                 .backend
                 .range(build_schema_prefix(&catalog_name).as_bytes());
+
+            info!("List schema from metasrv");
             while let Some(r) = schemas.next().await {
                 let SchemaKey { schema_name, .. } =
                     SchemaKey::parse(&String::from_utf8_lossy(&r?.0))?;
+                info!("Found schema: {}", &schema_name);
                 let schema = match catalog.schema(&schema_name)? {
                     None => {
                         let schema = self.new_schema_provider(&catalog_name, &schema_name);
+                        info!("Register schema: {}", &schema_name);
                         catalog.register_schema(schema_name.clone(), schema.clone())?;
+                        info!("Registered schema: {}", &schema_name);
                         schema
                     }
                     Some(schema) => schema,
@@ -104,19 +125,49 @@ impl RemoteCatalogManager {
                 let mut tables = self
                     .backend
                     .range(build_table_prefix(&catalog_name, &schema_name).as_bytes());
+
                 while let Some(r) = tables.next().await {
                     let Kv(k, v) = r?;
                     let table_key = TableKey::parse(&String::from_utf8_lossy(&k))?;
                     let table_value = TableValue::parse(&String::from_utf8_lossy(&v))?;
 
                     let table_ref = self.open_or_create_table(&table_key, &table_value).await?;
+                    info!("Try to register table: {}", &table_key.table_name);
                     schema.register_table(table_key.table_name.to_string(), table_ref)?;
+                    info!("Table {} registered", &table_key.table_name);
                     max_table_id = max_table_id.max(table_value.id);
                 }
             }
         }
 
         Ok((res, max_table_id))
+    }
+
+    async fn initiate_default_catalog(&self) -> Result<CatalogProviderRef, Error> {
+        let default_catalog = self.new_catalog_provider(DEFAULT_CATALOG_NAME);
+        let default_schema = self.new_schema_provider(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)?;
+        let schema_key = SchemaKey {
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            node_id: self.node_id.clone(),
+        }
+        .to_string();
+        self.backend
+            .set(schema_key.as_bytes(), &SchemaValue {}.to_bytes()?)
+            .await?;
+        info!("Registered default schema");
+
+        let catalog_key = CatalogKey {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            node_id: self.node_id.clone(),
+        }
+        .to_string();
+        self.backend
+            .set(catalog_key.as_bytes(), &CatalogValue {}.to_bytes()?)
+            .await?;
+        info!("Registered default catalog");
+        Ok(default_catalog)
     }
 
     async fn open_or_create_table(
@@ -177,13 +228,14 @@ impl RemoteCatalogManager {
 impl CatalogManager for RemoteCatalogManager {
     async fn start(&self) -> crate::error::Result<()> {
         let (catalogs, max_table_id) = self.initiate_catalogs().await?;
-        info!("Max table id allocated: {}", max_table_id);
         *(self.catalogs.write().await) = catalogs;
         self.next_table_id
             .store(max_table_id + 1, Ordering::Relaxed);
+        info!("Max table id allocated: {}", max_table_id);
 
         let mut system_table_requests = self.system_table_requests.lock().await;
         handle_system_table_request(self, self.engine.clone(), &mut system_table_requests).await?;
+        info!("All system table opened");
         Ok(())
     }
 
@@ -258,7 +310,7 @@ impl CatalogList for RemoteCatalogManager {
         catalog: CatalogProviderRef,
     ) -> Result<Option<CatalogProviderRef>, Error> {
         futures::executor::block_on(async move {
-            let key = self.catalog_key(&name).to_string();
+            let key = self.build_catalog_key(&name).to_string();
             let prev = match self.backend.get(key.as_bytes()).await? {
                 None => None,
                 Some(_) => self.catalogs.read().await.get(&name).cloned(),
@@ -276,12 +328,8 @@ impl CatalogList for RemoteCatalogManager {
     fn catalog_names(&self) -> Result<Vec<String>, Error> {
         futures::executor::block_on(async move {
             let mut res = HashSet::new();
-            while let Some(v) = self
-                .backend
-                .range(build_catalog_prefix().as_bytes())
-                .next()
-                .await
-            {
+            let mut catalog_iter = self.backend.range(build_catalog_prefix().as_bytes());
+            while let Some(v) = catalog_iter.next().await {
                 let CatalogKey {
                     node_id,
                     catalog_name,
@@ -295,7 +343,7 @@ impl CatalogList for RemoteCatalogManager {
         })
     }
 
-    /// Read catalog info of given name from metsrv.
+    /// Read catalog info of given name from metasrv.
     fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>, Error> {
         futures::executor::block_on(async move {
             let key = CatalogKey {
@@ -315,7 +363,7 @@ impl CatalogList for RemoteCatalogManager {
 pub struct RemoteCatalogProvider {
     catalog_name: String,
     node_id: String,
-    backend: Arc<MetaKvBackend>,
+    backend: KvBackendRef,
     schemas: Arc<RwLock<HashMap<String, SchemaProviderRef>>>,
 }
 
@@ -372,6 +420,8 @@ impl crate::CatalogProvider for RemoteCatalogProvider {
             self.backend
                 .set(key.as_bytes(), &SchemaValue {}.to_bytes()?)
                 .await?;
+            let mut schemas = self.schemas.write().await;
+            schemas.insert(name, schema);
             Ok(prev)
         })
     }
@@ -380,7 +430,10 @@ impl crate::CatalogProvider for RemoteCatalogProvider {
         futures::executor::block_on(async move {
             let key = self.schema_key(name).to_string();
             match self.backend.get(key.as_bytes()).await? {
-                None => Ok(None),
+                None => {
+                    info!("Schema key does not exist on backend: {}", key);
+                    Ok(None)
+                }
                 Some(_) => Ok(self.schemas.read().await.get(name).cloned()),
             }
         })
@@ -391,7 +444,7 @@ pub struct RemoteSchemaProvider {
     catalog_name: String,
     schema_name: String,
     node_id: String,
-    backend: Arc<MetaKvBackend>,
+    backend: KvBackendRef,
     tables: Arc<RwLock<HashMap<String, TableRef>>>,
 }
 
@@ -452,13 +505,21 @@ impl SchemaProvider for RemoteSchemaProvider {
         name: String,
         table: TableRef,
     ) -> crate::error::Result<Option<TableRef>> {
+        let table_info = table.table_info();
+        let table_value = TableValue {
+            meta: table_info.meta.clone(),
+            id: table_info.ident.table_id,
+        };
+
         futures::executor::block_on(async move {
             let key = self.table_key(name.clone()).to_string();
             let prev = match self.backend.get(key.as_bytes()).await? {
                 None => None,
                 Some(_) => self.tables.read().await.get(&key).cloned(),
             };
-            self.backend.set(key.as_bytes(), "".as_bytes()).await?;
+            self.backend
+                .set(key.as_bytes(), &table_value.as_bytes()?)
+                .await?;
             let mut tables = self.tables.write().await;
             tables.insert(name, table);
             Ok(prev)
@@ -468,15 +529,13 @@ impl SchemaProvider for RemoteSchemaProvider {
     fn deregister_table(&self, name: &str) -> crate::error::Result<Option<TableRef>> {
         futures::executor::block_on(async move {
             let key = self.table_key(&name).to_string();
-            let table_ref = match self.backend.get(key.as_bytes()).await? {
-                None => None,
-                Some(_) => self.tables.write().await.remove(name),
-            };
             self.backend.delete_range(key.as_bytes(), &[]).await?;
-            Ok(table_ref)
+            let mut tables = self.tables.write().await;
+            Ok(tables.remove(&key))
         })
     }
 
+    // TODO(hl): Should we further check if table is opened?
     fn table_exist(&self, name: &str) -> Result<bool, Error> {
         futures::executor::block_on(async move {
             let key = self.table_key(&name).to_string();
