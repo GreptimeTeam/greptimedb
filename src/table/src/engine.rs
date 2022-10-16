@@ -40,6 +40,7 @@ pub trait TableEngine: Send + Sync {
     fn get_table(&self, ctx: &EngineContext, name: &str) -> Result<Option<TableRef>>;
 
     /// Returns true when the given table is exists.
+    /// TODO(hl): support catalog and schema
     fn table_exists(&self, ctx: &EngineContext, name: &str) -> bool;
 
     /// Drops the given table.

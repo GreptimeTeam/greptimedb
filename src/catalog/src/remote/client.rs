@@ -9,7 +9,10 @@ pub struct MetaKvBackend {}
 impl KvBackend for MetaKvBackend {
     type Error = crate::error::Error;
 
-    fn range(&self, key: &[u8]) -> ValueIter<Self::Error> {
+    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Self::Error>
+    where
+        'a: 'b,
+    {
         let _ = key;
         todo!()
     }
