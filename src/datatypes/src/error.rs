@@ -70,7 +70,7 @@ pub enum Error {
     #[snafu(display("Default value should not be null for non null column"))]
     NullDefault { backtrace: Backtrace },
 
-    #[snafu(display("Uncompatible default value type, reason: {}", reason))]
+    #[snafu(display("Incompatible default value type, reason: {}", reason))]
     DefaultValueType {
         reason: String,
         backtrace: Backtrace,
