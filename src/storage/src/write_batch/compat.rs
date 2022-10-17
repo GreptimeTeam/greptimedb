@@ -24,7 +24,7 @@ impl CompatWrite for WriteBatch {
             }
         );
 
-        // For columns not in schema, returns error instead of dropping it silently.
+        // For columns not in schema, returns error instead of discarding the column silently.
         let column_not_in = column_not_in_schema(dest_schema, self.schema.column_schemas());
         ensure!(
             column_not_in.is_none(),

@@ -335,6 +335,7 @@ impl WriterInner {
             let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence + 1).await?;
             while let Some((req_sequence, _header, request)) = stream.try_next().await? {
                 while let Some((sequence_before_alter, _)) = next_apply_metadata {
+                    // There might be multiple metadata changes to be applied, so a loop is necessary.
                     if req_sequence > sequence_before_alter {
                         // This is the first request that use the new metadata.
                         // It's safe to unwrap here. It's checked above. Move out metadata to avoid cloning it.
@@ -356,7 +357,7 @@ impl WriterInner {
                         );
                         next_apply_metadata = recovered_metadata.pop_first();
                     } else {
-                        // Keep the next_apply_metadata until req_sequence >= sequence_before_alter
+                        // Keep the next_apply_metadata until req_sequence > sequence_before_alter
                         break;
                     }
                 }
