@@ -87,33 +87,29 @@ impl<R: Region> Table for MitoTable<R> {
                 .column_schema_by_name(name)
                 .expect("column schema not found");
 
-            let vector = columns_values.remove(name).or_else(|| {
-                Self::try_get_column_default_constraint_vector(column_schema, rows_num).ok()?
-            });
+            let vector = match columns_values.remove(name) {
+                Some(v) => v,
+                None => Self::try_get_column_default_constraint_vector(column_schema, rows_num)?,
+            };
 
-            if let Some(vector) = vector {
-                put_op
-                    .add_key_column(name, vector)
-                    .map_err(TableError::new)?;
-            } else if !column_schema.is_nullable() {
-                return MissingColumnSnafu { name }.fail()?;
-            }
+            put_op
+                .add_key_column(name, vector)
+                .map_err(TableError::new)?;
         }
+
         // Add value columns
         for name in value_columns {
             let column_schema = schema
                 .column_schema_by_name(name)
                 .expect("column schema not found");
 
-            let vector = columns_values.remove(name).or_else(|| {
-                Self::try_get_column_default_constraint_vector(column_schema, rows_num).ok()?
-            });
-
-            if let Some(v) = vector {
-                put_op.add_value_column(name, v).map_err(TableError::new)?;
-            } else if !column_schema.is_nullable() {
-                return MissingColumnSnafu { name }.fail()?;
-            }
+            let vector = match columns_values.remove(name) {
+                Some(v) => v,
+                None => Self::try_get_column_default_constraint_vector(column_schema, rows_num)?,
+            };
+            put_op
+                .add_value_column(name, vector)
+                .map_err(TableError::new)?;
         }
 
         ensure!(
@@ -464,11 +460,16 @@ impl<R: Region> MitoTable<R> {
     fn try_get_column_default_constraint_vector(
         column_schema: &ColumnSchema,
         rows_num: usize,
-    ) -> TableResult<Option<VectorRef>> {
+    ) -> TableResult<VectorRef> {
         // TODO(dennis): when we support altering schema, we should check the schemas difference between table and region
-        Ok(column_schema
+        let vector = column_schema
             .create_default_vector(rows_num)
-            .context(UnsupportedDefaultConstraintSnafu)?)
+            .context(UnsupportedDefaultConstraintSnafu)?
+            .context(MissingColumnSnafu {
+                name: &column_schema.name,
+            })?;
+
+        Ok(vector)
     }
 
     pub async fn open(
