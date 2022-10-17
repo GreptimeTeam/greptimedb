@@ -12,7 +12,7 @@ use common_query::Output;
 use common_telemetry::logging::{debug, error, info};
 use common_telemetry::timer;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
-use object_store::{backend::fs::Backend, util, ObjectStore};
+use object_store::{services::fs::Builder, util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
 use snafu::prelude::*;
@@ -340,10 +340,9 @@ async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStor
 
     info!("The storage directory is: {}", &data_dir);
 
-    let accessor = Backend::build()
+    let accessor = Builder::default()
         .root(&data_dir)
-        .finish()
-        .await
+        .build()
         .context(error::InitBackendSnafu { dir: &data_dir })?;
 
     Ok(ObjectStore::new(accessor))

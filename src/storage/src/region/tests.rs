@@ -183,10 +183,9 @@ async fn test_recover_region_manifets() {
     let tmp_dir = TempDir::new("test_new_region").unwrap();
 
     let object_store = ObjectStore::new(
-        fs::Backend::build()
+        fs::Builder::default()
             .root(&tmp_dir.path().to_string_lossy())
-            .finish()
-            .await
+            .build()
             .unwrap(),
     );
 

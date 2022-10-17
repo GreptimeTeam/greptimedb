@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 futures = { version = "0.3" }
-opendal = "0.9"
+opendal = "0.17"
 tokio = { version = "1.0", features = ["full"] }
 
 [dev-dependencies]

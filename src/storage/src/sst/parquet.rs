@@ -18,8 +18,9 @@ use datatypes::arrow::io::parquet::write::{
 };
 use futures::AsyncWriteExt;
 use futures_util::sink::SinkExt;
-use futures_util::{Stream, TryStreamExt};
+use futures_util::{try_join, Stream, TryStreamExt};
 use object_store::{ObjectStore, SeekableReader};
+use sluice::pipe;
 use snafu::ResultExt;
 use table::predicate::Predicate;
 
@@ -62,45 +63,55 @@ impl<'a> ParquetWriter<'a> {
         let schema = store_schema.arrow_schema();
         let object = self.object_store.object(self.file_path);
 
-        // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
-        // but in s3/azblob backend the Content-Length field of HTTP request is set
-        // to this value.
-        let mut writer = object.writer(0).await.context(error::FlushIoSnafu)?;
+        let (reader, mut writer) = pipe::pipe();
 
         // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
         let encodings = get_encoding_for_schema(schema, |_| Encoding::Plain);
-
-        let mut sink = FileSink::try_new(
-            &mut writer,
-            // The file sink needs the `Schema` instead of a reference.
-            (**schema).clone(),
-            encodings,
-            WriteOptions {
-                write_statistics: true,
-                compression: Compression::Gzip,
-                version: Version::V2,
+        try_join!(
+            async {
+                // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
+                // but in s3/azblob backend the Content-Length field of HTTP request is set
+                // to this value.
+                object
+                    .write_from(0, reader)
+                    .await
+                    .context(error::FlushIoSnafu)
             },
-        )
-        .context(error::WriteParquetSnafu)?;
-
-        for batch in self.iter {
-            let batch = batch?;
-            sink.send(store_schema.batch_to_arrow_chunk(&batch))
-                .await
+            async {
+                let mut sink = FileSink::try_new(
+                    &mut writer,
+                    // The file sink needs the `Schema` instead of a reference.
+                    (**schema).clone(),
+                    encodings,
+                    WriteOptions {
+                        write_statistics: true,
+                        compression: Compression::Gzip,
+                        version: Version::V2,
+                    },
+                )
                 .context(error::WriteParquetSnafu)?;
-        }
 
-        if let Some(meta) = extra_meta {
-            for (k, v) in meta {
-                sink.metadata.insert(k, Some(v));
+                for batch in self.iter {
+                    let batch = batch?;
+                    sink.send(store_schema.batch_to_arrow_chunk(&batch))
+                        .await
+                        .context(error::WriteParquetSnafu)?;
+                }
+
+                if let Some(meta) = extra_meta {
+                    for (k, v) in meta {
+                        sink.metadata.insert(k, Some(v));
+                    }
+                }
+                sink.close().await.context(error::WriteParquetSnafu)?;
+                drop(sink);
+
+                writer.close().await.context(error::WriteObjectSnafu {
+                    path: self.file_path,
+                })
             }
-        }
-        sink.close().await.context(error::WriteParquetSnafu)?;
-
-        drop(sink);
-        writer.flush().await.context(error::WriteObjectSnafu {
-            path: self.file_path,
-        })
+        )
+        .map(|_| ())
     }
 }
 
@@ -287,7 +298,7 @@ mod tests {
     use datatypes::arrow::io::parquet::read::FileReader;
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::vectors::TimestampVector;
-    use object_store::backend::fs::Backend;
+    use object_store::backend::fs::Builder;
     use store_api::storage::OpType;
     use tempdir::TempDir;
 
@@ -324,7 +335,7 @@ mod tests {
 
         let dir = TempDir::new("write_parquet").unwrap();
         let path = dir.path().to_str().unwrap();
-        let backend = Backend::build().root(path).finish().await.unwrap();
+        let backend = Builder::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend);
         let sst_file_name = "test-flush.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
