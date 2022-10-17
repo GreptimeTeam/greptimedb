@@ -2732,7 +2732,7 @@ dependencies = [
 [[package]]
 name = "mysql_async"
 version = "0.30.0"
-source = "git+https://github.com/Morranto/mysql_async.git#127b538e20b880e2855204e480fa784d8d08e150"
+source = "git+https://github.com/Morranto/mysql_async.git?rev=127b538#127b538e20b880e2855204e480fa784d8d08e150"
 dependencies = [
  "bytes",
  "crossbeam",
