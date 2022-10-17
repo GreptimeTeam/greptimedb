@@ -335,8 +335,7 @@ mod tests {
 
         let dir = TempDir::new("write_parquet").unwrap();
         let path = dir.path().to_str().unwrap();
-        let mut builder = Builder::default();
-        let backend = builder.root(path).build().unwrap();
+        let backend = Builder::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend);
         let sst_file_name = "test-flush.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();

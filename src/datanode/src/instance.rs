@@ -271,8 +271,7 @@ async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStor
 
     info!("The storage directory is: {}", &data_dir);
 
-    let mut builder = Builder::default();
-    let accessor = builder
+    let accessor = Builder::default()
         .root(&data_dir)
         .build()
         .context(error::InitBackendSnafu { dir: &data_dir })?;

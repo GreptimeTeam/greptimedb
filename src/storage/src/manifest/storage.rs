@@ -273,7 +273,6 @@ mod tests {
     async fn test_manifest_log_store() {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = TempDir::new("test_manifest_log_store").unwrap();
-        let mut builder = fs::Builder::default();
         let object_store = ObjectStore::new(
             fs::Builder::default()
                 .root(&tmp_dir.path().to_string_lossy())

@@ -77,7 +77,11 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 #[tokio::test]
 async fn test_fs_backend() -> Result<()> {
     let tmp_dir = TempDir::new("test_fs_backend")?;
-    let store = ObjectStore::new(fs::Builder::default().root(&tmp_dir.path().to_string_lossy()).build()?);
+    let store = ObjectStore::new(
+        fs::Builder::default()
+            .root(&tmp_dir.path().to_string_lossy())
+            .build()?,
+    );
 
     test_object_crud(&store).await?;
     test_object_list(&store).await?;

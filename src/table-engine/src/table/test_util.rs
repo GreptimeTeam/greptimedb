@@ -65,8 +65,7 @@ pub fn build_test_table_info() -> TableInfo {
 pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     let dir = TempDir::new(prefix).unwrap();
     let store_dir = dir.path().to_string_lossy();
-    let mut builder = Builder::default();
-    let accessor = builder.root(&store_dir).build().unwrap();
+    let accessor = Builder::default().root(&store_dir).build().unwrap();
     (dir, ObjectStore::new(accessor))
 }
 
