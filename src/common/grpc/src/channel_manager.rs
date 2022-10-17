@@ -80,6 +80,10 @@ impl ChannelManager {
         manager
     }
 
+    pub fn config(&self) -> Option<Config> {
+        self.config.clone()
+    }
+
     pub fn get(&self, addr: impl AsRef<str>) -> Result<InnerChannel> {
         let addr = addr.as_ref();
         let mut pool = self.pool.lock().unwrap();

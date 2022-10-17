@@ -43,6 +43,11 @@ impl Client {
         inner.start(urls).await
     }
 
+    pub async fn is_started(&self) -> bool {
+        let inner = self.inner.read().await;
+        inner.is_started()
+    }
+
     pub async fn create(&self, req: CreateRequest) -> Result<CreateResponse> {
         let inner = self.inner.read().await;
         inner.create(req).await
@@ -123,5 +128,55 @@ impl Inner {
     #[inline]
     fn is_started(&self) -> bool {
         !self.peers.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_start_client() {
+        let mut client = Client::new(ChannelManager::default());
+
+        assert!(!client.is_started().await);
+
+        client
+            .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
+            .await
+            .unwrap();
+
+        assert!(client.is_started().await);
+    }
+
+    #[tokio::test]
+    async fn test_already_start() {
+        let mut client = Client::new(ChannelManager::default());
+        client
+            .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
+            .await
+            .unwrap();
+
+        assert!(client.is_started().await);
+
+        let res = client.start(&["127.0.0.1:1002"]).await;
+
+        assert!(res.is_err());
+
+        assert!(matches!(
+            res.err(),
+            Some(error::Error::IllegalGrpcClientState { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_start_with_duplicate_peers() {
+        let mut client = Client::new(ChannelManager::default());
+        client
+            .start(&["127.0.0.1:1000", "127.0.0.1:1000", "127.0.0.1:1000"])
+            .await
+            .unwrap();
+
+        assert_eq!(1, client.inner.write().await.peers.len());
     }
 }

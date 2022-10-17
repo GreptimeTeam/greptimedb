@@ -6,7 +6,7 @@ use api::v1::meta::RangeRequest;
 use api::v1::meta::Region;
 use api::v1::meta::TableName;
 use common_grpc::channel_manager::ChannelManager;
-use meta_client::client::MetaClient;
+use meta_client::client::MetaClientBuilder;
 use tracing::event;
 use tracing::subscriber;
 use tracing::Level;
@@ -20,8 +20,15 @@ fn main() {
 #[tokio::main]
 async fn run() {
     let channel_manager = ChannelManager::default();
-    let mut meta_client = MetaClient::new(channel_manager);
+    let mut meta_client = MetaClientBuilder::new()
+        .start_heartbeat_client()
+        .start_router_client()
+        .start_store_client()
+        .channel_manager(channel_manager)
+        .build();
     meta_client.start(&["127.0.0.1:3002"]).await.unwrap();
+    // required only when the heartbeat_client is started
+    meta_client.ask_leader().await.unwrap();
 
     let create_req = CreateRequest {
         table_name: Some(TableName {

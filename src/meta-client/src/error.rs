@@ -30,6 +30,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc::error::Error,
     },
+
+    #[snafu(display("{} not started", name))]
+    NotStarted { name: String, backtrace: Backtrace },
 }
 
 #[allow(dead_code)]
@@ -50,6 +53,7 @@ impl ErrorExt for Error {
             | Error::IllegalGrpcClientState { .. }
             | Error::TonicStatus { .. }
             | Error::AskLeader { .. }
+            | Error::NotStarted { .. }
             | Error::CreateChannel { .. } => StatusCode::Internal,
         }
     }
