@@ -1,15 +1,15 @@
 use std::{fs, path, sync::Arc};
 
 use api::v1::{
-    admin_expr, insert_expr, object_expr, select_expr, AdminExpr, AdminResult, ObjectExpr,
-    ObjectResult, SelectExpr,
+    admin_expr, codec::InsertBatch, insert_expr, object_expr, select_expr, AdminExpr, AdminResult,
+    ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
 use catalog::{CatalogManagerRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
 use common_query::Output;
-use common_telemetry::logging::{error, info};
+use common_telemetry::logging::{debug, error, info};
 use common_telemetry::timer;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use object_store::{backend::fs::Backend, util, ObjectStore};
@@ -18,6 +18,7 @@ use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
+use table::requests::AddColumnRequest;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
@@ -29,7 +30,7 @@ use crate::error::{
 use crate::metric;
 use crate::script::ScriptExecutor;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
-use crate::server::grpc::insert::insertion_expr_to_request;
+use crate::server::grpc::insert::{self, insertion_expr_to_request};
 use crate::server::grpc::plan::PhysicalPlanner;
 use crate::server::grpc::select::to_object_result;
 use crate::sql::{SqlHandler, SqlRequest};
@@ -38,10 +39,8 @@ type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 
 // An abstraction to read/write services.
 pub struct Instance {
-    // Query service
     query_engine: QueryEngineRef,
     sql_handler: SqlHandler,
-    // Catalog list
     catalog_manager: CatalogManagerRef,
     physical_planner: PhysicalPlanner,
     script_executor: ScriptExecutor,
@@ -82,6 +81,60 @@ impl Instance {
         })
     }
 
+    async fn add_new_columns_to_table(
+        &self,
+        table_name: &str,
+        add_columns: Vec<AddColumnRequest>,
+    ) -> Result<()> {
+        let column_names = add_columns
+            .iter()
+            .map(|req| req.column_schema.name.clone())
+            .collect::<Vec<_>>();
+
+        let alter_request = insert::build_alter_table_request(table_name, add_columns);
+
+        debug!(
+            "Adding new columns: {:?} to table: {}",
+            column_names, table_name
+        );
+
+        let _result = self
+            .sql_handler()
+            .execute(SqlRequest::Alter(alter_request))
+            .await?;
+
+        info!(
+            "Added new columns: {:?} to table: {}",
+            column_names, table_name
+        );
+        Ok(())
+    }
+
+    async fn create_table_by_insert_batches(
+        &self,
+        table_name: &str,
+        insert_batches: &[InsertBatch],
+    ) -> Result<()> {
+        // Create table automatically, build schema from data.
+        let table_id = self.catalog_manager.next_table_id();
+        let create_table_request =
+            insert::build_create_table_request(table_id, table_name, insert_batches)?;
+
+        info!(
+            "Try to create table: {} automatically with request: {:?}",
+            table_name, create_table_request,
+        );
+
+        let _result = self
+            .sql_handler()
+            .execute(SqlRequest::Create(create_table_request))
+            .await?;
+
+        info!("Success to create table: {} automatically", table_name);
+
+        Ok(())
+    }
+
     pub async fn execute_grpc_insert(
         &self,
         table_name: &str,
@@ -94,11 +147,27 @@ impl Instance {
             .schema(DEFAULT_SCHEMA_NAME)
             .unwrap();
 
-        let table = schema_provider
-            .table(table_name)
-            .context(TableNotFoundSnafu { table_name })?;
+        let insert_batches = insert::insert_batches(values.values)?;
+        ensure!(!insert_batches.is_empty(), error::IllegalInsertDataSnafu);
 
-        let insert = insertion_expr_to_request(table_name, values, table.clone())?;
+        let table = if let Some(table) = schema_provider.table(table_name) {
+            let schema = table.schema();
+            if let Some(add_columns) = insert::find_new_columns(&schema, &insert_batches)? {
+                self.add_new_columns_to_table(table_name, add_columns)
+                    .await?;
+            }
+
+            table
+        } else {
+            self.create_table_by_insert_batches(table_name, &insert_batches)
+                .await?;
+
+            schema_provider
+                .table(table_name)
+                .context(TableNotFoundSnafu { table_name })?
+        };
+
+        let insert = insertion_expr_to_request(table_name, insert_batches, table.clone())?;
 
         let affected_rows = table
             .insert(insert)

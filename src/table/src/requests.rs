@@ -45,9 +45,17 @@ pub struct AlterTableRequest {
     pub alter_kind: AlterKind,
 }
 
+/// Add column request
+#[derive(Debug)]
+pub struct AddColumnRequest {
+    pub column_schema: ColumnSchema,
+    pub is_key: bool,
+}
+
 #[derive(Debug)]
 pub enum AlterKind {
-    AddColumn { new_column: ColumnSchema },
+    AddColumns { columns: Vec<AddColumnRequest> },
+    RemoveColumns { names: Vec<String> },
 }
 
 /// Drop table request

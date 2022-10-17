@@ -49,7 +49,7 @@ message Column {
   bytes null_mask = 4;
 
   // Helpful in creating vector from column.
-  optional ColumnDataType datatype = 5;
+  ColumnDataType datatype = 5;
 }
 
 message ColumnDef {

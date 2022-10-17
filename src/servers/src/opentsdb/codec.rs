@@ -1,5 +1,5 @@
 use api::v1::codec::InsertBatch;
-use api::v1::{column, insert_expr, Column, InsertExpr};
+use api::v1::{column, column::SemanticType, insert_expr, Column, ColumnDataType, InsertExpr};
 
 use crate::error::{self, Result};
 
@@ -119,6 +119,8 @@ impl DataPoint {
                 ts_millis_values: vec![self.ts_millis],
                 ..Default::default()
             }),
+            semantic_type: SemanticType::Timestamp as i32,
+            datatype: ColumnDataType::Timestamp as i32,
             ..Default::default()
         };
         columns.push(ts_column);
@@ -129,6 +131,8 @@ impl DataPoint {
                 f64_values: vec![self.value],
                 ..Default::default()
             }),
+            semantic_type: SemanticType::Field as i32,
+            datatype: ColumnDataType::Float64 as i32,
             ..Default::default()
         };
         columns.push(value_column);
@@ -140,6 +144,8 @@ impl DataPoint {
                     string_values: vec![tagv.to_string()],
                     ..Default::default()
                 }),
+                semantic_type: SemanticType::Tag as i32,
+                datatype: ColumnDataType::String as i32,
                 ..Default::default()
             });
         }

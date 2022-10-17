@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use api::v1::ColumnDataType;
 use api::v1::{
-    admin_result, alter_expr::Kind, codec::InsertBatch, column, insert_expr, AddColumn, AlterExpr,
-    Column, ColumnDef, CreateExpr, InsertExpr, MutateResult,
+    admin_result, alter_expr::Kind, codec::InsertBatch, column, column::SemanticType, insert_expr,
+    AddColumn, AlterExpr, Column, ColumnDef, CreateExpr, InsertExpr, MutateResult,
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
@@ -17,27 +17,38 @@ use servers::server::Server;
 use crate::instance::Instance;
 use crate::tests::test_util;
 
-#[tokio::test]
-async fn test_insert_and_select() {
+async fn setup_grpc_server(port: usize) -> String {
     common_telemetry::init_default_ut_logging();
 
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let (mut opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let addr = format!("127.0.0.1:{}", port);
+    opts.rpc_addr = addr.clone();
     let instance = Arc::new(Instance::new(&opts).await.unwrap());
     instance.start().await.unwrap();
 
+    let addr_cloned = addr.clone();
     tokio::spawn(async move {
         let mut grpc_server = GrpcServer::new(instance.clone(), instance);
-        let addr = "127.0.0.1:3001".parse::<SocketAddr>().unwrap();
+        let addr = addr_cloned.parse::<SocketAddr>().unwrap();
         grpc_server.start(addr).await.unwrap()
     });
 
     // wait for GRPC server to start
     tokio::time::sleep(Duration::from_secs(1)).await;
+    addr
+}
 
-    let grpc_client = Client::connect("http://127.0.0.1:3001").await.unwrap();
-    let db = Database::new("greptime", grpc_client.clone());
-    let admin = Admin::new("greptime", grpc_client);
+#[tokio::test]
+async fn test_auto_create_table() {
+    let addr = setup_grpc_server(3991).await;
 
+    let grpc_client = Client::connect(format!("http://{}", addr)).await.unwrap();
+    let db = Database::new("greptime", grpc_client);
+
+    insert_and_assert(&db).await;
+}
+
+fn expect_data() -> (Column, Column, Column, Column) {
     // testing data:
     let expected_host_col = Column {
         column_name: "host".to_string(),
@@ -48,7 +59,8 @@ async fn test_insert_and_select() {
                 .collect(),
             ..Default::default()
         }),
-        datatype: Some(12), // string
+        semantic_type: SemanticType::Field as i32,
+        datatype: ColumnDataType::String as i32,
         ..Default::default()
     };
     let expected_cpu_col = Column {
@@ -58,8 +70,8 @@ async fn test_insert_and_select() {
             ..Default::default()
         }),
         null_mask: vec![2],
-        datatype: Some(10), // float64
-        ..Default::default()
+        semantic_type: SemanticType::Field as i32,
+        datatype: ColumnDataType::Float64 as i32,
     };
     let expected_mem_col = Column {
         column_name: "memory".to_string(),
@@ -68,8 +80,8 @@ async fn test_insert_and_select() {
             ..Default::default()
         }),
         null_mask: vec![4],
-        datatype: Some(10), // float64
-        ..Default::default()
+        semantic_type: SemanticType::Field as i32,
+        datatype: ColumnDataType::Float64 as i32,
     };
     let expected_ts_col = Column {
         column_name: "ts".to_string(),
@@ -77,9 +89,27 @@ async fn test_insert_and_select() {
             ts_millis_values: vec![100, 101, 102, 103],
             ..Default::default()
         }),
-        datatype: Some(15), // timestamp
+        semantic_type: SemanticType::Timestamp as i32,
+        datatype: ColumnDataType::Timestamp as i32,
         ..Default::default()
     };
+
+    (
+        expected_host_col,
+        expected_cpu_col,
+        expected_mem_col,
+        expected_ts_col,
+    )
+}
+
+#[tokio::test]
+async fn test_insert_and_select() {
+    let addr = setup_grpc_server(3990).await;
+
+    let grpc_client = Client::connect(format!("http://{}", addr)).await.unwrap();
+
+    let db = Database::new("greptime", grpc_client.clone());
+    let admin = Admin::new("greptime", grpc_client);
 
     // create
     let expr = testing_create_expr();
@@ -112,6 +142,13 @@ async fn test_insert_and_select() {
     assert_eq!(result.result, None);
 
     // insert
+    insert_and_assert(&db).await;
+}
+
+async fn insert_and_assert(db: &Database) {
+    // testing data:
+    let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
+
     let values = vec![InsertBatch {
         columns: vec![
             expected_host_col.clone(),
@@ -161,19 +198,19 @@ fn testing_create_expr() -> CreateExpr {
     let column_defs = vec![
         ColumnDef {
             name: "host".to_string(),
-            datatype: 12, // string
+            datatype: ColumnDataType::String as i32,
             is_nullable: false,
             default_constraint: None,
         },
         ColumnDef {
             name: "cpu".to_string(),
-            datatype: 10, // float64
+            datatype: ColumnDataType::Float64 as i32,
             is_nullable: true,
             default_constraint: None,
         },
         ColumnDef {
             name: "memory".to_string(),
-            datatype: 10, // float64
+            datatype: ColumnDataType::Float64 as i32,
             is_nullable: true,
             default_constraint: None,
         },

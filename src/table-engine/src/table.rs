@@ -20,7 +20,7 @@ use datatypes::vectors::{ConstantVector, TimestampVector, VectorRef};
 use futures::task::{Context, Poll};
 use futures::Stream;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, ChunkReader, ColumnDescriptorBuilder, PutOperation,
@@ -28,7 +28,7 @@ use store_api::storage::{
 };
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
 use table::metadata::{FilterPushDownType, TableInfoRef, TableMetaBuilder};
-use table::requests::{AlterKind, AlterTableRequest, InsertRequest};
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
 use table::{
     metadata::{TableInfo, TableType},
     table::Table,
@@ -36,8 +36,9 @@ use table::{
 use tokio::sync::Mutex;
 
 use crate::error::{
-    self, ProjectedColumnNotFoundSnafu, Result, ScanTableManifestSnafu, SchemaBuildSnafu,
-    TableInfoNotFoundSnafu, UnsupportedDefaultConstraintSnafu, UpdateTableManifestSnafu,
+    self, ColumnsNotExistSnafu, ProjectedColumnNotFoundSnafu, Result, ScanTableManifestSnafu,
+    SchemaBuildSnafu, TableInfoNotFoundSnafu, UnsupportedDefaultConstraintSnafu,
+    UpdateTableManifestSnafu,
 };
 use crate::manifest::action::*;
 use crate::manifest::TableManifest;
@@ -86,28 +87,50 @@ impl<R: Region> Table for MitoTable<R> {
 
         //Add row key and columns
         for name in key_columns {
-            let vector = columns_values
-                .remove(name)
-                .or_else(|| {
-                    Self::try_get_column_default_constraint_vector(&schema, name, rows_num).ok()?
-                })
-                .context(MissingColumnSnafu { name })
-                .map_err(TableError::from)?;
+            let column_schema = schema
+                .column_schema_by_name(name)
+                .expect("column schema not found");
 
-            put_op
-                .add_key_column(name, vector)
-                .map_err(TableError::new)?;
-        }
-        // Add vaue columns
-        for name in value_columns {
             let vector = columns_values.remove(name).or_else(|| {
-                Self::try_get_column_default_constraint_vector(&schema, name, rows_num).ok()?
+                Self::try_get_column_default_constraint_vector(column_schema, rows_num).ok()?
+            });
+
+            if let Some(vector) = vector {
+                put_op
+                    .add_key_column(name, vector)
+                    .map_err(TableError::new)?;
+            } else if !column_schema.is_nullable {
+                return MissingColumnSnafu { name }.fail().map_err(TableError::from);
+            }
+        }
+        // Add value columns
+        for name in value_columns {
+            let column_schema = schema
+                .column_schema_by_name(name)
+                .expect("column schema not found");
+
+            let vector = columns_values.remove(name).or_else(|| {
+                Self::try_get_column_default_constraint_vector(column_schema, rows_num).ok()?
             });
 
             if let Some(v) = vector {
                 put_op.add_value_column(name, v).map_err(TableError::new)?;
+            } else if !column_schema.is_nullable {
+                return MissingColumnSnafu { name }.fail().map_err(TableError::from);
             }
         }
+
+        ensure!(
+            columns_values.is_empty(),
+            ColumnsNotExistSnafu {
+                table_name: &table_info.name,
+                column_names: columns_values
+                    .keys()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+            }
+        );
 
         logging::debug!(
             "Insert into table {} with put_op: {:?}",
@@ -181,42 +204,58 @@ impl<R: Region> Table for MitoTable<R> {
         let table_info = self.table_info();
         let table_name = &table_info.name;
         let table_meta = &table_info.meta;
-        let (alter_op, table_schema) = match &req.alter_kind {
-            AlterKind::AddColumn { new_column } => {
-                let desc = ColumnDescriptorBuilder::new(
-                    table_meta.next_column_id,
-                    &new_column.name,
-                    new_column.data_type.clone(),
-                )
-                .is_nullable(new_column.is_nullable)
-                .default_constraint(new_column.default_constraint.clone())
-                .build()
-                .context(error::BuildColumnDescriptorSnafu {
-                    table_name,
-                    column_name: &new_column.name,
-                })?;
-                let alter_op = AlterOperation::AddColumns {
-                    columns: vec![AddColumn {
-                        desc,
-                        // TODO(yingwen): [alter] AlterTableRequest should be able to add a key column.
-                        is_key: false,
-                    }],
-                };
+
+        let (alter_op, table_schema, new_columns_num) = match &req.alter_kind {
+            AlterKind::AddColumns {
+                columns: new_columns,
+            } => {
+                let columns = new_columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, add_column)| {
+                        let new_column = &add_column.column_schema;
+
+                        let desc = ColumnDescriptorBuilder::new(
+                            table_meta.next_column_id + i as u32,
+                            &new_column.name,
+                            new_column.data_type.clone(),
+                        )
+                        .is_nullable(new_column.is_nullable)
+                        .default_constraint(new_column.default_constraint.clone())
+                        .build()
+                        .context(error::BuildColumnDescriptorSnafu {
+                            table_name,
+                            column_name: &new_column.name,
+                        })?;
+
+                        Ok(AddColumn {
+                            desc,
+                            is_key: add_column.is_key,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                let alter_op = AlterOperation::AddColumns { columns };
 
                 // TODO(yingwen): [alter] Better way to alter the schema struct. In fact the column order
                 // in table schema could differ from the region schema, so we could just push this column
                 // to the back of the schema (as last column).
-                let table_schema =
-                    build_table_schema_with_new_column(table_name, &table_meta.schema, new_column)?;
+                let table_schema = build_table_schema_with_new_columns(
+                    table_name,
+                    &table_meta.schema,
+                    new_columns,
+                )?;
 
-                (alter_op, table_schema)
+                (alter_op, table_schema, new_columns.len() as u32)
             }
+            // TODO(dennis): supports removing columns etc.
+            _ => unimplemented!(),
         };
 
         let new_meta = TableMetaBuilder::default()
             .schema(table_schema.clone())
             .engine(&table_meta.engine)
-            .next_column_id(table_meta.next_column_id + 1) // Bump next column id.
+            .next_column_id(table_meta.next_column_id + new_columns_num) // Bump next column id.
             .primary_key_indices(table_meta.primary_key_indices.clone())
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
@@ -272,24 +311,27 @@ impl<R: Region> Table for MitoTable<R> {
     }
 }
 
-fn build_table_schema_with_new_column(
+fn build_table_schema_with_new_columns(
     table_name: &str,
     table_schema: &SchemaRef,
-    new_column: &ColumnSchema,
+    new_columns: &[AddColumnRequest],
 ) -> Result<SchemaRef> {
-    if table_schema
-        .column_schema_by_name(&new_column.name)
-        .is_some()
-    {
-        return error::ColumnExistsSnafu {
-            column_name: &new_column.name,
-            table_name,
-        }
-        .fail()?;
-    }
-
     let mut columns = table_schema.column_schemas().to_vec();
-    columns.push(new_column.clone());
+
+    for add_column in new_columns {
+        let new_column = &add_column.column_schema;
+        if table_schema
+            .column_schema_by_name(&new_column.name)
+            .is_some()
+        {
+            return error::ColumnExistsSnafu {
+                column_name: &new_column.name,
+                table_name,
+            }
+            .fail()?;
+        }
+        columns.push(new_column.clone());
+    }
 
     // Right now we are not support adding the column
     // before or after some column, so just clone a new schema like this.
@@ -307,7 +349,7 @@ fn build_table_schema_with_new_column(
         builder = builder.add_metadata(k, v);
     }
     let new_schema = Arc::new(builder.build().with_context(|_| error::SchemaBuildSnafu {
-        msg: format!("cannot add new column {:?}", new_column),
+        msg: format!("cannot add new columns {:?}", new_columns),
     })?);
     Ok(new_schema)
 }
@@ -424,14 +466,10 @@ impl<R: Region> MitoTable<R> {
     }
 
     fn try_get_column_default_constraint_vector(
-        schema: &SchemaRef,
-        name: &str,
+        column_schema: &ColumnSchema,
         rows_num: usize,
     ) -> TableResult<Option<VectorRef>> {
         // TODO(dennis): when we support altering schema, we should check the schemas difference between table and region
-        let column_schema = schema
-            .column_schema_by_name(name)
-            .expect("column schema not found");
         if let Some(v) = &column_schema.default_constraint {
             assert!(rows_num > 0);
 
@@ -572,7 +610,12 @@ mod tests {
         let table_schema = &table_meta.schema;
 
         let new_column = ColumnSchema::new("host", ConcreteDataType::string_datatype(), true);
-        let result = build_table_schema_with_new_column(table_name, table_schema, &new_column);
+
+        let new_columns = vec![AddColumnRequest {
+            column_schema: new_column,
+            is_key: false,
+        }];
+        let result = build_table_schema_with_new_columns(table_name, table_schema, &new_columns);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -580,8 +623,12 @@ mod tests {
             .contains("Column host already exists in table demo"));
 
         let new_column = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_columns = vec![AddColumnRequest {
+            column_schema: new_column.clone(),
+            is_key: false,
+        }];
         let new_schema =
-            build_table_schema_with_new_column(table_name, table_schema, &new_column).unwrap();
+            build_table_schema_with_new_columns(table_name, table_schema, &new_columns).unwrap();
 
         assert_eq!(new_schema.num_columns(), table_schema.num_columns() + 1);
         assert_eq!(

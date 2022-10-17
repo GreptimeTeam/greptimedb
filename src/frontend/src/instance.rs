@@ -262,8 +262,8 @@ mod tests {
 
     use api::v1::codec::{InsertBatch, SelectResult};
     use api::v1::{
-        admin_expr, admin_result, column, object_expr, object_result, select_expr, Column,
-        ExprHeader, MutateResult, SelectExpr,
+        admin_expr, admin_result, column, column::SemanticType, object_expr, object_result,
+        select_expr, Column, ExprHeader, MutateResult, SelectExpr,
     };
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
@@ -367,7 +367,8 @@ mod tests {
                     .collect(),
                 ..Default::default()
             }),
-            datatype: Some(12), // string
+            semantic_type: SemanticType::Field as i32,
+            datatype: ColumnDataType::String as i32,
             ..Default::default()
         };
         let expected_cpu_col = Column {
@@ -377,8 +378,8 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![2],
-            datatype: Some(10), // float64
-            ..Default::default()
+            semantic_type: SemanticType::Field as i32,
+            datatype: ColumnDataType::Float64 as i32,
         };
         let expected_mem_col = Column {
             column_name: "memory".to_string(),
@@ -387,8 +388,8 @@ mod tests {
                 ..Default::default()
             }),
             null_mask: vec![4],
-            datatype: Some(10), // float64
-            ..Default::default()
+            semantic_type: SemanticType::Field as i32,
+            datatype: ColumnDataType::Float64 as i32,
         };
         let expected_disk_col = Column {
             column_name: "disk_util".to_string(),
@@ -396,7 +397,8 @@ mod tests {
                 f64_values: vec![9.9, 9.9, 9.9, 9.9],
                 ..Default::default()
             }),
-            datatype: Some(10), // float64
+            semantic_type: SemanticType::Field as i32,
+            datatype: ColumnDataType::Float64 as i32,
             ..Default::default()
         };
         let expected_ts_col = Column {
@@ -405,7 +407,9 @@ mod tests {
                 ts_millis_values: vec![1000, 2000, 3000, 4000],
                 ..Default::default()
             }),
-            datatype: Some(15), // timestamp
+            // FIXME(dennis): looks like the read schema in table scan doesn't have timestamp index, we have to investigate it.
+            semantic_type: SemanticType::Field as i32,
+            datatype: ColumnDataType::Timestamp as i32,
             ..Default::default()
         };
 
@@ -495,25 +499,25 @@ mod tests {
         let column_defs = vec![
             GrpcColumnDef {
                 name: "host".to_string(),
-                datatype: 12, // string
+                datatype: ColumnDataType::String as i32,
                 is_nullable: false,
                 default_constraint: None,
             },
             GrpcColumnDef {
                 name: "cpu".to_string(),
-                datatype: 10, // float64
+                datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
                 default_constraint: None,
             },
             GrpcColumnDef {
                 name: "memory".to_string(),
-                datatype: 10, // float64
+                datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
                 default_constraint: None,
             },
             GrpcColumnDef {
                 name: "disk_util".to_string(),
-                datatype: 10, // float64
+                datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
                 default_constraint: Some(
                     ColumnDefaultConstraint::Value(Value::from(9.9f64))
@@ -523,7 +527,7 @@ mod tests {
             },
             GrpcColumnDef {
                 name: "ts".to_string(),
-                datatype: 15, // timestamp
+                datatype: ColumnDataType::Timestamp as i32,
                 is_nullable: true,
                 default_constraint: None,
             },
@@ -533,6 +537,7 @@ mod tests {
             column_defs,
             time_index: "ts".to_string(),
             primary_keys: vec!["ts".to_string(), "host".to_string()],
+            create_if_not_exists: true,
             ..Default::default()
         }
     }

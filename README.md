@@ -125,7 +125,7 @@ cargo run -- --log-dir=logs --log-level=debug frontend start -c ./config/fronten
      cpu DOUBLE DEFAULT 0,
      memory DOUBLE,
      TIME INDEX (ts),
-     PRIMARY KEY(ts,host)) ENGINE=mito WITH(regions=1);
+     PRIMARY KEY(host)) ENGINE=mito WITH(regions=1);
    ```
 
 3. Insert data:
