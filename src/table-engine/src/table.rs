@@ -100,7 +100,7 @@ impl<R: Region> Table for MitoTable<R> {
                     .add_key_column(name, vector)
                     .map_err(TableError::new)?;
             } else if !column_schema.is_nullable {
-                return MissingColumnSnafu { name }.fail().map_err(TableError::from);
+                return MissingColumnSnafu { name }.fail()?;
             }
         }
         // Add value columns
@@ -116,7 +116,7 @@ impl<R: Region> Table for MitoTable<R> {
             if let Some(v) = vector {
                 put_op.add_value_column(name, v).map_err(TableError::new)?;
             } else if !column_schema.is_nullable {
-                return MissingColumnSnafu { name }.fail().map_err(TableError::from);
+                return MissingColumnSnafu { name }.fail()?;
             }
         }
 
