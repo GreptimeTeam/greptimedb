@@ -328,9 +328,7 @@ mod tests {
         let dir = TempDir::new("test_create_new_region").unwrap();
         let store_dir = dir.path().to_string_lossy();
 
-        let mut builder = Builder::default();
-
-        let accessor = builder.root(&store_dir).build().unwrap();
+        let accessor = Builder::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor);
 
         let config = EngineConfig::default();

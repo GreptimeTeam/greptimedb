@@ -22,7 +22,7 @@ mod tests {
         let tmp_dir = TempDir::new("test_region_manifest").unwrap();
         let mut builder = fs::Builder::default();
         let object_store = ObjectStore::new(
-            builder
+            fs::Builder::default()
                 .root(&tmp_dir.path().to_string_lossy())
                 .build()
                 .unwrap(),

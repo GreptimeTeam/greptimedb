@@ -180,8 +180,7 @@ mod tests {
     async fn test_statement_to_request() {
         let dir = TempDir::new("setup_test_engine_and_table").unwrap();
         let store_dir = dir.path().to_string_lossy();
-        let mut builder = Builder::default();
-        let accessor = builder.root(&store_dir).build().unwrap();
+        let accessor = Builder::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor);
 
         let sql = r#"insert into demo(host, cpu, memory, ts) values
