@@ -43,7 +43,7 @@ pub trait KvBackend: Send + Sync {
     }
 }
 
-pub type KvBackendRef = Arc<dyn KvBackend<Error = crate::error::Error> + Send + Sync>;
+pub type KvBackendRef = Arc<dyn KvBackend<Error = crate::error::Error>>;
 
 #[cfg(test)]
 mod tests {
