@@ -314,7 +314,7 @@ impl<S: LogStore> EngineInner<S> {
 mod tests {
     use datatypes::type_id::LogicalTypeId;
     use log_store::test_util::log_store_util;
-    use object_store::backend::fs::*;
+    use object_store::backend::fs::Builder;
     use store_api::storage::Region;
     use tempdir::TempDir;
 

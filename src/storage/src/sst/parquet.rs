@@ -298,7 +298,7 @@ mod tests {
     use datatypes::arrow::io::parquet::read::FileReader;
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::vectors::TimestampVector;
-    use object_store::backend::fs::*;
+    use object_store::backend::fs::Builder;
     use store_api::storage::OpType;
     use tempdir::TempDir;
 

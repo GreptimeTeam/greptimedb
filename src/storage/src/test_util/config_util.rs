@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
-use object_store::{backend::fs::*, ObjectStore};
+use object_store::{backend::fs::Builder, ObjectStore};
 
 use crate::background::JobPoolImpl;
 use crate::engine;
