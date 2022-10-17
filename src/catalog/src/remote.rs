@@ -16,7 +16,7 @@ mod manager;
 #[derive(Debug, Clone)]
 pub struct Kv(pub Vec<u8>, pub Vec<u8>);
 
-pub type ValueIter<'a, E> = Pin<Box<dyn Stream<Item = Result<Kv, E>> + Send + Sync + 'a>>;
+pub type ValueIter<'a, E> = Pin<Box<dyn Stream<Item = Result<Kv, E>> + Send + 'a>>;
 
 #[async_trait::async_trait]
 pub trait KvBackend: Send + Sync {
