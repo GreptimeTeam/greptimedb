@@ -35,5 +35,6 @@ storage = { path = "../storage" }
 table-engine = { path = "../table-engine" }
 tempdir = "0.3"
 chrono = "0.4"
+tempdir = "0.3"
 test-util = { path = "../../test-util" }
 tokio = { version = "1.0", features = ["full"] }

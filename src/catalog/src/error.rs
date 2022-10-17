@@ -115,6 +115,12 @@ pub enum Error {
 
     #[snafu(display("Failed to serialize catalog entry value"))]
     SerializeCatalogEntryValue { source: serde_json::error::Error },
+
+    #[snafu(display("IO error occurred while fetching catalog info, source: {}", source))]
+    Io {
+        backtrace: Backtrace,
+        source: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -132,9 +138,10 @@ impl ErrorExt for Error {
             | Error::DeserializeCatalogEntryValue { .. }
             | Error::SerializeCatalogEntryValue { .. } => StatusCode::Unexpected,
 
-            Error::SystemCatalog { .. } | Error::EmptyValue | Error::ValueDeserialize { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            Error::SystemCatalog { .. }
+            | Error::EmptyValue
+            | Error::ValueDeserialize { .. }
+            | Error::Io { .. } => StatusCode::StorageUnavailable,
 
             Error::ReadSystemCatalog { source, .. } => source.status_code(),
             Error::SystemCatalogTypeMismatch { source, .. } => source.status_code(),

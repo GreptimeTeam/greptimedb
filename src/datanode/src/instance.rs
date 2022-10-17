@@ -12,8 +12,8 @@ use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
-    self, CatalogSnafu, ExecuteSqlSnafu, InsertSnafu, NewCatalogSnafu, Result, TableNotFoundSnafu,
-    UnsupportedExprSnafu,
+    self, CatalogSnafu, ExecuteSqlSnafu, FindTableSnafu, InsertSnafu, NewCatalogSnafu, Result,
+    TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::metric;
 use crate::script::ScriptExecutor;
@@ -104,7 +104,7 @@ impl Instance {
         insert_batches: &[InsertBatch],
     ) -> Result<()> {
         // Create table automatically, build schema from data.
-        let table_id = self.catalog_manager.next_table_id();
+        let table_id = self.catalog_manager.next_table_id().await;
         let create_table_request =
             insert::build_create_table_request(table_id, table_name, insert_batches)?;
 
@@ -140,7 +140,10 @@ impl Instance {
         let insert_batches = insert::insert_batches(values.values)?;
         ensure!(!insert_batches.is_empty(), error::IllegalInsertDataSnafu);
 
-        let table = if let Some(table) = schema_provider.table(table_name) {
+        let table = if let Some(table) = schema_provider
+            .table(table_name)
+            .context(FindTableSnafu { table_name })?
+        {
             let schema = table.schema();
             if let Some(add_columns) = insert::find_new_columns(&schema, &insert_batches)? {
                 self.add_new_columns_to_table(table_name, add_columns)
