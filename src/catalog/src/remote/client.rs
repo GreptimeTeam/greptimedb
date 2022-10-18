@@ -2,8 +2,8 @@ use std::fmt::Debug;
 
 use async_stream::stream;
 use common_telemetry::debug;
+use futures_util::io::Cursor;
 use futures_util::AsyncReadExt;
-use futures_util::AsyncWriteExt;
 use futures_util::StreamExt;
 use opendal::ops::{OpDelete, OpList, OpRead, OpWrite};
 use opendal::{Accessor, BytesReader};
@@ -48,8 +48,8 @@ impl<T: ?Sized + Accessor> KvBackend for T {
         let key = format!("./{}", String::from_utf8_lossy(key));
 
         Box::pin(stream!({
-            let op = OpList::new("./").context(IoSnafu)?;
-            let mut files = self.list(&op).await.context(IoSnafu)?;
+            let op = OpList::new();
+            let mut files = self.list("./", op).await.context(IoSnafu)?;
             while let Some(r) = files.next().await {
                 let e = r.context(IoSnafu)?;
                 let path = e.path();
@@ -57,8 +57,9 @@ impl<T: ?Sized + Accessor> KvBackend for T {
                     debug!("Filter file:{}", path);
                     continue;
                 }
-                let op_read: OpRead = OpRead::new(path, ..).context(IoSnafu)?;
-                let mut value_reader: BytesReader = self.read(&op_read).await.context(IoSnafu)?;
+                let op_read: OpRead = OpRead::new(..);
+                let mut value_reader: BytesReader =
+                    self.read(path, op_read).await.context(IoSnafu)?;
                 let mut res = vec![];
                 value_reader.read(&mut res).await.context(IoSnafu)?;
                 let key = path.strip_prefix("./").unwrap();
@@ -69,25 +70,33 @@ impl<T: ?Sized + Accessor> KvBackend for T {
 
     async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
         let path = String::from_utf8_lossy(key).to_string();
-        let op = OpWrite::new(&path, val.len() as u64).context(IoSnafu)?;
-        let mut writer = self.write(&op).await.context(IoSnafu)?;
-        debug!("Setting file: {}, content length: {}", path, val.len());
-        writer.write_all(val).await.context(IoSnafu)
+        let op = OpWrite::new(val.len() as u64);
+        let val_len = val.len();
+        let cursor = Cursor::new(val.to_owned());
+        let bytes_written = self
+            .write(&path, op, Box::new(cursor))
+            .await
+            .context(IoSnafu)?;
+        debug!(
+            "Setting file: {}, content length: {}, bytes written: {}",
+            path, val_len, bytes_written
+        );
+        Ok(())
     }
 
     async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
         let start = format!("./{}", String::from_utf8_lossy(key));
         let end = format!("./{}", String::from_utf8_lossy(end));
 
-        let op_list = OpList::new("./").context(IoSnafu)?;
-        let mut files = self.list(&op_list).await.context(IoSnafu)?;
+        let op_list = OpList::new();
+        let mut files = self.list("./", op_list).await.context(IoSnafu)?;
         while let Some(r) = files.next().await {
             let dir = r.context(IoSnafu)?;
             let dir_bytes = dir.path().as_bytes();
             if dir_bytes >= start.as_bytes() && dir_bytes < end.as_bytes() {
                 debug!("Deleting file with path: {}", dir.path());
-                let op_delete = OpDelete::new(dir.path()).context(IoSnafu)?;
-                self.delete(&op_delete).await.context(IoSnafu)?;
+                let op_delete = OpDelete::new();
+                self.delete(dir.path(), op_delete).await.context(IoSnafu)?;
             }
         }
         Ok(())
@@ -116,13 +125,14 @@ mod tests {
     async fn test_opendal_backend() {
         common_telemetry::init_default_ut_logging();
         let dir = tempdir::TempDir::new("opendal_kv").unwrap();
-        let accessor = opendal::services::fs::Builder::default()
-            .root(dir.path().to_str().unwrap())
-            .finish()
-            .await
-            .unwrap();
+        let accessor = Arc::new(
+            opendal::services::fs::Builder::default()
+                .root(dir.path().to_str().unwrap())
+                .build()
+                .unwrap(),
+        );
 
-        let backend: KvBackendRef = Arc::new(crate::remote::OpendalBackend { accessor });
+        let backend: KvBackendRef = Arc::new(crate::remote::OpendalBackend::new(accessor));
         assert_eq!(
             HashSet::new(),
             collect_file_names(backend.clone(), "").await
