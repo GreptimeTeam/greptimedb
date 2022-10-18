@@ -9,7 +9,5 @@ mod heartbeat;
 pub mod router;
 pub mod store;
 
-pub const PROTOCOL_VERSION: u64 = 1;
-
 pub type GrpcResult<T> = std::result::Result<Response<T>, Status>;
 pub type GrpcStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + Sync + 'static>>;

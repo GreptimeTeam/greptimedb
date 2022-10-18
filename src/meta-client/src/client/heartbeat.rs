@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::AskLeaderRequest;
+use api::v1::meta::RequestHeader;
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::debug;
 use snafu::ensure;
@@ -91,9 +92,11 @@ impl Inner {
             }
         );
 
+        // TODO(jiachun): set cluster_id and member_id
+        let header = RequestHeader::new(0, 0);
         let mut leader = None;
         for addr in &self.peers {
-            let req = AskLeaderRequest::default();
+            let req = AskLeaderRequest::new(header.clone());
             let mut client = self.make_client(addr)?;
             match client.ask_leader(req).await {
                 Ok(res) => {
@@ -173,5 +176,18 @@ mod test {
             .unwrap();
 
         assert_eq!(1, client.inner.write().await.peers.len());
+    }
+
+    #[tokio::test]
+    async fn test_ask_leader_unavailable() {
+        let mut client = Client::new(ChannelManager::default());
+        client.start(&["unavailable_peer"]).await.unwrap();
+
+        let res = client.ask_leader().await;
+
+        assert!(res.is_err());
+
+        let err = res.err().unwrap();
+        assert!(matches!(err, error::Error::AskLeader { .. }));
     }
 }

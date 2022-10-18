@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::service::store::kv::KvStoreRef;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetaSrvOptions {
     pub server_addr: String,
     pub store_addr: String,

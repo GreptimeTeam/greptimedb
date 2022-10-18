@@ -13,8 +13,9 @@ use api::v1::meta::RangeRequest;
 use api::v1::meta::RangeResponse;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
+use common_grpc::channel_manager::ChannelConfig;
 use common_grpc::channel_manager::ChannelManager;
-use common_grpc::channel_manager::Config;
+use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
 use router::Client as RouterClient;
 use snafu::OptionExt;
@@ -25,9 +26,9 @@ use crate::error::Result;
 
 #[derive(Clone, Debug, Default)]
 pub struct MetaClientBuilder {
-    start_heartbeat_client: bool,
-    start_router_client: bool,
-    start_store_client: bool,
+    heartbeat_client: bool,
+    router_client: bool,
+    store_client: bool,
     channel_manager: Option<ChannelManager>,
 }
 
@@ -36,23 +37,23 @@ impl MetaClientBuilder {
         MetaClientBuilder::default()
     }
 
-    pub fn start_heartbeat_client(self) -> Self {
+    pub fn heartbeat_client(self, enabled: bool) -> Self {
         Self {
-            start_heartbeat_client: true,
+            heartbeat_client: enabled,
             ..self
         }
     }
 
-    pub fn start_router_client(self) -> Self {
+    pub fn router_client(self, enabled: bool) -> Self {
         Self {
-            start_router_client: true,
+            router_client: enabled,
             ..self
         }
     }
 
-    pub fn start_store_client(self) -> Self {
+    pub fn store_client(self, enabled: bool) -> Self {
         Self {
-            start_store_client: true,
+            store_client: enabled,
             ..self
         }
     }
@@ -74,16 +75,22 @@ impl MetaClientBuilder {
             Default::default()
         };
 
-        if self.start_heartbeat_client {
-            meta_client.heartbeat_client =
-                Some(HeartbeatClient::new(meta_client.channel_manager.clone()));
+        if let (false, false, false) =
+            (self.heartbeat_client, self.router_client, self.store_client)
+        {
+            panic!("At least one client needs to be enabled.")
         }
-        if self.start_router_client {
-            meta_client.router_client =
-                Some(RouterClient::new(meta_client.channel_manager.clone()));
+
+        let mgr = meta_client.channel_manager.clone();
+
+        if self.heartbeat_client {
+            meta_client.heartbeat_client = Some(HeartbeatClient::new(mgr.clone()));
         }
-        if self.start_store_client {
-            meta_client.store_client = Some(StoreClient::new(meta_client.channel_manager.clone()));
+        if self.router_client {
+            meta_client.router_client = Some(RouterClient::new(mgr.clone()));
+        }
+        if self.store_client {
+            meta_client.store_client = Some(StoreClient::new(mgr));
         }
 
         meta_client
@@ -104,14 +111,19 @@ impl MetaClient {
         U: AsRef<str>,
         A: AsRef<[U]> + Clone,
     {
+        info!("MetaClient channel config: {:?}", self.channel_config());
+
         if let Some(heartbeat_client) = &mut self.heartbeat_client {
             heartbeat_client.start(urls.clone()).await?;
+            info!("Heartbeat client started");
         }
         if let Some(router_client) = &mut self.router_client {
             router_client.start(urls.clone()).await?;
+            info!("Router client started");
         }
         if let Some(store_client) = &mut self.store_client {
             store_client.start(urls).await?;
+            info!("Store client started");
         }
 
         Ok(())
@@ -212,7 +224,7 @@ impl MetaClient {
         self.store_client.clone()
     }
 
-    pub fn channel_manager_config(&self) -> Option<Config> {
+    pub fn channel_config(&self) -> Option<ChannelConfig> {
         self.channel_manager.config()
     }
 }
@@ -225,21 +237,21 @@ mod tests {
     async fn test_meta_client_builder() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
 
-        let mut meta_client = MetaClientBuilder::new().start_heartbeat_client().build();
+        let mut meta_client = MetaClientBuilder::new().heartbeat_client(true).build();
         assert!(meta_client.heartbeat_client().is_some());
         assert!(meta_client.router_client().is_none());
         assert!(meta_client.store_client().is_none());
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.heartbeat_client().unwrap().is_started().await);
 
-        let mut meta_client = MetaClientBuilder::new().start_router_client().build();
+        let mut meta_client = MetaClientBuilder::new().router_client(true).build();
         assert!(meta_client.heartbeat_client().is_none());
         assert!(meta_client.router_client().is_some());
         assert!(meta_client.store_client().is_none());
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.router_client().unwrap().is_started().await);
 
-        let mut meta_client = MetaClientBuilder::new().start_store_client().build();
+        let mut meta_client = MetaClientBuilder::new().store_client(true).build();
         assert!(meta_client.heartbeat_client().is_none());
         assert!(meta_client.router_client().is_none());
         assert!(meta_client.store_client().is_some());
@@ -247,9 +259,9 @@ mod tests {
         assert!(meta_client.store_client().unwrap().is_started().await);
 
         let mut meta_client = MetaClientBuilder::new()
-            .start_heartbeat_client()
-            .start_router_client()
-            .start_store_client()
+            .heartbeat_client(true)
+            .router_client(true)
+            .store_client(true)
             .build();
         assert!(meta_client.heartbeat_client().is_some());
         assert!(meta_client.router_client().is_some());
@@ -258,5 +270,63 @@ mod tests {
         assert!(meta_client.heartbeat_client().unwrap().is_started().await);
         assert!(meta_client.router_client().unwrap().is_started().await);
         assert!(meta_client.store_client().unwrap().is_started().await);
+    }
+
+    #[tokio::test]
+    async fn test_not_start_heartbeat_client() {
+        let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
+
+        let mut meta_client = MetaClientBuilder::new()
+            .router_client(true)
+            .store_client(true)
+            .build();
+
+        meta_client.start(urls).await.unwrap();
+
+        let res = meta_client.ask_leader().await;
+
+        assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_not_start_router_client() {
+        let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
+
+        let mut meta_client = MetaClientBuilder::new()
+            .heartbeat_client(true)
+            .store_client(true)
+            .build();
+
+        meta_client.start(urls).await.unwrap();
+
+        let res = meta_client.create_route(CreateRequest::default()).await;
+
+        assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_not_start_store_client() {
+        let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
+
+        let mut meta_client = MetaClientBuilder::new()
+            .heartbeat_client(true)
+            .router_client(true)
+            .build();
+
+        meta_client.start(urls).await.unwrap();
+
+        let res = meta_client.put(PutRequest::default()).await;
+
+        assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
+    }
+
+    #[should_panic]
+    #[test]
+    fn test_enable_at_least_one_client() {
+        let _ = MetaClientBuilder::new()
+            .heartbeat_client(false)
+            .router_client(false)
+            .store_client(false)
+            .build();
     }
 }

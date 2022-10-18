@@ -197,4 +197,63 @@ mod test {
 
         assert_eq!(1, client.inner.write().await.peers.len());
     }
+
+    #[tokio::test]
+    async fn test_range_unavailable() {
+        let mut client = Client::new(ChannelManager::default());
+        client.start(&["unknow_peer"]).await.unwrap();
+
+        let req = RangeRequest {
+            key: b"key1".to_vec(),
+            ..Default::default()
+        };
+        let res = client.range(req).await;
+
+        assert!(res.is_err());
+
+        let err = res.err().unwrap();
+        assert!(
+            matches!(err, error::Error::TonicStatus { source, .. } if source.code() == tonic::Code::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_put_unavailable() {
+        let mut client = Client::new(ChannelManager::default());
+        client.start(&["unavailable_peer"]).await.unwrap();
+
+        let req = PutRequest {
+            key: b"key1".to_vec(),
+            value: b"value1".to_vec(),
+            prev_kv: true,
+            ..Default::default()
+        };
+        let res = client.put(req).await;
+
+        assert!(res.is_err());
+
+        let err = res.err().unwrap();
+        assert!(
+            matches!(err, error::Error::TonicStatus { source, .. } if source.code() == tonic::Code::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_unavailable() {
+        let mut client = Client::new(ChannelManager::default());
+        client.start(&["unavailable_peer"]).await.unwrap();
+
+        let req = DeleteRangeRequest {
+            key: b"key1".to_vec(),
+            ..Default::default()
+        };
+        let res = client.delete_range(req).await;
+
+        assert!(res.is_err());
+
+        let err = res.err().unwrap();
+        assert!(
+            matches!(err, error::Error::TonicStatus { source, .. } if source.code() == tonic::Code::Unavailable)
+        );
+    }
 }

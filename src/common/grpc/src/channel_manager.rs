@@ -14,48 +14,157 @@ const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 
 #[derive(Clone, Debug)]
 pub struct ChannelManager {
-    config: Option<Config>,
+    config: Option<ChannelConfig>,
     pool: Arc<Mutex<Pool>>,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct Config {
-    /// A timeout to each request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelConfig {
     pub timeout: Option<Duration>,
+    pub connect_timeout: Option<Duration>,
+    pub concurrency_limit: Option<usize>,
+    pub rate_limit: Option<(u64, Duration)>,
+    pub initial_stream_window_size: Option<u32>,
+    pub initial_connection_window_size: Option<u32>,
+    pub http2_keep_alive_interval: Option<Duration>,
+    pub http2_keep_alive_timeout: Option<Duration>,
+    pub http2_keep_alive_while_idle: Option<bool>,
+    pub http2_adaptive_window: Option<bool>,
+    pub tcp_keepalive: Option<Duration>,
+    pub tcp_nodelay: bool,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            timeout: None,
+            connect_timeout: None,
+            concurrency_limit: None,
+            rate_limit: None,
+            initial_stream_window_size: None,
+            initial_connection_window_size: None,
+            http2_keep_alive_interval: None,
+            http2_keep_alive_timeout: None,
+            http2_keep_alive_while_idle: None,
+            http2_adaptive_window: None,
+            tcp_keepalive: None,
+            tcp_nodelay: true,
+        }
+    }
+}
+
+impl ChannelConfig {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// A timeout to each request.
+    pub fn timeout(self, timeout: Duration) -> Self {
+        Self {
+            timeout: Some(timeout),
+            ..self
+        }
+    }
+
     /// A timeout to connecting to the uri.
     ///
     /// Defaults to no timeout.
-    pub connect_timeout: Option<Duration>,
+    pub fn connect_timeout(self, timeout: Duration) -> Self {
+        Self {
+            connect_timeout: Some(timeout),
+            ..self
+        }
+    }
+
     /// A concurrency limit to each request.
-    pub concurrency_limit: Option<usize>,
+    pub fn concurrency_limit(self, limit: usize) -> Self {
+        Self {
+            concurrency_limit: Some(limit),
+            ..self
+        }
+    }
+
     /// A rate limit to each request.
-    pub rate_limit: Option<(u64, Duration)>,
+    pub fn rate_limit(self, limit: u64, duration: Duration) -> Self {
+        Self {
+            rate_limit: Some((limit, duration)),
+            ..self
+        }
+    }
+
     /// Sets the SETTINGS_INITIAL_WINDOW_SIZE option for HTTP2 stream-level flow control.
     /// Default is 65,535
-    pub initial_stream_window_size: Option<u32>,
+    pub fn initial_stream_window_size(self, size: u32) -> Self {
+        Self {
+            initial_stream_window_size: Some(size),
+            ..self
+        }
+    }
+
     /// Sets the max connection-level flow control for HTTP2
     ///
     /// Default is 65,535
-    pub initial_connection_window_size: Option<u32>,
+    pub fn initial_connection_window_size(self, size: u32) -> Self {
+        Self {
+            initial_connection_window_size: Some(size),
+            ..self
+        }
+    }
+
     /// Set http2 KEEP_ALIVE_INTERVAL. Uses hyper’s default otherwise.
-    pub http2_keep_alive_interval: Option<Duration>,
+    pub fn http2_keep_alive_interval(self, duration: Duration) -> Self {
+        Self {
+            http2_keep_alive_interval: Some(duration),
+            ..self
+        }
+    }
+
     /// Set http2 KEEP_ALIVE_TIMEOUT. Uses hyper’s default otherwise.
-    pub http2_keep_alive_timeout: Option<Duration>,
+    pub fn http2_keep_alive_timeout(self, duration: Duration) -> Self {
+        Self {
+            http2_keep_alive_timeout: Some(duration),
+            ..self
+        }
+    }
+
     /// Set http2 KEEP_ALIVE_WHILE_IDLE. Uses hyper’s default otherwise.
-    pub http2_keep_alive_while_idle: Option<bool>,
+    pub fn http2_keep_alive_while_idle(self, enabled: bool) -> Self {
+        Self {
+            http2_keep_alive_while_idle: Some(enabled),
+            ..self
+        }
+    }
+
     /// Sets whether to use an adaptive flow control. Uses hyper’s default otherwise.
-    pub http2_adaptive_window: Option<bool>,
+    pub fn http2_adaptive_window(self, enabled: bool) -> Self {
+        Self {
+            http2_adaptive_window: Some(enabled),
+            ..self
+        }
+    }
+
     /// Set whether TCP keepalive messages are enabled on accepted connections.
     ///
     /// If None is specified, keepalive is disabled, otherwise the duration specified
     /// will be the time to remain idle before sending TCP keepalive probes.
     ///
     /// Default is no keepalive (None)
-    pub tcp_keepalive: Option<Duration>,
+    pub fn tcp_keepalive(self, duration: Duration) -> Self {
+        Self {
+            tcp_keepalive: Some(duration),
+            ..self
+        }
+    }
+
     /// Set the value of TCP_NODELAY option for accepted connections.
     ///
     /// Enabled by default.
-    pub tcp_nodelay: bool,
+    pub fn tcp_nodelay(self, enabled: bool) -> Self {
+        Self {
+            tcp_nodelay: enabled,
+            ..self
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -74,13 +183,13 @@ impl ChannelManager {
         Default::default()
     }
 
-    pub fn with_config(config: Config) -> Self {
+    pub fn with_config(config: ChannelConfig) -> Self {
         let mut manager = ChannelManager::new();
         manager.config = Some(config);
         manager
     }
 
-    pub fn config(&self) -> Option<Config> {
+    pub fn config(&self) -> Option<ChannelConfig> {
         self.config.clone()
     }
 
@@ -108,11 +217,11 @@ impl ChannelManager {
             if let Some((limit, dur)) = cfg.rate_limit {
                 endpoint = endpoint.rate_limit(limit, dur);
             }
-            if let Some(sz) = cfg.initial_stream_window_size {
-                endpoint = endpoint.initial_stream_window_size(sz);
+            if let Some(size) = cfg.initial_stream_window_size {
+                endpoint = endpoint.initial_stream_window_size(size);
             }
-            if let Some(sz) = cfg.initial_connection_window_size {
-                endpoint = endpoint.initial_connection_window_size(sz);
+            if let Some(size) = cfg.initial_connection_window_size {
+                endpoint = endpoint.initial_connection_window_size(size);
             }
             if let Some(dur) = cfg.http2_keep_alive_interval {
                 endpoint = endpoint.http2_keep_alive_interval(dur);
@@ -218,7 +327,23 @@ mod tests {
             channels: HashMap::default(),
         };
         let pool = Arc::new(Mutex::new(pool));
-        let mgr = ChannelManager { pool, config: None };
+        let config = ChannelConfig::new()
+            .timeout(Duration::from_secs(1))
+            .connect_timeout(Duration::from_secs(1))
+            .concurrency_limit(1)
+            .rate_limit(1, Duration::from_secs(1))
+            .initial_stream_window_size(1)
+            .initial_connection_window_size(1)
+            .http2_keep_alive_interval(Duration::from_secs(1))
+            .http2_keep_alive_timeout(Duration::from_secs(1))
+            .http2_keep_alive_while_idle(true)
+            .http2_adaptive_window(true)
+            .tcp_keepalive(Duration::from_secs(1))
+            .tcp_nodelay(true);
+        let mgr = ChannelManager {
+            pool,
+            config: Some(config),
+        };
         let addr = "test_uri";
 
         for i in 0..10 {
@@ -243,5 +368,59 @@ mod tests {
         });
 
         assert_eq!(0, pool.get_mut(addr).unwrap().access);
+    }
+
+    #[test]
+    fn test_config() {
+        let default_cfg = ChannelConfig::new();
+        assert_eq!(
+            ChannelConfig {
+                timeout: None,
+                connect_timeout: None,
+                concurrency_limit: None,
+                rate_limit: None,
+                initial_stream_window_size: None,
+                initial_connection_window_size: None,
+                http2_keep_alive_interval: None,
+                http2_keep_alive_timeout: None,
+                http2_keep_alive_while_idle: None,
+                http2_adaptive_window: None,
+                tcp_keepalive: None,
+                tcp_nodelay: true,
+            },
+            default_cfg
+        );
+
+        let cfg = default_cfg
+            .timeout(Duration::from_secs(3))
+            .connect_timeout(Duration::from_secs(5))
+            .concurrency_limit(6)
+            .rate_limit(5, Duration::from_secs(1))
+            .initial_stream_window_size(10)
+            .initial_connection_window_size(20)
+            .http2_keep_alive_interval(Duration::from_secs(1))
+            .http2_keep_alive_timeout(Duration::from_secs(3))
+            .http2_keep_alive_while_idle(true)
+            .http2_adaptive_window(true)
+            .tcp_keepalive(Duration::from_secs(2))
+            .tcp_nodelay(false);
+
+        assert_eq!(
+            ChannelConfig {
+                timeout: Some(Duration::from_secs(3)),
+                connect_timeout: Some(Duration::from_secs(5)),
+                concurrency_limit: Some(6),
+                rate_limit: Some((5, Duration::from_secs(1))),
+                initial_stream_window_size: Some(10),
+                initial_connection_window_size: Some(20),
+                http2_keep_alive_interval: Some(Duration::from_secs(1)),
+                http2_keep_alive_timeout: Some(Duration::from_secs(3)),
+                http2_keep_alive_while_idle: Some(true),
+                http2_adaptive_window: Some(true),
+                tcp_keepalive: Some(Duration::from_secs(2)),
+                tcp_nodelay: false,
+            },
+            cfg
+        );
     }
 }

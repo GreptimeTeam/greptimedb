@@ -43,9 +43,8 @@ message RouteResponse {
 message CreateRequest {
   RequestHeader header = 1;
 
-  Tenant tenant = 2;
-  TableName table_name = 3;
-  repeated Region regions = 4;
+  TableName table_name = 2;
+  repeated Region regions = 3;
 }
 
 message CreateResponse {
@@ -67,12 +66,6 @@ message RegionRoute {
   repeated uint64 follower_peer_indexes = 3;
 }
 
-message Tenant {
-  uint64 id = 1;
-  string name = 2;
-  map<string, string> attrs = 3;
-}
-
 message TableName {
   string catalog_name = 1;
   string schema_name = 2;
@@ -86,7 +79,7 @@ message Table {
 
 message Region {
   uint64 id = 1;
-  string region_name = 2;
+  string name = 2;
   Peer peer = 3;
 
   // PARTITION `region_name` VALUES LESS THAN (value_list)
