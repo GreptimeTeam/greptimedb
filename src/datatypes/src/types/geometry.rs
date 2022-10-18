@@ -10,6 +10,12 @@ pub enum GeometryType {
     Point,
 }
 
+impl Default for GeometryType {
+    fn default() -> Self {
+        Self::Point
+    }
+}
+
 impl DataType for GeometryType {
     fn name(&self) -> &str {
         "Geometry"
@@ -25,6 +31,7 @@ impl DataType for GeometryType {
         }
     }
 
+    // TODO: check if unreachable
     fn as_arrow_type(&self) -> arrow::datatypes::DataType {
         unreachable!()
     }

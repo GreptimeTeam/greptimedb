@@ -7,6 +7,7 @@ use self::point::{PointVector, PointVectorBuilder};
 use super::{MutableVector, Validity, Value, Vector};
 use crate::error::SerializeSnafu;
 use crate::prelude::ScalarRef;
+use crate::types::GeometryType;
 use crate::value::{GeometryValueRef, ValueRef};
 use crate::vectors::{impl_try_from_arrow_array_for_vector, impl_validity_for_vector};
 use crate::{
@@ -25,7 +26,11 @@ pub enum GeometryVector {
 
 impl Vector for GeometryVector {
     fn data_type(&self) -> crate::data_type::ConcreteDataType {
-        ConcreteDataType::geometry_datatype()
+        let subtype = match self {
+            Self::PointVector(_) => GeometryType::Point,
+        };
+
+        ConcreteDataType::geometry_datatype(subtype)
     }
 
     fn vector_type_name(&self) -> String {
@@ -161,7 +166,11 @@ impl GeometryVectorBuilder {
 
 impl MutableVector for GeometryVectorBuilder {
     fn data_type(&self) -> crate::data_type::ConcreteDataType {
-        ConcreteDataType::geometry_datatype()
+        let subtype = match self {
+            Self::PointVectorBuilder(_) => GeometryType::Point,
+        };
+
+        ConcreteDataType::geometry_datatype(subtype)
     }
 
     fn len(&self) -> usize {
@@ -276,7 +285,10 @@ mod tests {
         assert_eq!(vector.get(0), value.to_value());
         assert_eq!(vector.get_data(0).unwrap().to_owned_scalar(), value);
 
-        assert_eq!(vector.data_type(), ConcreteDataType::geometry_datatype());
+        assert_eq!(
+            vector.data_type(),
+            ConcreteDataType::geometry_datatype(GeometryType::Point)
+        );
 
         let iter = vector.iter_data();
         let mut cnt: usize = 0;
@@ -301,11 +313,9 @@ mod tests {
 
         assert_eq!(vector.memory_size(), 32); //2 elements (f64,f64)=2*2*8
 
-
         assert_eq!(
             format!("{:?}",vector.serialize_to_json().unwrap()),
             "[Object {\"Point\": Object {\"type\": String(\"Point\"), \"coordinates\": Array [Number(2.0), Number(1.0)]}}, Null]".to_string()
         )
-
     }
 }

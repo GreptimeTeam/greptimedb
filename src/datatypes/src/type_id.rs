@@ -1,3 +1,5 @@
+use crate::types::GeometryType;
+
 /// Unique identifier for logical data type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogicalTypeId {
@@ -66,7 +68,8 @@ impl LogicalTypeId {
             LogicalTypeId::List => {
                 ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
             }
-            LogicalTypeId::Geometry => ConcreteDataType::geometry_datatype(),
+            // FIXME(sunng87): check if default type works
+            LogicalTypeId::Geometry => ConcreteDataType::geometry_datatype(GeometryType::default()),
         }
     }
 }

@@ -188,8 +188,9 @@ impl ConcreteDataType {
         ConcreteDataType::Timestamp(TimestampType::new(TimeUnit::Millisecond))
     }
 
-    pub fn geometry_datatype() -> Self {
-        ConcreteDataType::Geometry(GeometryType::Point)
+    // FIXME: specify inner type
+    pub fn geometry_datatype(inner_type: GeometryType) -> Self {
+        ConcreteDataType::Geometry(inner_type)
     }
 
     /// Converts from arrow timestamp unit to

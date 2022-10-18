@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Result};
 use crate::prelude::*;
+use crate::types::GeometryType;
 use crate::vectors::all::GeometryVector;
 use crate::vectors::ListVector;
 
@@ -76,7 +77,7 @@ impl Value {
             Value::Date(_) => ConcreteDataType::date_datatype(),
             Value::DateTime(_) => ConcreteDataType::date_datatype(),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
-            Value::Geometry(_) => ConcreteDataType::geometry_datatype(),
+            Value::Geometry(geom) => ConcreteDataType::geometry_datatype(geom.subtype()),
         }
     }
 
@@ -328,6 +329,12 @@ impl GeometryValue {
     }
     pub fn to_value(self) -> Value {
         Value::Geometry(self)
+    }
+
+    pub fn subtype(&self) -> GeometryType {
+        match self {
+            Self::Point(_) => GeometryType::Point,
+        }
     }
 }
 
