@@ -1,19 +1,10 @@
-use std::sync::Arc;
-
-use arrow::array::{
-    Array, FixedSizeListArray, Float64Vec, ListArray, MutableArray, MutableFixedSizeListArray,
-    PrimitiveArray, StructArray,
-};
-use arrow::datatypes::DataType::{self, Float64, List};
+use arrow::array::{Array, Float64Vec, MutableArray, PrimitiveArray, StructArray};
+use arrow::datatypes::DataType::{self, Float64};
 use arrow::datatypes::Field;
-use geo::Point;
 
-use crate::value::{GeometryValue, GeometryValueRef, OrderedF64, Value, ValueRef};
+use crate::prelude::Validity;
+use crate::value::{GeometryValue, Value};
 use crate::vectors::impl_validity_for_vector;
-use crate::{
-    prelude::{ScalarVector, ScalarVectorBuilder, Validity, Vector},
-    vectors::MutableVector,
-};
 #[derive(Debug, Clone, PartialEq)]
 pub struct PointVector {
     pub array: StructArray,
@@ -29,9 +20,9 @@ impl PointVector {
     }
 
     pub fn slice(&self, offset: usize, length: usize) -> Self {
-        return Self {
+        Self {
             array: self.array.slice(offset, length),
-        };
+        }
     }
 
     pub fn get(&self, index: usize) -> Value {
@@ -67,12 +58,18 @@ pub struct PointVectorBuilder {
     pub array_y: Float64Vec,
 }
 
-impl PointVectorBuilder {
-    pub fn new() -> Self {
+impl Default for PointVectorBuilder {
+    fn default() -> Self {
         Self {
             array_x: Float64Vec::new(),
             array_y: Float64Vec::new(),
         }
+    }
+}
+
+impl PointVectorBuilder {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
@@ -102,7 +99,7 @@ impl PointVectorBuilder {
             Field::new("x", Float64, true),
             Field::new("y", Float64, true),
         ];
-        let validity = x.validity().map(|validity| validity.clone());
+        let validity = x.validity().cloned();
         let array = StructArray::new(DataType::Struct(fields), vec![x, y], validity);
 
         PointVector { array }

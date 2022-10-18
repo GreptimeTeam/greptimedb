@@ -258,7 +258,7 @@ fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Concre
                 if type_name.value.eq_ignore_ascii_case(DateTimeType::name()) {
                     Ok(ConcreteDataType::datetime_datatype())
                 } else if type_name.value.eq_ignore_ascii_case(GeometryType::name()) {
-                    Ok(ConcreteDataType::geometry_datatype())
+                    Ok(ConcreteDataType::geometry_datatype(GeometryType::Point))
                 } else {
                     error::SqlTypeNotSupportedSnafu {
                         t: data_type.clone(),

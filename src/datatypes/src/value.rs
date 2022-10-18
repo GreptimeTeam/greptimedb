@@ -17,6 +17,7 @@ use wkt::Wkt;
 
 use crate::error::{self, Result};
 use crate::prelude::*;
+use crate::types::GeometryType;
 use crate::vectors::all::GeometryVector;
 use crate::vectors::ListVector;
 
@@ -81,7 +82,7 @@ impl Value {
             Value::Date(_) => ConcreteDataType::date_datatype(),
             Value::DateTime(_) => ConcreteDataType::date_datatype(),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
-            Value::Geometry(_) => ConcreteDataType::geometry_datatype(),
+            Value::Geometry(geom) => ConcreteDataType::geometry_datatype(geom.subtype()),
         }
     }
 
@@ -357,6 +358,12 @@ impl GeometryValue {
             GeometryValue::Point(p) => p.wkt_string(),
         }
     }
+
+    pub fn subtype(&self) -> GeometryType {
+        match self {
+            Self::Point(_) => GeometryType::Point,
+        }
+    }
 }
 
 impl Default for GeometryValue {
@@ -598,7 +605,7 @@ impl<'a> GeometryValueRef<'a> {
     fn to_value(self) -> Value {
         match self {
             GeometryValueRef::Indexed { vector, idx } => vector.get(idx),
-            GeometryValueRef::Ref { val } => Value::Geometry(val.clone()),
+            GeometryValueRef::Ref { val } => Value::Geometry(*val),
         }
     }
 }
@@ -612,7 +619,7 @@ impl<'a> PartialEq for GeometryValueRef<'a> {
 impl<'a> Eq for GeometryValueRef<'a> {}
 
 impl<'a> Ord for GeometryValueRef<'a> {
-    fn cmp(&self, other: &Self) -> Ordering {
+    fn cmp(&self, _other: &Self) -> Ordering {
         unreachable!()
     }
 }

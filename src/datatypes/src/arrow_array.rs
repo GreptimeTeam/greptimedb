@@ -1,5 +1,3 @@
-use std::process::id;
-
 use arrow::array::{
     self, Array, BinaryArray as ArrowBinaryArray, MutableBinaryArray as ArrowMutableBinaryArray,
     MutableUtf8Array, PrimitiveArray, StructArray, Utf8Array,
@@ -11,8 +9,6 @@ use snafu::OptionExt;
 use crate::error::{ConversionSnafu, Result};
 use crate::prelude::ConcreteDataType;
 use crate::value::Value;
-use crate::vectors::all::GeometryVector;
-use crate::vectors::Vector;
 
 pub type BinaryArray = ArrowBinaryArray<i64>;
 pub type MutableBinaryArray = ArrowMutableBinaryArray<i64>;

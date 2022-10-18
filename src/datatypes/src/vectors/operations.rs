@@ -122,11 +122,11 @@ where
     }
 }
 impl VectorOp for GeometryVector {
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+    fn replicate(&self, _offsets: &[usize]) -> VectorRef {
         todo!()
     }
 
-    fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+    fn dedup(&self, _selected: &mut MutableBitmap, _prev_vector: Option<&dyn Vector>) {
         todo!()
     }
 

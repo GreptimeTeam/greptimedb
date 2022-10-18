@@ -145,7 +145,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::List(field) => Self::List(ListType::new(
                 ConcreteDataType::from_arrow_type(&field.data_type),
             )),
-            ArrowDataType::Struct(_) => ConcreteDataType::geometry_datatype(),
+            ArrowDataType::Struct(_) => ConcreteDataType::geometry_datatype(GeometryType::Point),
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
@@ -190,8 +190,9 @@ impl ConcreteDataType {
         ConcreteDataType::Timestamp(TimestampType::new(TimeUnit::Millisecond))
     }
 
-    pub fn geometry_datatype() -> Self {
-        ConcreteDataType::Geometry(GeometryType::Point)
+    // FIXME: specify inner type
+    pub fn geometry_datatype(inner_type: GeometryType) -> Self {
+        ConcreteDataType::Geometry(inner_type)
     }
 
     /// Converts from arrow timestamp unit to

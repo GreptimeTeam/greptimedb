@@ -1,17 +1,16 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, MutableArray, StructArray};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 
 use self::point::{PointVector, PointVectorBuilder};
-use super::{MutableVector, Validity, Value, Vector};
+use super::{MutableVector, Vector};
 use crate::error::SerializeSnafu;
 use crate::prelude::ScalarRef;
+use crate::types::GeometryType;
 use crate::value::{GeometryValueRef, ValueRef};
-use crate::vectors::{impl_try_from_arrow_array_for_vector, impl_validity_for_vector};
 use crate::{
     data_type::ConcreteDataType,
-    error,
     prelude::{ScalarVector, ScalarVectorBuilder},
     serialize::Serializable,
     value::GeometryValue,
@@ -25,7 +24,11 @@ pub enum GeometryVector {
 
 impl Vector for GeometryVector {
     fn data_type(&self) -> crate::data_type::ConcreteDataType {
-        ConcreteDataType::geometry_datatype()
+        let subtype = match self {
+            Self::PointVector(_) => GeometryType::Point,
+        };
+
+        ConcreteDataType::geometry_datatype(subtype)
     }
 
     fn vector_type_name(&self) -> String {
@@ -131,7 +134,7 @@ impl<'a> Iterator for GeometryVectorIter<'a> {
     type Item = Option<GeometryValueRef<'a>>;
     fn next(&mut self) -> Option<Self::Item> {
         let pos = self.pos;
-        self.pos = self.pos + 1;
+        self.pos += 1;
 
         if self.vector.len() <= pos {
             return None;
@@ -161,7 +164,11 @@ impl GeometryVectorBuilder {
 
 impl MutableVector for GeometryVectorBuilder {
     fn data_type(&self) -> crate::data_type::ConcreteDataType {
-        ConcreteDataType::geometry_datatype()
+        let subtype = match self {
+            Self::PointVectorBuilder(_) => GeometryType::Point,
+        };
+
+        ConcreteDataType::geometry_datatype(subtype)
     }
 
     fn len(&self) -> usize {
@@ -221,7 +228,7 @@ impl MutableVector for GeometryVectorBuilder {
 impl ScalarVectorBuilder for GeometryVectorBuilder {
     type VectorType = GeometryVector;
 
-    fn with_capacity(capacity: usize) -> Self {
+    fn with_capacity(_capacity: usize) -> Self {
         unimplemented!()
     }
 
@@ -295,14 +302,17 @@ mod tests {
         assert_eq!(vector.get(0), value.to_value());
         assert_eq!(vector.get_data(0).unwrap().to_owned_scalar(), value);
 
-        assert_eq!(vector.data_type(), ConcreteDataType::geometry_datatype());
+        assert_eq!(
+            vector.data_type(),
+            ConcreteDataType::geometry_datatype(GeometryType::Point)
+        );
 
         let iter = vector.iter_data();
         let mut cnt: usize = 0;
 
         for i in iter {
             assert_eq!(i, vector.get_data(cnt));
-            cnt = cnt + 1;
+            cnt += 1;
         }
         assert_eq!(cnt, vector.len());
 

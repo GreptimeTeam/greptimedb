@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::arrow::datatypes::DataType::Float64;
 use crate::data_type::DataType;
-use crate::prelude::{DataTypeRef, LogicalTypeId, Value};
+use crate::prelude::LogicalTypeId;
 use crate::value::GeometryValue;
 use crate::vectors::geometry::GeometryVectorBuilder;
 
@@ -12,6 +12,12 @@ const GEOMETRY_TYPE_NAME: &str = "Geometry";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GeometryType {
     Point,
+}
+
+impl Default for GeometryType {
+    fn default() -> Self {
+        Self::Point
+    }
 }
 
 impl DataType for GeometryType {
@@ -29,6 +35,7 @@ impl DataType for GeometryType {
         }
     }
 
+    // TODO: check if unreachable
     fn as_arrow_type(&self) -> arrow::datatypes::DataType {
         let fields = vec![
             Field::new("x", Float64, true),
