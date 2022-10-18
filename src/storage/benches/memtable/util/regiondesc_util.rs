@@ -5,6 +5,7 @@ use store_api::storage::{
 };
 
 use super::{schema_util::ColumnDef, TIMESTAMP_NAME};
+
 pub struct RegionDescBuilder {
     name: String,
     last_column_id: ColumnId,
@@ -15,18 +16,27 @@ pub struct RegionDescBuilder {
 impl RegionDescBuilder {
     pub fn new<T: Into<String>>(name: T) -> Self {
         let key_builder = RowKeyDescriptorBuilder::new(
-            ColumnDescriptorBuilder::new(2, TIMESTAMP_NAME, ConcreteDataType::int64_datatype())
-                .is_nullable(false)
-                .build()
-                .unwrap(),
+            ColumnDescriptorBuilder::new(
+                1,
+                TIMESTAMP_NAME,
+                ConcreteDataType::timestamp_millis_datatype(),
+            )
+            .is_nullable(false)
+            .build()
+            .unwrap(),
         );
 
         Self {
             name: name.into(),
-            last_column_id: 2,
+            last_column_id: 1,
             key_builder,
             default_cf_builder: ColumnFamilyDescriptorBuilder::default(),
         }
+    }
+
+    pub fn enable_version_column(mut self, enable: bool) -> Self {
+        self.key_builder = self.key_builder.enable_version_column(enable);
+        self
     }
 
     pub fn push_value_column(mut self, column_def: ColumnDef) -> Self {

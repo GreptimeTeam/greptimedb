@@ -166,15 +166,16 @@ impl Inserter {
     }
 }
 
-#[cfg(debug_assertions)]
 fn validate_input_and_memtable_schemas(batch: &WriteBatch, memtables: &MemtableSet) {
-    let batch_schema = batch.schema();
-    for (_, memtable) in memtables.iter() {
-        let memtable_schema = memtable.schema();
-        let user_schema = memtable_schema.user_schema();
-        debug_assert_eq!(batch_schema.version(), user_schema.version());
-        // Only validate column schemas.
-        debug_assert_eq!(batch_schema.column_schemas(), user_schema.column_schemas());
+    if cfg!(debug_assertions) {
+        let batch_schema = batch.schema();
+        for (_, memtable) in memtables.iter() {
+            let memtable_schema = memtable.schema();
+            let user_schema = memtable_schema.user_schema();
+            debug_assert_eq!(batch_schema.version(), user_schema.version());
+            // Only validate column schemas.
+            debug_assert_eq!(batch_schema.column_schemas(), user_schema.column_schemas());
+        }
     }
 }
 

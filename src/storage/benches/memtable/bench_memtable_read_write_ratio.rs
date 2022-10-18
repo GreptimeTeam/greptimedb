@@ -114,14 +114,24 @@ fn bench_memtable_read_write_ratio(c: &mut Criterion) {
         // the time is a little different the real time
         let read_num = READ_NUM.load(Ordering::Relaxed);
         let read_time = READ_SECS.load(Ordering::Relaxed);
-        let read_tps = read_num as f64 / read_time as f64;
+        let read_tps = if read_time != 0.0 {
+            read_num as f64 / read_time as f64
+        } else {
+            0.0
+        };
         let write_num = WRITE_NUM.load(Ordering::Relaxed);
         let write_time = WRITE_SECS.load(Ordering::Relaxed);
-        let write_tps = write_num as f64 / write_time as f64;
-        println!(
-            "\nread numbers: {}, read thrpt: {}\nwrite numbers: {}, write thrpt {}\n",
-            read_num, read_tps, write_num, write_tps
-        );
+        let write_tps = if write_time != 0.0 {
+            write_num as f64 / write_time as f64
+        } else {
+            0.0
+        };
+        if read_num != 0 || write_num != 0 {
+            println!(
+                "\nread numbers: {}, read thrpt: {}\nwrite numbers: {}, write thrpt {}\n",
+                read_num, read_tps, write_num, write_tps
+            );
+        }
     }
     group.finish();
 }
