@@ -159,6 +159,11 @@ impl StoreSchema {
     pub(crate) fn num_columns(&self) -> usize {
         self.schema.num_columns()
     }
+
+    #[inline]
+    pub(crate) fn is_key_column_index(&self, index: usize) -> bool {
+        index < self.row_key_end
+    }
 }
 
 impl TryFrom<ArrowSchema> for StoreSchema {

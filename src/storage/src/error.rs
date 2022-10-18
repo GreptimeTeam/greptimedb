@@ -304,6 +304,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: MetadataError,
     },
+
+    #[snafu(display("Incompatible schema to read, reason: {}", reason))]
+    CompatRead {
+        reason: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -336,7 +342,8 @@ impl ErrorExt for Error {
             | ConvertStoreSchema { .. }
             | InvalidRawRegion { .. }
             | FilterColumn { .. }
-            | AlterMetadata { .. } => StatusCode::Unexpected,
+            | AlterMetadata { .. }
+            | CompatRead { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | WriteParquet { .. }
