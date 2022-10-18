@@ -1,0 +1,18 @@
+[package]
+name = "substrait"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1.1"
+catalog = { path = "../../catalog" }
+common-error = { path = "../error" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
+    "simd",
+] }
+futures = "0.3"
+prost = "0.9"
+substrait = "0.2"
+snafu = { version = "0.7", features = ["backtraces"] }
+table = { path = "../../table" }
