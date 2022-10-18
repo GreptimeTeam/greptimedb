@@ -31,6 +31,8 @@ impl MemTable {
                 version: 0,
             },
             name: table_name.into(),
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
             desc: None,
             meta: TableMeta {
                 schema,

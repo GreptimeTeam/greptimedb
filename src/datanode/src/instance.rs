@@ -209,9 +209,9 @@ impl Instance {
                 // TODO(hl): Select table engine by engine_name
 
                 let request = self.sql_handler.create_to_request(table_id, c)?;
-                let catalog_name = request.catalog_name.clone();
-                let schema_name = request.schema_name.clone();
-                let table_name = request.table_name.clone();
+                let catalog_name = &request.catalog_name;
+                let schema_name = &request.schema_name;
+                let table_name = &request.table_name;
                 let table_id = request.id;
                 info!(
                     "Creating table, catalog: {:?}, schema: {:?}, table name: {:?}, table id: {}",

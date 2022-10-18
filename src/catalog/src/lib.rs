@@ -107,8 +107,8 @@ pub struct RegisterSystemTableRequest {
 
 #[derive(Clone)]
 pub struct RegisterTableRequest {
-    pub catalog: Option<String>,
-    pub schema: Option<String>,
+    pub catalog: String,
+    pub schema: String,
     pub table_name: String,
     pub table_id: TableId,
     pub table: TableRef,
@@ -133,13 +133,21 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
     sys_table_requests: &'a mut Vec<RegisterSystemTableRequest>,
 ) -> Result<(), Error> {
     for req in sys_table_requests.drain(..) {
-        let catalog_name = &req.create_table_request.catalog_name;
-        let schema_name = &req.create_table_request.schema_name;
+        let catalog_name = &req
+            .create_table_request
+            .catalog_name
+            .clone()
+            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
+        let schema_name = &req
+            .create_table_request
+            .schema_name
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
         let table_name = &req.create_table_request.table_name;
         let table_id = req.create_table_request.id;
 
         let table = if let Some(table) =
-            manager.table(catalog_name.as_deref(), schema_name.as_deref(), table_name)?
+            manager.table(Some(catalog_name), Some(schema_name), table_name)?
         {
             table
         } else {
@@ -149,10 +157,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
                 .with_context(|_| CreateTableSnafu {
                     table_info: format!(
                         "{}.{}.{}, id: {}",
-                        catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME),
-                        schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME),
-                        table_name,
-                        table_id,
+                        catalog_name, schema_name, table_name, table_id,
                     ),
                 })?;
             manager
