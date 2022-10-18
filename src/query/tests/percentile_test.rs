@@ -132,7 +132,6 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
     let number_table = Arc::new(MemTable::new(
         "corr_numbers",
         RecordBatch::new(schema, columns).unwrap(),
-        0,
     ));
     schema_provider
         .register_table(number_table.table_name().to_string(), number_table)

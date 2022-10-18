@@ -23,7 +23,23 @@ pub struct MemTable {
 }
 
 impl MemTable {
-    pub fn new(table_name: impl Into<String>, recordbatch: RecordBatch, table_id: TableId) -> Self {
+    pub fn new(table_name: impl Into<String>, recordbatch: RecordBatch) -> Self {
+        Self::new_with_catalog(
+            table_name,
+            recordbatch,
+            0,
+            "greptime".to_string(),
+            "public".to_string(),
+        )
+    }
+
+    pub fn new_with_catalog(
+        table_name: impl Into<String>,
+        recordbatch: RecordBatch,
+        table_id: TableId,
+        catalog_name: String,
+        schema_name: String,
+    ) -> Self {
         let schema = recordbatch.schema.clone();
         let info = Arc::new(TableInfo {
             ident: TableIdent {
@@ -31,8 +47,8 @@ impl MemTable {
                 version: 0,
             },
             name: table_name.into(),
-            catalog_name: "greptime".to_string(),
-            schema_name: "public".to_string(),
+            catalog_name,
+            schema_name,
             desc: None,
             meta: TableMeta {
                 schema,
@@ -66,7 +82,7 @@ impl MemTable {
             (0..100).collect::<Vec<_>>(),
         ))];
         let recordbatch = RecordBatch::new(schema, columns).unwrap();
-        MemTable::new("numbers", recordbatch, 0)
+        MemTable::new("numbers", recordbatch)
     }
 }
 
@@ -217,6 +233,6 @@ mod test {
             ])),
         ];
         let recordbatch = RecordBatch::new(schema, columns).unwrap();
-        MemTable::new("", recordbatch, 0)
+        MemTable::new("", recordbatch)
     }
 }

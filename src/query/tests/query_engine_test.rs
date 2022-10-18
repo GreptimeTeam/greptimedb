@@ -48,7 +48,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
         (0..100).collect::<Vec<_>>(),
     ))];
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let table = Arc::new(MemTable::new("numbers", recordbatch, 0));
+    let table = Arc::new(MemTable::new("numbers", recordbatch));
 
     let limit = 10;
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
@@ -175,7 +175,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let even_number_table = Arc::new(MemTable::new("even_numbers", recordbatch, 0));
+    let even_number_table = Arc::new(MemTable::new("even_numbers", recordbatch));
     schema_provider
         .register_table(
             even_number_table.table_name().to_string(),
@@ -205,7 +205,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
 
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let odd_number_table = Arc::new(MemTable::new("odd_numbers", recordbatch, 0));
+    let odd_number_table = Arc::new(MemTable::new("odd_numbers", recordbatch));
     schema_provider
         .register_table(odd_number_table.table_name().to_string(), odd_number_table)
         .unwrap();
