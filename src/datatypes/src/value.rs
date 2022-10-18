@@ -577,7 +577,7 @@ impl<'a> GeometryValueRef<'a> {
     fn to_value(self) -> Value {
         match self {
             GeometryValueRef::Indexed { vector, idx } => vector.get(idx),
-            GeometryValueRef::Ref { val } => Value::Geometry(val.clone()),
+            GeometryValueRef::Ref { val } => Value::Geometry(*val),
         }
     }
 }

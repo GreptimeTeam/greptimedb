@@ -134,7 +134,7 @@ impl<'a> Iterator for GeometryVectorIter<'a> {
     type Item = Option<GeometryValueRef<'a>>;
     fn next(&mut self) -> Option<Self::Item> {
         let pos = self.pos;
-        self.pos = self.pos + 1;
+        self.pos += 1;
 
         if self.vector.len() <= pos {
             return None;
@@ -293,7 +293,7 @@ mod tests {
 
         for i in iter {
             assert_eq!(i, vector.get_data(cnt));
-            cnt = cnt + 1;
+            cnt += 1;
         }
         assert_eq!(cnt, vector.len());
 

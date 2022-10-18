@@ -366,7 +366,7 @@ impl<'a> ScalarRef<'a> for GeometryValueRef<'a> {
                 Value::Geometry(value) => value,
                 _ => unreachable!(),
             },
-            GeometryValueRef::Ref { val } => (*val).clone(),
+            GeometryValueRef::Ref { val } => **val,
         }
     }
 }

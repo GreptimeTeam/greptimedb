@@ -20,9 +20,9 @@ impl PointVector {
     }
 
     pub fn slice(&self, offset: usize, length: usize) -> Self {
-        return Self {
+        Self {
             array: self.array.slice(offset, length),
-        };
+        }
     }
 
     pub fn get(&self, index: usize) -> Value {
@@ -58,12 +58,18 @@ pub struct PointVectorBuilder {
     pub array_y: Float64Vec,
 }
 
-impl PointVectorBuilder {
-    pub fn new() -> Self {
+impl Default for PointVectorBuilder {
+    fn default() -> Self {
         Self {
             array_x: Float64Vec::new(),
             array_y: Float64Vec::new(),
         }
+    }
+}
+
+impl PointVectorBuilder {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
@@ -93,7 +99,7 @@ impl PointVectorBuilder {
             Field::new("x", Float64, true),
             Field::new("y", Float64, true),
         ];
-        let validity = x.validity().map(|validity| validity.clone());
+        let validity = x.validity().cloned();
         let array = StructArray::new(DataType::Struct(fields), vec![x, y], validity);
 
         PointVector { array }
