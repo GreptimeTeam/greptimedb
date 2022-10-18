@@ -1,10 +1,21 @@
 mod mock;
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
-    use catalog::remote::{OpendalBackend, RemoteCatalogManager};
-    use catalog::CatalogManager;
+    use catalog::remote::{
+        KvBackendRef, OpendalBackend, RemoteCatalogManager, RemoteCatalogProvider,
+        RemoteSchemaProvider,
+    };
+    use catalog::{
+        CatalogList, CatalogManager, CatalogProvider, RegisterTableRequest, DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+    };
+    use datatypes::schema::Schema;
+    use table::engine::{EngineContext, TableEngineRef};
+    use table::requests::CreateTableRequest;
+    use tempdir::TempDir;
 
     use super::*;
 
@@ -18,16 +29,186 @@ mod tests {
         Arc::new(OpendalBackend::new(accessor))
     }
 
+    async fn prepare_components(
+        node_id: String,
+    ) -> (KvBackendRef, TableEngineRef, RemoteCatalogManager, TempDir) {
+        let dir = tempdir::TempDir::new("opendal_test").unwrap();
+        // let backend = create_opendal_backend(dir.path().to_str().unwrap()).await;
+        let backend = create_opendal_backend("/tmp/remote_catalog").await;
+        let engine = Arc::new(mock::MockTableEngine::default());
+        let catalog_manager =
+            RemoteCatalogManager::new(engine.clone(), node_id, backend.clone() as _);
+        catalog_manager.start().await.unwrap();
+        (backend, engine, catalog_manager, dir)
+    }
+
     #[tokio::test]
     async fn test_create_backend() {
-        let dir = tempdir::TempDir::new("opendal_test").unwrap();
-        let backend = create_opendal_backend(dir.path().to_str().unwrap()).await;
-        let engine = Arc::new(mock::MockTableEngine::default());
-        let catalog_manager = RemoteCatalogManager::new(
-            engine.clone(),
-            "localhost".to_string(),
-            backend.clone() as _,
+        let node_id = "localhost".to_string();
+        let (_, _, catalog_manager, _dir) = prepare_components(node_id).await;
+        assert_eq!(
+            vec![DEFAULT_CATALOG_NAME.to_owned()],
+            catalog_manager.catalog_names().unwrap()
         );
-        catalog_manager.start().await.unwrap();
+        let default_catalog = catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .expect("default catalog must exist");
+        assert_eq!(
+            vec![DEFAULT_SCHEMA_NAME.to_owned()],
+            default_catalog.schema_names().unwrap()
+        );
+        let default_schema = default_catalog
+            .schema(DEFAULT_SCHEMA_NAME)
+            .unwrap()
+            .expect("default schema must exist");
+        assert_eq!(Vec::<String>::new(), default_schema.table_names().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_register_to_default_schema() {
+        let node_id = "localhost".to_string();
+        let (_, table_engine, catalog_manager, _dir) = prepare_components(node_id).await;
+        let default_schema = catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .unwrap()
+            .schema(DEFAULT_SCHEMA_NAME)
+            .unwrap()
+            .unwrap();
+
+        let table_name = "some_table";
+        let table_id = 42;
+        let table = table_engine
+            .create_table(
+                &EngineContext {},
+                CreateTableRequest {
+                    id: table_id,
+                    catalog_name: None,
+                    schema_name: None,
+                    table_name: table_name.to_owned(),
+                    desc: None,
+                    schema: Arc::new(Schema::new(vec![])),
+                    primary_key_indices: vec![],
+                    create_if_not_exists: false,
+                    table_options: HashMap::from([("table_id".to_string(), table_id.to_string())]),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(default_schema
+            .register_table(table_name.to_owned(), table)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            vec![table_name.to_owned()],
+            default_schema.table_names().unwrap()
+        );
+        let table_read = default_schema
+            .table(table_name)
+            .unwrap()
+            .expect("Should return table just returned");
+        assert_eq!(table_name.to_owned(), table_read.table_info().name);
+        assert_eq!(table_id, table_read.table_info().ident.table_id);
+    }
+
+    #[tokio::test]
+    async fn test_register_catalog_and_schema() {
+        let node_id = "localhost";
+        let (backend, _, catalog_manager, _dir) = prepare_components(node_id.to_string()).await;
+        let catalog_name = "some_catalog";
+        let new_catalog = Arc::new(RemoteCatalogProvider::new(
+            catalog_name.to_string(),
+            node_id.to_string(),
+            backend.clone(),
+        ));
+        assert!(catalog_manager
+            .register_catalog(catalog_name.to_owned(), new_catalog.clone())
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            HashSet::from_iter(
+                vec![DEFAULT_CATALOG_NAME.to_string(), catalog_name.to_string()].into_iter()
+            ),
+            catalog_manager
+                .catalog_names()
+                .unwrap()
+                .into_iter()
+                .collect::<HashSet<_>>()
+        );
+
+        let schema_name = "some_schema";
+        let new_schema = Arc::new(RemoteSchemaProvider::new(
+            catalog_name.to_string(),
+            schema_name.to_string(),
+            node_id.to_string(),
+            backend.clone(),
+        ));
+        assert!(new_catalog
+            .register_schema(schema_name.to_string(), new_schema.clone())
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_register_table_to_new_schema() {
+        let node_id = "localhost";
+        let (backend, table_engine, catalog_manager, _dir) =
+            prepare_components(node_id.to_string()).await;
+        let catalog_name = "some_catalog";
+        let new_catalog = Arc::new(RemoteCatalogProvider::new(
+            catalog_name.to_string(),
+            node_id.to_string(),
+            backend.clone(),
+        ));
+        catalog_manager
+            .register_catalog(catalog_name.to_owned(), new_catalog.clone())
+            .unwrap();
+        let schema_name = "some_schema";
+        let new_schema = Arc::new(RemoteSchemaProvider::new(
+            catalog_name.to_string(),
+            schema_name.to_string(),
+            node_id.to_string(),
+            backend.clone(),
+        ));
+        new_catalog
+            .register_schema(schema_name.to_string(), new_schema)
+            .unwrap();
+
+        let table_name = "some_table";
+        let table_id = 42;
+        let table = table_engine
+            .create_table(
+                &EngineContext {},
+                CreateTableRequest {
+                    id: table_id,
+                    catalog_name: None,
+                    schema_name: None,
+                    table_name: table_name.to_owned(),
+                    desc: None,
+                    schema: Arc::new(Schema::new(vec![])),
+                    primary_key_indices: vec![],
+                    create_if_not_exists: false,
+                    table_options: HashMap::from([("table_id".to_string(), table_id.to_string())]),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            1,
+            catalog_manager
+                .register_table(RegisterTableRequest {
+                    catalog: Some(catalog_name.to_string()),
+                    schema: Some(schema_name.to_string()),
+                    table_name: table_name.to_string(),
+                    table_id,
+                    table
+                })
+                .await
+                .unwrap()
+        );
     }
 }

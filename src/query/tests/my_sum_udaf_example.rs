@@ -203,7 +203,7 @@ where
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let column: VectorRef = Arc::new(PrimitiveVector::<T>::from_vec(numbers));
     let recordbatch = RecordBatch::new(schema, vec![column]).unwrap();
-    let testing_table = MemTable::new(&table_name, recordbatch);
+    let testing_table = MemTable::new(&table_name, recordbatch, 0);
 
     let factory = new_query_engine_factory(testing_table);
     let engine = factory.query_engine();

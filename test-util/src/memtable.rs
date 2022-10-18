@@ -13,7 +13,7 @@ use futures::task::{Context, Poll};
 use futures::Stream;
 use snafu::prelude::*;
 use table::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
-use table::metadata::{TableIdent, TableInfo, TableInfoRef, TableMeta, TableType};
+use table::metadata::{TableId, TableIdent, TableInfo, TableInfoRef, TableMeta, TableType};
 use table::Table;
 
 #[derive(Debug, Clone)]
@@ -23,11 +23,11 @@ pub struct MemTable {
 }
 
 impl MemTable {
-    pub fn new(table_name: impl Into<String>, recordbatch: RecordBatch) -> Self {
+    pub fn new(table_name: impl Into<String>, recordbatch: RecordBatch, table_id: TableId) -> Self {
         let schema = recordbatch.schema.clone();
         let info = Arc::new(TableInfo {
             ident: TableIdent {
-                table_id: 0,
+                table_id,
                 version: 0,
             },
             name: table_name.into(),
@@ -64,7 +64,7 @@ impl MemTable {
             (0..100).collect::<Vec<_>>(),
         ))];
         let recordbatch = RecordBatch::new(schema, columns).unwrap();
-        MemTable::new("numbers", recordbatch)
+        MemTable::new("numbers", recordbatch, 0)
     }
 }
 
@@ -215,6 +215,6 @@ mod test {
             ])),
         ];
         let recordbatch = RecordBatch::new(schema, columns).unwrap();
-        MemTable::new("", recordbatch)
+        MemTable::new("", recordbatch, 0)
     }
 }
