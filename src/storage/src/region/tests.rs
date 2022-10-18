@@ -64,6 +64,20 @@ impl<S: LogStore> TesterBase<S> {
         self.region.write(&self.write_ctx, batch).await.unwrap()
     }
 
+    /// Put without version specified directly to inner writer.
+    pub async fn put_inner(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+        let data: Vec<(Timestamp, Option<i64>)> =
+            data.iter().map(|(l, r)| ((*l).into(), *r)).collect();
+        let mut batch = new_write_batch_for_test(false);
+        let put_data = new_put_data(&data);
+        batch.put(put_data).unwrap();
+
+        self.region
+            .write_inner(&self.write_ctx, batch)
+            .await
+            .unwrap()
+    }
+
     /// Scan all data.
     pub async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
         logging::info!("Full scan with ctx {:?}", self.read_ctx);

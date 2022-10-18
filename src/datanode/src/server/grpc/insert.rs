@@ -119,8 +119,7 @@ pub fn build_create_table_request(
         } in columns
         {
             if !new_columns.contains(column_name) {
-                let mut column_schema = build_column_schema(column_name, *datatype, true)?;
-
+                let mut is_nullable = true;
                 match *semantic_type {
                     TAG_SEMANTIC_TYPE => primary_key_indices.push(column_schemas.len()),
                     TIMESTAMP_SEMANTIC_TYPE => {
@@ -133,11 +132,12 @@ pub fn build_create_table_request(
                         );
                         timestamp_index = column_schemas.len();
                         // Timestamp column must not be null.
-                        column_schema.is_nullable = false;
+                        is_nullable = false;
                     }
                     _ => {}
                 }
 
+                let column_schema = build_column_schema(column_name, *datatype, is_nullable)?;
                 column_schemas.push(column_schema);
                 new_columns.insert(column_name.to_string());
             }

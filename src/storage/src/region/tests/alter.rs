@@ -3,7 +3,6 @@ use std::sync::Arc;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::prelude::ScalarVector;
-use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::Int64Vector;
 use datatypes::vectors::TimestampVector;
 use log_store::fs::log::LocalFileLogStore;
@@ -18,10 +17,9 @@ use tempdir::TempDir;
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::OpenOptions;
 use crate::region::RegionImpl;
+use crate::test_util;
 use crate::test_util::config_util;
-use crate::test_util::{self, write_batch_util};
 use crate::write_batch::PutData;
-use crate::write_batch::WriteBatch;
 
 const REGION_NAME: &str = "region-alter-0";
 
@@ -56,18 +54,6 @@ impl DataRow {
             v1,
         }
     }
-}
-
-fn new_write_batch_for_test() -> WriteBatch {
-    write_batch_util::new_write_batch(
-        &[
-            ("k0", LogicalTypeId::Int64, true),
-            (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
-            ("v0", LogicalTypeId::Int64, true),
-            ("v1", LogicalTypeId::Int64, true),
-        ],
-        Some(1),
-    )
 }
 
 fn new_put_data(data: &[DataRow]) -> PutData {
@@ -122,8 +108,9 @@ impl AlterTester {
         metadata.schema().clone()
     }
 
+    // Put with schema k0, ts, v0, v1
     async fn put(&self, data: &[DataRow]) -> WriteResponse {
-        let mut batch = new_write_batch_for_test();
+        let mut batch = self.base().region.write_request();
         let put_data = new_put_data(data);
         batch.put(put_data).unwrap();
 
@@ -135,8 +122,15 @@ impl AlterTester {
     }
 
     /// Put data with initial schema.
-    async fn put_before_alter(&self, data: &[(i64, Option<i64>)]) {
+    async fn put_with_init_schema(&self, data: &[(i64, Option<i64>)]) {
+        // put of FileTesterBase always use initial schema version.
         self.base().put(data).await;
+    }
+
+    /// Put data to inner writer with initial schema.
+    async fn put_inner_with_init_schema(&self, data: &[(i64, Option<i64>)]) {
+        // put of FileTesterBase always use initial schema version.
+        self.base().put_inner(data).await;
     }
 
     async fn alter(&self, mut req: AlterRequest) {
@@ -200,13 +194,14 @@ fn check_schema_names(schema: &SchemaRef, names: &[&str]) {
 #[tokio::test]
 async fn test_alter_region_with_reopen() {
     common_telemetry::init_default_ut_logging();
+
     let dir = TempDir::new("alter-region").unwrap();
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = AlterTester::new(store_dir).await;
 
     let data = vec![(1000, Some(100)), (1001, Some(101)), (1002, Some(102))];
 
-    tester.put_before_alter(&data).await;
+    tester.put_with_init_schema(&data).await;
     assert_eq!(3, tester.full_scan().await.len());
 
     let schema = tester.schema();
@@ -265,7 +260,7 @@ async fn test_alter_region() {
 
     let data = vec![(1000, Some(100)), (1001, Some(101)), (1002, Some(102))];
 
-    tester.put_before_alter(&data).await;
+    tester.put_with_init_schema(&data).await;
 
     let schema = tester.schema();
     check_schema_names(&schema, &["timestamp", "v0"]);
@@ -294,4 +289,30 @@ async fn test_alter_region() {
 
     let schema = tester.schema();
     check_schema_names(&schema, &["k0", "timestamp", "v2", "v3"]);
+}
+
+#[tokio::test]
+async fn test_put_old_schema_after_alter() {
+    let dir = TempDir::new("put-old").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+    let tester = AlterTester::new(store_dir).await;
+
+    let data = vec![(1000, Some(100)), (1001, Some(101)), (1002, Some(102))];
+
+    tester.put_with_init_schema(&data).await;
+
+    let req = add_column_req(&[
+        (new_column_desc(4, "k0"), true),  // key column k0
+        (new_column_desc(5, "v1"), false), // value column v1
+    ]);
+    tester.alter(req).await;
+
+    // Put with old schema.
+    let data = vec![(1003, Some(103)), (1004, Some(104))];
+    tester.put_with_init_schema(&data).await;
+
+    // Put data with old schema directly to the inner writer, to check that the region
+    // writer could compat the schema of write batch.
+    let data = vec![(1003, Some(103)), (1004, Some(104))];
+    tester.put_inner_with_init_schema(&data).await;
 }

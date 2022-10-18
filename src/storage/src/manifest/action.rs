@@ -45,7 +45,11 @@ pub struct RawColumnFamiliesMetadata {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RegionChange {
+    /// The committed sequence of the region when this change happens. So the
+    /// data with sequence **greater than** this sequence would use the new
+    /// metadata.
     pub committed_sequence: SequenceNumber,
+    /// The metadata after changed.
     pub metadata: RawRegionMetadata,
 }
 

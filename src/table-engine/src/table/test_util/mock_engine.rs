@@ -125,6 +125,7 @@ pub struct MockRegionInner {
     memtable: Arc<RwLock<MockMemtable>>,
 }
 
+/// A columnar memtable, maps column name to data of that column in each row.
 type MockMemtable = HashMap<String, Vec<Value>>;
 
 #[async_trait]
@@ -189,11 +190,10 @@ impl MockRegionInner {
         {
             let mut memtable = self.memtable.write().unwrap();
 
+            // Now drop columns is not supported.
             let rows = memtable.values().last().unwrap().len();
-
-            // currently dropping columns are not supported, so we only add columns here
             for column in metadata.user_schema().column_schemas() {
-                let _ = memtable
+                memtable
                     .entry(column.name.clone())
                     .or_insert_with(|| vec![Value::Null; rows]);
             }
@@ -211,8 +211,6 @@ impl MockRegionInner {
                 let column = memtable.get_mut(name).unwrap();
                 if let Some(data) = put.column_by_name(name) {
                     (0..data.len()).for_each(|i| column.push(data.get(i)));
-                } else {
-                    column.extend_from_slice(&vec![Value::Null; put.num_rows()]);
                 }
             }
         }

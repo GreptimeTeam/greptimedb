@@ -82,6 +82,13 @@ pub enum Error {
 
     #[snafu(display("Invalid database name: {}", name))]
     InvalidDatabaseName { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Invalid default constraint, column: {}, source: {}", column, source))]
+    InvalidDefault {
+        column: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -96,7 +103,8 @@ impl ErrorExt for Error {
             | Tokenizer { .. }
             | InvalidSql { .. }
             | ParseSqlValue { .. }
-            | SqlTypeNotSupported { .. } => StatusCode::InvalidSyntax,
+            | SqlTypeNotSupported { .. }
+            | InvalidDefault { .. } => StatusCode::InvalidSyntax,
 
             InvalidDatabaseName { .. } | ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
         }

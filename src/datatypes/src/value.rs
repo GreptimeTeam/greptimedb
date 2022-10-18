@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Result};
 use crate::prelude::*;
+use crate::type_id::LogicalTypeId;
 use crate::vectors::ListVector;
 
 pub type OrderedF32 = OrderedFloat<f32>;
@@ -69,7 +70,7 @@ impl Value {
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
             Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
             Value::Date(_) => ConcreteDataType::date_datatype(),
-            Value::DateTime(_) => ConcreteDataType::date_datatype(),
+            Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
         }
     }
@@ -112,6 +113,30 @@ impl Value {
             Value::DateTime(v) => ValueRef::DateTime(*v),
             Value::List(v) => ValueRef::List(ListValueRef::Ref { val: v }),
             Value::Timestamp(v) => ValueRef::Timestamp(*v),
+        }
+    }
+
+    /// Returns the logical type of the value.
+    pub fn logical_type_id(&self) -> LogicalTypeId {
+        match self {
+            Value::Null => LogicalTypeId::Null,
+            Value::Boolean(_) => LogicalTypeId::Boolean,
+            Value::UInt8(_) => LogicalTypeId::UInt8,
+            Value::UInt16(_) => LogicalTypeId::UInt16,
+            Value::UInt32(_) => LogicalTypeId::UInt32,
+            Value::UInt64(_) => LogicalTypeId::UInt64,
+            Value::Int8(_) => LogicalTypeId::Int8,
+            Value::Int16(_) => LogicalTypeId::Int16,
+            Value::Int32(_) => LogicalTypeId::Int32,
+            Value::Int64(_) => LogicalTypeId::Int64,
+            Value::Float32(_) => LogicalTypeId::Float32,
+            Value::Float64(_) => LogicalTypeId::Float64,
+            Value::String(_) => LogicalTypeId::String,
+            Value::Binary(_) => LogicalTypeId::Binary,
+            Value::List(_) => LogicalTypeId::List,
+            Value::Date(_) => LogicalTypeId::Date,
+            Value::DateTime(_) => LogicalTypeId::DateTime,
+            Value::Timestamp(_) => LogicalTypeId::Timestamp,
         }
     }
 }
@@ -582,68 +607,69 @@ mod tests {
         assert_eq!(Value::Binary(bytes.clone()), Value::from(bytes));
     }
 
+    fn check_type_and_value(data_type: &ConcreteDataType, value: &Value) {
+        assert_eq!(*data_type, value.data_type());
+        assert_eq!(data_type.logical_type_id(), value.logical_type_id());
+    }
+
     #[test]
     fn test_value_datatype() {
-        assert_eq!(
-            ConcreteDataType::boolean_datatype(),
-            Value::Boolean(true).data_type()
+        check_type_and_value(&ConcreteDataType::boolean_datatype(), &Value::Boolean(true));
+        check_type_and_value(&ConcreteDataType::uint8_datatype(), &Value::UInt8(u8::MIN));
+        check_type_and_value(
+            &ConcreteDataType::uint16_datatype(),
+            &Value::UInt16(u16::MIN),
         );
-        assert_eq!(
-            ConcreteDataType::uint8_datatype(),
-            Value::UInt8(u8::MIN).data_type()
+        check_type_and_value(
+            &ConcreteDataType::uint16_datatype(),
+            &Value::UInt16(u16::MAX),
         );
-        assert_eq!(
-            ConcreteDataType::uint16_datatype(),
-            Value::UInt16(u16::MIN).data_type()
+        check_type_and_value(
+            &ConcreteDataType::uint32_datatype(),
+            &Value::UInt32(u32::MIN),
         );
-        assert_eq!(
-            ConcreteDataType::uint16_datatype(),
-            Value::UInt16(u16::MAX).data_type()
+        check_type_and_value(
+            &ConcreteDataType::uint64_datatype(),
+            &Value::UInt64(u64::MIN),
         );
-        assert_eq!(
-            ConcreteDataType::uint32_datatype(),
-            Value::UInt32(u32::MIN).data_type()
+        check_type_and_value(&ConcreteDataType::int8_datatype(), &Value::Int8(i8::MIN));
+        check_type_and_value(&ConcreteDataType::int16_datatype(), &Value::Int16(i16::MIN));
+        check_type_and_value(&ConcreteDataType::int32_datatype(), &Value::Int32(i32::MIN));
+        check_type_and_value(&ConcreteDataType::int64_datatype(), &Value::Int64(i64::MIN));
+        check_type_and_value(
+            &ConcreteDataType::float32_datatype(),
+            &Value::Float32(OrderedFloat(f32::MIN)),
         );
-        assert_eq!(
-            ConcreteDataType::uint64_datatype(),
-            Value::UInt64(u64::MIN).data_type()
+        check_type_and_value(
+            &ConcreteDataType::float64_datatype(),
+            &Value::Float64(OrderedFloat(f64::MIN)),
         );
-        assert_eq!(
-            ConcreteDataType::int8_datatype(),
-            Value::Int8(i8::MIN).data_type()
+        check_type_and_value(
+            &ConcreteDataType::string_datatype(),
+            &Value::String(StringBytes::from("hello")),
         );
-        assert_eq!(
-            ConcreteDataType::int16_datatype(),
-            Value::Int16(i16::MIN).data_type()
+        check_type_and_value(
+            &ConcreteDataType::binary_datatype(),
+            &Value::Binary(Bytes::from(b"world".as_slice())),
         );
-        assert_eq!(
-            ConcreteDataType::int32_datatype(),
-            Value::Int32(i32::MIN).data_type()
+        check_type_and_value(
+            &ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
+            &Value::List(ListValue::new(
+                Some(Box::new(vec![Value::Int32(10)])),
+                ConcreteDataType::int32_datatype(),
+            )),
         );
-        assert_eq!(
-            ConcreteDataType::int64_datatype(),
-            Value::Int64(i64::MIN).data_type()
+        check_type_and_value(
+            &ConcreteDataType::date_datatype(),
+            &Value::Date(Date::new(1)),
         );
-        assert_eq!(
-            ConcreteDataType::float32_datatype(),
-            Value::Float32(OrderedFloat(f32::MIN)).data_type(),
+        check_type_and_value(
+            &ConcreteDataType::datetime_datatype(),
+            &Value::DateTime(DateTime::new(1)),
         );
-        assert_eq!(
-            ConcreteDataType::float64_datatype(),
-            Value::Float64(OrderedFloat(f64::MIN)).data_type(),
-        );
-        assert_eq!(
-            ConcreteDataType::string_datatype(),
-            Value::String(StringBytes::from("hello")).data_type(),
-        );
-        assert_eq!(
-            ConcreteDataType::binary_datatype(),
-            Value::Binary(Bytes::from(b"world".as_slice())).data_type()
-        );
-
-        assert_eq!(
-            ConcreteDataType::timestamp_millis_datatype(),
-            Value::Timestamp(Timestamp::from_millis(1)).data_type()
+        check_type_and_value(
+            &ConcreteDataType::timestamp_millis_datatype(),
+            &Value::Timestamp(Timestamp::from_millis(1)),
         );
     }
 

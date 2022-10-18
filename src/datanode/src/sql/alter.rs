@@ -91,7 +91,7 @@ mod tests {
                 let new_column = &columns[0].column_schema;
 
                 assert_eq!(new_column.name, "tagk_i");
-                assert!(new_column.is_nullable);
+                assert!(new_column.is_nullable());
                 assert_eq!(new_column.data_type, ConcreteDataType::string_datatype());
             }
             _ => unreachable!(),

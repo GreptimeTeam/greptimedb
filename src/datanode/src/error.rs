@@ -192,7 +192,7 @@ pub enum Error {
         source: api::error::Error,
     },
 
-    #[snafu(display("Column default constraint error, source: {}", source))]
+    #[snafu(display("Invalid column default constraint, source: {}", source))]
     ColumnDefaultConstraint {
         #[snafu(backtrace)]
         source: datatypes::error::Error,

@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use common_time::{RangeMillis, TimestampMillis};
 use datatypes::prelude::ScalarVector;
 use datatypes::schema::SchemaRef;
-use datatypes::vectors::{NullVector, TimestampVector, VectorRef};
-use snafu::{ensure, OptionExt};
+use datatypes::vectors::{TimestampVector, VectorRef};
+use snafu::OptionExt;
 use store_api::storage::{ColumnDescriptor, OpType, SequenceNumber};
 
 use crate::error::{self, Result};
@@ -59,6 +58,9 @@ impl Inserter {
         if batch.is_empty() || memtables.is_empty() {
             return Ok(());
         }
+
+        // Only validate schema in debug mod.
+        validate_input_and_memtable_schemas(batch, memtables);
 
         // Enough to hold all key or value columns.
         let total_column_num = batch.schema().num_columns();
@@ -164,6 +166,18 @@ impl Inserter {
     }
 }
 
+#[cfg(debug_assertions)]
+fn validate_input_and_memtable_schemas(batch: &WriteBatch, memtables: &MemtableSet) {
+    let batch_schema = batch.schema();
+    for (_, memtable) in memtables.iter() {
+        let memtable_schema = memtable.schema();
+        let user_schema = memtable_schema.user_schema();
+        debug_assert_eq!(batch_schema.version(), user_schema.version());
+        // Only validate column schemas.
+        debug_assert_eq!(batch_schema.column_schemas(), user_schema.column_schemas());
+    }
+}
+
 fn new_range_index_map(time_ranges: &[RangeMillis]) -> RangeIndexMap {
     time_ranges
         .iter()
@@ -177,18 +191,10 @@ fn clone_put_data_column_to(
     desc: &ColumnDescriptor,
     target: &mut Vec<VectorRef>,
 ) -> Result<()> {
-    if let Some(vector) = put_data.column_by_name(&desc.name) {
-        target.push(vector.clone());
-    } else {
-        // The write batch should have been validated before.
-        ensure!(
-            desc.is_nullable,
-            error::BatchMissingColumnSnafu { column: &desc.name }
-        );
-
-        let num_rows = put_data.num_rows();
-        target.push(Arc::new(NullVector::new(num_rows)));
-    }
+    let vector = put_data
+        .column_by_name(&desc.name)
+        .context(error::BatchMissingColumnSnafu { column: &desc.name })?;
+    target.push(vector.clone());
 
     Ok(())
 }
@@ -289,6 +295,8 @@ fn compute_slice_indexes(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use common_time::timestamp::Timestamp;
     use datatypes::prelude::ScalarVectorBuilder;
     use datatypes::vectors::{Int64Vector, TimestampVector, TimestampVectorBuilder};

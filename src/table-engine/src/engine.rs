@@ -143,8 +143,8 @@ fn build_row_key_desc(
         ts_column_schema.name.clone(),
         ts_column_schema.data_type.clone(),
     )
-    .default_constraint(ts_column_schema.default_constraint.clone())
-    .is_nullable(ts_column_schema.is_nullable)
+    .default_constraint(ts_column_schema.default_constraint().cloned())
+    .is_nullable(ts_column_schema.is_nullable())
     .build()
     .context(BuildColumnDescriptorSnafu {
         column_name: &ts_column_schema.name,
@@ -169,8 +169,8 @@ fn build_row_key_desc(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
-        .default_constraint(column_schema.default_constraint.clone())
-        .is_nullable(column_schema.is_nullable)
+        .default_constraint(column_schema.default_constraint().cloned())
+        .is_nullable(column_schema.is_nullable())
         .build()
         .context(BuildColumnDescriptorSnafu {
             column_name: &column_schema.name,
@@ -212,8 +212,8 @@ fn build_column_family(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
-        .default_constraint(column_schema.default_constraint.clone())
-        .is_nullable(column_schema.is_nullable)
+        .default_constraint(column_schema.default_constraint().cloned())
+        .is_nullable(column_schema.is_nullable())
         .build()
         .context(BuildColumnDescriptorSnafu {
             column_name: &column_schema.name,
@@ -444,7 +444,8 @@ mod tests {
         let column_schemas = vec![
             ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("n", ConcreteDataType::int32_datatype(), true)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(42i32)))),
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(42i32))))
+                .unwrap(),
             ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),

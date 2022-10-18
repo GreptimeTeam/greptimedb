@@ -115,6 +115,10 @@ impl ConcreteDataType {
     pub fn from_arrow_type(dt: &ArrowDataType) -> Self {
         ConcreteDataType::try_from(dt).expect("Unimplemented type")
     }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, ConcreteDataType::Null(NullType))
+    }
 }
 
 impl TryFrom<&ArrowDataType> for ConcreteDataType {
@@ -322,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_from_arrow_timestamp() {
+    fn test_from_arrow_timestamp() {
         assert_eq!(
             ConcreteDataType::timestamp_millis_datatype(),
             ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Millisecond)
@@ -342,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_is_timestamp() {
+    fn test_is_timestamp() {
         assert!(ConcreteDataType::timestamp_millis_datatype().is_timestamp());
         assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Second).is_timestamp());
         assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond).is_timestamp());
@@ -352,5 +356,11 @@ mod tests {
         // since timestamp data type is implemented, int64 is no longer allowed
         // to be used a data type for timestamp column
         assert!(!ConcreteDataType::int64_datatype().is_timestamp());
+    }
+
+    #[test]
+    fn test_is_null() {
+        assert!(ConcreteDataType::null_datatype().is_null());
+        assert!(!ConcreteDataType::int32_datatype().is_null());
     }
 }

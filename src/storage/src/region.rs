@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
@@ -23,6 +23,7 @@ use crate::manifest::{
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata};
 pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
+use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
 use crate::version::VersionEdit;
@@ -63,7 +64,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
         self.inner.in_memory_metadata()
     }
 
-    async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
+    async fn write(&self, ctx: &WriteContext, mut request: WriteBatch) -> Result<WriteResponse> {
+        // Compat the schema of the write batch outside of the write lock.
+        self.inner.compat_write_batch(&mut request)?;
+
         self.inner.write(ctx, request).await
     }
 
@@ -320,6 +324,11 @@ impl<S: LogStore> RegionImpl<S> {
     async fn wait_flush_done(&self) -> Result<()> {
         self.inner.writer.wait_flush_done().await
     }
+
+    /// Write to inner, also the `RegionWriter` directly.
+    async fn write_inner(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
+        self.inner.write(ctx, request).await
+    }
 }
 
 /// Shared data of region.
@@ -377,19 +386,17 @@ impl<S: LogStore> RegionInner<S> {
         SnapshotImpl::new(version, sequence, self.sst_layer.clone())
     }
 
-    async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
-        // FIXME(yingwen): [alter] The schema may be outdated.
-        let metadata = self.in_memory_metadata();
+    fn compat_write_batch(&self, request: &mut WriteBatch) -> Result<()> {
+        let metadata = self.version_control().metadata();
         let schema = metadata.schema();
 
-        // Only compare column schemas.
-        ensure!(
-            schema.column_schemas() == request.schema().column_schemas(),
-            error::InvalidInputSchemaSnafu {
-                region: &self.shared.name
-            }
-        );
+        // Try to make request schema compatible with region's outside of write lock. Note that
+        // schema might be altered after this step.
+        request.compat_write(schema.user_schema())
+    }
 
+    /// Write to writer directly.
+    async fn write(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
         let writer_ctx = WriterContext {
             shared: &self.shared,
             flush_strategy: &self.flush_strategy,
@@ -399,12 +406,18 @@ impl<S: LogStore> RegionInner<S> {
             writer: &self.writer,
             manifest: &self.manifest,
         };
-        // Now altering schema is not allowed, so it is safe to validate schema outside of the lock.
+        // The writer would also try to compat the schema of write batch if it finds out the
+        // schema version of request is less than current schema version.
         self.writer.write(ctx, request, writer_ctx).await
     }
 
     async fn alter(&self, request: AlterRequest) -> Result<()> {
-        // TODO(yingwen): [alter] Log the request.
+        logging::info!(
+            "Alter region {}, name: {}, request: {:?}",
+            self.shared.id,
+            self.shared.name,
+            request
+        );
 
         let alter_ctx = AlterContext {
             shared: &self.shared,
