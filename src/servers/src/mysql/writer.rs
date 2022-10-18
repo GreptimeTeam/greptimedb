@@ -117,7 +117,9 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                             ),
                         })
                     }
-                    Value::Geometry(_) => todo!(),
+                    Value::Geometry(v) => {
+                        row_writer.write_col(v.to_wkb())?;
+                    }
                 }
             }
             row_writer.end_row()?;
@@ -151,6 +153,7 @@ fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
             Ok(ColumnType::MYSQL_TYPE_VARCHAR)
         }
         ConcreteDataType::Timestamp(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
+        ConcreteDataType::Geometry(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
         _ => error::InternalSnafu {
             err_msg: format!(
                 "not implemented for column datatype {:?}",

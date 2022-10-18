@@ -4,6 +4,7 @@ use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
 
+use super::geometry::GeometryVectorBuilder;
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::prelude::ValueRef;
@@ -41,6 +42,7 @@ pub enum VectorBuilder {
     Date(DateVectorBuilder),
     DateTime(DateTimeVectorBuilder),
     Timestamp(TimestampVectorBuilder),
+    Geometry(GeometryVectorBuilder),
 }
 
 impl VectorBuilder {
@@ -99,6 +101,9 @@ impl VectorBuilder {
             ConcreteDataType::Timestamp(_) => {
                 VectorBuilder::Timestamp(TimestampVectorBuilder::with_capacity(capacity))
             }
+            ConcreteDataType::Geometry(_) => VectorBuilder::Geometry(
+                GeometryVectorBuilder::with_capacity_point_vector_builder(capacity),
+            ),
             _ => unimplemented!(),
         }
     }
@@ -122,6 +127,7 @@ impl VectorBuilder {
             VectorBuilder::Date(b) => b.data_type(),
             VectorBuilder::DateTime(b) => b.data_type(),
             VectorBuilder::Timestamp(b) => b.data_type(),
+            VectorBuilder::Geometry(b) => b.data_type(),
         }
     }
 
@@ -153,6 +159,7 @@ impl VectorBuilder {
             (VectorBuilder::Timestamp(b), Value::Int64(v)) => {
                 b.push(Some(Timestamp::from_millis(*v)))
             }
+            (VectorBuilder::Geometry(b), Value::Geometry(v)) => b.push(Some(v.as_ref())),
 
             _ => panic!(
                 "Value {:?} does not match builder type {:?}",
@@ -190,6 +197,7 @@ impl VectorBuilder {
             VectorBuilder::Date(b) => b.push_value_ref(value),
             VectorBuilder::DateTime(b) => b.push_value_ref(value),
             VectorBuilder::Timestamp(b) => b.push_value_ref(value),
+            VectorBuilder::Geometry(b) => b.push_value_ref(value),
         }
     }
 
@@ -212,6 +220,7 @@ impl VectorBuilder {
             VectorBuilder::Date(b) => b.push(None),
             VectorBuilder::DateTime(b) => b.push(None),
             VectorBuilder::Timestamp(b) => b.push(None),
+            VectorBuilder::Geometry(b) => b.push(None),
         }
     }
 
@@ -234,6 +243,7 @@ impl VectorBuilder {
             VectorBuilder::Date(b) => Arc::new(b.finish()),
             VectorBuilder::DateTime(b) => Arc::new(b.finish()),
             VectorBuilder::Timestamp(b) => Arc::new(b.finish()),
+            VectorBuilder::Geometry(b) => Arc::new(b.finish()),
         }
     }
 }

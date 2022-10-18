@@ -2,6 +2,8 @@ mod dedup;
 mod filter;
 mod replicate;
 
+use std::sync::Arc;
+
 use arrow::bitmap::MutableBitmap;
 
 use crate::error::Result;
@@ -129,6 +131,8 @@ impl VectorOp for GeometryVector {
     }
 
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
-        todo!()
+        let array = self.to_arrow_array();
+        let v = GeometryVector::try_from_arrow_array(array)?;
+        return Ok(Arc::new(v));
     }
 }

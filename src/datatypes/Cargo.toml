@@ -13,6 +13,8 @@ common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 enum_dispatch = "0.3"
+geo = { version = "0.23.0", features = ["use-serde"] }
+geojson = "*"
 num = "0.4"
 num-traits = "0.2"
 ordered-float = { version = "3.0", features = ["serde"] }
@@ -20,8 +22,7 @@ paste = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-geo = { version = "0.23.0", features = ["use-serde"] }
-geojson = "*"
+wkt = "0.10.3"
 
 [dependencies.arrow]
 package = "arrow2"

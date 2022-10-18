@@ -6,6 +6,7 @@ use std::sync::Arc;
 use arrow::array::Array;
 use arrow::datatypes::DataType as ArrowDataType;
 use datafusion_common::ScalarValue;
+use geometry::GeometryVector;
 use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result, UnknownVectorSnafu};
@@ -186,6 +187,7 @@ impl Helper {
             ArrowDataType::Timestamp(_, _) => {
                 Arc::new(TimestampVector::try_from_arrow_array(array)?)
             }
+            ArrowDataType::Struct(_) => Arc::new(GeometryVector::try_from_arrow_array(array)?),
             _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
         })
     }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow::array::{Array, MutableArray};
+use arrow::array::{Array, MutableArray, StructArray};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use self::point::{PointVector, PointVectorBuilder};
@@ -253,6 +253,25 @@ impl Serializable for GeometryVector {
     }
 }
 
+impl GeometryVector {
+    pub fn try_from_arrow_array(
+        array: impl AsRef<dyn arrow::array::Array>,
+    ) -> crate::error::Result<Self> {
+        let array = array
+            .as_ref()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .with_context(|| crate::error::ConversionSnafu {
+                from: std::format!("{:?}", array.as_ref().data_type()),
+            })?
+            .clone();
+
+        let pv = PointVector { array };
+
+        Ok(GeometryVector::PointVector(pv))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,11 +320,9 @@ mod tests {
 
         assert_eq!(vector.memory_size(), 32); //2 elements (f64,f64)=2*2*8
 
-
         assert_eq!(
             format!("{:?}",vector.serialize_to_json().unwrap()),
             "[Object {\"Point\": Object {\"type\": String(\"Point\"), \"coordinates\": Array [Number(2.0), Number(1.0)]}}, Null]".to_string()
         )
-
     }
 }

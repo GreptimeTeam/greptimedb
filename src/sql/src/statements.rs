@@ -8,10 +8,11 @@ pub mod statement;
 use std::str::FromStr;
 
 use common_time::Timestamp;
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
-use datatypes::types::DateTimeType;
-use datatypes::value::Value;
+use datatypes::types::{DateTimeType, GeometryType};
+use datatypes::value::{GeometryValue, Value};
 use snafu::ensure;
 
 use crate::ast::{
@@ -89,6 +90,16 @@ fn parse_string_to_value(
             } else {
                 ParseSqlValueSnafu {
                     msg: format!("Failed to parse {} to Timestamp value", s),
+                }
+                .fail()
+            }
+        }
+        ConcreteDataType::Geometry(t) => {
+            if let Ok(geo_value) = GeometryValue::from_str(&s) {
+                Ok(Value::Geometry(geo_value))
+            } else {
+                ParseSqlValueSnafu {
+                    msg: format!("Failed to parse {} to Geometry value", s),
                 }
                 .fail()
             }
@@ -246,6 +257,8 @@ fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Concre
             [type_name] => {
                 if type_name.value.eq_ignore_ascii_case(DateTimeType::name()) {
                     Ok(ConcreteDataType::datetime_datatype())
+                } else if type_name.value.eq_ignore_ascii_case(GeometryType::name()) {
+                    Ok(ConcreteDataType::geometry_datatype())
                 } else {
                     error::SqlTypeNotSupportedSnafu {
                         t: data_type.clone(),

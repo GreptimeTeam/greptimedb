@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::str::FromStr;
 
 use common_base::bytes::{Bytes, StringBytes};
 use common_time::date::Date;
@@ -9,6 +10,10 @@ use geojson::de::deserialize_geometry;
 use geojson::ser::serialize_geometry;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
+use wkt::Geometry;
+use wkt::ToWkt;
+use wkt::TryFromWkt;
+use wkt::Wkt;
 
 use crate::error::{self, Result};
 use crate::prelude::*;
@@ -328,6 +333,29 @@ impl GeometryValue {
     }
     pub fn to_value(self) -> Value {
         Value::Geometry(self)
+    }
+
+    pub fn as_ref(&self) -> GeometryValueRef {
+        GeometryValueRef::Ref { val: self }
+    }
+
+    pub fn from_str(s: &str) -> Result<Self> {
+        let wktls: Wkt<OrderedF64> = Wkt::from_str(s).unwrap();
+        match wktls.item {
+            Geometry::Point(_) => {
+                let p = Point::try_from_wkt_str(s).unwrap();
+                Ok(Self::Point(p))
+            }
+            Geometry::LineString(_) => todo!(),
+            Geometry::Polygon(_) => todo!(),
+            _ => unimplemented!(),
+        }
+    }
+
+    pub fn to_wkb(&self) -> String {
+        match self {
+            GeometryValue::Point(p) => p.wkt_string(),
+        }
     }
 }
 

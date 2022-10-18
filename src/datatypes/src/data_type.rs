@@ -65,6 +65,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Date(_)
                 | ConcreteDataType::DateTime(_)
                 | ConcreteDataType::Timestamp(_)
+                | ConcreteDataType::Geometry(_)
         )
     }
 
@@ -144,6 +145,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::List(field) => Self::List(ListType::new(
                 ConcreteDataType::from_arrow_type(&field.data_type),
             )),
+            ArrowDataType::Struct(_) => ConcreteDataType::geometry_datatype(),
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),

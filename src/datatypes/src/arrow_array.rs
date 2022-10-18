@@ -1,6 +1,8 @@
+use std::process::id;
+
 use arrow::array::{
     self, Array, BinaryArray as ArrowBinaryArray, MutableBinaryArray as ArrowMutableBinaryArray,
-    MutableUtf8Array, PrimitiveArray, Utf8Array,
+    MutableUtf8Array, PrimitiveArray, StructArray, Utf8Array,
 };
 use arrow::datatypes::DataType as ArrowDataType;
 use common_time::timestamp::Timestamp;
@@ -9,6 +11,8 @@ use snafu::OptionExt;
 use crate::error::{ConversionSnafu, Result};
 use crate::prelude::ConcreteDataType;
 use crate::value::Value;
+use crate::vectors::all::GeometryVector;
+use crate::vectors::Vector;
 
 pub type BinaryArray = ArrowBinaryArray<i64>;
 pub type MutableBinaryArray = ArrowMutableBinaryArray<i64>;
@@ -68,6 +72,10 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
                 _ => unreachable!(),
             };
             Value::Timestamp(Timestamp::new(value, unit))
+        }
+        ArrowDataType::Struct(_) => {
+            let k = cast_array!(array, StructArray).values().get(0).unwrap();
+            Value::Geometry(crate::value::GeometryValue::new_point(0.into(), 0.into()))
         }
         // TODO(sunng87): List
         _ => unimplemented!("Arrow array datatype: {:?}", array.data_type()),
