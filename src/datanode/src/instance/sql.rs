@@ -15,29 +15,6 @@ use crate::instance::Instance;
 use crate::metric;
 use crate::sql::SqlRequest;
 
-// TODO(LFC): Refactor datanode and frontend instances, separate impl for each query handler.
-#[async_trait]
-impl SqlQueryHandler for Instance {
-    async fn do_query(&self, query: &str) -> servers::error::Result<Output> {
-        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
-        self.execute_sql(query)
-            .await
-            .map_err(|e| {
-                error!(e; "Instance failed to execute sql");
-                BoxedError::new(e)
-            })
-            .context(servers::error::ExecuteQuerySnafu { query })
-    }
-
-    async fn insert_script(&self, name: &str, script: &str) -> servers::error::Result<()> {
-        self.script_executor.insert_script(name, script).await
-    }
-
-    async fn execute_script(&self, name: &str) -> servers::error::Result<Output> {
-        self.script_executor.execute_script(name).await
-    }
-}
-
 impl Instance {
     pub async fn execute_sql(&self, sql: &str) -> Result<Output> {
         let stmt = self
@@ -99,5 +76,27 @@ impl Instance {
                 self.sql_handler.execute(SqlRequest::ShowTables(stmt)).await
             }
         }
+    }
+}
+
+#[async_trait]
+impl SqlQueryHandler for Instance {
+    async fn do_query(&self, query: &str) -> servers::error::Result<Output> {
+        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
+        self.execute_sql(query)
+            .await
+            .map_err(|e| {
+                error!(e; "Instance failed to execute sql");
+                BoxedError::new(e)
+            })
+            .context(servers::error::ExecuteQuerySnafu { query })
+    }
+
+    async fn insert_script(&self, name: &str, script: &str) -> servers::error::Result<()> {
+        self.script_executor.insert_script(name, script).await
+    }
+
+    async fn execute_script(&self, name: &str) -> servers::error::Result<Output> {
+        self.script_executor.execute_script(name).await
     }
 }
