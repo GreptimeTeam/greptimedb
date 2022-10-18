@@ -147,7 +147,7 @@ mod tests {
             backend.clone(),
         ));
         assert!(new_catalog
-            .register_schema(schema_name.to_string(), new_schema.clone())
+            .register_schema(schema_name.to_string(), new_schema)
             .unwrap()
             .is_none());
     }
@@ -184,8 +184,8 @@ mod tests {
                 &EngineContext {},
                 CreateTableRequest {
                     id: table_id,
-                    catalog_name: Some(DEFAULT_CATALOG_NAME.to_string()),
-                    schema_name: Some(DEFAULT_SCHEMA_NAME.to_string()),
+                    catalog_name: Some(catalog_name.to_string()),
+                    schema_name: Some(schema_name.to_string()),
                     table_name: table_name.to_owned(),
                     desc: None,
                     schema: Arc::new(Schema::new(vec![])),
@@ -205,10 +205,13 @@ mod tests {
                     schema: schema_name.to_string(),
                     table_name: table_name.to_string(),
                     table_id,
-                    table
+                    table: table.clone()
                 })
                 .await
                 .unwrap()
         );
+
+        assert_eq!(catalog_name, table.table_info().catalog_name);
+        assert_eq!(schema_name, table.table_info().schema_name);
     }
 }
