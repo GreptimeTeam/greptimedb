@@ -45,7 +45,7 @@ impl<T: ?Sized + Accessor> KvBackend for T {
     where
         'a: 'b,
     {
-        let key = format!("./{}", String::from_utf8_lossy(&key));
+        let key = format!("./{}", String::from_utf8_lossy(key));
 
         Box::pin(stream!({
             let op = OpList::new("./").context(IoSnafu)?;
@@ -100,11 +100,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::remote::KvBackendRef;
 
-    async fn collect_file_names(
-        backend: Arc<dyn Accessor>,
-        path: impl AsRef<str>,
-    ) -> HashSet<String> {
+    async fn collect_file_names(backend: KvBackendRef, path: impl AsRef<str>) -> HashSet<String> {
         let mut iter = backend.range(path.as_ref().as_bytes());
         let mut res = HashSet::new();
         while let Some(v) = iter.next().await {
@@ -124,30 +122,28 @@ mod tests {
             .await
             .unwrap();
 
+        let backend: KvBackendRef = Arc::new(crate::remote::OpendalBackend { accessor });
         assert_eq!(
             HashSet::new(),
-            collect_file_names(accessor.clone(), "").await
+            collect_file_names(backend.clone(), "").await
         );
 
-        accessor.set("h".as_bytes(), "h".as_bytes()).await.unwrap();
+        backend.set("h".as_bytes(), "h".as_bytes()).await.unwrap();
         assert_eq!(
             vec!["h".to_string()].into_iter().collect::<HashSet<_>>(),
-            collect_file_names(accessor.clone(), "h").await
+            collect_file_names(backend.clone(), "h").await
         );
 
-        accessor
-            .set("he".as_bytes(), "he".as_bytes())
-            .await
-            .unwrap();
+        backend.set("he".as_bytes(), "he".as_bytes()).await.unwrap();
 
         assert_eq!(
             vec!["h".to_string(), "he".to_string()]
                 .into_iter()
                 .collect::<HashSet<_>>(),
-            collect_file_names(accessor.clone(), "h").await
+            collect_file_names(backend.clone(), "h").await
         );
 
-        accessor
+        backend
             .set("world".as_bytes(), "world".as_bytes())
             .await
             .unwrap();
@@ -155,10 +151,10 @@ mod tests {
             vec!["h".to_string(), "he".to_string()]
                 .into_iter()
                 .collect::<HashSet<_>>(),
-            collect_file_names(accessor.clone(), "h").await
+            collect_file_names(backend.clone(), "h").await
         );
 
-        accessor
+        backend
             .delete_range("h".as_bytes(), "he".as_bytes())
             .await
             .unwrap();
@@ -166,10 +162,10 @@ mod tests {
         // "he" is not deleted
         assert_eq!(
             vec!["he".to_string()].into_iter().collect::<HashSet<_>>(),
-            collect_file_names(accessor.clone(), "h").await
+            collect_file_names(backend.clone(), "h").await
         );
 
-        accessor
+        backend
             .set("hello".as_bytes(), "hello".as_bytes())
             .await
             .unwrap();
@@ -178,14 +174,14 @@ mod tests {
             vec!["he".to_string(), "hello".to_string()]
                 .into_iter()
                 .collect::<HashSet<_>>(),
-            collect_file_names(accessor.clone(), "h").await
+            collect_file_names(backend.clone(), "h").await
         );
 
         assert_eq!(
             vec!["world".to_string()]
                 .into_iter()
                 .collect::<HashSet<_>>(),
-            collect_file_names(accessor.clone(), "w").await
+            collect_file_names(backend.clone(), "w").await
         );
     }
 }

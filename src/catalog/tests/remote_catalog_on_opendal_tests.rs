@@ -1,29 +1,27 @@
-#![feature(btree_drain_filter)]
 mod mock;
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use catalog::remote::{KvBackend, RemoteCatalogManager};
+    use catalog::remote::{OpendalBackend, RemoteCatalogManager};
     use catalog::CatalogManager;
-    use opendal::Accessor;
 
     use super::*;
 
-    async fn create_opendal_backend(path: &str) -> Arc<dyn Accessor> {
-        let arc = opendal::services::fs::Builder::default()
+    async fn create_opendal_backend(path: &str) -> Arc<OpendalBackend> {
+        let accessor = opendal::services::fs::Builder::default()
             .root(path)
             .finish()
             .await
             .unwrap();
-        arc
+        Arc::new(OpendalBackend::new(accessor))
     }
 
     #[tokio::test]
     async fn test_create_backend() {
         let dir = tempdir::TempDir::new("opendal_test").unwrap();
         let backend = create_opendal_backend(dir.path().to_str().unwrap()).await;
-        let engine = Arc::new(mock::MockTableEngine::new());
+        let engine = Arc::new(mock::MockTableEngine::default());
         let catalog_manager = RemoteCatalogManager::new(
             engine.clone(),
             "localhost".to_string(),

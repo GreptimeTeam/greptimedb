@@ -1,4 +1,3 @@
-#![feature(btree_drain_filter)]
 #![feature(assert_matches)]
 
 mod mock;
@@ -7,7 +6,6 @@ mod mock;
 mod tests {
     use std::assert_matches::assert_matches;
     use std::collections::HashSet;
-    use std::fmt::Display;
     use std::sync::Arc;
 
     use catalog::error::Error;
@@ -21,7 +19,7 @@ mod tests {
     };
     use datatypes::schema::Schema;
     use futures_util::StreamExt;
-    use table::engine::{EngineContext, TableEngine, TableEngineRef};
+    use table::engine::{EngineContext, TableEngineRef};
     use table::requests::CreateTableRequest;
 
     use crate::mock::{MockKvBackend, MockTableEngine};
@@ -30,7 +28,7 @@ mod tests {
     async fn test_backend() {
         common_telemetry::init_default_ut_logging();
         let node_id = "localhost".to_string();
-        let backend = MockKvBackend::new();
+        let backend = MockKvBackend::default();
 
         let default_catalog_key = CatalogKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
@@ -72,8 +70,8 @@ mod tests {
     async fn prepare_components(
         node_id: String,
     ) -> (KvBackendRef, TableEngineRef, CatalogManagerRef) {
-        let backend = Arc::new(MockKvBackend::new()) as KvBackendRef;
-        let table_engine = Arc::new(MockTableEngine::new());
+        let backend = Arc::new(MockKvBackend::default()) as KvBackendRef;
+        let table_engine = Arc::new(MockTableEngine::default());
         let catalog_manager =
             RemoteCatalogManager::new(table_engine.clone(), node_id, backend.clone());
         catalog_manager.start().await.unwrap();
