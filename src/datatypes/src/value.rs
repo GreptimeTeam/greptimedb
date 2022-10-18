@@ -591,7 +591,7 @@ impl<'a> PartialEq for GeometryValueRef<'a> {
 impl<'a> Eq for GeometryValueRef<'a> {}
 
 impl<'a> Ord for GeometryValueRef<'a> {
-    fn cmp(&self, other: &Self) -> Ordering {
+    fn cmp(&self, _other: &Self) -> Ordering {
         unreachable!()
     }
 }

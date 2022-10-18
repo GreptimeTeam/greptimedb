@@ -1,18 +1,16 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, MutableArray};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 
 use self::point::{PointVector, PointVectorBuilder};
-use super::{MutableVector, Validity, Value, Vector};
+use super::{MutableVector, Vector};
 use crate::error::SerializeSnafu;
 use crate::prelude::ScalarRef;
 use crate::types::GeometryType;
 use crate::value::{GeometryValueRef, ValueRef};
-use crate::vectors::{impl_try_from_arrow_array_for_vector, impl_validity_for_vector};
 use crate::{
     data_type::ConcreteDataType,
-    error,
     prelude::{ScalarVector, ScalarVectorBuilder},
     serialize::Serializable,
     value::GeometryValue,
@@ -230,7 +228,7 @@ impl MutableVector for GeometryVectorBuilder {
 impl ScalarVectorBuilder for GeometryVectorBuilder {
     type VectorType = GeometryVector;
 
-    fn with_capacity(capacity: usize) -> Self {
+    fn with_capacity(_capacity: usize) -> Self {
         unimplemented!()
     }
 

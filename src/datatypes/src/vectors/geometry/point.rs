@@ -1,19 +1,10 @@
-use std::sync::Arc;
-
-use arrow::array::{
-    Array, FixedSizeListArray, Float64Vec, ListArray, MutableArray, MutableFixedSizeListArray,
-    PrimitiveArray, StructArray,
-};
-use arrow::datatypes::DataType::{self, Float64, List};
+use arrow::array::{Array, Float64Vec, MutableArray, PrimitiveArray, StructArray};
+use arrow::datatypes::DataType::{self, Float64};
 use arrow::datatypes::Field;
-use geo::Point;
 
-use crate::value::{GeometryValue, GeometryValueRef, OrderedF64, Value, ValueRef};
+use crate::prelude::Validity;
+use crate::value::{GeometryValue, Value};
 use crate::vectors::impl_validity_for_vector;
-use crate::{
-    prelude::{ScalarVector, ScalarVectorBuilder, Validity, Vector},
-    vectors::MutableVector,
-};
 #[derive(Debug, Clone, PartialEq)]
 pub struct PointVector {
     pub array: StructArray,

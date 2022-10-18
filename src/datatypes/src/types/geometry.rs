@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data_type::DataType;
-use crate::prelude::{DataTypeRef, LogicalTypeId, Value};
+use crate::prelude::LogicalTypeId;
 use crate::value::GeometryValue;
 use crate::vectors::geometry::GeometryVectorBuilder;
 

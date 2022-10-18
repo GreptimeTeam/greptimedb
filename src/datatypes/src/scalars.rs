@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::default;
 
 use common_time::{Date, DateTime, Timestamp};
 
