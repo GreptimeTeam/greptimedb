@@ -38,6 +38,7 @@ uuid = { version = "1.1", features = ["v4"] }
 atomic_float = "0.1"
 criterion = "0.3"
 datatypes = { path = "../datatypes", features = ["test"] }
+log-store = { path = "../log-store" }
 rand = "0.8"
 tempdir = "0.3"
 

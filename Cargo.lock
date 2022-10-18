@@ -902,7 +902,10 @@ name = "common-function-macro"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "common-query",
+ "datatypes",
  "quote",
+ "snafu",
  "static_assertions",
  "syn",
 ]
@@ -4716,6 +4719,7 @@ dependencies = [
  "num_cpus",
  "opensrv-mysql",
  "pgwire",
+ "query",
  "rand 0.8.5",
  "script",
  "serde",
@@ -4971,6 +4975,7 @@ dependencies = [
  "futures",
  "futures-util",
  "lazy_static",
+ "log-store",
  "object-store",
  "paste",
  "planus",
