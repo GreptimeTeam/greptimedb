@@ -9,11 +9,12 @@ mod tests {
     use super::*;
 
     async fn create_opendal_backend(path: &str) -> Arc<OpendalBackend> {
-        let accessor = opendal::services::fs::Builder::default()
-            .root(path)
-            .finish()
-            .await
-            .unwrap();
+        let accessor = Arc::new(
+            opendal::services::fs::Builder::default()
+                .root(path)
+                .build()
+                .unwrap(),
+        );
         Arc::new(OpendalBackend::new(accessor))
     }
 
