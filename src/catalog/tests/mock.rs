@@ -1,3 +1,5 @@
+#![feature(btree_drain_filter)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::ops::RangeInclusive;
@@ -46,9 +48,7 @@ impl Display for MockKvBackend {
 
 #[async_trait::async_trait]
 impl KvBackend for MockKvBackend {
-    type Error = Error;
-
-    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Self::Error>
+    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
     where
         'a: 'b,
     {
@@ -69,13 +69,13 @@ impl KvBackend for MockKvBackend {
         }))
     }
 
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Self::Error> {
+    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
         let mut map = self.map.write().await;
         map.insert(key.to_vec(), val.to_vec());
         Ok(())
     }
 
-    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Self::Error> {
+    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
         let start = key.to_vec();
         let end = end.to_vec();
         let range = RangeInclusive::new(start, end);

@@ -18,9 +18,7 @@ pub struct MetaKvBackend {}
 
 #[async_trait::async_trait]
 impl KvBackend for MetaKvBackend {
-    type Error = Error;
-
-    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Self::Error>
+    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
     where
         'a: 'b,
     {
@@ -28,13 +26,13 @@ impl KvBackend for MetaKvBackend {
         todo!()
     }
 
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Self::Error> {
+    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
         let _ = key;
         let _ = val;
         todo!()
     }
 
-    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Self::Error> {
+    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
         let _ = key;
         let _ = end;
         todo!()
@@ -43,9 +41,7 @@ impl KvBackend for MetaKvBackend {
 
 #[async_trait::async_trait]
 impl<T: ?Sized + Accessor> KvBackend for T {
-    type Error = Error;
-
-    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Self::Error>
+    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
     where
         'a: 'b,
     {
@@ -71,7 +67,7 @@ impl<T: ?Sized + Accessor> KvBackend for T {
         }))
     }
 
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Self::Error> {
+    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
         let path = String::from_utf8_lossy(key).to_string();
         let op = OpWrite::new(&path, val.len() as u64).context(IoSnafu)?;
         let mut writer = self.write(&op).await.context(IoSnafu)?;
@@ -79,7 +75,7 @@ impl<T: ?Sized + Accessor> KvBackend for T {
         writer.write_all(val).await.context(IoSnafu)
     }
 
-    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Self::Error> {
+    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
         let start = format!("./{}", String::from_utf8_lossy(key));
         let end = format!("./{}", String::from_utf8_lossy(end));
 

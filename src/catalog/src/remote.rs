@@ -7,6 +7,7 @@ use futures::Stream;
 use futures_util::StreamExt;
 pub use manager::{RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider};
 
+use crate::error::Error;
 mod client;
 mod consts;
 pub mod helper;
@@ -20,18 +21,16 @@ pub type ValueIter<'a, E> = Pin<Box<dyn Stream<Item = Result<Kv, E>> + Send + 'a
 
 #[async_trait::async_trait]
 pub trait KvBackend: Send + Sync {
-    type Error: ErrorExt;
-
-    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Self::Error>
+    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, crate::error::Error>
     where
         'a: 'b;
 
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Self::Error>;
+    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), crate::error::Error>;
 
-    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Self::Error>;
+    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), crate::error::Error>;
 
     /// Default get is implemented based on `range` method.
-    async fn get(&self, key: &[u8]) -> Result<Option<Kv>, Self::Error> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Kv>, Error> {
         let mut iter = self.range(key);
         while let Some(r) = iter.next().await {
             let kv = r?;
@@ -43,7 +42,7 @@ pub trait KvBackend: Send + Sync {
     }
 }
 
-pub type KvBackendRef = Arc<dyn KvBackend<Error = crate::error::Error>>;
+pub type KvBackendRef = Arc<dyn KvBackend>;
 
 #[cfg(test)]
 mod tests {
@@ -55,9 +54,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KvBackend for MockKvBackend {
-        type Error = crate::error::Error;
-
-        fn range<'a, 'b>(&'a self, _key: &[u8]) -> ValueIter<'b, Self::Error>
+        fn range<'a, 'b>(&'a self, _key: &[u8]) -> ValueIter<'b, Error>
         where
             'a: 'b,
         {
@@ -71,11 +68,11 @@ mod tests {
             }))
         }
 
-        async fn set(&self, _key: &[u8], _val: &[u8]) -> Result<(), Self::Error> {
+        async fn set(&self, _key: &[u8], _val: &[u8]) -> Result<(), Error> {
             unimplemented!()
         }
 
-        async fn delete_range(&self, _key: &[u8], _end: &[u8]) -> Result<(), Self::Error> {
+        async fn delete_range(&self, _key: &[u8], _end: &[u8]) -> Result<(), Error> {
             unimplemented!()
         }
     }
