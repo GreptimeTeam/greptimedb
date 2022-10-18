@@ -7,7 +7,6 @@ edition = "2021"
 api = { path = "../api" }
 async-stream = "0.3"
 async-trait = "0.1"
-catalog = { path = "../catalog" }
 client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
@@ -17,7 +16,6 @@ common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
-query = { path = "../query" }
 serde = "1.0"
 servers = { path = "../servers" }
 snafu = { version = "0.7", features = ["backtraces"] }

@@ -7,10 +7,7 @@ edition = "2021"
 proc-macro = true
 
 [dependencies]
-common-query = { path = "../query" }
-datatypes = { path = "../../datatypes" }
 quote = "1.0"
-snafu = { version = "0.7", features = ["backtraces"] }
 syn = "1.0"
 
 [dev-dependencies]
