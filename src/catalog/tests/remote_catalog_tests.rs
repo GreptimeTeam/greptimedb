@@ -127,8 +127,8 @@ mod tests {
             .await
             .unwrap();
         let reg_req = RegisterTableRequest {
-            catalog: Some(catalog_name),
-            schema: Some(schema_name),
+            catalog: catalog_name,
+            schema: schema_name,
             table_name,
             table_id: 1,
             table,
@@ -183,8 +183,8 @@ mod tests {
             .await
             .unwrap();
         let reg_req = RegisterTableRequest {
-            catalog: Some(catalog_name),
-            schema: Some(schema_name),
+            catalog: catalog_name,
+            schema: schema_name,
             table_name: table_name.clone(),
             table_id,
             table,
@@ -236,8 +236,8 @@ mod tests {
             .unwrap();
 
         let reg_req = RegisterTableRequest {
-            catalog: Some(catalog_name.clone()),
-            schema: Some(schema_name.clone()),
+            catalog: catalog_name.clone(),
+            schema: schema_name.clone(),
             table_name: " fail_table".to_string(),
             table_id: 2,
             table: table_to_register,

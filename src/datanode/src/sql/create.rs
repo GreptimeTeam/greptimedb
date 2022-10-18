@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::RegisterTableRequest;
+use catalog::{RegisterTableRequest, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_telemetry::tracing::info;
 use datatypes::schema::SchemaBuilder;
@@ -21,10 +21,13 @@ use crate::error::{
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn create(&self, req: CreateTableRequest) -> Result<Output> {
+    pub(crate) async fn create(&self, mut req: CreateTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
-        let catalog_name = req.catalog_name.clone();
-        let schema_name = req.schema_name.clone();
+        // determine catalog and schema from the very beginning
+        req.catalog_name
+            .get_or_insert_with(|| DEFAULT_CATALOG_NAME.to_string());
+        req.schema_name
+            .get_or_insert_with(|| DEFAULT_SCHEMA_NAME.to_string());
         let table_name = req.table_name.clone();
         let table_id = req.id;
 
@@ -37,8 +40,8 @@ impl SqlHandler {
             })?;
 
         let register_req = RegisterTableRequest {
-            catalog: catalog_name,
-            schema: schema_name,
+            catalog: table.table_info().catalog_name.clone(),
+            schema: table.table_info().schema_name.clone(),
             table_name: table_name.clone(),
             table_id,
             table,

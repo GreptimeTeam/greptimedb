@@ -286,36 +286,30 @@ impl CatalogManager for LocalCatalogManager {
             }
         );
 
-        let catalog_name = request
-            .catalog
-            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-        let schema_name = request
-            .schema
-            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+        let catalog_name = &request.catalog;
+        let schema_name = &request.schema;
 
         let catalog = self
             .catalogs
-            .catalog(&catalog_name)?
-            .context(CatalogNotFoundSnafu {
-                catalog_name: &catalog_name,
-            })?;
+            .catalog(catalog_name)?
+            .context(CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
-            .schema(&schema_name)?
+            .schema(schema_name)?
             .with_context(|| SchemaNotFoundSnafu {
                 schema_info: format!("{}.{}", catalog_name, schema_name),
             })?;
 
         if schema.table_exist(&request.table_name)? {
             return TableExistsSnafu {
-                table: format_full_table_name(&catalog_name, &schema_name, &request.table_name),
+                table: format_full_table_name(catalog_name, schema_name, &request.table_name),
             }
             .fail();
         }
 
         self.system
             .register_table(
-                catalog_name,
-                schema_name,
+                catalog_name.clone(),
+                schema_name.clone(),
                 request.table_name.clone(),
                 request.table_id,
             )

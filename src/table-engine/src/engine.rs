@@ -240,6 +240,17 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     ) -> Result<TableRef> {
         let table_name = &request.table_name;
 
+        // table engine's create_table reuses `CreateTableRequest`, but the catalog name
+        // and schema name must be set before calling table engine's create_table
+        let catalog_name = request
+            .catalog_name
+            .clone()
+            .expect("catalog name must be set before calling `create_table`");
+        let schema_name = request
+            .schema_name
+            .clone()
+            .expect("schema name must be set before calling `create_table`");
+
         if let Some(table) = self.get_table(table_name) {
             if request.create_if_not_exists {
                 return Ok(table);
@@ -314,6 +325,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .table_version(INIT_TABLE_VERSION)
             .table_type(TableType::Base)
             .desc(request.desc)
+            .catalog_name(catalog_name)
+            .schema_name(schema_name)
             .build()
             .context(error::BuildTableInfoSnafu { table_name })?;
 
@@ -479,8 +492,8 @@ mod tests {
                 &EngineContext::default(),
                 CreateTableRequest {
                     id: 1,
-                    catalog_name: None,
-                    schema_name: None,
+                    catalog_name: Some("greptime".to_string()),
+                    schema_name: Some("public".to_string()),
                     table_name: table_name.to_string(),
                     desc: Some("a test table".to_string()),
                     schema: schema.clone(),
@@ -713,8 +726,8 @@ mod tests {
 
         let request = CreateTableRequest {
             id: 1,
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: Some("greptime".to_string()),
+            schema_name: Some("public".to_string()),
             table_name: table_info.name.to_string(),
             schema: table_info.meta.schema.clone(),
             create_if_not_exists: true,
@@ -736,8 +749,8 @@ mod tests {
         // test create_if_not_exists=false
         let request = CreateTableRequest {
             id: 1,
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: Some("greptime".to_string()),
+            schema_name: Some("public".to_string()),
             table_name: table_info.name.to_string(),
             schema: table_info.meta.schema.clone(),
             create_if_not_exists: false,

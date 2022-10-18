@@ -33,8 +33,8 @@ mod tests {
         node_id: String,
     ) -> (KvBackendRef, TableEngineRef, RemoteCatalogManager, TempDir) {
         let dir = tempdir::TempDir::new("opendal_test").unwrap();
-        // let backend = create_opendal_backend(dir.path().to_str().unwrap()).await;
-        let backend = create_opendal_backend("/tmp/remote_catalog").await;
+        let backend = create_opendal_backend(dir.path().to_str().unwrap()).await;
+        // let backend = create_opendal_backend("/tmp/remote_catalog").await;
         let engine = Arc::new(mock::MockTableEngine::default());
         let catalog_manager =
             RemoteCatalogManager::new(engine.clone(), node_id, backend.clone() as _);
@@ -84,8 +84,8 @@ mod tests {
                 &EngineContext {},
                 CreateTableRequest {
                     id: table_id,
-                    catalog_name: None,
-                    schema_name: None,
+                    catalog_name: Some(DEFAULT_CATALOG_NAME.to_string()),
+                    schema_name: Some(DEFAULT_SCHEMA_NAME.to_string()),
                     table_name: table_name.to_owned(),
                     desc: None,
                     schema: Arc::new(Schema::new(vec![])),
@@ -184,8 +184,8 @@ mod tests {
                 &EngineContext {},
                 CreateTableRequest {
                     id: table_id,
-                    catalog_name: None,
-                    schema_name: None,
+                    catalog_name: Some(DEFAULT_CATALOG_NAME.to_string()),
+                    schema_name: Some(DEFAULT_SCHEMA_NAME.to_string()),
                     table_name: table_name.to_owned(),
                     desc: None,
                     schema: Arc::new(Schema::new(vec![])),
@@ -201,8 +201,8 @@ mod tests {
             1,
             catalog_manager
                 .register_table(RegisterTableRequest {
-                    catalog: Some(catalog_name.to_string()),
-                    schema: Some(schema_name.to_string()),
+                    catalog: catalog_name.to_string(),
+                    schema: schema_name.to_string(),
                     table_name: table_name.to_string(),
                     table_id,
                     table

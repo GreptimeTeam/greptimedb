@@ -244,12 +244,8 @@ impl CatalogManager for RemoteCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> crate::error::Result<usize> {
-        let catalog_name = request
-            .catalog
-            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-        let schema_name = request
-            .schema
-            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+        let catalog_name = request.catalog;
+        let schema_name = request.schema;
         let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
             catalog_name: &catalog_name,
         })?;

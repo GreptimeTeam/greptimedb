@@ -58,6 +58,8 @@ pub fn build_test_table_info() -> TableInfo {
         .ident(0)
         .table_version(0u64)
         .table_type(TableType::Base)
+        .catalog_name("greptime".to_string())
+        .schema_name("public".to_string())
         .build()
         .unwrap()
 }
@@ -93,8 +95,8 @@ pub async fn setup_test_engine_and_table() -> (
             &EngineContext::default(),
             CreateTableRequest {
                 id: 1,
-                catalog_name: None,
-                schema_name: None,
+                catalog_name: Some("greptime".to_string()),
+                schema_name: Some("public".to_string()),
                 table_name: TABLE_NAME.to_string(),
                 desc: Some("a test table".to_string()),
                 schema: schema.clone(),
@@ -125,8 +127,8 @@ pub async fn setup_mock_engine_and_table(
             &EngineContext::default(),
             CreateTableRequest {
                 id: 1,
-                catalog_name: None,
-                schema_name: None,
+                catalog_name: Some("greptime".to_string()),
+                schema_name: Some("public".to_string()),
                 table_name: TABLE_NAME.to_string(),
                 desc: None,
                 schema: schema.clone(),

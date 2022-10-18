@@ -99,6 +99,10 @@ pub struct TableInfo {
     pub ident: TableIdent,
     #[builder(setter(into))]
     pub name: String,
+    #[builder(setter(into))]
+    pub catalog_name: String,
+    #[builder(setter(into))]
+    pub schema_name: String,
     #[builder(default, setter(into))]
     pub desc: Option<String>,
     pub meta: TableMeta,
