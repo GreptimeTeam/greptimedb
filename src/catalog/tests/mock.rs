@@ -1,5 +1,3 @@
-#![feature(btree_drain_filter)]
-
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::ops::RangeInclusive;
@@ -19,16 +17,9 @@ use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, O
 use table::TableRef;
 use tokio::sync::RwLock;
 
+#[derive(Default)]
 pub struct MockKvBackend {
     map: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,
-}
-
-impl MockKvBackend {
-    pub fn new() -> Self {
-        Self {
-            map: Default::default(),
-        }
-    }
 }
 
 impl Display for MockKvBackend {
@@ -81,21 +72,14 @@ impl KvBackend for MockKvBackend {
         let range = RangeInclusive::new(start, end);
 
         let mut map = self.map.write().await;
-        let _: BTreeMap<_, _> = map.drain_filter(|k, _| range.contains(k)).collect();
+        map.retain(|k, _| !range.contains(k));
         Ok(())
     }
 }
 
+#[derive(Default)]
 pub struct MockTableEngine {
     tables: RwLock<HashMap<String, TableRef>>,
-}
-
-impl MockTableEngine {
-    pub fn new() -> Self {
-        Self {
-            tables: RwLock::new(HashMap::new()),
-        }
-    }
 }
 
 #[async_trait::async_trait]
