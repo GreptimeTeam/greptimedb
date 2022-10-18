@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::ops::RangeInclusive;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_stream::stream;
@@ -13,6 +14,7 @@ use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
 use serde::Serializer;
 use table::engine::{EngineContext, TableEngine};
+use table::metadata::TableId;
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::TableRef;
 use tokio::sync::RwLock;
@@ -96,6 +98,14 @@ impl TableEngine for MockTableEngine {
     ) -> table::Result<TableRef> {
         let table_name = request.table_name.clone();
 
+        let default_table_id = "0".to_owned();
+        let table_id = TableId::from_str(
+            request
+                .table_options
+                .get("table_id")
+                .unwrap_or(&default_table_id),
+        )
+        .unwrap();
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "name",
             ConcreteDataType::string_datatype(),
@@ -104,8 +114,11 @@ impl TableEngine for MockTableEngine {
 
         let data = vec![Arc::new(StringVector::from(vec!["a", "b", "c"])) as _];
         let record_batch = RecordBatch::new(schema, data).unwrap();
-        let table: TableRef =
-            Arc::new(test_util::MemTable::new(&table_name, record_batch)) as Arc<_>;
+        let table: TableRef = Arc::new(test_util::MemTable::new(
+            &table_name,
+            record_batch,
+            table_id,
+        )) as Arc<_>;
 
         let mut tables = self.tables.write().await;
         tables.insert(table_name, table.clone() as TableRef);

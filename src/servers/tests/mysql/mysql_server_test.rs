@@ -108,7 +108,7 @@ async fn test_query_all_datatypes() -> Result<()> {
     } = all_datatype_testing_data();
     let schema = Arc::new(Schema::new(column_schemas.clone()));
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
-    let table = MemTable::new("all_datatypes", recordbatch);
+    let table = MemTable::new("all_datatypes", recordbatch, 0);
 
     let mut mysql_server = create_mysql_server(table)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
