@@ -261,17 +261,68 @@ fn eval_aggr_fn<T: AggregateExpr>(
     scalar_val_try_into_py_obj(res, vm)
 }
 
-/// GrepTime's own UDF&UDAF
+/// GrepTime User Define Function module
+///
+/// allow Python Coprocessor Function to use already implemented udf functions from datafusion and GrepTime DB itself
+///
 #[pymodule]
-pub(crate) mod greptime_own_udf {
-    use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
-    use datatypes::{value::OrderedFloat, vectors::VectorRef};
-    use rustpython_vm::{PyObjectRef, PyResult, VirtualMachine};
+pub(crate) mod greptime_builtin {
+    // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
+    use std::sync::Arc;
 
-    use crate::python::{utils::PyVectorRef, vector::val_to_pyobj, PyVector};
+    use common_function::scalars::{
+        function::FunctionContext, math::PowFunction, Function, FunctionRef, FUNCTION_REGISTRY,
+    };
+    use datafusion::{
+        arrow::{
+            compute::comparison::{gt_eq_scalar, lt_eq_scalar},
+            datatypes::DataType,
+            error::ArrowError,
+            scalar::{PrimitiveScalar, Scalar},
+        },
+        physical_plan::expressions,
+    };
+    use datafusion_expr::ColumnarValue as DFColValue;
+    use datafusion_physical_expr::math_expressions;
+    use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector};
+    use datatypes::{
+        arrow::{
+            self,
+            array::{ArrayRef, NullArray},
+            compute,
+        },
+        vectors::VectorRef,
+    };
+    use paste::paste;
+    use rustpython_vm::{
+        builtins::{PyFloat, PyFunction, PyInt, PyStr},
+        function::{FuncArgs, KwArgs, OptionalArg},
+        AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    };
+
+    use crate::python::builtins::{
+        all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
+        type_cast_error,
+    };
+    use crate::python::{
+        utils::{is_instance, py_vec_obj_to_array, PyVectorRef},
+        vector::val_to_pyobj,
+        PyVector,
+    };
+
+    #[pyfunction]
+    fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {
+        PyVector::new(args, vm)
+    }
+
+    // the main binding code, due to proc macro things, can't directly use a simpler macro
+    // because pyfunction is not a attr?
+    // ------
+    // GrepTime DB's own UDF&UDAF
+    // ------
 
     fn eval_func(name: &str, v: &[PyVectorRef], vm: &VirtualMachine) -> PyResult<PyVector> {
-        let v: Vec<VectorRef> = v.into_iter().map(|v| v.as_vector_ref()).collect();
+        let v: Vec<VectorRef> = v.iter().map(|v| v.as_vector_ref()).collect();
         let func: Option<FunctionRef> = FUNCTION_REGISTRY.get_function(name);
         let res = match func {
             Some(f) => f.eval(Default::default(), &v),
@@ -279,7 +330,7 @@ pub(crate) mod greptime_own_udf {
         };
         match res {
             Ok(v) => Ok(v.into()),
-            Err(err) => Err(vm.new_runtime_error(format!("Internal Error: {}", err.to_string()))),
+            Err(err) => Err(vm.new_runtime_error(format!("Internal Error: {}", err))),
         }
     }
 
@@ -288,7 +339,7 @@ pub(crate) mod greptime_own_udf {
         args: &[PyVectorRef],
         vm: &VirtualMachine,
     ) -> PyResult<PyObjectRef> {
-        let v: Vec<VectorRef> = args.into_iter().map(|v| v.as_vector_ref()).collect();
+        let v: Vec<VectorRef> = args.iter().map(|v| v.as_vector_ref()).collect();
         let func = FUNCTION_REGISTRY.get_aggr_function(name);
         let f = match func {
             Some(f) => f.create().creator(),
@@ -299,27 +350,28 @@ pub(crate) mod greptime_own_udf {
         let mut acc = match acc {
             Ok(acc) => acc,
             Err(err) => {
-                return Err(vm.new_runtime_error(format!("Internal Error: {}", err.to_string())))
+                return Err(vm.new_runtime_error(format!("Internal Error: {}", err)))
             }
         };
         match acc.update_batch(&v) {
             Ok(_) => (),
             Err(err) => {
-                return Err(vm.new_runtime_error(format!("Internal Error: {}", err.to_string())))
+                return Err(vm.new_runtime_error(format!("Internal Error: {}", err)))
             }
         };
         let res = match acc.evaluate() {
             Ok(r) => r,
             Err(err) => {
-                return Err(vm.new_runtime_error(format!("Internal Error: {}", err.to_string())))
+                return Err(vm.new_runtime_error(format!("Internal Error: {}", err)))
             }
         };
         let res = val_to_pyobj(res, vm);
         Ok(res)
     }
 
+    /// GrepTime's own impl of pow function
     #[pyfunction]
-    fn pow(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+    fn pow_gp(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         eval_func("pow", &[v], vm)
     }
 
@@ -380,54 +432,13 @@ pub(crate) mod greptime_own_udf {
     ) -> PyResult<PyObjectRef> {
         eval_aggr_func("scipystatsnormpdf", &[v0, v1], vm)
     }
-}
-
-/// GrepTime User Define Function module
-///
-/// allow Python Coprocessor Function to use already implemented udf functions from datafusion and GrepTime DB itself
-///
-#[pymodule]
-pub(crate) mod greptime_builtin {
-    // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
-    use std::sync::Arc;
-
-    use common_function::scalars::math::PowFunction;
-    use common_function::scalars::{function::FunctionContext, Function};
-    use datafusion::arrow::compute::comparison::{gt_eq_scalar, lt_eq_scalar};
-    use datafusion::arrow::datatypes::DataType;
-    use datafusion::arrow::error::ArrowError;
-    use datafusion::arrow::scalar::{PrimitiveScalar, Scalar};
-    use datafusion::physical_plan::expressions;
-    use datafusion_expr::ColumnarValue as DFColValue;
-    use datafusion_physical_expr::math_expressions;
-    use datatypes::arrow;
-    use datatypes::arrow::array::{ArrayRef, NullArray};
-    use datatypes::arrow::compute;
-    use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector};
-    use paste::paste;
-    use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
-    use rustpython_vm::function::{FuncArgs, KwArgs, OptionalArg};
-    use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
-
-    use crate::python::builtins::{
-        all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
-        type_cast_error,
-    };
-    use crate::python::utils::PyVectorRef;
-    use crate::python::utils::{is_instance, py_vec_obj_to_array};
-    use crate::python::PyVector;
-
-    #[pyfunction]
-    fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {
-        PyVector::new(args, vm)
-    }
-
-    // the main binding code, due to proc macro things, can't directly use a simpler macro
-    // because pyfunction is not a attr?
 
     // The math function return a general PyObjectRef
     // so it can return both PyVector or a scalar PyInt/Float/Bool
 
+    // ------
+    // DataFusion's UDF&UDAF
+    // ------
     /// simple math function, the backing implement is datafusion's `sqrt` math function
     #[pyfunction]
     fn sqrt(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
