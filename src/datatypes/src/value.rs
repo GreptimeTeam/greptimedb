@@ -340,7 +340,7 @@ impl GeometryValue {
         GeometryValueRef::Ref { val: self }
     }
 
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn from_wkb(s: &str) -> Result<Self> {
         let wktls: Wkt<OrderedF64> = Wkt::from_str(s).unwrap();
         match wktls.item {
             Geometry::Point(_) => {

@@ -8,7 +8,6 @@ pub mod statement;
 use std::str::FromStr;
 
 use common_time::Timestamp;
-use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::{DateTimeType, GeometryType};
@@ -94,8 +93,8 @@ fn parse_string_to_value(
                 .fail()
             }
         }
-        ConcreteDataType::Geometry(t) => {
-            if let Ok(geo_value) = GeometryValue::from_str(&s) {
+        ConcreteDataType::Geometry(_) => {
+            if let Ok(geo_value) = GeometryValue::from_wkb(&s) {
                 Ok(Value::Geometry(geo_value))
             } else {
                 ParseSqlValueSnafu {
