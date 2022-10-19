@@ -261,6 +261,127 @@ fn eval_aggr_fn<T: AggregateExpr>(
     scalar_val_try_into_py_obj(res, vm)
 }
 
+/// GrepTime's own UDF&UDAF
+#[pymodule]
+pub(crate) mod greptime_own_udf {
+    use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
+    use datatypes::{value::OrderedFloat, vectors::VectorRef};
+    use rustpython_vm::{PyObjectRef, PyResult, VirtualMachine};
+
+    use crate::python::{utils::PyVectorRef, vector::val_to_pyobj, PyVector};
+
+    fn eval_func(name: &str, v: &[PyVectorRef], vm: &VirtualMachine) -> PyResult<PyVector> {
+        let v: Vec<VectorRef> = v.into_iter().map(|v| v.as_vector_ref()).collect();
+        let func: Option<FunctionRef> = FUNCTION_REGISTRY.get_function(name);
+        let res = match func {
+            Some(f) => f.eval(Default::default(), &v),
+            None => return Err(vm.new_type_error(format!("Can't found function {}", name))),
+        };
+        match res {
+            Ok(v) => Ok(v.into()),
+            Err(err) => Err(vm.new_runtime_error(format!("Internal Error: {}", err.to_string()))),
+        }
+    }
+
+    fn eval_aggr_func(
+        name: &str,
+        args: &[PyVectorRef],
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
+        let v: Vec<VectorRef> = args.into_iter().map(|v| v.as_vector_ref()).collect();
+        let func = FUNCTION_REGISTRY.get_aggr_function(name);
+        let f = match func {
+            Some(f) => f.create().creator(),
+            None => return Err(vm.new_type_error(format!("Can't found function {}", name))),
+        };
+        let types: Vec<_> = v.iter().map(|v| v.data_type()).collect();
+        let acc = f(&types);
+        let mut acc = match acc {
+            Ok(acc) => acc,
+            Err(err) => {
+                return Err(vm.new_runtime_error(format!("Internal Error: {}", err.to_string())))
+            }
+        };
+        match acc.update_batch(&v) {
+            Ok(_) => (),
+            Err(err) => {
+                return Err(vm.new_runtime_error(format!("Internal Error: {}", err.to_string())))
+            }
+        };
+        let res = match acc.evaluate() {
+            Ok(r) => r,
+            Err(err) => {
+                return Err(vm.new_runtime_error(format!("Internal Error: {}", err.to_string())))
+            }
+        };
+        let res = val_to_pyobj(res, vm);
+        Ok(res)
+    }
+
+    #[pyfunction]
+    fn pow(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        eval_func("pow", &[v], vm)
+    }
+
+    #[pyfunction]
+    fn clip(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        eval_func("clip", &[v], vm)
+    }
+
+    #[pyfunction]
+    fn median(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        eval_aggr_func("median", &[v], vm)
+    }
+
+    #[pyfunction]
+    fn diff(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        eval_aggr_func("diff", &[v], vm)
+    }
+
+    #[pyfunction]
+    fn mean(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        eval_aggr_func("mean", &[v], vm)
+    }
+
+    #[pyfunction]
+    fn polyval(v0: PyVectorRef, v1: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        eval_aggr_func("polyval", &[v0, v1], vm)
+    }
+
+    #[pyfunction]
+    fn argmax(v0: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        eval_aggr_func("argmax", &[v0], vm)
+    }
+
+    #[pyfunction]
+    fn argmin(v0: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        eval_aggr_func("argmin", &[v0], vm)
+    }
+
+    #[pyfunction]
+    fn percentile(v0: PyVectorRef, v1: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        eval_aggr_func("percentile", &[v0, v1], vm)
+    }
+
+    #[pyfunction]
+    fn scipystatsnormcdf(
+        v0: PyVectorRef,
+        v1: PyVectorRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
+        eval_aggr_func("scipystatsnormcdf", &[v0, v1], vm)
+    }
+
+    #[pyfunction]
+    fn scipystatsnormpdf(
+        v0: PyVectorRef,
+        v1: PyVectorRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
+        eval_aggr_func("scipystatsnormpdf", &[v0, v1], vm)
+    }
+}
+
 /// GrepTime User Define Function module
 ///
 /// allow Python Coprocessor Function to use already implemented udf functions from datafusion and GrepTime DB itself

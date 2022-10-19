@@ -31,6 +31,10 @@ impl FunctionRegistry {
             .insert(func.name(), func);
     }
 
+    pub fn get_aggr_function(&self, name: &str) -> Option<AggregateFunctionMetaRef> {
+        self.aggregate_functions.read().unwrap().get(name).cloned()
+    }
+
     pub fn get_function(&self, name: &str) -> Option<FunctionRef> {
         self.functions.read().unwrap().get(name).cloned()
     }
