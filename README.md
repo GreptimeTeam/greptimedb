@@ -133,33 +133,6 @@ cargo run -- --log-dir=logs --log-level=debug frontend start -c ./config/fronten
    ```
    You can delete your data by removing `/tmp/greptimedb`.
 
-## Contribute
+## Contributing
 
-1. [Install rust](https://www.rust-lang.org/tools/install)
-2. [Install `pre-commit`](https://pre-commit.com/#plugins) for run hooks on every commit automatically such as `cargo fmt` etc.
-
-```
-$ pip install pre-commit
-
-or
-
-$ brew install pre-commit
-$
-```
-
-3. Install the git hook scripts:
-
-```
-$ pre-commit install
-pre-commit installed at .git/hooks/pre-commit
-
-$ pre-commit install --hook-type commit-msg
-pre-commit installed at .git/hooks/commit-msg
-
-$ pre-commit install --hook-type pre-push
-pre-commit installed at .git/hooks/pre-pus
-```
-
-now `pre-commit` will run automatically on `git commit`.
-
-4. Check out branch from `develop` and make your contribution. Follow the [style guide](https://github.com/GreptimeTeam/docs/blob/main/style-guide/zh.md). Create a PR when you are ready, feel free and have fun!
+Please refer to [contribution guidelines](CONTRIBUTING.md) for more information.
