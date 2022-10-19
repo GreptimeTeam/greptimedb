@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_time::{RangeMillis, TimestampMillis};
+use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::schema::SchemaRef;
-use datatypes::vectors::{TimestampVector, VectorRef};
+use datatypes::vectors::{Int64Vector, TimestampVector, VectorRef};
 use snafu::OptionExt;
 use store_api::storage::{ColumnDescriptor, OpType, SequenceNumber};
 
-use crate::error::{self, Result};
+use crate::error::{self, IllegalTimestampColumnTypeSnafu, Result};
 use crate::memtable::{KeyValues, Memtable, MemtableSet};
 use crate::write_batch::{Mutation, PutData, WriteBatch};
 
@@ -144,12 +145,29 @@ impl Inserter {
                 column: &timestamp_schema.name,
             },
         )?;
-        let timestamps = timestamps
-            .as_any()
-            .downcast_ref()
-            .context(error::BatchMissingTimestampSnafu)?;
-        let slice_indexes =
-            compute_slice_indexes(timestamps, self.bucket_duration, &self.time_range_indexes);
+
+        let slice_indexes = match timestamps.data_type() {
+            ConcreteDataType::Int64(_) => {
+                let timestamps: &Int64Vector = timestamps
+                    .as_any()
+                    .downcast_ref()
+                    .context(error::BatchMissingTimestampSnafu)?;
+                compute_slice_indexes(timestamps, self.bucket_duration, &self.time_range_indexes)
+            }
+            ConcreteDataType::Timestamp(_) => {
+                let timestamps: &TimestampVector = timestamps
+                    .as_any()
+                    .downcast_ref()
+                    .context(error::BatchMissingTimestampSnafu)?;
+                compute_slice_indexes(timestamps, self.bucket_duration, &self.time_range_indexes)
+            }
+            _ => {
+                return IllegalTimestampColumnTypeSnafu {
+                    data_type: timestamps.data_type(),
+                }
+                .fail();
+            }
+        };
 
         for slice_index in slice_indexes {
             let sliced_data = put_data.slice(slice_index.start, slice_index.end);
@@ -216,8 +234,8 @@ struct SliceIndex {
 /// # Panics
 /// Panics if the duration is too large to be represented by i64, or `timestamps` are not all
 /// included by `time_range_indexes`.
-fn compute_slice_indexes(
-    timestamps: &TimestampVector,
+fn compute_slice_indexes<T: for<'a> ScalarVector<RefItem<'a>: Into<i64>>>(
+    timestamps: &T,
     duration: Duration,
     time_range_indexes: &RangeIndexMap,
 ) -> Vec<SliceIndex> {
@@ -225,6 +243,7 @@ fn compute_slice_indexes(
         .as_millis()
         .try_into()
         .unwrap_or_else(|e| panic!("Duration {:?} too large, {}", duration, e));
+
     let mut slice_indexes = Vec::with_capacity(time_range_indexes.len());
     // Current start and end of a valid `SliceIndex`.
     let (mut start, mut end) = (0, 0);
@@ -234,8 +253,9 @@ fn compute_slice_indexes(
     // Iterate all timestamps, split timestamps by its time range.
     for (i, ts) in timestamps.iter_data().enumerate() {
         // Find index for time range of the timestamp.
+
         let current_range_index = ts
-            .and_then(|v| TimestampMillis::new(v.value()).align_by_bucket(duration_ms))
+            .and_then(|v| TimestampMillis::new(v.into()).align_by_bucket(duration_ms))
             .and_then(|aligned| time_range_indexes.get(&aligned).copied());
 
         match current_range_index {
@@ -300,7 +320,9 @@ mod tests {
 
     use common_time::timestamp::Timestamp;
     use datatypes::prelude::ScalarVectorBuilder;
-    use datatypes::vectors::{Int64Vector, TimestampVector, TimestampVectorBuilder};
+    use datatypes::vectors::{
+        Int64Vector, Int64VectorBuilder, TimestampVector, TimestampVectorBuilder,
+    };
     use datatypes::{type_id::LogicalTypeId, value::Value};
     use store_api::storage::{PutOperation, WriteRequest};
 
@@ -347,6 +369,82 @@ mod tests {
         );
 
         assert_eq!(expect, slice_indexes);
+    }
+
+    #[test]
+    fn test_check_compute_slice_indexes_i64() {
+        let timestamps = &[Some(99), Some(13), Some(18), Some(234)];
+        let range_starts = &[0, 200];
+        let duration = 100;
+
+        let mut builder = Int64VectorBuilder::with_capacity(timestamps.len());
+        for v in timestamps {
+            builder.push(*v);
+        }
+
+        let ts_vec = builder.finish();
+
+        let time_ranges = new_time_ranges(range_starts, duration);
+        let time_range_indexes = new_range_index_map(&time_ranges);
+
+        let slice_indexes = compute_slice_indexes(
+            &ts_vec,
+            Duration::from_millis(duration as u64),
+            &time_range_indexes,
+        );
+        assert_eq!(
+            vec![
+                SliceIndex {
+                    start: 0,
+                    end: 3,
+                    range_index: 0,
+                },
+                SliceIndex {
+                    start: 3,
+                    end: 4,
+                    range_index: 1,
+                },
+            ],
+            slice_indexes
+        );
+    }
+
+    #[test]
+    fn test_check_compute_slice_indexes_timestamp() {
+        let timestamps = &[Some(99), Some(13), Some(18), Some(234)];
+        let range_starts = &[0, 200];
+        let duration = 100;
+
+        let mut builder = TimestampVectorBuilder::with_capacity(timestamps.len());
+        for v in timestamps {
+            builder.push(v.map(Timestamp::from_millis));
+        }
+
+        let ts_vec = builder.finish();
+
+        let time_ranges = new_time_ranges(range_starts, duration);
+        let time_range_indexes = new_range_index_map(&time_ranges);
+
+        let slice_indexes = compute_slice_indexes(
+            &ts_vec,
+            Duration::from_millis(duration as u64),
+            &time_range_indexes,
+        );
+        assert_eq!(
+            vec![
+                SliceIndex {
+                    start: 0,
+                    end: 3,
+                    range_index: 0,
+                },
+                SliceIndex {
+                    start: 3,
+                    end: 4,
+                    range_index: 1,
+                },
+            ],
+            slice_indexes
+        );
     }
 
     #[test]

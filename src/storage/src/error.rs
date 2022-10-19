@@ -5,6 +5,7 @@ use std::str::Utf8Error;
 use common_error::prelude::*;
 use datatypes::arrow;
 use datatypes::arrow::error::ArrowError;
+use datatypes::prelude::ConcreteDataType;
 use serde_json::error::Error as JsonError;
 use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
@@ -296,6 +297,9 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Timestamp column type illegal, data type: {:?}", data_type))]
+    IllegalTimestampColumnType { data_type: ConcreteDataType },
+
     #[snafu(display(
         "Failed to convert between ColumnSchema and ColumnMetadata, source: {}",
         source
@@ -320,7 +324,8 @@ impl ErrorExt for Error {
             | InvalidProjection { .. }
             | BuildBatch { .. }
             | NotInSchemaToCompat { .. }
-            | WriteToOldVersion { .. } => StatusCode::InvalidArguments,
+            | WriteToOldVersion { .. }
+            | IllegalTimestampColumnType { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. }
             | EncodeJson { .. }
