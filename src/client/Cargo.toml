@@ -7,7 +7,6 @@ edition = "2021"
 [dependencies]
 api = { path = "../api" }
 async-stream = "0.3"
-catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }

@@ -790,7 +790,6 @@ version = "0.1.0"
 dependencies = [
  "api",
  "async-stream",
- "catalog",
  "common-base",
  "common-error",
  "common-grpc",
@@ -950,7 +949,6 @@ name = "common-recordbatch"
 version = "0.1.0"
 dependencies = [
  "common-error",
- "datafusion",
  "datafusion-common",
  "datatypes",
  "futures",
@@ -1002,7 +1000,6 @@ name = "common-time"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "common-error",
  "serde",
  "serde_json",
  "snafu",
@@ -1733,7 +1730,6 @@ dependencies = [
  "arrow2",
  "async-stream",
  "async-trait",
- "catalog",
  "client",
  "common-base",
  "common-error",
@@ -1747,7 +1743,6 @@ dependencies = [
  "datanode",
  "datatypes",
  "futures",
- "query",
  "serde",
  "servers",
  "snafu",
@@ -4549,7 +4544,6 @@ dependencies = [
  "axum-test-helper",
  "bytes",
  "catalog",
- "client",
  "common-base",
  "common-error",
  "common-grpc",
@@ -4574,7 +4568,6 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
- "table",
  "test-util",
  "tokio",
  "tokio-postgres",
@@ -4870,7 +4863,6 @@ dependencies = [
  "datatypes",
  "derive_builder",
  "futures",
- "object-store",
  "serde",
  "serde_json",
  "snafu",

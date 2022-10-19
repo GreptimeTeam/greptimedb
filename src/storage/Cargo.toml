@@ -20,7 +20,6 @@ datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"
 lazy_static = "1.4"
-log-store = { path = "../log-store" }
 object-store = { path = "../object-store" }
 paste = "1.0"
 planus = "0.2"
@@ -40,6 +39,7 @@ uuid = { version = "1.1", features = ["v4"] }
 atomic_float = "0.1"
 criterion = "0.3"
 datatypes = { path = "../datatypes", features = ["test"] }
+log-store = { path = "../log-store" }
 rand = "0.8"
 tempdir = "0.3"
 
