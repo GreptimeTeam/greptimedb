@@ -8,7 +8,8 @@ use std::{
 };
 
 use common_error::prelude::*;
-use common_time::{RangeMillis, TimestampMillis};
+use common_time::timestamp_millis::BucketAligned;
+use common_time::RangeMillis;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::vectors::{Int64Vector, TimestampVector};
 use datatypes::{
@@ -265,7 +266,7 @@ impl WriteRequest for WriteBatch {
 /// So timestamp within `[i64::MIN, i64::MIN + duration)` or
 /// `[i64::MAX-(i64::MAX%duration), i64::MAX]` is not a valid input.
 fn align_timestamp(ts: i64, duration: i64) -> Option<i64> {
-    let aligned = TimestampMillis::new(ts).align_by_bucket(duration)?.as_i64();
+    let aligned = ts.align_by_bucket(duration)?.as_i64();
     // Also ensure end timestamp won't overflow.
     aligned.checked_add(duration)?;
     Some(aligned)

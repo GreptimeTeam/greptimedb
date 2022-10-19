@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use common_time::timestamp_millis::BucketAligned;
 use common_time::{RangeMillis, TimestampMillis};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ScalarVector;
@@ -255,7 +256,7 @@ fn compute_slice_indexes<T: for<'a> ScalarVector<RefItem<'a>: Into<i64>>>(
         // Find index for time range of the timestamp.
 
         let current_range_index = ts
-            .and_then(|v| TimestampMillis::new(v.into()).align_by_bucket(duration_ms))
+            .and_then(|v| v.align_by_bucket(duration_ms))
             .and_then(|aligned| time_range_indexes.get(&aligned).copied());
 
         match current_range_index {
