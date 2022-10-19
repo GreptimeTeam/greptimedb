@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use api::prometheus::remote::{ReadRequest, WriteRequest};
 use api::v1::{AdminExpr, AdminResult, ObjectExpr, ObjectResult};
 use async_trait::async_trait;
 use common_query::Output;
@@ -7,6 +8,7 @@ use common_query::Output;
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
+use crate::prometheus::Metrics;
 
 /// All query handler traits for various request protocols, like SQL or GRPC.
 /// Instance that wishes to support certain request protocol, just implement the corresponding
@@ -53,4 +55,14 @@ pub trait OpentsdbProtocolHandler {
     /// A successful request will not return a response.
     /// Only on error will the socket return a line of data.
     async fn exec(&self, data_point: &DataPoint) -> Result<()>;
+}
+
+#[async_trait]
+pub trait PrometheusProtocolHandler {
+    /// Handling protometheus remote write requests
+    async fn write(&self, request: &WriteRequest) -> Result<()>;
+    /// Handling protometheus remote read requests
+    async fn read(&self, request: &ReadRequest) -> Result<()>;
+    /// Handling push gateway requests
+    async fn inject_metrics(&self, metrics: &Metrics) -> Result<()>;
 }

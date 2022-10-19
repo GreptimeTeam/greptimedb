@@ -24,6 +24,7 @@ hyper = { version = "0.14", features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 metrics = "0.20"
 num_cpus = "1.13"
+openmetrics-parser = "0.4"
 opensrv-mysql = "0.1"
 pgwire = { version = "0.4" }
 serde = "1.0"
