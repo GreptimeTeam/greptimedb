@@ -644,10 +644,16 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "log-store",
+ "object-store",
+ "opendal",
  "serde",
  "serde_json",
  "snafu",
+ "storage",
  "table",
+ "table-engine",
+ "tempdir",
  "tokio",
 ]
 

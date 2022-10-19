@@ -32,7 +32,7 @@ pub const TIMESTAMP_INDEX: usize = 2;
 pub const VALUE_INDEX: usize = 3;
 
 pub struct SystemCatalogTable {
-    schema: SchemaRef,
+    table_info: TableInfoRef,
     pub table: TableRef,
 }
 
@@ -43,7 +43,7 @@ impl Table for SystemCatalogTable {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.table_info.meta.schema.clone()
     }
 
     async fn scan(
@@ -61,7 +61,7 @@ impl Table for SystemCatalogTable {
     }
 
     fn table_info(&self) -> TableInfoRef {
-        unreachable!("System catalog table does not support table_info method")
+        self.table_info.clone()
     }
 }
 
@@ -81,7 +81,10 @@ impl SystemCatalogTable {
             .await
             .context(OpenSystemCatalogSnafu)?
         {
-            Ok(Self { table, schema })
+            Ok(Self {
+                table_info: table.table_info(),
+                table,
+            })
         } else {
             // system catalog table is not yet created, try to create
             let request = CreateTableRequest {
@@ -100,7 +103,8 @@ impl SystemCatalogTable {
                 .create_table(&ctx, request)
                 .await
                 .context(CreateSystemCatalogSnafu)?;
-            Ok(Self { table, schema })
+            let table_info = table.table_info();
+            Ok(Self { table, table_info })
         }
     }
 
@@ -327,10 +331,18 @@ mod tests {
     use datafusion::execution::runtime_env::RuntimeEnv;
     use datafusion::field_util::SchemaExt;
     use datatypes::arrow;
+    use log_store::fs::noop::NoopLogStore;
+    use object_store::ObjectStore;
+    use storage::config::EngineConfig as StorageEngineConfig;
+    use storage::EngineImpl;
     use table::engine::TableEngine;
+    use table::metadata::TableType;
     use table::metadata::TableType::Base;
     use table::requests::{AlterTableRequest, DropTableRequest};
     use table::table::adapter::TableAdapter;
+    use table_engine::config::EngineConfig;
+    use table_engine::engine::MitoEngine;
+    use tempdir::TempDir;
 
     use super::*;
 
@@ -490,11 +502,30 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic]
     async fn test_system_table_info() {
-        let system_table = SystemCatalogTable::new(Arc::new(MockTableEngine::default()))
-            .await
+        let dir = TempDir::new("system-table-test").unwrap();
+        let store_dir = dir.path().to_string_lossy();
+        let accessor = opendal::services::fs::Builder::default()
+            .root(&store_dir)
+            .build()
             .unwrap();
-        let _ = system_table.table_info();
+        let object_store = ObjectStore::new(accessor);
+        let table_engine = Arc::new(MitoEngine::new(
+            EngineConfig::default(),
+            EngineImpl::new(
+                StorageEngineConfig::default(),
+                Arc::new(NoopLogStore::default()),
+                object_store.clone(),
+            ),
+            object_store,
+        ));
+
+        let system_table = SystemCatalogTable::new(table_engine).await.unwrap();
+        let info = system_table.table_info();
+        assert_eq!(TableType::Base, info.table_type);
+        assert_eq!(SYSTEM_CATALOG_TABLE_NAME, info.name);
+        assert_eq!(SYSTEM_CATALOG_TABLE_ID, info.ident.table_id);
+        assert_eq!(SYSTEM_CATALOG_NAME, info.catalog_name);
+        assert_eq!(INFORMATION_SCHEMA_NAME, info.schema_name);
     }
 }
