@@ -10,6 +10,34 @@ To learn about the design of GreptimeDB, please refer to the [design docs](https
 - Make sure all unit tests are passed.
 - Make sure all clippy warnings are fixed (you can check it locally by running `cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr`).
 
+
+#### `pre-commit` Hooks
+You could setup the [`pre-commit`](https://pre-commit.com/#plugins) hooks to run these checks on every commit automatically.
+
+1. Install `pre-commit`
+```
+$ pip install pre-commit
+```
+or
+```
+$ brew install pre-commit
+```
+
+2. Install the `pre-commit` hooks
+```
+$ pre-commit install
+pre-commit installed at .git/hooks/pre-commit
+
+$ pre-commit install --hook-type commit-msg
+pre-commit installed at .git/hooks/commit-msg
+
+$ pre-commit install --hook-type pre-push
+pre-commit installed at .git/hooks/pre-pus
+```
+
+now `pre-commit` will run automatically on `git commit`.
+
+
 ### Title
 
 The titles of pull requests should be prefixed with category name listed in [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0) 
@@ -32,4 +60,4 @@ of what you were trying to do and what went wrong. You can also reach for help i
 
 
 ## Bug report
-To report a bug or a security issue, you can [open a new GitHub issue](https://github.com/GrepTimeTeam/greptimedb/issues/new). 
+To report a bug or a security issue, you can [open a new GitHub issue](https://github.com/GrepTimeTeam/greptimedb/issues/new).
