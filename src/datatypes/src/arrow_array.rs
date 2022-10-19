@@ -8,7 +8,7 @@ use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result};
 use crate::prelude::ConcreteDataType;
-use crate::value::Value;
+use crate::value::{GeometryValue, Value};
 
 pub type BinaryArray = ArrowBinaryArray<i64>;
 pub type MutableBinaryArray = ArrowMutableBinaryArray<i64>;
@@ -70,8 +70,26 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
             Value::Timestamp(Timestamp::new(value, unit))
         }
         ArrowDataType::Struct(_) => {
-            let k = cast_array!(array, StructArray).values().get(0).unwrap();
-            Value::Geometry(crate::value::GeometryValue::new_point(0.into(), 0.into()))
+            let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+
+            let ref_x_array = struct_array
+                .values()
+                .get(0)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<PrimitiveArray<f64>>()
+                .unwrap();
+
+            let ref_y_array = struct_array
+                .values()
+                .get(1)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<PrimitiveArray<f64>>()
+                .unwrap();
+
+            let (x, y) = (ref_x_array.value(idx), ref_y_array.value(idx));
+            Value::Geometry(GeometryValue::new_point(x, y))
         }
         // TODO(sunng87): List
         _ => unimplemented!("Arrow array datatype: {:?}", array.data_type()),

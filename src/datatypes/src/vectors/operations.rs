@@ -130,9 +130,9 @@ impl VectorOp for GeometryVector {
         todo!()
     }
 
-    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+    fn filter(&self, _filter: &BooleanVector) -> Result<VectorRef> {
         let array = self.to_arrow_array();
         let v = GeometryVector::try_from_arrow_array(array)?;
-        return Ok(Arc::new(v));
+        Ok(Arc::new(v))
     }
 }
