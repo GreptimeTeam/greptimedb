@@ -2,8 +2,9 @@ use std::cmp::Ordering;
 
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use snafu::ensure;
 use snafu::ResultExt;
+use snafu::{ensure, OptionExt};
+use sqlparser::ast::Value;
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::tokenizer::{Token, Word};
@@ -56,131 +57,9 @@ impl<'a> ParserContext<'a> {
             table_id: 0, // table id is assigned by catalog manager
             partitions,
         };
-        Self::validate_create(&create_table)?;
+        validate_create(&create_table)?;
 
         Ok(Statement::Create(create_table))
-    }
-
-    fn validate_create(create_table: &CreateTable) -> Result<()> {
-        if let Some(partitions) = &create_table.partitions {
-            Self::validate_partitions(&create_table.columns, partitions)?;
-        }
-        Ok(())
-    }
-
-    fn validate_partitions(columns: &[ColumnDef], partitions: &Partitions) -> Result<()> {
-        // Ensure that all columns used in "PARTITION BY RANGE COLUMNS" are defined in create table.
-        let partition_columns = partitions
-            .column_list
-            .iter()
-            // Normally the columns in "create table" won't be too many,
-            // a linear search to find the target every time is fine.
-            .filter_map(|x| columns.iter().find(|c| &c.name == x))
-            .collect::<Vec<&ColumnDef>>();
-        if partition_columns.len() != partitions.column_list.len() {
-            return error::InvalidSqlSnafu {
-                msg: "The columns by which to partition are not defined.",
-            }
-            .fail();
-        }
-
-        // Ensure that partition names do not have duplicates.
-        let partition_names = partitions
-            .entries
-            .iter()
-            .map(|x| &x.name.value)
-            .sorted()
-            .collect::<Vec<&String>>();
-        for w in partition_names.windows(2) {
-            if w[0] == w[1] {
-                return error::InvalidSqlSnafu {
-                    msg: format!("Duplicate partition names: {}", w[0]),
-                }
-                .fail();
-            }
-        }
-
-        // Ensure that value list matches the column list.
-        for entry in partitions.entries.iter() {
-            if entry.value_list.len() != partition_columns.len() {
-                return error::InvalidSqlSnafu {
-                    msg: "Partition value list does not match column list.",
-                }
-                .fail();
-            }
-        }
-
-        // Ensure that value lists of partitions are strictly increasing.
-        let value_lists = partitions
-            .entries
-            .iter()
-            .map(|x| &x.value_list)
-            .collect::<Vec<_>>();
-        for i in 1..value_lists.len() {
-            let mut equal_tuples = 0;
-            for (n, (x, y)) in value_lists[i - 1]
-                .iter()
-                .zip(value_lists[i].iter())
-                .enumerate()
-            {
-                let column = partition_columns[n];
-                let is_x_maxvalue = matches!(x, SqlValue::Number(s, _) if s == MAXVALUE);
-                let is_y_maxvalue = matches!(y, SqlValue::Number(s, _) if s == MAXVALUE);
-                match (is_x_maxvalue, is_y_maxvalue) {
-                    (true, true) => {
-                        equal_tuples += 1;
-                    },
-                    (false, false) => {
-                        let column_name = &column.name.value;
-                        let cdt = sql_data_type_to_concrete_data_type(&column.data_type)?;
-                        let x = sql_value_to_value(column_name, &cdt, x)?;
-                        let y = sql_value_to_value(column_name, &cdt, y)?;
-                        match x.cmp(&y) {
-                            Ordering::Less => break,
-                            Ordering::Equal => equal_tuples += 1,
-                            Ordering::Greater => return error::InvalidSqlSnafu {
-                                msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
-                            }.fail()
-                        }
-                    }
-                    (true, false) => {
-                        return error::InvalidSqlSnafu {
-                            msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
-                        }.fail()
-                    },
-                    (false, true) => break,
-                }
-            }
-            ensure!(
-                equal_tuples < partition_columns.len(),
-                error::InvalidSqlSnafu {
-                    msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
-                }
-            );
-        }
-
-        // Ensure that partition ranges fully cover all values.
-        // Simply check the last partition is bounded by "MAXVALUE"s.
-        // MySQL does not have this restriction. However, I think we'd better have it because:
-        //   - It might save user from adding more partitions in the future by hand, which is often
-        //     a tedious task. Why not provide an extra partition at the beginning and leave all
-        //     other partition related jobs to us? I think it's a reasonable argument to user.
-        //   - It might save us from some ugly designs and codings. The "MAXVALUE" bound is natural
-        //     in dealing with values that are unspecified upfront. Without it, we have to store
-        //     and use the user defined max bound everywhere, starting from calculating regions by
-        //     partition rule in Frontend, to automatically split and merge regions in Meta.
-        let is_bound_by_maxvalue = value_lists.last().map(|v| {
-            v.iter()
-                .all(|x| matches!(x, SqlValue::Number(s, _) if s == MAXVALUE))
-        });
-        ensure!(
-            matches!(is_bound_by_maxvalue, Some(true)),
-            error::InvalidSqlSnafu {
-                msg: "Please provide an extra partition that is bounded by 'MAXVALUE'."
-            }
-        );
-
-        Ok(())
     }
 
     // "PARTITION BY ..." syntax:
@@ -378,6 +257,161 @@ impl<'a> ParserContext<'a> {
     }
 }
 
+fn validate_create(create_table: &CreateTable) -> Result<()> {
+    if let Some(partitions) = &create_table.partitions {
+        validate_partitions(&create_table.columns, partitions)?;
+    }
+    Ok(())
+}
+
+fn validate_partitions(columns: &[ColumnDef], partitions: &Partitions) -> Result<()> {
+    let partition_columns = ensure_partition_columns_defined(columns, partitions)?;
+
+    ensure_partition_names_no_duplicate(partitions)?;
+
+    ensure_value_list_len_matches_columns(partitions, &partition_columns)?;
+
+    let value_lists = ensure_value_lists_strictly_increased(partitions, partition_columns)?;
+
+    ensure_value_lists_bounded_by_maxvalue(value_lists)?;
+
+    Ok(())
+}
+
+/// Ensure that partition ranges fully cover all values.
+// Simply check the last partition is bounded by "MAXVALUE"s.
+// MySQL does not have this restriction. However, I think we'd better have it because:
+//   - It might save user from adding more partitions in the future by hand, which is often
+//     a tedious task. Why not provide an extra partition at the beginning and leave all
+//     other partition related jobs to us? I think it's a reasonable argument to user.
+//   - It might save us from some ugly designs and codings. The "MAXVALUE" bound is natural
+//     in dealing with values that are unspecified upfront. Without it, we have to store
+//     and use the user defined max bound everywhere, starting from calculating regions by
+//     partition rule in Frontend, to automatically split and merge regions in Meta.
+fn ensure_value_lists_bounded_by_maxvalue(value_lists: Vec<&Vec<Value>>) -> Result<()> {
+    let is_maxvalue_bound = value_lists.last().map(|v| {
+        v.iter()
+            .all(|x| matches!(x, SqlValue::Number(s, _) if s == MAXVALUE))
+    });
+    ensure!(
+        matches!(is_maxvalue_bound, Some(true)),
+        error::InvalidSqlSnafu {
+            msg: "Please provide an extra partition that is bounded by 'MAXVALUE'."
+        }
+    );
+    Ok(())
+}
+
+/// Ensure that value lists of partitions are strictly increasing.
+fn ensure_value_lists_strictly_increased<'a>(
+    partitions: &'a Partitions,
+    partition_columns: Vec<&'a ColumnDef>,
+) -> Result<Vec<&'a Vec<Value>>> {
+    let value_lists = partitions
+        .entries
+        .iter()
+        .map(|x| &x.value_list)
+        .collect::<Vec<_>>();
+    for i in 1..value_lists.len() {
+        let mut equal_tuples = 0;
+        for (n, (x, y)) in value_lists[i - 1]
+            .iter()
+            .zip(value_lists[i].iter())
+            .enumerate()
+        {
+            let column = partition_columns[n];
+            let is_x_maxvalue = matches!(x, SqlValue::Number(s, _) if s == MAXVALUE);
+            let is_y_maxvalue = matches!(y, SqlValue::Number(s, _) if s == MAXVALUE);
+            match (is_x_maxvalue, is_y_maxvalue) {
+                (true, true) => {
+                    equal_tuples += 1;
+                }
+                (false, false) => {
+                    let column_name = &column.name.value;
+                    let cdt = sql_data_type_to_concrete_data_type(&column.data_type)?;
+                    let x = sql_value_to_value(column_name, &cdt, x)?;
+                    let y = sql_value_to_value(column_name, &cdt, y)?;
+                    match x.cmp(&y) {
+                        Ordering::Less => break,
+                        Ordering::Equal => equal_tuples += 1,
+                        Ordering::Greater => return error::InvalidSqlSnafu {
+                            msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
+                        }.fail()
+                    }
+                }
+                (true, false) => return error::InvalidSqlSnafu {
+                    msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
+                }
+                .fail(),
+                (false, true) => break,
+            }
+        }
+        ensure!(
+            equal_tuples < partition_columns.len(),
+            error::InvalidSqlSnafu {
+                msg: "VALUES LESS THAN value must be strictly increasing for each partition.",
+            }
+        );
+    }
+    Ok(value_lists)
+}
+
+/// Ensure that value list's length matches the column list.
+fn ensure_value_list_len_matches_columns(
+    partitions: &Partitions,
+    partition_columns: &Vec<&ColumnDef>,
+) -> Result<()> {
+    for entry in partitions.entries.iter() {
+        ensure!(
+            entry.value_list.len() == partition_columns.len(),
+            error::InvalidSqlSnafu {
+                msg: "Partition value list does not match column list.",
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Ensure that all columns used in "PARTITION BY RANGE COLUMNS" are defined in create table.
+fn ensure_partition_columns_defined<'a>(
+    columns: &'a [ColumnDef],
+    partitions: &'a Partitions,
+) -> Result<Vec<&'a ColumnDef>> {
+    partitions
+        .column_list
+        .iter()
+        .map(|x| {
+            // Normally the columns in "create table" won't be too many,
+            // a linear search to find the target every time is fine.
+            columns
+                .iter()
+                .find(|c| &c.name == x)
+                .context(error::InvalidSqlSnafu {
+                    msg: format!("Partition column {:?} not defined!", x.value),
+                })
+        })
+        .collect::<Result<Vec<&ColumnDef>>>()
+}
+
+/// Ensure that partition names do not duplicate.
+fn ensure_partition_names_no_duplicate(partitions: &Partitions) -> Result<()> {
+    let partition_names = partitions
+        .entries
+        .iter()
+        .map(|x| &x.name.value)
+        .sorted()
+        .collect::<Vec<&String>>();
+    for w in partition_names.windows(2) {
+        ensure!(
+            w[0] != w[1],
+            error::InvalidSqlSnafu {
+                msg: format!("Duplicate partition names: {}", w[0]),
+            }
+        )
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
@@ -411,7 +445,7 @@ ENGINE=mito";
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("The columns by which to partition are not defined"));
+            .contains("Partition column \"x\" not defined!"));
 
         let sql = r"
 CREATE TABLE rcx ( a INT, b STRING, c INT )
