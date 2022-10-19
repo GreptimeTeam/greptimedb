@@ -136,8 +136,8 @@ fn create_to_expr(create: CreateTable) -> Result<CreateExpr> {
         table_idents_to_full_name(&create.name).context(error::ParseSqlSnafu)?;
 
     let expr = CreateExpr {
-        catalog_name,
-        schema_name,
+        catalog_name: Some(catalog_name),
+        schema_name: Some(schema_name),
         table_name,
         column_defs: columns_to_expr(&create.columns)?,
         time_index: find_time_index(&create.constraints)?,

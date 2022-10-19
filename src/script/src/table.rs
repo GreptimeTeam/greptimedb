@@ -41,8 +41,8 @@ impl ScriptsTable {
         // maybe put into system catalog?
         let request = CreateTableRequest {
             id: SCRIPTS_TABLE_ID,
-            catalog_name: Some(DEFAULT_CATALOG_NAME.to_string()),
-            schema_name: Some(DEFAULT_SCHEMA_NAME.to_string()),
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: SCRIPTS_TABLE_NAME.to_string(),
             desc: Some("Scripts table".to_string()),
             schema,

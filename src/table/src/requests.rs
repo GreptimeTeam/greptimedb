@@ -17,8 +17,8 @@ pub struct InsertRequest {
 #[derive(Debug, Clone)]
 pub struct CreateTableRequest {
     pub id: TableId,
-    pub catalog_name: Option<String>,
-    pub schema_name: Option<String>,
+    pub catalog_name: String,
+    pub schema_name: String,
     pub table_name: String,
     pub desc: Option<String>,
     pub schema: SchemaRef,
