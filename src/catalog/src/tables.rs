@@ -6,9 +6,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_stream::stream;
+use common_query::execution::ExecutionPlan;
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStream};
 use datatypes::prelude::{ConcreteDataType, VectorBuilder};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
@@ -17,6 +18,7 @@ use futures::Stream;
 use snafu::ResultExt;
 use table::engine::TableEngineRef;
 use table::metadata::{TableId, TableInfoRef};
+use table::table::scan::SimpleTableScan;
 use table::{Table, TableRef};
 
 use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
@@ -62,7 +64,7 @@ impl Table for Tables {
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
-    ) -> table::error::Result<SendableRecordBatchStream> {
+    ) -> table::error::Result<Arc<dyn ExecutionPlan>> {
         let catalogs = self.catalogs.clone();
         let schema_ref = self.schema.clone();
         let engine_name = self.engine_name.clone();
@@ -89,10 +91,11 @@ impl Table for Tables {
             }
         });
 
-        Ok(Box::pin(TablesRecordBatchStream {
+        let stream = Box::pin(TablesRecordBatchStream {
             schema: self.schema.clone(),
             stream: Box::pin(stream),
-        }))
+        });
+        Ok(Arc::new(SimpleTableScan::new(stream)))
     }
 }
 
@@ -298,7 +301,8 @@ mod tests {
         catalog_list.register_catalog("test_catalog".to_string(), catalog_provider);
         let tables = Tables::new(catalog_list, "test_engine".to_string());
 
-        let mut tables_stream = tables.scan(&None, &[], None).await.unwrap();
+        let tables_stream = tables.scan(&None, &[], None).await.unwrap();
+        let mut tables_stream = tables_stream.execute(0, None).await.unwrap();
         if let Some(t) = tables_stream.next().await {
             let batch = t.unwrap().df_recordbatch;
             assert_eq!(1, batch.num_rows());

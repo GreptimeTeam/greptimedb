@@ -2,7 +2,7 @@ use datafusion::logical_plan::Expr as DfExpr;
 
 /// Central struct of query API.
 /// Represent logical expressions such as `A + 1`, or `CAST(c1 AS int)`.
-#[derive(Clone, PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub struct Expr {
     df_expr: DfExpr,
 }

@@ -44,6 +44,15 @@ pub enum InnerError {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
+
+    #[snafu(display(
+        "Failed to convert DataFusion's recordbatch stream, source: {}",
+        source
+    ))]
+    ConvertDfRecordBatchStream {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
 }
 
 impl ErrorExt for InnerError {
@@ -59,6 +68,7 @@ impl ErrorExt for InnerError {
             }
             ParseSql { source, .. } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
+            ConvertDfRecordBatchStream { source } => source.status_code(),
         }
     }
 

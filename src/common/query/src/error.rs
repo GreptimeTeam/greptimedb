@@ -62,6 +62,30 @@ pub enum InnerError {
 
     #[snafu(display("unexpected: not constant column"))]
     InvalidInputCol { backtrace: Backtrace },
+
+    #[snafu(display("Not expected to run ExecutionPlan more than once"))]
+    ExecuteRepeatedly { backtrace: Backtrace },
+
+    #[snafu(display("Runtime is required when executing DataFusion's plan."))]
+    MissingRuntime { backtrace: Backtrace },
+
+    #[snafu(display("General DataFusion error, source: {}", source))]
+    GeneralDataFusion {
+        source: DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to execute DataFusion ExecutionPlan, source: {}", source))]
+    DataFusionExecutionPlan {
+        source: DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("General RecordBatch error, source: {}", source))]
+    GeneralRecordBatch {
+        source: common_recordbatch::error::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -79,6 +103,13 @@ impl ErrorExt for InnerError {
             InnerError::InvalidInputs { source, .. } => source.status_code(),
             InnerError::IntoVector { source, .. } => source.status_code(),
             InnerError::FromScalarValue { source } => source.status_code(),
+
+            InnerError::ExecuteRepeatedly { .. }
+            | InnerError::MissingRuntime { .. }
+            | InnerError::GeneralDataFusion { .. }
+            | InnerError::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
+
+            InnerError::GeneralRecordBatch { source, .. } => source.status_code(),
         }
     }
 

@@ -2,6 +2,7 @@ use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 
 pub mod columnar_value;
 pub mod error;
+pub mod execution;
 mod function;
 pub mod logical_plan;
 pub mod prelude;

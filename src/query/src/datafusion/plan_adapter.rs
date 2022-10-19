@@ -2,6 +2,7 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::execution::runtime_env::RuntimeEnv;
@@ -14,7 +15,6 @@ use datafusion::{
 };
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
-use table::table::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
 
 use crate::datafusion::error;
 use crate::error::Result;
@@ -100,7 +100,7 @@ impl PhysicalPlan for PhysicalPlanAdapter {
 
         Ok(Box::pin(
             RecordBatchStreamAdapter::try_new(df_stream)
-                .context(error::TableSchemaMismatchSnafu)?,
+                .context(error::ConvertDfRecordBatchStreamSnafu)?,
         ))
     }
 

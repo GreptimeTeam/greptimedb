@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_query::execution::ExecutionPlan;
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
@@ -22,7 +23,7 @@ use crate::consts::{
     SYSTEM_CATALOG_TABLE_NAME,
 };
 use crate::error::{
-    CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
+    self, CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
     OpenSystemCatalogSnafu, Result, ValueDeserializeSnafu,
 };
 
@@ -51,7 +52,7 @@ impl Table for SystemCatalogTable {
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
-    ) -> table::Result<SendableRecordBatchStream> {
+    ) -> table::Result<Arc<dyn ExecutionPlan>> {
         panic!("System catalog table does not support scan!")
     }
 
@@ -111,7 +112,15 @@ impl SystemCatalogTable {
     /// Create a stream of all entries inside system catalog table
     pub async fn records(&self) -> Result<SendableRecordBatchStream> {
         let full_projection = None;
-        let stream = self.table.scan(&full_projection, &[], None).await.unwrap();
+        let scan = self
+            .table
+            .scan(&full_projection, &[], None)
+            .await
+            .context(error::SystemCatalogTableScanSnafu)?;
+        let stream = scan
+            .execute(0, None)
+            .await
+            .context(error::SystemCatalogTableScanExecSnafu)?;
         Ok(stream)
     }
 }
