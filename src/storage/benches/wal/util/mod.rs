@@ -1,9 +1,11 @@
+pub mod write_batch_util;
+
 use std::sync::Arc;
 
 use datatypes::{
     prelude::ScalarVector,
     type_id::LogicalTypeId,
-    vectors::{BooleanVector, Float64Vector, Int64Vector, StringVector, UInt64Vector},
+    vectors::{BooleanVector, Float64Vector, StringVector, TimestampVector, UInt64Vector},
 };
 use rand::Rng;
 use storage::{
@@ -11,13 +13,13 @@ use storage::{
     write_batch::{PutData, WriteBatch},
 };
 use store_api::storage::{consts, PutOperation, WriteRequest};
-pub mod write_batch_util;
+
 pub fn new_test_batch() -> WriteBatch {
     write_batch_util::new_write_batch(
         &[
             ("k1", LogicalTypeId::UInt64, false),
             (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-            ("ts", LogicalTypeId::Int64, false),
+            ("ts", LogicalTypeId::Timestamp, false),
             ("v1", LogicalTypeId::Boolean, true),
             ("4", LogicalTypeId::Float64, false),
             ("5", LogicalTypeId::Float64, false),
@@ -30,6 +32,7 @@ pub fn new_test_batch() -> WriteBatch {
         Some(2),
     )
 }
+
 pub fn gen_new_batch_and_extras(
     putdate_nums: usize,
 ) -> (WriteBatch, Vec<storage::proto::wal::MutationExtra>) {
@@ -58,7 +61,7 @@ pub fn gen_new_batch_and_extras(
         rng.fill(&mut fvs[..]);
         let intv = Arc::new(UInt64Vector::from_slice(&intvs));
         let boolv = Arc::new(BooleanVector::from(boolvs.to_vec()));
-        let tsv = Arc::new(Int64Vector::from_slice(&tsvs));
+        let tsv = Arc::new(TimestampVector::from_values(tsvs));
         let fvs = Arc::new(Float64Vector::from_slice(&fvs));
         let svs = Arc::new(StringVector::from_slice(&svs));
         let mut put_data = PutData::default();
