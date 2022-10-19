@@ -324,6 +324,14 @@ pub struct TableEntryValue {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::execution::runtime_env::RuntimeEnv;
+    use datafusion::field_util::SchemaExt;
+    use datatypes::arrow;
+    use table::engine::TableEngine;
+    use table::metadata::TableType::Base;
+    use table::requests::{AlterTableRequest, DropTableRequest};
+    use table::table::adapter::TableAdapter;
+
     use super::*;
 
     #[test]
@@ -394,5 +402,99 @@ mod tests {
         assert_eq!(EntryType::Schema, EntryType::try_from(2).unwrap());
         assert_eq!(EntryType::Table, EntryType::try_from(3).unwrap());
         assert!(EntryType::try_from(4).is_err());
+    }
+
+    struct MockTableEngine {
+        table_name: String,
+        sole_table: TableRef,
+    }
+
+    impl Default for MockTableEngine {
+        fn default() -> Self {
+            Self {
+                table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
+                sole_table: Arc::new(
+                    TableAdapter::new(
+                        Arc::new(datafusion::datasource::empty::EmptyTable::new(Arc::new(
+                            arrow::datatypes::Schema::empty(),
+                        ))),
+                        Arc::new(RuntimeEnv::default()),
+                    )
+                    .unwrap(),
+                ),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TableEngine for MockTableEngine {
+        fn name(&self) -> &str {
+            "MockTableEngine"
+        }
+
+        async fn create_table(
+            &self,
+            _ctx: &EngineContext,
+            _request: CreateTableRequest,
+        ) -> table::Result<TableRef> {
+            unreachable!()
+        }
+
+        async fn open_table(
+            &self,
+            _ctx: &EngineContext,
+            request: OpenTableRequest,
+        ) -> table::Result<Option<TableRef>> {
+            if request.table_name == self.table_name {
+                Ok(Some(self.sole_table.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        async fn alter_table(
+            &self,
+            _ctx: &EngineContext,
+            _request: AlterTableRequest,
+        ) -> table::Result<TableRef> {
+            unreachable!()
+        }
+
+        fn get_table(&self, _ctx: &EngineContext, name: &str) -> table::Result<Option<TableRef>> {
+            if name == self.table_name {
+                Ok(Some(self.sole_table.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn table_exists(&self, _ctx: &EngineContext, name: &str) -> bool {
+            name == self.table_name
+        }
+
+        async fn drop_table(
+            &self,
+            _ctx: &EngineContext,
+            _request: DropTableRequest,
+        ) -> table::Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_system_table_type() {
+        let system_table = SystemCatalogTable::new(Arc::new(MockTableEngine::default()))
+            .await
+            .unwrap();
+        assert_eq!(Base, system_table.table_type());
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn test_system_table_info() {
+        let system_table = SystemCatalogTable::new(Arc::new(MockTableEngine::default()))
+            .await
+            .unwrap();
+        let _ = system_table.table_info();
     }
 }
