@@ -837,6 +837,7 @@ dependencies = [
  "datanode",
  "frontend",
  "futures",
+ "meta-srv",
  "serde",
  "snafu",
  "tempdir",
@@ -919,8 +920,11 @@ dependencies = [
  "async-trait",
  "common-base",
  "common-error",
+ "common-runtime",
  "datafusion",
  "snafu",
+ "tokio",
+ "tonic",
 ]
 
 [[package]]
@@ -1612,6 +1616,22 @@ checksum = "64f18991e7bf11e7ffee451b5318b5c1a73c52d0d0ada6e5a3017c8c1ced6a21"
 dependencies = [
  "libc",
  "str-buf",
+]
+
+[[package]]
+name = "etcd-client"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1259da3b15ec7e54bd7203adb2c4335adb9ca1d47b56220d650e52c247e824a"
+dependencies = [
+ "http",
+ "prost",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tower",
+ "tower-service",
 ]
 
 [[package]]
@@ -2604,6 +2624,45 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "meta-client"
+version = "0.1.0"
+dependencies = [
+ "api",
+ "common-error",
+ "common-grpc",
+ "common-telemetry",
+ "etcd-client",
+ "rand 0.8.5",
+ "snafu",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "meta-srv"
+version = "0.1.0"
+dependencies = [
+ "api",
+ "async-trait",
+ "common-base",
+ "common-error",
+ "common-telemetry",
+ "etcd-client",
+ "futures",
+ "http-body",
+ "serde",
+ "snafu",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
