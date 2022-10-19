@@ -10,7 +10,7 @@ use std::{
 use common_error::prelude::*;
 use common_time::{RangeMillis, TimestampMillis};
 use datatypes::schema::{ColumnSchema, SchemaRef};
-use datatypes::vectors::TimestampVector;
+use datatypes::vectors::{Int64Vector, TimestampVector};
 use datatypes::{
     arrow::error::ArrowError, data_type::ConcreteDataType, prelude::ScalarVector, prelude::Value,
     vectors::VectorRef,
@@ -216,11 +216,26 @@ impl WriteRequest for WriteBatch {
 
                         aligned_timestamps.insert(aligned);
                     } else {
-                        let ts_vector = column.as_any().downcast_ref::<TimestampVector>().unwrap(); // not expected to fail
-                        for ts in ts_vector.iter_data().flatten() {
-                            let aligned = align_timestamp(ts.value(), durations_millis)
-                                .context(TimestampOverflowSnafu { ts: ts.value() })?;
-                            aligned_timestamps.insert(aligned);
+                        match column.data_type() {
+                            ConcreteDataType::Timestamp(_) => {
+                                let ts_vector =
+                                    column.as_any().downcast_ref::<TimestampVector>().unwrap();
+                                for ts in ts_vector.iter_data().flatten() {
+                                    let aligned = align_timestamp(ts.value(), durations_millis)
+                                        .context(TimestampOverflowSnafu { ts: ts.value() })?;
+                                    aligned_timestamps.insert(aligned);
+                                }
+                            }
+                            ConcreteDataType::Int64(_) => {
+                                let ts_vector =
+                                    column.as_any().downcast_ref::<Int64Vector>().unwrap();
+                                for ts in ts_vector.iter_data().flatten() {
+                                    let aligned = align_timestamp(ts, durations_millis)
+                                        .context(TimestampOverflowSnafu { ts })?;
+                                    aligned_timestamps.insert(aligned);
+                                }
+                            }
+                            _ => unreachable!(),
                         }
                     }
                 }
