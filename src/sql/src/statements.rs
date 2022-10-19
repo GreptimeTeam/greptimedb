@@ -94,7 +94,7 @@ fn parse_string_to_value(
             }
         }
         ConcreteDataType::Geometry(_) => {
-            if let Ok(geo_value) = GeometryValue::from_wkb(&s) {
+            if let Ok(geo_value) = GeometryValue::from_wkt(&s) {
                 Ok(Value::Geometry(geo_value))
             } else {
                 ParseSqlValueSnafu {
