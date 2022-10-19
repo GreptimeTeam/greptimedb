@@ -224,7 +224,7 @@ impl MetaClient {
         self.store_client.clone()
     }
 
-    pub fn channel_config(&self) -> Option<ChannelConfig> {
+    pub fn channel_config(&self) -> &ChannelConfig {
         self.channel_manager.config()
     }
 }

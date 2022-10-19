@@ -14,8 +14,93 @@ const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 
 #[derive(Clone, Debug)]
 pub struct ChannelManager {
-    config: Option<ChannelConfig>,
+    config: ChannelConfig,
     pool: Arc<Mutex<Pool>>,
+}
+
+impl Default for ChannelManager {
+    fn default() -> Self {
+        ChannelManager::with_config(ChannelConfig::default())
+    }
+}
+
+impl ChannelManager {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    pub fn with_config(config: ChannelConfig) -> Self {
+        let pool = Pool {
+            channels: HashMap::default(),
+        };
+        let pool = Arc::new(Mutex::new(pool));
+        let cloned_pool = pool.clone();
+
+        common_runtime::spawn_bg(async move {
+            recycle_channel_in_loop(cloned_pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
+        });
+
+        Self { pool, config }
+    }
+
+    pub fn config(&self) -> &ChannelConfig {
+        &self.config
+    }
+
+    pub fn get(&self, addr: impl AsRef<str>) -> Result<InnerChannel> {
+        let addr = addr.as_ref();
+        let mut pool = self.pool.lock().unwrap();
+        if let Some(ch) = pool.get_mut(addr) {
+            ch.access += 1;
+            return Ok(ch.channel.clone());
+        }
+
+        let mut endpoint =
+            Endpoint::new(format!("http://{}", addr)).context(error::CreateChannelSnafu)?;
+
+        if let Some(dur) = self.config.timeout {
+            endpoint = endpoint.timeout(dur);
+        }
+        if let Some(dur) = self.config.connect_timeout {
+            endpoint = endpoint.connect_timeout(dur);
+        }
+        if let Some(limit) = self.config.concurrency_limit {
+            endpoint = endpoint.concurrency_limit(limit);
+        }
+        if let Some((limit, dur)) = self.config.rate_limit {
+            endpoint = endpoint.rate_limit(limit, dur);
+        }
+        if let Some(size) = self.config.initial_stream_window_size {
+            endpoint = endpoint.initial_stream_window_size(size);
+        }
+        if let Some(size) = self.config.initial_connection_window_size {
+            endpoint = endpoint.initial_connection_window_size(size);
+        }
+        if let Some(dur) = self.config.http2_keep_alive_interval {
+            endpoint = endpoint.http2_keep_alive_interval(dur);
+        }
+        if let Some(dur) = self.config.http2_keep_alive_timeout {
+            endpoint = endpoint.keep_alive_timeout(dur);
+        }
+        if let Some(enabled) = self.config.http2_keep_alive_while_idle {
+            endpoint = endpoint.keep_alive_while_idle(enabled);
+        }
+        if let Some(enabled) = self.config.http2_adaptive_window {
+            endpoint = endpoint.http2_adaptive_window(enabled);
+        }
+        endpoint = endpoint
+            .tcp_keepalive(self.config.tcp_keepalive)
+            .tcp_nodelay(self.config.tcp_nodelay);
+
+        let inner_channel = endpoint.connect_lazy();
+        let channel = Channel {
+            channel: inner_channel.clone(),
+            access: 1,
+        };
+        pool.put(addr, channel);
+
+        Ok(inner_channel)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,85 +257,6 @@ struct Pool {
     channels: HashMap<String, Channel>,
 }
 
-#[derive(Debug)]
-struct Channel {
-    channel: InnerChannel,
-    access: usize,
-}
-
-impl ChannelManager {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    pub fn with_config(config: ChannelConfig) -> Self {
-        let mut manager = ChannelManager::new();
-        manager.config = Some(config);
-        manager
-    }
-
-    pub fn config(&self) -> Option<ChannelConfig> {
-        self.config.clone()
-    }
-
-    pub fn get(&self, addr: impl AsRef<str>) -> Result<InnerChannel> {
-        let addr = addr.as_ref();
-        let mut pool = self.pool.lock().unwrap();
-        if let Some(ch) = pool.get_mut(addr) {
-            ch.access += 1;
-            return Ok(ch.channel.clone());
-        }
-
-        let mut endpoint =
-            Endpoint::new(format!("http://{}", addr)).context(error::CreateChannelSnafu)?;
-
-        if let Some(cfg) = &self.config {
-            if let Some(dur) = cfg.timeout {
-                endpoint = endpoint.timeout(dur);
-            }
-            if let Some(dur) = cfg.connect_timeout {
-                endpoint = endpoint.connect_timeout(dur);
-            }
-            if let Some(limit) = cfg.concurrency_limit {
-                endpoint = endpoint.concurrency_limit(limit);
-            }
-            if let Some((limit, dur)) = cfg.rate_limit {
-                endpoint = endpoint.rate_limit(limit, dur);
-            }
-            if let Some(size) = cfg.initial_stream_window_size {
-                endpoint = endpoint.initial_stream_window_size(size);
-            }
-            if let Some(size) = cfg.initial_connection_window_size {
-                endpoint = endpoint.initial_connection_window_size(size);
-            }
-            if let Some(dur) = cfg.http2_keep_alive_interval {
-                endpoint = endpoint.http2_keep_alive_interval(dur);
-            }
-            if let Some(dur) = cfg.http2_keep_alive_timeout {
-                endpoint = endpoint.keep_alive_timeout(dur);
-            }
-            if let Some(enabled) = cfg.http2_keep_alive_while_idle {
-                endpoint = endpoint.keep_alive_while_idle(enabled);
-            }
-            if let Some(enabled) = cfg.http2_adaptive_window {
-                endpoint = endpoint.http2_adaptive_window(enabled);
-            }
-            endpoint = endpoint
-                .tcp_keepalive(cfg.tcp_keepalive)
-                .tcp_nodelay(cfg.tcp_nodelay);
-        }
-
-        let inner_channel = endpoint.connect_lazy();
-        let channel = Channel {
-            channel: inner_channel.clone(),
-            access: 1,
-        };
-        pool.put(addr, channel);
-
-        Ok(inner_channel)
-    }
-}
-
 impl Pool {
     #[inline]
     fn get_mut(&mut self, addr: &str) -> Option<&mut Channel> {
@@ -271,20 +277,10 @@ impl Pool {
     }
 }
 
-impl Default for ChannelManager {
-    fn default() -> Self {
-        let pool = Pool {
-            channels: HashMap::default(),
-        };
-        let pool = Arc::new(Mutex::new(pool));
-        let cloned_pool = pool.clone();
-
-        common_runtime::spawn_bg(async move {
-            recycle_channel_in_loop(cloned_pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
-        });
-
-        Self { pool, config: None }
-    }
+#[derive(Debug)]
+struct Channel {
+    channel: InnerChannel,
+    access: usize,
 }
 
 async fn recycle_channel_in_loop(pool: Arc<Mutex<Pool>>, interval_secs: u64) {
@@ -315,7 +311,10 @@ mod tests {
             channels: HashMap::default(),
         };
         let pool = Arc::new(Mutex::new(pool));
-        let mgr = ChannelManager { pool, config: None };
+        let mgr = ChannelManager {
+            pool,
+            ..Default::default()
+        };
         let addr = "http://test";
 
         let _ = mgr.get(addr).unwrap();
@@ -340,10 +339,7 @@ mod tests {
             .http2_adaptive_window(true)
             .tcp_keepalive(Duration::from_secs(1))
             .tcp_nodelay(true);
-        let mgr = ChannelManager {
-            pool,
-            config: Some(config),
-        };
+        let mgr = ChannelManager { pool, config };
         let addr = "test_uri";
 
         for i in 0..10 {
