@@ -46,4 +46,3 @@ streaming-stats = "0.2"
 test-util = { path = "../../test-util" }
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = "0.1"
-

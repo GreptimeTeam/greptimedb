@@ -9,5 +9,5 @@ common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
-sqlparser = "0.15.0"
+sqlparser = { git = "https://github.com/sunng87/sqlparser-rs.git", branch = "feature/argument-for-custom-type-for-v015" }
 table-engine = { path = "../table-engine" }

@@ -7,8 +7,6 @@ use crate::prelude::LogicalTypeId;
 use crate::value::GeometryValue;
 use crate::vectors::geometry::GeometryVectorBuilder;
 
-const GEOMETRY_TYPE_NAME: &str = "Geometry";
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GeometryType {
     Point,
@@ -22,7 +20,7 @@ impl Default for GeometryType {
 
 impl DataType for GeometryType {
     fn name(&self) -> &str {
-        GEOMETRY_TYPE_NAME
+        Self::GEOMETRY_TYPE_NAME
     }
 
     fn logical_type_id(&self) -> crate::type_id::LogicalTypeId {
@@ -54,7 +52,8 @@ impl DataType for GeometryType {
 }
 
 impl GeometryType {
-    pub fn name() -> &'static str {
-        GEOMETRY_TYPE_NAME
-    }
+    pub const GEOMETRY_TYPE_NAME: &'static str = "Geometry";
+    pub const GEOMETRY_SUBTYPE_POINT_NAME: &'static str = "POINT";
+    pub const GEOMETRY_SUBTYPE_LINESTRING_NAME: &'static str = "LINESTRING";
+    pub const GEOMETRY_SUBTYPE_POLYGON_NAME: &'static str = "POLYGON";
 }

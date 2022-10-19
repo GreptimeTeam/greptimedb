@@ -30,3 +30,6 @@ members = [
     "src/table-engine",
     "test-util",
 ]
+
+[patch.crates-io]
+sqlparser = { git = "https://github.com/sunng87/sqlparser-rs.git", branch = "feature/argument-for-custom-type-for-v015" }

@@ -256,14 +256,36 @@ fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Concre
             [type_name] => {
                 if type_name.value.eq_ignore_ascii_case(DateTimeType::name()) {
                     Ok(ConcreteDataType::datetime_datatype())
-                } else if type_name.value.eq_ignore_ascii_case(GeometryType::name()) {
-                    Ok(ConcreteDataType::geometry_datatype(GeometryType::Point))
                 } else {
                     error::SqlTypeNotSupportedSnafu {
                         t: data_type.clone(),
                     }
                     .fail()
                 }
+            }
+            _ => error::SqlTypeNotSupportedSnafu {
+                t: data_type.clone(),
+            }
+            .fail(),
+        },
+        SqlDataType::CustomWithArgs(obj_name, args) => match &obj_name.0[..] {
+            [type_name] => {
+                if type_name
+                    .value
+                    .eq_ignore_ascii_case(GeometryType::GEOMETRY_TYPE_NAME)
+                {
+                    if let Some(subtype) = args.get(0) {
+                        let subtype = subtype.to_uppercase();
+                        if subtype == GeometryType::GEOMETRY_SUBTYPE_POINT_NAME {
+                            return Ok(ConcreteDataType::Geometry(GeometryType::Point));
+                        }
+                    }
+                }
+
+                error::SqlTypeNotSupportedSnafu {
+                    t: data_type.clone(),
+                }
+                .fail()
             }
             _ => error::SqlTypeNotSupportedSnafu {
                 t: data_type.clone(),
@@ -325,6 +347,25 @@ mod tests {
         check_type(
             SqlDataType::Timestamp,
             ConcreteDataType::timestamp_millis_datatype(),
+        );
+        check_type(
+            SqlDataType::CustomWithArgs(ObjectName(vec!["GEOMETRY".into()]), vec!["POINT".into()]),
+            ConcreteDataType::geometry_datatype(GeometryType::Point),
+        );
+
+        assert!(
+            sql_data_type_to_concrete_data_type(&SqlDataType::CustomWithArgs(
+                ObjectName(vec!["GEOMETRY".into()]),
+                vec![]
+            ))
+            .is_err()
+        );
+        assert!(
+            sql_data_type_to_concrete_data_type(&SqlDataType::CustomWithArgs(
+                ObjectName(vec!["GEOMETRY".into()]),
+                vec!["DUMMY_TYPE".into()]
+            ))
+            .is_err()
         );
     }
 
