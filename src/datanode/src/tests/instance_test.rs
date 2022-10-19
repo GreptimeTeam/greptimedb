@@ -5,7 +5,6 @@ use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow_array::StringArray;
 
-use crate::error;
 use crate::instance::Instance;
 use crate::tests::test_util;
 
@@ -187,8 +186,14 @@ pub async fn test_create_table_illegal_timestamp_type() {
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#,
         )
-        .await;
-    assert!(matches!(output, Err(error::Error::CreateSchema { .. })));
+        .await
+        .unwrap();
+    match output {
+        Output::AffectedRows(rows) => {
+            assert_eq!(1, rows);
+        }
+        _ => unreachable!(),
+    }
 }
 
 #[tokio::test]
