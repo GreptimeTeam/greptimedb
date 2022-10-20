@@ -16,7 +16,6 @@ pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
 pub mod error;
 pub mod local;
-pub mod remote;
 pub mod schema;
 mod system;
 pub mod tables;
