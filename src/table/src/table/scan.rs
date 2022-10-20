@@ -82,3 +82,57 @@ impl ExecutionPlan for SimpleTableScan {
         Statistics::default()
     }
 }
+
+#[cfg(test)]
+mod test {
+    use common_recordbatch::util;
+    use common_recordbatch::{RecordBatch, RecordBatches};
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::Int32Vector;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_simple_table_scan() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+
+        let batch1 = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice(&[1, 2])) as _],
+        )
+        .unwrap();
+        let batch2 = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice(&[3, 4, 5])) as _],
+        )
+        .unwrap();
+
+        let recordbatches =
+            RecordBatches::try_new(schema.clone(), vec![batch1.clone(), batch2.clone()]).unwrap();
+        let stream = recordbatches.as_stream();
+
+        let scan = SimpleTableScan::new(stream);
+
+        assert_eq!(scan.schema(), schema);
+
+        let runtime = Arc::new(RuntimeEnv::default());
+        let stream = scan.execute(0, runtime.clone()).await.unwrap();
+        let recordbatches = util::collect(stream).await.unwrap();
+        assert_eq!(recordbatches[0], batch1);
+        assert_eq!(recordbatches[1], batch2);
+
+        let result = scan.execute(0, runtime).await;
+        assert!(result.is_err());
+        match result {
+            Err(e) => assert!(e
+                .to_string()
+                .contains("Not expected to run ExecutionPlan more than once")),
+            _ => unreachable!(),
+        }
+    }
+}
