@@ -2,18 +2,15 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_stream::stream;
-use backoff::exponential::ExponentialBackoffBuilder;
-use backoff::ExponentialBackoff;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_catalog::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
     SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
 };
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, info};
 use futures::Stream;
 use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -25,8 +22,8 @@ use table::TableRef;
 use tokio::sync::Mutex;
 
 use crate::error::{
-    BumpTableIdSnafu, CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu,
-    OpenTableSnafu, ParseTableIdSnafu, SchemaNotFoundSnafu, TableExistsSnafu,
+    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu,
+    SchemaNotFoundSnafu, TableExistsSnafu,
 };
 use crate::error::{InvalidTableSchemaSnafu, Result};
 use crate::remote::{Kv, KvBackendRef};
@@ -378,61 +375,9 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    /// Bump table id in a CAS manner with backoff.
+    /// Remote catalog manager does not support bump table id.
     async fn next_table_id(&self) -> Result<TableId> {
-        let key = common_catalog::consts::TABLE_ID_KEY_PREFIX.as_bytes();
-        let op = || async {
-            // TODO(hl): optimize this get
-            let (prev, prev_bytes) = match self.backend.get(key).await? {
-                None => (MIN_USER_TABLE_ID, vec![]),
-                Some(kv) => (parse_table_id(&kv.1)?, kv.1),
-            };
-
-            match self
-                .backend
-                .compare_and_set(key, &prev_bytes, &(prev + 1).to_le_bytes())
-                .await
-            {
-                Ok(cas_res) => match cas_res {
-                    Ok(_) => Ok(prev),
-                    Err(e) => {
-                        info!("Table id {:?} already occupied", e);
-                        Err(backoff::Error::transient(
-                            BumpTableIdSnafu {
-                                msg: "Table id occupied",
-                            }
-                            .build(),
-                        ))
-                    }
-                },
-                Err(e) => {
-                    error!(e;"Failed to CAS table id");
-                    Err(backoff::Error::permanent(
-                        BumpTableIdSnafu {
-                            msg: format!("Failed to perform CAS operation: {:?}", e),
-                        }
-                        .build(),
-                    ))
-                }
-            }
-        };
-
-        let retry_policy: ExponentialBackoff = ExponentialBackoffBuilder::new()
-            .with_initial_interval(Duration::from_millis(4))
-            .with_multiplier(2.0)
-            .with_max_interval(Duration::from_millis(1000))
-            .with_max_elapsed_time(Some(Duration::from_millis(3000)))
-            .build();
-
-        backoff::future::retry(retry_policy, op).await.map_err(|e| {
-            BumpTableIdSnafu {
-                msg: format!(
-                    "Bump table id exceeds max fail times, last error msg: {:?}",
-                    e
-                ),
-            }
-            .build()
-        })
+        unreachable!("Should not request table id from RemoteCatalogManager")
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
@@ -614,16 +559,6 @@ impl CatalogProvider for RemoteCatalogProvider {
     }
 }
 
-/// Parse u8 slice to `TableId`
-fn parse_table_id(val: &[u8]) -> Result<TableId> {
-    Ok(TableId::from_le_bytes(val.try_into().map_err(|_| {
-        ParseTableIdSnafu {
-            data: format!("{:?}", val),
-        }
-        .build()
-    })?))
-}
-
 pub struct RemoteSchemaProvider {
     catalog_name: String,
     schema_name: String,
@@ -743,19 +678,5 @@ impl SchemaProvider for RemoteSchemaProvider {
     /// Checks if table exists in schema provider based on locally opened table map.
     fn table_exist(&self, name: &str) -> Result<bool> {
         Ok(self.tables.load().contains_key(name))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_table_id() {
-        assert_eq!(12, parse_table_id(&12_i32.to_le_bytes()).unwrap());
-        let mut data = vec![];
-        data.extend_from_slice(&12_i32.to_le_bytes());
-        data.push(0);
-        assert!(parse_table_id(&data).is_err());
     }
 }

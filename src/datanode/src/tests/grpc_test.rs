@@ -11,6 +11,7 @@ use api::v1::{
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::GrpcServer;
 use servers::server::Server;
@@ -249,6 +250,8 @@ fn testing_create_expr() -> CreateExpr {
         time_index: "ts".to_string(),
         primary_keys: vec!["ts".to_string(), "host".to_string()],
         create_if_not_exists: true,
-        table_options: HashMap::from([("region_id".to_string(), "0".to_string())]),
+        table_options: Default::default(),
+        table_id: Some(MIN_USER_TABLE_ID),
+        region_ids: vec![0],
     }
 }

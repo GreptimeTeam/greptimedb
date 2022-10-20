@@ -238,21 +238,24 @@ fn create_to_expr(create: CreateTable) -> Result<CreateExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name).context(error::ParseSqlSnafu)?;
 
+    // FIXME(hl): Table id and region id should be generated from metasrv
+    let table_id = Some(1024);
+    let region_ids = vec![0];
+
     let time_index = find_time_index(&create.constraints)?;
     let expr = CreateExpr {
         catalog_name: Some(catalog_name),
         schema_name: Some(schema_name),
         table_name,
+        desc: None,
         column_defs: columns_to_expr(&create.columns, &time_index)?,
         time_index,
         primary_keys: find_primary_keys(&create.constraints)?,
         create_if_not_exists: create.if_not_exists,
         // TODO(LFC): Fill in other table options.
-        table_options: HashMap::from([
-            ("engine".to_string(), create.engine),
-            ("region_id".to_string(), "0".to_string()),
-        ]),
-        ..Default::default()
+        table_options: HashMap::from([("engine".to_string(), create.engine)]),
+        table_id,
+        region_ids,
     };
     Ok(expr)
 }
@@ -629,16 +632,18 @@ mod tests {
                 default_constraint: None,
             },
         ];
-        let mut table_options = HashMap::with_capacity(1);
-        table_options.insert("region_id".to_string(), "0".to_string());
         CreateExpr {
+            catalog_name: None,
+            schema_name: None,
             table_name: "demo".to_string(),
+            desc: None,
             column_defs,
             time_index: "ts".to_string(),
             primary_keys: vec!["ts".to_string(), "host".to_string()],
             create_if_not_exists: true,
-            table_options,
-            ..Default::default()
+            table_options: Default::default(),
+            table_id: None,
+            region_ids: vec![0],
         }
     }
 }

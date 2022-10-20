@@ -5,6 +5,7 @@ use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
+use common_telemetry::info;
 use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
@@ -83,18 +84,25 @@ impl Instance {
             .schema_name
             .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
 
-        let table_id = self
-            .catalog_manager()
-            .next_table_id()
-            .await
-            .context(CatalogSnafu)?;
-
-        let region_id = expr
-            .table_options
-            .get(&"region_id".to_string())
-            .unwrap()
-            .parse::<u32>()
-            .unwrap();
+        let table_id = if let Some(table_id) = expr.table_id {
+            info!(
+                "Creating table {}.{}.{} with table id from frontend: {}",
+                catalog_name, schema_name, expr.table_name, table_id
+            );
+            table_id
+        } else {
+            let table_id = self
+                .catalog_manager()
+                .next_table_id()
+                .await
+                .context(CatalogSnafu)?;
+            info!(
+                "Creating table {}.{}.{} with table id from catalog manager: {}",
+                catalog_name, schema_name, expr.table_name, table_id
+            );
+            table_id
+        };
+        let region_ids = expr.region_ids;
 
         Ok(CreateTableRequest {
             id: table_id,
@@ -103,7 +111,7 @@ impl Instance {
             table_name: expr.table_name,
             desc: expr.desc,
             schema,
-            region_numbers: vec![region_id],
+            region_numbers: region_ids,
             primary_key_indices,
             create_if_not_exists: expr.create_if_not_exists,
             table_options: expr.table_options,
@@ -191,8 +199,7 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
+    use common_catalog::consts::MIN_USER_TABLE_ID;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
 
@@ -312,9 +319,6 @@ mod tests {
                 default_constraint: None,
             },
         ];
-        let table_options = [("region_id".to_string(), "0".to_string())]
-            .into_iter()
-            .collect::<HashMap<_, _>>();
         CreateExpr {
             catalog_name: None,
             schema_name: None,
@@ -324,7 +328,9 @@ mod tests {
             time_index: "ts".to_string(),
             primary_keys: vec!["ts".to_string(), "host".to_string()],
             create_if_not_exists: true,
-            table_options,
+            table_options: Default::default(),
+            table_id: Some(MIN_USER_TABLE_ID),
+            region_ids: vec![0],
         }
     }
 

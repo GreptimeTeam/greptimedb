@@ -49,6 +49,8 @@ async fn run() {
         primary_keys: vec!["key".to_string()],
         create_if_not_exists: false,
         table_options: Default::default(),
+        table_id: Some(1024),
+        region_ids: vec![0],
     };
 
     let admin = Admin::new("create table", client.clone());
