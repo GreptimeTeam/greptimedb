@@ -38,8 +38,10 @@ impl Instance {
                 let schema_provider = self
                     .catalog_manager
                     .catalog(DEFAULT_CATALOG_NAME)
+                    .expect("datafusion does not accept fallible catalog access")
                     .unwrap()
                     .schema(DEFAULT_SCHEMA_NAME)
+                    .expect("datafusion does not accept fallible catalog access")
                     .unwrap();
 
                 let request = self.sql_handler.insert_to_request(schema_provider, *i)?;
@@ -47,14 +49,14 @@ impl Instance {
             }
 
             Statement::Create(c) => {
-                let table_id = self.catalog_manager.next_table_id();
+                let table_id = self.catalog_manager.next_table_id().await;
                 let _engine_name = c.engine.clone();
                 // TODO(hl): Select table engine by engine_name
 
                 let request = self.sql_handler.create_to_request(table_id, c)?;
-                let catalog_name = request.catalog_name.clone();
-                let schema_name = request.schema_name.clone();
-                let table_name = request.table_name.clone();
+                let catalog_name = &request.catalog_name;
+                let schema_name = &request.schema_name;
+                let table_name = &request.table_name;
                 let table_id = request.id;
                 info!(
                     "Creating table, catalog: {:?}, schema: {:?}, table name: {:?}, table id: {}",

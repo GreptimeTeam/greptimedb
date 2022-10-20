@@ -11,7 +11,10 @@ use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
 use snafu::prelude::*;
 use table::requests::AddColumnRequest;
 
-use crate::error::{self, InsertSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu};
+use crate::error::{
+    self, CatalogSnafu, FindTableSnafu, InsertSnafu, Result, TableNotFoundSnafu,
+    UnsupportedExprSnafu,
+};
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::{self, insertion_expr_to_request};
@@ -55,7 +58,7 @@ impl Instance {
         insert_batches: &[InsertBatch],
     ) -> Result<()> {
         // Create table automatically, build schema from data.
-        let table_id = self.catalog_manager.next_table_id();
+        let table_id = self.catalog_manager.next_table_id().await;
         let create_table_request =
             insert::build_create_table_request(table_id, table_name, insert_batches)?;
 
@@ -82,14 +85,19 @@ impl Instance {
         let schema_provider = self
             .catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
+            .expect("datafusion does not accept fallible catalog access")
             .unwrap()
             .schema(DEFAULT_SCHEMA_NAME)
+            .expect("datafusion does not accept fallible catalog access")
             .unwrap();
 
         let insert_batches = insert::insert_batches(values.values)?;
         ensure!(!insert_batches.is_empty(), error::IllegalInsertDataSnafu);
 
-        let table = if let Some(table) = schema_provider.table(table_name) {
+        let table = if let Some(table) = schema_provider
+            .table(table_name)
+            .context(FindTableSnafu { table_name })?
+        {
             let schema = table.schema();
             if let Some(add_columns) = insert::find_new_columns(&schema, &insert_batches)? {
                 self.add_new_columns_to_table(table_name, add_columns)
@@ -103,6 +111,7 @@ impl Instance {
 
             schema_provider
                 .table(table_name)
+                .context(CatalogSnafu)?
                 .context(TableNotFoundSnafu { table_name })?
         };
 
