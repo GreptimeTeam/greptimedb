@@ -7,8 +7,8 @@ use api::v1::meta::HeartbeatResponse;
 use api::v1::meta::ResponseHeader;
 use api::v1::meta::PROTOCOL_VERSION;
 use futures::StreamExt;
-use futures::TryFutureExt;
-use snafu::OptionExt;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use tonic::Response;
 use tonic::Streaming;
@@ -16,7 +16,6 @@ use tonic::Streaming;
 use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use super::GrpcStream;
-use crate::error;
 use crate::error::Result;
 use crate::metasrv::MetaSrv;
 
@@ -28,30 +27,72 @@ impl heartbeat_server::Heartbeat for MetaSrv {
         &self,
         req: Request<Streaming<HeartbeatRequest>>,
     ) -> GrpcResult<Self::HeartbeatStream> {
-        let msg = req
-            .into_inner()
-            .next()
-            .await
-            .context(error::StreamNoneSnafu {})??;
+        let mut in_stream = req.into_inner();
+        let (tx, rx) = mpsc::channel(128);
 
-        let res = handle_heartbeat(msg).map_err(|e| e.into());
+        let kv_store = self.kv_store();
+        common_runtime::spawn_bg(async move {
+            while let Some(msg) = in_stream.next().await {
+                match msg {
+                    Ok(req) => tx
+                        .send(
+                            handle_heartbeat(req, kv_store.clone())
+                                .await
+                                .map_err(|e| e.into()),
+                        )
+                        .await
+                        .expect("working rx"),
+                    Err(err) => {
+                        match tx.send(Err(err)).await {
+                            Ok(_) => (),
+                            Err(_err) => break, // response was droped
+                        }
+                    }
+                }
+            }
+        });
 
-        let output = futures::stream::once(res);
+        let out_stream = ReceiverStream::new(rx);
 
-        Ok(Response::new(Box::pin(output)))
+        Ok(Response::new(Box::pin(out_stream) as Self::HeartbeatStream))
     }
 
     async fn ask_leader(&self, req: Request<AskLeaderRequest>) -> GrpcResult<AskLeaderResponse> {
         let req = req.into_inner();
-        let kv_store = self.kv_store();
-        let res = handle_ask_leader(req, kv_store).await?;
+        let res = self.handle_ask_leader(req).await?;
 
         Ok(Response::new(res))
     }
 }
 
-async fn handle_heartbeat(msg: HeartbeatRequest) -> Result<HeartbeatResponse> {
-    let HeartbeatRequest { header, .. } = msg;
+impl MetaSrv {
+    // TODO(jiachun): move out when we can get the leader peer from kv store
+    async fn handle_ask_leader(&self, req: AskLeaderRequest) -> Result<AskLeaderResponse> {
+        let AskLeaderRequest { header, .. } = req;
+
+        let res_header = ResponseHeader {
+            protocol_version: PROTOCOL_VERSION,
+            cluster_id: header.map_or(0u64, |h| h.cluster_id),
+            ..Default::default()
+        };
+
+        // TODO(jiachun): return leader
+        let res = AskLeaderResponse {
+            header: Some(res_header),
+            leader: Some(Endpoint {
+                addr: self.options().server_addr.clone(),
+            }),
+        };
+
+        Ok(res)
+    }
+}
+
+async fn handle_heartbeat(
+    req: HeartbeatRequest,
+    _kv_store: KvStoreRef,
+) -> Result<HeartbeatResponse> {
+    let HeartbeatRequest { header, .. } = req;
 
     let res_header = ResponseHeader {
         protocol_version: PROTOCOL_VERSION,
@@ -64,29 +105,6 @@ async fn handle_heartbeat(msg: HeartbeatRequest) -> Result<HeartbeatResponse> {
     let res = HeartbeatResponse {
         header: Some(res_header),
         ..Default::default()
-    };
-
-    Ok(res)
-}
-
-async fn handle_ask_leader(
-    req: AskLeaderRequest,
-    _kv_store: KvStoreRef,
-) -> Result<AskLeaderResponse> {
-    let AskLeaderRequest { header, .. } = req;
-
-    let res_header = ResponseHeader {
-        protocol_version: PROTOCOL_VERSION,
-        cluster_id: header.map_or(0u64, |h| h.cluster_id),
-        ..Default::default()
-    };
-
-    // TODO(jiachun): return leader
-    let res = AskLeaderResponse {
-        header: Some(res_header),
-        leader: Some(Endpoint {
-            addr: "127.0.0.1:3002".to_string(),
-        }),
     };
 
     Ok(res)
@@ -105,15 +123,7 @@ mod tests {
     use crate::service::store::kv::KvStore;
 
     #[derive(Clone)]
-    pub struct NoopKvStore {
-        _opts: MetaSrvOptions,
-    }
-
-    impl NoopKvStore {
-        pub fn new(opts: MetaSrvOptions) -> Self {
-            Self { _opts: opts }
-        }
-    }
+    pub struct NoopKvStore;
 
     #[async_trait::async_trait]
     impl KvStore for NoopKvStore {
@@ -135,18 +145,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_heartbeat_resp_header() {
+        let kv_store = Arc::new(NoopKvStore {});
+
         let header = RequestHeader::new(1, 2);
         let req = HeartbeatRequest::new(header);
 
-        let res = handle_heartbeat(req).await.unwrap();
+        let res = handle_heartbeat(req, kv_store).await.unwrap();
 
         assert_eq!(1, res.header.unwrap().cluster_id);
     }
 
     #[tokio::test]
     async fn test_ask_leader() {
-        let kv_store = Arc::new(NoopKvStore::new(MetaSrvOptions::default()));
-        let meta_srv = MetaSrv::new(kv_store);
+        let kv_store = Arc::new(NoopKvStore {});
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
 
         let header = RequestHeader::new(1, 1);
         let req = AskLeaderRequest::new(header);
@@ -154,6 +166,6 @@ mod tests {
         let res = meta_srv.ask_leader(req.into_request()).await.unwrap();
         let res = res.into_inner();
         assert_eq!(1, res.header.unwrap().cluster_id);
-        assert_eq!("127.0.0.1:3002".to_string(), res.leader.unwrap().addr);
+        assert_eq!(meta_srv.options().bind_addr, res.leader.unwrap().addr);
     }
 }

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use api::v1::meta::CreateRequest;
 use api::v1::meta::DeleteRangeRequest;
+use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::Partition;
 use api::v1::meta::PutRequest;
 use api::v1::meta::RangeRequest;
@@ -22,22 +23,37 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
+    let id = (1000u64, 2000u64);
     let config = ChannelConfig::new()
         .timeout(Duration::from_secs(3))
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config);
-    let mut meta_client = MetaClientBuilder::new()
-        .heartbeat_client(true)
-        .router_client(true)
-        .store_client(true)
+    let mut meta_client = MetaClientBuilder::new(id.0, id.1)
+        .enable_heartbeat()
+        .enable_router()
+        .enable_store()
         .channel_manager(channel_manager)
         .build();
     meta_client.start(&["127.0.0.1:3002"]).await.unwrap();
     // required only when the heartbeat_client is enabled
     meta_client.ask_leader().await.unwrap();
 
-    let header = RequestHeader::new(0, 0);
+    let (sender, mut receiver) = meta_client.heartbeat().await.unwrap();
+
+    // send heartbeats
+    tokio::spawn(async move {
+        for _ in 0..5 {
+            let req = HeartbeatRequest::new(RequestHeader::with_id(id));
+            sender.send(req).await.unwrap();
+        }
+    });
+
+    while let Some(res) = receiver.message().await.unwrap() {
+        event!(Level::INFO, "heartbeat response: {:#?}", res);
+    }
+
+    let header = RequestHeader::with_id(id);
 
     let p1 = Partition::new()
         .column_list(vec![b"col_1".to_vec(), b"col_2".to_vec()])

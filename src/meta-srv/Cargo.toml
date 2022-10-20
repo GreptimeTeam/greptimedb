@@ -9,6 +9,7 @@ api = { path = "../api" }
 async-trait = "0.1"
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
+common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 etcd-client = "0.10"
 futures = "0.3"

@@ -35,7 +35,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Empty table nalme"))]
+    #[snafu(display("Empty table name"))]
     EmptyTableName { backtrace: Backtrace },
 }
 

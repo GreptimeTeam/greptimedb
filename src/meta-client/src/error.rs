@@ -25,6 +25,9 @@ pub enum Error {
     #[snafu(display("Failed to ask leader from all endpoints"))]
     AskLeader { backtrace: Backtrace },
 
+    #[snafu(display("No leader, should ask leader first"))]
+    NoLeader { backtrace: Backtrace },
+
     #[snafu(display("Failed to create gRPC channel, source: {}", source))]
     CreateChannel {
         #[snafu(backtrace)]
@@ -33,6 +36,15 @@ pub enum Error {
 
     #[snafu(display("{} not started", name))]
     NotStarted { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to send heartbeat: {}", err_msg))]
+    SendHeartbeat {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed create heartbeat stream to server"))]
+    CreateHeartbeatStream { backtrace: Backtrace },
 }
 
 #[allow(dead_code)]
@@ -53,7 +65,10 @@ impl ErrorExt for Error {
             | Error::IllegalGrpcClientState { .. }
             | Error::TonicStatus { .. }
             | Error::AskLeader { .. }
+            | Error::NoLeader { .. }
             | Error::NotStarted { .. }
+            | Error::SendHeartbeat { .. }
+            | Error::CreateHeartbeatStream { .. }
             | Error::CreateChannel { .. } => StatusCode::Internal,
         }
     }
@@ -119,6 +134,14 @@ mod tests {
     }
 
     #[test]
+    fn test_no_leader_error() {
+        let e = throw_none_option().context(NoLeaderSnafu).err().unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Internal);
+    }
+
+    #[test]
     fn test_create_channel_error() {
         fn throw_common_grpc_error() -> StdResult<common_grpc::Error> {
             tonic::transport::Endpoint::new("http//http")
@@ -128,6 +151,28 @@ mod tests {
 
         let e = throw_common_grpc_error()
             .context(CreateChannelSnafu)
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Internal);
+    }
+
+    #[test]
+    fn test_send_heartbeat_error() {
+        let e = throw_none_option()
+            .context(SendHeartbeatSnafu { err_msg: "" })
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Internal);
+    }
+
+    #[test]
+    fn test_create_heartbeat_stream_error() {
+        let e = throw_none_option()
+            .context(CreateHeartbeatStreamSnafu)
             .err()
             .unwrap();
 

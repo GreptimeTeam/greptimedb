@@ -20,11 +20,19 @@ impl From<&str> for Endpoint {
 }
 
 impl RequestHeader {
-    pub fn new(cluster_id: u64, member_id: u64) -> RequestHeader {
-        RequestHeader {
+    pub fn new(cluster_id: u64, member_id: u64) -> Self {
+        Self {
             protocol_version: PROTOCOL_VERSION,
             cluster_id,
             member_id,
+        }
+    }
+
+    pub fn with_id(id: (u64, u64)) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            cluster_id: id.0,
+            member_id: id.1,
         }
     }
 }

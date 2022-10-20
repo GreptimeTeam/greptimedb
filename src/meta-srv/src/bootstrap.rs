@@ -14,14 +14,15 @@ use crate::service::store::etcd::EtcdStore;
 // Bootstrap the rpc server to serve incoming request
 pub async fn bootstrap_meta_srv(opts: MetaSrvOptions) -> crate::Result<()> {
     let kv_store = EtcdStore::with_endpoints([&opts.store_addr]).await?;
-    let meta_srv = MetaSrv::new(kv_store);
 
-    let listener = TcpListener::bind(&opts.server_addr)
+    let listener = TcpListener::bind(&opts.bind_addr)
         .await
         .context(error::TcpBindSnafu {
-            addr: &opts.server_addr,
+            addr: &opts.bind_addr,
         })?;
     let listener = TcpListenerStream::new(listener);
+
+    let meta_srv = MetaSrv::new(opts, kv_store);
 
     tonic::transport::Server::builder()
         .accept_http1(true) // for admin services

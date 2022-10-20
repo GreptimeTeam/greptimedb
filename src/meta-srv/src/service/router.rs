@@ -41,7 +41,7 @@ async fn handle_create(req: CreateRequest, _kv_store: KvStoreRef) -> Result<Rout
     let _table_name = table_name.context(error::EmptyTableNameSnafu)?;
 
     // TODO(jiachun):
-    let peers = vec![Peer::new(0, "127.0.0.0:3000")];
+    let peers = vec![Peer::new(0, "127.0.0.1:3000")];
 
     Ok(RouteResponse {
         peers,
@@ -58,6 +58,7 @@ mod tests {
     use tonic::IntoRequest;
 
     use super::*;
+    use crate::metasrv::MetaSrvOptions;
     use crate::service::store::kv::KvStore;
 
     struct MockKvStore;
@@ -84,7 +85,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_route() {
         let kv_store = Arc::new(MockKvStore {});
-        let meta_srv = MetaSrv::new(kv_store);
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
 
         let header = RequestHeader::new(1, 1);
         let req = RouteRequest::new(header);
@@ -99,7 +100,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_create() {
         let kv_store = Arc::new(MockKvStore {});
-        let meta_srv = MetaSrv::new(kv_store);
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
 
         let header = RequestHeader::new(1, 1);
         let table_name = TableName::new("test_catalog", "test_db", "table1");
