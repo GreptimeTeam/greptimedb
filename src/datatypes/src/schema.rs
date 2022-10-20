@@ -1,6 +1,6 @@
 mod constraint;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use arrow::datatypes::Metadata;
@@ -25,12 +25,14 @@ const VERSION_KEY: &str = "greptime:version";
 /// Key used to store default constraint in arrow field's metadata.
 const ARROW_FIELD_DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 
+/// Schema of a column, used as an immutable struct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColumnSchema {
     pub name: String,
     pub data_type: ConcreteDataType,
     is_nullable: bool,
     default_constraint: Option<ColumnDefaultConstraint>,
+    metadata: Metadata,
 }
 
 impl ColumnSchema {
@@ -44,6 +46,7 @@ impl ColumnSchema {
             data_type,
             is_nullable,
             default_constraint: None,
+            metadata: Metadata::new(),
         }
     }
 
@@ -57,6 +60,11 @@ impl ColumnSchema {
         self.default_constraint.as_ref()
     }
 
+    #[inline]
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+
     pub fn with_default_constraint(
         mut self,
         default_constraint: Option<ColumnDefaultConstraint>,
@@ -67,6 +75,12 @@ impl ColumnSchema {
 
         self.default_constraint = default_constraint;
         Ok(self)
+    }
+
+    /// Creates a new [`ColumnSchema`] with given metadata.
+    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
+        self.metadata = metadata;
+        self
     }
 
     pub fn create_default_vector(&self, num_rows: usize) -> Result<Option<VectorRef>> {
@@ -303,8 +317,9 @@ impl TryFrom<&Field> for ColumnSchema {
 
     fn try_from(field: &Field) -> Result<ColumnSchema> {
         let data_type = ConcreteDataType::try_from(&field.data_type)?;
-        let default_constraint = match field.metadata.get(ARROW_FIELD_DEFAULT_CONSTRAINT_KEY) {
-            Some(json) => Some(serde_json::from_str(json).context(DeserializeSnafu { json })?),
+        let mut metadata = field.metadata.clone();
+        let default_constraint = match metadata.remove(ARROW_FIELD_DEFAULT_CONSTRAINT_KEY) {
+            Some(json) => Some(serde_json::from_str(&json).context(DeserializeSnafu { json })?),
             None => None,
         };
 
@@ -313,6 +328,7 @@ impl TryFrom<&Field> for ColumnSchema {
             data_type,
             is_nullable: field.is_nullable,
             default_constraint,
+            metadata,
         })
     }
 }
@@ -321,16 +337,19 @@ impl TryFrom<&ColumnSchema> for Field {
     type Error = Error;
 
     fn try_from(column_schema: &ColumnSchema) -> Result<Field> {
-        let metadata = if let Some(value) = &column_schema.default_constraint {
-            let mut m = BTreeMap::new();
-            m.insert(
+        let mut metadata = column_schema.metadata.clone();
+        if let Some(value) = &column_schema.default_constraint {
+            // Adds an additional metadata to store the default constraint.
+            let old = metadata.insert(
                 ARROW_FIELD_DEFAULT_CONSTRAINT_KEY.to_string(),
                 serde_json::to_string(&value).context(SerializeSnafu)?,
             );
-            m
-        } else {
-            BTreeMap::default()
-        };
+            assert!(
+                old.is_none(),
+                "metadata of {} already exists",
+                ARROW_FIELD_DEFAULT_CONSTRAINT_KEY
+            );
+        }
 
         Ok(Field::new(
             column_schema.name.clone(),
@@ -420,6 +439,11 @@ mod tests {
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
             .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(99))))
             .unwrap();
+        assert!(column_schema
+            .metadata()
+            .get(ARROW_FIELD_DEFAULT_CONSTRAINT_KEY)
+            .is_none());
+
         let field = Field::try_from(&column_schema).unwrap();
         assert_eq!("test", field.name);
         assert_eq!(ArrowDataType::Int32, field.data_type);
@@ -431,6 +455,31 @@ mod tests {
                 .get(ARROW_FIELD_DEFAULT_CONSTRAINT_KEY)
                 .unwrap()
         );
+
+        let new_column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!(column_schema, new_column_schema);
+    }
+
+    #[test]
+    fn test_column_schema_with_metadata() {
+        let mut metadata = Metadata::new();
+        metadata.insert("k1".to_string(), "v1".to_string());
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
+            .with_metadata(metadata)
+            .with_default_constraint(Some(ColumnDefaultConstraint::null_value()))
+            .unwrap();
+        assert_eq!("v1", column_schema.metadata().get("k1").unwrap());
+        assert!(column_schema
+            .metadata()
+            .get(ARROW_FIELD_DEFAULT_CONSTRAINT_KEY)
+            .is_none());
+
+        let field = Field::try_from(&column_schema).unwrap();
+        assert_eq!("v1", field.metadata.get("k1").unwrap());
+        assert!(field
+            .metadata
+            .get(ARROW_FIELD_DEFAULT_CONSTRAINT_KEY)
+            .is_some());
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
         assert_eq!(column_schema, new_column_schema);
