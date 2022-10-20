@@ -3,9 +3,8 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{
-    CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-};
+use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::Result;

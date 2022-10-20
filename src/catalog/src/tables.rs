@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_stream::stream;
+use common_catalog::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
@@ -19,7 +20,6 @@ use table::engine::TableEngineRef;
 use table::metadata::{TableId, TableInfoRef};
 use table::{Table, TableRef};
 
-use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use crate::error::{Error, InsertTableRecordSnafu};
 use crate::system::{build_table_insert_request, SystemCatalogTable};
 use crate::{

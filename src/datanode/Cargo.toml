@@ -16,6 +16,7 @@ axum = "0.6.0-rc.2"
 axum-macros = "0.3.0-rc.1"
 catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
+common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-query = { path = "../common/query" }
@@ -65,3 +66,4 @@ tempdir = "0.3"
 package = "arrow2"
 version = "0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+common-catalog = { path = "../common/catalog" }

@@ -7,6 +7,7 @@ edition = "2021"
 [dependencies]
 async-stream = "0.3"
 async-trait = "0.1"
+common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }

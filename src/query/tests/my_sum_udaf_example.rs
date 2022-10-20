@@ -3,9 +3,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{
-    CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-};
+use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMeta;
 use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::CreateAccumulatorSnafu;

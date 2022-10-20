@@ -134,9 +134,8 @@ impl ScriptEngine for PyEngine {
 #[cfg(test)]
 mod tests {
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{
-        CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-    };
+    use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_recordbatch::util;
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;

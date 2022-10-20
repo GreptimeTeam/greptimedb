@@ -2,6 +2,10 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_catalog::consts::{
+    INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID,
+    SYSTEM_CATALOG_TABLE_NAME,
+};
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
@@ -17,10 +21,6 @@ use table::metadata::{TableId, TableInfoRef};
 use table::requests::{CreateTableRequest, InsertRequest, OpenTableRequest};
 use table::{Table, TableRef};
 
-use crate::consts::{
-    INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID,
-    SYSTEM_CATALOG_TABLE_NAME,
-};
 use crate::error::{
     CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
     OpenSystemCatalogSnafu, Result, ValueDeserializeSnafu,

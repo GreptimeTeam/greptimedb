@@ -1,9 +1,7 @@
 //! sql handler
 
-use catalog::{
-    schema::SchemaProviderRef, CatalogManagerRef, CatalogProviderRef, DEFAULT_CATALOG_NAME,
-    DEFAULT_SCHEMA_NAME,
-};
+use catalog::{schema::SchemaProviderRef, CatalogManagerRef, CatalogProviderRef};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::show::{ShowDatabases, ShowTables};

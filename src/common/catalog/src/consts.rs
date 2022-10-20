@@ -11,3 +11,7 @@ pub const MIN_USER_TABLE_ID: u32 = 1024;
 pub const SYSTEM_CATALOG_TABLE_ID: u32 = 0;
 /// scripts table id
 pub const SCRIPTS_TABLE_ID: u32 = 1;
+
+pub(crate) const CATALOG_PREFIX: &str = "__c";
+pub(crate) const SCHEMA_PREFIX: &str = "__s";
+pub(crate) const TABLE_PREFIX: &str = "__t";

@@ -1,9 +1,8 @@
 use std::sync::Arc;
 mod function;
 use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{
-    CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-};
+use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};

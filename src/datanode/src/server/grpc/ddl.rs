@@ -173,7 +173,6 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
 mod tests {
     use std::collections::HashMap;
 
-    use catalog::MIN_USER_TABLE_ID;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
 
@@ -188,7 +187,7 @@ mod tests {
 
         let expr = testing_create_expr();
         let request = instance.create_expr_to_request(expr).await.unwrap();
-        assert_eq!(request.id, MIN_USER_TABLE_ID);
+        assert_eq!(request.id, common_catalog::consts::MIN_USER_TABLE_ID);
         assert_eq!(request.catalog_name, "greptime".to_string());
         assert_eq!(request.schema_name, "public".to_string());
         assert_eq!(request.table_name, "my-metrics");

@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::info;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
@@ -10,11 +11,9 @@ use table::metadata::TableId;
 use table::requests::CreateTableRequest;
 use table::TableRef;
 
-pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use crate::error::{CreateTableSnafu, Error};
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
-pub mod consts;
 pub mod error;
 pub mod local;
 pub mod remote;

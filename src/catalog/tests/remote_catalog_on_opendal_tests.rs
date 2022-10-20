@@ -8,10 +8,8 @@ mod tests {
         KvBackendRef, OpendalBackend, RemoteCatalogManager, RemoteCatalogProvider,
         RemoteSchemaProvider,
     };
-    use catalog::{
-        CatalogList, CatalogManager, CatalogProvider, RegisterTableRequest, DEFAULT_CATALOG_NAME,
-        DEFAULT_SCHEMA_NAME,
-    };
+    use catalog::{CatalogList, CatalogManager, CatalogProvider, RegisterTableRequest};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::schema::Schema;
     use table::engine::{EngineContext, TableEngineRef};
     use table::requests::CreateTableRequest;

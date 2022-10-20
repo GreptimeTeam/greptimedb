@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_stream::stream;
 use catalog::error::Error;
 use catalog::remote::{Kv, KvBackend, ValueIter};
-use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
 use common_telemetry::logging::info;
 use datatypes::data_type::ConcreteDataType;
