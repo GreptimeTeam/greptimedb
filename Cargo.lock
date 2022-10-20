@@ -4755,6 +4755,8 @@ dependencies = [
  "common-error",
  "common-time",
  "datatypes",
+ "itertools",
+ "once_cell",
  "snafu",
  "sqlparser",
  "table-engine",
