@@ -92,7 +92,7 @@ impl CatalogProvider for CatalogProviderAdapter {
         self
     }
 
-    fn schema_names(&self) -> Result<Vec<String>, catalog::error::Error> {
+    fn schema_names(&self) -> catalog::error::Result<Vec<String>> {
         Ok(self.df_catalog_provider.schema_names())
     }
 
@@ -100,11 +100,11 @@ impl CatalogProvider for CatalogProviderAdapter {
         &self,
         _name: String,
         _schema: SchemaProviderRef,
-    ) -> Result<Option<SchemaProviderRef>, catalog::error::Error> {
+    ) -> catalog::error::Result<Option<SchemaProviderRef>> {
         todo!("register_schema is not supported in Datafusion catalog provider")
     }
 
-    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>, catalog::error::Error> {
+    fn schema(&self, name: &str) -> catalog::error::Result<Option<Arc<dyn SchemaProvider>>> {
         Ok(self
             .df_catalog_provider
             .schema(name)

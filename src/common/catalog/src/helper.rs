@@ -7,20 +7,23 @@ use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::{TableId, TableMeta, TableVersion};
 
-use crate::consts::{CATALOG_PREFIX, SCHEMA_PREFIX, TABLE_PREFIX};
+use crate::consts::{CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_KEY_PREFIX};
 use crate::error::{
     DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu, SerializeCatalogEntryValueSnafu,
 };
 
 lazy_static! {
-    static ref CATALOG_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{}-([a-zA-Z_]+)-([a-zA-Z_]+)$", CATALOG_PREFIX)).unwrap();
+    static ref CATALOG_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)$",
+        CATALOG_KEY_PREFIX
+    ))
+    .unwrap();
 }
 
 lazy_static! {
     static ref SCHEMA_KEY_PATTERN: Regex = Regex::new(&format!(
         "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)$",
-        SCHEMA_PREFIX
+        SCHEMA_KEY_PREFIX
     ))
     .unwrap();
 }
@@ -28,23 +31,23 @@ lazy_static! {
 lazy_static! {
     static ref TABLE_KEY_PATTERN: Regex = Regex::new(&format!(
         "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)-([a-zA-Z_]+)$",
-        TABLE_PREFIX
+        TABLE_KEY_PREFIX
     ))
     .unwrap();
 }
 
 pub fn build_catalog_prefix() -> String {
-    format!("{}-", CATALOG_PREFIX)
+    format!("{}-", CATALOG_KEY_PREFIX)
 }
 
 pub fn build_schema_prefix(catalog_name: impl AsRef<str>) -> String {
-    format!("{}-{}-", SCHEMA_PREFIX, catalog_name.as_ref())
+    format!("{}-{}-", SCHEMA_KEY_PREFIX, catalog_name.as_ref())
 }
 
 pub fn build_table_prefix(catalog_name: impl AsRef<str>, schema_name: impl AsRef<str>) -> String {
     format!(
         "{}-{}-{}-",
-        TABLE_PREFIX,
+        TABLE_KEY_PREFIX,
         catalog_name.as_ref(),
         schema_name.as_ref()
     )
@@ -60,17 +63,17 @@ pub struct TableKey {
 
 impl Display for TableKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.serialize_str(TABLE_PREFIX)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.catalog_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.schema_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.table_name)?;
-        f.serialize_str("-")?;
+        f.write_str(TABLE_KEY_PREFIX)?;
+        f.write_str("-")?;
+        f.write_str(&self.catalog_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.schema_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.table_name)?;
+        f.write_str("-")?;
         f.serialize_u64(self.version)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.node_id)
+        f.write_str("-")?;
+        f.write_str(&self.node_id)
     }
 }
 
@@ -121,11 +124,11 @@ pub struct CatalogKey {
 
 impl Display for CatalogKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.serialize_str(CATALOG_PREFIX)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.catalog_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.node_id)
+        f.write_str(CATALOG_KEY_PREFIX)?;
+        f.write_str("-")?;
+        f.write_str(&self.catalog_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.node_id)
     }
 }
 
@@ -162,13 +165,13 @@ pub struct SchemaKey {
 
 impl Display for SchemaKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.serialize_str(SCHEMA_PREFIX)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.catalog_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.schema_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.node_id)
+        f.write_str(SCHEMA_KEY_PREFIX)?;
+        f.write_str("-")?;
+        f.write_str(&self.catalog_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.schema_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.node_id)
     }
 }
 

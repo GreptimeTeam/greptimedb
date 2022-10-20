@@ -22,7 +22,11 @@ pub enum Error {
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        todo!()
+        match self {
+            Error::InvalidCatalog { .. }
+            | Error::DeserializeCatalogEntryValue { .. }
+            | Error::SerializeCatalogEntryValue { .. } => StatusCode::Unexpected,
+        }
     }
 
     fn backtrace_opt(&self) -> Option<&Backtrace> {

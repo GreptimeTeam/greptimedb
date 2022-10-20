@@ -10,7 +10,7 @@ use table::metadata::TableId;
 use table::requests::CreateTableRequest;
 use table::TableRef;
 
-use crate::error::{CreateTableSnafu, Error};
+use crate::error::{CreateTableSnafu, Result};
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
 pub mod error;
@@ -31,13 +31,13 @@ pub trait CatalogList: Sync + Send {
         &self,
         name: String,
         catalog: CatalogProviderRef,
-    ) -> Result<Option<CatalogProviderRef>, Error>;
+    ) -> Result<Option<CatalogProviderRef>>;
 
     /// Retrieves the list of available catalog names
-    fn catalog_names(&self) -> Result<Vec<String>, Error>;
+    fn catalog_names(&self) -> Result<Vec<String>>;
 
     /// Retrieves a specific catalog by name, provided it exists.
-    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>, Error>;
+    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>>;
 }
 
 /// Represents a catalog, comprising a number of named schemas.
@@ -47,17 +47,17 @@ pub trait CatalogProvider: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
     /// Retrieves the list of available schema names in this catalog.
-    fn schema_names(&self) -> Result<Vec<String>, Error>;
+    fn schema_names(&self) -> Result<Vec<String>>;
 
     /// Registers schema to this catalog.
     fn register_schema(
         &self,
         name: String,
         schema: SchemaProviderRef,
-    ) -> Result<Option<SchemaProviderRef>, Error>;
+    ) -> Result<Option<SchemaProviderRef>>;
 
     /// Retrieves a specific schema from the catalog by name, provided it exists.
-    fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>, Error>;
+    fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>>;
 }
 
 pub type CatalogListRef = Arc<dyn CatalogList>;
@@ -128,7 +128,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
     manager: &'a M,
     engine: TableEngineRef,
     sys_table_requests: &'a mut Vec<RegisterSystemTableRequest>,
-) -> Result<(), Error> {
+) -> Result<()> {
     for req in sys_table_requests.drain(..) {
         let catalog_name = &req.create_table_request.catalog_name;
         let schema_name = &req.create_table_request.schema_name;

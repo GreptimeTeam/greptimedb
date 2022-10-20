@@ -372,7 +372,7 @@ mod tests {
         )))
     }
 
-    fn throw_catalog_error() -> std::result::Result<(), catalog::error::Error> {
+    fn throw_catalog_error() -> catalog::error::Result<()> {
         Err(catalog::error::Error::RegisterTable {
             source: BoxedError::new(MockError::with_backtrace(StatusCode::Internal)),
         })
