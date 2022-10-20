@@ -11,7 +11,10 @@ use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
 use snafu::prelude::*;
 use table::requests::AddColumnRequest;
 
-use crate::error::{self, InsertSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu};
+use crate::error::{
+    self, CatalogSnafu, FindTableSnafu, InsertSnafu, Result, TableNotFoundSnafu,
+    UnsupportedExprSnafu,
+};
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::{self, insertion_expr_to_request};
