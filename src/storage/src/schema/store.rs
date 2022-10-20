@@ -4,11 +4,11 @@ use common_error::prelude::*;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk as ArrowChunk;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
-use datatypes::schema::{ColumnSchema, Metadata, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{Metadata, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::Helper;
 use store_api::storage::consts;
 
-use crate::metadata::{self, ColumnsMetadata, Error, Result};
+use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, Error, Result};
 use crate::read::Batch;
 
 const ROW_KEY_END_KEY: &str = "greptime:storage:row_key_end";
@@ -25,6 +25,7 @@ const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
 // FIXME(yingwen): Remove Clone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoreSchema {
+    columns: Vec<ColumnMetadata>,
     schema: SchemaRef,
     row_key_end: usize,
     user_column_end: usize,
@@ -86,19 +87,12 @@ impl StoreSchema {
             .unwrap_or(false)
     }
 
-    // To avoid cyclic depenency, we need to use the error in crate level.
     pub(crate) fn from_columns_metadata(
         columns: &ColumnsMetadata,
         version: u32,
     ) -> Result<StoreSchema> {
-        let column_schemas: Vec<_> = columns
-            .columns()
-            .iter()
-            .map(|col| ColumnSchema::from(&col.desc))
-            .collect();
-
         StoreSchema::new(
-            column_schemas,
+            columns.columns().to_vec(),
             version,
             columns.timestamp_key_index(),
             columns.row_key_end(),
@@ -107,14 +101,19 @@ impl StoreSchema {
     }
 
     pub(crate) fn new(
-        column_schemas: Vec<ColumnSchema>,
+        columns: Vec<ColumnMetadata>,
         version: u32,
         timestamp_key_index: usize,
         row_key_end: usize,
         user_column_end: usize,
     ) -> Result<StoreSchema> {
+        let column_schemas = columns
+            .iter()
+            .map(|meta| meta.to_column_schema_for_store())
+            .collect::<Result<Vec<_>>>()?;
+
         let schema = SchemaBuilder::try_from(column_schemas)
-            .context(metadata::InvalidSchemaSnafu)?
+            .context(metadata::ConvertSchemaSnafu)?
             .timestamp_index(timestamp_key_index)
             .version(version)
             .add_metadata(ROW_KEY_END_KEY, row_key_end.to_string())
@@ -132,6 +131,7 @@ impl StoreSchema {
         );
 
         Ok(StoreSchema {
+            columns,
             schema: Arc::new(schema),
             row_key_end,
             user_column_end,
@@ -183,7 +183,15 @@ impl TryFrom<ArrowSchema> for StoreSchema {
             metadata::InvalidIndexSnafu
         );
 
+        // Recover ColumnMetadata from schema.
+        let columns = schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| ColumnMetadata::from_column_schema_for_store(column_schema))
+            .collect::<Result<_>>()?;
+
         Ok(StoreSchema {
+            columns,
             schema: Arc::new(schema),
             row_key_end,
             user_column_end,

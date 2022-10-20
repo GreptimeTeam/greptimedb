@@ -218,15 +218,17 @@ impl ProjectedSchema {
         region_schema: &RegionSchema,
         projection: &Projection,
     ) -> Result<StoreSchema> {
-        let column_schemas: Vec<_> = projection
+        // Reorder columns according to the projection.
+        let columns: Vec<_> = projection
             .columns_to_read
             .iter()
-            .map(|col_idx| ColumnSchema::from(&region_schema.column_metadata(*col_idx).desc))
+            .map(|col_idx| region_schema.column_metadata(*col_idx))
+            .cloned()
             .collect();
         // All row key columns are reserved in this schema, so we can use the row_key_end
         // and timestamp_key_index from region schema.
         StoreSchema::new(
-            column_schemas,
+            columns,
             region_schema.version(),
             region_schema.timestamp_key_index(),
             region_schema.row_key_end(),
