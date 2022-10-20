@@ -211,13 +211,10 @@ fn parse_index_from_metadata(metadata: &Metadata, key: &str) -> Result<usize> {
 mod tests {
     use datatypes::arrow::array::Array;
     use datatypes::arrow::chunk::Chunk as ArrowChunk;
-    use datatypes::type_id::LogicalTypeId;
-    use store_api::storage::consts;
 
     use super::*;
     use crate::read::Batch;
     use crate::schema::tests;
-    use crate::test_util::schema_util;
 
     fn check_chunk_batch(chunk: &ArrowChunk<Arc<dyn Array>>, batch: &Batch) {
         assert_eq!(5, chunk.columns().len());
@@ -240,20 +237,22 @@ mod tests {
 
         assert_eq!(**store_schema, converted_store_schema);
 
-        let expect_schema = schema_util::new_schema_with_version(
-            &[
-                ("k0", LogicalTypeId::Int64, false),
-                ("timestamp", LogicalTypeId::Timestamp, false),
-                ("v0", LogicalTypeId::Int64, true),
-                (consts::SEQUENCE_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                (consts::OP_TYPE_COLUMN_NAME, LogicalTypeId::UInt8, false),
-            ],
-            Some(1),
-            123,
-        );
+        let column_schemas: Vec<_> = region_schema
+            .columns()
+            .iter()
+            .map(|meta| meta.to_column_schema_for_store().unwrap())
+            .collect();
+        let expect_schema = SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .version(123)
+            .timestamp_index(1)
+            .build()
+            .unwrap();
+        // Only compare column schemas since SchemaRef in StoreSchema also contains other metadata that only used
+        // by StoreSchema.
         assert_eq!(
             expect_schema.column_schemas(),
-            store_schema.schema().column_schemas()
+            store_schema.schema().column_schemas(),
         );
         assert_eq!(3, store_schema.sequence_index());
         assert_eq!(4, store_schema.op_type_index());
