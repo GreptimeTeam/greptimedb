@@ -9,14 +9,12 @@ mod tests {
     use std::sync::Arc;
 
     use catalog::error::Error;
-    use catalog::remote::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use catalog::remote::{
         KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider,
     };
-    use catalog::{
-        CatalogManager, CatalogManagerRef, RegisterTableRequest, DEFAULT_CATALOG_NAME,
-        DEFAULT_SCHEMA_NAME,
-    };
+    use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_catalog::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use datatypes::schema::Schema;
     use futures_util::StreamExt;
     use table::engine::{EngineContext, TableEngineRef};

@@ -168,12 +168,12 @@ pub fn new_memory_catalog_list() -> Result<Arc<MemoryCatalogList>> {
 
 #[cfg(test)]
 mod tests {
+    use common_catalog::consts::*;
     use common_error::ext::ErrorExt;
     use common_error::prelude::StatusCode;
     use table::table::numbers::NumbersTable;
 
     use super::*;
-    use crate::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
     #[test]
     fn test_new_memory_catalog_list() {

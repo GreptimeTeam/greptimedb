@@ -2,6 +2,10 @@ use std::any::Any;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID,
+    SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
+};
 use common_recordbatch::RecordBatch;
 use common_telemetry::{debug, info};
 use datatypes::prelude::ScalarVector;
@@ -15,9 +19,6 @@ use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
 use table::TableRef;
 
-use crate::consts::{
-    INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
-};
 use crate::error::Result;
 use crate::error::{
     CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu,
@@ -33,7 +34,7 @@ use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
     CatalogProvider, CatalogProviderRef, RegisterSystemTableRequest, RegisterTableRequest,
-    SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+    SchemaProvider,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.

@@ -104,17 +104,10 @@ pub enum Error {
     #[snafu(display("Illegal catalog manager state: {}", msg))]
     IllegalManagerState { backtrace: Backtrace, msg: String },
 
-    #[snafu(display("Invalid catalog info: {}", key))]
-    InvalidCatalog { key: String },
-
-    #[snafu(display("Failed to deserialize catalog entry value: {}", raw))]
-    DeserializeCatalogEntryValue {
-        raw: String,
-        source: serde_json::error::Error,
+    #[snafu(display("Cannot parse catalog value, source: {}", source))]
+    InvalidCatalogValue {
+        source: common_catalog::error::Error,
     },
-
-    #[snafu(display("Failed to serialize catalog entry value"))]
-    SerializeCatalogEntryValue { source: serde_json::error::Error },
 
     #[snafu(display("IO error occurred while fetching catalog info, source: {}", source))]
     Io {
@@ -133,10 +126,7 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. }
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
-            | Error::InvalidEntryType { .. }
-            | Error::InvalidCatalog { .. }
-            | Error::DeserializeCatalogEntryValue { .. }
-            | Error::SerializeCatalogEntryValue { .. } => StatusCode::Unexpected,
+            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue
@@ -145,6 +135,7 @@ impl ErrorExt for Error {
 
             Error::ReadSystemCatalog { source, .. } => source.status_code(),
             Error::SystemCatalogTypeMismatch { source, .. } => source.status_code(),
+            Error::InvalidCatalogValue { source, .. } => source.status_code(),
 
             Error::RegisterTable { .. } => StatusCode::Internal,
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,

@@ -3,6 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::{
+    build_catalog_prefix, build_schema_prefix, build_table_prefix, CatalogKey, CatalogValue,
+    SchemaKey, SchemaValue, TableKey, TableValue,
+};
 use common_telemetry::info;
 use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -13,18 +18,13 @@ use table::TableRef;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::error::{
-    CatalogNotFoundSnafu, CreateTableSnafu, Error, OpenTableSnafu, SchemaNotFoundSnafu,
-    TableExistsSnafu,
-};
-use crate::remote::helper::{
-    build_catalog_prefix, build_schema_prefix, build_table_prefix, CatalogKey, CatalogValue,
-    SchemaKey, SchemaValue, TableKey, TableValue,
+    CatalogNotFoundSnafu, CreateTableSnafu, Error, InvalidCatalogValueSnafu, OpenTableSnafu,
+    SchemaNotFoundSnafu, TableExistsSnafu,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogList, CatalogManager, CatalogProviderRef,
     RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 
 /// Catalog manager based on metasrv.
@@ -89,7 +89,8 @@ impl RemoteCatalogManager {
         let mut catalogs = self.backend.range(build_catalog_prefix().as_bytes());
         while let Some(r) = catalogs.next().await {
             let CatalogKey { catalog_name, .. } =
-                CatalogKey::parse(&String::from_utf8_lossy(&r?.0))?;
+                CatalogKey::parse(&String::from_utf8_lossy(&r?.0))
+                    .context(InvalidCatalogValueSnafu)?;
 
             info!("Fetch catalog from metasrv: {}", &catalog_name);
             let catalog = res
@@ -104,7 +105,8 @@ impl RemoteCatalogManager {
             info!("List schema from metasrv");
             while let Some(r) = schemas.next().await {
                 let SchemaKey { schema_name, .. } =
-                    SchemaKey::parse(&String::from_utf8_lossy(&r?.0))?;
+                    SchemaKey::parse(&String::from_utf8_lossy(&r?.0))
+                        .context(InvalidCatalogValueSnafu)?;
                 info!("Found schema: {}", &schema_name);
                 let schema = match catalog.schema(&schema_name)? {
                     None => {
@@ -128,8 +130,10 @@ impl RemoteCatalogManager {
 
                 while let Some(r) = tables.next().await {
                     let Kv(k, v) = r?;
-                    let table_key = TableKey::parse(&String::from_utf8_lossy(&k))?;
-                    let table_value = TableValue::parse(&String::from_utf8_lossy(&v))?;
+                    let table_key = TableKey::parse(&String::from_utf8_lossy(&k))
+                        .context(InvalidCatalogValueSnafu)?;
+                    let table_value = TableValue::parse(&String::from_utf8_lossy(&v))
+                        .context(InvalidCatalogValueSnafu)?;
 
                     let table_ref = self.open_or_create_table(&table_key, &table_value).await?;
                     info!("Try to register table: {}", &table_key.table_name);
@@ -154,7 +158,12 @@ impl RemoteCatalogManager {
         }
         .to_string();
         self.backend
-            .set(schema_key.as_bytes(), &SchemaValue {}.to_bytes()?)
+            .set(
+                schema_key.as_bytes(),
+                &SchemaValue {}
+                    .to_bytes()
+                    .context(InvalidCatalogValueSnafu)?,
+            )
             .await?;
         info!("Registered default schema");
 
@@ -164,7 +173,12 @@ impl RemoteCatalogManager {
         }
         .to_string();
         self.backend
-            .set(catalog_key.as_bytes(), &CatalogValue {}.to_bytes()?)
+            .set(
+                catalog_key.as_bytes(),
+                &CatalogValue {}
+                    .to_bytes()
+                    .context(InvalidCatalogValueSnafu)?,
+            )
             .await?;
         info!("Registered default catalog");
         Ok(default_catalog)
@@ -312,7 +326,12 @@ impl CatalogList for RemoteCatalogManager {
                 Some(_) => self.catalogs.read().await.get(&name).cloned(),
             };
             self.backend
-                .set(key.as_bytes(), &CatalogValue {}.to_bytes()?)
+                .set(
+                    key.as_bytes(),
+                    &CatalogValue {}
+                        .to_bytes()
+                        .context(InvalidCatalogValueSnafu)?,
+                )
                 .await?;
             let mut catalogs = self.catalogs.write().await;
             catalogs.insert(name, catalog);
@@ -329,7 +348,8 @@ impl CatalogList for RemoteCatalogManager {
                 let CatalogKey {
                     node_id,
                     catalog_name,
-                } = CatalogKey::parse(&String::from_utf8_lossy(&v?.0))?;
+                } = CatalogKey::parse(&String::from_utf8_lossy(&v?.0))
+                    .context(InvalidCatalogValueSnafu)?;
 
                 if node_id == self.node_id {
                     res.insert(catalog_name);
@@ -399,7 +419,7 @@ impl crate::CatalogProvider for RemoteCatalogProvider {
                     node_id,
                     schema_name,
                     catalog_name,
-                } = SchemaKey::parse(&key)?;
+                } = SchemaKey::parse(&key).context(InvalidCatalogValueSnafu)?;
                 assert_eq!(self.catalog_name, catalog_name);
                 if node_id == self.node_id {
                     res.insert(schema_name);
@@ -423,7 +443,12 @@ impl crate::CatalogProvider for RemoteCatalogProvider {
             };
 
             self.backend
-                .set(key.as_bytes(), &SchemaValue {}.to_bytes()?)
+                .set(
+                    key.as_bytes(),
+                    &SchemaValue {}
+                        .to_bytes()
+                        .context(InvalidCatalogValueSnafu)?,
+                )
                 .await?;
             let mut schemas = self.schemas.write().await;
             schemas.insert(name, schema);
@@ -497,7 +522,7 @@ impl SchemaProvider for RemoteSchemaProvider {
                     schema_name,
                     catalog_name,
                     table_name,
-                } = TableKey::parse(key)?;
+                } = TableKey::parse(key).context(InvalidCatalogValueSnafu)?;
 
                 assert_eq!(self.schema_name, schema_name);
                 assert_eq!(self.catalog_name, catalog_name);
@@ -538,7 +563,10 @@ impl SchemaProvider for RemoteSchemaProvider {
                 Some(_) => self.tables.read().await.get(&key).cloned(),
             };
             self.backend
-                .set(key.as_bytes(), &table_value.as_bytes()?)
+                .set(
+                    key.as_bytes(),
+                    &table_value.as_bytes().context(InvalidCatalogValueSnafu)?,
+                )
                 .await?;
             let mut tables = self.tables.write().await;
             tables.insert(name, table);

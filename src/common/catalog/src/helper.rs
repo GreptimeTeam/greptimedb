@@ -6,11 +6,10 @@ use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::{TableId, TableMeta};
 
+use crate::consts::{CATALOG_PREFIX, SCHEMA_PREFIX, TABLE_PREFIX};
 use crate::error::{
-    DeserializeCatalogEntryValueSnafu, InvalidCatalogSnafu, SerializeCatalogEntryValueSnafu,
+    DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu, SerializeCatalogEntryValueSnafu,
 };
-use crate::remote::consts::{CATALOG_PREFIX, SCHEMA_PREFIX, TABLE_ID_PREFIX, TABLE_PREFIX};
-use crate::Error;
 
 lazy_static! {
     static ref CATALOG_KEY_PATTERN: Regex =
@@ -33,23 +32,15 @@ lazy_static! {
     .unwrap();
 }
 
-lazy_static! {
-    static ref TABLE_ID_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{}-([a-zA-Z_]+)$", TABLE_ID_PREFIX)).unwrap();
-}
-
-pub(crate) fn build_catalog_prefix() -> String {
+pub fn build_catalog_prefix() -> String {
     format!("{}-", CATALOG_PREFIX)
 }
 
-pub(crate) fn build_schema_prefix(catalog_name: impl AsRef<str>) -> String {
+pub fn build_schema_prefix(catalog_name: impl AsRef<str>) -> String {
     format!("{}-{}-", SCHEMA_PREFIX, catalog_name.as_ref())
 }
 
-pub(crate) fn build_table_prefix(
-    catalog_name: impl AsRef<str>,
-    schema_name: impl AsRef<str>,
-) -> String {
+pub fn build_table_prefix(catalog_name: impl AsRef<str>, schema_name: impl AsRef<str>) -> String {
     format!(
         "{}-{}-{}-",
         TABLE_PREFIX,
@@ -103,12 +94,12 @@ pub struct TableValue {
 }
 
 impl TableValue {
-    pub(crate) fn parse(s: impl AsRef<str>) -> Result<Self, Error> {
+    pub fn parse(s: impl AsRef<str>) -> Result<Self, Error> {
         serde_json::from_str(s.as_ref())
             .context(DeserializeCatalogEntryValueSnafu { raw: s.as_ref() })
     }
 
-    pub(crate) fn as_bytes(&self) -> Result<Vec<u8>, Error> {
+    pub fn as_bytes(&self) -> Result<Vec<u8>, Error> {
         Ok(serde_json::to_string(self)
             .context(SerializeCatalogEntryValueSnafu)?
             .into_bytes())
@@ -208,7 +199,6 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema};
 
     use super::*;
-    use crate::remote::helper::CatalogKey;
 
     #[test]
     fn test_parse_catalog_key() {

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::{RegisterTableRequest, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::RegisterTableRequest;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_telemetry::tracing::info;
 use datatypes::schema::SchemaBuilder;
