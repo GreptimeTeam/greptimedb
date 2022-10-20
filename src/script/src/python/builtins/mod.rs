@@ -371,13 +371,13 @@ pub(crate) mod greptime_builtin {
 
     /// GrepTime's own impl of pow function
     #[pyfunction]
-    fn pow_gp(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        eval_func("pow", &[v], vm)
+    fn pow_gp(v0: PyVectorRef, v1: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        eval_func("pow", &[v0, v1], vm)
     }
 
     #[pyfunction]
-    fn clip(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        eval_func("clip", &[v], vm)
+    fn clip(v0: PyVectorRef, v1: PyVectorRef, v2: PyVectorRef,vm: &VirtualMachine) -> PyResult<PyVector> {
+        eval_func("clip", &[v0, v1, v2], vm)
     }
 
     #[pyfunction]

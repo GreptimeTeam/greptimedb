@@ -924,5 +924,111 @@ sum(prev(values))"#,
             ty: Float64,
             value: Float(3.0)
         ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+            "pows": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 2.0, 3.0])
+            ),
+        },
+        script: r#"
+from greptime import *
+pow_gp(values, pows)"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVec([1.0, 4.0, 27.0])
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([-1.0, 2.0, 0.5])
+            ),
+            "lower": Var(
+                ty: Float64,
+                value: FloatVec([0.0, 0.0, 0.0])
+            ),
+            "upper": Var(
+                ty: Float64,
+                value: FloatVec([1.0, 1.0, 1.0])
+            ),
+        },
+        script: r#"
+from greptime import *
+clip(values, lower, upper)"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVec([0.0, 1.0, 0.5])
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([-1.0, 2.0, 2.0, 0.5])
+            )
+        },
+        script: r#"
+from greptime import *
+median(values)"#,
+        expect: Ok((
+            ty: Float64,
+            value: Float(1.25)
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([-1.0, 2.0, 2.0, 0.5])
+            )
+        },
+        script: r#"
+from greptime import *
+diff(values)"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVec([3.0, 0.0, -1.5])
+        ))
+    ),
+    TestCase(
+        input: {
+            "values": Var(
+                ty: Float64,
+                value: FloatVec([-1.0, 2.0, 2.0, 0.0])
+            )
+        },
+        script: r#"
+from greptime import *
+mean(values)"#,
+        expect: Ok((
+            ty: Float64,
+            value: Float(0.75)
+        ))
+    ),
+    TestCase(
+        input: {
+            "p": Var(
+                ty: Float64,
+                value: FloatVec([-1.0, 2.0])
+            ),
+            "x": Var(
+                ty: Float64,
+                value: FloatVec([1.0])
+            )
+        },
+        script: r#"
+from greptime import *
+polyval(p, x)"#,
+        expect: Ok((
+            ty: Float64,
+            value: FloatVec([3.0])
+        ))
     )
 ]
