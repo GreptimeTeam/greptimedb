@@ -8,12 +8,13 @@ use datatypes::schema::{ColumnSchema, Metadata, Schema, SchemaBuilder, SchemaRef
 use datatypes::vectors::Helper;
 use store_api::storage::consts;
 
-use crate::metadata::ColumnsMetadata;
+use crate::metadata::{self, ColumnsMetadata, Error, Result};
 use crate::read::Batch;
-use crate::schema::{self, Error, Result};
 
 const ROW_KEY_END_KEY: &str = "greptime:storage:row_key_end";
 const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
+
+// FIXME(yingwen): Use StoreSchemaRef
 
 /// Schema for storage engine.
 ///
@@ -21,6 +22,7 @@ const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
 /// columns. The columns are organized in `key, value, internal` order.
 ///
 /// Only contains a reference to schema and some indices, so it should be cheap to clone.
+// FIXME(yingwen): Remove Clone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoreSchema {
     schema: SchemaRef,
@@ -57,7 +59,7 @@ impl StoreSchema {
             .iter()
             .enumerate()
             .map(|(i, column)| {
-                Helper::try_into_vector(column.clone()).context(schema::ConvertChunkSnafu {
+                Helper::try_into_vector(column.clone()).context(metadata::ConvertChunkSnafu {
                     name: self.column_name(i),
                 })
             })
@@ -84,12 +86,14 @@ impl StoreSchema {
             .unwrap_or(false)
     }
 
+    // To avoid cyclic depenency, we need to use the error in crate level.
     pub(crate) fn from_columns_metadata(
         columns: &ColumnsMetadata,
         version: u32,
     ) -> Result<StoreSchema> {
         let column_schemas: Vec<_> = columns
-            .iter_all_columns()
+            .columns()
+            .iter()
             .map(|col| ColumnSchema::from(&col.desc))
             .collect();
 
@@ -110,13 +114,13 @@ impl StoreSchema {
         user_column_end: usize,
     ) -> Result<StoreSchema> {
         let schema = SchemaBuilder::try_from(column_schemas)
-            .context(schema::ConvertSchemaSnafu)?
+            .context(metadata::InvalidSchemaSnafu)?
             .timestamp_index(timestamp_key_index)
             .version(version)
             .add_metadata(ROW_KEY_END_KEY, row_key_end.to_string())
             .add_metadata(USER_COLUMN_END_KEY, user_column_end.to_string())
             .build()
-            .context(schema::BuildSchemaSnafu)?;
+            .context(metadata::InvalidSchemaSnafu)?;
 
         assert_eq!(
             consts::SEQUENCE_COLUMN_NAME,
@@ -164,7 +168,7 @@ impl TryFrom<ArrowSchema> for StoreSchema {
     type Error = Error;
 
     fn try_from(arrow_schema: ArrowSchema) -> Result<StoreSchema> {
-        let schema = Schema::try_from(arrow_schema).context(schema::ConvertArrowSchemaSnafu)?;
+        let schema = Schema::try_from(arrow_schema).context(metadata::ConvertArrowSchemaSnafu)?;
         // Recover other metadata from schema.
         let row_key_end = parse_index_from_metadata(schema.metadata(), ROW_KEY_END_KEY)?;
         let user_column_end = parse_index_from_metadata(schema.metadata(), USER_COLUMN_END_KEY)?;
@@ -172,11 +176,11 @@ impl TryFrom<ArrowSchema> for StoreSchema {
         // There should be sequence and op_type columns.
         ensure!(
             consts::SEQUENCE_COLUMN_NAME == schema.column_schemas()[user_column_end].name,
-            schema::InvalidIndexSnafu
+            metadata::InvalidIndexSnafu
         );
         ensure!(
             consts::OP_TYPE_COLUMN_NAME == schema.column_schemas()[user_column_end + 1].name,
-            schema::InvalidIndexSnafu
+            metadata::InvalidIndexSnafu
         );
 
         Ok(StoreSchema {
@@ -190,8 +194,10 @@ impl TryFrom<ArrowSchema> for StoreSchema {
 fn parse_index_from_metadata(metadata: &Metadata, key: &str) -> Result<usize> {
     let value = metadata
         .get(key)
-        .context(schema::MissingMetaSnafu { key })?;
-    value.parse().context(schema::ParseIndexSnafu { value })
+        .context(metadata::MetaNotFoundSnafu { key })?;
+    value.parse().with_context(|_| metadata::ParseMetaIntSnafu {
+        key_value: format!("{}={}", key, value),
+    })
 }
 
 #[cfg(test)]

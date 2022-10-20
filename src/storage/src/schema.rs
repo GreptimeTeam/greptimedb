@@ -3,71 +3,9 @@ mod projected;
 mod region;
 mod store;
 
-use common_error::prelude::*;
-
 pub use crate::schema::projected::{ProjectedSchema, ProjectedSchemaRef};
 pub use crate::schema::region::{RegionSchema, RegionSchemaRef};
 pub use crate::schema::store::StoreSchema;
-
-#[derive(Debug, Snafu)]
-pub enum Error {
-    #[snafu(display("Failed to build schema, source: {}", source))]
-    BuildSchema {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Failed to convert from arrow schema, source: {}", source))]
-    ConvertArrowSchema {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Invalid internal column index in arrow schema"))]
-    InvalidIndex { backtrace: Backtrace },
-
-    #[snafu(display("Missing metadata {} in arrow schema", key))]
-    MissingMeta { key: String, backtrace: Backtrace },
-
-    #[snafu(display("Missing column {} in arrow schema", column))]
-    MissingColumn {
-        column: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display(
-        "Failed to parse index in schema meta, value: {}, source: {}",
-        value,
-        source
-    ))]
-    ParseIndex {
-        value: String,
-        source: std::num::ParseIntError,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display(
-        "Failed to convert arrow chunk to batch, name: {}, source: {}",
-        name,
-        source
-    ))]
-    ConvertChunk {
-        name: String,
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Failed to convert schema, source: {}", source))]
-    ConvertSchema {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Invalid projection, {}", msg))]
-    InvalidProjection { msg: String, backtrace: Backtrace },
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {

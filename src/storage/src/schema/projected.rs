@@ -9,8 +9,9 @@ use datatypes::vectors::{BooleanVector, VectorRef};
 use store_api::storage::{Chunk, ColumnId};
 
 use crate::error;
+use crate::metadata::{self, Result};
 use crate::read::{Batch, BatchOp};
-use crate::schema::{self, RegionSchema, RegionSchemaRef, Result, StoreSchema};
+use crate::schema::{RegionSchema, RegionSchemaRef, StoreSchema};
 
 /// Metadata about projection.
 #[derive(Debug, Default)]
@@ -256,13 +257,13 @@ impl ProjectedSchema {
             .collect();
 
         let mut builder = SchemaBuilder::try_from(column_schemas)
-            .context(schema::ConvertSchemaSnafu)?
+            .context(metadata::ConvertSchemaSnafu)?
             .version(region_schema.version());
         if let Some(timestamp_index) = timestamp_index {
             builder = builder.timestamp_index(timestamp_index);
         }
 
-        let schema = builder.build().context(schema::BuildSchemaSnafu)?;
+        let schema = builder.build().context(metadata::InvalidSchemaSnafu)?;
 
         Ok(Arc::new(schema))
     }
@@ -272,7 +273,7 @@ impl ProjectedSchema {
         // should be always read, and the `StoreSchema` also requires the timestamp column.
         ensure!(
             !indices.is_empty(),
-            schema::InvalidProjectionSnafu {
+            metadata::InvalidProjectionSnafu {
                 msg: "at least one column should be read",
             }
         );
@@ -282,7 +283,7 @@ impl ProjectedSchema {
         for i in indices {
             ensure!(
                 *i < user_schema.num_columns(),
-                schema::InvalidProjectionSnafu {
+                metadata::InvalidProjectionSnafu {
                     msg: format!(
                         "index {} out of bound, only contains {} columns",
                         i,
@@ -363,7 +364,8 @@ mod tests {
     use store_api::storage::OpType;
 
     use super::*;
-    use crate::schema::{tests, Error};
+    use crate::metadata::Error;
+    use crate::schema::tests;
     use crate::test_util::{read_util, schema_util};
 
     #[test]
@@ -428,7 +430,8 @@ mod tests {
 
         // Test is_needed
         let needed: Vec<_> = region_schema
-            .all_columns()
+            .columns()
+            .iter()
             .enumerate()
             .filter_map(|(idx, column_meta)| {
                 if projected_schema.is_needed(column_meta.id()) {
@@ -491,7 +494,7 @@ mod tests {
             projected_schema.schema_to_read()
         );
 
-        for column in region_schema.all_columns() {
+        for column in region_schema.columns() {
             assert!(projected_schema.is_needed(column.id()));
         }
 

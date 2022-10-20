@@ -21,6 +21,7 @@ use crate::schema::{RegionSchema, RegionSchemaRef};
 
 /// Error for handling metadata.
 #[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub enum Error {
     #[snafu(display("Column name {} already exists", name))]
     ColNameExists { name: String, backtrace: Backtrace },
@@ -37,7 +38,7 @@ pub enum Error {
     #[snafu(display("Failed to build schema, source: {}", source))]
     InvalidSchema {
         #[snafu(backtrace)]
-        source: crate::schema::Error,
+        source: datatypes::error::Error,
     },
 
     #[snafu(display("Column name {} is reserved by the system", name))]
@@ -67,6 +68,7 @@ pub enum Error {
 
     #[snafu(display("Failed to drop column {} as it is an internal column", name))]
     DropInternalColumn { name: String },
+
     // End of variants for validating `AlterRequest`.
     #[snafu(display("Failed to convert to column schema, source: {}", source))]
     ToColumnSchema {
@@ -80,6 +82,7 @@ pub enum Error {
         source
     ))]
     ParseMetaInt {
+        // Store key and value in one string to reduce the enum size.
         key_value: String,
         source: std::num::ParseIntError,
         backtrace: Backtrace,
@@ -93,6 +96,35 @@ pub enum Error {
         source: ColumnDescriptorBuilderError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to convert from arrow schema, source: {}", source))]
+    ConvertArrowSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Invalid internal column index in arrow schema"))]
+    InvalidIndex { backtrace: Backtrace },
+
+    #[snafu(display(
+        "Failed to convert arrow chunk to batch, name: {}, source: {}",
+        name,
+        source
+    ))]
+    ConvertChunk {
+        name: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to convert schema, source: {}", source))]
+    ConvertSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Invalid projection, {}", msg))]
+    InvalidProjection { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -313,8 +345,7 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
 
     fn try_from(raw: RawRegionMetadata) -> Result<RegionMetadata> {
         let columns = Arc::new(ColumnsMetadata::from(raw.columns));
-        let schema =
-            Arc::new(RegionSchema::new(columns.clone(), raw.version).context(InvalidSchemaSnafu)?);
+        let schema = Arc::new(RegionSchema::new(columns.clone(), raw.version)?);
 
         Ok(RegionMetadata {
             id: raw.id,
@@ -327,9 +358,9 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
     }
 }
 
-const METADATA_CF_ID_KEY: &str = "greptime:cf_id";
-const METADATA_COLUMN_ID_KEY: &str = "greptime:column_id";
-const METADATA_COMMENT_KEY: &str = "greptime:comment";
+const METADATA_CF_ID_KEY: &str = "greptime:storage:cf_id";
+const METADATA_COLUMN_ID_KEY: &str = "greptime:storage:column_id";
+const METADATA_COMMENT_KEY: &str = "greptime:storage:comment";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColumnMetadata {
@@ -350,7 +381,7 @@ impl ColumnMetadata {
 
     /// Convert `self` to [`ColumnSchema`] for building a [`StoreSchema`](crate::schema::StoreSchema). This
     /// would store additional metadatas to the ColumnSchema.
-    fn to_column_schema_for_store(&self) -> Result<ColumnSchema> {
+    pub fn to_column_schema_for_store(&self) -> Result<ColumnSchema> {
         let desc = &self.desc;
         ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable())
             .with_metadata(self.to_metadata())
@@ -359,7 +390,7 @@ impl ColumnMetadata {
     }
 
     /// Convert [`ColumnSchema`] in [`StoreSchema`](crate::schema::StoreSchema) to [`ColumnMetadata`].
-    fn from_column_schema_for_store(column_schema: &ColumnSchema) -> Result<ColumnMetadata> {
+    pub fn from_column_schema_for_store(column_schema: &ColumnSchema) -> Result<ColumnMetadata> {
         let metadata = column_schema.metadata();
         let cf_id = try_parse_int(metadata, METADATA_CF_ID_KEY, Some(consts::DEFAULT_CF_ID))?;
         let column_id = try_parse_int(metadata, METADATA_COLUMN_ID_KEY, None)?;
@@ -401,7 +432,7 @@ where
     T: FromStr<Err = ParseIntError>,
 {
     if let Some(value) = metadata.get(key) {
-        return value.parse().context(ParseMetaIntSnafu {
+        return value.parse().with_context(|_| ParseMetaIntSnafu {
             key_value: format!("{}={}", key, value),
         });
     }
@@ -454,8 +485,9 @@ impl ColumnsMetadata {
         self.columns.iter().take(self.user_column_end)
     }
 
-    pub fn iter_all_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
-        self.columns.iter()
+    #[inline]
+    pub fn columns(&self) -> &[ColumnMetadata] {
+        &self.columns
     }
 
     #[inline]
@@ -803,8 +835,7 @@ impl RegionMetadataBuilder {
 
     fn build(self) -> Result<RegionMetadata> {
         let columns = Arc::new(self.columns_meta_builder.build()?);
-        let schema =
-            Arc::new(RegionSchema::new(columns.clone(), self.version).context(InvalidSchemaSnafu)?);
+        let schema = Arc::new(RegionSchema::new(columns.clone(), self.version)?);
 
         Ok(RegionMetadata {
             id: self.id,

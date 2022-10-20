@@ -3,8 +3,8 @@ use std::sync::Arc;
 use common_error::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 
-use crate::metadata::{ColumnMetadata, ColumnsMetadata, ColumnsMetadataRef};
-use crate::schema::{self, Result, StoreSchema};
+use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, ColumnsMetadataRef, Result};
+use crate::schema::StoreSchema;
 
 /// Schema of region.
 ///
@@ -118,8 +118,8 @@ impl RegionSchema {
     }
 
     #[cfg(test)]
-    pub(crate) fn all_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
-        self.columns.iter_all_columns()
+    pub(crate) fn columns(&self) -> &[ColumnMetadata] {
+        self.columns.columns()
     }
 }
 
@@ -133,11 +133,11 @@ fn build_user_schema(columns: &ColumnsMetadata, version: u32) -> Result<Schema> 
         .collect();
 
     SchemaBuilder::try_from(column_schemas)
-        .context(schema::ConvertSchemaSnafu)?
+        .context(metadata::ConvertSchemaSnafu)?
         .timestamp_index(columns.timestamp_key_index())
         .version(version)
         .build()
-        .context(schema::BuildSchemaSnafu)
+        .context(metadata::InvalidSchemaSnafu)
 }
 
 #[cfg(test)]
