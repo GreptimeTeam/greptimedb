@@ -252,29 +252,15 @@ fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Concre
         SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
-        SqlDataType::Custom(obj_name) => match &obj_name.0[..] {
+        SqlDataType::Custom(obj_name, modifiers) => match &obj_name.0[..] {
             [type_name] => {
                 if type_name.value.eq_ignore_ascii_case(DateTimeType::name()) {
-                    Ok(ConcreteDataType::datetime_datatype())
-                } else {
-                    error::SqlTypeNotSupportedSnafu {
-                        t: data_type.clone(),
-                    }
-                    .fail()
-                }
-            }
-            _ => error::SqlTypeNotSupportedSnafu {
-                t: data_type.clone(),
-            }
-            .fail(),
-        },
-        SqlDataType::CustomWithArgs(obj_name, args) => match &obj_name.0[..] {
-            [type_name] => {
-                if type_name
+                    return Ok(ConcreteDataType::datetime_datatype());
+                } else if type_name
                     .value
                     .eq_ignore_ascii_case(GeometryType::GEOMETRY_TYPE_NAME)
                 {
-                    if let Some(subtype) = args.get(0) {
+                    if let Some(subtype) = modifiers.get(0) {
                         let subtype = subtype.to_uppercase();
                         if subtype == GeometryType::GEOMETRY_SUBTYPE_POINT_NAME {
                             return Ok(ConcreteDataType::Geometry(GeometryType::Point));
@@ -341,7 +327,7 @@ mod tests {
         check_type(SqlDataType::Boolean, ConcreteDataType::boolean_datatype());
         check_type(SqlDataType::Date, ConcreteDataType::date_datatype());
         check_type(
-            SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")])),
+            SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")]), vec![]),
             ConcreteDataType::datetime_datatype(),
         );
         check_type(
@@ -349,24 +335,20 @@ mod tests {
             ConcreteDataType::timestamp_millis_datatype(),
         );
         check_type(
-            SqlDataType::CustomWithArgs(ObjectName(vec!["GEOMETRY".into()]), vec!["POINT".into()]),
+            SqlDataType::Custom(ObjectName(vec!["GEOMETRY".into()]), vec!["POINT".into()]),
             ConcreteDataType::geometry_datatype(GeometryType::Point),
         );
 
-        assert!(
-            sql_data_type_to_concrete_data_type(&SqlDataType::CustomWithArgs(
-                ObjectName(vec!["GEOMETRY".into()]),
-                vec![]
-            ))
-            .is_err()
-        );
-        assert!(
-            sql_data_type_to_concrete_data_type(&SqlDataType::CustomWithArgs(
-                ObjectName(vec!["GEOMETRY".into()]),
-                vec!["DUMMY_TYPE".into()]
-            ))
-            .is_err()
-        );
+        assert!(sql_data_type_to_concrete_data_type(&SqlDataType::Custom(
+            ObjectName(vec!["GEOMETRY".into()]),
+            vec![]
+        ))
+        .is_err());
+        assert!(sql_data_type_to_concrete_data_type(&SqlDataType::Custom(
+            ObjectName(vec!["GEOMETRY".into()]),
+            vec!["DUMMY_TYPE".into()]
+        ))
+        .is_err());
     }
 
     #[test]
