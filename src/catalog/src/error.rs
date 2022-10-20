@@ -106,6 +106,7 @@ pub enum Error {
 
     #[snafu(display("Cannot parse catalog value, source: {}", source))]
     InvalidCatalogValue {
+        #[snafu(backtrace)]
         source: common_catalog::error::Error,
     },
 
