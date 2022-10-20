@@ -354,8 +354,8 @@ impl TryFrom<ScalarValue> for Value {
                 let items = if let Some(vs) = vs {
                     let vs = vs
                         .into_iter()
-                        .map(|v| v.try_into())
-                        .collect::<Result<Vec<Value>>>()?;
+                        .map(ScalarValue::try_into)
+                        .collect::<Result<_>>()?;
                     Some(Box::new(vs))
                 } else {
                     None
