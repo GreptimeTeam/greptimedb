@@ -1,14 +1,15 @@
 use api::v1::meta::router_server;
 use api::v1::meta::CreateRequest;
-use api::v1::meta::CreateResponse;
 use api::v1::meta::Peer;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
+use snafu::OptionExt;
 use tonic::Request;
 use tonic::Response;
 
 use super::store::kv::KvStoreRef;
 use super::GrpcResult;
+use crate::error;
 use crate::error::Result;
 use crate::metasrv::MetaSrv;
 
@@ -22,7 +23,7 @@ impl router_server::Router for MetaSrv {
         Ok(Response::new(res))
     }
 
-    async fn create(&self, req: Request<CreateRequest>) -> GrpcResult<CreateResponse> {
+    async fn create(&self, req: Request<CreateRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
         let kv_store = self.kv_store();
         let res = handle_create(req, kv_store).await?;
@@ -35,16 +36,15 @@ async fn handle_route(_req: RouteRequest, _kv_store: KvStoreRef) -> Result<Route
     todo!()
 }
 
-async fn handle_create(req: CreateRequest, _kv_store: KvStoreRef) -> Result<CreateResponse> {
-    let CreateRequest { mut regions, .. } = req;
+async fn handle_create(req: CreateRequest, _kv_store: KvStoreRef) -> Result<RouteResponse> {
+    let CreateRequest { table_name, .. } = req;
+    let _table_name = table_name.context(error::EmptyTableNameSnafu)?;
 
-    // TODO(jiachun): route table
-    for r in &mut regions {
-        r.peer = Some(Peer::new(0, "127.0.0.1:3000"));
-    }
+    // TODO(jiachun):
+    let peers = vec![Peer::new(0, "127.0.0.0:3000")];
 
-    Ok(CreateResponse {
-        regions,
+    Ok(RouteResponse {
+        peers,
         ..Default::default()
     })
 }
@@ -105,22 +105,20 @@ mod tests {
         let table_name = TableName::new("test_catalog", "test_db", "table1");
         let req = CreateRequest::new(header, table_name);
 
-        let p = region::Partition::new()
+        let p0 = Partition::new()
             .column_list(vec![b"col1".to_vec(), b"col2".to_vec()])
             .value_list(vec![b"v1".to_vec(), b"v2".to_vec()]);
-        let r1 = Region::new(1, "region1", p);
 
-        let p = region::Partition::new()
+        let p1 = Partition::new()
             .column_list(vec![b"col1".to_vec(), b"col2".to_vec()])
             .value_list(vec![b"v11".to_vec(), b"v22".to_vec()]);
-        let r2 = Region::new(1, "region2", p);
 
-        let req = req.add_region(r1).add_region(r2);
+        let req = req.add_partition(p0).add_partition(p1);
 
         let res = meta_srv.create(req.into_request()).await.unwrap();
 
-        for r in res.into_inner().regions {
-            assert_eq!("127.0.0.1:3000", r.peer.unwrap().endpoint.unwrap().addr);
+        for r in res.into_inner().peers {
+            assert_eq!("127.0.0.1:3000", r.endpoint.unwrap().addr);
         }
     }
 }

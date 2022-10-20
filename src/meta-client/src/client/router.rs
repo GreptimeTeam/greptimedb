@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use api::v1::meta::router_client::RouterClient;
 use api::v1::meta::CreateRequest;
-use api::v1::meta::CreateResponse;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
 use common_grpc::channel_manager::ChannelManager;
@@ -48,7 +47,7 @@ impl Client {
         inner.is_started()
     }
 
-    pub async fn create(&self, req: CreateRequest) -> Result<CreateResponse> {
+    pub async fn create(&self, req: CreateRequest) -> Result<RouteResponse> {
         let inner = self.inner.read().await;
         inner.create(req).await
     }
@@ -97,7 +96,7 @@ impl Inner {
         Ok(res.into_inner())
     }
 
-    async fn create(&self, req: CreateRequest) -> Result<CreateResponse> {
+    async fn create(&self, req: CreateRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
 
         let res = client.create(req).await.context(error::TonicStatusSnafu)?;

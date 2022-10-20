@@ -34,6 +34,9 @@ pub enum Error {
         source: tonic::transport::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Empty table nalme"))]
+    EmptyTableName { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -60,7 +63,7 @@ impl ErrorExt for Error {
             | Error::ConnectEtcd { .. }
             | Error::TcpBind { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
-            Error::EmptyKey { .. } => StatusCode::InvalidArguments,
+            Error::EmptyKey { .. } | Error::EmptyTableName { .. } => StatusCode::InvalidArguments,
         }
     }
 }
@@ -141,5 +144,16 @@ mod tests {
 
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
+    }
+
+    #[test]
+    fn test_empty_table_error() {
+        let e = throw_none_option()
+            .context(EmptyTableNameSnafu)
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::InvalidArguments);
     }
 }

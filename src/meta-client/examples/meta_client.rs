@@ -1,11 +1,10 @@
 use std::time::Duration;
 
-use api::v1::meta::region::Partition;
 use api::v1::meta::CreateRequest;
 use api::v1::meta::DeleteRangeRequest;
+use api::v1::meta::Partition;
 use api::v1::meta::PutRequest;
 use api::v1::meta::RangeRequest;
-use api::v1::meta::Region;
 use api::v1::meta::RequestHeader;
 use api::v1::meta::TableName;
 use common_grpc::channel_manager::ChannelConfig;
@@ -51,8 +50,8 @@ async fn run() {
     let table_name = TableName::new("test_catlog", "test_schema", "test_table");
 
     let create_req = CreateRequest::new(header, table_name)
-        .add_region(Region::new(0, "test_region1", p1))
-        .add_region(Region::new(1, "test_region2", p2));
+        .add_partition(p1)
+        .add_partition(p2);
 
     let res = meta_client.create_route(create_req).await.unwrap();
     event!(Level::INFO, "create_route result: {:#?}", res);

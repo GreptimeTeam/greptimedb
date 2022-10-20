@@ -83,14 +83,14 @@ impl CreateRequest {
         }
     }
 
-    pub fn add_region(mut self, region: Region) -> Self {
-        self.regions.push(region);
+    pub fn add_partition(mut self, partition: Partition) -> Self {
+        self.partitions.push(partition);
         self
     }
 }
 
 impl Region {
-    pub fn new(id: u64, name: impl Into<String>, partition: region::Partition) -> Self {
+    pub fn new(id: u64, name: impl Into<String>, partition: Partition) -> Self {
         Self {
             id,
             name: name.into(),
@@ -105,7 +105,7 @@ impl Region {
     }
 }
 
-impl region::Partition {
+impl Partition {
     pub fn new() -> Self {
         Default::default()
     }

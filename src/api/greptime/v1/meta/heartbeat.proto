@@ -18,10 +18,10 @@ service Heartbeat {
 message HeartbeatRequest {
   RequestHeader header = 1;
 
+  // Self peer
+  Peer peer = 2;
   // Leader node
-  bool is_leader = 2;
-  // Leader Peer
-  Endpoint leader_endpoint = 3;
+  bool is_leader = 3;
   // Actually reported time interval
   TimeInterval report_interval = 4;
   // Node stat
@@ -48,15 +48,25 @@ message NodeStat {
   double read_io_rate = 7;
   // Write disk I/O in the node
   double write_io_rate = 8;
+
+  // Others
+  map<string, string> attrs = 100;
 }
 
 message RegionStat {
-  string table_name = 1;
-  uint64 region_id = 2;
+  uint64 region_id = 1;
+  TableName table_name = 2;
   // The read capacity units during this period
   uint64 rcus = 3;
   // The write capacity units during this period
   uint64 wcus = 4;
+  // Approximate region size
+  uint64 approximate_size = 5;
+  // Approximate number of rows
+  uint64 approximate_rows = 6;
+
+  // Others
+  map<string, string> attrs = 100;
 }
 
 message ReplicaStat {

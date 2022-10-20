@@ -4,7 +4,6 @@ mod router;
 mod store;
 
 use api::v1::meta::CreateRequest;
-use api::v1::meta::CreateResponse;
 use api::v1::meta::DeleteRangeRequest;
 use api::v1::meta::DeleteRangeResponse;
 use api::v1::meta::PutRequest;
@@ -142,7 +141,7 @@ impl MetaClient {
         todo!()
     }
 
-    pub async fn create_route(&self, req: CreateRequest) -> Result<CreateResponse> {
+    pub async fn create_route(&self, req: CreateRequest) -> Result<RouteResponse> {
         self.router_client()
             .context(error::NotStartedSnafu {
                 name: "route_client",

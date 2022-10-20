@@ -24,7 +24,7 @@ service Router {
   //
   rpc Route(RouteRequest) returns (RouteResponse) {}
 
-  rpc Create(CreateRequest) returns (CreateResponse) {}
+  rpc Create(CreateRequest) returns (RouteResponse) {}
 }
 
 message RouteRequest {
@@ -44,13 +44,7 @@ message CreateRequest {
   RequestHeader header = 1;
 
   TableName table_name = 2;
-  repeated Region regions = 3;
-}
-
-message CreateResponse {
-  ResponseHeader header = 1;
-
-  repeated Region regions = 2; 
+  repeated Partition partitions = 3;
 }
 
 message TableRoute {
@@ -66,12 +60,6 @@ message RegionRoute {
   repeated uint64 follower_peer_indexes = 3;
 }
 
-message TableName {
-  string catalog_name = 1;
-  string schema_name = 2;
-  string table_name = 3;
-}
-
 message Table {
   TableName table_name = 1;
   bytes table_schema = 2;
@@ -80,14 +68,13 @@ message Table {
 message Region {
   uint64 id = 1;
   string name = 2;
-  Peer peer = 3;
+  Partition partition = 3;
+  
+  map<string, string> attrs = 100;
+}
 
-  // PARTITION `region_name` VALUES LESS THAN (value_list)
-  message Partition {
-    repeated bytes column_list = 1;
-    repeated bytes value_list = 2;
-  }
-  Partition partition = 4;
-
-  map<string, string> attrs = 5;
+// PARTITION `region_name` VALUES LESS THAN (value_list)
+message Partition {
+  repeated bytes column_list = 1;
+  repeated bytes value_list = 2;
 }
