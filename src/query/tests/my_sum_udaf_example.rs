@@ -26,7 +26,7 @@ use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use query::error::Result;
 use query::QueryEngineFactory;
-use test_util::MemTable;
+use table::test_util::MemTable;
 
 #[derive(Debug, Default)]
 struct MySumAccumulator<T, SumT>

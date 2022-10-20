@@ -16,7 +16,7 @@ pub mod error;
 mod manager;
 pub mod memory;
 pub mod schema;
-mod system;
+pub mod system;
 pub mod tables;
 
 /// Represent a list of named catalogs

@@ -1628,7 +1628,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1259da3b15ec7e54bd7203adb2c4335adb9ca1d47b56220d650e52c247e824a"
 dependencies = [
  "http",
- "prost",
+ "prost 0.11.0",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -3761,7 +3761,6 @@ dependencies = [
  "stats-cli",
  "streaming-stats",
  "table",
- "test-util",
  "tokio",
  "tokio-stream",
 ]
@@ -4623,7 +4622,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
- "test-util",
+ "table",
  "tokio",
  "tokio-postgres",
  "tokio-stream",
@@ -5042,11 +5041,13 @@ dependencies = [
  "catalog",
  "common-error",
  "datafusion",
+ "datatypes",
  "futures",
  "prost 0.9.0",
  "snafu",
  "substrait 0.2.0",
  "table",
+ "tokio",
 ]
 
 [[package]]
@@ -5194,22 +5195,6 @@ checksum = "633c1a546cee861a1a6d0dc69ebeca693bf4296661ba7852b9d21d159e0506df"
 dependencies = [
  "libc",
  "winapi",
-]
-
-[[package]]
-name = "test-util"
-version = "0.1.0"
-dependencies = [
- "arrow2",
- "async-trait",
- "common-query",
- "common-recordbatch",
- "datafusion",
- "datatypes",
- "futures",
- "snafu",
- "table",
- "tokio",
 ]
 
 [[package]]
