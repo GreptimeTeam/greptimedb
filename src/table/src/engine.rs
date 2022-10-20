@@ -58,9 +58,6 @@ pub struct EngineContext {}
 
 #[derive(Default)]
 pub struct MockTableEngine {
-    // table_name: String,
-    // sole_table: TableRef,
-    // catalog name, schema name, table name
     tables: Mutex<HashMap<(String, String, String), TableRef>>,
 }
 
