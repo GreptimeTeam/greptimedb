@@ -74,6 +74,8 @@ impl ColumnDescriptorBuilder {
     }
 }
 
+// Convert [ColumnDescriptor] to [ColumnSchema]. Fields not in ColumnSchema **will not**
+// be stored as metadata.
 impl From<&ColumnDescriptor> for ColumnSchema {
     fn from(desc: &ColumnDescriptor) -> ColumnSchema {
         ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable)
