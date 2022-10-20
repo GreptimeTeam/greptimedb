@@ -17,7 +17,8 @@ const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
 
 /// Schema for storage engine.
 ///
-/// Used internally, contains all row key columns, internal columns and parts of value columns.
+/// Used internally, contains all row key columns, internal columns and parts of value
+/// columns. The columns are organized in `key, value, internal` order.
 ///
 /// Only contains a reference to schema and some indices, so it should be cheap to clone.
 #[derive(Debug, Clone, PartialEq)]
