@@ -93,6 +93,7 @@ impl SqlQueryHandler for Instance {
                 let expr = InsertExpr {
                     table_name,
                     expr: Some(insert_expr::Expr::Sql(query.to_string())),
+                    options: HashMap::default(),
                 };
                 self.db
                     .insert(expr)
@@ -444,6 +445,7 @@ mod tests {
         let insert_expr = InsertExpr {
             table_name: "demo".to_string(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
+            options: HashMap::default(),
         };
         let object_expr = ObjectExpr {
             header: Some(ExprHeader::default()),
