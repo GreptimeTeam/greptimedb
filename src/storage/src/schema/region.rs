@@ -4,7 +4,7 @@ use common_error::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 
 use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, ColumnsMetadataRef, Result};
-use crate::schema::StoreSchema;
+use crate::schema::{StoreSchema, StoreSchemaRef};
 
 /// Schema of region.
 ///
@@ -29,7 +29,7 @@ pub struct RegionSchema {
     /// is correct.
     user_schema: SchemaRef,
     /// store schema contains all columns of the region, including all internal columns.
-    store_schema: StoreSchema,
+    store_schema: StoreSchemaRef,
     /// Metadata of columns.
     columns: ColumnsMetadataRef,
 }
@@ -37,7 +37,7 @@ pub struct RegionSchema {
 impl RegionSchema {
     pub fn new(columns: ColumnsMetadataRef, version: u32) -> Result<RegionSchema> {
         let user_schema = Arc::new(build_user_schema(&columns, version)?);
-        let store_schema = StoreSchema::from_columns_metadata(&columns, version)?;
+        let store_schema = Arc::new(StoreSchema::from_columns_metadata(&columns, version)?);
 
         debug_assert_eq!(user_schema.version(), store_schema.version());
         debug_assert_eq!(version, user_schema.version());
@@ -58,7 +58,7 @@ impl RegionSchema {
 
     /// Returns the schema actually stores, which would also contains all internal columns.
     #[inline]
-    pub fn store_schema(&self) -> &StoreSchema {
+    pub fn store_schema(&self) -> &StoreSchemaRef {
         &self.store_schema
     }
 

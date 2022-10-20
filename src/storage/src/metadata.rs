@@ -1374,10 +1374,7 @@ mod tests {
         let new_meta = ColumnMetadata::from_column_schema_for_store(&column_schema).unwrap();
         assert_eq!(meta, new_meta);
 
-        let meta = ColumnMetadata {
-            cf_id: 567,
-            desc: desc.clone(),
-        };
+        let meta = ColumnMetadata { cf_id: 567, desc };
         let column_schema = meta.to_column_schema_for_store().unwrap();
         let new_meta = ColumnMetadata::from_column_schema_for_store(&column_schema).unwrap();
         assert_eq!(meta, new_meta);

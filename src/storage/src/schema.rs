@@ -5,7 +5,7 @@ mod store;
 
 pub use crate::schema::projected::{ProjectedSchema, ProjectedSchemaRef};
 pub use crate::schema::region::{RegionSchema, RegionSchemaRef};
-pub use crate::schema::store::StoreSchema;
+pub use crate::schema::store::{StoreSchema, StoreSchemaRef};
 
 #[cfg(test)]
 mod tests {

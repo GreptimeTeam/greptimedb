@@ -11,7 +11,7 @@ use store_api::storage::{Chunk, ColumnId};
 use crate::error;
 use crate::metadata::{self, Result};
 use crate::read::{Batch, BatchOp};
-use crate::schema::{RegionSchema, RegionSchemaRef, StoreSchema};
+use crate::schema::{RegionSchema, RegionSchemaRef, StoreSchema, StoreSchemaRef};
 
 /// Metadata about projection.
 #[derive(Debug, Default)]
@@ -92,7 +92,7 @@ pub struct ProjectedSchema {
     /// Projection info, `None` means don't need to do projection.
     projection: Option<Projection>,
     /// Schema used to read from data sources.
-    schema_to_read: StoreSchema,
+    schema_to_read: StoreSchemaRef,
     /// User schema after projection.
     projected_user_schema: SchemaRef,
 }
@@ -146,7 +146,7 @@ impl ProjectedSchema {
     }
 
     #[inline]
-    pub fn schema_to_read(&self) -> &StoreSchema {
+    pub fn schema_to_read(&self) -> &StoreSchemaRef {
         &self.schema_to_read
     }
 
@@ -217,7 +217,7 @@ impl ProjectedSchema {
     fn build_schema_to_read(
         region_schema: &RegionSchema,
         projection: &Projection,
-    ) -> Result<StoreSchema> {
+    ) -> Result<StoreSchemaRef> {
         // Reorder columns according to the projection.
         let columns: Vec<_> = projection
             .columns_to_read
@@ -227,13 +227,15 @@ impl ProjectedSchema {
             .collect();
         // All row key columns are reserved in this schema, so we can use the row_key_end
         // and timestamp_key_index from region schema.
-        StoreSchema::new(
+        let store_schema = StoreSchema::new(
             columns,
             region_schema.version(),
             region_schema.timestamp_key_index(),
             region_schema.row_key_end(),
             projection.num_user_columns,
-        )
+        )?;
+
+        Ok(Arc::new(store_schema))
     }
 
     fn build_projected_user_schema(

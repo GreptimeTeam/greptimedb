@@ -14,22 +14,21 @@ use crate::read::Batch;
 const ROW_KEY_END_KEY: &str = "greptime:storage:row_key_end";
 const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
 
-// FIXME(yingwen): Use StoreSchemaRef
-
 /// Schema for storage engine.
 ///
 /// Used internally, contains all row key columns, internal columns and parts of value
 /// columns. The columns are organized in `key, value, internal` order.
 ///
 /// Only contains a reference to schema and some indices, so it should be cheap to clone.
-// FIXME(yingwen): Remove Clone.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct StoreSchema {
     columns: Vec<ColumnMetadata>,
     schema: SchemaRef,
     row_key_end: usize,
     user_column_end: usize,
 }
+
+pub type StoreSchemaRef = Arc<StoreSchema>;
 
 impl StoreSchema {
     #[inline]
@@ -187,7 +186,7 @@ impl TryFrom<ArrowSchema> for StoreSchema {
         let columns = schema
             .column_schemas()
             .iter()
-            .map(|column_schema| ColumnMetadata::from_column_schema_for_store(column_schema))
+            .map(ColumnMetadata::from_column_schema_for_store)
             .collect::<Result<_>>()?;
 
         Ok(StoreSchema {
@@ -239,7 +238,7 @@ mod tests {
         let sst_arrow_schema = store_schema.arrow_schema();
         let converted_store_schema = StoreSchema::try_from((**sst_arrow_schema).clone()).unwrap();
 
-        assert_eq!(*store_schema, converted_store_schema);
+        assert_eq!(**store_schema, converted_store_schema);
 
         let expect_schema = schema_util::new_schema_with_version(
             &[
