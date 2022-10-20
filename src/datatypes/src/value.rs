@@ -363,48 +363,22 @@ impl TryFrom<ScalarValue> for Value {
                 let datatype = t.as_ref().try_into()?;
                 Value::List(ListValue::new(items, datatype))
             }
-            ScalarValue::Date32(d) => {
-                if let Some(d) = d {
-                    Value::Date(Date::new(d))
-                } else {
-                    Value::Null
-                }
-            }
-            ScalarValue::Date64(d) => {
-                if let Some(d) = d {
-                    Value::DateTime(DateTime::new(d))
-                } else {
-                    Value::Null
-                }
-            }
-            ScalarValue::TimestampSecond(t, _) => {
-                if let Some(t) = t {
-                    Value::Timestamp(Timestamp::new(t, TimeUnit::Second))
-                } else {
-                    Value::Null
-                }
-            }
-            ScalarValue::TimestampMillisecond(t, _) => {
-                if let Some(t) = t {
-                    Value::Timestamp(Timestamp::new(t, TimeUnit::Millisecond))
-                } else {
-                    Value::Null
-                }
-            }
-            ScalarValue::TimestampMicrosecond(t, _) => {
-                if let Some(t) = t {
-                    Value::Timestamp(Timestamp::new(t, TimeUnit::Microsecond))
-                } else {
-                    Value::Null
-                }
-            }
-            ScalarValue::TimestampNanosecond(t, _) => {
-                if let Some(t) = t {
-                    Value::Timestamp(Timestamp::new(t, TimeUnit::Nanosecond))
-                } else {
-                    Value::Null
-                }
-            }
+            ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
+            ScalarValue::Date64(d) => d
+                .map(|x| Value::DateTime(DateTime::new(x)))
+                .unwrap_or(Value::Null),
+            ScalarValue::TimestampSecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Second)))
+                .unwrap_or(Value::Null),
+            ScalarValue::TimestampMillisecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Millisecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::TimestampMicrosecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Microsecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::TimestampNanosecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
+                .unwrap_or(Value::Null),
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.get_datatype(),
