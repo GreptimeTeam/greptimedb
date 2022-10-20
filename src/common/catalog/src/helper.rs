@@ -97,6 +97,7 @@ impl TableKey {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableValue {
     pub id: TableId,
+    pub node_id: String,
     pub meta: TableMeta,
 }
 
@@ -267,7 +268,11 @@ mod tests {
             options: Default::default(),
         };
 
-        let value = TableValue { id: 42, meta };
+        let value = TableValue {
+            id: 42,
+            node_id: "localhost".to_string(),
+            meta,
+        };
         let serialized = serde_json::to_string(&value).unwrap();
         let deserialized = TableValue::parse(&serialized).unwrap();
         assert_eq!(value, deserialized);
