@@ -66,4 +66,3 @@ tempdir = "0.3"
 package = "arrow2"
 version = "0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
-common-catalog = { path = "../common/catalog" }

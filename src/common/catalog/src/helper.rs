@@ -1,10 +1,11 @@
 use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
-use table::metadata::{TableId, TableMeta};
+use table::metadata::{TableId, TableMeta, TableVersion};
 
 use crate::consts::{CATALOG_PREFIX, SCHEMA_PREFIX, TABLE_PREFIX};
 use crate::error::{
@@ -26,7 +27,7 @@ lazy_static! {
 
 lazy_static! {
     static ref TABLE_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)$",
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)-([a-zA-Z_]+)$",
         TABLE_PREFIX
     ))
     .unwrap();
@@ -53,6 +54,7 @@ pub struct TableKey {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+    pub version: TableVersion,
     pub node_id: String,
 }
 
@@ -66,6 +68,8 @@ impl Display for TableKey {
         f.serialize_str("-")?;
         f.serialize_str(&self.table_name)?;
         f.serialize_str("-")?;
+        f.serialize_u64(self.version)?;
+        f.serialize_str("-")?;
         f.serialize_str(&self.node_id)
     }
 }
@@ -76,13 +80,16 @@ impl TableKey {
         let captures = TABLE_KEY_PATTERN
             .captures(key)
             .context(InvalidCatalogSnafu { key })?;
-        ensure!(captures.len() == 5, InvalidCatalogSnafu { key });
+        ensure!(captures.len() == 6, InvalidCatalogSnafu { key });
 
+        let version =
+            u64::from_str(&captures[4]).map_err(|_| InvalidCatalogSnafu { key }.build())?;
         Ok(Self {
             catalog_name: captures[1].to_string(),
             schema_name: captures[2].to_string(),
             table_name: captures[3].to_string(),
-            node_id: captures[4].to_string(),
+            version,
+            node_id: captures[5].to_string(),
         })
     }
 }
@@ -221,12 +228,13 @@ mod tests {
 
     #[test]
     fn test_parse_table_key() {
-        let key = "__t-C-S-T-N";
+        let key = "__t-C-S-T-42-N";
         let entry = TableKey::parse(key).unwrap();
         assert_eq!("C", entry.catalog_name);
         assert_eq!("S", entry.schema_name);
         assert_eq!("T", entry.table_name);
         assert_eq!("N", entry.node_id);
+        assert_eq!(42, entry.version);
         assert_eq!(key, &entry.to_string());
     }
 
