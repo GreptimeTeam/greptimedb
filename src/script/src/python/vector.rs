@@ -939,7 +939,16 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
         value::Value::DateTime(v) => vm.ctx.new_int(v.val()).into(),
         // FIXME(dennis): lose the timestamp unit here
         Value::Timestamp(v) => vm.ctx.new_int(v.value()).into(),
-        value::Value::List(_) => unreachable!(),
+        value::Value::List(list) => {
+            let list = list.items().as_ref();
+            match list {
+                Some(list) => {
+                    let list: Vec<_> = list.iter().map(|v| val_to_pyobj(v.clone(), vm)).collect();
+                    vm.ctx.new_list(list).into()
+                }
+                None => vm.ctx.new_list(Vec::new()).into(),
+            }
+        }
     }
 }
 
