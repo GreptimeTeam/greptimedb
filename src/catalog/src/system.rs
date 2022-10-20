@@ -493,16 +493,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_system_table_type() {
-        let system_table = SystemCatalogTable::new(Arc::new(MockTableEngine::default()))
-            .await
-            .unwrap();
-        assert_eq!(Base, system_table.table_type());
-    }
-
-    #[tokio::test]
-    async fn test_system_table_info() {
+    async fn prepare_table_engine() -> (TempDir, TableEngineRef) {
         let dir = TempDir::new("system-table-test").unwrap();
         let store_dir = dir.path().to_string_lossy();
         let accessor = opendal::services::fs::Builder::default()
@@ -519,7 +510,19 @@ mod tests {
             ),
             object_store,
         ));
+        (dir, table_engine)
+    }
 
+    #[tokio::test]
+    async fn test_system_table_type() {
+        let (_dir, table_engine) = prepare_table_engine().await;
+        let system_table = SystemCatalogTable::new(table_engine).await.unwrap();
+        assert_eq!(Base, system_table.table_type());
+    }
+
+    #[tokio::test]
+    async fn test_system_table_info() {
+        let (_dir, table_engine) = prepare_table_engine().await;
         let system_table = SystemCatalogTable::new(table_engine).await.unwrap();
         let info = system_table.table_info();
         assert_eq!(TableType::Base, info.table_type);
