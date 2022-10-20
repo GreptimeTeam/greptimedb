@@ -12,9 +12,10 @@ use datatypes::vectors::UInt32Vector;
 use futures::task::{Context, Poll};
 use futures::Stream;
 use snafu::prelude::*;
-use table::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
-use table::metadata::TableInfoRef;
-use table::Table;
+
+use crate::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
+use crate::metadata::TableInfoRef;
+use crate::Table;
 
 #[derive(Debug, Clone)]
 pub struct MemTable {

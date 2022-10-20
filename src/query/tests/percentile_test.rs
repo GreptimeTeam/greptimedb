@@ -18,7 +18,7 @@ use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
 use query::error::Result;
 use query::{QueryEngine, QueryEngineFactory};
-use test_util::MemTable;
+use table::test_util::MemTable;
 
 #[tokio::test]
 async fn test_percentile_aggregator() -> Result<()> {
