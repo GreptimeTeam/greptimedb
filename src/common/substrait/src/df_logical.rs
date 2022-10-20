@@ -9,7 +9,7 @@ use prost::Message;
 use snafu::ensure;
 use snafu::{OptionExt, ResultExt};
 use substrait::protobuf::plan_rel::RelType as PlanRelType;
-use substrait::protobuf::read_rel::ReadType;
+use substrait::protobuf::read_rel::{NamedTable, ReadType};
 use substrait::protobuf::rel::RelType;
 use substrait::protobuf::PlanRel;
 use substrait::protobuf::ReadRel;
@@ -19,8 +19,8 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::error::Error;
 use crate::error::{
     DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, InternalSnafu,
-    InvalidParametersSnafu, MissingFieldSnafu, TableNotFoundSnafu, UnsupportedExprSnafu,
-    UnsupportedPlanSnafu,
+    InvalidParametersSnafu, MissingFieldSnafu, TableNotFoundSnafu, UnknownPlanSnafu,
+    UnsupportedExprSnafu, UnsupportedPlanSnafu,
 };
 use crate::SubstraitPlan;
 
@@ -123,7 +123,7 @@ impl DFLogicalSubstraitConvertor {
             field: "read_type",
             plan: "Read",
         })?;
-        let (catalog_name, schema_name, table_name) = match read_type {
+        let (table_name, schema_name, catalog_name) = match read_type {
             ReadType::NamedTable(mut named_table) => {
                 ensure!(
                     named_table.names.len() == 3,
@@ -245,8 +245,117 @@ impl DFLogicalSubstraitConvertor {
     }
 
     pub fn convert_table_scan_plan(&self, table_scan: TableScan) -> Result<ReadRel, Error> {
-        let _provider = table_scan.source;
+        let provider = table_scan
+            .source
+            .as_any()
+            .downcast_ref::<DfTableProviderAdapter>()
+            .context(UnknownPlanSnafu)?;
+        let table_info = provider.table().table_info();
 
-        todo!("get catalog and schema name")
+        let catalog_name = table_info.catalog_name.clone();
+        let schema_name = table_info.schema_name.clone();
+        let table_name = table_info.name.clone();
+
+        let named_table = NamedTable {
+            names: vec![catalog_name, schema_name, table_name],
+            advanced_extension: None,
+        };
+        let read_type = ReadType::NamedTable(named_table);
+
+        let read_rel = ReadRel {
+            common: None,
+            base_schema: None,
+            filter: None,
+            projection: None,
+            advanced_extension: None,
+            read_type: Some(read_type),
+        };
+
+        Ok(read_rel)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use catalog::{
+        memory::{MemoryCatalogProvider, MemorySchemaProvider},
+        CatalogList, CatalogProvider, LocalCatalogManager, RegisterTableRequest,
+        DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+    };
+    use datatypes::schema::Schema;
+    use table::{engine::MockTableEngine, requests::CreateTableRequest, test_util::EmptyTable};
+
+    use super::*;
+
+    const DEFAULT_TABLE_NAME: &str = "SubstraitTable";
+
+    async fn build_mock_catalog_manager() -> CatalogManagerRef {
+        let mock_table_engine = Arc::new(MockTableEngine::new());
+        let catalog_manager = Arc::new(
+            LocalCatalogManager::try_new(mock_table_engine)
+                .await
+                .unwrap(),
+        );
+        let schema_provider = Arc::new(MemorySchemaProvider::new());
+        let catalog_provider = Arc::new(MemoryCatalogProvider::new());
+        catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
+        catalog_manager.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
+
+        catalog_manager.init().await.unwrap();
+        catalog_manager
+    }
+
+    fn build_create_table_request<N: ToString>(table_name: N) -> CreateTableRequest {
+        CreateTableRequest {
+            id: 1,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            desc: None,
+            schema: Arc::new(Schema::new(vec![])),
+            primary_key_indices: vec![],
+            create_if_not_exists: true,
+            table_options: Default::default(),
+        }
+    }
+
+    async fn logical_plan_round_trip(plan: LogicalPlan, catalog: CatalogManagerRef) {
+        let convertor = DFLogicalSubstraitConvertor::new(catalog);
+
+        let rel = convertor.convert_plan(plan.clone()).unwrap();
+        let tripped_plan = convertor.convert_rel(Box::new(rel)).unwrap();
+
+        assert_eq!(format!("{:?}", plan), format!("{:?}", tripped_plan));
+    }
+
+    #[tokio::test]
+    async fn test_bare_table_scan() {
+        let catalog_manager = build_mock_catalog_manager().await;
+        let table_ref = Arc::new(EmptyTable::new(build_create_table_request(
+            DEFAULT_TABLE_NAME,
+        )));
+        catalog_manager
+            .register_table(RegisterTableRequest {
+                catalog: Some(DEFAULT_CATALOG_NAME.to_string()),
+                schema: Some(DEFAULT_SCHEMA_NAME.to_string()),
+                table_name: DEFAULT_TABLE_NAME.to_string(),
+                table_id: 1,
+                table: table_ref.clone(),
+            })
+            .await
+            .unwrap();
+        let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
+        let schema = adapter.schema().to_dfschema_ref().unwrap();
+
+        let table_scan_plan = LogicalPlan::TableScan(TableScan {
+            table_name: DEFAULT_TABLE_NAME.to_string(),
+            source: adapter,
+            projection: None,
+            projected_schema: schema,
+            filters: vec![],
+            limit: None,
+        });
+
+        logical_plan_round_trip(table_scan_plan, catalog_manager).await;
     }
 }

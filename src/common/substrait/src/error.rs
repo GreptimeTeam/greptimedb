@@ -53,6 +53,9 @@ pub enum Error {
 
     #[snafu(display("Table quering not found: {}", name))]
     TableNotFound { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Cannot convert plan doesn't belong to GrepTimeDB"))]
+    UnknownPlan { backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -61,7 +64,8 @@ impl ErrorExt for Error {
             Error::UnsupportedPlan { .. } | Error::UnsupportedExpr { .. } => {
                 StatusCode::Unsupported
             }
-            Error::EncodeRel { .. }
+            Error::UnknownPlan { .. }
+            | Error::EncodeRel { .. }
             | Error::DecodeRel { .. }
             | Error::EmptyPlan { .. }
             | Error::EmptyExpr { .. }

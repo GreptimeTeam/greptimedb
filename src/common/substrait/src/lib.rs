@@ -8,6 +8,9 @@ use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
 
+pub use crate::df_logical::DFLogicalSubstraitConvertor;
+pub use crate::df_physical::DFExecutionSubstraitConvertor;
+
 pub type ExecutionPlanRef = Arc<dyn ExecutionPlan>;
 pub type PhysicalExprRef = Arc<dyn PhysicalExpr>;
 
