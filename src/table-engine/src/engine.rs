@@ -238,8 +238,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         _ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> Result<TableRef> {
-        let catalog_name = request.catalog_name;
-        let schema_name = request.schema_name;
+        let catalog_name = &request.catalog_name;
+        let schema_name = &request.schema_name;
         let table_name = &request.table_name;
 
         if let Some(table) = self.get_table(table_name) {

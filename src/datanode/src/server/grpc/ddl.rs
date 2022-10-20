@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
-use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
 use datatypes::schema::ColumnDefaultConstraint;
@@ -76,7 +76,7 @@ impl Instance {
             })
             .collect::<Result<Vec<usize>>>()?;
 
-        let table_id = self.catalog_manager().next_table_id().await;
+        let table_id = self.catalog_manager().next_table_id();
 
         let catalog_name = expr
             .catalog_name

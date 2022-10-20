@@ -49,7 +49,7 @@ impl Instance {
             }
 
             Statement::Create(c) => {
-                let table_id = self.catalog_manager.next_table_id().await;
+                let table_id = self.catalog_manager.next_table_id();
                 let _engine_name = c.engine.clone();
                 // TODO(hl): Select table engine by engine_name
 

@@ -3,7 +3,6 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::info;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
@@ -70,7 +69,7 @@ pub trait CatalogManager: CatalogList {
     async fn start(&self) -> error::Result<()>;
 
     /// Returns next available table id.
-    async fn next_table_id(&self) -> TableId;
+    fn next_table_id(&self) -> TableId;
 
     /// Registers a table given given catalog/schema to catalog manager,
     /// returns table registered.
@@ -131,16 +130,8 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
     sys_table_requests: &'a mut Vec<RegisterSystemTableRequest>,
 ) -> Result<(), Error> {
     for req in sys_table_requests.drain(..) {
-        let catalog_name = &req
-            .create_table_request
-            .catalog_name
-            .clone()
-            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-        let schema_name = &req
-            .create_table_request
-            .schema_name
-            .clone()
-            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+        let catalog_name = &req.create_table_request.catalog_name;
+        let schema_name = &req.create_table_request.schema_name;
         let table_name = &req.create_table_request.table_name;
         let table_id = req.create_table_request.id;
 

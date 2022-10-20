@@ -12,8 +12,7 @@ use snafu::prelude::*;
 use table::requests::AddColumnRequest;
 
 use crate::error::{
-    self, CatalogSnafu, FindTableSnafu, InsertSnafu, Result, TableNotFoundSnafu,
-    UnsupportedExprSnafu,
+    self, CatalogSnafu, InsertSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
@@ -97,13 +96,15 @@ impl Instance {
             .catalog_manager
             .catalog(catalog_name)
             .unwrap()
+            .expect("default catalog must exist")
             .schema(schema_name)
+            .expect("default schema must exist")
             .unwrap();
 
         let insert_batches = insert::insert_batches(values.values)?;
         ensure!(!insert_batches.is_empty(), error::IllegalInsertDataSnafu);
 
-        let table = if let Some(table) = schema_provider.table(table_name) {
+        let table = if let Some(table) = schema_provider.table(table_name).context(CatalogSnafu)? {
             let schema = table.schema();
             if let Some(add_columns) = insert::find_new_columns(&schema, &insert_batches)? {
                 self.add_new_columns_to_table(table_name, add_columns)
@@ -122,6 +123,7 @@ impl Instance {
 
             schema_provider
                 .table(table_name)
+                .context(CatalogSnafu)?
                 .context(TableNotFoundSnafu { table_name })?
         };
 

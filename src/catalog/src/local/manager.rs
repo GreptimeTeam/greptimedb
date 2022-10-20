@@ -11,7 +11,7 @@ use common_telemetry::{debug, info};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::lock::Mutex;
-use futures_util::{StreamExt, TryFutureExt};
+use futures_util::StreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
@@ -273,7 +273,7 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     #[inline]
-    async fn next_table_id(&self) -> TableId {
+    fn next_table_id(&self) -> TableId {
         self.next_table_id.fetch_add(1, Ordering::Relaxed)
     }
 

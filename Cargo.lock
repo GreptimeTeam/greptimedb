@@ -647,9 +647,11 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "lazy_static",
  "log-store",
  "object-store",
  "opendal",
+ "regex",
  "serde",
  "serde_json",
  "snafu",
@@ -657,6 +659,7 @@ dependencies = [
  "table",
  "table-engine",
  "tempdir",
+ "test-util",
  "tokio",
 ]
 
@@ -4786,6 +4789,7 @@ name = "sql"
 version = "0.1.0"
 dependencies = [
  "catalog",
+ "common-catalog",
  "common-error",
  "common-time",
  "datatypes",
