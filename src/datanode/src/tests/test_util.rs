@@ -58,8 +58,8 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
             &EngineContext::default(),
             CreateTableRequest {
                 id: MIN_USER_TABLE_ID,
-                catalog_name: None,
-                schema_name: None,
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
                 table_name: table_name.to_string(),
                 desc: Some(" a test table".to_string()),
                 schema: Arc::new(

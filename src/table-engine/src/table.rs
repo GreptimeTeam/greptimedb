@@ -145,6 +145,10 @@ impl<R: Region> Table for MitoTable<R> {
         self.table_info().table_type
     }
 
+    fn table_info(&self) -> TableInfoRef {
+        self.table_info.load_full()
+    }
+
     async fn scan(
         &self,
         projection: &Option<Vec<usize>>,

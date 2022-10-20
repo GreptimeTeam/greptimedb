@@ -13,6 +13,7 @@ use futures::task::{Context, Poll};
 use futures::Stream;
 use snafu::prelude::*;
 use table::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
+use table::metadata::TableInfoRef;
 use table::Table;
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,10 @@ impl Table for MemTable {
 
     fn schema(&self) -> SchemaRef {
         self.recordbatch.schema.clone()
+    }
+
+    fn table_info(&self) -> TableInfoRef {
+        unimplemented!()
     }
 
     async fn scan(
