@@ -93,6 +93,7 @@ impl SqlQueryHandler for Instance {
                 let expr = InsertExpr {
                     table_name,
                     expr: Some(insert_expr::Expr::Sql(query.to_string())),
+                    options: HashMap::default(),
                 };
                 self.db
                     .insert(expr)
@@ -136,8 +137,8 @@ fn create_to_expr(create: CreateTable) -> Result<CreateExpr> {
         table_idents_to_full_name(&create.name).context(error::ParseSqlSnafu)?;
 
     let expr = CreateExpr {
-        catalog_name,
-        schema_name,
+        catalog_name: Some(catalog_name),
+        schema_name: Some(schema_name),
         table_name,
         column_defs: columns_to_expr(&create.columns)?,
         time_index: find_time_index(&create.constraints)?,
@@ -216,8 +217,8 @@ fn columns_to_expr(column_defs: &[ColumnDef]) -> Result<Vec<GrpcColumnDef>> {
             Ok(GrpcColumnDef {
                 name: schema.name.clone(),
                 datatype: datatype as i32,
-                is_nullable: schema.is_nullable,
-                default_constraint: match &schema.default_constraint {
+                is_nullable: schema.is_nullable(),
+                default_constraint: match schema.default_constraint() {
                     None => None,
                     Some(v) => Some(v.clone().try_into().context(
                         ConvertColumnDefaultConstraintSnafu {
@@ -444,6 +445,7 @@ mod tests {
         let insert_expr = InsertExpr {
             table_name: "demo".to_string(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
+            options: HashMap::default(),
         };
         let object_expr = ObjectExpr {
             header: Some(ExprHeader::default()),

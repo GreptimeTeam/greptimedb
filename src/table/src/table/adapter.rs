@@ -32,6 +32,7 @@ use futures::Stream;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
+use crate::metadata::TableInfoRef;
 use crate::table::{FilterPushDownType, Table, TableRef, TableType};
 
 /// Greptime SendableRecordBatchStream -> datafusion ExecutionPlan.
@@ -189,6 +190,10 @@ impl Table for TableAdapter {
         self.schema.clone()
     }
 
+    fn table_info(&self) -> TableInfoRef {
+        unreachable!("Should not call table_info of TableAdaptor directly")
+    }
+
     fn table_type(&self) -> TableType {
         match self.table_provider.table_type() {
             DfTableType::Base => TableType::Base,
@@ -307,5 +312,30 @@ impl Stream for RecordBatchStreamAdapter {
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.stream.size_hint()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow;
+    use datafusion::datasource::empty::EmptyTable;
+    use datafusion_common::field_util::SchemaExt;
+
+    use super::*;
+    use crate::metadata::TableType::Base;
+
+    #[test]
+    #[should_panic]
+    fn test_table_adaptor_info() {
+        let df_table = Arc::new(EmptyTable::new(Arc::new(arrow::datatypes::Schema::empty())));
+        let table_adapter = TableAdapter::new(df_table, Arc::new(RuntimeEnv::default())).unwrap();
+        let _ = table_adapter.table_info();
+    }
+
+    #[test]
+    fn test_table_adaptor_type() {
+        let df_table = Arc::new(EmptyTable::new(Arc::new(arrow::datatypes::Schema::empty())));
+        let table_adapter = TableAdapter::new(df_table, Arc::new(RuntimeEnv::default())).unwrap();
+        assert_eq!(Base, table_adapter.table_type());
     }
 }

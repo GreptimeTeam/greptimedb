@@ -10,10 +10,9 @@ pub type ColumnFamilyId = u32;
 /// Id of the region.
 pub type RegionId = u64;
 
-// TODO(yingwen): Validate default value has same type with column, and name is a valid column name.
 /// A [ColumnDescriptor] contains information to create a column.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
-#[builder(pattern = "owned")]
+#[builder(pattern = "owned", build_fn(validate = "Self::validate"))]
 pub struct ColumnDescriptor {
     pub id: ColumnId,
     #[builder(setter(into))]
@@ -21,13 +20,25 @@ pub struct ColumnDescriptor {
     pub data_type: ConcreteDataType,
     /// Is column nullable, default is true.
     #[builder(default = "true")]
-    pub is_nullable: bool,
+    is_nullable: bool,
     /// Default constraint of column, default is None, which means no default constraint
     /// for this column, and user must provide a value for a not-null column.
     #[builder(default)]
-    pub default_constraint: Option<ColumnDefaultConstraint>,
+    default_constraint: Option<ColumnDefaultConstraint>,
     #[builder(default, setter(into))]
     pub comment: String,
+}
+
+impl ColumnDescriptor {
+    #[inline]
+    pub fn is_nullable(&self) -> bool {
+        self.is_nullable
+    }
+
+    #[inline]
+    pub fn default_constraint(&self) -> Option<&ColumnDefaultConstraint> {
+        self.default_constraint.as_ref()
+    }
 }
 
 impl ColumnDescriptorBuilder {
@@ -39,12 +50,35 @@ impl ColumnDescriptorBuilder {
             ..Default::default()
         }
     }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(name) = &self.name {
+            if name.is_empty() {
+                return Err("name should not be empty".to_string());
+            }
+        }
+
+        if let (Some(Some(constraint)), Some(data_type)) =
+            (&self.default_constraint, &self.data_type)
+        {
+            // The default value of unwrap_or should be same as the default value
+            // defined in the `#[builder(default = "xxx")]` attribute.
+            let is_nullable = self.is_nullable.unwrap_or(true);
+
+            constraint
+                .validate(data_type, is_nullable)
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
 }
 
 impl From<&ColumnDescriptor> for ColumnSchema {
     fn from(desc: &ColumnDescriptor) -> ColumnSchema {
         ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable)
             .with_default_constraint(desc.default_constraint.clone())
+            .expect("ColumnDescriptor should validate default constraint")
     }
 }
 
@@ -139,7 +173,7 @@ mod tests {
             .is_nullable(false)
             .build()
             .unwrap();
-        assert!(!desc.is_nullable);
+        assert!(!desc.is_nullable());
 
         let desc = new_column_desc_builder()
             .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Null)))
@@ -147,7 +181,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ColumnDefaultConstraint::Value(Value::Null),
-            desc.default_constraint.unwrap()
+            *desc.default_constraint().unwrap()
         );
 
         let desc = new_column_desc_builder()
@@ -164,6 +198,12 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!("A test column", desc.comment);
+
+        new_column_desc_builder()
+            .is_nullable(false)
+            .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Null)))
+            .build()
+            .unwrap_err();
     }
 
     fn new_timestamp_desc() -> ColumnDescriptor {

@@ -4,7 +4,9 @@ use clap::Parser;
 use cmd::datanode;
 use cmd::error::Result;
 use cmd::frontend;
-use common_telemetry::{self, logging::error, logging::info};
+use cmd::metasrv;
+use common_telemetry::logging::error;
+use common_telemetry::logging::info;
 
 #[derive(Parser)]
 #[clap(name = "greptimedb")]
@@ -29,6 +31,8 @@ enum SubCommand {
     Datanode(datanode::Command),
     #[clap(name = "frontend")]
     Frontend(frontend::Command),
+    #[clap(name = "metasrv")]
+    Metasrv(metasrv::Command),
 }
 
 impl SubCommand {
@@ -36,6 +40,7 @@ impl SubCommand {
         match self {
             SubCommand::Datanode(cmd) => cmd.run().await,
             SubCommand::Frontend(cmd) => cmd.run().await,
+            SubCommand::Metasrv(cmd) => cmd.run().await,
         }
     }
 }
@@ -45,6 +50,7 @@ impl fmt::Display for SubCommand {
         match self {
             SubCommand::Datanode(..) => write!(f, "greptime-datanode"),
             SubCommand::Frontend(..) => write!(f, "greptime-frontend"),
+            SubCommand::Metasrv(..) => write!(f, "greptime-metasrv"),
         }
     }
 }

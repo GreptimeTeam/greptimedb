@@ -101,6 +101,10 @@ pub struct TableInfo {
     pub name: String,
     #[builder(default, setter(into))]
     pub desc: Option<String>,
+    #[builder(default, setter(into))]
+    pub catalog_name: String,
+    #[builder(default, setter(into))]
+    pub schema_name: String,
     pub meta: TableMeta,
     #[builder(default = "TableType::Base")]
     pub table_type: TableType,

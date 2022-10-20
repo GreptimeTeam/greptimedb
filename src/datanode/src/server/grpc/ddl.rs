@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
+use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
 use datatypes::schema::ColumnDefaultConstraint;
@@ -77,10 +78,16 @@ impl Instance {
 
         let table_id = self.catalog_manager().next_table_id();
 
+        let catalog_name = expr
+            .catalog_name
+            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
+        let schema_name = expr
+            .schema_name
+            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
         Ok(CreateTableRequest {
             id: table_id,
-            catalog_name: expr.catalog_name,
-            schema_name: expr.schema_name,
+            catalog_name,
+            schema_name,
             table_name: expr.table_name,
             desc: expr.desc,
             schema,
@@ -147,17 +154,19 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
 fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let data_type =
         ColumnDataTypeWrapper::try_new(column_def.datatype).context(error::ColumnDataTypeSnafu)?;
-    Ok(ColumnSchema {
-        name: column_def.name.clone(),
-        data_type: data_type.into(),
-        is_nullable: column_def.is_nullable,
-        default_constraint: match &column_def.default_constraint {
-            None => None,
-            Some(v) => Some(
-                ColumnDefaultConstraint::try_from(&v[..]).context(ColumnDefaultConstraintSnafu)?,
-            ),
-        },
-    })
+    let default_constraint = match &column_def.default_constraint {
+        None => None,
+        Some(v) => {
+            Some(ColumnDefaultConstraint::try_from(&v[..]).context(ColumnDefaultConstraintSnafu)?)
+        }
+    };
+    ColumnSchema::new(
+        column_def.name.clone(),
+        data_type.into(),
+        column_def.is_nullable,
+    )
+    .with_default_constraint(default_constraint)
+    .context(ColumnDefaultConstraintSnafu)
 }
 
 #[cfg(test)]
@@ -180,8 +189,8 @@ mod tests {
         let expr = testing_create_expr();
         let request = instance.create_expr_to_request(expr).unwrap();
         assert_eq!(request.id, MIN_USER_TABLE_ID);
-        assert_eq!(request.catalog_name, None);
-        assert_eq!(request.schema_name, None);
+        assert_eq!(request.catalog_name, "greptime".to_string());
+        assert_eq!(request.schema_name, "public".to_string());
         assert_eq!(request.table_name, "my-metrics");
         assert_eq!(request.desc, Some("blabla".to_string()));
         assert_eq!(request.schema, expected_table_schema());
@@ -237,7 +246,7 @@ mod tests {
         let column_schema = create_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
-        assert!(column_schema.is_nullable);
+        assert!(column_schema.is_nullable());
 
         let default_constraint = ColumnDefaultConstraint::Value(Value::from("defaut value"));
         let column_def = ColumnDef {
@@ -249,10 +258,10 @@ mod tests {
         let column_schema = create_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
-        assert!(column_schema.is_nullable);
+        assert!(column_schema.is_nullable());
         assert_eq!(
             default_constraint,
-            column_schema.default_constraint.unwrap()
+            *column_schema.default_constraint().unwrap()
         );
     }
 
@@ -298,30 +307,10 @@ mod tests {
 
     fn expected_table_schema() -> SchemaRef {
         let column_schemas = vec![
-            ColumnSchema {
-                name: "host".to_string(),
-                data_type: ConcreteDataType::string_datatype(),
-                is_nullable: false,
-                default_constraint: None,
-            },
-            ColumnSchema {
-                name: "ts".to_string(),
-                data_type: ConcreteDataType::timestamp_millis_datatype(),
-                is_nullable: false,
-                default_constraint: None,
-            },
-            ColumnSchema {
-                name: "cpu".to_string(),
-                data_type: ConcreteDataType::float32_datatype(),
-                is_nullable: true,
-                default_constraint: None,
-            },
-            ColumnSchema {
-                name: "memory".to_string(),
-                data_type: ConcreteDataType::float64_datatype(),
-                is_nullable: true,
-                default_constraint: None,
-            },
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), true),
+            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ];
         Arc::new(
             SchemaBuilder::try_from(column_schemas)

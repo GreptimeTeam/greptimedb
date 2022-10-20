@@ -44,8 +44,8 @@ impl SqlHandler {
             },
         };
         Ok(AlterTableRequest {
-            catalog_name,
-            schema_name,
+            catalog_name: Some(catalog_name),
+            schema_name: Some(schema_name),
             table_name,
             alter_kind,
         })
@@ -80,8 +80,8 @@ mod tests {
         let handler = create_mock_sql_handler().await;
         let alter_table = parse_sql("ALTER TABLE my_metric_1 ADD tagk_i STRING Null;");
         let req = handler.alter_to_request(alter_table).unwrap();
-        assert_eq!(req.catalog_name, None);
-        assert_eq!(req.schema_name, None);
+        assert_eq!(req.catalog_name, Some("greptime".to_string()));
+        assert_eq!(req.schema_name, Some("public".to_string()));
         assert_eq!(req.table_name, "my_metric_1");
 
         let alter_kind = req.alter_kind;
@@ -91,7 +91,7 @@ mod tests {
                 let new_column = &columns[0].column_schema;
 
                 assert_eq!(new_column.name, "tagk_i");
-                assert!(new_column.is_nullable);
+                assert!(new_column.is_nullable());
                 assert_eq!(new_column.data_type, ConcreteDataType::string_datatype());
             }
             _ => unreachable!(),

@@ -19,6 +19,8 @@ members = [
     "src/datatypes",
     "src/frontend",
     "src/log-store",
+    "src/meta-client",
+    "src/meta-srv",
     "src/object-store",
     "src/query",
     "src/script",

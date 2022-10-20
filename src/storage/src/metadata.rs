@@ -202,7 +202,7 @@ impl RegionMetadata {
         // We don't check the case that the column is not nullable but default constraint is null. The
         // caller should guarantee this.
         ensure!(
-            add_column.desc.is_nullable || add_column.desc.default_constraint.is_some(),
+            add_column.desc.is_nullable() || add_column.desc.default_constraint().is_some(),
             AddNonNullColumnSnafu {
                 name: &add_column.desc.name,
             }

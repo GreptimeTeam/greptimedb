@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package greptime.v1.meta;
+
+import "greptime/v1/meta/common.proto";
+
+service Router {
+  // Fetch routing information for tables. The smallest unit is the complete
+  // routing information(all regions) of a table.
+  // 
+  // table_1
+  //    table_name
+  //    table_schema
+  //    regions
+  //      region_1
+  //        mutate_endpoint
+  //        select_endpoint_1, select_endpoint_2
+  //      region_2
+  //        mutate_endpoint
+  //        select_endpoint_1, select_endpoint_2, select_endpoint_3
+  //      region_xxx
+  // table_2
+  //    ...
+  //
+  rpc Route(RouteRequest) returns (RouteResponse) {}
+
+  rpc Create(CreateRequest) returns (CreateResponse) {}
+}
+
+message RouteRequest {
+  RequestHeader header = 1;
+
+  repeated TableName table_names = 2;
+}
+
+message RouteResponse {
+  ResponseHeader header = 1;
+
+  repeated Peer peers = 2;
+  repeated TableRoute table_routes = 3;
+}
+
+message CreateRequest {
+  RequestHeader header = 1;
+
+  TableName table_name = 2;
+  repeated Region regions = 3;
+}
+
+message CreateResponse {
+  ResponseHeader header = 1;
+
+  repeated Region regions = 2; 
+}
+
+message TableRoute {
+  Table table = 1;
+  repeated RegionRoute region_routes = 2;
+}
+
+message RegionRoute {
+  Region region = 1;
+  // single leader node for write task
+  uint64 leader_peer_index = 2;
+  // multiple follower nodes for read task
+  repeated uint64 follower_peer_indexes = 3;
+}
+
+message TableName {
+  string catalog_name = 1;
+  string schema_name = 2;
+  string table_name = 3;
+}
+
+message Table {
+  TableName table_name = 1;
+  bytes table_schema = 2;
+}
+
+message Region {
+  uint64 id = 1;
+  string name = 2;
+  Peer peer = 3;
+
+  // PARTITION `region_name` VALUES LESS THAN (value_list)
+  message Partition {
+    repeated bytes column_list = 1;
+    repeated bytes value_list = 2;
+  }
+  Partition partition = 4;
+
+  map<string, string> attrs = 5;
+}

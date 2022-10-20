@@ -1,0 +1,25 @@
+[package]
+name = "meta-srv"
+version = "0.1.0"
+edition = "2021"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+api = { path = "../api" }
+async-trait = "0.1"
+common-base = { path = "../common/base" }
+common-error = { path = "../common/error" }
+common-telemetry = { path = "../common/telemetry" }
+etcd-client = "0.10"
+futures = "0.3"
+http-body = "0.4"
+serde = "1.0"
+snafu = { version = "0.7", features = ["backtraces"] }
+tokio = { version = "1.0", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.8"
+url = "2.3"
+
+[dev-dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -12,7 +12,8 @@ use crate::vectors::{Vector, VectorRef};
 /// Vector compute operations.
 pub trait VectorOp {
     /// Copies each element according `offsets` parameter.
-    /// (`i-th` element should be copied `offsets[i] - offsets[i - 1]` times.)
+    /// - `i-th` element should be copied `offsets[i] - offsets[i - 1]` times
+    /// - `0-th` element would be copied `offsets[0]` times
     ///
     /// # Panics
     /// Panics if `offsets.len() != self.len()`.

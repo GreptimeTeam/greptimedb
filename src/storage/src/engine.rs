@@ -314,7 +314,7 @@ impl<S: LogStore> EngineInner<S> {
 mod tests {
     use datatypes::type_id::LogicalTypeId;
     use log_store::test_util::log_store_util;
-    use object_store::backend::fs::Backend;
+    use object_store::backend::fs::Builder;
     use store_api::storage::Region;
     use tempdir::TempDir;
 
@@ -327,7 +327,8 @@ mod tests {
             log_store_util::create_tmp_local_file_log_store("test_engine_wal").await;
         let dir = TempDir::new("test_create_new_region").unwrap();
         let store_dir = dir.path().to_string_lossy();
-        let accessor = Backend::build().root(&store_dir).finish().await.unwrap();
+
+        let accessor = Builder::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor);
 
         let config = EngineConfig::default();

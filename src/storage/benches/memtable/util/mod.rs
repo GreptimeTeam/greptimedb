@@ -15,6 +15,7 @@ pub const TIMESTAMP_NAME: &str = "timestamp";
 
 pub fn schema_for_test() -> RegionSchemaRef {
     let desc = RegionDescBuilder::new("bench")
+        .enable_version_column(true)
         .push_value_column(("v1", LogicalTypeId::UInt64, true))
         .push_value_column(("v2", LogicalTypeId::String, true))
         .build();

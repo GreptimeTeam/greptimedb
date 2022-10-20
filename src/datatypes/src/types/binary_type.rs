@@ -25,7 +25,7 @@ impl DataType for BinaryType {
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {
-        LogicalTypeId::String
+        LogicalTypeId::Binary
     }
 
     fn default_value(&self) -> Value {

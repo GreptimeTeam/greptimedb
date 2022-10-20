@@ -7,12 +7,13 @@ pub mod statement;
 
 use std::str::FromStr;
 
+use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::DateTimeType;
 use datatypes::value::Value;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 
 use crate::ast::{
     ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, ObjectName,
@@ -24,14 +25,16 @@ use crate::error::{
 
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when
 /// catalog and schema are default) to tuple.
-pub fn table_idents_to_full_name(
-    obj_name: &ObjectName,
-) -> Result<(Option<String>, Option<String>, String)> {
+pub fn table_idents_to_full_name(obj_name: &ObjectName) -> Result<(String, String, String)> {
     match &obj_name.0[..] {
-        [table] => Ok((None, None, table.value.clone())),
+        [table] => Ok((
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            table.value.clone(),
+        )),
         [catalog, schema, table] => Ok((
-            Some(catalog.value.clone()),
-            Some(schema.value.clone()),
+            catalog.value.clone(),
+            schema.value.clone(),
             table.value.clone(),
         )),
         _ => error::InvalidSqlSnafu {
@@ -209,6 +212,8 @@ fn parse_column_default_constraint(
     }
 }
 
+// TODO(yingwen): Make column nullable by default, and checks invalid case like
+// a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
 pub fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let is_nullable = column_def
@@ -221,15 +226,14 @@ pub fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let default_constraint =
         parse_column_default_constraint(&name, &data_type, &column_def.options)?;
 
-    Ok(ColumnSchema {
-        name,
-        data_type,
-        is_nullable,
-        default_constraint,
-    })
+    ColumnSchema::new(name, data_type, is_nullable)
+        .with_default_constraint(default_constraint)
+        .context(error::InvalidDefaultSnafu {
+            column: &column_def.name.value,
+        })
 }
 
-fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
+pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
     match data_type {
         SqlDataType::BigInt(_) => Ok(ConcreteDataType::int64_datatype()),
         SqlDataType::Int(_) => Ok(ConcreteDataType::int32_datatype()),
@@ -386,7 +390,7 @@ mod tests {
             &SqlValue::DoubleQuotedString("2022-02-22 00:01:03".to_string()),
         )
         .unwrap();
-        assert_eq!(ConcreteDataType::date_datatype(), value.data_type());
+        assert_eq!(ConcreteDataType::datetime_datatype(), value.data_type());
         if let Value::DateTime(d) = value {
             assert_eq!("2022-02-22 00:01:03", d.to_string());
         } else {

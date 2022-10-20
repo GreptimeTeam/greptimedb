@@ -98,12 +98,13 @@ mod tests {
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
     use log_store::fs::noop::NoopLogStore;
-    use object_store::{backend::fs::Backend, ObjectStore};
+    use object_store::{services::fs::Builder, ObjectStore};
     use query::QueryEngineFactory;
     use sql::statements::statement::Statement;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use table::error::Result as TableResult;
+    use table::metadata::TableInfoRef;
     use table::{Table, TableRef};
     use table_engine::config::EngineConfig as TableEngineConfig;
     use table_engine::engine::MitoEngine;
@@ -135,6 +136,11 @@ mod tests {
                     .unwrap(),
             )
         }
+
+        fn table_info(&self) -> TableInfoRef {
+            unimplemented!()
+        }
+
         async fn scan(
             &self,
             _projection: &Option<Vec<usize>>,
@@ -180,7 +186,7 @@ mod tests {
     async fn test_statement_to_request() {
         let dir = TempDir::new("setup_test_engine_and_table").unwrap();
         let store_dir = dir.path().to_string_lossy();
-        let accessor = Backend::build().root(&store_dir).finish().await.unwrap();
+        let accessor = Builder::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor);
 
         let sql = r#"insert into demo(host, cpu, memory, ts) values

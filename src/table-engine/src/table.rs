@@ -11,12 +11,8 @@ use common_query::logical_plan::Expr;
 use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::logging;
-use common_time::util;
-use common_time::Timestamp;
-use datatypes::data_type::DataType;
-use datatypes::prelude::ScalarVector;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder};
-use datatypes::vectors::{ConstantVector, TimestampVector, VectorRef};
+use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use datatypes::vectors::VectorRef;
 use futures::task::{Context, Poll};
 use futures::Stream;
 use object_store::ObjectStore;
@@ -85,39 +81,35 @@ impl<R: Region> Table for MitoTable<R> {
         // columns_values is not empty, it's safe to unwrap
         let rows_num = columns_values.values().next().unwrap().len();
 
-        //Add row key and columns
+        // Add row key columns
         for name in key_columns {
             let column_schema = schema
                 .column_schema_by_name(name)
                 .expect("column schema not found");
 
-            let vector = columns_values.remove(name).or_else(|| {
-                Self::try_get_column_default_constraint_vector(column_schema, rows_num).ok()?
-            });
+            let vector = match columns_values.remove(name) {
+                Some(v) => v,
+                None => Self::try_get_column_default_constraint_vector(column_schema, rows_num)?,
+            };
 
-            if let Some(vector) = vector {
-                put_op
-                    .add_key_column(name, vector)
-                    .map_err(TableError::new)?;
-            } else if !column_schema.is_nullable {
-                return MissingColumnSnafu { name }.fail()?;
-            }
+            put_op
+                .add_key_column(name, vector)
+                .map_err(TableError::new)?;
         }
+
         // Add value columns
         for name in value_columns {
             let column_schema = schema
                 .column_schema_by_name(name)
                 .expect("column schema not found");
 
-            let vector = columns_values.remove(name).or_else(|| {
-                Self::try_get_column_default_constraint_vector(column_schema, rows_num).ok()?
-            });
-
-            if let Some(v) = vector {
-                put_op.add_value_column(name, v).map_err(TableError::new)?;
-            } else if !column_schema.is_nullable {
-                return MissingColumnSnafu { name }.fail()?;
-            }
+            let vector = match columns_values.remove(name) {
+                Some(v) => v,
+                None => Self::try_get_column_default_constraint_vector(column_schema, rows_num)?,
+            };
+            put_op
+                .add_value_column(name, vector)
+                .map_err(TableError::new)?;
         }
 
         ensure!(
@@ -132,7 +124,7 @@ impl<R: Region> Table for MitoTable<R> {
             }
         );
 
-        logging::debug!(
+        logging::trace!(
             "Insert into table {} with put_op: {:?}",
             table_info.name,
             put_op
@@ -151,6 +143,10 @@ impl<R: Region> Table for MitoTable<R> {
 
     fn table_type(&self) -> TableType {
         self.table_info().table_type
+    }
+
+    fn table_info(&self) -> TableInfoRef {
+        self.table_info.load_full()
     }
 
     async fn scan(
@@ -220,8 +216,8 @@ impl<R: Region> Table for MitoTable<R> {
                             &new_column.name,
                             new_column.data_type.clone(),
                         )
-                        .is_nullable(new_column.is_nullable)
-                        .default_constraint(new_column.default_constraint.clone())
+                        .is_nullable(new_column.is_nullable())
+                        .default_constraint(new_column.default_constraint().cloned())
                         .build()
                         .context(error::BuildColumnDescriptorSnafu {
                             table_name,
@@ -468,41 +464,16 @@ impl<R: Region> MitoTable<R> {
     fn try_get_column_default_constraint_vector(
         column_schema: &ColumnSchema,
         rows_num: usize,
-    ) -> TableResult<Option<VectorRef>> {
+    ) -> TableResult<VectorRef> {
         // TODO(dennis): when we support altering schema, we should check the schemas difference between table and region
-        if let Some(v) = &column_schema.default_constraint {
-            assert!(rows_num > 0);
+        let vector = column_schema
+            .create_default_vector(rows_num)
+            .context(UnsupportedDefaultConstraintSnafu)?
+            .context(MissingColumnSnafu {
+                name: &column_schema.name,
+            })?;
 
-            match v {
-                ColumnDefaultConstraint::Value(v) => {
-                    let mut mutable_vector = column_schema.data_type.create_mutable_vector(1);
-                    mutable_vector
-                        .push_value_ref(v.as_value_ref())
-                        .map_err(TableError::new)?;
-                    let vector =
-                        Arc::new(ConstantVector::new(mutable_vector.to_vector(), rows_num));
-                    Ok(Some(vector))
-                }
-                ColumnDefaultConstraint::Function(expr) => {
-                    match &expr[..] {
-                        // TODO(dennis): we only supports current_timestamp right now,
-                        //   it's better to use a expression framework in future.
-                        "current_timestamp()" => {
-                            let vector =
-                                Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
-                                    util::current_time_millis(),
-                                )]));
-                            Ok(Some(Arc::new(ConstantVector::new(vector, rows_num))))
-                        }
-                        _ => UnsupportedDefaultConstraintSnafu { expr }
-                            .fail()
-                            .map_err(TableError::new),
-                    }
-                }
-            }
-        } else {
-            Ok(None)
-        }
+        Ok(vector)
     }
 
     pub async fn open(

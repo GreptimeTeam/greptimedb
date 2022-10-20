@@ -97,7 +97,7 @@ impl LocalCatalogManager {
             let table_id = req.create_table_request.id;
 
             let table = if let Some(table) =
-                self.table(catalog_name.as_deref(), schema_name.as_deref(), table_name)?
+                self.table(Some(catalog_name), Some(schema_name), table_name)?
             {
                 table
             } else {
@@ -108,15 +108,12 @@ impl LocalCatalogManager {
                     .with_context(|_| CreateTableSnafu {
                         table_info: format!(
                             "{}.{}.{}, id: {}",
-                            catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME),
-                            schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME),
-                            table_name,
-                            table_id,
+                            catalog_name, schema_name, table_name, table_id,
                         ),
                     })?;
                 self.register_table(RegisterTableRequest {
-                    catalog: catalog_name.clone(),
-                    schema: schema_name.clone(),
+                    catalog: Some(catalog_name.clone()),
+                    schema: Some(schema_name.clone()),
                     table_name: table_name.clone(),
                     table_id,
                     table: table.clone(),

@@ -22,12 +22,6 @@ pub enum Error {
         source: MetadataError,
     },
 
-    #[snafu(display("Invalid schema of input data, region: {}", region))]
-    InvalidInputSchema {
-        region: String,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Missing column {} in write batch", column))]
     BatchMissingColumn {
         column: String,
@@ -132,7 +126,10 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid timestamp in write batch, source: {}", source))]
-    InvalidTimestamp { source: crate::write_batch::Error },
+    InvalidTimestamp {
+        #[snafu(backtrace)]
+        source: crate::write_batch::Error,
+    },
 
     #[snafu(display("Task already cancelled"))]
     Cancelled { backtrace: Backtrace },
@@ -269,6 +266,35 @@ pub enum Error {
         #[snafu(backtrace)]
         source: MetadataError,
     },
+
+    #[snafu(display(
+        "Failed to add default value for column {}, source: {}",
+        column,
+        source
+    ))]
+    AddDefault {
+        column: String,
+        source: crate::write_batch::Error,
+    },
+
+    #[snafu(display(
+        "Not allowed to write data with version {} to schema with version {}",
+        data_version,
+        schema_version
+    ))]
+    WriteToOldVersion {
+        /// Schema version of data to write.
+        data_version: u32,
+        schema_version: u32,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Column {} not in schema with version {}", column, version))]
+    NotInSchemaToCompat {
+        column: String,
+        version: u32,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -279,12 +305,13 @@ impl ErrorExt for Error {
 
         match self {
             InvalidScanIndex { .. }
-            | InvalidInputSchema { .. }
             | BatchMissingColumn { .. }
             | BatchMissingTimestamp { .. }
             | InvalidTimestamp { .. }
             | InvalidProjection { .. }
-            | BuildBatch { .. } => StatusCode::InvalidArguments,
+            | BuildBatch { .. }
+            | NotInSchemaToCompat { .. }
+            | WriteToOldVersion { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. }
             | EncodeJson { .. }
@@ -322,6 +349,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             PushBatch { source, .. } => source.status_code(),
+            AddDefault { source, .. } => source.status_code(),
         }
     }
 

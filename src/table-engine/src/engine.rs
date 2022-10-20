@@ -143,8 +143,8 @@ fn build_row_key_desc(
         ts_column_schema.name.clone(),
         ts_column_schema.data_type.clone(),
     )
-    .default_constraint(ts_column_schema.default_constraint.clone())
-    .is_nullable(ts_column_schema.is_nullable)
+    .default_constraint(ts_column_schema.default_constraint().cloned())
+    .is_nullable(ts_column_schema.is_nullable())
     .build()
     .context(BuildColumnDescriptorSnafu {
         column_name: &ts_column_schema.name,
@@ -169,8 +169,8 @@ fn build_row_key_desc(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
-        .default_constraint(column_schema.default_constraint.clone())
-        .is_nullable(column_schema.is_nullable)
+        .default_constraint(column_schema.default_constraint().cloned())
+        .is_nullable(column_schema.is_nullable())
         .build()
         .context(BuildColumnDescriptorSnafu {
             column_name: &column_schema.name,
@@ -212,8 +212,8 @@ fn build_column_family(
             column_schema.name.clone(),
             column_schema.data_type.clone(),
         )
-        .default_constraint(column_schema.default_constraint.clone())
-        .is_nullable(column_schema.is_nullable)
+        .default_constraint(column_schema.default_constraint().cloned())
+        .is_nullable(column_schema.is_nullable())
         .build()
         .context(BuildColumnDescriptorSnafu {
             column_name: &column_schema.name,
@@ -238,13 +238,18 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         _ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> Result<TableRef> {
+        let catalog_name = request.catalog_name;
+        let schema_name = request.schema_name;
         let table_name = &request.table_name;
 
         if let Some(table) = self.get_table(table_name) {
             if request.create_if_not_exists {
                 return Ok(table);
             } else {
-                return TableExistsSnafu { table_name }.fail();
+                return TableExistsSnafu {
+                    table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+                }
+                .fail();
             }
         }
 
@@ -313,6 +318,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .ident(table_id)
             .table_version(INIT_TABLE_VERSION)
             .table_type(TableType::Base)
+            .catalog_name(catalog_name.to_string())
+            .schema_name(schema_name.to_string())
             .desc(request.desc)
             .build()
             .context(error::BuildTableInfoSnafu { table_name })?;
@@ -444,7 +451,8 @@ mod tests {
         let column_schemas = vec![
             ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("n", ConcreteDataType::int32_datatype(), true)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(42i32)))),
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(42i32))))
+                .unwrap(),
             ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
@@ -478,8 +486,8 @@ mod tests {
                 &EngineContext::default(),
                 CreateTableRequest {
                     id: 1,
-                    catalog_name: None,
-                    schema_name: None,
+                    catalog_name: "greptime".to_string(),
+                    schema_name: "public".to_string(),
                     table_name: table_name.to_string(),
                     desc: Some("a test table".to_string()),
                     schema: schema.clone(),
@@ -712,8 +720,8 @@ mod tests {
 
         let request = CreateTableRequest {
             id: 1,
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
             table_name: table_info.name.to_string(),
             schema: table_info.meta.schema.clone(),
             create_if_not_exists: true,
@@ -735,8 +743,8 @@ mod tests {
         // test create_if_not_exists=false
         let request = CreateTableRequest {
             id: 1,
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
             table_name: table_info.name.to_string(),
             schema: table_info.meta.schema.clone(),
             create_if_not_exists: false,

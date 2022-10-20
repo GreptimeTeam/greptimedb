@@ -97,6 +97,8 @@ pub fn build_alter_table_request(
 
 /// Try to build create table request from insert data.
 pub fn build_create_table_request(
+    catalog_name: &str,
+    schema_name: &str,
     table_id: TableId,
     table_name: &str,
     insert_batches: &[InsertBatch],
@@ -119,8 +121,7 @@ pub fn build_create_table_request(
         } in columns
         {
             if !new_columns.contains(column_name) {
-                let mut column_schema = build_column_schema(column_name, *datatype, true)?;
-
+                let mut is_nullable = true;
                 match *semantic_type {
                     TAG_SEMANTIC_TYPE => primary_key_indices.push(column_schemas.len()),
                     TIMESTAMP_SEMANTIC_TYPE => {
@@ -133,11 +134,12 @@ pub fn build_create_table_request(
                         );
                         timestamp_index = column_schemas.len();
                         // Timestamp column must not be null.
-                        column_schema.is_nullable = false;
+                        is_nullable = false;
                     }
                     _ => {}
                 }
 
+                let column_schema = build_column_schema(column_name, *datatype, is_nullable)?;
                 column_schemas.push(column_schema);
                 new_columns.insert(column_name.to_string());
             }
@@ -158,8 +160,8 @@ pub fn build_create_table_request(
 
         return Ok(CreateTableRequest {
             id: table_id,
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: catalog_name.to_string(),
+            schema_name: schema_name.to_string(),
             table_name: table_name.to_string(),
             desc: None,
             schema,
@@ -371,6 +373,7 @@ mod tests {
         value::Value,
     };
     use table::error::Result as TableResult;
+    use table::metadata::TableInfoRef;
     use table::Table;
 
     use super::{
@@ -384,14 +387,13 @@ mod tests {
         let table_id = 10;
         let table_name = "test_metric";
 
-        assert!(build_create_table_request(table_id, table_name, &[]).is_err());
+        assert!(build_create_table_request("", "", table_id, table_name, &[]).is_err());
 
         let insert_batches = insert_batches(mock_insert_batches()).unwrap();
 
-        let req = build_create_table_request(table_id, table_name, &insert_batches).unwrap();
+        let req =
+            build_create_table_request("", "", table_id, table_name, &insert_batches).unwrap();
         assert_eq!(table_id, req.id);
-        assert!(req.catalog_name.is_none());
-        assert!(req.schema_name.is_none());
         assert_eq!(table_name, req.table_name);
         assert!(req.desc.is_none());
         assert_eq!(vec![0], req.primary_key_indices);
@@ -540,6 +542,11 @@ mod tests {
                     .unwrap(),
             )
         }
+
+        fn table_info(&self) -> TableInfoRef {
+            unimplemented!()
+        }
+
         async fn scan(
             &self,
             _projection: &Option<Vec<usize>>,
