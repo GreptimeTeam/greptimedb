@@ -11,7 +11,6 @@ use datafusion::datasource::{
     TableType as DfTableType,
 };
 use datafusion::error::Result as DfResult;
-use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::Expr as DfExpr;
 use datafusion::physical_plan::ExecutionPlan as DfExecutionPlan;
 use datatypes::schema::SchemaRef as TableSchemaRef;
@@ -62,7 +61,7 @@ impl TableProvider for DfTableProviderAdapter {
     ) -> DfResult<Arc<dyn DfExecutionPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Into::into).collect();
         let inner = self.table.scan(projection, &filters, limit).await?;
-        Ok(Arc::new(DfExecutionPlanAdapter { inner }))
+        Ok(Arc::new(DfExecutionPlanAdapter(inner)))
     }
 
     fn supports_filter_pushdown(&self, filter: &DfExpr) -> DfResult<DfTableProviderFilterPushDown> {
@@ -81,11 +80,10 @@ impl TableProvider for DfTableProviderAdapter {
 pub struct TableAdapter {
     schema: TableSchemaRef,
     table_provider: Arc<dyn TableProvider>,
-    _runtime: Arc<RuntimeEnv>,
 }
 
 impl TableAdapter {
-    pub fn new(table_provider: Arc<dyn TableProvider>, runtime: Arc<RuntimeEnv>) -> Result<Self> {
+    pub fn new(table_provider: Arc<dyn TableProvider>) -> Result<Self> {
         Ok(Self {
             schema: Arc::new(
                 table_provider
@@ -94,7 +92,6 @@ impl TableAdapter {
                     .context(error::SchemaConversionSnafu)?,
             ),
             table_provider,
-            _runtime: runtime,
         })
     }
 }
@@ -134,9 +131,7 @@ impl Table for TableAdapter {
             .scan(projection, &filters, limit)
             .await
             .context(error::DatafusionSnafu)?;
-        Ok(Arc::new(ExecutionPlanAdapter {
-            inner: execution_plan,
-        }))
+        Ok(Arc::new(ExecutionPlanAdapter(execution_plan)))
     }
 
     fn supports_filter_pushdown(&self, filter: &Expr) -> Result<FilterPushDownType> {
@@ -165,14 +160,14 @@ mod tests {
     #[should_panic]
     fn test_table_adaptor_info() {
         let df_table = Arc::new(EmptyTable::new(Arc::new(arrow::datatypes::Schema::empty())));
-        let table_adapter = TableAdapter::new(df_table, Arc::new(RuntimeEnv::default())).unwrap();
+        let table_adapter = TableAdapter::new(df_table).unwrap();
         let _ = table_adapter.table_info();
     }
 
     #[test]
     fn test_table_adaptor_type() {
         let df_table = Arc::new(EmptyTable::new(Arc::new(arrow::datatypes::Schema::empty())));
-        let table_adapter = TableAdapter::new(df_table, Arc::new(RuntimeEnv::default())).unwrap();
+        let table_adapter = TableAdapter::new(df_table).unwrap();
         assert_eq!(Base, table_adapter.table_type());
     }
 }

@@ -5059,6 +5059,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "common-time",
+ "datafusion",
  "datafusion-common",
  "datatypes",
  "futures",

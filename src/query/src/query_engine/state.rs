@@ -58,10 +58,8 @@ impl QueryEngineState {
 
         let df_context = ExecutionContext::with_config(config);
 
-        df_context.state.lock().catalog_list = Arc::new(DfCatalogListAdapter::new(
-            df_context.runtime_env(),
-            catalog_list.clone(),
-        ));
+        df_context.state.lock().catalog_list =
+            Arc::new(DfCatalogListAdapter::new(catalog_list.clone()));
 
         Self {
             df_context,

@@ -66,9 +66,6 @@ pub enum InnerError {
     #[snafu(display("Not expected to run ExecutionPlan more than once"))]
     ExecuteRepeatedly { backtrace: Backtrace },
 
-    #[snafu(display("Runtime is required when executing DataFusion's plan."))]
-    MissingRuntime { backtrace: Backtrace },
-
     #[snafu(display("General DataFusion error, source: {}", source))]
     GeneralDataFusion {
         source: DataFusionError,
@@ -105,7 +102,6 @@ impl ErrorExt for InnerError {
             InnerError::FromScalarValue { source } => source.status_code(),
 
             InnerError::ExecuteRepeatedly { .. }
-            | InnerError::MissingRuntime { .. }
             | InnerError::GeneralDataFusion { .. }
             | InnerError::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
 

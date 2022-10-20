@@ -128,6 +128,7 @@ impl Stream for MemtableStream {
 #[cfg(test)]
 mod test {
     use common_recordbatch::util;
+    use datafusion::execution::runtime_env::RuntimeEnv;
     use datatypes::prelude::*;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Int32Vector, StringVector};
@@ -139,7 +140,10 @@ mod test {
         let table = build_testing_table();
 
         let scan_stream = table.scan(&Some(vec![1]), &[], None).await.unwrap();
-        let scan_stream = scan_stream.execute(0, None).await.unwrap();
+        let scan_stream = scan_stream
+            .execute(0, Arc::new(RuntimeEnv::default()))
+            .await
+            .unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
         let columns = recordbatch[0].df_recordbatch.columns();
@@ -159,7 +163,10 @@ mod test {
         let table = build_testing_table();
 
         let scan_stream = table.scan(&None, &[], Some(2)).await.unwrap();
-        let scan_stream = scan_stream.execute(0, None).await.unwrap();
+        let scan_stream = scan_stream
+            .execute(0, Arc::new(RuntimeEnv::default()))
+            .await
+            .unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
         let columns = recordbatch[0].df_recordbatch.columns();

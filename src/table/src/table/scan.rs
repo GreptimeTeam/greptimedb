@@ -71,7 +71,7 @@ impl ExecutionPlan for SimpleTableScan {
     async fn execute(
         &self,
         _partition: usize,
-        _runtime: Option<Arc<RuntimeEnv>>,
+        _runtime: Arc<RuntimeEnv>,
     ) -> QueryResult<SendableRecordBatchStream> {
         let mut stream = self.stream.lock().unwrap();
         Ok(stream.take().context(query_error::ExecuteRepeatedlySnafu)?)

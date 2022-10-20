@@ -280,6 +280,7 @@ fn build_schema_for_tables() -> Schema {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::execution::runtime_env::RuntimeEnv;
     use datatypes::arrow::array::Utf8Array;
     use datatypes::arrow::datatypes::DataType;
     use futures_util::StreamExt;
@@ -302,7 +303,10 @@ mod tests {
         let tables = Tables::new(catalog_list, "test_engine".to_string());
 
         let tables_stream = tables.scan(&None, &[], None).await.unwrap();
-        let mut tables_stream = tables_stream.execute(0, None).await.unwrap();
+        let mut tables_stream = tables_stream
+            .execute(0, Arc::new(RuntimeEnv::default()))
+            .await
+            .unwrap();
         if let Some(t) = tables_stream.next().await {
             let batch = t.unwrap().df_recordbatch;
             assert_eq!(1, batch.num_rows());
