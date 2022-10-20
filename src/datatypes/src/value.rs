@@ -3,7 +3,8 @@ use std::cmp::Ordering;
 use common_base::bytes::{Bytes, StringBytes};
 use common_time::date::Date;
 use common_time::datetime::DateTime;
-use common_time::timestamp::Timestamp;
+use common_time::timestamp::{TimeUnit, Timestamp};
+use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
@@ -329,6 +330,92 @@ impl Ord for ListValue {
     }
 }
 
+impl TryFrom<ScalarValue> for Value {
+    type Error = error::Error;
+
+    fn try_from(v: ScalarValue) -> Result<Self> {
+        let v = match v {
+            ScalarValue::Boolean(b) => Value::from(b),
+            ScalarValue::Float32(f) => Value::from(f),
+            ScalarValue::Float64(f) => Value::from(f),
+            ScalarValue::Int8(i) => Value::from(i),
+            ScalarValue::Int16(i) => Value::from(i),
+            ScalarValue::Int32(i) => Value::from(i),
+            ScalarValue::Int64(i) => Value::from(i),
+            ScalarValue::UInt8(u) => Value::from(u),
+            ScalarValue::UInt16(u) => Value::from(u),
+            ScalarValue::UInt32(u) => Value::from(u),
+            ScalarValue::UInt64(u) => Value::from(u),
+            ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
+                Value::from(s.map(StringBytes::from))
+            }
+            ScalarValue::Binary(b) | ScalarValue::LargeBinary(b) => Value::from(b.map(Bytes::from)),
+            ScalarValue::List(vs, t) => {
+                let items = if let Some(vs) = vs {
+                    let vs = vs
+                        .into_iter()
+                        .map(|v| v.try_into())
+                        .collect::<Result<Vec<Value>>>()?;
+                    Some(Box::new(vs))
+                } else {
+                    None
+                };
+                let datatype = t.as_ref().try_into()?;
+                Value::List(ListValue::new(items, datatype))
+            }
+            ScalarValue::Date32(d) => {
+                if let Some(d) = d {
+                    Value::Date(Date::new(d))
+                } else {
+                    Value::Null
+                }
+            }
+            ScalarValue::Date64(d) => {
+                if let Some(d) = d {
+                    Value::DateTime(DateTime::new(d))
+                } else {
+                    Value::Null
+                }
+            }
+            ScalarValue::TimestampSecond(t, _) => {
+                if let Some(t) = t {
+                    Value::Timestamp(Timestamp::new(t, TimeUnit::Second))
+                } else {
+                    Value::Null
+                }
+            }
+            ScalarValue::TimestampMillisecond(t, _) => {
+                if let Some(t) = t {
+                    Value::Timestamp(Timestamp::new(t, TimeUnit::Millisecond))
+                } else {
+                    Value::Null
+                }
+            }
+            ScalarValue::TimestampMicrosecond(t, _) => {
+                if let Some(t) = t {
+                    Value::Timestamp(Timestamp::new(t, TimeUnit::Microsecond))
+                } else {
+                    Value::Null
+                }
+            }
+            ScalarValue::TimestampNanosecond(t, _) => {
+                if let Some(t) = t {
+                    Value::Timestamp(Timestamp::new(t, TimeUnit::Nanosecond))
+                } else {
+                    Value::Null
+                }
+            }
+            _ => {
+                return error::UnsupportedArrowTypeSnafu {
+                    arrow_type: v.get_datatype(),
+                }
+                .fail()
+            }
+        };
+        Ok(v)
+    }
+}
+
 /// Reference to [Value].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueRef<'a> {
@@ -548,7 +635,210 @@ impl<'a> PartialOrd for ListValueRef<'a> {
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::DataType as ArrowDataType;
+
     use super::*;
+
+    #[test]
+    fn test_try_from_scalar_value() {
+        assert_eq!(
+            Value::Boolean(true),
+            ScalarValue::Boolean(Some(true)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Boolean(false),
+            ScalarValue::Boolean(Some(false)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Boolean(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Float32(1.0f32.into()),
+            ScalarValue::Float32(Some(1.0f32)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Float32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Float64(2.0f64.into()),
+            ScalarValue::Float64(Some(2.0f64)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Float64(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int8(i8::MAX),
+            ScalarValue::Int8(Some(i8::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int16(i16::MAX),
+            ScalarValue::Int16(Some(i16::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int16(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int32(i32::MAX),
+            ScalarValue::Int32(Some(i32::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int64(i64::MAX),
+            ScalarValue::Int64(Some(i64::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int64(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt8(u8::MAX),
+            ScalarValue::UInt8(Some(u8::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt16(u16::MAX),
+            ScalarValue::UInt16(Some(u16::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt16(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt32(u32::MAX),
+            ScalarValue::UInt32(Some(u32::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt64(u64::MAX),
+            ScalarValue::UInt64(Some(u64::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt64(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::from("hello"),
+            ScalarValue::Utf8(Some("hello".to_string()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Utf8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::from("large_hello"),
+            ScalarValue::LargeUtf8(Some("large_hello".to_string()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::LargeUtf8(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::from("world".as_bytes()),
+            ScalarValue::Binary(Some("world".as_bytes().to_vec()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Binary(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::from("large_world".as_bytes()),
+            ScalarValue::LargeBinary(Some("large_world".as_bytes().to_vec()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::LargeBinary(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![Value::Int32(1), Value::Null])),
+                ConcreteDataType::int32_datatype()
+            )),
+            ScalarValue::List(
+                Some(Box::new(vec![
+                    ScalarValue::Int32(Some(1)),
+                    ScalarValue::Int32(None)
+                ])),
+                Box::new(ArrowDataType::Int32)
+            )
+            .try_into()
+            .unwrap()
+        );
+        assert_eq!(
+            Value::List(ListValue::new(None, ConcreteDataType::uint32_datatype())),
+            ScalarValue::List(None, Box::new(ArrowDataType::UInt32))
+                .try_into()
+                .unwrap()
+        );
+
+        assert_eq!(
+            Value::Date(Date::new(123)),
+            ScalarValue::Date32(Some(123)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Date32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::DateTime(DateTime::new(456)),
+            ScalarValue::Date64(Some(456)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Date64(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Second)),
+            ScalarValue::TimestampSecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampSecond(None, None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)),
+            ScalarValue::TimestampMillisecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampMillisecond(None, None)
+                .try_into()
+                .unwrap()
+        );
+
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Microsecond)),
+            ScalarValue::TimestampMicrosecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampMicrosecond(None, None)
+                .try_into()
+                .unwrap()
+        );
+
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Nanosecond)),
+            ScalarValue::TimestampNanosecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampNanosecond(None, None)
+                .try_into()
+                .unwrap()
+        );
+
+        let result: Result<Value> = ScalarValue::Decimal128(Some(1), 0, 0).try_into();
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported arrow data type, type: Decimal(0, 0)");
+    }
 
     #[test]
     fn test_value_from_inner() {
