@@ -2657,6 +2657,7 @@ dependencies = [
  "common-telemetry",
  "etcd-client",
  "futures",
+ "h2",
  "http-body",
  "serde",
  "snafu",

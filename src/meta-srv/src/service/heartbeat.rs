@@ -1,3 +1,5 @@
+use std::io::ErrorKind;
+
 use api::v1::meta::heartbeat_server;
 use api::v1::meta::AskLeaderRequest;
 use api::v1::meta::AskLeaderResponse;
@@ -6,6 +8,8 @@ use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::HeartbeatResponse;
 use api::v1::meta::ResponseHeader;
 use api::v1::meta::PROTOCOL_VERSION;
+use common_telemetry::error;
+use common_telemetry::info;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -16,6 +20,7 @@ use tonic::Streaming;
 use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use super::GrpcStream;
+use crate::error;
 use crate::error::Result;
 use crate::metasrv::MetaSrv;
 
@@ -43,6 +48,14 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                         .await
                         .expect("working rx"),
                     Err(err) => {
+                        if let Some(io_err) = error::match_for_io_error(&err) {
+                            if io_err.kind() == ErrorKind::BrokenPipe {
+                                // client disconnected in unexpected way
+                                error!("Client disconnected: broken pipe");
+                                break;
+                            }
+                        }
+
                         match tx.send(Err(err)).await {
                             Ok(_) => (),
                             Err(_err) => break, // response was droped
@@ -50,6 +63,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                     }
                 }
             }
+            info!("Heartbeat stream broken: {:?}", in_stream);
         });
 
         let out_stream = ReceiverStream::new(rx);

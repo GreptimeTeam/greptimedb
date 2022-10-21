@@ -28,11 +28,11 @@ impl RequestHeader {
         }
     }
 
-    pub fn with_id(id: (u64, u64)) -> Self {
+    pub fn with_id((cluster_id, member_id): (u64, u64)) -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION,
-            cluster_id: id.0,
-            member_id: id.1,
+            cluster_id,
+            member_id,
         }
     }
 }

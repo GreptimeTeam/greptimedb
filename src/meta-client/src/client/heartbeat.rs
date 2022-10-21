@@ -10,8 +10,6 @@ use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::debug;
 use common_telemetry::info;
 use snafu::ensure;
-use snafu::Backtrace;
-use snafu::GenerateImplicitData;
 use snafu::OptionExt;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
@@ -36,13 +34,12 @@ impl HeartbeatSender {
 
     #[inline]
     pub async fn send(&self, req: HeartbeatRequest) -> Result<()> {
-        self.sender
-            .send(req)
-            .await
-            .map_err(|e| error::Error::SendHeartbeat {
+        self.sender.send(req).await.map_err(|e| {
+            error::SendHeartbeatSnafu {
                 err_msg: e.to_string(),
-                backtrace: Backtrace::generate(),
-            })
+            }
+            .build()
+        })
     }
 }
 
@@ -172,13 +169,12 @@ impl Inner {
 
         let (sender, receiver) = mpsc::channel::<HeartbeatRequest>(128);
         let handshake = HeartbeatRequest::new(RequestHeader::with_id(self.id));
-        sender
-            .send(handshake)
-            .await
-            .map_err(|e| error::Error::SendHeartbeat {
+        sender.send(handshake).await.map_err(|e| {
+            error::SendHeartbeatSnafu {
                 err_msg: e.to_string(),
-                backtrace: Backtrace::generate(),
-            })?;
+            }
+            .build()
+        })?;
         let receiver = ReceiverStream::new(receiver);
 
         let mut stream = leader
