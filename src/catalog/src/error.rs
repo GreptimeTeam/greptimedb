@@ -118,6 +118,12 @@ pub enum Error {
 
     #[snafu(display("Local and remote catalog data are inconsistent, msg: {}", msg))]
     CatalogStateInconsistent { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to perform metasrv operation, source: {}", source))]
+    MetaSrv {
+        #[snafu(backtrace)]
+        source: meta_client::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -150,6 +156,7 @@ impl ErrorExt for Error {
             | Error::InsertTableRecord { source, .. }
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. } => source.status_code(),
+            Error::MetaSrv { source, .. } => source.status_code(),
         }
     }
 

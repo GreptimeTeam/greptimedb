@@ -1,41 +1,88 @@
 use std::fmt::Debug;
 
+use api::v1::meta::{DeleteRangeRequest, PutRequest, RangeRequest};
 use async_stream::stream;
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use futures_util::io::Cursor;
 use futures_util::AsyncReadExt;
 use futures_util::StreamExt;
+use meta_client::client::MetaClient;
 use opendal::ops::{OpDelete, OpList, OpRead, OpWrite};
 use opendal::{Accessor, BytesReader};
 use snafu::ResultExt;
 
-use crate::error::Error;
 use crate::error::IoSnafu;
+use crate::error::{Error, MetaSrvSnafu};
 use crate::remote::{Kv, KvBackend, ValueIter};
 
 #[derive(Debug)]
-pub struct MetaKvBackend {}
+pub struct MetaKvBackend {
+    client: MetaClient,
+}
 
+/// Implement `KvBackend` trait for `MetaKvBackend` instead of opendal's `Accessor` since
+/// `MetaClient`'s range method can return both keys and values, which can reduce IO overhead
+/// comparing to `Accessor`'s list and get method.
 #[async_trait::async_trait]
 impl KvBackend for MetaKvBackend {
     fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
     where
         'a: 'b,
     {
-        let _ = key;
-        todo!()
+        let mut start_key = key.to_vec();
+        Box::pin(stream!({
+            let mut more = true;
+            while more {
+                let resp = self
+                    .client
+                    .range(RangeRequest {
+                        header: None,
+                        key: start_key.to_vec(),
+                        range_end: vec![],
+                        limit: 0,
+                        keys_only: false,
+                    })
+                    .await
+                    .context(MetaSrvSnafu)?;
+
+                more = resp.more;
+                let kvs = resp.kvs;
+                start_key = kvs.last().map(|kv| &kv.key).unwrap_or(&start_key).clone();
+                for kv in kvs.into_iter() {
+                    yield Ok(Kv(kv.key, kv.value));
+                }
+            }
+        }))
     }
 
     async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
-        let _ = key;
-        let _ = val;
-        todo!()
+        let req = PutRequest {
+            key: key.to_vec(),
+            value: val.to_vec(),
+            prev_kv: false,
+            header: None,
+        };
+        let _ = self.client.put(req).await.context(MetaSrvSnafu)?;
+        Ok(())
     }
 
     async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
-        let _ = key;
-        let _ = end;
-        todo!()
+        let req = DeleteRangeRequest {
+            header: None,
+            key: key.to_vec(),
+            range_end: end.to_vec(),
+            prev_kv: false,
+        };
+
+        let resp = self.client.delete_range(req).await.context(MetaSrvSnafu)?;
+        info!(
+            "Delete range, key: {}, end: {}, deleted: {}",
+            String::from_utf8_lossy(key),
+            String::from_utf8_lossy(end),
+            resp.deleted
+        );
+
+        Ok(())
     }
 }
 

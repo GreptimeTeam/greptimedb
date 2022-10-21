@@ -5,6 +5,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+api = { path = "../api" }
 async-stream = "0.3"
 async-trait = "0.1"
 common-catalog = { path = "../common/catalog" }
@@ -19,6 +20,7 @@ datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"
 lazy_static = "1.4"
+meta-client = { path = "../meta-client" }
 opendal = "0.17"
 regex = "1.6"
 serde = "1.0"

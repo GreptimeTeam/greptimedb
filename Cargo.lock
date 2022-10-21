@@ -633,6 +633,7 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 name = "catalog"
 version = "0.1.0"
 dependencies = [
+ "api",
  "async-stream",
  "async-trait",
  "chrono",
@@ -649,6 +650,7 @@ dependencies = [
  "futures-util",
  "lazy_static",
  "log-store",
+ "meta-client",
  "object-store",
  "opendal",
  "regex",
