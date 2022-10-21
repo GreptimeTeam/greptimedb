@@ -104,7 +104,7 @@ pub enum Error {
     #[snafu(display("Illegal catalog manager state: {}", msg))]
     IllegalManagerState { backtrace: Backtrace, msg: String },
 
-    #[snafu(display("Failed to scan system catalog table"))]
+    #[snafu(display("Failed to scan system catalog table, source: {}", source))]
     SystemCatalogTableScan {
         #[snafu(backtrace)]
         source: table::error::Error,
