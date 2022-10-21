@@ -112,8 +112,8 @@ mod tests {
                 &EngineContext {},
                 CreateTableRequest {
                     id: 1,
-                    catalog_name: Some(catalog_name.clone()),
-                    schema_name: Some(schema_name.clone()),
+                    catalog_name: catalog_name.clone(),
+                    schema_name: schema_name.clone(),
                     table_name: table_name.clone(),
                     desc: None,
                     schema: table_schema.clone(),
@@ -168,8 +168,8 @@ mod tests {
                 &EngineContext {},
                 CreateTableRequest {
                     id: table_id,
-                    catalog_name: Some(catalog_name.clone()),
-                    schema_name: Some(schema_name.clone()),
+                    catalog_name: catalog_name.clone(),
+                    schema_name: schema_name.clone(),
                     table_name: table_name.clone(),
                     desc: None,
                     schema: table_schema.clone(),
@@ -220,8 +220,8 @@ mod tests {
                 &EngineContext {},
                 CreateTableRequest {
                     id: 2,
-                    catalog_name: Some(catalog_name.clone()),
-                    schema_name: Some(schema_name.clone()),
+                    catalog_name: catalog_name.clone(),
+                    schema_name: schema_name.clone(),
                     table_name: "".to_string(),
                     desc: None,
                     schema: Arc::new(Schema::new(vec![])),

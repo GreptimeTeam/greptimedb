@@ -9,9 +9,9 @@ use opendal::ops::{OpDelete, OpList, OpRead, OpWrite};
 use opendal::{Accessor, BytesReader};
 use snafu::ResultExt;
 
+use crate::error::Error;
 use crate::error::IoSnafu;
 use crate::remote::{Kv, KvBackend, ValueIter};
-use crate::Error;
 
 #[derive(Debug)]
 pub struct MetaKvBackend {}

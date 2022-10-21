@@ -76,7 +76,7 @@ impl Instance {
             })
             .collect::<Result<Vec<usize>>>()?;
 
-        let table_id = self.catalog_manager().next_table_id().await;
+        let table_id = self.catalog_manager().next_table_id();
 
         let catalog_name = expr
             .catalog_name

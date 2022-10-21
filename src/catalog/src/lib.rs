@@ -3,7 +3,6 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::info;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};

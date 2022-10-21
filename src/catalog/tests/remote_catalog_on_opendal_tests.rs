@@ -82,8 +82,8 @@ mod tests {
                 &EngineContext {},
                 CreateTableRequest {
                     id: table_id,
-                    catalog_name: Some(DEFAULT_CATALOG_NAME.to_string()),
-                    schema_name: Some(DEFAULT_SCHEMA_NAME.to_string()),
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: table_name.to_owned(),
                     desc: None,
                     schema: Arc::new(Schema::new(vec![])),
@@ -182,8 +182,8 @@ mod tests {
                 &EngineContext {},
                 CreateTableRequest {
                     id: table_id,
-                    catalog_name: Some(catalog_name.to_string()),
-                    schema_name: Some(schema_name.to_string()),
+                    catalog_name: catalog_name.to_string(),
+                    schema_name: schema_name.to_string(),
                     table_name: table_name.to_owned(),
                     desc: None,
                     schema: Arc::new(Schema::new(vec![])),

@@ -273,7 +273,7 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     #[inline]
-    async fn next_table_id(&self) -> TableId {
+    fn next_table_id(&self) -> TableId {
         self.next_table_id.fetch_add(1, Ordering::Relaxed)
     }
 

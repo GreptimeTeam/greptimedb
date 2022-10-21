@@ -7,7 +7,6 @@ use std::sync::Arc;
 use async_stream::stream;
 use catalog::error::Error;
 use catalog::remote::{Kv, KvBackend, ValueIter};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
 use common_telemetry::logging::info;
 use datatypes::data_type::ConcreteDataType;
@@ -98,14 +97,8 @@ impl TableEngine for MockTableEngine {
         request: CreateTableRequest,
     ) -> table::Result<TableRef> {
         let table_name = request.table_name.clone();
-        let catalog_name = request
-            .catalog_name
-            .clone()
-            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-        let schema_name = request
-            .schema_name
-            .clone()
-            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+        let catalog_name = request.catalog_name.clone();
+        let schema_name = request.schema_name.clone();
 
         let default_table_id = "0".to_owned();
         let table_id = TableId::from_str(

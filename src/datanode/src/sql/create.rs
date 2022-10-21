@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::RegisterTableRequest;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_telemetry::tracing::info;
 use datatypes::schema::SchemaBuilder;
@@ -22,7 +21,7 @@ use crate::error::{
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn create(&self, mut req: CreateTableRequest) -> Result<Output> {
+    pub(crate) async fn create(&self, req: CreateTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
         let table_name = req.table_name.clone();
         let table_id = req.id;

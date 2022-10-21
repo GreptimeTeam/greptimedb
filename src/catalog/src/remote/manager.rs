@@ -12,7 +12,7 @@ use common_telemetry::info;
 use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
-use table::metadata::TableId;
+use table::metadata::{TableId, TableVersion};
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::TableRef;
 use tokio::sync::{Mutex, RwLock};
@@ -211,8 +211,8 @@ impl RemoteCatalogManager {
             None => {
                 let req = CreateTableRequest {
                     id: table_value.id,
-                    catalog_name: Some(table_key.catalog_name.clone()),
-                    schema_name: Some(table_key.schema_name.clone()),
+                    catalog_name: table_key.catalog_name.clone(),
+                    schema_name: table_key.schema_name.clone(),
                     table_name: table_key.table_name.clone(),
                     desc: None,
                     schema: table_value.meta.schema.clone(),
@@ -253,7 +253,7 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    async fn next_table_id(&self) -> TableId {
+    fn next_table_id(&self) -> TableId {
         self.next_table_id.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -494,11 +494,13 @@ impl RemoteSchemaProvider {
         }
     }
 
-    pub fn table_key(&self, table_name: impl AsRef<str>) -> TableKey {
+    // TODO(hl): Set version when building table key
+    pub fn table_key(&self, table_name: impl AsRef<str>, table_version: TableVersion) -> TableKey {
         TableKey {
             catalog_name: self.catalog_name.clone(),
             schema_name: self.schema_name.clone(),
             table_name: table_name.as_ref().to_string(),
+            version: table_version,
             node_id: self.node_id.clone(),
         }
     }
@@ -522,6 +524,7 @@ impl SchemaProvider for RemoteSchemaProvider {
                     schema_name,
                     catalog_name,
                     table_name,
+                    ..
                 } = TableKey::parse(key).context(InvalidCatalogValueSnafu)?;
 
                 assert_eq!(self.schema_name, schema_name);
@@ -537,7 +540,9 @@ impl SchemaProvider for RemoteSchemaProvider {
 
     fn table(&self, name: &str) -> crate::error::Result<Option<TableRef>> {
         futures::executor::block_on(async move {
-            let key = self.table_key(&name).to_string();
+            // TODO(hl): determine table version
+            let table_version = 0;
+            let key = self.table_key(&name, table_version).to_string();
             match self.backend.get(key.as_bytes()).await? {
                 None => Ok(None),
                 Some(_) => Ok(self.tables.read().await.get(name).cloned()),
@@ -551,13 +556,15 @@ impl SchemaProvider for RemoteSchemaProvider {
         table: TableRef,
     ) -> crate::error::Result<Option<TableRef>> {
         let table_info = table.table_info();
+        let table_version = table_info.ident.version;
         let table_value = TableValue {
             meta: table_info.meta.clone(),
             id: table_info.ident.table_id,
+            node_id: "todo".to_string(),
         };
 
         futures::executor::block_on(async move {
-            let key = self.table_key(name.clone()).to_string();
+            let key = self.table_key(name.clone(), table_version).to_string();
             let prev = match self.backend.get(key.as_bytes()).await? {
                 None => None,
                 Some(_) => self.tables.read().await.get(&key).cloned(),
@@ -576,17 +583,21 @@ impl SchemaProvider for RemoteSchemaProvider {
 
     fn deregister_table(&self, name: &str) -> crate::error::Result<Option<TableRef>> {
         futures::executor::block_on(async move {
-            let key = self.table_key(&name).to_string();
+            // TODO(hl): determine table version
+            let table_version = 0;
+            let key = self.table_key(&name, table_version).to_string();
             self.backend.delete_range(key.as_bytes(), &[]).await?;
             let mut tables = self.tables.write().await;
             Ok(tables.remove(&key))
         })
     }
 
-    // TODO(hl): Should we further check if table is opened?
+    // TODO(hl): Should we further check if table is opened and if version matches?
     fn table_exist(&self, name: &str) -> Result<bool, Error> {
         futures::executor::block_on(async move {
-            let key = self.table_key(&name).to_string();
+            // TODO(hl): determine table version
+            let table_version = 0;
+            let key = self.table_key(&name, table_version).to_string();
             Ok(self.backend.get(key.as_bytes()).await?.is_some())
         })
     }
