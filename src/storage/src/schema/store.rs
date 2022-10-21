@@ -164,6 +164,21 @@ impl StoreSchema {
     pub(crate) fn is_key_column_index(&self, index: usize) -> bool {
         index < self.row_key_end
     }
+
+    #[inline]
+    pub(crate) fn is_user_column_index(&self, index: usize) -> bool {
+        index < self.user_column_end
+    }
+
+    #[inline]
+    pub(crate) fn row_key_end(&self) -> usize {
+        self.row_key_end
+    }
+
+    #[inline]
+    pub(crate) fn user_column_end(&self) -> usize {
+        self.user_column_end
+    }
 }
 
 impl TryFrom<ArrowSchema> for StoreSchema {
