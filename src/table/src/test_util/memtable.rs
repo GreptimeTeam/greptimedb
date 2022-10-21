@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_query::execution::ExecutionPlan;
+use common_query::execution::ExecutionPlanRef;
 use common_query::prelude::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream};
@@ -72,7 +72,7 @@ impl Table for MemTable {
         projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
+    ) -> Result<ExecutionPlanRef> {
         let df_recordbatch = if let Some(indices) = projection {
             self.recordbatch
                 .df_recordbatch

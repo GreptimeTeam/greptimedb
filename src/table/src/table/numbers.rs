@@ -2,6 +2,7 @@ use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use common_query::execution::ExecutionPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
@@ -14,7 +15,7 @@ use futures::Stream;
 use crate::error::Result;
 use crate::metadata::TableInfoRef;
 use crate::table::scan::SimpleTableScan;
-use crate::table::{ExecutionPlan, Expr, Table};
+use crate::table::{Expr, Table};
 
 /// numbers table for test
 #[derive(Debug, Clone)]
@@ -54,7 +55,7 @@ impl Table for NumbersTable {
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
+    ) -> Result<ExecutionPlanRef> {
         let stream = Box::pin(NumbersStream {
             limit: limit.unwrap_or(100) as u32,
             schema: self.schema.clone(),

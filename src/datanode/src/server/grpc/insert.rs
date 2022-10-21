@@ -364,7 +364,7 @@ mod tests {
         insert_expr, Column, ColumnDataType,
     };
     use common_base::BitVec;
-    use common_query::execution::ExecutionPlan;
+    use common_query::execution::ExecutionPlanRef;
     use common_query::prelude::Expr;
     use common_time::timestamp::Timestamp;
     use datatypes::{
@@ -552,7 +552,7 @@ mod tests {
             _projection: &Option<Vec<usize>>,
             _filters: &[Expr],
             _limit: Option<usize>,
-        ) -> TableResult<Arc<dyn ExecutionPlan>> {
+        ) -> TableResult<ExecutionPlanRef> {
             unimplemented!();
         }
     }

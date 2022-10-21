@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_query::execution::{DfExecutionPlanAdapter, ExecutionPlan, ExecutionPlanAdapter};
+use common_query::execution::{DfExecutionPlanAdapter, ExecutionPlanAdapter, ExecutionPlanRef};
 use common_query::logical_plan::Expr;
 use common_query::DfExecutionPlan;
 use common_telemetry::debug;
@@ -123,7 +123,7 @@ impl Table for TableAdapter {
         projection: &Option<Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
+    ) -> Result<ExecutionPlanRef> {
         let filters: Vec<DfExpr> = filters.iter().map(|e| e.df_expr().clone()).collect();
         debug!("TableScan filter size: {}", filters.len());
         let execution_plan = self

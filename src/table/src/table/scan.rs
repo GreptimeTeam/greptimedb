@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
+use common_query::execution::{ExecutionPlan, ExecutionPlanRef};
 use common_query::PhysicalSortExpr;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::execution::runtime_env::RuntimeEnv;
@@ -12,8 +13,6 @@ use datafusion::physical_plan::Partitioning;
 use datafusion::physical_plan::Statistics;
 use datatypes::schema::SchemaRef;
 use snafu::OptionExt;
-
-use crate::table::ExecutionPlan;
 
 pub struct SimpleTableScan {
     stream: Mutex<Option<SendableRecordBatchStream>>,
@@ -57,14 +56,11 @@ impl ExecutionPlan for SimpleTableScan {
         None
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+    fn children(&self) -> Vec<ExecutionPlanRef> {
         vec![]
     }
 
-    fn with_new_children(
-        &self,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> QueryResult<Arc<dyn ExecutionPlan>> {
+    fn with_new_children(&self, _children: Vec<ExecutionPlanRef>) -> QueryResult<ExecutionPlanRef> {
         unimplemented!()
     }
 
