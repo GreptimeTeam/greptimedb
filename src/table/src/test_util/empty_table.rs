@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+use common_query::execution::ExecutionPlanRef;
+use common_recordbatch::EmptyRecordBatchStream;
 
 use crate::metadata::TableInfoBuilder;
 use crate::metadata::TableInfoRef;
 use crate::requests::InsertRequest;
+use crate::table::scan::SimpleTableScan;
 use crate::Result;
 use crate::{
     metadata::{TableMetaBuilder, TableType},
@@ -64,7 +66,8 @@ impl Table for EmptyTable {
         _projection: &Option<Vec<usize>>,
         _filters: &[common_query::prelude::Expr],
         _limit: Option<usize>,
-    ) -> Result<SendableRecordBatchStream> {
-        Ok(Box::pin(EmptyRecordBatchStream::new(self.schema())))
+    ) -> Result<ExecutionPlanRef> {
+        let scan = SimpleTableScan::new(Box::pin(EmptyRecordBatchStream::new(self.schema())));
+        Ok(Arc::new(scan))
     }
 }

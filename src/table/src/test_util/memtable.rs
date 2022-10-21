@@ -16,6 +16,7 @@ use snafu::prelude::*;
 
 use crate::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
 use crate::metadata::TableInfoRef;
+use crate::table::scan::SimpleTableScan;
 use crate::Table;
 
 #[derive(Debug, Clone)]

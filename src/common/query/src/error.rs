@@ -132,6 +132,7 @@ impl From<Error> for DataFusionError {
 
 #[cfg(test)]
 mod tests {
+    use arrow::error::ArrowError;
     use snafu::GenerateImplicitData;
 
     use super::*;
@@ -154,6 +155,48 @@ mod tests {
             .unwrap()
             .into();
         assert_error(&err, StatusCode::EngineExecuteQuery);
+
+        let err: Error = throw_df_error()
+            .context(GeneralDataFusionSnafu)
+            .err()
+            .unwrap()
+            .into();
+        assert_error(&err, StatusCode::Unexpected);
+
+        let err: Error = throw_df_error()
+            .context(DataFusionExecutionPlanSnafu)
+            .err()
+            .unwrap()
+            .into();
+        assert_error(&err, StatusCode::Unexpected);
+    }
+
+    #[test]
+    fn test_execute_repeatedly_error() {
+        let error: Error = None::<i32>
+            .context(ExecuteRepeatedlySnafu)
+            .err()
+            .unwrap()
+            .into();
+        assert_eq!(error.inner.status_code(), StatusCode::Unexpected);
+        assert!(error.backtrace_opt().is_some());
+    }
+
+    #[test]
+    fn test_general_recordbatch_error() {
+        let result: std::result::Result<i32, common_recordbatch::error::Error> =
+            Err(common_recordbatch::error::InnerError::PollStream {
+                source: ArrowError::Overflow,
+                backtrace: Backtrace::generate(),
+            }
+            .into());
+        let error: Error = result
+            .context(GeneralRecordBatchSnafu)
+            .err()
+            .unwrap()
+            .into();
+        assert_eq!(error.inner.status_code(), StatusCode::Internal);
+        assert!(error.backtrace_opt().is_some());
     }
 
     fn raise_datatype_error() -> std::result::Result<(), DataTypeError> {
