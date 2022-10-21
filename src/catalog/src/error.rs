@@ -115,6 +115,9 @@ pub enum Error {
         backtrace: Backtrace,
         source: std::io::Error,
     },
+
+    #[snafu(display("Local and remote catalog data are inconsistent, msg: {}", msg))]
+    CatalogStateInconsistent { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -127,7 +130,8 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. }
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
-            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
+            | Error::InvalidEntryType { .. }
+            | Error::CatalogStateInconsistent { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue

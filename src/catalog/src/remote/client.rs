@@ -46,7 +46,6 @@ impl<T: ?Sized + Accessor> KvBackend for T {
         'a: 'b,
     {
         let key = format!("./{}", String::from_utf8_lossy(key));
-
         Box::pin(stream!({
             let op = OpList::new();
             let mut files = self.list("./", op).await.context(IoSnafu)?;
@@ -54,7 +53,7 @@ impl<T: ?Sized + Accessor> KvBackend for T {
                 let e = r.context(IoSnafu)?;
                 let path = e.path();
                 if !path.starts_with(&key) {
-                    debug!("Filter file:{}", path);
+                    debug!("Range key: {}, filter file: {}", key, path);
                     continue;
                 }
                 let op_read: OpRead = OpRead::new(..);

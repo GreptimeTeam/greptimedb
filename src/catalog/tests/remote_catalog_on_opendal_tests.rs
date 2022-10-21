@@ -65,15 +65,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_to_default_schema() {
+        common_telemetry::init_default_ut_logging();
         let node_id = "localhost".to_string();
         let (_, table_engine, catalog_manager, _dir) = prepare_components(node_id).await;
         let default_schema = catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
             .unwrap()
-            .unwrap()
+            .expect("default catalog must exist")
             .schema(DEFAULT_SCHEMA_NAME)
             .unwrap()
-            .unwrap();
+            .expect("default schema must exist");
 
         let table_name = "some_table";
         let table_id = 42;

@@ -8,6 +8,7 @@ pub use manager::{RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvi
 use opendal::Accessor;
 
 use crate::error::Error;
+
 mod client;
 
 mod manager;

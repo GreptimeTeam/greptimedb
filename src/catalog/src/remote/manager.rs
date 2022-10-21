@@ -8,9 +8,9 @@ use common_catalog::{
     build_catalog_prefix, build_schema_prefix, build_table_prefix, CatalogKey, CatalogValue,
     SchemaKey, SchemaValue, TableKey, TableValue,
 };
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use futures_util::StreamExt;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableVersion};
 use table::requests::{CreateTableRequest, OpenTableRequest};
@@ -18,8 +18,8 @@ use table::TableRef;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::error::{
-    CatalogNotFoundSnafu, CreateTableSnafu, Error, InvalidCatalogValueSnafu, OpenTableSnafu,
-    SchemaNotFoundSnafu, TableExistsSnafu,
+    CatalogNotFoundSnafu, CatalogStateInconsistentSnafu, CreateTableSnafu, Error,
+    InvalidCatalogValueSnafu, OpenTableSnafu, SchemaNotFoundSnafu, TableExistsSnafu,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
@@ -494,7 +494,6 @@ impl RemoteSchemaProvider {
         }
     }
 
-    // TODO(hl): Set version when building table key
     pub fn table_key(&self, table_name: impl AsRef<str>, table_version: TableVersion) -> TableKey {
         TableKey {
             catalog_name: self.catalog_name.clone(),
@@ -540,13 +539,26 @@ impl SchemaProvider for RemoteSchemaProvider {
 
     fn table(&self, name: &str) -> crate::error::Result<Option<TableRef>> {
         futures::executor::block_on(async move {
-            // TODO(hl): determine table version
-            let table_version = 0;
+            let table = match self.tables.read().await.get(name).cloned() {
+                None => return Ok(None),
+                Some(t) => t,
+            };
+            let table_version = table.table_info().ident.version;
             let key = self.table_key(&name, table_version).to_string();
-            match self.backend.get(key.as_bytes()).await? {
-                None => Ok(None),
-                Some(_) => Ok(self.tables.read().await.get(name).cloned()),
-            }
+
+            // Also check if table info exists on metasrv
+            let metasrv_entry = self.backend.get(key.as_bytes()).await?;
+            ensure!(
+                metasrv_entry.is_some(),
+                CatalogStateInconsistentSnafu {
+                    msg: format!(
+                        "Local table info: {:?}, but entry with key {} does not exist in metasrv",
+                        table.table_info(),
+                        key
+                    )
+                }
+            );
+            Ok(Some(table))
         })
     }
 
@@ -575,6 +587,10 @@ impl SchemaProvider for RemoteSchemaProvider {
                     &table_value.as_bytes().context(InvalidCatalogValueSnafu)?,
                 )
                 .await?;
+            debug!(
+                "Successfully set catalog table entry, key: {}, table value: {:?}",
+                key, table_value
+            );
             let mut tables = self.tables.write().await;
             tables.insert(name, table);
             Ok(prev)
@@ -583,22 +599,21 @@ impl SchemaProvider for RemoteSchemaProvider {
 
     fn deregister_table(&self, name: &str) -> crate::error::Result<Option<TableRef>> {
         futures::executor::block_on(async move {
-            // TODO(hl): determine table version
-            let table_version = 0;
+            let table_version = match self.tables.read().await.get(name) {
+                None => return Ok(None),
+                Some(t) => t.table_info().ident.version,
+            };
             let key = self.table_key(&name, table_version).to_string();
+            // TODO(hl): Shall we also delete entries with older versions?
             self.backend.delete_range(key.as_bytes(), &[]).await?;
             let mut tables = self.tables.write().await;
             Ok(tables.remove(&key))
         })
     }
 
-    // TODO(hl): Should we further check if table is opened and if version matches?
+    /// Checks if table exists in schema provider based on locally opened table map.
+    /// TODO(hl): Also check if table existence on metasrv differs from local table map?
     fn table_exist(&self, name: &str) -> Result<bool, Error> {
-        futures::executor::block_on(async move {
-            // TODO(hl): determine table version
-            let table_version = 0;
-            let key = self.table_key(&name, table_version).to_string();
-            Ok(self.backend.get(key.as_bytes()).await?.is_some())
-        })
+        futures::executor::block_on(async move { Ok(self.tables.read().await.contains_key(name)) })
     }
 }
