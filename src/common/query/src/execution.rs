@@ -280,3 +280,135 @@ impl DfExecutionPlan for DfExecutionPlanAdapter {
         self.0.statistics()
     }
 }
+
+#[cfg(test)]
+mod test {
+    use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+    use common_recordbatch::{RecordBatch, RecordBatches};
+    use datafusion::arrow_print;
+    use datafusion::datasource::TableProvider as DfTableProvider;
+    use datafusion::logical_plan::LogicalPlanBuilder;
+    use datafusion::physical_plan::collect;
+    use datafusion::prelude::ExecutionContext;
+    use datafusion_common::field_util::SchemaExt;
+    use datafusion_expr::Expr;
+    use datatypes::schema::Schema;
+    use datatypes::vectors::Int32Vector;
+
+    use super::*;
+
+    struct MyDfTableProvider;
+
+    #[async_trait]
+    impl DfTableProvider for MyDfTableProvider {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn schema(&self) -> DfSchemaRef {
+            Arc::new(ArrowSchema::new(vec![Field::new(
+                "a",
+                DataType::Int32,
+                false,
+            )]))
+        }
+
+        async fn scan(
+            &self,
+            _projection: &Option<Vec<usize>>,
+            _filters: &[Expr],
+            _limit: Option<usize>,
+        ) -> DfResult<Arc<dyn DfExecutionPlan>> {
+            let schema = Schema::try_from(self.schema()).unwrap();
+            let my_plan = Arc::new(MyExecutionPlan {
+                schema: Arc::new(schema),
+            });
+            let df_plan = DfExecutionPlanAdapter(my_plan);
+            Ok(Arc::new(df_plan))
+        }
+    }
+
+    #[derive(Debug)]
+    struct MyExecutionPlan {
+        schema: SchemaRef,
+    }
+
+    #[async_trait]
+    impl ExecutionPlan for MyExecutionPlan {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_partitioning(&self) -> Partitioning {
+            Partitioning::UnknownPartitioning(1)
+        }
+
+        fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
+            None
+        }
+
+        fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+            vec![]
+        }
+
+        fn with_new_children(
+            &self,
+            _children: Vec<Arc<dyn ExecutionPlan>>,
+        ) -> Result<Arc<dyn ExecutionPlan>> {
+            unimplemented!()
+        }
+
+        async fn execute(
+            &self,
+            _partition: usize,
+            _runtime: Arc<RuntimeEnv>,
+        ) -> Result<SendableRecordBatchStream> {
+            let schema = self.schema();
+            let recordbatches = RecordBatches::try_new(
+                schema.clone(),
+                vec![
+                    RecordBatch::new(
+                        schema.clone(),
+                        vec![Arc::new(Int32Vector::from_slice(vec![1])) as _],
+                    )
+                    .unwrap(),
+                    RecordBatch::new(
+                        schema,
+                        vec![Arc::new(Int32Vector::from_slice(vec![2, 3])) as _],
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+            Ok(recordbatches.as_stream())
+        }
+
+        fn statistics(&self) -> Statistics {
+            Statistics::default()
+        }
+    }
+
+    // Test our execution plan can be executed by DataFusion, through adapters.
+    #[tokio::test]
+    async fn test_execution_plan_adapter() {
+        let ctx = ExecutionContext::new();
+        let logical_plan = LogicalPlanBuilder::scan("test", Arc::new(MyDfTableProvider), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let physical_plan = ctx.create_physical_plan(&logical_plan).await.unwrap();
+        let df_recordbatches = collect(physical_plan, Arc::new(RuntimeEnv::default()))
+            .await
+            .unwrap();
+        let pretty_print = arrow_print::write(&df_recordbatches);
+        let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
+        assert_eq!(
+            pretty_print,
+            vec!["+---+", "| a |", "+---+", "| 1 |", "| 2 |", "| 3 |", "+---+",]
+        );
+    }
+}
