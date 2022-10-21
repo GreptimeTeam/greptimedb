@@ -11,7 +11,7 @@ use rand::Rng;
 use servers::error::Result;
 use servers::mysql::server::MysqlServer;
 use servers::server::Server;
-use test_util::MemTable;
+use table::test_util::MemTable;
 
 use crate::create_testing_sql_query_handler;
 use crate::mysql::{all_datatype_testing_data, MysqlTextRow, TestingData};
