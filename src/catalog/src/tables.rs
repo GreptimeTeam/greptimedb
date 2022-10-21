@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 
 use async_stream::stream;
 use common_catalog::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
+use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
@@ -17,6 +18,7 @@ use datatypes::vectors::VectorRef;
 use futures::Stream;
 use snafu::ResultExt;
 use table::engine::TableEngineRef;
+use table::error::TablesRecordBatchSnafu;
 use table::metadata::{TableId, TableInfoRef};
 use table::{Table, TableRef};
 
@@ -67,24 +69,39 @@ impl Table for Tables {
         let schema_ref = self.schema.clone();
         let engine_name = self.engine_name.clone();
 
-        let convert_err = |e: Error| {
-            common_recordbatch::error::CreateRecordBatchesSnafu {
-                reason: format!("Failed to access catalog, cause: {}", e),
-            }
-            .build()
-        };
-
         let stream = stream!({
-            for catalog_name in catalogs.catalog_names().map_err(convert_err)? {
+            for catalog_name in catalogs
+                .catalog_names()
+                .map_err(BoxedError::new)
+                .context(TablesRecordBatchSnafu)?
+            {
                 let catalog = catalogs
                     .catalog(&catalog_name)
-                    .map_err(convert_err)?
+                    .map_err(BoxedError::new)
+                    .context(TablesRecordBatchSnafu)?
                     .unwrap();
-                for schema_name in catalog.schema_names().map_err(convert_err)? {
-                    let mut tables_in_schema =
-                        Vec::with_capacity(catalog.schema_names().map_err(convert_err)?.len());
-                    let schema = catalog.schema(&schema_name).map_err(convert_err)?.unwrap();
-                    for table_name in schema.table_names().map_err(convert_err)? {
+                for schema_name in catalog
+                    .schema_names()
+                    .map_err(BoxedError::new)
+                    .context(TablesRecordBatchSnafu)?
+                {
+                    let mut tables_in_schema = Vec::with_capacity(
+                        catalog
+                            .schema_names()
+                            .map_err(BoxedError::new)
+                            .context(TablesRecordBatchSnafu)?
+                            .len(),
+                    );
+                    let schema = catalog
+                        .schema(&schema_name)
+                        .map_err(BoxedError::new)
+                        .context(TablesRecordBatchSnafu)?
+                        .unwrap();
+                    for table_name in schema
+                        .table_names()
+                        .map_err(BoxedError::new)
+                        .context(TablesRecordBatchSnafu)?
+                    {
                         tables_in_schema.push(table_name);
                     }
 
