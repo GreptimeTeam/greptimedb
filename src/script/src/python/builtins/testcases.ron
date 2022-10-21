@@ -1093,7 +1093,7 @@ percentile(x, p)"#,
         },
         script: r#"
 from greptime import *
-scipystatsnormcdf(x, p)"#,
+scipy_stats_norm_cdf(x, p)"#,
         expect: Ok((
             ty: Float64,
             value: Float(0.3444602779022303)
@@ -1112,7 +1112,7 @@ scipystatsnormcdf(x, p)"#,
         },
         script: r#"
 from greptime import *
-scipystatsnormpdf(x, p)"#,
+scipy_stats_norm_pdf(x, p)"#,
         expect: Ok((
             ty: Float64,
             value: Float(0.1768885735289059)

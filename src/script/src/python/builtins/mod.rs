@@ -349,21 +349,15 @@ pub(crate) mod greptime_builtin {
         let acc = f(&types);
         let mut acc = match acc {
             Ok(acc) => acc,
-            Err(err) => {
-                return Err(vm.new_runtime_error(format!("Internal Error: {}", err)))
-            }
+            Err(err) => return Err(vm.new_runtime_error(format!("Internal Error: {}", err))),
         };
         match acc.update_batch(&v) {
             Ok(_) => (),
-            Err(err) => {
-                return Err(vm.new_runtime_error(format!("Internal Error: {}", err)))
-            }
+            Err(err) => return Err(vm.new_runtime_error(format!("Internal Error: {}", err))),
         };
         let res = match acc.evaluate() {
             Ok(r) => r,
-            Err(err) => {
-                return Err(vm.new_runtime_error(format!("Internal Error: {}", err)))
-            }
+            Err(err) => return Err(vm.new_runtime_error(format!("Internal Error: {}", err))),
         };
         let res = val_to_pyobj(res, vm);
         Ok(res)
@@ -376,7 +370,12 @@ pub(crate) mod greptime_builtin {
     }
 
     #[pyfunction]
-    fn clip(v0: PyVectorRef, v1: PyVectorRef, v2: PyVectorRef,vm: &VirtualMachine) -> PyResult<PyVector> {
+    fn clip(
+        v0: PyVectorRef,
+        v1: PyVectorRef,
+        v2: PyVectorRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyVector> {
         eval_func("clip", &[v0, v1, v2], vm)
     }
 
@@ -416,7 +415,7 @@ pub(crate) mod greptime_builtin {
     }
 
     #[pyfunction]
-    fn scipystatsnormcdf(
+    fn scipy_stats_norm_cdf(
         v0: PyVectorRef,
         v1: PyVectorRef,
         vm: &VirtualMachine,
@@ -425,7 +424,7 @@ pub(crate) mod greptime_builtin {
     }
 
     #[pyfunction]
-    fn scipystatsnormpdf(
+    fn scipy_stats_norm_pdf(
         v0: PyVectorRef,
         v1: PyVectorRef,
         vm: &VirtualMachine,
