@@ -5,6 +5,13 @@ use std::sync::{Arc, RwLock};
 use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
+use datafusion::optimizer::common_subexpr_eliminate::CommonSubexprEliminate;
+use datafusion::optimizer::eliminate_limit::EliminateLimit;
+use datafusion::optimizer::filter_push_down::FilterPushDown;
+use datafusion::optimizer::limit_push_down::LimitPushDown;
+use datafusion::optimizer::projection_push_down::ProjectionPushDown;
+use datafusion::optimizer::single_distinct_to_groupby::SingleDistinctToGroupBy;
+use datafusion::optimizer::to_approx_perc::ToApproxPerc;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 
 use crate::datafusion::DfCatalogListAdapter;
@@ -36,7 +43,18 @@ impl QueryEngineState {
                 catalog::DEFAULT_CATALOG_NAME,
                 catalog::DEFAULT_SCHEMA_NAME,
             )
-            .add_optimizer_rule(Arc::new(TypeConversionRule {}));
+            .with_optimizer_rules(vec![
+                // TODO(hl): SimplifyExpressions is not exported.
+                Arc::new(TypeConversionRule {}),
+                // These are the default optimizer in datafusion
+                Arc::new(CommonSubexprEliminate::new()),
+                Arc::new(EliminateLimit::new()),
+                Arc::new(ProjectionPushDown::new()),
+                Arc::new(FilterPushDown::new()),
+                Arc::new(LimitPushDown::new()),
+                Arc::new(SingleDistinctToGroupBy::new()),
+                Arc::new(ToApproxPerc::new()),
+            ]);
 
         let df_context = ExecutionContext::with_config(config);
 
