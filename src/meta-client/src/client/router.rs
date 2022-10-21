@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use api::v1::meta::router_client::RouterClient;
 use api::v1::meta::CreateRequest;
-use api::v1::meta::CreateResponse;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
 use common_grpc::channel_manager::ChannelManager;
@@ -13,6 +12,7 @@ use snafu::ResultExt;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
+use super::Id;
 use crate::client::load_balance as lb;
 use crate::error;
 use crate::error::Result;
@@ -23,15 +23,14 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(channel_manager: ChannelManager) -> Self {
-        let inner = Inner {
+    pub fn new(id: Id, channel_manager: ChannelManager) -> Self {
+        let inner = Arc::new(RwLock::new(Inner {
+            id,
             channel_manager,
             peers: vec![],
-        };
+        }));
 
-        Self {
-            inner: Arc::new(RwLock::new(inner)),
-        }
+        Self { inner }
     }
 
     pub async fn start<U, A>(&mut self, urls: A) -> Result<()>
@@ -48,7 +47,7 @@ impl Client {
         inner.is_started()
     }
 
-    pub async fn create(&self, req: CreateRequest) -> Result<CreateResponse> {
+    pub async fn create(&self, req: CreateRequest) -> Result<RouteResponse> {
         let inner = self.inner.read().await;
         inner.create(req).await
     }
@@ -61,6 +60,8 @@ impl Client {
 
 #[derive(Debug)]
 struct Inner {
+    #[allow(dead_code)]
+    id: Id, // TODO(jiachun): will use it later
     channel_manager: ChannelManager,
     peers: Vec<String>,
 }
@@ -97,7 +98,7 @@ impl Inner {
         Ok(res.into_inner())
     }
 
-    async fn create(&self, req: CreateRequest) -> Result<CreateResponse> {
+    async fn create(&self, req: CreateRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
 
         let res = client.create(req).await.context(error::TonicStatusSnafu)?;
@@ -139,7 +140,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_client() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
 
         assert!(!client.is_started().await);
 
@@ -153,7 +154,7 @@ mod test {
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
@@ -173,7 +174,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_with_duplicate_peers() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1000", "127.0.0.1:1000"])
             .await
@@ -184,7 +185,7 @@ mod test {
 
     #[tokio::test]
     async fn test_create_unavailable() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unavailable_peer"]).await.unwrap();
 
         let header = RequestHeader::new(0, 0);
@@ -201,7 +202,7 @@ mod test {
 
     #[tokio::test]
     async fn test_route_unavailable() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unavailable_peer"]).await.unwrap();
 
         let header = RequestHeader::new(0, 0);

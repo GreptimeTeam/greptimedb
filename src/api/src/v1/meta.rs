@@ -20,8 +20,16 @@ impl From<&str> for Endpoint {
 }
 
 impl RequestHeader {
-    pub fn new(cluster_id: u64, member_id: u64) -> RequestHeader {
-        RequestHeader {
+    pub fn new(cluster_id: u64, member_id: u64) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            cluster_id,
+            member_id,
+        }
+    }
+
+    pub fn with_id((cluster_id, member_id): (u64, u64)) -> Self {
+        Self {
             protocol_version: PROTOCOL_VERSION,
             cluster_id,
             member_id,
@@ -83,14 +91,14 @@ impl CreateRequest {
         }
     }
 
-    pub fn add_region(mut self, region: Region) -> Self {
-        self.regions.push(region);
+    pub fn add_partition(mut self, partition: Partition) -> Self {
+        self.partitions.push(partition);
         self
     }
 }
 
 impl Region {
-    pub fn new(id: u64, name: impl Into<String>, partition: region::Partition) -> Self {
+    pub fn new(id: u64, name: impl Into<String>, partition: Partition) -> Self {
         Self {
             id,
             name: name.into(),
@@ -105,7 +113,7 @@ impl Region {
     }
 }
 
-impl region::Partition {
+impl Partition {
     pub fn new() -> Self {
         Default::default()
     }

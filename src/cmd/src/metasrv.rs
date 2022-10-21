@@ -37,6 +37,8 @@ impl SubCommand {
 #[derive(Debug, Parser)]
 struct StartCommand {
     #[clap(long)]
+    bind_addr: Option<String>,
+    #[clap(long)]
     server_addr: Option<String>,
     #[clap(long)]
     store_addr: Option<String>,
@@ -68,6 +70,9 @@ impl TryFrom<StartCommand> for MetaSrvOptions {
             MetaSrvOptions::default()
         };
 
+        if let Some(addr) = cmd.bind_addr {
+            opts.bind_addr = addr;
+        }
         if let Some(addr) = cmd.server_addr {
             opts.server_addr = addr;
         }
@@ -86,11 +91,13 @@ mod tests {
     #[test]
     fn test_read_from_cmd() {
         let cmd = StartCommand {
+            bind_addr: Some("127.0.0.1:3002".to_string()),
             server_addr: Some("0.0.0.0:3002".to_string()),
             store_addr: Some("127.0.0.1:2380".to_string()),
             config_file: None,
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
+        assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("0.0.0.0:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
     }
@@ -98,6 +105,7 @@ mod tests {
     #[test]
     fn test_read_from_config_file() {
         let cmd = StartCommand {
+            bind_addr: None,
             server_addr: None,
             store_addr: None,
             config_file: Some(format!(
@@ -106,6 +114,7 @@ mod tests {
             )),
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
+        assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("0.0.0.0:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
     }
