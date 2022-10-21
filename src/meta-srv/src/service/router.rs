@@ -59,33 +59,13 @@ mod tests {
 
     use super::*;
     use crate::metasrv::MetaSrvOptions;
-    use crate::service::store::kv::KvStore;
-
-    struct MockKvStore;
-
-    #[async_trait::async_trait]
-    impl KvStore for MockKvStore {
-        async fn range(&self, _req: RangeRequest) -> crate::Result<RangeResponse> {
-            unreachable!()
-        }
-
-        async fn put(&self, _req: PutRequest) -> crate::Result<PutResponse> {
-            unreachable!()
-        }
-
-        async fn delete_range(
-            &self,
-            _req: DeleteRangeRequest,
-        ) -> crate::Result<DeleteRangeResponse> {
-            unreachable!()
-        }
-    }
+    use crate::service::store::noop::NoopKvStore;
 
     #[should_panic]
     #[tokio::test]
     async fn test_handle_route() {
-        let kv_store = Arc::new(MockKvStore {});
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
+        let kv_store = Arc::new(NoopKvStore {});
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
         let header = RequestHeader::new(1, 1);
         let req = RouteRequest::new(header);
@@ -99,8 +79,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_create() {
-        let kv_store = Arc::new(MockKvStore {});
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
+        let kv_store = Arc::new(NoopKvStore {});
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
         let header = RequestHeader::new(1, 1);
         let table_name = TableName::new("test_catalog", "test_db", "table1");

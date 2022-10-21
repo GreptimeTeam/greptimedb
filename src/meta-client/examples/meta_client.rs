@@ -4,6 +4,7 @@ use api::v1::meta::CreateRequest;
 use api::v1::meta::DeleteRangeRequest;
 use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::Partition;
+use api::v1::meta::Peer;
 use api::v1::meta::PutRequest;
 use api::v1::meta::RangeRequest;
 use api::v1::meta::RequestHeader;
@@ -43,10 +44,12 @@ async fn run() {
 
     // send heartbeats
     tokio::spawn(async move {
-        for _ in 0..5 {
-            let req = HeartbeatRequest::new(RequestHeader::with_id(id));
+        for _ in 0..10 {
+            let mut req = HeartbeatRequest::new(RequestHeader::with_id(id));
+            req.peer = Some(Peer::new(1, "meta_client_peer"));
             sender.send(req).await.unwrap();
         }
+        tokio::time::sleep(Duration::from_secs(10)).await;
     });
 
     while let Some(res) = receiver.message().await.unwrap() {

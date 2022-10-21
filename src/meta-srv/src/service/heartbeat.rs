@@ -17,7 +17,6 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Streaming;
 
-use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use super::GrpcStream;
 use crate::error;
@@ -34,19 +33,29 @@ impl heartbeat_server::Heartbeat for MetaSrv {
     ) -> GrpcResult<Self::HeartbeatStream> {
         let mut in_stream = req.into_inner();
         let (tx, rx) = mpsc::channel(128);
-
-        let kv_store = self.kv_store();
+        let handlers = self.heartbeat_handlers();
         common_runtime::spawn_bg(async move {
+            let mut pusher_key = None;
+
             while let Some(msg) = in_stream.next().await {
                 match msg {
-                    Ok(req) => tx
-                        .send(
-                            handle_heartbeat(req, kv_store.clone())
-                                .await
-                                .map_err(|e| e.into()),
-                        )
-                        .await
-                        .expect("working rx"),
+                    Ok(req) => {
+                        if pusher_key.is_none() {
+                            if let Some(ref peer) = req.peer {
+                                let key = format!(
+                                    "{}/{}",
+                                    peer.id,
+                                    peer.endpoint.as_ref().map_or("unknow", |ep| &ep.addr)
+                                );
+                                handlers.register(&key, tx.clone()).await;
+                                pusher_key = Some(key);
+                            }
+                        }
+
+                        tx.send(handlers.handle(req).await.map_err(|e| e.into()))
+                            .await
+                            .expect("working rx");
+                    }
                     Err(err) => {
                         if let Some(io_err) = error::match_for_io_error(&err) {
                             if io_err.kind() == ErrorKind::BrokenPipe {
@@ -63,7 +72,15 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                     }
                 }
             }
-            info!("Heartbeat stream broken: {:?}", in_stream);
+
+            info!(
+                "Heartbeat stream broken: {:?}",
+                pusher_key.as_ref().unwrap_or(&"unknow".to_string())
+            );
+
+            if let Some(key) = pusher_key {
+                let _ = handlers.unregister(&key);
+            }
         });
 
         let out_stream = ReceiverStream::new(rx);
@@ -102,28 +119,6 @@ impl MetaSrv {
     }
 }
 
-async fn handle_heartbeat(
-    req: HeartbeatRequest,
-    _kv_store: KvStoreRef,
-) -> Result<HeartbeatResponse> {
-    let HeartbeatRequest { header, .. } = req;
-
-    let res_header = ResponseHeader {
-        protocol_version: PROTOCOL_VERSION,
-        cluster_id: header.map_or(0, |h| h.cluster_id),
-        ..Default::default()
-    };
-
-    // TODO(jiachun) Do something high-end
-
-    let res = HeartbeatResponse {
-        header: Some(res_header),
-        ..Default::default()
-    };
-
-    Ok(res)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -134,45 +129,12 @@ mod tests {
 
     use super::*;
     use crate::metasrv::MetaSrvOptions;
-    use crate::service::store::kv::KvStore;
-
-    #[derive(Clone)]
-    pub struct NoopKvStore;
-
-    #[async_trait::async_trait]
-    impl KvStore for NoopKvStore {
-        async fn range(&self, _req: RangeRequest) -> crate::Result<RangeResponse> {
-            unreachable!()
-        }
-
-        async fn put(&self, _req: PutRequest) -> crate::Result<PutResponse> {
-            unreachable!()
-        }
-
-        async fn delete_range(
-            &self,
-            _req: DeleteRangeRequest,
-        ) -> crate::Result<DeleteRangeResponse> {
-            unreachable!()
-        }
-    }
-
-    #[tokio::test]
-    async fn test_handle_heartbeat_resp_header() {
-        let kv_store = Arc::new(NoopKvStore {});
-
-        let header = RequestHeader::new(1, 2);
-        let req = HeartbeatRequest::new(header);
-
-        let res = handle_heartbeat(req, kv_store).await.unwrap();
-
-        assert_eq!(1, res.header.unwrap().cluster_id);
-    }
+    use crate::service::store::noop::NoopKvStore;
 
     #[tokio::test]
     async fn test_ask_leader() {
         let kv_store = Arc::new(NoopKvStore {});
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
         let header = RequestHeader::new(1, 1);
         let req = AskLeaderRequest::new(header);
