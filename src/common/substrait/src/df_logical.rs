@@ -8,12 +8,12 @@ use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
 use prost::Message;
 use snafu::ensure;
 use snafu::{OptionExt, ResultExt};
-use substrait::protobuf::plan_rel::RelType as PlanRelType;
-use substrait::protobuf::read_rel::{NamedTable, ReadType};
-use substrait::protobuf::rel::RelType;
-use substrait::protobuf::PlanRel;
-use substrait::protobuf::ReadRel;
-use substrait::protobuf::Rel;
+use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
+use substrait_proto::protobuf::read_rel::{NamedTable, ReadType};
+use substrait_proto::protobuf::rel::RelType;
+use substrait_proto::protobuf::PlanRel;
+use substrait_proto::protobuf::ReadRel;
+use substrait_proto::protobuf::Rel;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::Error;
@@ -34,7 +34,7 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 
     type Plan = LogicalPlan;
 
-    async fn from_buf<B: Buf + Send>(&self, message: B) -> Result<Self::Plan, Self::Error> {
+    async fn convert_buf<B: Buf + Send>(&self, message: B) -> Result<Self::Plan, Self::Error> {
         let plan_rel = PlanRel::decode(message).context(DecodeRelSnafu)?;
         let rel = match plan_rel.rel_type.context(EmptyPlanSnafu)? {
             PlanRelType::Rel(rel) => rel,
@@ -46,7 +46,7 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         self.convert_rel(Box::new(rel))
     }
 
-    fn from_plan(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
+    fn convert_plan(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
         let rel = self.convert_plan(plan)?;
 
         let mut buf = BytesMut::new();

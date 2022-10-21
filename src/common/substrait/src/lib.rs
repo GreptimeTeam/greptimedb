@@ -12,7 +12,7 @@ pub trait SubstraitPlan {
 
     type Plan;
 
-    async fn from_buf<B: Buf + Send>(&self, message: B) -> Result<Self::Plan, Self::Error>;
+    async fn convert_buf<B: Buf + Send>(&self, message: B) -> Result<Self::Plan, Self::Error>;
 
-    fn from_plan(&self, plan: Self::Plan) -> Result<Bytes, Self::Error>;
+    fn convert_plan(&self, plan: Self::Plan) -> Result<Bytes, Self::Error>;
 }
