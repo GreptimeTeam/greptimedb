@@ -5,6 +5,7 @@ pub mod util;
 
 use std::pin::Pin;
 
+pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use error::Result;
 use futures::task::{Context, Poll};

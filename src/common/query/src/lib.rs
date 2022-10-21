@@ -14,3 +14,6 @@ pub enum Output {
     RecordBatches(RecordBatches),
     Stream(SendableRecordBatchStream),
 }
+
+pub use datafusion::physical_plan::expressions::PhysicalSortExpr;
+pub use datafusion::physical_plan::ExecutionPlan as DfExecutionPlan;

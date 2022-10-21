@@ -5,19 +5,19 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
+use common_recordbatch::DfSendableRecordBatchStream;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::physical_plan::expressions::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::MetricsSet;
-use datafusion::physical_plan::ExecutionPlan as DfExecutionPlan;
-use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datafusion::physical_plan::{DisplayFormatType, Distribution, Partitioning, Statistics};
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
+use crate::DfExecutionPlan;
+use crate::PhysicalSortExpr;
 
 /// `ExecutionPlan` represent nodes in the Physical Plan.
 ///

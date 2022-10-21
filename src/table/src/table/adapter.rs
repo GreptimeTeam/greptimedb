@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use common_query::execution::{DfExecutionPlanAdapter, ExecutionPlan, ExecutionPlanAdapter};
 use common_query::logical_plan::Expr;
+use common_query::DfExecutionPlan;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 ///  Datafusion table adpaters
@@ -12,7 +13,6 @@ use datafusion::datasource::{
 };
 use datafusion::error::Result as DfResult;
 use datafusion::logical_plan::Expr as DfExpr;
-use datafusion::physical_plan::ExecutionPlan as DfExecutionPlan;
 use datatypes::schema::SchemaRef as TableSchemaRef;
 use snafu::prelude::*;
 

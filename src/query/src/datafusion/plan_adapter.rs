@@ -2,16 +2,15 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use common_query::PhysicalSortExpr;
 use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
+use common_recordbatch::DfSendableRecordBatchStream;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::{
     error::Result as DfResult,
-    physical_plan::{
-        expressions::PhysicalSortExpr, ExecutionPlan, Partitioning as DfPartitioning,
-        SendableRecordBatchStream as DfSendableRecordBatchStream, Statistics,
-    },
+    physical_plan::{ExecutionPlan, Partitioning as DfPartitioning, Statistics},
 };
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
