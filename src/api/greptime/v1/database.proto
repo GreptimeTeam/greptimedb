@@ -55,6 +55,8 @@ message InsertExpr {
     // The "sql" field is meant to be removed in the future.
     string sql = 3;
   }
+  
+  map<string, bytes> options = 4;
 }
 
 // TODO(jiachun)

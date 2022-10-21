@@ -146,7 +146,7 @@ impl<R: Region> Table for MitoTable<R> {
     }
 
     fn table_info(&self) -> TableInfoRef {
-        self.table_info.load().clone()
+        self.table_info.load_full()
     }
 
     async fn scan(

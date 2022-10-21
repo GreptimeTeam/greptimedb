@@ -13,7 +13,9 @@ use futures::task::{Context, Poll};
 use futures::Stream;
 use snafu::prelude::*;
 use table::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
-use table::metadata::{TableId, TableIdent, TableInfo, TableInfoRef, TableMeta, TableType};
+use table::metadata::{
+    TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType, TableVersion,
+};
 use table::Table;
 
 #[derive(Debug, Clone)]
@@ -41,27 +43,33 @@ impl MemTable {
         schema_name: String,
     ) -> Self {
         let schema = recordbatch.schema.clone();
-        let info = Arc::new(TableInfo {
-            ident: TableIdent {
-                table_id,
-                version: 0,
-            },
-            name: table_name.into(),
-            catalog_name,
-            schema_name,
-            desc: None,
-            meta: TableMeta {
-                schema,
-                primary_key_indices: vec![],
-                value_indices: vec![],
-                engine: "mock".to_string(),
-                next_column_id: 0,
-                engine_options: Default::default(),
-                options: Default::default(),
-                created_on: Default::default(),
-            },
-            table_type: TableType::Base,
-        });
+
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .value_indices(vec![])
+            .engine("mock".to_string())
+            .next_column_id(0)
+            .engine_options(Default::default())
+            .options(Default::default())
+            .created_on(Default::default())
+            .build()
+            .unwrap();
+
+        let info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(table_id)
+                .table_version(0 as TableVersion)
+                .name(table_name.into())
+                .schema_name(schema_name)
+                .catalog_name(catalog_name)
+                .desc(None)
+                .table_type(TableType::Base)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+
         Self { info, recordbatch }
     }
 

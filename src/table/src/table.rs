@@ -22,7 +22,7 @@ pub trait Table: Send + Sync {
     /// Get a reference to the schema for this table
     fn schema(&self) -> SchemaRef;
 
-    /// Get table info reference.
+    /// Get a reference to the table info.
     fn table_info(&self) -> TableInfoRef;
 
     /// Get the type of this table for metadata/catalog purposes.

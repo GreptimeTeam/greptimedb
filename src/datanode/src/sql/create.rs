@@ -24,11 +24,6 @@ use crate::sql::SqlHandler;
 impl SqlHandler {
     pub(crate) async fn create(&self, mut req: CreateTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
-        // determine catalog and schema from the very beginning
-        req.catalog_name
-            .get_or_insert_with(|| DEFAULT_CATALOG_NAME.to_string());
-        req.schema_name
-            .get_or_insert_with(|| DEFAULT_SCHEMA_NAME.to_string());
         let table_name = req.table_name.clone();
         let table_id = req.id;
 
@@ -207,8 +202,6 @@ mod tests {
         let c = handler.create_to_request(42, parsed_stmt).unwrap();
         assert_eq!("demo_table", c.table_name);
         assert_eq!(42, c.id);
-        assert!(c.schema_name.is_none());
-        assert!(c.catalog_name.is_none());
         assert!(!c.create_if_not_exists);
         assert_eq!(vec![0], c.primary_key_indices);
         assert_eq!(1, c.schema.timestamp_index().unwrap());
@@ -306,8 +299,8 @@ mod tests {
         let request = handler.create_to_request(42, create_table).unwrap();
 
         assert_eq!(42, request.id);
-        assert_eq!(Some("c".to_string()), request.catalog_name);
-        assert_eq!(Some("s".to_string()), request.schema_name);
+        assert_eq!("c".to_string(), request.catalog_name);
+        assert_eq!("s".to_string(), request.schema_name);
         assert_eq!("demo".to_string(), request.table_name);
         assert!(!request.create_if_not_exists);
         assert_eq!(4, request.schema.column_schemas().len());

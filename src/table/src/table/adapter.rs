@@ -314,3 +314,28 @@ impl Stream for RecordBatchStreamAdapter {
         self.stream.size_hint()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow;
+    use datafusion::datasource::empty::EmptyTable;
+    use datafusion_common::field_util::SchemaExt;
+
+    use super::*;
+    use crate::metadata::TableType::Base;
+
+    #[test]
+    #[should_panic]
+    fn test_table_adaptor_info() {
+        let df_table = Arc::new(EmptyTable::new(Arc::new(arrow::datatypes::Schema::empty())));
+        let table_adapter = TableAdapter::new(df_table, Arc::new(RuntimeEnv::default())).unwrap();
+        let _ = table_adapter.table_info();
+    }
+
+    #[test]
+    fn test_table_adaptor_type() {
+        let df_table = Arc::new(EmptyTable::new(Arc::new(arrow::datatypes::Schema::empty())));
+        let table_adapter = TableAdapter::new(df_table, Arc::new(RuntimeEnv::default())).unwrap();
+        assert_eq!(Base, table_adapter.table_type());
+    }
+}

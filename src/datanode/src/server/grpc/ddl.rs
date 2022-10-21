@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
 use datatypes::schema::ColumnDefaultConstraint;
@@ -77,10 +78,16 @@ impl Instance {
 
         let table_id = self.catalog_manager().next_table_id().await;
 
+        let catalog_name = expr
+            .catalog_name
+            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
+        let schema_name = expr
+            .schema_name
+            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
         Ok(CreateTableRequest {
             id: table_id,
-            catalog_name: expr.catalog_name,
-            schema_name: expr.schema_name,
+            catalog_name,
+            schema_name,
             table_name: expr.table_name,
             desc: expr.desc,
             schema,
@@ -181,8 +188,8 @@ mod tests {
         let expr = testing_create_expr();
         let request = instance.create_expr_to_request(expr).await.unwrap();
         assert_eq!(request.id, common_catalog::consts::MIN_USER_TABLE_ID);
-        assert_eq!(request.catalog_name, None);
-        assert_eq!(request.schema_name, None);
+        assert_eq!(request.catalog_name, "greptime".to_string());
+        assert_eq!(request.schema_name, "public".to_string());
         assert_eq!(request.table_name, "my-metrics");
         assert_eq!(request.desc, Some("blabla".to_string()));
         assert_eq!(request.schema, expected_table_schema());

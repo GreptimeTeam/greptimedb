@@ -5,9 +5,13 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+catalog = { path = "../catalog" }
+common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
+itertools = "0.10"
+once_cell = "1.10"
 snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.15.0"
 table-engine = { path = "../table-engine" }

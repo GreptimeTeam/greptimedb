@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use api::v1::{codec::InsertBatch, *};
 use client::{Client, Database};
 
@@ -18,6 +20,7 @@ async fn run() {
         expr: Some(insert_expr::Expr::Values(insert_expr::Values {
             values: insert_batches(),
         })),
+        options: HashMap::default(),
     };
     db.insert(expr).await.unwrap();
 }

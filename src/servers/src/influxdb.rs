@@ -98,6 +98,7 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
                 expr: Some(Expr::Values(insert_expr::Values {
                     values: vec![writer.finish().into()],
                 })),
+                options: HashMap::default(),
             })
             .collect())
     }

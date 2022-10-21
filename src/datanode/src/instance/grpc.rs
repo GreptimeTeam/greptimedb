@@ -12,8 +12,7 @@ use snafu::prelude::*;
 use table::requests::AddColumnRequest;
 
 use crate::error::{
-    self, CatalogSnafu, FindTableSnafu, InsertSnafu, Result, TableNotFoundSnafu,
-    UnsupportedExprSnafu,
+    self, CatalogSnafu, InsertSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
@@ -54,13 +53,20 @@ impl Instance {
 
     async fn create_table_by_insert_batches(
         &self,
+        catalog_name: &str,
+        schema_name: &str,
         table_name: &str,
         insert_batches: &[InsertBatch],
     ) -> Result<()> {
         // Create table automatically, build schema from data.
-        let table_id = self.catalog_manager.next_table_id().await;
-        let create_table_request =
-            insert::build_create_table_request(table_id, table_name, insert_batches)?;
+        let table_id = self.catalog_manager.next_table_id();
+        let create_table_request = insert::build_create_table_request(
+            catalog_name,
+            schema_name,
+            table_id,
+            table_name,
+            insert_batches,
+        )?;
 
         info!(
             "Try to create table: {} automatically with request: {:?}",
@@ -82,22 +88,23 @@ impl Instance {
         table_name: &str,
         values: insert_expr::Values,
     ) -> Result<Output> {
+        // maybe infer from insert batch?
+        let catalog_name = DEFAULT_CATALOG_NAME;
+        let schema_name = DEFAULT_SCHEMA_NAME;
+
         let schema_provider = self
             .catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .expect("datafusion does not accept fallible catalog access")
+            .catalog(catalog_name)
             .unwrap()
-            .schema(DEFAULT_SCHEMA_NAME)
-            .expect("datafusion does not accept fallible catalog access")
+            .expect("default catalog must exist")
+            .schema(schema_name)
+            .expect("default schema must exist")
             .unwrap();
 
         let insert_batches = insert::insert_batches(values.values)?;
         ensure!(!insert_batches.is_empty(), error::IllegalInsertDataSnafu);
 
-        let table = if let Some(table) = schema_provider
-            .table(table_name)
-            .context(FindTableSnafu { table_name })?
-        {
+        let table = if let Some(table) = schema_provider.table(table_name).context(CatalogSnafu)? {
             let schema = table.schema();
             if let Some(add_columns) = insert::find_new_columns(&schema, &insert_batches)? {
                 self.add_new_columns_to_table(table_name, add_columns)
@@ -106,8 +113,13 @@ impl Instance {
 
             table
         } else {
-            self.create_table_by_insert_batches(table_name, &insert_batches)
-                .await?;
+            self.create_table_by_insert_batches(
+                catalog_name,
+                schema_name,
+                table_name,
+                &insert_batches,
+            )
+            .await?;
 
             schema_provider
                 .table(table_name)

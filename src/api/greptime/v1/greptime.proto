@@ -3,6 +3,7 @@ syntax = "proto3";
 package greptime.v1;
 
 import "greptime/v1/admin.proto";
+import "greptime/v1/common.proto";
 import "greptime/v1/database.proto";
 
 service Greptime {
@@ -10,8 +11,9 @@ service Greptime {
 }
 
 message BatchRequest {
-  repeated AdminRequest admins = 1;
-  repeated DatabaseRequest databases = 2;
+  RequestHeader header = 1;
+  repeated AdminRequest admins = 2;
+  repeated DatabaseRequest databases = 3;
 }
 
 message BatchResponse {

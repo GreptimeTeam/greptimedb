@@ -1,49 +1,53 @@
 use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
-use table::metadata::{TableId, TableMeta};
+use table::metadata::{TableId, TableMeta, TableVersion};
 
-use crate::consts::{CATALOG_PREFIX, SCHEMA_PREFIX, TABLE_PREFIX};
+use crate::consts::{CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_KEY_PREFIX};
 use crate::error::{
     DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu, SerializeCatalogEntryValueSnafu,
 };
 
 lazy_static! {
-    static ref CATALOG_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{}-([a-zA-Z_]+)-([a-zA-Z_]+)$", CATALOG_PREFIX)).unwrap();
+    static ref CATALOG_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)$",
+        CATALOG_KEY_PREFIX
+    ))
+    .unwrap();
 }
 
 lazy_static! {
     static ref SCHEMA_KEY_PATTERN: Regex = Regex::new(&format!(
         "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)$",
-        SCHEMA_PREFIX
+        SCHEMA_KEY_PREFIX
     ))
     .unwrap();
 }
 
 lazy_static! {
     static ref TABLE_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)$",
-        TABLE_PREFIX
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)-([a-zA-Z_]+)$",
+        TABLE_KEY_PREFIX
     ))
     .unwrap();
 }
 
 pub fn build_catalog_prefix() -> String {
-    format!("{}-", CATALOG_PREFIX)
+    format!("{}-", CATALOG_KEY_PREFIX)
 }
 
 pub fn build_schema_prefix(catalog_name: impl AsRef<str>) -> String {
-    format!("{}-{}-", SCHEMA_PREFIX, catalog_name.as_ref())
+    format!("{}-{}-", SCHEMA_KEY_PREFIX, catalog_name.as_ref())
 }
 
 pub fn build_table_prefix(catalog_name: impl AsRef<str>, schema_name: impl AsRef<str>) -> String {
     format!(
         "{}-{}-{}-",
-        TABLE_PREFIX,
+        TABLE_KEY_PREFIX,
         catalog_name.as_ref(),
         schema_name.as_ref()
     )
@@ -53,20 +57,23 @@ pub struct TableKey {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+    pub version: TableVersion,
     pub node_id: String,
 }
 
 impl Display for TableKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.serialize_str(TABLE_PREFIX)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.catalog_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.schema_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.table_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.node_id)
+        f.write_str(TABLE_KEY_PREFIX)?;
+        f.write_str("-")?;
+        f.write_str(&self.catalog_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.schema_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.table_name)?;
+        f.write_str("-")?;
+        f.serialize_u64(self.version)?;
+        f.write_str("-")?;
+        f.write_str(&self.node_id)
     }
 }
 
@@ -76,13 +83,16 @@ impl TableKey {
         let captures = TABLE_KEY_PATTERN
             .captures(key)
             .context(InvalidCatalogSnafu { key })?;
-        ensure!(captures.len() == 5, InvalidCatalogSnafu { key });
+        ensure!(captures.len() == 6, InvalidCatalogSnafu { key });
 
+        let version =
+            u64::from_str(&captures[4]).map_err(|_| InvalidCatalogSnafu { key }.build())?;
         Ok(Self {
             catalog_name: captures[1].to_string(),
             schema_name: captures[2].to_string(),
             table_name: captures[3].to_string(),
-            node_id: captures[4].to_string(),
+            version,
+            node_id: captures[5].to_string(),
         })
     }
 }
@@ -90,6 +100,7 @@ impl TableKey {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableValue {
     pub id: TableId,
+    pub node_id: String,
     pub meta: TableMeta,
 }
 
@@ -113,11 +124,11 @@ pub struct CatalogKey {
 
 impl Display for CatalogKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.serialize_str(CATALOG_PREFIX)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.catalog_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.node_id)
+        f.write_str(CATALOG_KEY_PREFIX)?;
+        f.write_str("-")?;
+        f.write_str(&self.catalog_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.node_id)
     }
 }
 
@@ -154,13 +165,13 @@ pub struct SchemaKey {
 
 impl Display for SchemaKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.serialize_str(SCHEMA_PREFIX)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.catalog_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.schema_name)?;
-        f.serialize_str("-")?;
-        f.serialize_str(&self.node_id)
+        f.write_str(SCHEMA_KEY_PREFIX)?;
+        f.write_str("-")?;
+        f.write_str(&self.catalog_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.schema_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.node_id)
     }
 }
 
@@ -221,12 +232,13 @@ mod tests {
 
     #[test]
     fn test_parse_table_key() {
-        let key = "__t-C-S-T-N";
+        let key = "__t-C-S-T-42-N";
         let entry = TableKey::parse(key).unwrap();
         assert_eq!("C", entry.catalog_name);
         assert_eq!("S", entry.schema_name);
         assert_eq!("T", entry.table_name);
         assert_eq!("N", entry.node_id);
+        assert_eq!(42, entry.version);
         assert_eq!(key, &entry.to_string());
     }
 
@@ -259,7 +271,11 @@ mod tests {
             options: Default::default(),
         };
 
-        let value = TableValue { id: 42, meta };
+        let value = TableValue {
+            id: 42,
+            node_id: "localhost".to_string(),
+            meta,
+        };
         let serialized = serde_json::to_string(&value).unwrap();
         let deserialized = TableValue::parse(&serialized).unwrap();
         assert_eq!(value, deserialized);

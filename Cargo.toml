@@ -5,6 +5,7 @@ members = [
     "src/client",
     "src/cmd",
     "src/common/base",
+    "src/common/catalog",
     "src/common/error",
     "src/common/function",
     "src/common/function-macro",

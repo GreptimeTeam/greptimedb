@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use api::v1::codec::InsertBatch;
 use api::v1::{column, column::SemanticType, insert_expr, Column, ColumnDataType, InsertExpr};
 
@@ -159,6 +161,7 @@ impl DataPoint {
             expr: Some(insert_expr::Expr::Values(insert_expr::Values {
                 values: vec![batch.into()],
             })),
+            options: HashMap::default(),
         }
     }
 

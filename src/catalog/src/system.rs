@@ -32,7 +32,7 @@ pub const TIMESTAMP_INDEX: usize = 2;
 pub const VALUE_INDEX: usize = 3;
 
 pub struct SystemCatalogTable {
-    schema: SchemaRef,
+    table_info: TableInfoRef,
     pub table: TableRef,
 }
 
@@ -43,7 +43,7 @@ impl Table for SystemCatalogTable {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.table_info.meta.schema.clone()
     }
 
     async fn scan(
@@ -61,7 +61,7 @@ impl Table for SystemCatalogTable {
     }
 
     fn table_info(&self) -> TableInfoRef {
-        unreachable!("System catalog table does not support table_info method")
+        self.table_info.clone()
     }
 }
 
@@ -81,13 +81,16 @@ impl SystemCatalogTable {
             .await
             .context(OpenSystemCatalogSnafu)?
         {
-            Ok(Self { table, schema })
+            Ok(Self {
+                table_info: table.table_info(),
+                table,
+            })
         } else {
             // system catalog table is not yet created, try to create
             let request = CreateTableRequest {
                 id: SYSTEM_CATALOG_TABLE_ID,
-                catalog_name: Some(SYSTEM_CATALOG_NAME.to_string()),
-                schema_name: Some(INFORMATION_SCHEMA_NAME.to_string()),
+                catalog_name: SYSTEM_CATALOG_NAME.to_string(),
+                schema_name: INFORMATION_SCHEMA_NAME.to_string(),
                 table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
                 desc: Some("System catalog table".to_string()),
                 schema: schema.clone(),
@@ -100,7 +103,8 @@ impl SystemCatalogTable {
                 .create_table(&ctx, request)
                 .await
                 .context(CreateSystemCatalogSnafu)?;
-            Ok(Self { table, schema })
+            let table_info = table.table_info();
+            Ok(Self { table, table_info })
         }
     }
 
@@ -324,6 +328,22 @@ pub struct TableEntryValue {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::execution::runtime_env::RuntimeEnv;
+    use datafusion::field_util::SchemaExt;
+    use datatypes::arrow;
+    use log_store::fs::noop::NoopLogStore;
+    use object_store::ObjectStore;
+    use storage::config::EngineConfig as StorageEngineConfig;
+    use storage::EngineImpl;
+    use table::engine::TableEngine;
+    use table::metadata::TableType;
+    use table::metadata::TableType::Base;
+    use table::requests::{AlterTableRequest, DropTableRequest};
+    use table::table::adapter::TableAdapter;
+    use table_engine::config::EngineConfig;
+    use table_engine::engine::MitoEngine;
+    use tempdir::TempDir;
+
     use super::*;
 
     #[test]
@@ -394,5 +414,121 @@ mod tests {
         assert_eq!(EntryType::Schema, EntryType::try_from(2).unwrap());
         assert_eq!(EntryType::Table, EntryType::try_from(3).unwrap());
         assert!(EntryType::try_from(4).is_err());
+    }
+
+    struct MockTableEngine {
+        table_name: String,
+        sole_table: TableRef,
+    }
+
+    impl Default for MockTableEngine {
+        fn default() -> Self {
+            Self {
+                table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
+                sole_table: Arc::new(
+                    TableAdapter::new(
+                        Arc::new(datafusion::datasource::empty::EmptyTable::new(Arc::new(
+                            arrow::datatypes::Schema::empty(),
+                        ))),
+                        Arc::new(RuntimeEnv::default()),
+                    )
+                    .unwrap(),
+                ),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TableEngine for MockTableEngine {
+        fn name(&self) -> &str {
+            "MockTableEngine"
+        }
+
+        async fn create_table(
+            &self,
+            _ctx: &EngineContext,
+            _request: CreateTableRequest,
+        ) -> table::Result<TableRef> {
+            unreachable!()
+        }
+
+        async fn open_table(
+            &self,
+            _ctx: &EngineContext,
+            request: OpenTableRequest,
+        ) -> table::Result<Option<TableRef>> {
+            if request.table_name == self.table_name {
+                Ok(Some(self.sole_table.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        async fn alter_table(
+            &self,
+            _ctx: &EngineContext,
+            _request: AlterTableRequest,
+        ) -> table::Result<TableRef> {
+            unreachable!()
+        }
+
+        fn get_table(&self, _ctx: &EngineContext, name: &str) -> table::Result<Option<TableRef>> {
+            if name == self.table_name {
+                Ok(Some(self.sole_table.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn table_exists(&self, _ctx: &EngineContext, name: &str) -> bool {
+            name == self.table_name
+        }
+
+        async fn drop_table(
+            &self,
+            _ctx: &EngineContext,
+            _request: DropTableRequest,
+        ) -> table::Result<()> {
+            unreachable!()
+        }
+    }
+
+    async fn prepare_table_engine() -> (TempDir, TableEngineRef) {
+        let dir = TempDir::new("system-table-test").unwrap();
+        let store_dir = dir.path().to_string_lossy();
+        let accessor = opendal::services::fs::Builder::default()
+            .root(&store_dir)
+            .build()
+            .unwrap();
+        let object_store = ObjectStore::new(accessor);
+        let table_engine = Arc::new(MitoEngine::new(
+            EngineConfig::default(),
+            EngineImpl::new(
+                StorageEngineConfig::default(),
+                Arc::new(NoopLogStore::default()),
+                object_store.clone(),
+            ),
+            object_store,
+        ));
+        (dir, table_engine)
+    }
+
+    #[tokio::test]
+    async fn test_system_table_type() {
+        let (_dir, table_engine) = prepare_table_engine().await;
+        let system_table = SystemCatalogTable::new(table_engine).await.unwrap();
+        assert_eq!(Base, system_table.table_type());
+    }
+
+    #[tokio::test]
+    async fn test_system_table_info() {
+        let (_dir, table_engine) = prepare_table_engine().await;
+        let system_table = SystemCatalogTable::new(table_engine).await.unwrap();
+        let info = system_table.table_info();
+        assert_eq!(TableType::Base, info.table_type);
+        assert_eq!(SYSTEM_CATALOG_TABLE_NAME, info.name);
+        assert_eq!(SYSTEM_CATALOG_TABLE_ID, info.ident.table_id);
+        assert_eq!(SYSTEM_CATALOG_NAME, info.catalog_name);
+        assert_eq!(INFORMATION_SCHEMA_NAME, info.schema_name);
     }
 }

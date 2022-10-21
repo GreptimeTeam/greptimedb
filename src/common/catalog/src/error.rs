@@ -8,21 +8,29 @@ use snafu::{Backtrace, ErrorCompat};
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Invalid catalog info: {}", key))]
-    InvalidCatalog { key: String },
+    InvalidCatalog { key: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to deserialize catalog entry value: {}", raw))]
     DeserializeCatalogEntryValue {
         raw: String,
+        backtrace: Backtrace,
         source: serde_json::error::Error,
     },
 
     #[snafu(display("Failed to serialize catalog entry value"))]
-    SerializeCatalogEntryValue { source: serde_json::error::Error },
+    SerializeCatalogEntryValue {
+        backtrace: Backtrace,
+        source: serde_json::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        todo!()
+        match self {
+            Error::InvalidCatalog { .. }
+            | Error::DeserializeCatalogEntryValue { .. }
+            | Error::SerializeCatalogEntryValue { .. } => StatusCode::Unexpected,
+        }
     }
 
     fn backtrace_opt(&self) -> Option<&Backtrace> {

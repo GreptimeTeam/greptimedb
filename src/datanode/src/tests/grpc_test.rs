@@ -162,6 +162,7 @@ async fn insert_and_assert(db: &Database) {
     let expr = InsertExpr {
         table_name: "demo".to_string(),
         expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
+        options: HashMap::default(),
     };
     let result = db.insert(expr).await;
     assert!(result.is_ok());
