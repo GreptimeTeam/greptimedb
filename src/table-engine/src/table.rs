@@ -151,6 +151,7 @@ impl<R: Region> Table for MitoTable<R> {
 
     async fn scan(
         &self,
+        _partition: usize,
         projection: &Option<Vec<usize>>,
         filters: &[Expr],
         _limit: Option<usize>,

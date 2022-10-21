@@ -50,6 +50,7 @@ impl Table for NumbersTable {
 
     async fn scan(
         &self,
+        _partition: usize,
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,

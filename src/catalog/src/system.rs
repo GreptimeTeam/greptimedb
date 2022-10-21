@@ -22,7 +22,7 @@ use crate::consts::{
     SYSTEM_CATALOG_TABLE_NAME,
 };
 use crate::error::{
-    CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
+    self, CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
     OpenSystemCatalogSnafu, Result, ValueDeserializeSnafu,
 };
 
@@ -48,6 +48,7 @@ impl Table for SystemCatalogTable {
 
     async fn scan(
         &self,
+        _partition: usize,
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
@@ -111,7 +112,11 @@ impl SystemCatalogTable {
     /// Create a stream of all entries inside system catalog table
     pub async fn records(&self) -> Result<SendableRecordBatchStream> {
         let full_projection = None;
-        let stream = self.table.scan(&full_projection, &[], None).await.unwrap();
+        let stream = self
+            .table
+            .scan(0, &full_projection, &[], None)
+            .await
+            .context(error::SystemCatalogTableScanSnafu)?;
         Ok(stream)
     }
 }

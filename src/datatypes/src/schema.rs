@@ -19,7 +19,7 @@ use crate::vectors::VectorRef;
 /// query engine may modify the column order of the arrow schema, then
 /// we would fail to recover the correct timestamp column when converting
 /// the arrow schema back to our schema.
-const TIMESTAMP_COLUMN_KEY: &str = "greptime:timestamp_column";
+pub const TIMESTAMP_COLUMN_KEY: &str = "greptime:timestamp_column";
 /// Key used to store version number of the schema in metadata.
 const VERSION_KEY: &str = "greptime:version";
 /// Key used to store default constraint in arrow field's metadata.

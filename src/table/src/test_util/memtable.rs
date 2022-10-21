@@ -68,6 +68,7 @@ impl Table for MemTable {
 
     async fn scan(
         &self,
+        _partition: usize,
         projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
@@ -137,7 +138,7 @@ mod test {
     async fn test_scan_with_projection() {
         let table = build_testing_table();
 
-        let scan_stream = table.scan(&Some(vec![1]), &[], None).await.unwrap();
+        let scan_stream = table.scan(0, &Some(vec![1]), &[], None).await.unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
         let columns = recordbatch[0].df_recordbatch.columns();
@@ -156,7 +157,7 @@ mod test {
     async fn test_scan_with_limit() {
         let table = build_testing_table();
 
-        let scan_stream = table.scan(&None, &[], Some(2)).await.unwrap();
+        let scan_stream = table.scan(0, &None, &[], Some(2)).await.unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
         let columns = recordbatch[0].df_recordbatch.columns();

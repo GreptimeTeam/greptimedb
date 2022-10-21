@@ -59,6 +59,7 @@ impl Table for Tables {
 
     async fn scan(
         &self,
+        _partition: usize,
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
@@ -298,7 +299,7 @@ mod tests {
         catalog_list.register_catalog("test_catalog".to_string(), catalog_provider);
         let tables = Tables::new(catalog_list, "test_engine".to_string());
 
-        let mut tables_stream = tables.scan(&None, &[], None).await.unwrap();
+        let mut tables_stream = tables.scan(0, &None, &[], None).await.unwrap();
         if let Some(t) = tables_stream.next().await {
             let batch = t.unwrap().df_recordbatch;
             assert_eq!(1, batch.num_rows());

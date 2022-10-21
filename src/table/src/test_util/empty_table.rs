@@ -61,6 +61,7 @@ impl Table for EmptyTable {
 
     async fn scan(
         &self,
+        _partition: usize,
         _projection: &Option<Vec<usize>>,
         _filters: &[common_query::prelude::Expr],
         _limit: Option<usize>,

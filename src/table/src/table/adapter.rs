@@ -6,6 +6,7 @@ use std::fmt::Debug;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
@@ -24,10 +25,11 @@ use datafusion::physical_plan::{
     RecordBatchStream as DfRecordBatchStream,
     SendableRecordBatchStream as DfSendableRecordBatchStream, Statistics,
 };
+use datafusion_common::field_util::SchemaExt;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::error::{ArrowError, Result as ArrowResult};
-use datatypes::schema::SchemaRef;
 use datatypes::schema::{Schema, SchemaRef as TableSchemaRef};
+use datatypes::schema::{SchemaRef, TIMESTAMP_COLUMN_KEY};
 use futures::Stream;
 use snafu::prelude::*;
 
@@ -144,10 +146,18 @@ impl TableProvider for DfTableProviderAdapter {
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Into::into).collect();
 
-        let stream = self.table.scan(projection, &filters, limit).await?;
-        Ok(Arc::new(ExecutionPlanAdapter {
-            schema: stream.schema(),
-            stream: Mutex::new(Some(stream)),
+        let table_schema = self.table.schema();
+        let df_schema = project_arrow_schema(table_schema, projection)?;
+
+        let partitioning = self.table.partitioning_hint(&filters);
+
+        Ok(Arc::new(TableScanPlan {
+            table: self.table.clone(),
+            df_schema,
+            partitioning,
+            projection: projection.clone(),
+            filters,
+            limit,
         }))
     }
 
@@ -160,6 +170,94 @@ impl TableProvider for DfTableProviderAdapter {
             FilterPushDownType::Inexact => Ok(DfTableProviderFilterPushDown::Inexact),
             FilterPushDownType::Exact => Ok(DfTableProviderFilterPushDown::Exact),
         }
+    }
+}
+
+fn project_arrow_schema(
+    table_schema: SchemaRef,
+    projection: &Option<Vec<usize>>,
+) -> DfResult<DfSchemaRef> {
+    let df_schema = table_schema.arrow_schema();
+    let df_schema = if let Some(projection) = &projection {
+        let mut df_schema = df_schema.project(projection)?;
+        if let Some(timestamp_index) = table_schema.timestamp_index() {
+            if !projection.contains(&timestamp_index) {
+                df_schema.metadata.remove(TIMESTAMP_COLUMN_KEY);
+            }
+        }
+        Arc::new(df_schema)
+    } else {
+        df_schema.clone()
+    };
+    Ok(df_schema)
+}
+
+struct TableScanPlan {
+    table: TableRef,
+    df_schema: DfSchemaRef,
+    partitioning: Partitioning,
+    projection: Option<Vec<usize>>,
+    filters: Vec<Expr>,
+    limit: Option<usize>,
+}
+
+impl Debug for TableScanPlan {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TableScanPlan")
+            .field("table", &self.table.table_info().name)
+            .field("df_schema", &self.df_schema)
+            .field("partitioning", &self.partitioning)
+            .field("projection", &self.projection)
+            .field("filters", &self.filters)
+            .field("limit", &self.limit)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl ExecutionPlan for TableScanPlan {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> DfSchemaRef {
+        self.df_schema.clone()
+    }
+
+    fn output_partitioning(&self) -> Partitioning {
+        self.partitioning.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
+        None
+    }
+
+    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        &self,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        unimplemented!("Leaf table scan node cannot have new children for now.")
+    }
+
+    async fn execute(
+        &self,
+        partition: usize,
+        _runtime: Arc<RuntimeEnv>,
+    ) -> DfResult<DfSendableRecordBatchStream> {
+        let stream = self
+            .table
+            .scan(partition, &self.projection, &self.filters, self.limit)
+            .await?;
+        Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream)))
+    }
+
+    fn statistics(&self) -> Statistics {
+        // TODO(LFC): impl statistics
+        Statistics::default()
     }
 }
 
@@ -204,6 +302,7 @@ impl Table for TableAdapter {
 
     async fn scan(
         &self,
+        _partition: usize,
         projection: &Option<Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,

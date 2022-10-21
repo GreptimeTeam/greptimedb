@@ -103,6 +103,12 @@ pub enum Error {
 
     #[snafu(display("Illegal catalog manager state: {}", msg))]
     IllegalManagerState { backtrace: Backtrace, msg: String },
+
+    #[snafu(display("Failed to scan system catalog table, source: {}", source))]
+    SystemCatalogTableScan {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -131,7 +137,8 @@ impl ErrorExt for Error {
             | Error::CreateSystemCatalog { source, .. }
             | Error::InsertTableRecord { source, .. }
             | Error::OpenTable { source, .. }
-            | Error::CreateTable { source, .. } => source.status_code(),
+            | Error::CreateTable { source, .. }
+            | Error::SystemCatalogTableScan { source } => source.status_code(),
         }
     }
 

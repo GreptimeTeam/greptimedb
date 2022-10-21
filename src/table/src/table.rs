@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
+use datafusion::physical_plan::Partitioning;
 use datatypes::schema::SchemaRef;
 
 use crate::error::Result;
@@ -35,9 +36,17 @@ pub trait Table: Send + Sync {
         unimplemented!();
     }
 
+    /// Hints for scanning executor(DataFusion) of how partitioning will be calculated with the
+    /// provided `filters`. Executor may use this partitioning hint to decide how to call the
+    /// `scan` method.
+    fn partitioning_hint(&self, _filters: &[Expr]) -> Partitioning {
+        Partitioning::UnknownPartitioning(1)
+    }
+
     /// Scan the table and returns a SendableRecordBatchStream.
     async fn scan(
         &self,
+        partition: usize,
         projection: &Option<Vec<usize>>,
         filters: &[Expr],
         // limit can be used to reduce the amount scanned

@@ -409,7 +409,7 @@ mod tests {
                 ..Default::default()
             }),
             // FIXME(dennis): looks like the read schema in table scan doesn't have timestamp index, we have to investigate it.
-            semantic_type: SemanticType::Field as i32,
+            semantic_type: SemanticType::Timestamp as i32,
             datatype: ColumnDataType::Timestamp as i32,
             ..Default::default()
         };
