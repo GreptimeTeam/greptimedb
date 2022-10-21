@@ -72,7 +72,7 @@ impl<S: LogStore> Wal<S> {
     /// v                                                                          v
     /// +---------------------+----------------------------------------------------+--------------+-------------+--------------+
     /// |                     |                       Header                       |              |             |              |
-    /// | Header Len(varint)  |  (last_manifest_version + mutation_extras + ...)   | Data Chunk0  | Data Chunk1 |     ...      |
+    /// | Header Len(varint)  |  (last_manifest_version + mutation_types + ...)   | Data Chunk0  | Data Chunk1 |     ...      |
     /// |                     |                                                    |              |             |              |
     /// +---------------------+----------------------------------------------------+--------------+-------------+--------------+
     /// ```
@@ -85,7 +85,7 @@ impl<S: LogStore> Wal<S> {
     ) -> Result<(u64, usize)> {
         header.payload_type = payload.payload_type();
         if let Payload::WriteBatchArrow(batch) = payload {
-            header.mutation_extras = wal::gen_mutation_extras(batch);
+            header.mutation_types = wal::gen_mutation_types(batch);
         }
 
         let mut buf = vec![];
@@ -184,8 +184,8 @@ impl<S: LogStore> Wal<S> {
         match PayloadType::from_i32(header.payload_type) {
             Some(PayloadType::None) => Ok((seq_num, header, None)),
             Some(PayloadType::WriteBatchArrow) => {
-                let mutation_extras = std::mem::take(&mut header.mutation_extras);
-                let decoder = WriteBatchArrowDecoder::new(mutation_extras);
+                let mutation_types = std::mem::take(&mut header.mutation_types);
+                let decoder = WriteBatchArrowDecoder::new(mutation_types);
                 let write_batch = decoder
                     .decode(&input[data_pos..])
                     .map_err(BoxedError::new)
@@ -196,8 +196,8 @@ impl<S: LogStore> Wal<S> {
                 Ok((seq_num, header, Some(write_batch)))
             }
             Some(PayloadType::WriteBatchProto) => {
-                let mutation_extras = std::mem::take(&mut header.mutation_extras);
-                let decoder = WriteBatchProtobufDecoder::new(mutation_extras);
+                let mutation_types = std::mem::take(&mut header.mutation_types);
+                let decoder = WriteBatchProtobufDecoder::new(mutation_types);
                 let write_batch = decoder
                     .decode(&input[data_pos..])
                     .map_err(BoxedError::new)
@@ -319,7 +319,7 @@ mod tests {
         let wal_header = WalHeader {
             payload_type: 1,
             last_manifest_version: 99999999,
-            mutation_extras: vec![],
+            mutation_types: vec![],
         };
 
         let mut buf: Vec<u8> = vec![];

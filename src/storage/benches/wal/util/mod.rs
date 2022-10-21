@@ -33,9 +33,7 @@ pub fn new_test_batch() -> WriteBatch {
     )
 }
 
-pub fn gen_new_batch_and_extras(
-    putdate_nums: usize,
-) -> (WriteBatch, Vec<storage::proto::wal::MutationExtra>) {
+pub fn gen_new_batch_and_types(putdate_nums: usize) -> (WriteBatch, Vec<i32>) {
     let mut batch = new_test_batch();
     let mut rng = rand::thread_rng();
     for _ in 0..putdate_nums {
@@ -78,6 +76,6 @@ pub fn gen_new_batch_and_extras(
         put_data.add_key_column("10", svs.clone()).unwrap();
         batch.put(put_data).unwrap();
     }
-    let extras = proto::wal::gen_mutation_extras(&batch);
-    (batch, extras)
+    let types = proto::wal::gen_mutation_types(&batch);
+    (batch, types)
 }

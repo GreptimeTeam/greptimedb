@@ -3,13 +3,11 @@ tonic::include_proto!("greptime.storage.wal.v1");
 
 use crate::write_batch::{Mutation, WriteBatch};
 
-pub fn gen_mutation_extras(write_batch: &WriteBatch) -> Vec<MutationExtra> {
+pub fn gen_mutation_types(write_batch: &WriteBatch) -> Vec<i32> {
     write_batch
         .iter()
         .map(|m| match m {
-            Mutation::Put(_) => MutationExtra {
-                mutation_type: MutationType::Put.into(),
-            },
+            Mutation::Put(_) => MutationType::Put.into(),
         })
         .collect::<Vec<_>>()
 }

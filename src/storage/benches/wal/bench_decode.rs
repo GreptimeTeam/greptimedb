@@ -2,7 +2,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use storage::codec::{Decoder, Encoder};
 use storage::write_batch::{codec, WriteBatch};
 
-use super::util::gen_new_batch_and_extras;
+use crate::wal::util::gen_new_batch_and_types;
 
 /*
 -------------------------------------
@@ -30,22 +30,22 @@ fn encode_protobuf(batch: &WriteBatch, dst: &mut Vec<u8>) {
     assert!(result.is_ok());
 }
 
-fn decode_arrow(dst: &[u8], mutation_extras: &[storage::proto::wal::MutationExtra]) {
-    let decoder = codec::WriteBatchArrowDecoder::new(mutation_extras.to_vec());
+fn decode_arrow(dst: &[u8], mutation_types: &[i32]) {
+    let decoder = codec::WriteBatchArrowDecoder::new(mutation_types.to_vec());
     let result = decoder.decode(dst);
     assert!(result.is_ok());
 }
 
-fn decode_protobuf(dst: &[u8], mutation_extras: &[storage::proto::wal::MutationExtra]) {
-    let decoder = codec::WriteBatchProtobufDecoder::new(mutation_extras.to_vec());
+fn decode_protobuf(dst: &[u8], mutation_types: &[i32]) {
+    let decoder = codec::WriteBatchProtobufDecoder::new(mutation_types.to_vec());
     let result = decoder.decode(dst);
     assert!(result.is_ok());
 }
 
 fn bench_wal_decode(c: &mut Criterion) {
-    let (batch_10, extras_10) = gen_new_batch_and_extras(1);
-    let (batch_100, extras_100) = gen_new_batch_and_extras(10);
-    let (batch_10000, extras_10000) = gen_new_batch_and_extras(100);
+    let (batch_10, types_10) = gen_new_batch_and_types(1);
+    let (batch_100, types_100) = gen_new_batch_and_types(10);
+    let (batch_10000, types_10000) = gen_new_batch_and_types(100);
     let mut dst_protobuf_10 = vec![];
     let mut dst_protobuf_100 = vec![];
     let mut dst_protobuf_10000 = vec![];
@@ -64,22 +64,22 @@ fn bench_wal_decode(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("wal_decode");
     group.bench_function("protobuf_decode_with_10_num_rows", |b| {
-        b.iter(|| decode_protobuf(&dst_protobuf_10, &extras_10))
+        b.iter(|| decode_protobuf(&dst_protobuf_10, &types_10))
     });
     group.bench_function("protobuf_decode_with_100_num_rows", |b| {
-        b.iter(|| decode_protobuf(&dst_protobuf_100, &extras_100))
+        b.iter(|| decode_protobuf(&dst_protobuf_100, &types_100))
     });
     group.bench_function("protobuf_decode_with_10000_num_rows", |b| {
-        b.iter(|| decode_protobuf(&dst_protobuf_10000, &extras_10000))
+        b.iter(|| decode_protobuf(&dst_protobuf_10000, &types_10000))
     });
     group.bench_function("arrow_decode_with_10_num_rows", |b| {
-        b.iter(|| decode_arrow(&dst_arrow_10, &extras_10))
+        b.iter(|| decode_arrow(&dst_arrow_10, &types_10))
     });
     group.bench_function("arrow_decode_with_100_num_rows", |b| {
-        b.iter(|| decode_arrow(&dst_arrow_100, &extras_100))
+        b.iter(|| decode_arrow(&dst_arrow_100, &types_100))
     });
     group.bench_function("arrow_decode_with_10000_num_rows", |b| {
-        b.iter(|| decode_arrow(&dst_arrow_10000, &extras_10000))
+        b.iter(|| decode_arrow(&dst_arrow_10000, &types_10000))
     });
     group.finish();
 }

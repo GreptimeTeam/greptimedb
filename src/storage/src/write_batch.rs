@@ -494,7 +494,7 @@ pub mod codec {
 
     use crate::codec::{Decoder, Encoder};
     use crate::proto::{
-        wal::{MutationExtra, MutationType},
+        wal::MutationType,
         write_batch::{self, gen_columns, gen_put_data_vector},
     };
     use crate::write_batch::{
@@ -557,12 +557,12 @@ pub mod codec {
     }
 
     pub struct WriteBatchArrowDecoder {
-        mutation_extras: Vec<MutationExtra>,
+        mutation_types: Vec<i32>,
     }
 
     impl WriteBatchArrowDecoder {
-        pub fn new(mutation_extras: Vec<MutationExtra>) -> Self {
-            Self { mutation_extras }
+        pub fn new(mutation_types: Vec<i32>) -> Self {
+            Self { mutation_types }
         }
     }
 
@@ -576,7 +576,7 @@ pub mod codec {
             let mut reader = StreamReader::new(reader, metadata);
             let arrow_schema = reader.metadata().schema.clone();
 
-            let mut chunks = Vec::with_capacity(self.mutation_extras.len());
+            let mut chunks = Vec::with_capacity(self.mutation_types.len());
             for stream_state in reader.by_ref() {
                 let stream_state = stream_state.context(DecodeArrowSnafu)?;
                 let chunk = match stream_state {
@@ -596,11 +596,11 @@ pub mod codec {
             );
 
             ensure!(
-                chunks.len() == self.mutation_extras.len(),
+                chunks.len() == self.mutation_types.len(),
                 DataCorruptedSnafu {
                     message: format!(
                         "expected {} mutations, but got {}",
-                        self.mutation_extras.len(),
+                        self.mutation_types.len(),
                         chunks.len()
                     )
                 }
@@ -609,8 +609,8 @@ pub mod codec {
             let schema = Arc::new(Schema::try_from(arrow_schema).context(ParseSchemaSnafu)?);
             let mut write_batch = WriteBatch::new(schema.clone());
 
-            for (ext, chunk) in self.mutation_extras.iter().zip(chunks.into_iter()) {
-                match MutationType::from_i32(ext.mutation_type) {
+            for (mutation_type, chunk) in self.mutation_types.iter().zip(chunks.into_iter()) {
+                match MutationType::from_i32(*mutation_type) {
                     Some(MutationType::Put) => {
                         let mut put_data = PutData::with_num_columns(schema.num_columns());
                         for (column_schema, array) in
@@ -628,7 +628,7 @@ pub mod codec {
                     }
                     _ => {
                         return DataCorruptedSnafu {
-                            message: format!("Unexpceted mutation type: {}", ext.mutation_type),
+                            message: format!("Unexpceted mutation type: {}", mutation_type),
                         }
                         .fail()
                     }
@@ -682,13 +682,13 @@ pub mod codec {
     }
 
     pub struct WriteBatchProtobufDecoder {
-        mutation_extras: Vec<MutationExtra>,
+        mutation_types: Vec<i32>,
     }
 
     impl WriteBatchProtobufDecoder {
         #[allow(dead_code)]
-        pub fn new(mutation_extras: Vec<MutationExtra>) -> Self {
-            Self { mutation_extras }
+        pub fn new(mutation_types: Vec<i32>) -> Self {
+            Self { mutation_types }
         }
     }
 
@@ -706,11 +706,11 @@ pub mod codec {
             let schema = SchemaRef::try_from(schema).context(FromProtobufSnafu {})?;
 
             ensure!(
-                write_batch.mutations.len() == self.mutation_extras.len(),
+                write_batch.mutations.len() == self.mutation_types.len(),
                 DataCorruptedSnafu {
                     message: &format!(
                         "expected {} mutations, but got {}",
-                        self.mutation_extras.len(),
+                        self.mutation_types.len(),
                         write_batch.mutations.len()
                     )
                 }
@@ -773,7 +773,6 @@ mod tests {
     use super::*;
     use crate::codec::{Decoder, Encoder};
     use crate::proto;
-    use crate::proto::wal::MutationExtra;
     use crate::test_util::write_batch_util;
 
     #[test]
@@ -1025,7 +1024,7 @@ mod tests {
         )
     }
 
-    fn gen_new_batch_and_extras() -> (WriteBatch, Vec<MutationExtra>) {
+    fn gen_new_batch_and_types() -> (WriteBatch, Vec<i32>) {
         let mut batch = new_test_batch();
         for i in 0..10 {
             let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
@@ -1041,21 +1040,21 @@ mod tests {
             batch.put(put_data).unwrap();
         }
 
-        let extras = proto::wal::gen_mutation_extras(&batch);
+        let types = proto::wal::gen_mutation_types(&batch);
 
-        (batch, extras)
+        (batch, types)
     }
 
     #[test]
     fn test_codec_arrow() -> Result<()> {
-        let (batch, mutation_extras) = gen_new_batch_and_extras();
+        let (batch, mutation_types) = gen_new_batch_and_types();
 
         let encoder = codec::WriteBatchArrowEncoder::new();
         let mut dst = vec![];
         let result = encoder.encode(&batch, &mut dst);
         assert!(result.is_ok());
 
-        let decoder = codec::WriteBatchArrowDecoder::new(mutation_extras);
+        let decoder = codec::WriteBatchArrowDecoder::new(mutation_types);
         let result = decoder.decode(&dst);
         let batch2 = result?;
         assert_eq!(batch.num_rows, batch2.num_rows);
@@ -1065,14 +1064,14 @@ mod tests {
 
     #[test]
     fn test_codec_protobuf() -> Result<()> {
-        let (batch, mutation_extras) = gen_new_batch_and_extras();
+        let (batch, mutation_types) = gen_new_batch_and_types();
 
         let encoder = codec::WriteBatchProtobufEncoder {};
         let mut dst = vec![];
         let result = encoder.encode(&batch, &mut dst);
         assert!(result.is_ok());
 
-        let decoder = codec::WriteBatchProtobufDecoder::new(mutation_extras);
+        let decoder = codec::WriteBatchProtobufDecoder::new(mutation_types);
         let result = decoder.decode(&dst);
         let batch2 = result?;
         assert_eq!(batch.num_rows, batch2.num_rows);
@@ -1080,7 +1079,7 @@ mod tests {
         Ok(())
     }
 
-    fn gen_new_batch_and_extras_with_none_column() -> (WriteBatch, Vec<MutationExtra>) {
+    fn gen_new_batch_and_types_with_none_column() -> (WriteBatch, Vec<i32>) {
         let mut batch = new_test_batch();
         for _ in 0..10 {
             let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
@@ -1094,21 +1093,21 @@ mod tests {
             batch.put(put_data).unwrap();
         }
 
-        let extras = proto::wal::gen_mutation_extras(&batch);
+        let types = proto::wal::gen_mutation_types(&batch);
 
-        (batch, extras)
+        (batch, types)
     }
 
     #[test]
     fn test_codec_with_none_column_arrow() -> Result<()> {
-        let (batch, mutation_extras) = gen_new_batch_and_extras_with_none_column();
+        let (batch, mutation_types) = gen_new_batch_and_types_with_none_column();
 
         let encoder = codec::WriteBatchArrowEncoder::new();
         let mut dst = vec![];
         let result = encoder.encode(&batch, &mut dst);
         assert!(result.is_ok());
 
-        let decoder = codec::WriteBatchArrowDecoder::new(mutation_extras);
+        let decoder = codec::WriteBatchArrowDecoder::new(mutation_types);
         let result = decoder.decode(&dst);
         let batch2 = result?;
         assert_eq!(batch.num_rows, batch2.num_rows);
@@ -1118,13 +1117,13 @@ mod tests {
 
     #[test]
     fn test_codec_with_none_column_protobuf() -> Result<()> {
-        let (batch, mutation_extras) = gen_new_batch_and_extras_with_none_column();
+        let (batch, mutation_types) = gen_new_batch_and_types_with_none_column();
 
         let encoder = codec::WriteBatchProtobufEncoder {};
         let mut dst = vec![];
         encoder.encode(&batch, &mut dst).unwrap();
 
-        let decoder = codec::WriteBatchProtobufDecoder::new(mutation_extras);
+        let decoder = codec::WriteBatchProtobufDecoder::new(mutation_types);
         let result = decoder.decode(&dst);
         let batch2 = result?;
         assert_eq!(batch.num_rows, batch2.num_rows);

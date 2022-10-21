@@ -2,7 +2,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use storage::codec::Encoder;
 use storage::write_batch::{codec, WriteBatch};
 
-use super::util::gen_new_batch_and_extras;
+use crate::wal::util::gen_new_batch_and_types;
 
 /*
 -------------------------------------
@@ -33,9 +33,9 @@ fn encode_protobuf(batch: &WriteBatch) {
 }
 
 fn bench_wal_encode(c: &mut Criterion) {
-    let (batch_10, _) = gen_new_batch_and_extras(1);
-    let (batch_100, _) = gen_new_batch_and_extras(10);
-    let (batch_10000, _) = gen_new_batch_and_extras(100);
+    let (batch_10, _) = gen_new_batch_and_types(1);
+    let (batch_100, _) = gen_new_batch_and_types(10);
+    let (batch_10000, _) = gen_new_batch_and_types(100);
 
     let mut group = c.benchmark_group("wal_encode");
     group.bench_function("protobuf_encode_with_10_num_rows", |b| {
