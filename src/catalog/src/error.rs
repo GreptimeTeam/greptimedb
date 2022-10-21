@@ -110,7 +110,7 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to execute system catalog table scan"))]
+    #[snafu(display("Failed to execute system catalog table scan, source: {}", source))]
     SystemCatalogTableScanExec {
         #[snafu(backtrace)]
         source: common_query::error::Error,
