@@ -53,6 +53,12 @@ pub enum InnerError {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
+
+    #[snafu(display("Failed to execute physical plan, source: {}", source))]
+    ExecutePhysicalPlan {
+        #[snafu(backtrace)]
+        source: common_query::error::Error,
+    },
 }
 
 impl ErrorExt for InnerError {
@@ -69,6 +75,7 @@ impl ErrorExt for InnerError {
             ParseSql { source, .. } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
             ConvertDfRecordBatchStream { source } => source.status_code(),
+            ExecutePhysicalPlan { source } => source.status_code(),
         }
     }
 

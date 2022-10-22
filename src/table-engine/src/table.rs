@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use common_query::execution::ExecutionPlanRef;
 use common_query::logical_plan::Expr;
+use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream};
 use common_telemetry::logging;
@@ -156,7 +156,7 @@ impl<R: Region> Table for MitoTable<R> {
         projection: &Option<Vec<usize>>,
         filters: &[Expr],
         _limit: Option<usize>,
-    ) -> TableResult<ExecutionPlanRef> {
+    ) -> TableResult<PhysicalPlanRef> {
         let read_ctx = ReadContext::default();
         let snapshot = self.region.snapshot(&read_ctx).map_err(TableError::new)?;
 

@@ -2,8 +2,8 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_query::execution::ExecutionPlanRef;
 use common_query::logical_plan::Expr;
+use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::timestamp::Timestamp;
@@ -53,7 +53,7 @@ impl Table for SystemCatalogTable {
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
-    ) -> table::Result<ExecutionPlanRef> {
+    ) -> table::Result<PhysicalPlanRef> {
         panic!("System catalog table does not support scan!")
     }
 

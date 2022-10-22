@@ -1,9 +1,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_query::execution::{DfExecutionPlanAdapter, ExecutionPlanAdapter, ExecutionPlanRef};
 use common_query::logical_plan::Expr;
-use common_query::DfExecutionPlan;
+use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlanAdapter, PhysicalPlanRef};
+use common_query::DfPhysicalPlan;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 ///  Datafusion table adpaters
@@ -13,7 +13,7 @@ use datafusion::datasource::{
 };
 use datafusion::error::Result as DfResult;
 use datafusion::logical_plan::Expr as DfExpr;
-use datatypes::schema::SchemaRef as TableSchemaRef;
+use datatypes::schema::{SchemaRef as TableSchemaRef, SchemaRef};
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
@@ -58,10 +58,10 @@ impl TableProvider for DfTableProviderAdapter {
         projection: &Option<Vec<usize>>,
         filters: &[DfExpr],
         limit: Option<usize>,
-    ) -> DfResult<Arc<dyn DfExecutionPlan>> {
+    ) -> DfResult<Arc<dyn DfPhysicalPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Into::into).collect();
         let inner = self.table.scan(projection, &filters, limit).await?;
-        Ok(Arc::new(DfExecutionPlanAdapter(inner)))
+        Ok(Arc::new(DfPhysicalPlanAdapter(inner)))
     }
 
     fn supports_filter_pushdown(&self, filter: &DfExpr) -> DfResult<DfTableProviderFilterPushDown> {
@@ -123,7 +123,7 @@ impl Table for TableAdapter {
         projection: &Option<Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
-    ) -> Result<ExecutionPlanRef> {
+    ) -> Result<PhysicalPlanRef> {
         let filters: Vec<DfExpr> = filters.iter().map(|e| e.df_expr().clone()).collect();
         debug!("TableScan filter size: {}", filters.len());
         let execution_plan = self
@@ -131,7 +131,13 @@ impl Table for TableAdapter {
             .scan(projection, &filters, limit)
             .await
             .context(error::DatafusionSnafu)?;
-        Ok(Arc::new(ExecutionPlanAdapter(execution_plan)))
+        let schema: SchemaRef = Arc::new(
+            execution_plan
+                .schema()
+                .try_into()
+                .context(error::SchemaConversionSnafu)?,
+        );
+        Ok(Arc::new(PhysicalPlanAdapter::new(schema, execution_plan)))
     }
 
     fn supports_filter_pushdown(&self, filter: &Expr) -> Result<FilterPushDownType> {

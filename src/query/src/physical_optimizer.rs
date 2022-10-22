@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::{error::Result, plan::PhysicalPlan, query_engine::QueryContext};
+use common_query::physical_plan::PhysicalPlan;
+
+use crate::{error::Result, query_engine::QueryContext};
 
 pub trait PhysicalOptimizer {
     fn optimize_physical_plan(

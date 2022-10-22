@@ -5,12 +5,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
-use common_query::execution::{ExecutionPlan, ExecutionPlanRef};
-use common_query::PhysicalSortExpr;
+use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::physical_plan::Partitioning;
-use datafusion::physical_plan::Statistics;
 use datatypes::schema::SchemaRef;
 use snafu::OptionExt;
 
@@ -39,7 +37,7 @@ impl SimpleTableScan {
 }
 
 #[async_trait]
-impl ExecutionPlan for SimpleTableScan {
+impl PhysicalPlan for SimpleTableScan {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -52,15 +50,11 @@ impl ExecutionPlan for SimpleTableScan {
         Partitioning::UnknownPartitioning(1)
     }
 
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        None
-    }
-
-    fn children(&self) -> Vec<ExecutionPlanRef> {
+    fn children(&self) -> Vec<PhysicalPlanRef> {
         vec![]
     }
 
-    fn with_new_children(&self, _children: Vec<ExecutionPlanRef>) -> QueryResult<ExecutionPlanRef> {
+    fn with_new_children(&self, _children: Vec<PhysicalPlanRef>) -> QueryResult<PhysicalPlanRef> {
         unimplemented!()
     }
 
@@ -71,11 +65,6 @@ impl ExecutionPlan for SimpleTableScan {
     ) -> QueryResult<SendableRecordBatchStream> {
         let mut stream = self.stream.lock().unwrap();
         Ok(stream.take().context(query_error::ExecuteRepeatedlySnafu)?)
-    }
-
-    fn statistics(&self) -> Statistics {
-        // TODO(LFC): implement statistics
-        Statistics::default()
     }
 }
 

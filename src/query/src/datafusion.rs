@@ -2,7 +2,6 @@
 
 mod catalog_adapter;
 mod error;
-pub mod plan_adapter;
 mod planner;
 
 use std::sync::Arc;
@@ -11,9 +10,14 @@ use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
+use common_query::physical_plan::PhysicalPlanAdapter;
+use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan};
 use common_query::{prelude::ScalarUdf, Output};
+use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::ExecutionPlan;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::statement::Statement;
 use sql::{dialect::GenericDialect, parser::ParserContext};
@@ -22,14 +26,13 @@ pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 use crate::metric;
 use crate::query_engine::{QueryContext, QueryEngineState};
 use crate::{
-    datafusion::plan_adapter::PhysicalPlanAdapter,
     datafusion::planner::{DfContextProviderAdapter, DfPlanner},
     error::Result,
     executor::QueryExecutor,
     logical_optimizer::LogicalOptimizer,
     physical_optimizer::PhysicalOptimizer,
     physical_planner::PhysicalPlanner,
-    plan::{LogicalPlan, PhysicalPlan},
+    plan::LogicalPlan,
     planner::Planner,
     QueryEngine,
 };
@@ -179,8 +182,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
             .as_any()
             .downcast_ref::<PhysicalPlanAdapter>()
             .context(error::PhysicalPlanDowncastSnafu)?
-            .df_plan()
-            .clone();
+            .df_plan();
 
         for optimizer in optimizers {
             new_plan = optimizer
@@ -203,9 +205,25 @@ impl QueryExecutor for DatafusionQueryEngine {
         let _timer = timer!(metric::METRIC_EXEC_PLAN_ELAPSED);
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
-            1 => Ok(plan.execute(&ctx.state().runtime(), 0).await?),
+            1 => Ok(plan
+                .execute(0, ctx.state().runtime().into())
+                .await
+                .context(error::ExecutePhysicalPlanSnafu)?),
             _ => {
-                unimplemented!();
+                // merge into a single partition
+                let plan =
+                    CoalescePartitionsExec::new(Arc::new(DfPhysicalPlanAdapter(plan.clone())));
+                // CoalescePartitionsExec must produce a single partition
+                assert_eq!(1, plan.output_partitioning().partition_count());
+                let df_stream = plan
+                    .execute(0, ctx.state().runtime().into())
+                    .await
+                    .context(error::DatafusionSnafu {
+                        msg: "Failed to execute DataFusion merge exec",
+                    })?;
+                let stream = RecordBatchStreamAdapter::try_new(df_stream)
+                    .context(error::ConvertDfRecordBatchStreamSnafu)?;
+                Ok(Box::pin(stream))
             }
         }
     }

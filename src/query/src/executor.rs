@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use common_query::physical_plan::PhysicalPlan;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::execution::runtime_env::RuntimeEnv;
 
-use crate::{error::Result, plan::PhysicalPlan, query_engine::QueryContext};
+use crate::{error::Result, query_engine::QueryContext};
 
 /// Executor to run [ExecutionPlan].
 #[async_trait::async_trait]

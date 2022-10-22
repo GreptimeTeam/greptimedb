@@ -6,8 +6,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_query::execution::ExecutionPlanRef;
 use common_query::logical_plan::Expr;
+use common_query::physical_plan::PhysicalPlanRef;
 use datatypes::schema::SchemaRef;
 
 use crate::error::Result;
@@ -47,7 +47,7 @@ pub trait Table: Send + Sync {
         // If set, it contains the amount of rows needed by the `LogicalPlan`,
         // The datasource should return *at least* this number of rows if available.
         limit: Option<usize>,
-    ) -> Result<ExecutionPlanRef>;
+    ) -> Result<PhysicalPlanRef>;
 
     /// Tests whether the table provider can make use of a filter expression
     /// to optimise data retrieval.

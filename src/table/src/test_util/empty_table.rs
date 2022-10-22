@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_query::execution::ExecutionPlanRef;
+use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::EmptyRecordBatchStream;
 
 use crate::metadata::TableInfoBuilder;
@@ -66,7 +66,7 @@ impl Table for EmptyTable {
         _projection: &Option<Vec<usize>>,
         _filters: &[common_query::prelude::Expr],
         _limit: Option<usize>,
-    ) -> Result<ExecutionPlanRef> {
+    ) -> Result<PhysicalPlanRef> {
         let scan = SimpleTableScan::new(Box::pin(EmptyRecordBatchStream::new(self.schema())));
         Ok(Arc::new(scan))
     }

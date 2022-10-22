@@ -78,10 +78,19 @@ pub enum InnerError {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("General RecordBatch error, source: {}", source))]
-    GeneralRecordBatch {
+    #[snafu(display(
+        "Failed to convert DataFusion's recordbatch stream, source: {}",
+        source
+    ))]
+    ConvertDfRecordBatchStream {
+        #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
-        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to convert arrow schema, source: {}", source))]
+    ConvertArrowSchema {
+        #[snafu(backtrace)]
+        source: DataTypeError,
     },
 }
 
@@ -97,15 +106,17 @@ impl ErrorExt for InnerError {
             | InnerError::InvalidInputState { .. }
             | InnerError::InvalidInputCol { .. }
             | InnerError::BadAccumulatorImpl { .. } => StatusCode::EngineExecuteQuery,
-            InnerError::InvalidInputs { source, .. } => source.status_code(),
-            InnerError::IntoVector { source, .. } => source.status_code(),
-            InnerError::FromScalarValue { source } => source.status_code(),
+
+            InnerError::InvalidInputs { source, .. }
+            | InnerError::IntoVector { source, .. }
+            | InnerError::FromScalarValue { source }
+            | InnerError::ConvertArrowSchema { source } => source.status_code(),
 
             InnerError::ExecuteRepeatedly { .. }
             | InnerError::GeneralDataFusion { .. }
             | InnerError::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
 
-            InnerError::GeneralRecordBatch { source, .. } => source.status_code(),
+            InnerError::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
         }
     }
 
@@ -183,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn test_general_recordbatch_error() {
+    fn test_convert_df_recordbatch_stream_error() {
         let result: std::result::Result<i32, common_recordbatch::error::Error> =
             Err(common_recordbatch::error::InnerError::PollStream {
                 source: ArrowError::Overflow,
@@ -191,7 +202,7 @@ mod tests {
             }
             .into());
         let error: Error = result
-            .context(GeneralRecordBatchSnafu)
+            .context(ConvertDfRecordBatchStreamSnafu)
             .err()
             .unwrap()
             .into();

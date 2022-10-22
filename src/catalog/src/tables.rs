@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_stream::stream;
-use common_query::execution::ExecutionPlanRef;
 use common_query::logical_plan::Expr;
+use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream};
 use datatypes::prelude::{ConcreteDataType, VectorBuilder};
@@ -64,7 +64,7 @@ impl Table for Tables {
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
-    ) -> table::error::Result<ExecutionPlanRef> {
+    ) -> table::error::Result<PhysicalPlanRef> {
         let catalogs = self.catalogs.clone();
         let schema_ref = self.schema.clone();
         let engine_name = self.engine_name.clone();

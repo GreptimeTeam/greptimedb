@@ -2,7 +2,7 @@ use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use common_query::execution::ExecutionPlanRef;
+use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
@@ -55,7 +55,7 @@ impl Table for NumbersTable {
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
-    ) -> Result<ExecutionPlanRef> {
+    ) -> Result<PhysicalPlanRef> {
         let stream = Box::pin(NumbersStream {
             limit: limit.unwrap_or(100) as u32,
             schema: self.schema.clone(),
