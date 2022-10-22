@@ -14,20 +14,3 @@ use datafusion::logical_plan::LogicalPlan as DfLogicalPlan;
 pub enum LogicalPlan {
     DfPlan(DfLogicalPlan),
 }
-
-/// Partitioning schemes supported by operators.
-#[derive(Debug, Clone)]
-pub enum Partitioning {
-    /// Unknown partitioning scheme with a known number of partitions
-    UnknownPartitioning(usize),
-}
-
-impl Partitioning {
-    /// Returns the number of partitions in this partitioning scheme
-    pub fn partition_count(&self) -> usize {
-        use Partitioning::*;
-        match self {
-            UnknownPartitioning(n) => *n,
-        }
-    }
-}
