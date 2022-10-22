@@ -26,66 +26,43 @@ pub type Pusher = Sender<std::result::Result<HeartbeatResponse, tonic::Status>>;
 
 #[derive(Clone)]
 pub struct HeartbeatHandlers {
-    inner: Arc<RwLock<Inner>>,
+    kv_store: KvStoreRef,
+    handlers: Arc<RwLock<Vec<Box<dyn HeartbeatHandler>>>>,
+    pushers: Arc<RwLock<HashMap<String, Pusher>>>,
 }
 
 impl HeartbeatHandlers {
     pub fn new(kv_store: KvStoreRef) -> Self {
-        let inner = Arc::new(RwLock::new(Inner {
+        Self {
             kv_store,
-            handlers: Default::default(),
-            pushers: Default::default(),
-        }));
-
-        Self { inner }
+            handlers: Arc::new(RwLock::new(Default::default())),
+            pushers: Arc::new(RwLock::new(Default::default())),
+        }
     }
 
     pub async fn add_handler(&self, handler: impl HeartbeatHandler + 'static) {
-        let mut inner = self.inner.write().await;
-        inner.add_handler(handler);
+        let mut handlers = self.handlers.write().await;
+        handlers.push(Box::new(handler));
     }
 
-    pub async fn register(&self, key: impl Into<String>, pusher: Pusher) {
-        let mut inner = self.inner.write().await;
-        let key = key.into();
-        info!("Pusher register: {}", &key);
-        inner.register(key, pusher);
+    pub async fn register(&self, key: impl AsRef<str>, pusher: Pusher) {
+        let mut pushers = self.pushers.write().await;
+        let key = key.as_ref();
+        info!("Pusher register: {}", key);
+        pushers.insert(key.into(), pusher);
     }
 
     pub async fn unregister(&self, key: impl AsRef<str>) -> Option<Pusher> {
-        let mut inner = self.inner.write().await;
-        info!("Pusher unregister: {}", key.as_ref());
-        inner.unregister(key)
+        let mut pushers = self.pushers.write().await;
+        let key = key.as_ref();
+        info!("Pusher unregister: {}", key);
+        pushers.remove(key)
     }
 
     pub async fn handle(&self, req: HeartbeatRequest) -> Result<HeartbeatResponse> {
-        let inner = self.inner.read().await;
-        inner.handle(req).await
-    }
-}
-
-struct Inner {
-    kv_store: KvStoreRef,
-    handlers: Vec<Box<dyn HeartbeatHandler>>,
-    pushers: HashMap<String, Pusher>,
-}
-
-impl Inner {
-    fn add_handler(&mut self, handler: impl HeartbeatHandler + 'static) {
-        self.handlers.push(Box::new(handler));
-    }
-
-    fn register(&mut self, key: impl Into<String>, pusher: Pusher) {
-        self.pushers.insert(key.into(), pusher);
-    }
-
-    fn unregister(&mut self, key: impl AsRef<str>) -> Option<Pusher> {
-        self.pushers.remove(key.as_ref())
-    }
-
-    async fn handle(&self, req: HeartbeatRequest) -> Result<HeartbeatResponse> {
         let mut res = HeartbeatResponse::default();
-        for h in &self.handlers {
+        let handlers = self.handlers.read().await;
+        for h in handlers.iter() {
             res = h.handle(&req, res, self.kv_store.clone()).await?;
         }
         Ok(res)
