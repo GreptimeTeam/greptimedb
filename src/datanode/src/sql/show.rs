@@ -5,10 +5,10 @@ use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::arrow::compute;
 use datatypes::arrow_array::StringArray;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::schema::{ColumnSchema, Schema, ColumnDefaultConstraint};
 use datatypes::vectors::{Helper, StringVector, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
+use sql::statements::show::{ShowDatabases, ShowKind, ShowTables, ShowCreateTable};
 
 use crate::error::{
     ArrowComputationSnafu, CastVectorSnafu, NewRecordBatchSnafu, NewRecordBatchesSnafu, Result,
@@ -102,6 +102,49 @@ impl SqlHandler {
         Ok(Output::RecordBatches(
             RecordBatches::try_new(schema, vec![recordbatch]).context(NewRecordBatchesSnafu)?,
         ))
+    }
+
+    pub(crate) async fn show_create_table(&self, stmt: ShowCreateTable) -> Result<Output> {
+        let schema1 = self.get_default_schema()?;
+        let name = stmt.tablename.as_ref().unwrap();
+        ensure!(
+            schema1.table_exist(name),
+            UnsupportedExprSnafu{
+                name: name.to_string(),
+            }
+        );
+        let column_schemas = vec![
+            ColumnSchema::new("Table", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("Create Table", ConcreteDataType::string_datatype(), false),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let sql1 = vec![name.to_string()];
+        let tableref =schema1.table(name).as_ref();
+        let table_info = tableref.unwrap().table_info();
+        let table_schema = tableref.unwrap().schema();
+        let mut sql2 = String::new();
+        for col in table_schema.column_schemas(){
+            sql2 += format!("{} {:?}",col.name, col.data_type).as_str();
+            if !col.is_nullable() {
+                sql2 += " NOT NULL";
+            }
+            if let Some(expr) = col.default_constraint() {
+                match expr {
+                    ColumnDefaultConstraint::Value(v) =>{
+                        if (v.is_null()){
+                            sql2 += format!(" DEFAULT NULL").as_str();
+                        }else {
+                            sql2 += format!(" DEFAULT {:?}",v).as_str();
+                        }
+                    },
+                    ColumnDefaultConstraint::Function(f) =>{
+                        sql2 += format!( "DEFAULT {}()",f).as_str();
+                    }
+                }
+            }
+            sql2 += ", ";
+        }
+        
     }
 }
 
