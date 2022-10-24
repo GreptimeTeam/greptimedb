@@ -1,11 +1,12 @@
 //! Utilities for resolving schema compatibility problems.
 
 use datatypes::schema::{ColumnSchema, SchemaRef};
-use snafu::ensure;
+use datatypes::vectors::VectorRef;
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{self, Result};
+use crate::read::Batch;
 use crate::schema::StoreSchema;
-// use crate::schema::{ProjectedSchemaRef, StoreSchema};
 
 /// Make schema compatible to write to target with another schema.
 pub trait CompatWrite {
@@ -57,15 +58,15 @@ fn is_source_column_readable(
 /// Read data in source schema as dest schema.
 #[derive(Debug)]
 pub struct ReadResolver {
-    /// Version of the source schema.
-    source_version: u32,
-    /// Version of the schema dest to read as.
-    dest_version: u32,
-    /// For each column in dest schema, stores the index in source schema for
-    /// this column, or None if source schema doesn't have this column.
+    /// Schema of data source.
+    source_schema: StoreSchema,
+    /// Schema user expects to read.
+    dest_schema: StoreSchema,
+    /// For each column in dest schema, stores the index in read result for
+    /// this column, or None if the column is not in result.
     ///
     /// This vec would be left empty if `source_version == dest_version`.
-    indices_in_source: Vec<Option<usize>>,
+    indices_in_result: Vec<Option<usize>>,
     /// For each column in source schema, stores whether we need to read that column. All
     /// columns are needed by default.
     is_needed: Vec<bool>,
@@ -84,18 +85,22 @@ impl ReadResolver {
             let is_needed = vec![true; source_schema.num_columns()];
 
             return Ok(ReadResolver {
-                source_version,
-                dest_version,
-                indices_in_source: Vec::new(),
+                source_schema: source_schema.clone(),
+                dest_schema: dest_schema.clone(),
+                indices_in_result: Vec::new(),
                 is_needed,
                 row_key_end: source_schema.row_key_end(),
                 user_column_end: source_schema.user_column_end(),
             });
         }
 
-        let mut indices_in_source = vec![None; dest_schema.num_columns()];
+        let mut indices_in_result = vec![None; dest_schema.num_columns()];
         let mut is_needed = vec![true; source_schema.num_columns()];
-        let (mut row_key_end, mut num_values) = (0, 0);
+        let mut row_key_end = 0;
+        // Number of value columns.
+        let mut num_values = 0;
+        // Number of columns in result from source data.
+        let mut num_columns_in_result = 0;
 
         for (idx, source_column) in source_schema.schema().column_schemas().iter().enumerate() {
             // For each column in source schema, check whether we need to read it.
@@ -106,8 +111,11 @@ impl ReadResolver {
                 let dest_column = &dest_schema.schema().column_schemas()[dest_idx];
                 // Check whether we could read this column.
                 if is_source_column_readable(source_column, dest_column)? {
-                    // Mark that this column could be read from source data.
-                    indices_in_source[dest_idx] = Some(idx);
+                    // Mark that this column could be read from source data, since some
+                    // columns in source schema would be skipped, we should not use
+                    // the source column's index directly.
+                    indices_in_result[dest_idx] = Some(num_columns_in_result);
+                    num_columns_in_result += 1;
 
                     if source_schema.is_key_column_index(idx) {
                         // This column is also a key column in source schema.
@@ -128,9 +136,9 @@ impl ReadResolver {
         }
 
         Ok(ReadResolver {
-            source_version,
-            dest_version,
-            indices_in_source,
+            source_schema: source_schema.clone(),
+            dest_schema: dest_schema.clone(),
+            indices_in_result,
             is_needed,
             row_key_end,
             user_column_end: row_key_end + num_values,
@@ -139,13 +147,66 @@ impl ReadResolver {
 
     /// Returns a bool slice to denote which key column in source is needed.
     #[inline]
-    pub fn is_source_key_needed(&self) -> &[bool] {
+    pub fn source_key_needed(&self) -> &[bool] {
         &self.is_needed[..self.row_key_end]
     }
 
     /// Returns a bool slice to denote which value column in source is needed.
     #[inline]
-    pub fn is_source_value_needed(&self) -> &[bool] {
+    pub fn source_value_needed(&self) -> &[bool] {
         &self.is_needed[self.row_key_end..self.user_column_end]
     }
+
+    /// Construct a new [Batch] from row key, value, sequence and op_type.
+    ///
+    /// # Panics
+    /// Panics if input `VectorRef` is empty.
+    pub fn batch_from_parts(
+        &self,
+        row_key_columns: Vec<VectorRef>,
+        mut value_columns: Vec<VectorRef>,
+        sequences: VectorRef,
+        op_types: VectorRef,
+    ) -> Result<Batch> {
+        // Each vector should has same length, so here we just use the length of `sequence`.
+        let num_rows = sequences.len();
+
+        let mut source = row_key_columns;
+        // Reserve space for value, sequence and op_type
+        source.reserve(value_columns.len() + 2);
+        source.append(&mut value_columns);
+        // Internal columns are push in sequence, op_type order.
+        source.push(sequences);
+        source.push(op_types);
+
+        if self.source_schema.version() == self.dest_schema.version() {
+            return Ok(Batch::new(source));
+        }
+
+        let column_schemas = self.dest_schema.schema().column_schemas();
+        let columns = self
+            .indices_in_result
+            .iter()
+            .zip(column_schemas)
+            .map(|(index_opt, column_schema)| {
+                if let Some(idx) = index_opt {
+                    Ok(source[*idx].clone())
+                } else {
+                    let vector = column_schema
+                        .create_default_vector(num_rows)
+                        .context(error::CreateDefaultToReadSnafu {
+                            column: &column_schema.name,
+                        })?
+                        .context(error::NoDefaultToReadSnafu {
+                            column: &column_schema.name,
+                        })?;
+                    Ok(vector)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Batch::new(columns))
+    }
+
+    //
 }

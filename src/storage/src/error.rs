@@ -310,6 +310,23 @@ pub enum Error {
         reason: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Failed to read column {}, could not create default value, source: {}",
+        column,
+        source
+    ))]
+    CreateDefaultToRead {
+        column: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to read column {}, no proper default value for it", column))]
+    NoDefaultToRead {
+        column: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -343,7 +360,9 @@ impl ErrorExt for Error {
             | InvalidRawRegion { .. }
             | FilterColumn { .. }
             | AlterMetadata { .. }
-            | CompatRead { .. } => StatusCode::Unexpected,
+            | CompatRead { .. }
+            | CreateDefaultToRead { .. }
+            | NoDefaultToRead { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | WriteParquet { .. }
