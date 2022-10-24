@@ -17,7 +17,7 @@ use crate::remote::{Kv, KvBackend, ValueIter};
 
 #[derive(Debug)]
 pub struct MetaKvBackend {
-    client: MetaClient,
+    pub client: MetaClient,
 }
 
 /// Implement `KvBackend` trait for `MetaKvBackend` instead of opendal's `Accessor` since

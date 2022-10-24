@@ -639,6 +639,7 @@ dependencies = [
  "chrono",
  "common-catalog",
  "common-error",
+ "common-grpc",
  "common-query",
  "common-recordbatch",
  "common-runtime",

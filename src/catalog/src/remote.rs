@@ -13,6 +13,8 @@ mod client;
 
 mod manager;
 
+pub use client::MetaKvBackend;
+
 #[derive(Debug, Clone)]
 pub struct Kv(pub Vec<u8>, pub Vec<u8>);
 
