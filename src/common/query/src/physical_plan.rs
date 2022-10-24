@@ -8,9 +8,10 @@ use common_recordbatch::DfSendableRecordBatchStream;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
-use datafusion::execution::runtime_env::RuntimeEnv;
+pub use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::physical_plan::expressions::PhysicalSortExpr;
-use datafusion::physical_plan::{Partitioning, Statistics};
+pub use datafusion::physical_plan::Partitioning;
+use datafusion::physical_plan::Statistics;
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 

@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
+use common_query::physical_plan::Partitioning;
+use common_query::physical_plan::RuntimeEnv;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::SendableRecordBatchStream;
-use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::physical_plan::Partitioning;
 use datatypes::schema::SchemaRef;
 use snafu::OptionExt;
 

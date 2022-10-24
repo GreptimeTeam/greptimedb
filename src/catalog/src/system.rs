@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
+use common_query::physical_plan::RuntimeEnv;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::timestamp::Timestamp;
 use common_time::util;
-use datafusion::execution::runtime_env::RuntimeEnv;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::{BinaryVector, TimestampVector, UInt8Vector};

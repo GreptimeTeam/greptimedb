@@ -280,7 +280,7 @@ fn build_schema_for_tables() -> Schema {
 
 #[cfg(test)]
 mod tests {
-    use datafusion::execution::runtime_env::RuntimeEnv;
+    use common_query::physical_plan::RuntimeEnv;
     use datatypes::arrow::array::Utf8Array;
     use datatypes::arrow::datatypes::DataType;
     use futures_util::StreamExt;

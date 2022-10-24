@@ -426,8 +426,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
 #[cfg(test)]
 mod tests {
+    use common_query::physical_plan::RuntimeEnv;
     use common_recordbatch::util;
-    use datafusion::execution::runtime_env::RuntimeEnv;
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;
     use datatypes::prelude::{ConcreteDataType, ScalarVector};

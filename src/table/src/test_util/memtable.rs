@@ -128,8 +128,8 @@ impl Stream for MemtableStream {
 
 #[cfg(test)]
 mod test {
+    use common_query::physical_plan::RuntimeEnv;
     use common_recordbatch::util;
-    use datafusion::execution::runtime_env::RuntimeEnv;
     use datatypes::prelude::*;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Int32Vector, StringVector};
