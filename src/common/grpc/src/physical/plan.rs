@@ -184,7 +184,7 @@ impl ExecutionPlan for MockExecution {
         _runtime: Arc<RuntimeEnv>,
     ) -> datafusion::error::Result<SendableRecordBatchStream> {
         let id_array = Arc::new(PrimitiveArray::from_slice([1u32, 2, 3, 4, 5]));
-        let name_array = Arc::new(Utf8Array::<i64>::from_slice([
+        let name_array = Arc::new(Utf8Array::<i32>::from_slice([
             "zhangsan", "lisi", "wangwu", "Tony", "Mike",
         ]));
         let age_array = Arc::new(PrimitiveArray::from_slice([25u32, 28, 27, 35, 25]));
