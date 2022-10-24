@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use common_error::prelude::{ErrorExt, StatusCode};
+use common_error::prelude::{BoxedError, ErrorExt, StatusCode};
 use datafusion::error::DataFusionError;
 use prost::{DecodeError, EncodeError};
 use snafu::{Backtrace, ErrorCompat, Snafu};
@@ -46,10 +46,16 @@ pub enum Error {
     },
 
     #[snafu(display("Internal error from DataFusion: {}", source))]
-    DFInternal { source: DataFusionError },
+    DFInternal {
+        source: DataFusionError,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Internal error: {}", source))]
-    Internal { source: Box<dyn std::error::Error> },
+    Internal {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("Table quering not found: {}", name))]
     TableNotFound { name: String, backtrace: Backtrace },

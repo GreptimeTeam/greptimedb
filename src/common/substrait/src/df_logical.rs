@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use bytes::{Buf, Bytes, BytesMut};
 use catalog::CatalogManagerRef;
+use common_error::prelude::BoxedError;
 use datafusion::datasource::TableProvider;
 use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
 use prost::Message;
@@ -41,7 +42,7 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
             }
             .fail()?,
         };
-        self.convert_rel(Box::new(rel))
+        self.convert_rel(rel)
     }
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
@@ -61,7 +62,7 @@ impl DFLogicalSubstraitConvertor {
 }
 
 impl DFLogicalSubstraitConvertor {
-    pub fn convert_rel(&self, rel: Box<Rel>) -> Result<LogicalPlan, Error> {
+    pub fn convert_rel(&self, rel: Rel) -> Result<LogicalPlan, Error> {
         let rel_type = rel.rel_type.context(EmptyPlanSnafu)?;
         let logical_plan = match rel_type {
             RelType::Read(read_rel) => self.convert_read_rel(read_rel),
@@ -148,10 +149,10 @@ impl DFLogicalSubstraitConvertor {
         let table_ref = self
             .catalog_manager
             .table(Some(&catalog_name), Some(&schema_name), &table_name)
-            .map_err(|e| Box::new(e) as _)
+            .map_err(BoxedError::new)
             .context(InternalSnafu)?
             .context(TableNotFoundSnafu {
-                name: format!("{}-{}-{}", catalog_name, schema_name, table_name),
+                name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
             })?;
         let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
         // Get schema direct from the table.
@@ -281,7 +282,7 @@ mod test {
         DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
     };
     use datatypes::schema::Schema;
-    use table::{engine::MockTableEngine, requests::CreateTableRequest, test_util::EmptyTable};
+    use table::{requests::CreateTableRequest, test_util::EmptyTable, test_util::MockTableEngine};
 
     use super::*;
 
@@ -321,7 +322,7 @@ mod test {
         let convertor = DFLogicalSubstraitConvertor::new(catalog);
 
         let rel = convertor.convert_plan(plan.clone()).unwrap();
-        let tripped_plan = convertor.convert_rel(Box::new(rel)).unwrap();
+        let tripped_plan = convertor.convert_rel(rel).unwrap();
 
         assert_eq!(format!("{:?}", plan), format!("{:?}", tripped_plan));
     }
