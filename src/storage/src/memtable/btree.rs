@@ -18,6 +18,7 @@ use crate::memtable::{
     BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId, RowOrdering,
 };
 use crate::read::Batch;
+use crate::schema::compat::ReadResolver;
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 
 type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
@@ -69,7 +70,7 @@ impl Memtable for BTreeMemtable {
     fn iter(&self, ctx: &IterContext) -> Result<BoxedBatchIterator> {
         assert!(ctx.batch_size > 0);
 
-        let iter = BTreeIterator::new(ctx.clone(), self.schema.clone(), self.map.clone());
+        let iter = BTreeIterator::new(ctx.clone(), self.schema.clone(), self.map.clone())?;
 
         Ok(Box::new(iter))
     }
@@ -85,6 +86,7 @@ struct BTreeIterator {
     schema: RegionSchemaRef,
     /// Projected schema that user expect to read.
     projected_schema: ProjectedSchemaRef,
+    resolver: ReadResolver,
     map: Arc<RwLockMap>,
     last_key: Option<InnerKey>,
 }
@@ -103,27 +105,33 @@ impl Iterator for BTreeIterator {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Result<Batch>> {
-        self.next_batch().map(Ok)
+        self.next_batch().transpose()
     }
 }
 
 impl BTreeIterator {
-    fn new(ctx: IterContext, schema: RegionSchemaRef, map: Arc<RwLockMap>) -> BTreeIterator {
+    fn new(
+        ctx: IterContext,
+        schema: RegionSchemaRef,
+        map: Arc<RwLockMap>,
+    ) -> Result<BTreeIterator> {
         let projected_schema = ctx
             .projected_schema
             .clone()
             .unwrap_or_else(|| Arc::new(ProjectedSchema::no_projection(schema.clone())));
+        let resolver = ReadResolver::new(schema.store_schema(), projected_schema.schema_to_read())?;
 
-        BTreeIterator {
+        Ok(BTreeIterator {
             ctx,
             schema,
             projected_schema,
+            resolver,
             map,
             last_key: None,
-        }
+        })
     }
 
-    fn next_batch(&mut self) -> Option<Batch> {
+    fn next_batch(&mut self) -> Result<Option<Batch>> {
         let map = self.map.read().unwrap();
         let iter = if let Some(last_key) = &self.last_key {
             map.range((Bound::Excluded(last_key), Bound::Unbounded))
@@ -139,7 +147,7 @@ impl BTreeIterator {
         };
 
         if keys.is_empty() {
-            return None;
+            return Ok(None);
         }
         self.last_key = keys.last().map(|k| {
             let mut last_key = (*k).clone();
@@ -151,27 +159,30 @@ impl BTreeIterator {
             .schema
             .row_key_columns()
             .map(|column_meta| column_meta.desc.data_type.clone());
-        let key_needed = vec![true; self.schema.num_row_key_columns()];
         let value_data_types = self
             .schema
             .value_columns()
             .map(|column_meta| column_meta.desc.data_type.clone());
-        let value_needed: Vec<_> = self
-            .schema
-            .value_columns()
-            .map(|column_meta| self.projected_schema.is_needed(column_meta.id()))
-            .collect();
 
-        let key_columns = rows_to_vectors(key_data_types, &key_needed, keys.as_slice());
-        let value_columns = rows_to_vectors(value_data_types, &value_needed, values.as_slice());
-        let batch = self.projected_schema.batch_from_parts(
+        let key_columns = rows_to_vectors(
+            key_data_types,
+            self.resolver.source_key_needed(),
+            keys.as_slice(),
+        );
+        let value_columns = rows_to_vectors(
+            value_data_types,
+            self.resolver.source_value_needed(),
+            values.as_slice(),
+        );
+
+        let batch = self.resolver.batch_from_parts(
             key_columns,
             value_columns,
             Arc::new(sequences),
             Arc::new(op_types),
-        );
+        )?;
 
-        Some(batch)
+        Ok(Some(batch))
     }
 }
 

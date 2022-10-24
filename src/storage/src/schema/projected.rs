@@ -184,6 +184,7 @@ impl ProjectedSchema {
             .unwrap_or(true)
     }
 
+    // TODO(yingwen): Remove this method.
     /// Construct a new [Batch] from row key, value, sequence and op_type.
     ///
     /// # Panics
