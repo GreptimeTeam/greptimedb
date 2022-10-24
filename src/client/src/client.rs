@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::{greptime_client::GreptimeClient, *};
@@ -79,7 +80,7 @@ impl Client {
         }
     }
 
-    pub fn start<U, A>(&mut self, urls: A)
+    pub fn start<U, A>(&self, urls: A)
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
@@ -88,7 +89,10 @@ impl Client {
             .as_ref()
             .iter()
             .map(|peer| peer.as_ref().to_string())
+            .collect::<HashSet<_>>()
+            .drain()
             .collect();
+
         self.inner.set_peers(urls);
     }
 
@@ -162,5 +166,67 @@ impl Client {
     pub fn add_channel(&self, addr: &str, channel: Channel) {
         self.inner.set_peers(vec![addr.to_string()]);
         self.inner.channel_manager.put_channel(addr, channel)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use api::v1::DatabaseRequest;
+
+    use super::{Inner, LB};
+    use crate::{error, Client};
+
+    #[test]
+    fn test_inner_random_peer() {
+        let inner = Inner::default();
+        let peer1 = "127.0.0.1:3001".to_string();
+        let peer2 = "127.0.0.1:3002".to_string();
+        inner.set_peers(vec![peer1.clone(), peer2.clone()]);
+
+        let mut set = HashSet::with_capacity(2);
+        set.insert(peer1);
+        set.insert(peer2);
+
+        for _ in 0..100 {
+            let peer = inner.random_peer().unwrap();
+            assert!(set.contains(&peer));
+        }
+    }
+
+    #[test]
+    fn test_start_with_duplicate_peers() {
+        let client = Client::new();
+        client.start(vec!["127.0.0.1:3001", "127.0.0.1:3001", "127.0.0.1:3001"]);
+        let guard = client.inner.peers.read();
+        let peers = guard.as_ref().unwrap();
+
+        assert_eq!(&vec!["127.0.0.1:3001".to_string()], peers);
+    }
+
+    #[tokio::test]
+    async fn test_create_unavailable() {
+        let client = Client::new();
+        client.start(&["unavailable_peer"]);
+
+        let req = DatabaseRequest::default();
+        let result = client.database(None, req, LB::Random).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(
+            matches!(err, error::Error::TonicStatus { source, .. } if source.code() == tonic::Code::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_random_client() {
+        let client = Client::new();
+        let result = client.random_client();
+        assert!(result.is_err());
+
+        client.start(vec!["127.0.0.1:3001"]);
+        let result = client.random_client();
+        assert!(result.is_ok());
     }
 }

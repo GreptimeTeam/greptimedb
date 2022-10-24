@@ -104,7 +104,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
 
 #[tokio::test]
 async fn test_insert_and_select() {
-    let mut client = Client::new();
+    let client = Client::new();
     let addr = setup_grpc_server(3990).await;
     client.start(vec![addr]);
     let db = Database::new("greptime", client.clone());
