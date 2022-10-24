@@ -30,6 +30,10 @@ pub trait KvBackend: Send + Sync {
 
     async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), crate::error::Error>;
 
+    async fn delete(&self, key: &[u8]) -> Result<(), Error> {
+        self.delete_range(key, &[]).await
+    }
+
     /// Default get is implemented based on `range` method.
     async fn get(&self, key: &[u8]) -> Result<Option<Kv>, Error> {
         let mut iter = self.range(key);
