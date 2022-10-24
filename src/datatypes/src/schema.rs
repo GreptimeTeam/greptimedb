@@ -344,10 +344,12 @@ impl TryFrom<&ColumnSchema> for Field {
                 ARROW_FIELD_DEFAULT_CONSTRAINT_KEY.to_string(),
                 serde_json::to_string(&value).context(SerializeSnafu)?,
             );
-            assert!(
+
+            ensure!(
                 old.is_none(),
-                "metadata of {} already exists",
-                ARROW_FIELD_DEFAULT_CONSTRAINT_KEY
+                error::DuplicateMetaSnafu {
+                    key: ARROW_FIELD_DEFAULT_CONSTRAINT_KEY,
+                }
             );
         }
 
@@ -483,6 +485,20 @@ mod tests {
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
         assert_eq!(column_schema, new_column_schema);
+    }
+
+    #[test]
+    fn test_column_schema_with_duplicate_metadata() {
+        let mut metadata = Metadata::new();
+        metadata.insert(
+            ARROW_FIELD_DEFAULT_CONSTRAINT_KEY.to_string(),
+            "v1".to_string(),
+        );
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
+            .with_metadata(metadata)
+            .with_default_constraint(Some(ColumnDefaultConstraint::null_value()))
+            .unwrap();
+        Field::try_from(&column_schema).unwrap_err();
     }
 
     #[test]

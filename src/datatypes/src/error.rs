@@ -75,6 +75,9 @@ pub enum Error {
         reason: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Duplicated metadata for {}", key))]
+    DuplicateMeta { key: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
