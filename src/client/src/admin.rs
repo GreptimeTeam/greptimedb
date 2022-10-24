@@ -3,9 +3,10 @@ use common_error::prelude::StatusCode;
 use common_query::Output;
 use snafu::prelude::*;
 
+use crate::client::Client;
+use crate::client::LB;
 use crate::database::PROTOCOL_VERSION;
 use crate::error;
-use crate::Client;
 use crate::Result;
 
 #[derive(Clone, Debug)]
@@ -22,8 +23,12 @@ impl Admin {
         }
     }
 
-    pub async fn start(&mut self, url: impl Into<String>) -> Result<()> {
-        self.client.start(url).await
+    pub fn start<U, A>(&mut self, urls: A)
+    where
+        U: AsRef<str>,
+        A: AsRef<[U]>,
+    {
+        self.client.start(urls)
     }
 
     pub async fn create(&self, expr: CreateExpr) -> Result<AdminResult> {
@@ -61,7 +66,7 @@ impl Admin {
             exprs,
         };
 
-        let resp = self.client.admin(req).await?;
+        let resp = self.client.admin(None, req, LB::Random).await?;
 
         let results = resp.results;
         ensure!(

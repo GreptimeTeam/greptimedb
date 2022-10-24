@@ -16,8 +16,8 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
-    let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
-    let db = Database::new("greptime", client);
+    let mut db = Database::new("greptime", Client::new());
+    db.start(&["127.0.0.1:3001"]);
 
     let physical = mock_physical_plan();
     let result = db.physical_plan(physical, None).await;

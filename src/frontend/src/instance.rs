@@ -44,14 +44,9 @@ impl Instance {
 
     pub(crate) async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
         let addr = opts.datanode_grpc_addr();
-        self.db
-            .start(addr.clone())
-            .await
-            .context(error::ConnectDatanodeSnafu { addr: addr.clone() })?;
-        self.admin
-            .start(addr.clone())
-            .await
-            .context(error::ConnectDatanodeSnafu { addr })?;
+        self.db.start(vec![addr.clone()]);
+
+        self.admin.start(vec![addr]);
         Ok(())
     }
 }

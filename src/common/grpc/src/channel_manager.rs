@@ -101,6 +101,11 @@ impl ChannelManager {
 
         Ok(inner_channel)
     }
+
+    pub fn put_channel(&self, addr: &str, channel: InnerChannel) {
+        let mut guard = self.pool.lock().unwrap();
+        guard.put(addr, Channel { channel, access: 0 });
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

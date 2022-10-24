@@ -805,6 +805,8 @@ dependencies = [
  "datafusion",
  "datanode",
  "datatypes",
+ "parking_lot",
+ "rand 0.8.5",
  "snafu",
  "tokio",
  "tonic",

@@ -10,8 +10,8 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
-    let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
-    let db = Database::new("greptime", client);
+    let mut db = Database::new("greptime", Client::new());
+    db.start(&["127.0.0.1:3001"]);
 
     let sql = Select::Sql("select * from demo".to_string());
     let result = db.select(sql).await.unwrap();

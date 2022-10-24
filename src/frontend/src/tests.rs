@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use api::v1::greptime_client::GreptimeClient;
 use client::Client;
 use datanode::instance::Instance as DatanodeInstance;
 use servers::grpc::GrpcServer;
@@ -56,6 +55,7 @@ pub(crate) async fn create_frontend_instance() -> Arc<Instance> {
         }))
         .await
         .unwrap();
-    let client = Client::with_client(GreptimeClient::new(channel));
+    let client = Client::new();
+    client.add_channel("[::]:50051", channel);
     Arc::new(Instance::with_client(client))
 }

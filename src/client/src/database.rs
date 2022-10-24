@@ -21,6 +21,7 @@ use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use snafu::{ensure, OptionExt, ResultExt};
 
+use crate::client::LB;
 use crate::error;
 use crate::{
     error::{ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu},
@@ -43,8 +44,12 @@ impl Database {
         }
     }
 
-    pub async fn start(&mut self, url: impl Into<String>) -> Result<()> {
-        self.client.start(url).await
+    pub fn start<U, A>(&mut self, urls: A)
+    where
+        U: AsRef<str>,
+        A: AsRef<[U]>,
+    {
+        self.client.start(urls)
     }
 
     pub fn name(&self) -> &str {
@@ -135,7 +140,7 @@ impl Database {
             exprs,
         };
 
-        let res = self.client.database(req).await?;
+        let res = self.client.database(None, req, LB::Random).await?;
         let res = res.results;
 
         ensure!(

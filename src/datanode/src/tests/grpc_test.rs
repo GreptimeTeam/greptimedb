@@ -42,8 +42,8 @@ async fn setup_grpc_server(port: usize) -> String {
 async fn test_auto_create_table() {
     let addr = setup_grpc_server(3991).await;
 
-    let grpc_client = Client::connect(format!("http://{}", addr)).await.unwrap();
-    let db = Database::new("greptime", grpc_client);
+    let mut db = Database::new("greptime", Client::new());
+    db.start(vec![addr]);
 
     insert_and_assert(&db).await;
 }
@@ -104,12 +104,11 @@ fn expect_data() -> (Column, Column, Column, Column) {
 
 #[tokio::test]
 async fn test_insert_and_select() {
+    let mut client = Client::new();
     let addr = setup_grpc_server(3990).await;
-
-    let grpc_client = Client::connect(format!("http://{}", addr)).await.unwrap();
-
-    let db = Database::new("greptime", grpc_client.clone());
-    let admin = Admin::new("greptime", grpc_client);
+    client.start(vec![addr]);
+    let db = Database::new("greptime", client.clone());
+    let admin = Admin::new("greptime", client);
 
     // create
     let expr = testing_create_expr();
