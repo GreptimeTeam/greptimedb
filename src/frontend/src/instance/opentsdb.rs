@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use client::ObjectResult;
+use client::{ObjectResult, Options};
 use common_error::prelude::BoxedError;
 use servers::error as server_error;
 use servers::opentsdb::codec::DataPoint;
@@ -28,7 +28,7 @@ impl Instance {
     async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> Result<()> {
         let expr = data_point.as_grpc_insert();
 
-        let result = self.db.insert(expr.clone()).await;
+        let result = self.db.insert(expr.clone(), Options::default()).await;
 
         let object_result = match result {
             Ok(result) => result,

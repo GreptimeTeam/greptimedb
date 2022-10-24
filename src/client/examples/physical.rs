@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use client::{Client, Database};
+use client::{Client, Database, Options};
 use common_grpc::MockExecution;
 use datafusion::physical_plan::{
     expressions::Column, projection::ProjectionExec, ExecutionPlan, PhysicalExpr,
@@ -20,7 +20,7 @@ async fn run() {
     db.start(&["127.0.0.1:3001"]);
 
     let physical = mock_physical_plan();
-    let result = db.physical_plan(physical, None).await;
+    let result = db.physical_plan(physical, None, Options::default()).await;
 
     event!(Level::INFO, "result: {:#?}", result);
 }

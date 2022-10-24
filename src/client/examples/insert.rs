@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use api::v1::{codec::InsertBatch, *};
-use client::{Client, Database};
+use client::{Client, Database, Options};
 
 fn main() {
     tracing::subscriber::set_global_default(tracing_subscriber::FmtSubscriber::builder().finish())
@@ -22,7 +22,7 @@ async fn run() {
         })),
         options: HashMap::default(),
     };
-    db.insert(expr).await.unwrap();
+    db.insert(expr, Options::default()).await.unwrap();
 }
 
 fn insert_batches() -> Vec<Vec<u8>> {

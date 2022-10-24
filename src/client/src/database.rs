@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::codec::SelectResult as GrpcSelectResult;
+use api::v1::RequestHeader;
 use api::v1::{
     column::Values, object_expr, object_result, select_expr, Column, ColumnDataType,
     DatabaseRequest, ExprHeader, InsertExpr, MutateResult as GrpcMutateResult, ObjectExpr,
@@ -22,7 +23,7 @@ use datatypes::schema::{ColumnSchema, Schema};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::client::LB;
-use crate::error;
+use crate::{error, Options};
 use crate::{
     error::{ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu},
     Client, Result,
@@ -56,7 +57,7 @@ impl Database {
         &self.name
     }
 
-    pub async fn insert(&self, insert: InsertExpr) -> Result<ObjectResult> {
+    pub async fn insert(&self, insert: InsertExpr, options: Options) -> Result<ObjectResult> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
         };
@@ -64,10 +65,14 @@ impl Database {
             header: Some(header),
             expr: Some(object_expr::Expr::Insert(insert)),
         };
-        self.object(expr).await?.try_into()
+        self.object(expr, options).await?.try_into()
     }
 
-    pub async fn batch_insert(&self, insert_exprs: Vec<InsertExpr>) -> Result<Vec<ObjectResult>> {
+    pub async fn batch_insert(
+        &self,
+        insert_exprs: Vec<InsertExpr>,
+        options: Options,
+    ) -> Result<Vec<ObjectResult>> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
         };
@@ -78,26 +83,27 @@ impl Database {
                 expr: Some(object_expr::Expr::Insert(expr)),
             })
             .collect();
-        self.objects(obj_exprs)
+        self.objects(obj_exprs, options)
             .await?
             .into_iter()
             .map(|result| result.try_into())
             .collect()
     }
 
-    pub async fn select(&self, expr: Select) -> Result<ObjectResult> {
+    pub async fn select(&self, expr: Select, options: Options) -> Result<ObjectResult> {
         let select_expr = match expr {
             Select::Sql(sql) => SelectExpr {
                 expr: Some(select_expr::Expr::Sql(sql)),
             },
         };
-        self.do_select(select_expr).await
+        self.do_select(select_expr, options).await
     }
 
     pub async fn physical_plan(
         &self,
         physical: Arc<dyn ExecutionPlan>,
         original_ql: Option<String>,
+        options: Options,
     ) -> Result<ObjectResult> {
         let plan = DefaultAsPlanImpl::try_from_physical_plan(physical.clone())
             .context(EncodePhysicalSnafu { physical })?
@@ -109,10 +115,10 @@ impl Database {
                 plan,
             })),
         };
-        self.do_select(select_expr).await
+        self.do_select(select_expr, options).await
     }
 
-    async fn do_select(&self, select_expr: SelectExpr) -> Result<ObjectResult> {
+    async fn do_select(&self, select_expr: SelectExpr, options: Options) -> Result<ObjectResult> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
         };
@@ -122,25 +128,35 @@ impl Database {
             expr: Some(object_expr::Expr::Select(select_expr)),
         };
 
-        let obj_result = self.object(expr).await?;
+        let obj_result = self.object(expr, options).await?;
         obj_result.try_into()
     }
 
     // TODO(jiachun) update/delete
 
-    pub async fn object(&self, expr: ObjectExpr) -> Result<GrpcObjectResult> {
-        let res = self.objects(vec![expr]).await?.pop().unwrap();
+    pub async fn object(&self, expr: ObjectExpr, options: Options) -> Result<GrpcObjectResult> {
+        let res = self.objects(vec![expr], options).await?.pop().unwrap();
         Ok(res)
     }
 
-    async fn objects(&self, exprs: Vec<ObjectExpr>) -> Result<Vec<GrpcObjectResult>> {
+    async fn objects(
+        &self,
+        exprs: Vec<ObjectExpr>,
+        options: Options,
+    ) -> Result<Vec<GrpcObjectResult>> {
+        let header = options
+            .catalog
+            .map(|catalog| RequestHeader { tenant: catalog });
+        let database = options.schema.unwrap_or_else(|| self.name.clone());
+        let load_balance = options.load_balance.unwrap_or(LB::Random);
+
         let expr_count = exprs.len();
         let req = DatabaseRequest {
-            name: self.name.clone(),
+            name: database,
             exprs,
         };
 
-        let res = self.client.database(None, req, LB::Random).await?;
+        let res = self.client.database(header, req, load_balance).await?;
         let res = res.results;
 
         ensure!(

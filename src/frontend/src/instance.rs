@@ -11,7 +11,7 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use client::admin::{admin_result_to_output, Admin};
-use client::{Client, Database, Select};
+use client::{Client, Database, Options, Select};
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use datatypes::schema::ColumnSchema;
@@ -80,7 +80,7 @@ impl SqlQueryHandler for Instance {
         match stmt {
             Statement::Query(_) => self
                 .db
-                .select(Select::Sql(query.to_string()))
+                .select(Select::Sql(query.to_string()), Options::default())
                 .await
                 .and_then(|object_result| object_result.try_into()),
             Statement::Insert(insert) => {
@@ -91,7 +91,7 @@ impl SqlQueryHandler for Instance {
                     options: HashMap::default(),
                 };
                 self.db
-                    .insert(expr)
+                    .insert(expr, Options::default())
                     .await
                     .and_then(|object_result| object_result.try_into())
             }
@@ -230,7 +230,7 @@ fn columns_to_expr(column_defs: &[ColumnDef]) -> Result<Vec<GrpcColumnDef>> {
 impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> server_error::Result<GrpcObjectResult> {
         self.db
-            .object(query.clone())
+            .object(query.clone(), Options::default())
             .await
             .map_err(BoxedError::new)
             .with_context(|_| server_error::ExecuteQuerySnafu {

@@ -163,12 +163,15 @@ async fn insert_and_assert(db: &Database) {
         expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
         options: HashMap::default(),
     };
-    let result = db.insert(expr).await;
+    let result = db.insert(expr, client::Options::default()).await;
     assert!(result.is_ok());
 
     // select
     let result = db
-        .select(client::Select::Sql("select * from demo".to_string()))
+        .select(
+            client::Select::Sql("select * from demo".to_string()),
+            client::Options::default(),
+        )
         .await
         .unwrap();
     assert!(matches!(result, ObjectResult::Select(_)));

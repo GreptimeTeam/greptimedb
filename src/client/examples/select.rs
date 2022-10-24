@@ -1,4 +1,4 @@
-use client::{Client, Database, Select};
+use client::{Client, Database, Options, Select};
 use tracing::{event, Level};
 
 fn main() {
@@ -14,7 +14,7 @@ async fn run() {
     db.start(&["127.0.0.1:3001"]);
 
     let sql = Select::Sql("select * from demo".to_string());
-    let result = db.select(sql).await.unwrap();
+    let result = db.select(sql, Options::default()).await.unwrap();
 
     event!(Level::INFO, "result: {:#?}", result);
 }
