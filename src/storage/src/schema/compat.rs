@@ -1,12 +1,17 @@
 //! Utilities for resolving schema compatibility problems.
 
+use std::sync::Arc;
+
+use datatypes::arrow::array::Array;
+use datatypes::arrow::chunk::Chunk as ArrowChunk;
+use datatypes::arrow::datatypes::Field;
 use datatypes::schema::{ColumnSchema, SchemaRef};
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{Helper, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{self, Result};
 use crate::read::Batch;
-use crate::schema::StoreSchema;
+use crate::schema::StoreSchemaRef;
 
 /// Make schema compatible to write to target with another schema.
 pub trait CompatWrite {
@@ -59,9 +64,9 @@ fn is_source_column_readable(
 #[derive(Debug)]
 pub struct ReadResolver {
     /// Schema of data source.
-    source_schema: StoreSchema,
+    source_schema: StoreSchemaRef,
     /// Schema user expects to read.
-    dest_schema: StoreSchema,
+    dest_schema: StoreSchemaRef,
     /// For each column in dest schema, stores the index in read result for
     /// this column, or None if the column is not in result.
     ///
@@ -77,20 +82,22 @@ pub struct ReadResolver {
 }
 
 impl ReadResolver {
-    pub fn new(source_schema: &StoreSchema, dest_schema: &StoreSchema) -> Result<ReadResolver> {
+    pub fn new(source_schema: StoreSchemaRef, dest_schema: StoreSchemaRef) -> Result<ReadResolver> {
         let (source_version, dest_version) = (source_schema.version(), dest_schema.version());
         if source_version == dest_version {
             debug_assert_eq!(source_schema, dest_schema);
 
             let is_needed = vec![true; source_schema.num_columns()];
 
+            let (row_key_end, user_column_end) =
+                (source_schema.row_key_end(), source_schema.user_column_end());
             return Ok(ReadResolver {
-                source_schema: source_schema.clone(),
-                dest_schema: dest_schema.clone(),
+                source_schema,
+                dest_schema,
                 indices_in_result: Vec::new(),
                 is_needed,
-                row_key_end: source_schema.row_key_end(),
-                user_column_end: source_schema.user_column_end(),
+                row_key_end,
+                user_column_end,
             });
         }
 
@@ -136,8 +143,8 @@ impl ReadResolver {
         }
 
         Ok(ReadResolver {
-            source_schema: source_schema.clone(),
-            dest_schema: dest_schema.clone(),
+            source_schema,
+            dest_schema,
             indices_in_result,
             is_needed,
             row_key_end,
@@ -179,10 +186,69 @@ impl ReadResolver {
         source.push(sequences);
         source.push(op_types);
 
-        if self.source_schema.version() == self.dest_schema.version() {
+        if !self.need_compat() {
             return Ok(Batch::new(source));
         }
 
+        self.source_columns_to_batch(source, num_rows)
+    }
+
+    pub fn fields_to_read(&self) -> Vec<Field> {
+        if !self.need_compat() {
+            return self.dest_schema.arrow_schema().fields.clone();
+        }
+
+        self.source_schema
+            .arrow_schema()
+            .fields
+            .iter()
+            .zip(self.is_needed.iter())
+            .filter_map(|(field, is_needed)| {
+                if *is_needed {
+                    Some(field.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub fn arrow_chunk_to_batch(&self, chunk: &ArrowChunk<Arc<dyn Array>>) -> Result<Batch> {
+        let names = self
+            .source_schema
+            .schema()
+            .column_schemas()
+            .iter()
+            .zip(self.is_needed.iter())
+            .filter_map(|(column_schema, is_needed)| {
+                if *is_needed {
+                    Some(&column_schema.name)
+                } else {
+                    None
+                }
+            });
+        let source = chunk
+            .iter()
+            .zip(names)
+            .map(|(column, name)| {
+                Helper::try_into_vector(column.clone()).context(error::ConvertChunkSnafu { name })
+            })
+            .collect::<Result<_>>()?;
+
+        if !self.need_compat() || chunk.is_empty() {
+            return Ok(Batch::new(source));
+        }
+
+        let num_rows = chunk.len();
+        self.source_columns_to_batch(source, num_rows)
+    }
+
+    #[inline]
+    fn need_compat(&self) -> bool {
+        self.source_schema.version() != self.dest_schema.version()
+    }
+
+    fn source_columns_to_batch(&self, source: Vec<VectorRef>, num_rows: usize) -> Result<Batch> {
         let column_schemas = self.dest_schema.schema().column_schemas();
         let columns = self
             .indices_in_result
@@ -207,6 +273,4 @@ impl ReadResolver {
 
         Ok(Batch::new(columns))
     }
-
-    //
 }
