@@ -118,7 +118,7 @@ impl SqlHandler {
             ColumnSchema::new("Create Table", ConcreteDataType::string_datatype(), false),
         ];
         let schema = Arc::new(Schema::new(column_schemas));
-        let sql1 = vec![name.to_string()];
+        let sql1 = name.to_string();
         let tableref =schema1.table(name).as_ref();
         let table_info = tableref.unwrap().table_info();
         let table_schema = tableref.unwrap().schema();
@@ -144,7 +144,39 @@ impl SqlHandler {
             }
             sql2 += ", ";
         }
-        
+        let keys=table_info.meta.primary_key_indices;
+        let mut res = String::new();
+        for iter in keys{
+            res += format!("{}",table_schema.column_name_by_index(iter)).as_str();
+            res += ",";
+        }
+        sql2 += format!("PRIMARY KEY({})",res).as_str();
+        sql2 += format!("TIMESTAMP KEY({})",table_schema.timestamp_column().unwrap().name).as_str();
+        let mut sql3 = table_info.meta.engine;
+        let mut sql4 = "".to_string();
+        let opts = table_info.meta.options;
+        if !opts.is_empty() {
+            let mut v: Vec<String> = opts
+            .into_iter()
+            .map(|(k,v)| format!("{}={}",k, v))
+            .collect();
+            v.sort();
+            sql4 = format!(" WITH({})", v.join(", "));
+        }
+        let sqls = vec![format!("CREATE TABLE {} ({}) ENGINE={}{}",sql1,sql2,sql3,sql4)];
+        let tables = vec![table_info.name];
+        let recordbatch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(StringVector::from(tables)),
+                Arc::new(StringVector::from(sqls)),
+                ],
+        )
+        .context(NewRecordBatchSnafu)?;
+
+        Ok(Output::RecordBatches(
+            RecordBatches::try_new(schema, vec![recordbatch]).context(NewRecordBatchesSnafu)?,
+        ))
     }
 }
 
