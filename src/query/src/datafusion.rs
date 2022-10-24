@@ -206,7 +206,7 @@ impl QueryExecutor for DatafusionQueryEngine {
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan
-                .execute(0, ctx.state().runtime().into())
+                .execute(0, ctx.state().runtime())
                 .await
                 .context(error::ExecutePhysicalPlanSnafu)?),
             _ => {
@@ -215,12 +215,11 @@ impl QueryExecutor for DatafusionQueryEngine {
                     CoalescePartitionsExec::new(Arc::new(DfPhysicalPlanAdapter(plan.clone())));
                 // CoalescePartitionsExec must produce a single partition
                 assert_eq!(1, plan.output_partitioning().partition_count());
-                let df_stream = plan
-                    .execute(0, ctx.state().runtime().into())
-                    .await
-                    .context(error::DatafusionSnafu {
+                let df_stream = plan.execute(0, ctx.state().runtime()).await.context(
+                    error::DatafusionSnafu {
                         msg: "Failed to execute DataFusion merge exec",
-                    })?;
+                    },
+                )?;
                 let stream = RecordBatchStreamAdapter::try_new(df_stream)
                     .context(error::ConvertDfRecordBatchStreamSnafu)?;
                 Ok(Box::pin(stream))

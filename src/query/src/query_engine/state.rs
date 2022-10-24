@@ -12,10 +12,10 @@ use datafusion::optimizer::limit_push_down::LimitPushDown;
 use datafusion::optimizer::projection_push_down::ProjectionPushDown;
 use datafusion::optimizer::single_distinct_to_groupby::SingleDistinctToGroupBy;
 use datafusion::optimizer::to_approx_perc::ToApproxPerc;
+use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 
 use crate::datafusion::DfCatalogListAdapter;
-use crate::executor::Runtime;
 use crate::optimizer::TypeConversionRule;
 
 /// Query engine global state
@@ -106,7 +106,7 @@ impl QueryEngineState {
     }
 
     #[inline]
-    pub(crate) fn runtime(&self) -> Runtime {
-        self.df_context.runtime_env().into()
+    pub(crate) fn runtime(&self) -> Arc<RuntimeEnv> {
+        self.df_context.runtime_env()
     }
 }
