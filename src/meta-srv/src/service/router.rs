@@ -67,8 +67,11 @@ mod tests {
         let kv_store = Arc::new(NoopKvStore {});
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
-        let header = RequestHeader::new(1, 1);
-        let req = RouteRequest::new(header);
+        let header = RequestHeader::new((1, 1));
+        let req = RouteRequest {
+            header: Some(header),
+            ..Default::default()
+        };
         let req = req
             .add_table(TableName::new("catalog1", "schema1", "table1"))
             .add_table(TableName::new("catalog1", "schema1", "table2"))
@@ -82,9 +85,13 @@ mod tests {
         let kv_store = Arc::new(NoopKvStore {});
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
-        let header = RequestHeader::new(1, 1);
+        let header = RequestHeader::new((1, 1));
         let table_name = TableName::new("test_catalog", "test_db", "table1");
-        let req = CreateRequest::new(header, table_name);
+        let req = CreateRequest {
+            header: Some(header),
+            table_name: Some(table_name),
+            ..Default::default()
+        };
 
         let p0 = Partition::new()
             .column_list(vec![b"col1".to_vec(), b"col2".to_vec()])

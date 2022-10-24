@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use api::v1::meta::router_client::RouterClient;
 use api::v1::meta::CreateRequest;
+use api::v1::meta::RequestHeader;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
 use common_grpc::channel_manager::ChannelManager;
@@ -60,8 +61,7 @@ impl Client {
 
 #[derive(Debug)]
 struct Inner {
-    #[allow(dead_code)]
-    id: Id, // TODO(jiachun): will use it later
+    id: Id,
     channel_manager: ChannelManager,
     peers: Vec<String>,
 }
@@ -90,17 +90,17 @@ impl Inner {
         Ok(())
     }
 
-    async fn route(&self, req: RouteRequest) -> Result<RouteResponse> {
+    async fn route(&self, mut req: RouteRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-
+        req.header = Some(RequestHeader::new(self.id));
         let res = client.route(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
     }
 
-    async fn create(&self, req: CreateRequest) -> Result<RouteResponse> {
+    async fn create(&self, mut req: CreateRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-
+        req.header = Some(RequestHeader::new(self.id));
         let res = client.create(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -134,7 +134,7 @@ impl Inner {
 
 #[cfg(test)]
 mod test {
-    use api::v1::meta::{RequestHeader, TableName};
+    use api::v1::meta::RequestHeader;
 
     use super::*;
 
@@ -188,8 +188,11 @@ mod test {
         let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unavailable_peer"]).await.unwrap();
 
-        let header = RequestHeader::new(0, 0);
-        let req = CreateRequest::new(header, TableName::default());
+        let header = RequestHeader::new((0, 0));
+        let req = CreateRequest {
+            header: Some(header),
+            ..Default::default()
+        };
         let res = client.create(req).await;
 
         assert!(res.is_err());
@@ -205,8 +208,11 @@ mod test {
         let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unavailable_peer"]).await.unwrap();
 
-        let header = RequestHeader::new(0, 0);
-        let req = RouteRequest::new(header);
+        let header = RequestHeader::new((0, 0));
+        let req = RouteRequest {
+            header: Some(header),
+            ..Default::default()
+        };
         let res = client.route(req).await;
 
         assert!(res.is_err());

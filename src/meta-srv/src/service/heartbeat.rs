@@ -136,8 +136,10 @@ mod tests {
         let kv_store = Arc::new(NoopKvStore {});
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
-        let header = RequestHeader::new(1, 1);
-        let req = AskLeaderRequest::new(header);
+        let header = RequestHeader::new((1, 1));
+        let req = AskLeaderRequest {
+            header: Some(header),
+        };
 
         let res = meta_srv.ask_leader(req.into_request()).await.unwrap();
         let res = res.into_inner();

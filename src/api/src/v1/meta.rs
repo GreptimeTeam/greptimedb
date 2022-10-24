@@ -20,36 +20,11 @@ impl From<&str> for Endpoint {
 }
 
 impl RequestHeader {
-    pub fn new(cluster_id: u64, member_id: u64) -> Self {
+    pub fn new((cluster_id, member_id): (u64, u64)) -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION,
             cluster_id,
             member_id,
-        }
-    }
-
-    pub fn with_id((cluster_id, member_id): (u64, u64)) -> Self {
-        Self {
-            protocol_version: PROTOCOL_VERSION,
-            cluster_id,
-            member_id,
-        }
-    }
-}
-
-impl HeartbeatRequest {
-    pub fn new(header: RequestHeader) -> Self {
-        Self {
-            header: Some(header),
-            ..Default::default()
-        }
-    }
-}
-
-impl AskLeaderRequest {
-    pub fn new(header: RequestHeader) -> Self {
-        Self {
-            header: Some(header),
         }
     }
 }
@@ -69,13 +44,6 @@ impl TableName {
 }
 
 impl RouteRequest {
-    pub fn new(header: RequestHeader) -> Self {
-        Self {
-            header: Some(header),
-            ..Default::default()
-        }
-    }
-
     pub fn add_table(mut self, table_name: TableName) -> Self {
         self.table_names.push(table_name);
         self
@@ -83,14 +51,6 @@ impl RouteRequest {
 }
 
 impl CreateRequest {
-    pub fn new(header: RequestHeader, table_name: TableName) -> Self {
-        Self {
-            header: Some(header),
-            table_name: Some(table_name),
-            ..Default::default()
-        }
-    }
-
     pub fn add_partition(mut self, partition: Partition) -> Self {
         self.partitions.push(partition);
         self

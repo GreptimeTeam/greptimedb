@@ -46,8 +46,11 @@ mod tests {
     async fn test_handle_heartbeat_resp_header() {
         let kv_store = Arc::new(NoopKvStore {});
 
-        let header = RequestHeader::new(1, 2);
-        let req = HeartbeatRequest::new(header);
+        let header = RequestHeader::new((1, 2));
+        let req = HeartbeatRequest {
+            header: Some(header),
+            ..Default::default()
+        };
         let res = HeartbeatResponse::default();
 
         let response_handler = ResponseHeaderHandler {};

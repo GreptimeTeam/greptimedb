@@ -4,12 +4,6 @@ mod router;
 mod store;
 
 use api::v1::meta::CreateRequest;
-use api::v1::meta::DeleteRangeRequest;
-use api::v1::meta::DeleteRangeResponse;
-use api::v1::meta::PutRequest;
-use api::v1::meta::PutResponse;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::RangeResponse;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
 use common_grpc::channel_manager::ChannelConfig;
@@ -24,6 +18,12 @@ use self::heartbeat::HeartbeatSender;
 use self::heartbeat::HeartbeatStream;
 use crate::error;
 use crate::error::Result;
+use crate::rpc::DeleteRangeRequest;
+use crate::rpc::DeleteRangeResponse;
+use crate::rpc::PutRequest;
+use crate::rpc::PutResponse;
+use crate::rpc::RangeRequest;
+use crate::rpc::RangeResponse;
 
 pub type Id = (u64, u64);
 
@@ -214,8 +214,9 @@ impl MetaClient {
             .context(error::NotStartedSnafu {
                 name: "store_client",
             })?
-            .range(req)
+            .range(req.into())
             .await
+            .map(RangeResponse::new)
     }
 
     /// Put puts the given key into the key-value store.
@@ -224,8 +225,9 @@ impl MetaClient {
             .context(error::NotStartedSnafu {
                 name: "store_client",
             })?
-            .put(req)
+            .put(req.into())
             .await
+            .map(PutResponse::new)
     }
 
     /// DeleteRange deletes the given range from the key-value store.
@@ -234,8 +236,9 @@ impl MetaClient {
             .context(error::NotStartedSnafu {
                 name: "store_client",
             })?
-            .delete_range(req)
+            .delete_range(req.into())
             .await
+            .map(DeleteRangeResponse::new)
     }
 
     #[inline]
