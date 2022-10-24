@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use catalog::CatalogManagerRef;
 use datafusion::datasource::TableProvider;
@@ -28,13 +27,12 @@ pub struct DFLogicalSubstraitConvertor {
     catalog_manager: CatalogManagerRef,
 }
 
-#[async_trait]
 impl SubstraitPlan for DFLogicalSubstraitConvertor {
     type Error = Error;
 
     type Plan = LogicalPlan;
 
-    async fn convert_buf<B: Buf + Send>(&self, message: B) -> Result<Self::Plan, Self::Error> {
+    fn decode<B: Buf + Send>(&self, message: B) -> Result<Self::Plan, Self::Error> {
         let plan_rel = PlanRel::decode(message).context(DecodeRelSnafu)?;
         let rel = match plan_rel.rel_type.context(EmptyPlanSnafu)? {
             PlanRelType::Rel(rel) => rel,
@@ -46,7 +44,7 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         self.convert_rel(Box::new(rel))
     }
 
-    fn convert_plan(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
+    fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
         let rel = self.convert_plan(plan)?;
 
         let mut buf = BytesMut::new();

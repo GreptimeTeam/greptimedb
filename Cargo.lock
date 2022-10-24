@@ -5036,7 +5036,6 @@ dependencies = [
 name = "substrait"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bytes",
  "catalog",
  "common-error",
