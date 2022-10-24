@@ -3,9 +3,9 @@ use std::io::ErrorKind;
 use api::v1::meta::heartbeat_server;
 use api::v1::meta::AskLeaderRequest;
 use api::v1::meta::AskLeaderResponse;
-use api::v1::meta::Endpoint;
 use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::HeartbeatResponse;
+use api::v1::meta::Peer;
 use api::v1::meta::ResponseHeader;
 use api::v1::meta::PROTOCOL_VERSION;
 use common_telemetry::error;
@@ -42,11 +42,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                     Ok(req) => {
                         if pusher_key.is_none() {
                             if let Some(ref peer) = req.peer {
-                                let key = format!(
-                                    "{}/{}",
-                                    peer.id,
-                                    peer.endpoint.as_ref().map_or("unknow", |ep| &ep.addr)
-                                );
+                                let key = format!("{}/{}", peer.id, peer.addr);
                                 handlers.register(&key, tx.clone()).await;
                                 pusher_key = Some(key);
                             }
@@ -110,7 +106,8 @@ impl MetaSrv {
         // TODO(jiachun): return leader
         let res = AskLeaderResponse {
             header: Some(res_header),
-            leader: Some(Endpoint {
+            leader: Some(Peer {
+                id: 0,
                 addr: self.options().server_addr.clone(),
             }),
         };

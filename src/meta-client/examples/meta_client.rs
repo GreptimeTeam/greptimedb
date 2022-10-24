@@ -1,17 +1,16 @@
 use std::time::Duration;
 
-use api::v1::meta::CreateRequest;
 use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::Partition;
 use api::v1::meta::Peer;
-use api::v1::meta::RequestHeader;
-use api::v1::meta::TableName;
 use common_grpc::channel_manager::ChannelConfig;
 use common_grpc::channel_manager::ChannelManager;
 use meta_client::client::MetaClientBuilder;
+use meta_client::rpc::CreateRequest;
 use meta_client::rpc::DeleteRangeRequest;
+use meta_client::rpc::Partition;
 use meta_client::rpc::PutRequest;
 use meta_client::rpc::RangeRequest;
+use meta_client::rpc::TableName;
 use tracing::event;
 use tracing::subscriber;
 use tracing::Level;
@@ -46,7 +45,10 @@ async fn run() {
     tokio::spawn(async move {
         for _ in 0..5 {
             let req = HeartbeatRequest {
-                peer: Some(Peer::new(1, "meta_client_peer")),
+                peer: Some(Peer {
+                    id: 1,
+                    addr: "meta_client_peer".to_string(),
+                }),
                 ..Default::default()
             };
             sender.send(req).await.unwrap();
@@ -60,20 +62,19 @@ async fn run() {
         }
     });
 
-    let header = RequestHeader::new(id);
+    let p1 = Partition {
+        column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
+        value_list: vec![b"k1".to_vec(), b"k2".to_vec()],
+    };
 
-    let p1 = Partition::new()
-        .column_list(vec![b"col_1".to_vec(), b"col_2".to_vec()])
-        .value_list(vec![b"k1".to_vec(), b"k2".to_vec()]);
-
-    let p2 = Partition::new()
-        .column_list(vec![b"col_1".to_vec(), b"col_2".to_vec()])
-        .value_list(vec![b"Max1".to_vec(), b"Max2".to_vec()]);
+    let p2 = Partition {
+        column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
+        value_list: vec![b"Max1".to_vec(), b"Max2".to_vec()],
+    };
 
     let table_name = TableName::new("test_catlog", "test_schema", "test_table");
 
     let create_req = CreateRequest {
-        header: Some(header),
         table_name: Some(table_name),
         ..Default::default()
     }

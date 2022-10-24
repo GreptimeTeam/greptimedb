@@ -1,7 +1,17 @@
+mod router;
 mod store;
 
 use api::v1::meta::KeyValue as PbKeyValue;
+use api::v1::meta::Peer as PbPeer;
 use api::v1::meta::ResponseHeader as PbResponseHeader;
+use api::v1::meta::TableName as PbTableName;
+pub use router::CreateRequest;
+pub use router::Partition;
+pub use router::Region;
+pub use router::RouteRequest;
+pub use router::RouteResponse;
+pub use router::Table;
+pub use router::TableRoute;
 pub use store::DeleteRangeRequest;
 pub use store::DeleteRangeResponse;
 pub use store::PutRequest;
@@ -72,6 +82,71 @@ impl KeyValue {
     #[inline]
     pub fn take_value(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.0.value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TableName {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+}
+
+impl TableName {
+    pub fn new(
+        catalog_name: impl Into<String>,
+        schema_name: impl Into<String>,
+        table_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            catalog_name: catalog_name.into(),
+            schema_name: schema_name.into(),
+            table_name: table_name.into(),
+        }
+    }
+}
+
+impl From<TableName> for PbTableName {
+    fn from(tb: TableName) -> Self {
+        Self {
+            catalog_name: tb.catalog_name,
+            schema_name: tb.schema_name,
+            table_name: tb.table_name,
+        }
+    }
+}
+
+impl From<PbTableName> for TableName {
+    fn from(tb: PbTableName) -> Self {
+        Self {
+            catalog_name: tb.catalog_name,
+            schema_name: tb.schema_name,
+            table_name: tb.table_name,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Peer {
+    pub id: u64,
+    pub addr: String,
+}
+
+impl From<PbPeer> for Peer {
+    fn from(p: PbPeer) -> Self {
+        Self {
+            id: p.id,
+            addr: p.addr,
+        }
+    }
+}
+
+impl Peer {
+    pub fn new(id: u64, addr: impl Into<String>) -> Self {
+        Self {
+            id,
+            addr: addr.into(),
+        }
     }
 }
 

@@ -41,7 +41,10 @@ async fn handle_create(req: CreateRequest, _kv_store: KvStoreRef) -> Result<Rout
     let _table_name = table_name.context(error::EmptyTableNameSnafu)?;
 
     // TODO(jiachun):
-    let peers = vec![Peer::new(0, "127.0.0.1:3000")];
+    let peers = vec![Peer {
+        id: 0,
+        addr: "127.0.0.1:3000".to_string(),
+    }];
 
     Ok(RouteResponse {
         peers,
@@ -106,7 +109,7 @@ mod tests {
         let res = meta_srv.create(req.into_request()).await.unwrap();
 
         for r in res.into_inner().peers {
-            assert_eq!("127.0.0.1:3000", r.endpoint.unwrap().addr);
+            assert_eq!("127.0.0.1:3000", r.addr);
         }
     }
 }
