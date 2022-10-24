@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use common_error::prelude::*;
-use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{Schema, SchemaBuilder, SchemaRef};
 
 use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, ColumnsMetadataRef, Result};
 use crate::schema::{StoreSchema, StoreSchemaRef};
@@ -129,7 +129,7 @@ pub type RegionSchemaRef = Arc<RegionSchema>;
 fn build_user_schema(columns: &ColumnsMetadata, version: u32) -> Result<Schema> {
     let column_schemas: Vec<_> = columns
         .iter_user_columns()
-        .map(|col| ColumnSchema::from(&col.desc))
+        .map(|col| col.desc.to_column_schema())
         .collect();
 
     SchemaBuilder::try_from(column_schemas)

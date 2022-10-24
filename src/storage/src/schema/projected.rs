@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::arrow::bitmap::MutableBitmap;
-use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{SchemaBuilder, SchemaRef};
 use datatypes::vectors::{BooleanVector, VectorRef};
 use store_api::storage::{Chunk, ColumnId};
 
@@ -257,7 +257,12 @@ impl ProjectedSchema {
         let column_schemas: Vec<_> = projection
             .projected_columns
             .iter()
-            .map(|col_idx| ColumnSchema::from(&region_schema.column_metadata(*col_idx).desc))
+            .map(|col_idx| {
+                region_schema
+                    .column_metadata(*col_idx)
+                    .desc
+                    .to_column_schema()
+            })
             .collect();
 
         let mut builder = SchemaBuilder::try_from(column_schemas)

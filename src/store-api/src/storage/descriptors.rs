@@ -39,6 +39,14 @@ impl ColumnDescriptor {
     pub fn default_constraint(&self) -> Option<&ColumnDefaultConstraint> {
         self.default_constraint.as_ref()
     }
+
+    /// Convert [ColumnDescriptor] to [ColumnSchema]. Fields not in ColumnSchema **will not**
+    /// be stored as metadata.
+    pub fn to_column_schema(&self) -> ColumnSchema {
+        ColumnSchema::new(&self.name, self.data_type.clone(), self.is_nullable)
+            .with_default_constraint(self.default_constraint.clone())
+            .expect("ColumnDescriptor should validate default constraint")
+    }
 }
 
 impl ColumnDescriptorBuilder {
@@ -71,16 +79,6 @@ impl ColumnDescriptorBuilder {
         }
 
         Ok(())
-    }
-}
-
-// Convert [ColumnDescriptor] to [ColumnSchema]. Fields not in ColumnSchema **will not**
-// be stored as metadata.
-impl From<&ColumnDescriptor> for ColumnSchema {
-    fn from(desc: &ColumnDescriptor) -> ColumnSchema {
-        ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable)
-            .with_default_constraint(desc.default_constraint.clone())
-            .expect("ColumnDescriptor should validate default constraint")
     }
 }
 
@@ -206,6 +204,22 @@ mod tests {
             .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Null)))
             .build()
             .unwrap_err();
+    }
+
+    #[test]
+    fn test_descriptor_to_column_schema() {
+        let constraint = ColumnDefaultConstraint::Value(Value::Int32(123));
+        let desc = new_column_desc_builder()
+            .default_constraint(Some(constraint.clone()))
+            .is_nullable(false)
+            .build()
+            .unwrap();
+        let column_schema = desc.to_column_schema();
+        let expected = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), false)
+            .with_default_constraint(Some(constraint))
+            .unwrap();
+
+        assert_eq!(expected, column_schema);
     }
 
     fn new_timestamp_desc() -> ColumnDescriptor {

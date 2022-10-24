@@ -381,7 +381,7 @@ impl ColumnMetadata {
 
     /// Convert `self` to [`ColumnSchema`] for building a [`StoreSchema`](crate::schema::StoreSchema). This
     /// would store additional metadatas to the ColumnSchema.
-    pub fn to_column_schema_for_store(&self) -> Result<ColumnSchema> {
+    pub fn to_column_schema(&self) -> Result<ColumnSchema> {
         let desc = &self.desc;
         ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable())
             .with_metadata(self.to_metadata())
@@ -390,7 +390,7 @@ impl ColumnMetadata {
     }
 
     /// Convert [`ColumnSchema`] in [`StoreSchema`](crate::schema::StoreSchema) to [`ColumnMetadata`].
-    pub fn from_column_schema_for_store(column_schema: &ColumnSchema) -> Result<ColumnMetadata> {
+    pub fn from_column_schema(column_schema: &ColumnSchema) -> Result<ColumnMetadata> {
         let metadata = column_schema.metadata();
         let cf_id = try_parse_int(metadata, METADATA_CF_ID_KEY, Some(consts::DEFAULT_CF_ID))?;
         let column_id = try_parse_int(metadata, METADATA_COLUMN_ID_KEY, None)?;
@@ -1370,13 +1370,13 @@ mod tests {
             cf_id: consts::DEFAULT_CF_ID,
             desc: desc.clone(),
         };
-        let column_schema = meta.to_column_schema_for_store().unwrap();
-        let new_meta = ColumnMetadata::from_column_schema_for_store(&column_schema).unwrap();
+        let column_schema = meta.to_column_schema().unwrap();
+        let new_meta = ColumnMetadata::from_column_schema(&column_schema).unwrap();
         assert_eq!(meta, new_meta);
 
         let meta = ColumnMetadata { cf_id: 567, desc };
-        let column_schema = meta.to_column_schema_for_store().unwrap();
-        let new_meta = ColumnMetadata::from_column_schema_for_store(&column_schema).unwrap();
+        let column_schema = meta.to_column_schema().unwrap();
+        let new_meta = ColumnMetadata::from_column_schema(&column_schema).unwrap();
         assert_eq!(meta, new_meta);
     }
 }

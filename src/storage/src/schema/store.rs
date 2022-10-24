@@ -14,12 +14,10 @@ use crate::read::Batch;
 const ROW_KEY_END_KEY: &str = "greptime:storage:row_key_end";
 const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
 
-/// Schema for storage engine.
+/// Schema that contains storage engine specific metadata, such as internal columns.
 ///
-/// Used internally, contains all row key columns, internal columns and parts of value
-/// columns. The columns are organized in `key, value, internal` order.
-///
-/// Only contains a reference to schema and some indices, so it should be cheap to clone.
+/// Used internally, contains all row key columns, internal columns and a sub set of
+/// value columns in a region. The columns are organized in `key, value, internal` order.
 #[derive(Debug, PartialEq)]
 pub struct StoreSchema {
     columns: Vec<ColumnMetadata>,
@@ -108,7 +106,7 @@ impl StoreSchema {
     ) -> Result<StoreSchema> {
         let column_schemas = columns
             .iter()
-            .map(|meta| meta.to_column_schema_for_store())
+            .map(|meta| meta.to_column_schema())
             .collect::<Result<Vec<_>>>()?;
 
         let schema = SchemaBuilder::try_from(column_schemas)
@@ -186,7 +184,7 @@ impl TryFrom<ArrowSchema> for StoreSchema {
         let columns = schema
             .column_schemas()
             .iter()
-            .map(ColumnMetadata::from_column_schema_for_store)
+            .map(ColumnMetadata::from_column_schema)
             .collect::<Result<_>>()?;
 
         Ok(StoreSchema {
@@ -240,7 +238,7 @@ mod tests {
         let column_schemas: Vec<_> = region_schema
             .columns()
             .iter()
-            .map(|meta| meta.to_column_schema_for_store().unwrap())
+            .map(|meta| meta.to_column_schema().unwrap())
             .collect();
         let expect_schema = SchemaBuilder::try_from(column_schemas)
             .unwrap()
