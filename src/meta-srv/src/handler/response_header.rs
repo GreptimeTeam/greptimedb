@@ -1,8 +1,8 @@
 use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::HeartbeatResponse;
 use api::v1::meta::ResponseHeader;
 use api::v1::meta::PROTOCOL_VERSION;
 
+use super::Context;
 use super::HeartbeatHandler;
 use crate::error::Result;
 use crate::service::store::kv::KvStoreRef;
@@ -14,22 +14,17 @@ impl HeartbeatHandler for ResponseHeaderHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        res: HeartbeatResponse,
+        ctx: &mut Context,
         _store: KvStoreRef,
-    ) -> Result<HeartbeatResponse> {
+    ) -> Result<()> {
         let HeartbeatRequest { header, .. } = req;
         let res_header = ResponseHeader {
             protocol_version: PROTOCOL_VERSION,
             cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
             ..Default::default()
         };
-
-        let res = HeartbeatResponse {
-            header: Some(res_header),
-            ..res
-        };
-
-        Ok(res)
+        ctx.header = Some(res_header);
+        Ok(())
     }
 }
 
@@ -37,7 +32,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::meta::request_header;
+    use api::v1::meta::{request_header, HeartbeatResponse};
 
     use super::*;
     use crate::service::store::noop::NoopKvStore;
@@ -45,16 +40,18 @@ mod tests {
     #[tokio::test]
     async fn test_handle_heartbeat_resp_header() {
         let kv_store = Arc::new(NoopKvStore {});
-
         let req = HeartbeatRequest {
             header: request_header((1, 2)),
             ..Default::default()
         };
-        let res = HeartbeatResponse::default();
+        let mut ctx = Context::default();
 
         let response_handler = ResponseHeaderHandler {};
-        let res = response_handler.handle(&req, res, kv_store).await.unwrap();
-
+        response_handler
+            .handle(&req, &mut ctx, kv_store)
+            .await
+            .unwrap();
+        let res: HeartbeatResponse = ctx.into();
         assert_eq!(1, res.header.unwrap().cluster_id);
     }
 }

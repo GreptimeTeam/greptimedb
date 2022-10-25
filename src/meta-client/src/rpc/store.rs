@@ -41,7 +41,7 @@ impl From<RangeRequest> for PbRangeRequest {
 
 impl RangeRequest {
     #[inline]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             key: vec![],
             range_end: vec![],
@@ -91,7 +91,7 @@ pub struct RangeResponse(PbRangeResponse);
 
 impl RangeResponse {
     #[inline]
-    pub const fn new(res: PbRangeResponse) -> Self {
+    pub fn new(res: PbRangeResponse) -> Self {
         Self(res)
     }
 
@@ -106,7 +106,7 @@ impl RangeResponse {
     }
 
     #[inline]
-    pub const fn more(&self) -> bool {
+    pub fn more(&self) -> bool {
         self.0.more
     }
 }
@@ -136,7 +136,7 @@ impl From<PutRequest> for PbPutRequest {
 
 impl PutRequest {
     #[inline]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             key: vec![],
             value: vec![],
@@ -173,7 +173,7 @@ pub struct PutResponse(PbPutResponse);
 
 impl PutResponse {
     #[inline]
-    pub const fn new(res: PbPutResponse) -> Self {
+    pub fn new(res: PbPutResponse) -> Self {
         Self(res)
     }
 
@@ -219,7 +219,7 @@ impl From<DeleteRangeRequest> for PbDeleteRangeRequest {
 
 impl DeleteRangeRequest {
     #[inline]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             key: vec![],
             range_end: vec![],
@@ -262,7 +262,7 @@ pub struct DeleteRangeResponse(PbDeleteRangeResponse);
 
 impl DeleteRangeResponse {
     #[inline]
-    pub const fn new(res: PbDeleteRangeResponse) -> Self {
+    pub fn new(res: PbDeleteRangeResponse) -> Self {
         Self(res)
     }
 

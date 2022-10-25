@@ -24,22 +24,22 @@ pub struct ResponseHeader(PbResponseHeader);
 
 impl ResponseHeader {
     #[inline]
-    pub(crate) const fn new(header: PbResponseHeader) -> Self {
+    pub(crate) fn new(header: PbResponseHeader) -> Self {
         Self(header)
     }
 
     #[inline]
-    pub const fn protocol_version(&self) -> u64 {
+    pub fn protocol_version(&self) -> u64 {
         self.0.protocol_version
     }
 
     #[inline]
-    pub const fn cluster_id(&self) -> u64 {
+    pub fn cluster_id(&self) -> u64 {
         self.0.cluster_id
     }
 
     #[inline]
-    pub const fn error_code(&self) -> i32 {
+    pub fn error_code(&self) -> i32 {
         match self.0.error.as_ref() {
             Some(err) => err.code,
             None => 0,
@@ -60,7 +60,7 @@ pub struct KeyValue(PbKeyValue);
 
 impl KeyValue {
     #[inline]
-    pub(crate) const fn new(kv: PbKeyValue) -> Self {
+    pub(crate) fn new(kv: PbKeyValue) -> Self {
         Self(kv)
     }
 

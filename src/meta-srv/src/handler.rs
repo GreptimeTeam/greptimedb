@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::HeartbeatResponse;
+use api::v1::meta::ResponseHeader;
 use common_telemetry::info;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
@@ -17,10 +18,33 @@ pub trait HeartbeatHandler: Send + Sync {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        res: HeartbeatResponse,
+        ctx: &mut Context,
         store: KvStoreRef,
-    ) -> Result<HeartbeatResponse>;
+    ) -> Result<()>;
 }
+
+#[derive(Debug, Default)]
+pub struct Context {
+    pub header: Option<ResponseHeader>,
+    pub states: Vec<State>,
+    pub instructions: Vec<Instruction>,
+}
+
+impl From<Context> for HeartbeatResponse {
+    fn from(ctx: Context) -> Self {
+        Self {
+            header: ctx.header,
+            // TODO(jiachun): set other fields
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum State {}
+
+#[derive(Debug)]
+pub enum Instruction {}
 
 pub type Pusher = Sender<std::result::Result<HeartbeatResponse, tonic::Status>>;
 
@@ -60,11 +84,11 @@ impl HeartbeatHandlers {
     }
 
     pub async fn handle(&self, req: HeartbeatRequest) -> Result<HeartbeatResponse> {
-        let mut res = HeartbeatResponse::default();
+        let mut ctx = Context::default();
         let handlers = self.handlers.read().await;
         for h in handlers.iter() {
-            res = h.handle(&req, res, self.kv_store.clone()).await?;
+            h.handle(&req, &mut ctx, self.kv_store.clone()).await?;
         }
-        Ok(res)
+        Ok(ctx.into())
     }
 }

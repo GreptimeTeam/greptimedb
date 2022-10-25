@@ -26,7 +26,7 @@ impl From<RouteRequest> for PbRouteRequest {
 
 impl RouteRequest {
     #[inline]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             table_names: vec![],
         }
@@ -57,7 +57,7 @@ impl From<CreateRequest> for PbCreateRequest {
 
 impl CreateRequest {
     #[inline]
-    pub const fn new(table_name: TableName) -> Self {
+    pub fn new(table_name: TableName) -> Self {
         Self {
             table_name: Some(table_name),
             partitions: vec![],
