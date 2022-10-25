@@ -9,7 +9,7 @@ use common_query::Output;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::Result;
 use servers::query_handler::{SqlQueryHandler, SqlQueryHandlerRef};
-use test_util::MemTable;
+use table::test_util::MemTable;
 
 mod http;
 mod mysql;

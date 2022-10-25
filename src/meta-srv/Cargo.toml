@@ -2,16 +2,17 @@
 name = "meta-srv"
 version = "0.1.0"
 edition = "2021"
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 api = { path = "../api" }
 async-trait = "0.1"
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
+common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 etcd-client = "0.10"
 futures = "0.3"
+h2 = "0.3"
 http-body = "0.4"
 serde = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }

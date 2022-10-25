@@ -17,7 +17,9 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
+    "simd",
+] }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"
@@ -40,5 +42,4 @@ opendal = "0.17"
 storage = { path = "../storage" }
 table-engine = { path = "../table-engine" }
 tempdir = "0.3"
-test-util = { path = "../../test-util" }
 tokio = { version = "1.0", features = ["full"] }

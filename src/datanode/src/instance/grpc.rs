@@ -7,12 +7,15 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
+use query::plan::LogicalPlan;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
 use snafu::prelude::*;
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::AddColumnRequest;
 
 use crate::error::{
-    self, CatalogSnafu, InsertSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu,
+    self, CatalogSnafu, DecodeLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, Result,
+    TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
@@ -160,6 +163,7 @@ impl Instance {
         let expr = select_expr.expr;
         match expr {
             Some(select_expr::Expr::Sql(sql)) => self.execute_sql(&sql).await,
+            Some(select_expr::Expr::LogicalPlan(plan)) => self.execute_logical(plan).await,
             Some(select_expr::Expr::PhysicalPlan(api::v1::PhysicalPlan { original_ql, plan })) => {
                 self.physical_planner
                     .execute(PhysicalPlanner::parse(plan)?, original_ql)
@@ -170,6 +174,18 @@ impl Instance {
             }
             .fail(),
         }
+    }
+
+    async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
+        let logical_plan_converter = DFLogicalSubstraitConvertor::new(self.catalog_manager.clone());
+        let logical_plan = logical_plan_converter
+            .decode(plan_bytes.as_slice())
+            .context(DecodeLogicalPlanSnafu)?;
+
+        self.query_engine
+            .execute(&LogicalPlan::DfPlan(logical_plan))
+            .await
+            .context(ExecuteSqlSnafu)
     }
 }
 

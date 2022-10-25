@@ -16,6 +16,12 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to decode logical plan, source: {}", source))]
+    DecodeLogicalPlan {
+        #[snafu(backtrace)]
+        source: substrait::error::Error,
+    },
+
     #[snafu(display("Failed to execute physical plan, source: {}", source))]
     ExecutePhysicalPlan {
         #[snafu(backtrace)]
@@ -281,6 +287,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::ExecuteSql { source } => source.status_code(),
+            Error::DecodeLogicalPlan { source } => source.status_code(),
             Error::ExecutePhysicalPlan { source } => source.status_code(),
             Error::NewCatalog { source } => source.status_code(),
             Error::FindTable { source, .. } => source.status_code(),

@@ -19,5 +19,4 @@ table = { path = "../../table" }
 [dev-dependencies]
 chrono = "0.4"
 tempdir = "0.3"
-test-util = { path = "../../../test-util" }
 tokio = { version = "1.0", features = ["full"] }

@@ -31,6 +31,12 @@ message Endpoint {
   string addr = 1;
 }
 
+message TableName {
+  string catalog_name = 1;
+  string schema_name = 2;
+  string table_name = 3;
+}
+
 message TimeInterval {
   // The unix timestamp in millis of the start of this period.
   uint64 start_timestamp_millis = 1;

@@ -1,6 +1,5 @@
 //! Storage engine implementation.
 #![feature(map_first_last)]
-mod arrow_stream;
 mod background;
 mod chunk;
 pub mod codec;

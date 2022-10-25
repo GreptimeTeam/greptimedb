@@ -6,7 +6,7 @@ use metrics::counter;
 use servers::http::handler as http_handler;
 use servers::http::handler::ScriptExecution;
 use servers::http::{HttpResponse, JsonOutput};
-use test_util::MemTable;
+use table::test_util::MemTable;
 
 use crate::create_testing_sql_query_handler;
 

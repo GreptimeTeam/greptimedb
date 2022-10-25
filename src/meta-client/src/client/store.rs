@@ -15,6 +15,7 @@ use snafu::ResultExt;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
+use super::Id;
 use crate::client::load_balance as lb;
 use crate::error;
 use crate::error::Result;
@@ -25,15 +26,14 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(channel_manager: ChannelManager) -> Self {
-        let inner = Inner {
+    pub fn new(id: Id, channel_manager: ChannelManager) -> Self {
+        let inner = Arc::new(RwLock::new(Inner {
+            id,
             channel_manager,
             peers: vec![],
-        };
+        }));
 
-        Self {
-            inner: Arc::new(RwLock::new(inner)),
-        }
+        Self { inner }
     }
 
     pub async fn start<U, A>(&mut self, urls: A) -> Result<()>
@@ -68,6 +68,8 @@ impl Client {
 
 #[derive(Debug)]
 struct Inner {
+    #[allow(dead_code)]
+    id: Id, // TODO(jiachun): will use it later
     channel_manager: ChannelManager,
     peers: Vec<String>,
 }
@@ -155,7 +157,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_client() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
 
         assert!(!client.is_started().await);
 
@@ -169,7 +171,7 @@ mod test {
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
@@ -189,7 +191,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_with_duplicate_peers() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1000", "127.0.0.1:1000"])
             .await
@@ -200,7 +202,7 @@ mod test {
 
     #[tokio::test]
     async fn test_range_unavailable() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unknow_peer"]).await.unwrap();
 
         let req = RangeRequest {
@@ -219,7 +221,7 @@ mod test {
 
     #[tokio::test]
     async fn test_put_unavailable() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unavailable_peer"]).await.unwrap();
 
         let req = PutRequest {
@@ -240,7 +242,7 @@ mod test {
 
     #[tokio::test]
     async fn test_delete_range_unavailable() {
-        let mut client = Client::new(ChannelManager::default());
+        let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unavailable_peer"]).await.unwrap();
 
         let req = DeleteRangeRequest {

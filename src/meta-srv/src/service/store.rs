@@ -50,6 +50,7 @@ mod tests {
     use tonic::IntoRequest;
 
     use super::*;
+    use crate::metasrv::MetaSrvOptions;
     use crate::service::store::kv::KvStore;
 
     struct MockKvStore;
@@ -75,7 +76,7 @@ mod tests {
     #[tokio::test]
     async fn test_range() {
         let kv_store = Arc::new(MockKvStore {});
-        let meta_srv = MetaSrv::new(kv_store);
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
         let req = RangeRequest::default();
         let res = meta_srv.range(req.into_request()).await;
 
@@ -85,7 +86,7 @@ mod tests {
     #[tokio::test]
     async fn test_put() {
         let kv_store = Arc::new(MockKvStore {});
-        let meta_srv = MetaSrv::new(kv_store);
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
         let req = PutRequest::default();
         let res = meta_srv.put(req.into_request()).await;
 
@@ -95,7 +96,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_range() {
         let kv_store = Arc::new(MockKvStore {});
-        let meta_srv = MetaSrv::new(kv_store);
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
         let req = DeleteRangeRequest::default();
         let res = meta_srv.delete_range(req.into_request()).await;
 

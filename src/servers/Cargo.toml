@@ -44,6 +44,6 @@ mysql_async = { git = "https://github.com/Morranto/mysql_async.git", rev = "127b
 query = { path = "../query" }
 rand = "0.8"
 script = { path = "../script", features = ["python"] }
-test-util = { path = "../../test-util" }
+table = { path = "../table" }
 tokio-postgres = "0.7"
 tokio-test = "0.4"

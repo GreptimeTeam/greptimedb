@@ -10,7 +10,9 @@ common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
+    "simd",
+] }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../datatypes" }
 derive_builder = "0.11"
@@ -20,9 +22,9 @@ paste = "1.0"
 serde = "1.0.136"
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
+tokio = { version = "1.18", features = ["full"] }
 
 [dev-dependencies]
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 tempdir = "0.3"
-tokio = { version = "1.18", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }

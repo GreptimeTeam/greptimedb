@@ -8,8 +8,9 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
+use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStream};
 use common_telemetry::logging;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use datatypes::vectors::VectorRef;
@@ -25,6 +26,7 @@ use store_api::storage::{
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
 use table::metadata::{FilterPushDownType, TableInfoRef, TableMetaBuilder};
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
+use table::table::scan::SimpleTableScan;
 use table::{
     metadata::{TableInfo, TableType},
     table::Table,
@@ -154,7 +156,7 @@ impl<R: Region> Table for MitoTable<R> {
         projection: &Option<Vec<usize>>,
         filters: &[Expr],
         _limit: Option<usize>,
-    ) -> TableResult<SendableRecordBatchStream> {
+    ) -> TableResult<PhysicalPlanRef> {
         let read_ctx = ReadContext::default();
         let snapshot = self.region.snapshot(&read_ctx).map_err(TableError::new)?;
 
@@ -180,7 +182,8 @@ impl<R: Region> Table for MitoTable<R> {
             }
         });
 
-        Ok(Box::pin(ChunkStream { schema, stream }))
+        let stream = Box::pin(ChunkStream { schema, stream });
+        Ok(Arc::new(SimpleTableScan::new(stream)))
     }
 
     // Alter table changes the schemas of the table. The altering happens as cloning a new schema,

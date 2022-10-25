@@ -13,7 +13,7 @@ use datatypes::vectors::PrimitiveVector;
 use query::query_engine::QueryEngineFactory;
 use query::QueryEngine;
 use rand::Rng;
-use test_util::MemTable;
+use table::test_util::MemTable;
 
 pub fn create_query_engine() -> Arc<dyn QueryEngine> {
     let schema_provider = Arc::new(MemorySchemaProvider::new());

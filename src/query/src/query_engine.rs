@@ -6,13 +6,14 @@ use std::sync::Arc;
 use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
+use common_query::physical_plan::PhysicalPlan;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use sql::statements::statement::Statement;
 
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
-use crate::plan::{LogicalPlan, PhysicalPlan};
+use crate::plan::LogicalPlan;
 pub use crate::query_engine::context::QueryContext;
 pub use crate::query_engine::state::QueryEngineState;
 

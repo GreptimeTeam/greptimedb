@@ -107,8 +107,8 @@ impl ScriptsTable {
         let table = self
             .catalog_manager
             .table(
-                Some(DEFAULT_CATALOG_NAME),
-                Some(DEFAULT_SCHEMA_NAME),
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
                 SCRIPTS_TABLE_NAME,
             )
             .context(FindScriptsTableSnafu)?

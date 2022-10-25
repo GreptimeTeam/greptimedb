@@ -1,16 +1,19 @@
 use std::collections::{HashMap, HashSet};
+use std::num::ParseIntError;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, Metadata};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 use store_api::storage::{
     consts::{self, ReservedColumnId},
     AddColumn, AlterOperation, AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder,
-    ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnFamilyId, ColumnId,
-    RegionDescriptor, RegionDescriptorBuilder, RegionId, RegionMeta, RowKeyDescriptor,
-    RowKeyDescriptorBuilder, Schema, SchemaRef,
+    ColumnDescriptorBuilderError, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder,
+    ColumnFamilyId, ColumnId, RegionDescriptor, RegionDescriptorBuilder, RegionId, RegionMeta,
+    RowKeyDescriptor, RowKeyDescriptorBuilder, Schema, SchemaRef,
 };
 
 use crate::manifest::action::{RawColumnFamiliesMetadata, RawColumnsMetadata, RawRegionMetadata};
@@ -18,6 +21,7 @@ use crate::schema::{RegionSchema, RegionSchemaRef};
 
 /// Error for handling metadata.
 #[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub enum Error {
     #[snafu(display("Column name {} already exists", name))]
     ColNameExists { name: String, backtrace: Backtrace },
@@ -34,7 +38,7 @@ pub enum Error {
     #[snafu(display("Failed to build schema, source: {}", source))]
     InvalidSchema {
         #[snafu(backtrace)]
-        source: crate::schema::Error,
+        source: datatypes::error::Error,
     },
 
     #[snafu(display("Column name {} is reserved by the system", name))]
@@ -64,7 +68,63 @@ pub enum Error {
 
     #[snafu(display("Failed to drop column {} as it is an internal column", name))]
     DropInternalColumn { name: String },
+
     // End of variants for validating `AlterRequest`.
+    #[snafu(display("Failed to convert to column schema, source: {}", source))]
+    ToColumnSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to parse metadata to int, key_value: {}, source: {}",
+        key_value,
+        source
+    ))]
+    ParseMetaInt {
+        // Store key and value in one string to reduce the enum size.
+        key_value: String,
+        source: std::num::ParseIntError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Metadata of {} not found", key))]
+    MetaNotFound { key: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to build column descriptor, source: {}", source))]
+    BuildColumnDescriptor {
+        source: ColumnDescriptorBuilderError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to convert from arrow schema, source: {}", source))]
+    ConvertArrowSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Invalid internal column index in arrow schema"))]
+    InvalidIndex { backtrace: Backtrace },
+
+    #[snafu(display(
+        "Failed to convert arrow chunk to batch, name: {}, source: {}",
+        name,
+        source
+    ))]
+    ConvertChunk {
+        name: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to convert schema, source: {}", source))]
+    ConvertSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Invalid projection, {}", msg))]
+    InvalidProjection { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -285,8 +345,7 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
 
     fn try_from(raw: RawRegionMetadata) -> Result<RegionMetadata> {
         let columns = Arc::new(ColumnsMetadata::from(raw.columns));
-        let schema =
-            Arc::new(RegionSchema::new(columns.clone(), raw.version).context(InvalidSchemaSnafu)?);
+        let schema = Arc::new(RegionSchema::new(columns.clone(), raw.version)?);
 
         Ok(RegionMetadata {
             id: raw.id,
@@ -298,6 +357,10 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
         })
     }
 }
+
+const METADATA_CF_ID_KEY: &str = "greptime:storage:cf_id";
+const METADATA_COLUMN_ID_KEY: &str = "greptime:storage:column_id";
+const METADATA_COMMENT_KEY: &str = "greptime:storage:comment";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColumnMetadata {
@@ -315,6 +378,67 @@ impl ColumnMetadata {
     pub fn name(&self) -> &str {
         &self.desc.name
     }
+
+    /// Convert `self` to [`ColumnSchema`] for building a [`StoreSchema`](crate::schema::StoreSchema). This
+    /// would store additional metadatas to the ColumnSchema.
+    pub fn to_column_schema(&self) -> Result<ColumnSchema> {
+        let desc = &self.desc;
+        ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable())
+            .with_metadata(self.to_metadata())
+            .with_default_constraint(desc.default_constraint().cloned())
+            .context(ToColumnSchemaSnafu)
+    }
+
+    /// Convert [`ColumnSchema`] in [`StoreSchema`](crate::schema::StoreSchema) to [`ColumnMetadata`].
+    pub fn from_column_schema(column_schema: &ColumnSchema) -> Result<ColumnMetadata> {
+        let metadata = column_schema.metadata();
+        let cf_id = try_parse_int(metadata, METADATA_CF_ID_KEY, Some(consts::DEFAULT_CF_ID))?;
+        let column_id = try_parse_int(metadata, METADATA_COLUMN_ID_KEY, None)?;
+        let comment = metadata
+            .get(METADATA_COMMENT_KEY)
+            .cloned()
+            .unwrap_or_default();
+
+        let desc = ColumnDescriptorBuilder::new(
+            column_id,
+            &column_schema.name,
+            column_schema.data_type.clone(),
+        )
+        .is_nullable(column_schema.is_nullable())
+        .default_constraint(column_schema.default_constraint().cloned())
+        .comment(comment)
+        .build()
+        .context(BuildColumnDescriptorSnafu)?;
+
+        Ok(ColumnMetadata { cf_id, desc })
+    }
+
+    fn to_metadata(&self) -> Metadata {
+        let mut metadata = Metadata::new();
+        if self.cf_id != consts::DEFAULT_CF_ID {
+            metadata.insert(METADATA_CF_ID_KEY.to_string(), self.cf_id.to_string());
+        }
+        metadata.insert(METADATA_COLUMN_ID_KEY.to_string(), self.desc.id.to_string());
+        if !self.desc.comment.is_empty() {
+            metadata.insert(METADATA_COMMENT_KEY.to_string(), self.desc.comment.clone());
+        }
+
+        metadata
+    }
+}
+
+fn try_parse_int<T>(metadata: &Metadata, key: &str, default_value: Option<T>) -> Result<T>
+where
+    T: FromStr<Err = ParseIntError>,
+{
+    if let Some(value) = metadata.get(key) {
+        return value.parse().with_context(|_| ParseMetaIntSnafu {
+            key_value: format!("{}={}", key, value),
+        });
+    }
+    // No such key in metadata.
+
+    default_value.context(MetaNotFoundSnafu { key })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -361,8 +485,9 @@ impl ColumnsMetadata {
         self.columns.iter().take(self.user_column_end)
     }
 
-    pub fn iter_all_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
-        self.columns.iter()
+    #[inline]
+    pub fn columns(&self) -> &[ColumnMetadata] {
+        &self.columns
     }
 
     #[inline]
@@ -710,8 +835,7 @@ impl RegionMetadataBuilder {
 
     fn build(self) -> Result<RegionMetadata> {
         let columns = Arc::new(self.columns_meta_builder.build()?);
-        let schema =
-            Arc::new(RegionSchema::new(columns.clone(), self.version).context(InvalidSchemaSnafu)?);
+        let schema = Arc::new(RegionSchema::new(columns.clone(), self.version)?);
 
         Ok(RegionMetadata {
             id: self.id,
@@ -765,10 +889,11 @@ fn is_internal_value_column(column_name: &str) -> bool {
     )
 }
 
-// TODO(yingwen): Add tests for using invalid row_key/cf to build metadata.
 #[cfg(test)]
 mod tests {
+    use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::type_id::LogicalTypeId;
+    use datatypes::value::Value;
     use store_api::storage::{
         AddColumn, AlterOperation, ColumnDescriptorBuilder, ColumnFamilyDescriptorBuilder,
         RowKeyDescriptorBuilder,
@@ -1230,5 +1355,28 @@ mod tests {
             names: vec![String::from("v0")],
         };
         metadata.validate_alter(&req).unwrap();
+    }
+
+    #[test]
+    fn test_column_metadata_conversion() {
+        let desc = ColumnDescriptorBuilder::new(123, "test", ConcreteDataType::int32_datatype())
+            .is_nullable(false)
+            .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Int32(321))))
+            .comment("hello")
+            .build()
+            .unwrap();
+
+        let meta = ColumnMetadata {
+            cf_id: consts::DEFAULT_CF_ID,
+            desc: desc.clone(),
+        };
+        let column_schema = meta.to_column_schema().unwrap();
+        let new_meta = ColumnMetadata::from_column_schema(&column_schema).unwrap();
+        assert_eq!(meta, new_meta);
+
+        let meta = ColumnMetadata { cf_id: 567, desc };
+        let column_schema = meta.to_column_schema().unwrap();
+        let new_meta = ColumnMetadata::from_column_schema(&column_schema).unwrap();
+        assert_eq!(meta, new_meta);
     }
 }

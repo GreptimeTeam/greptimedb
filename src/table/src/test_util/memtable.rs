@@ -3,20 +3,23 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStream};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::UInt32Vector;
 use futures::task::{Context, Poll};
 use futures::Stream;
 use snafu::prelude::*;
-use table::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
-use table::metadata::{
+
+use crate::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
+use crate::metadata::{
     TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType, TableVersion,
 };
-use table::Table;
+use crate::table::scan::SimpleTableScan;
+use crate::Table;
 
 #[derive(Debug, Clone)]
 pub struct MemTable {
@@ -113,7 +116,7 @@ impl Table for MemTable {
         projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> Result<PhysicalPlanRef> {
         let df_recordbatch = if let Some(indices) = projection {
             self.recordbatch
                 .df_recordbatch
@@ -137,10 +140,10 @@ impl Table for MemTable {
             ),
             df_recordbatch,
         };
-        Ok(Box::pin(MemtableStream {
+        Ok(Arc::new(SimpleTableScan::new(Box::pin(MemtableStream {
             schema: recordbatch.schema.clone(),
             recordbatch: Some(recordbatch),
-        }))
+        }))))
     }
 }
 
@@ -168,6 +171,7 @@ impl Stream for MemtableStream {
 
 #[cfg(test)]
 mod test {
+    use common_query::physical_plan::RuntimeEnv;
     use common_recordbatch::util;
     use datatypes::prelude::*;
     use datatypes::schema::ColumnSchema;
@@ -180,6 +184,10 @@ mod test {
         let table = build_testing_table();
 
         let scan_stream = table.scan(&Some(vec![1]), &[], None).await.unwrap();
+        let scan_stream = scan_stream
+            .execute(0, Arc::new(RuntimeEnv::default()))
+            .await
+            .unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
         let columns = recordbatch[0].df_recordbatch.columns();
@@ -199,6 +207,10 @@ mod test {
         let table = build_testing_table();
 
         let scan_stream = table.scan(&None, &[], Some(2)).await.unwrap();
+        let scan_stream = scan_stream
+            .execute(0, Arc::new(RuntimeEnv::default()))
+            .await
+            .unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
         let columns = recordbatch[0].df_recordbatch.columns();

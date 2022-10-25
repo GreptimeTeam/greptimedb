@@ -33,16 +33,32 @@ pub enum InnerError {
         reason: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to convert Arrow schema, source: {}", source))]
+    SchemaConversion {
+        source: datatypes::error::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to poll stream, source: {}", source))]
+    PollStream {
+        source: datatypes::arrow::error::ArrowError,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for InnerError {
     fn status_code(&self) -> StatusCode {
         match self {
             InnerError::NewDfRecordBatch { .. } => StatusCode::InvalidArguments,
-            InnerError::DataTypes { .. } | InnerError::CreateRecordBatches { .. } => {
-                StatusCode::Internal
-            }
+
+            InnerError::DataTypes { .. }
+            | InnerError::CreateRecordBatches { .. }
+            | InnerError::PollStream { .. } => StatusCode::Internal,
+
             InnerError::External { source } => source.status_code(),
+
+            InnerError::SchemaConversion { source, .. } => source.status_code(),
         }
     }
 

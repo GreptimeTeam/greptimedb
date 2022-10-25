@@ -7,6 +7,8 @@ use common_catalog::consts::{
     SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_query::logical_plan::Expr;
+use common_query::physical_plan::PhysicalPlanRef;
+use common_query::physical_plan::RuntimeEnv;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::timestamp::Timestamp;
@@ -22,7 +24,7 @@ use table::requests::{CreateTableRequest, InsertRequest, OpenTableRequest};
 use table::{Table, TableRef};
 
 use crate::error::{
-    CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
+    self, CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
     OpenSystemCatalogSnafu, Result, ValueDeserializeSnafu,
 };
 
@@ -51,7 +53,7 @@ impl Table for SystemCatalogTable {
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
-    ) -> table::Result<SendableRecordBatchStream> {
+    ) -> table::Result<PhysicalPlanRef> {
         panic!("System catalog table does not support scan!")
     }
 
@@ -111,7 +113,15 @@ impl SystemCatalogTable {
     /// Create a stream of all entries inside system catalog table
     pub async fn records(&self) -> Result<SendableRecordBatchStream> {
         let full_projection = None;
-        let stream = self.table.scan(&full_projection, &[], None).await.unwrap();
+        let scan = self
+            .table
+            .scan(&full_projection, &[], None)
+            .await
+            .context(error::SystemCatalogTableScanSnafu)?;
+        let stream = scan
+            .execute(0, Arc::new(RuntimeEnv::default()))
+            .await
+            .context(error::SystemCatalogTableScanExecSnafu)?;
         Ok(stream)
     }
 }
@@ -328,18 +338,12 @@ pub struct TableEntryValue {
 
 #[cfg(test)]
 mod tests {
-    use datafusion::execution::runtime_env::RuntimeEnv;
-    use datafusion::field_util::SchemaExt;
-    use datatypes::arrow;
     use log_store::fs::noop::NoopLogStore;
     use object_store::ObjectStore;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
-    use table::engine::TableEngine;
     use table::metadata::TableType;
     use table::metadata::TableType::Base;
-    use table::requests::{AlterTableRequest, DropTableRequest};
-    use table::table::adapter::TableAdapter;
     use table_engine::config::EngineConfig;
     use table_engine::engine::MitoEngine;
     use tempdir::TempDir;
@@ -416,84 +420,7 @@ mod tests {
         assert!(EntryType::try_from(4).is_err());
     }
 
-    struct MockTableEngine {
-        table_name: String,
-        sole_table: TableRef,
-    }
-
-    impl Default for MockTableEngine {
-        fn default() -> Self {
-            Self {
-                table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
-                sole_table: Arc::new(
-                    TableAdapter::new(
-                        Arc::new(datafusion::datasource::empty::EmptyTable::new(Arc::new(
-                            arrow::datatypes::Schema::empty(),
-                        ))),
-                        Arc::new(RuntimeEnv::default()),
-                    )
-                    .unwrap(),
-                ),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TableEngine for MockTableEngine {
-        fn name(&self) -> &str {
-            "MockTableEngine"
-        }
-
-        async fn create_table(
-            &self,
-            _ctx: &EngineContext,
-            _request: CreateTableRequest,
-        ) -> table::Result<TableRef> {
-            unreachable!()
-        }
-
-        async fn open_table(
-            &self,
-            _ctx: &EngineContext,
-            request: OpenTableRequest,
-        ) -> table::Result<Option<TableRef>> {
-            if request.table_name == self.table_name {
-                Ok(Some(self.sole_table.clone()))
-            } else {
-                Ok(None)
-            }
-        }
-
-        async fn alter_table(
-            &self,
-            _ctx: &EngineContext,
-            _request: AlterTableRequest,
-        ) -> table::Result<TableRef> {
-            unreachable!()
-        }
-
-        fn get_table(&self, _ctx: &EngineContext, name: &str) -> table::Result<Option<TableRef>> {
-            if name == self.table_name {
-                Ok(Some(self.sole_table.clone()))
-            } else {
-                Ok(None)
-            }
-        }
-
-        fn table_exists(&self, _ctx: &EngineContext, name: &str) -> bool {
-            name == self.table_name
-        }
-
-        async fn drop_table(
-            &self,
-            _ctx: &EngineContext,
-            _request: DropTableRequest,
-        ) -> table::Result<()> {
-            unreachable!()
-        }
-    }
-
-    async fn prepare_table_engine() -> (TempDir, TableEngineRef) {
+    pub async fn prepare_table_engine() -> (TempDir, TableEngineRef) {
         let dir = TempDir::new("system-table-test").unwrap();
         let store_dir = dir.path().to_string_lossy();
         let accessor = opendal::services::fs::Builder::default()
