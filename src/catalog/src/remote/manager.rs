@@ -1,19 +1,22 @@
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use async_stream::stream;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_catalog::{
     build_catalog_prefix, build_schema_prefix, build_table_prefix, CatalogKey, CatalogValue,
     SchemaKey, SchemaValue, TableKey, TableValue,
 };
 use common_telemetry::{debug, info};
+use futures::Stream;
 use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
-use table::metadata::{TableId, TableIdent, TableVersion};
+use table::metadata::{TableId, TableVersion};
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::TableRef;
 use tokio::sync::Mutex;
@@ -53,53 +56,6 @@ impl RemoteCatalogManager {
         }
     }
 
-    async fn fetch_remote_catalogs(&self) -> Result<HashSet<String>> {
-        let mut remote_catalogs = HashSet::new();
-        let mut iter = self.backend.range(build_catalog_prefix().as_bytes());
-        while let Some(r) = iter.next().await {
-            let CatalogKey {
-                node_id,
-                catalog_name,
-            } = CatalogKey::parse(&String::from_utf8_lossy(&r?.0))
-                .context(InvalidCatalogValueSnafu)?;
-            if node_id == self.node_id {
-                remote_catalogs.insert(catalog_name);
-            }
-        }
-        Ok(remote_catalogs)
-    }
-
-    #[inline]
-    async fn local_catalogs(&self) -> HashSet<String> {
-        self.catalogs.load().keys().cloned().collect::<HashSet<_>>()
-    }
-
-    pub async fn sync(&self) -> Result<()> {
-        let remote_catalogs = self.fetch_remote_catalogs().await?;
-        let local = self.local_catalogs().await;
-
-        for catalog_to_register in local.difference(&remote_catalogs) {
-            let key = self.build_catalog_key(catalog_to_register).to_string();
-            self.backend
-                .set(
-                    key.as_bytes(),
-                    &CatalogValue {}
-                        .to_bytes()
-                        .context(InvalidCatalogValueSnafu)?,
-                )
-                .await?
-        }
-
-        for (_, catalog) in self.catalogs.load().iter() {
-            let catalog_provider = catalog
-                .as_any()
-                .downcast_ref::<RemoteCatalogProvider>()
-                .unwrap();
-            catalog_provider.sync().await?;
-        }
-        Ok(())
-    }
-
     fn build_catalog_key(&self, catalog_name: impl AsRef<str>) -> CatalogKey {
         CatalogKey {
             catalog_name: catalog_name.as_ref().to_string(),
@@ -128,37 +84,37 @@ impl RemoteCatalogManager {
         }) as _
     }
 
-    /// Fetch catalogs/schemas/tables from remote catalog manager along with max table id allocated.
-    async fn initiate_catalogs(&self) -> Result<(HashMap<String, CatalogProviderRef>, TableId)> {
-        let mut res = HashMap::new();
-        let mut max_table_id = TableId::MIN;
-
-        // initiate default catalog and schema
-        let default_catalog = self.initiate_default_catalog().await?;
-        res.insert(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
-        info!("Default catalog and schema registered");
-
+    async fn iter_remote_catalogs(
+        &self,
+    ) -> Pin<Box<dyn Stream<Item = Result<CatalogKey>> + Send + '_>> {
         let catalog_range_prefix = build_catalog_prefix();
         info!("catalog_range_prefix: {}", catalog_range_prefix);
         let mut catalogs = self.backend.range(catalog_range_prefix.as_bytes());
-        while let Some(r) = catalogs.next().await {
-            let Kv(k, _) = r?;
-            if !k.starts_with(catalog_range_prefix.as_bytes()) {
-                debug!("Ignoring non-catalog key: {}", String::from_utf8_lossy(&k));
-                continue;
+        Box::pin(stream!({
+            while let Some(r) = catalogs.next().await {
+                let Kv(k, _) = r?;
+                if !k.starts_with(catalog_range_prefix.as_bytes()) {
+                    debug!("Ignoring non-catalog key: {}", String::from_utf8_lossy(&k));
+                    continue;
+                }
+                let key = CatalogKey::parse(&String::from_utf8_lossy(&k))
+                    .context(InvalidCatalogValueSnafu)?;
+                if key.node_id != self.node_id {
+                    continue;
+                }
+                yield Ok(key)
             }
+        }))
+    }
 
-            let CatalogKey { catalog_name, .. } = CatalogKey::parse(&String::from_utf8_lossy(&k))
-                .context(InvalidCatalogValueSnafu)?;
+    async fn iter_remote_schemas(
+        &self,
+        catalog_name: &str,
+    ) -> Pin<Box<dyn Stream<Item = Result<SchemaKey>> + Send + '_>> {
+        let schema_prefix = build_schema_prefix(catalog_name);
+        let mut schemas = self.backend.range(schema_prefix.as_bytes());
 
-            info!("Fetch catalog from metasrv: {}", &catalog_name);
-            let catalog = res
-                .entry(catalog_name.clone())
-                .or_insert_with(|| self.new_catalog_provider(&catalog_name));
-
-            let schema_prefix = build_schema_prefix(&catalog_name);
-            let mut schemas = self.backend.range(schema_prefix.as_bytes());
-
+        Box::pin(stream!({
             while let Some(r) = schemas.next().await {
                 let Kv(k, _) = r?;
                 if !k.starts_with(schema_prefix.as_bytes()) {
@@ -166,9 +122,71 @@ impl RemoteCatalogManager {
                     continue;
                 }
 
-                let SchemaKey { schema_name, .. } = SchemaKey::parse(&String::from_utf8_lossy(&k))
+                let schema_key = SchemaKey::parse(&String::from_utf8_lossy(&k))
                     .context(InvalidCatalogValueSnafu)?;
-                info!("Found schema: {}", &schema_name);
+
+                if schema_key.node_id == self.node_id {
+                    yield Ok(schema_key)
+                }
+            }
+        }))
+    }
+
+    /// Iterate over all table entries on metasrv
+    /// TODO(hl): table entries with different version is not currently considered.
+    /// Ideally deprecated table entry must be deleted when deregistering from catalog.
+    async fn iter_remote_tables(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+    ) -> Pin<Box<dyn Stream<Item = Result<(TableKey, TableValue)>> + Send + '_>> {
+        let table_prefix = build_table_prefix(catalog_name, schema_name);
+        let mut tables = self.backend.range(table_prefix.as_bytes());
+        Box::pin(stream!({
+            while let Some(r) = tables.next().await {
+                let Kv(k, v) = r?;
+                if !k.starts_with(table_prefix.as_bytes()) {
+                    debug!("Ignoring non-table prefix: {}", String::from_utf8_lossy(&k));
+                    continue;
+                }
+                let table_key = TableKey::parse(&String::from_utf8_lossy(&k))
+                    .context(InvalidCatalogValueSnafu)?;
+                let table_value = TableValue::parse(&String::from_utf8_lossy(&v))
+                    .context(InvalidCatalogValueSnafu)?;
+
+                if table_value.node_id == self.node_id {
+                    yield Ok((table_key, table_value))
+                }
+            }
+        }))
+    }
+
+    /// Fetch catalogs/schemas/tables from remote catalog manager along with max table id allocated.
+    async fn initiate_catalogs(&self) -> Result<(HashMap<String, CatalogProviderRef>, TableId)> {
+        let mut res = HashMap::new();
+        let mut max_table_id = MIN_USER_TABLE_ID;
+
+        // initiate default catalog and schema
+        let default_catalog = self.initiate_default_catalog().await?;
+        res.insert(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
+        info!("Default catalog and schema registered");
+
+        let mut catalogs = self.iter_remote_catalogs().await;
+        while let Some(r) = catalogs.next().await {
+            let CatalogKey { catalog_name, .. } = r?;
+            info!("Fetch catalog from metasrv: {}", catalog_name);
+            let catalog = res
+                .entry(catalog_name.clone())
+                .or_insert_with(|| self.new_catalog_provider(&catalog_name));
+
+            let mut schemas = self.iter_remote_schemas(&catalog_name).await;
+            while let Some(r) = schemas.next().await {
+                let SchemaKey {
+                    catalog_name,
+                    schema_name,
+                    ..
+                } = r?;
+                info!("Found schema: {}.{}", catalog_name, schema_name);
                 let schema = match catalog.schema(&schema_name)? {
                     None => {
                         let schema = self.new_schema_provider(&catalog_name, &schema_name);
@@ -183,25 +201,16 @@ impl RemoteCatalogManager {
                     "Fetch schema from metasrv: {}.{}",
                     &catalog_name, &schema_name
                 );
-
-                let table_prefix = build_table_prefix(&catalog_name, &schema_name);
-                let mut tables = self.backend.range(table_prefix.as_bytes());
-
+                let mut tables = self.iter_remote_tables(&catalog_name, &schema_name).await;
                 while let Some(r) = tables.next().await {
-                    let Kv(k, v) = r?;
-                    if !k.starts_with(table_prefix.as_bytes()) {
-                        debug!("Ignoring non-table prefix: {}", String::from_utf8_lossy(&k));
-                        continue;
-                    }
-                    let table_key = TableKey::parse(&String::from_utf8_lossy(&k))
-                        .context(InvalidCatalogValueSnafu)?;
-                    let table_value = TableValue::parse(&String::from_utf8_lossy(&v))
-                        .context(InvalidCatalogValueSnafu)?;
-
+                    let (table_key, table_value) = r?;
                     let table_ref = self.open_or_create_table(&table_key, &table_value).await?;
                     schema.register_table(table_key.table_name.to_string(), table_ref)?;
                     info!("Registered table {}", &table_key.table_name);
-                    max_table_id = max_table_id.max(table_value.id);
+                    if table_value.id > max_table_id {
+                        info!("Max table id: {} -> {}", max_table_id, table_value.id);
+                        max_table_id = table_value.id;
+                    }
                 }
             }
         }
@@ -252,35 +261,40 @@ impl RemoteCatalogManager {
         table_value: &TableValue,
     ) -> Result<TableRef> {
         let context = EngineContext {};
+        let TableKey {
+            catalog_name,
+            schema_name,
+            table_name,
+            ..
+        } = table_key;
+
+        let TableValue { id, meta, .. } = table_value;
 
         let request = OpenTableRequest {
-            catalog_name: table_key.catalog_name.clone(),
-            schema_name: table_key.schema_name.clone(),
-            table_name: table_key.table_name.clone(),
-            table_id: table_value.id,
+            catalog_name: catalog_name.clone(),
+            schema_name: schema_name.clone(),
+            table_name: table_name.clone(),
+            table_id: *id,
         };
         match self
             .engine
             .open_table(&context, request)
             .await
             .with_context(|_| OpenTableSnafu {
-                table_info: format!(
-                    "{}.{}.{}, id:{}",
-                    &table_key.catalog_name, &table_key.schema_name, &table_key.table_name, 1
-                ),
+                table_info: format!("{}.{}.{}, id:{}", catalog_name, schema_name, table_name, id,),
             })? {
             Some(table) => Ok(table),
             None => {
                 let req = CreateTableRequest {
-                    id: table_value.id,
-                    catalog_name: table_key.catalog_name.clone(),
-                    schema_name: table_key.schema_name.clone(),
-                    table_name: table_key.table_name.clone(),
+                    id: *id,
+                    catalog_name: catalog_name.clone(),
+                    schema_name: schema_name.clone(),
+                    table_name: table_name.clone(),
                     desc: None,
-                    schema: table_value.meta.schema.clone(),
-                    primary_key_indices: table_value.meta.primary_key_indices.clone(),
+                    schema: meta.schema.clone(),
+                    primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,
-                    table_options: table_value.meta.options.clone(),
+                    table_options: meta.options.clone(),
                 };
 
                 self.engine
@@ -289,10 +303,7 @@ impl RemoteCatalogManager {
                     .context(CreateTableSnafu {
                         table_info: format!(
                             "{}.{}.{}, id:{}",
-                            &table_key.catalog_name,
-                            &table_key.schema_name,
-                            &table_key.table_name,
-                            table_value.id
+                            &catalog_name, &schema_name, &table_name, id
                         ),
                     })
             }
@@ -442,55 +453,6 @@ impl RemoteCatalogProvider {
         }
     }
 
-    async fn fetch_remote_schemas(&self) -> Result<HashSet<String>> {
-        let mut remote_schemas = HashSet::new();
-        let mut iter = self
-            .backend
-            .range(build_schema_prefix(&self.catalog_name).as_bytes());
-        while let Some(r) = iter.next().await {
-            let kv = r?;
-            let SchemaKey {
-                catalog_name,
-                schema_name,
-                node_id,
-            } = SchemaKey::parse(&String::from_utf8_lossy(&kv.0))
-                .context(InvalidCatalogValueSnafu)?;
-            debug_assert_eq!(catalog_name, self.catalog_name);
-            if node_id == self.node_id {
-                remote_schemas.insert(schema_name);
-            }
-        }
-        Ok(remote_schemas)
-    }
-
-    #[inline]
-    async fn local_schemas(&self) -> HashSet<String> {
-        self.schemas.load().keys().cloned().collect::<HashSet<_>>()
-    }
-
-    pub async fn sync(&self) -> Result<()> {
-        let remote_schemas = self.fetch_remote_schemas().await?;
-        let local = self.local_schemas().await;
-
-        for schema_to_register in local.difference(&remote_schemas) {
-            let key = self.build_schema_key(schema_to_register).to_string();
-            let val = SchemaValue {}
-                .to_bytes()
-                .context(InvalidCatalogValueSnafu)?;
-            self.backend.set(key.as_bytes(), &val).await?;
-        }
-
-        let schemas = self.schemas.load();
-        for schema in schemas.values() {
-            let schema = schema
-                .as_any()
-                .downcast_ref::<RemoteSchemaProvider>()
-                .unwrap();
-            schema.sync().await?;
-        }
-        Ok(())
-    }
-
     fn build_schema_key(&self, schema_name: impl AsRef<str>) -> SchemaKey {
         SchemaKey {
             catalog_name: self.catalog_name.clone(),
@@ -571,68 +533,6 @@ impl RemoteSchemaProvider {
             tables: Default::default(),
             mutex: Default::default(),
         }
-    }
-
-    /// Fetch remote table entries with highest table version.
-    async fn fetch_remote_tables(&self) -> Result<HashMap<String, TableVersion>> {
-        let mut res: HashMap<String, TableVersion> = HashMap::new();
-        let mut iter = self
-            .backend
-            .range(build_table_prefix(&self.catalog_name, &self.schema_name).as_bytes());
-        while let Some(r) = iter.next().await {
-            let kv = r?;
-            let TableKey {
-                catalog_name,
-                schema_name,
-                table_name,
-                version,
-                node_id,
-            } = TableKey::parse(&String::from_utf8_lossy(&kv.0))
-                .context(InvalidCatalogValueSnafu)?;
-            debug_assert_eq!(catalog_name, self.catalog_name);
-            debug_assert_eq!(schema_name, self.schema_name);
-
-            if node_id == self.node_id
-                && match res.get(&table_name) {
-                    // table not exist or some entry with newer version found
-                    None => true,
-                    Some(prev) => version > (*prev),
-                }
-            {
-                res.insert(table_name, version);
-            }
-        }
-
-        Ok(res)
-    }
-
-    /// Refresh tables in schema according to table list from metasrv
-    pub async fn sync(&self) -> Result<()> {
-        let remote_tables = self.fetch_remote_tables().await?;
-        let local_tables = self.tables.load();
-        for (table_name, table_ref) in local_tables.iter() {
-            let TableIdent { table_id, version } = table_ref.table_info().ident;
-            let need_register = match remote_tables.get(table_name) {
-                None => true,
-                Some(prev_ver) => *prev_ver < version, // remote version obsolete
-            };
-
-            if need_register {
-                let key = self.build_table_key(table_name, version).to_string();
-                let value = TableValue {
-                    id: table_id,
-                    node_id: self.node_id.clone(),
-                    meta: table_ref.table_info().meta.clone(),
-                };
-                self.backend
-                    .set(
-                        key.as_bytes(),
-                        &value.as_bytes().context(InvalidCatalogValueSnafu)?,
-                    )
-                    .await?;
-            }
-        }
-        Ok(())
     }
 
     fn build_table_key(
