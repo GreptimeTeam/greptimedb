@@ -1,5 +1,7 @@
 mod df_logical;
 mod error;
+mod schema;
+mod types;
 
 use bytes::{Buf, Bytes};
 
