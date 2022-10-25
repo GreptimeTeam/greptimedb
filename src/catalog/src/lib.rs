@@ -82,8 +82,8 @@ pub trait CatalogManager: CatalogList {
     /// Returns the table by catalog, schema and table name.
     fn table(
         &self,
-        catalog: Option<&str>,
-        schema: Option<&str>,
+        catalog: &str,
+        schema: &str,
         table_name: &str,
     ) -> error::Result<Option<TableRef>>;
 }
@@ -135,9 +135,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
         let table_name = &req.create_table_request.table_name;
         let table_id = req.create_table_request.id;
 
-        let table = if let Some(table) =
-            manager.table(Some(catalog_name), Some(schema_name), table_name)?
-        {
+        let table = if let Some(table) = manager.table(catalog_name, schema_name, table_name)? {
             table
         } else {
             let table = engine
