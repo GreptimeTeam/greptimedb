@@ -47,9 +47,12 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
         let rel = self.convert_plan(plan)?;
+        let plan_rel = PlanRel {
+            rel_type: Some(PlanRelType::Rel(rel)),
+        };
 
         let mut buf = BytesMut::new();
-        rel.encode(&mut buf).context(EncodeRelSnafu)?;
+        plan_rel.encode(&mut buf).context(EncodeRelSnafu)?;
 
         Ok(buf.freeze())
     }
@@ -321,8 +324,8 @@ mod test {
     async fn logical_plan_round_trip(plan: LogicalPlan, catalog: CatalogManagerRef) {
         let convertor = DFLogicalSubstraitConvertor::new(catalog);
 
-        let rel = convertor.convert_plan(plan.clone()).unwrap();
-        let tripped_plan = convertor.convert_rel(rel).unwrap();
+        let proto = convertor.encode(plan.clone()).unwrap();
+        let tripped_plan = convertor.decode(proto).unwrap();
 
         assert_eq!(format!("{:?}", plan), format!("{:?}", tripped_plan));
     }
