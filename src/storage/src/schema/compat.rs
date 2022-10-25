@@ -11,7 +11,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{self, Result};
 use crate::read::Batch;
-use crate::schema::StoreSchemaRef;
+use crate::schema::{ProjectedSchemaRef, StoreSchemaRef};
 
 /// Make schema compatible to write to target with another schema.
 pub trait CompatWrite {
@@ -66,7 +66,7 @@ pub struct ReadResolver {
     /// Schema of data source.
     source_schema: StoreSchemaRef,
     /// Schema user expects to read.
-    dest_schema: StoreSchemaRef,
+    dest_schema: ProjectedSchemaRef,
     /// For each column in dest schema, stores the index in read result for
     /// this column, or None if the column is not in result.
     ///
@@ -82,26 +82,56 @@ pub struct ReadResolver {
 }
 
 impl ReadResolver {
-    pub fn new(source_schema: StoreSchemaRef, dest_schema: StoreSchemaRef) -> Result<ReadResolver> {
-        let (source_version, dest_version) = (source_schema.version(), dest_schema.version());
-        if source_version == dest_version {
-            debug_assert_eq!(source_schema, dest_schema);
+    /// Creates a new [ReadResolver] that could convert data with `source_schema` into data
+    /// with `dest_schema`.
+    pub fn new(
+        source_schema: StoreSchemaRef,
+        dest_schema: ProjectedSchemaRef,
+    ) -> Result<ReadResolver> {
+        if source_schema.version() == dest_schema.schema_to_read().version() {
+            ReadResolver::from_same_version(source_schema, dest_schema)
+        } else {
+            ReadResolver::from_different_version(source_schema, dest_schema)
+        }
+    }
 
-            let is_needed = vec![true; source_schema.num_columns()];
-
-            let (row_key_end, user_column_end) =
-                (source_schema.row_key_end(), source_schema.user_column_end());
-            return Ok(ReadResolver {
-                source_schema,
-                dest_schema,
-                indices_in_result: Vec::new(),
-                is_needed,
-                row_key_end,
-                user_column_end,
-            });
+    fn from_same_version(
+        source_schema: StoreSchemaRef,
+        dest_schema: ProjectedSchemaRef,
+    ) -> Result<ReadResolver> {
+        let mut is_needed = vec![true; source_schema.num_columns()];
+        if source_schema.num_columns() != dest_schema.schema_to_read().num_columns() {
+            // `dest_schema` might be projected, so we need to find out value columns not be read
+            // by the `dest_schema`.
+            let is_value_needed =
+                &mut is_needed[source_schema.row_key_end()..source_schema.user_column_end()];
+            // Iterate value columns in source and mark those not in destination as unneeded.
+            for (value_column, is_needed) in
+                source_schema.value_columns().iter().zip(is_value_needed)
+            {
+                if !dest_schema.is_needed(value_column.id()) {
+                    *is_needed = false;
+                }
+            }
         }
 
-        let mut indices_in_result = vec![None; dest_schema.num_columns()];
+        let (row_key_end, user_column_end) =
+            (source_schema.row_key_end(), source_schema.user_column_end());
+        Ok(ReadResolver {
+            source_schema,
+            dest_schema,
+            indices_in_result: Vec::new(),
+            is_needed,
+            row_key_end,
+            user_column_end,
+        })
+    }
+
+    fn from_different_version(
+        source_schema: StoreSchemaRef,
+        dest_schema: ProjectedSchemaRef,
+    ) -> Result<ReadResolver> {
+        let mut indices_in_result = vec![None; dest_schema.schema_to_read().num_columns()];
         let mut is_needed = vec![true; source_schema.num_columns()];
         let mut row_key_end = 0;
         // Number of value columns.
@@ -112,10 +142,11 @@ impl ReadResolver {
         for (idx, source_column) in source_schema.schema().column_schemas().iter().enumerate() {
             // For each column in source schema, check whether we need to read it.
             if let Some(dest_idx) = dest_schema
+                .schema_to_read()
                 .schema()
                 .column_index_by_name(&source_column.name)
             {
-                let dest_column = &dest_schema.schema().column_schemas()[dest_idx];
+                let dest_column = &dest_schema.schema_to_read().schema().column_schemas()[dest_idx];
                 // Check whether we could read this column.
                 if is_source_column_readable(source_column, dest_column)? {
                     // Mark that this column could be read from source data, since some
@@ -193,9 +224,15 @@ impl ReadResolver {
         self.source_columns_to_batch(source, num_rows)
     }
 
+    /// Returns list of fields need to read from the parquet file.
     pub fn fields_to_read(&self) -> Vec<Field> {
         if !self.need_compat() {
-            return self.dest_schema.arrow_schema().fields.clone();
+            return self
+                .dest_schema
+                .schema_to_read()
+                .arrow_schema()
+                .fields
+                .clone();
         }
 
         self.source_schema
@@ -213,6 +250,9 @@ impl ReadResolver {
             .collect()
     }
 
+    /// Convert chunk read from the parquet file into [Batch].
+    ///
+    /// The chunk should have the same schema as [`ReadResolver::fields_to_read()`].
     pub fn arrow_chunk_to_batch(&self, chunk: &ArrowChunk<Arc<dyn Array>>) -> Result<Batch> {
         let names = self
             .source_schema
@@ -245,11 +285,11 @@ impl ReadResolver {
 
     #[inline]
     fn need_compat(&self) -> bool {
-        self.source_schema.version() != self.dest_schema.version()
+        self.source_schema.version() != self.dest_schema.schema_to_read().version()
     }
 
     fn source_columns_to_batch(&self, source: Vec<VectorRef>, num_rows: usize) -> Result<Batch> {
-        let column_schemas = self.dest_schema.schema().column_schemas();
+        let column_schemas = self.dest_schema.schema_to_read().schema().column_schemas();
         let columns = self
             .indices_in_result
             .iter()

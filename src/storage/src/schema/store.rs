@@ -50,6 +50,7 @@ impl StoreSchema {
         ArrowChunk::new(batch.columns().iter().map(|v| v.to_arrow_array()).collect())
     }
 
+    // TODO(yingwen): Remove this method.
     pub fn arrow_chunk_to_batch(&self, chunk: &ArrowChunk<Arc<dyn Array>>) -> Result<Batch> {
         assert_eq!(self.schema.num_columns(), chunk.columns().len());
 
@@ -178,6 +179,11 @@ impl StoreSchema {
     #[inline]
     pub(crate) fn user_column_end(&self) -> usize {
         self.user_column_end
+    }
+
+    #[inline]
+    pub(crate) fn value_columns(&self) -> &[ColumnMetadata] {
+        &self.columns[self.row_key_end..self.user_column_end]
     }
 }
 

@@ -219,10 +219,7 @@ impl<'a> ParquetReader<'a> {
                 .context(error::ConvertStoreSchemaSnafu { file: &file_path })?,
         );
 
-        let resolver = ReadResolver::new(
-            store_schema.clone(),
-            self.projected_schema.schema_to_read().clone(),
-        )?;
+        let resolver = ReadResolver::new(store_schema.clone(), self.projected_schema.clone())?;
 
         let pruned_row_groups = self
             .predicate

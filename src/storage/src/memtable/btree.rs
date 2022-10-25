@@ -119,10 +119,7 @@ impl BTreeIterator {
             .projected_schema
             .clone()
             .unwrap_or_else(|| Arc::new(ProjectedSchema::no_projection(schema.clone())));
-        let resolver = ReadResolver::new(
-            schema.store_schema().clone(),
-            projected_schema.schema_to_read().clone(),
-        )?;
+        let resolver = ReadResolver::new(schema.store_schema().clone(), projected_schema.clone())?;
 
         Ok(BTreeIterator {
             ctx,
