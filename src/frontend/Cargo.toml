@@ -19,6 +19,7 @@ datatypes = { path = "../datatypes" }
 serde = "1.0"
 servers = { path = "../servers" }
 snafu = { version = "0.7", features = ["backtraces"] }
+table = { path = "../table" }
 sql = { path = "../sql" }
 tokio = { version = "1.18", features = ["full"] }
 
