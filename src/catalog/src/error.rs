@@ -168,9 +168,7 @@ impl ErrorExt for Error {
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. } => source.status_code(),
             Error::MetaSrv { source, .. } => source.status_code(),
-            Error::CreateTable { source, .. } | Error::SystemCatalogTableScan { source } => {
-                source.status_code()
-            }
+            Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
         }
     }

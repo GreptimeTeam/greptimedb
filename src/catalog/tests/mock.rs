@@ -16,6 +16,7 @@ use serde::Serializer;
 use table::engine::{EngineContext, TableEngine};
 use table::metadata::TableId;
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::test_util::MemTable;
 use table::TableRef;
 use tokio::sync::RwLock;
 
@@ -116,7 +117,7 @@ impl TableEngine for MockTableEngine {
 
         let data = vec![Arc::new(StringVector::from(vec!["a", "b", "c"])) as _];
         let record_batch = RecordBatch::new(schema, data).unwrap();
-        let table: TableRef = Arc::new(test_util::MemTable::new_with_catalog(
+        let table: TableRef = Arc::new(MemTable::new_with_catalog(
             &table_name,
             record_batch,
             table_id,

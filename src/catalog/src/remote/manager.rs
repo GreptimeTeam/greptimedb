@@ -364,13 +364,10 @@ impl CatalogManager for RemoteCatalogManager {
 
     fn table(
         &self,
-        catalog: Option<&str>,
-        schema: Option<&str>,
+        catalog_name: &str,
+        schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableRef>> {
-        let catalog_name = catalog.unwrap_or(DEFAULT_CATALOG_NAME);
-        let schema_name = schema.unwrap_or(DEFAULT_SCHEMA_NAME);
-
         let catalog = self
             .catalog(catalog_name)?
             .with_context(|| CatalogNotFoundSnafu { catalog_name })?;
