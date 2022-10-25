@@ -5,11 +5,12 @@ use std::sync::Arc;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk as ArrowChunk;
 use datatypes::arrow::datatypes::Field;
-use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::schema::SchemaRef;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{self, Result};
+use crate::metadata::ColumnMetadata;
 use crate::read::Batch;
 use crate::schema::{ProjectedSchemaRef, StoreSchemaRef};
 
@@ -24,35 +25,40 @@ pub trait CompatWrite {
     fn compat_write(&mut self, dest_schema: &SchemaRef) -> Result<()>;
 }
 
-/// Checks whether column with `source_schema` could be read as a column with `dest_schema`.
+/// Checks whether column with `source_column` could be read as a column with `dest_column`.
 ///
 /// Returns
-/// - `Ok(true)` if `source_schema` is compatible to read using `dest_schema` as schema.
+/// - `Ok(true)` if `source_column` is compatible to read using `dest_column` as schema.
 /// - `Ok(false)` if they are considered different columns.
 /// - `Err` if there is incompatible issue that could not be resolved.
 fn is_source_column_readable(
-    source_schema: &ColumnSchema,
-    dest_schema: &ColumnSchema,
+    source_column: &ColumnMetadata,
+    dest_column: &ColumnMetadata,
 ) -> Result<bool> {
-    debug_assert_eq!(source_schema.name, dest_schema.name);
-    // TODO(yingwen): Check column id.
+    debug_assert_eq!(source_column.name(), dest_column.name());
+
+    if source_column.id() != dest_column.id() {
+        return Ok(false);
+    }
 
     ensure!(
-        source_schema.data_type == dest_schema.data_type,
+        source_column.desc.data_type == dest_column.desc.data_type,
         error::CompatReadSnafu {
             reason: format!(
                 "could not read column {} from {:?} type as {:?} type",
-                dest_schema.name, source_schema.data_type, dest_schema.data_type
+                dest_column.name(),
+                source_column.desc.data_type,
+                dest_column.desc.data_type
             ),
         }
     );
 
     ensure!(
-        dest_schema.is_nullable() || !source_schema.is_nullable(),
+        dest_column.desc.is_nullable() || !source_column.desc.is_nullable(),
         error::CompatReadSnafu {
             reason: format!(
                 "unable to read nullable data for non null column {}",
-                dest_schema.name
+                dest_column.name()
             ),
         }
     );
@@ -101,16 +107,13 @@ impl ReadResolver {
     ) -> Result<ReadResolver> {
         let mut is_needed = vec![true; source_schema.num_columns()];
         if source_schema.num_columns() != dest_schema.schema_to_read().num_columns() {
-            // `dest_schema` might be projected, so we need to find out value columns not be read
+            // `dest_schema` might be projected, so we need to find out value columns that not be read
             // by the `dest_schema`.
-            let is_value_needed =
-                &mut is_needed[source_schema.row_key_end()..source_schema.user_column_end()];
-            // Iterate value columns in source and mark those not in destination as unneeded.
-            for (value_column, is_needed) in
-                source_schema.value_columns().iter().zip(is_value_needed)
-            {
+
+            for (offset, value_column) in source_schema.value_columns().iter().enumerate() {
+                // Iterate value columns in source and mark those not in destination as unneeded.
                 if !dest_schema.is_needed(value_column.id()) {
-                    *is_needed = false;
+                    is_needed[source_schema.value_column_index_by_offset(offset)] = false;
                 }
             }
         }
@@ -131,7 +134,8 @@ impl ReadResolver {
         source_schema: StoreSchemaRef,
         dest_schema: ProjectedSchemaRef,
     ) -> Result<ReadResolver> {
-        let mut indices_in_result = vec![None; dest_schema.schema_to_read().num_columns()];
+        let schema_to_read = dest_schema.schema_to_read();
+        let mut indices_in_result = vec![None; schema_to_read.num_columns()];
         let mut is_needed = vec![true; source_schema.num_columns()];
         let mut row_key_end = 0;
         // Number of value columns.
@@ -139,14 +143,13 @@ impl ReadResolver {
         // Number of columns in result from source data.
         let mut num_columns_in_result = 0;
 
-        for (idx, source_column) in source_schema.schema().column_schemas().iter().enumerate() {
+        for (idx, source_column) in source_schema.columns().iter().enumerate() {
             // For each column in source schema, check whether we need to read it.
-            if let Some(dest_idx) = dest_schema
-                .schema_to_read()
+            if let Some(dest_idx) = schema_to_read
                 .schema()
-                .column_index_by_name(&source_column.name)
+                .column_index_by_name(source_column.name())
             {
-                let dest_column = &dest_schema.schema_to_read().schema().column_schemas()[dest_idx];
+                let dest_column = &schema_to_read.columns()[dest_idx];
                 // Check whether we could read this column.
                 if is_source_column_readable(source_column, dest_column)? {
                     // Mark that this column could be read from source data, since some

@@ -185,6 +185,17 @@ impl StoreSchema {
     pub(crate) fn value_columns(&self) -> &[ColumnMetadata] {
         &self.columns[self.row_key_end..self.user_column_end]
     }
+
+    /// Returns the index of the value column according its `offset`.
+    #[inline]
+    pub(crate) fn value_column_index_by_offset(&self, offset: usize) -> usize {
+        self.row_key_end + offset
+    }
+
+    #[inline]
+    pub(crate) fn columns(&self) -> &[ColumnMetadata] {
+        &self.columns
+    }
 }
 
 impl TryFrom<ArrowSchema> for StoreSchema {

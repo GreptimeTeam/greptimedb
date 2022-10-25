@@ -176,7 +176,6 @@ impl ProjectedSchema {
         Chunk::new(columns)
     }
 
-    // TODO(yingwen): Remove this.
     /// Returns true if column with given `column_id` is needed (in projection).
     pub fn is_needed(&self, column_id: ColumnId) -> bool {
         self.projection
