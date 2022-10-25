@@ -1,9 +1,11 @@
+pub mod adapter;
 pub mod error;
 mod recordbatch;
 pub mod util;
 
 use std::pin::Pin;
 
+pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use error::Result;
 use futures::task::{Context, Poll};
@@ -74,6 +76,41 @@ impl RecordBatches {
     pub fn take(self) -> Vec<RecordBatch> {
         self.batches
     }
+
+    pub fn as_stream(&self) -> SendableRecordBatchStream {
+        Box::pin(SimpleRecordBatchStream {
+            inner: RecordBatches {
+                schema: self.schema(),
+                batches: self.batches.clone(),
+            },
+            index: 0,
+        })
+    }
+}
+
+pub struct SimpleRecordBatchStream {
+    inner: RecordBatches,
+    index: usize,
+}
+
+impl RecordBatchStream for SimpleRecordBatchStream {
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
+}
+
+impl Stream for SimpleRecordBatchStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(if self.index < self.inner.batches.len() {
+            let batch = self.inner.batches[self.index].clone();
+            self.index += 1;
+            Some(Ok(batch))
+        } else {
+            None
+        })
+    }
 }
 
 #[cfg(test)]
@@ -115,5 +152,28 @@ mod tests {
         let batches = RecordBatches::try_new(schema1.clone(), vec![batch1.clone()]).unwrap();
         assert_eq!(schema1, batches.schema());
         assert_eq!(vec![batch1], batches.take());
+    }
+
+    #[tokio::test]
+    async fn test_simple_recordbatch_stream() {
+        let column_a = ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false);
+        let column_b = ColumnSchema::new("b", ConcreteDataType::string_datatype(), false);
+        let schema = Arc::new(Schema::new(vec![column_a, column_b]));
+
+        let va1: VectorRef = Arc::new(Int32Vector::from_slice(&[1, 2]));
+        let vb1: VectorRef = Arc::new(StringVector::from(vec!["a", "b"]));
+        let batch1 = RecordBatch::new(schema.clone(), vec![va1, vb1]).unwrap();
+
+        let va2: VectorRef = Arc::new(Int32Vector::from_slice(&[3, 4, 5]));
+        let vb2: VectorRef = Arc::new(StringVector::from(vec!["c", "d", "e"]));
+        let batch2 = RecordBatch::new(schema.clone(), vec![va2, vb2]).unwrap();
+
+        let recordbatches =
+            RecordBatches::try_new(schema.clone(), vec![batch1.clone(), batch2.clone()]).unwrap();
+        let stream = recordbatches.as_stream();
+        let collected = util::collect(stream).await.unwrap();
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0], batch1);
+        assert_eq!(collected[1], batch2);
     }
 }

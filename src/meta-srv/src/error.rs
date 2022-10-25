@@ -34,6 +34,9 @@ pub enum Error {
         source: tonic::transport::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Empty table name"))]
+    EmptyTableName { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -60,8 +63,32 @@ impl ErrorExt for Error {
             | Error::ConnectEtcd { .. }
             | Error::TcpBind { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
-            Error::EmptyKey { .. } => StatusCode::InvalidArguments,
+            Error::EmptyKey { .. } | Error::EmptyTableName { .. } => StatusCode::InvalidArguments,
         }
+    }
+}
+
+// for form tonic
+pub(crate) fn match_for_io_error(err_status: &Status) -> Option<&std::io::Error> {
+    let mut err: &(dyn std::error::Error + 'static) = err_status;
+
+    loop {
+        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            return Some(io_err);
+        }
+
+        // h2::Error do not expose std::io::Error with `source()`
+        // https://github.com/hyperium/h2/pull/462
+        if let Some(h2_err) = err.downcast_ref::<h2::Error>() {
+            if let Some(io_err) = h2_err.get_io() {
+                return Some(io_err);
+            }
+        }
+
+        err = match err.source() {
+            Some(err) => err,
+            None => return None,
+        };
     }
 }
 
@@ -141,5 +168,16 @@ mod tests {
 
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
+    }
+
+    #[test]
+    fn test_empty_table_error() {
+        let e = throw_none_option()
+            .context(EmptyTableNameSnafu)
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::InvalidArguments);
     }
 }

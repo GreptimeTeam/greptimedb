@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::arrow::bitmap::MutableBitmap;
-use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{SchemaBuilder, SchemaRef};
 use datatypes::vectors::{BooleanVector, VectorRef};
 use store_api::storage::{Chunk, ColumnId};
 
 use crate::error;
+use crate::metadata::{self, Result};
 use crate::read::{Batch, BatchOp};
-use crate::schema::{self, RegionSchema, RegionSchemaRef, Result, StoreSchema};
+use crate::schema::{RegionSchema, RegionSchemaRef, StoreSchema, StoreSchemaRef};
 
 /// Metadata about projection.
 #[derive(Debug, Default)]
@@ -91,7 +92,7 @@ pub struct ProjectedSchema {
     /// Projection info, `None` means don't need to do projection.
     projection: Option<Projection>,
     /// Schema used to read from data sources.
-    schema_to_read: StoreSchema,
+    schema_to_read: StoreSchemaRef,
     /// User schema after projection.
     projected_user_schema: SchemaRef,
 }
@@ -145,7 +146,7 @@ impl ProjectedSchema {
     }
 
     #[inline]
-    pub fn schema_to_read(&self) -> &StoreSchema {
+    pub fn schema_to_read(&self) -> &StoreSchemaRef {
         &self.schema_to_read
     }
 
@@ -216,21 +217,25 @@ impl ProjectedSchema {
     fn build_schema_to_read(
         region_schema: &RegionSchema,
         projection: &Projection,
-    ) -> Result<StoreSchema> {
-        let column_schemas: Vec<_> = projection
+    ) -> Result<StoreSchemaRef> {
+        // Reorder columns according to the projection.
+        let columns: Vec<_> = projection
             .columns_to_read
             .iter()
-            .map(|col_idx| ColumnSchema::from(&region_schema.column_metadata(*col_idx).desc))
+            .map(|col_idx| region_schema.column_metadata(*col_idx))
+            .cloned()
             .collect();
         // All row key columns are reserved in this schema, so we can use the row_key_end
         // and timestamp_key_index from region schema.
-        StoreSchema::new(
-            column_schemas,
+        let store_schema = StoreSchema::new(
+            columns,
             region_schema.version(),
             region_schema.timestamp_key_index(),
             region_schema.row_key_end(),
             projection.num_user_columns,
-        )
+        )?;
+
+        Ok(Arc::new(store_schema))
     }
 
     fn build_projected_user_schema(
@@ -252,17 +257,22 @@ impl ProjectedSchema {
         let column_schemas: Vec<_> = projection
             .projected_columns
             .iter()
-            .map(|col_idx| ColumnSchema::from(&region_schema.column_metadata(*col_idx).desc))
+            .map(|col_idx| {
+                region_schema
+                    .column_metadata(*col_idx)
+                    .desc
+                    .to_column_schema()
+            })
             .collect();
 
         let mut builder = SchemaBuilder::try_from(column_schemas)
-            .context(schema::ConvertSchemaSnafu)?
+            .context(metadata::ConvertSchemaSnafu)?
             .version(region_schema.version());
         if let Some(timestamp_index) = timestamp_index {
             builder = builder.timestamp_index(timestamp_index);
         }
 
-        let schema = builder.build().context(schema::BuildSchemaSnafu)?;
+        let schema = builder.build().context(metadata::InvalidSchemaSnafu)?;
 
         Ok(Arc::new(schema))
     }
@@ -272,7 +282,7 @@ impl ProjectedSchema {
         // should be always read, and the `StoreSchema` also requires the timestamp column.
         ensure!(
             !indices.is_empty(),
-            schema::InvalidProjectionSnafu {
+            metadata::InvalidProjectionSnafu {
                 msg: "at least one column should be read",
             }
         );
@@ -282,7 +292,7 @@ impl ProjectedSchema {
         for i in indices {
             ensure!(
                 *i < user_schema.num_columns(),
-                schema::InvalidProjectionSnafu {
+                metadata::InvalidProjectionSnafu {
                     msg: format!(
                         "index {} out of bound, only contains {} columns",
                         i,
@@ -363,7 +373,8 @@ mod tests {
     use store_api::storage::OpType;
 
     use super::*;
-    use crate::schema::{tests, Error};
+    use crate::metadata::Error;
+    use crate::schema::tests;
     use crate::test_util::{read_util, schema_util};
 
     #[test]
@@ -428,7 +439,8 @@ mod tests {
 
         // Test is_needed
         let needed: Vec<_> = region_schema
-            .all_columns()
+            .columns()
+            .iter()
             .enumerate()
             .filter_map(|(idx, column_meta)| {
                 if projected_schema.is_needed(column_meta.id()) {
@@ -491,7 +503,7 @@ mod tests {
             projected_schema.schema_to_read()
         );
 
-        for column in region_schema.all_columns() {
+        for column in region_schema.columns() {
             assert!(projected_schema.is_needed(column.id()));
         }
 

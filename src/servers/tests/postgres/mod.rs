@@ -8,7 +8,7 @@ use rand::Rng;
 use servers::error::Result;
 use servers::postgres::PostgresServer;
 use servers::server::Server;
-use test_util::MemTable;
+use table::test_util::MemTable;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
 use crate::create_testing_sql_query_handler;

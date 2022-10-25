@@ -4,28 +4,29 @@ use common_error::prelude::*;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk as ArrowChunk;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
-use datatypes::schema::{ColumnSchema, Metadata, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{Metadata, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::Helper;
 use store_api::storage::consts;
 
-use crate::metadata::ColumnsMetadata;
+use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, Error, Result};
 use crate::read::Batch;
-use crate::schema::{self, Error, Result};
 
 const ROW_KEY_END_KEY: &str = "greptime:storage:row_key_end";
 const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
 
-/// Schema for storage engine.
+/// Schema that contains storage engine specific metadata, such as internal columns.
 ///
-/// Used internally, contains all row key columns, internal columns and parts of value columns.
-///
-/// Only contains a reference to schema and some indices, so it should be cheap to clone.
-#[derive(Debug, Clone, PartialEq)]
+/// Used internally, contains all row key columns, internal columns and a sub set of
+/// value columns in a region. The columns are organized in `key, value, internal` order.
+#[derive(Debug, PartialEq)]
 pub struct StoreSchema {
+    columns: Vec<ColumnMetadata>,
     schema: SchemaRef,
     row_key_end: usize,
     user_column_end: usize,
 }
+
+pub type StoreSchemaRef = Arc<StoreSchema>;
 
 impl StoreSchema {
     #[inline]
@@ -56,7 +57,7 @@ impl StoreSchema {
             .iter()
             .enumerate()
             .map(|(i, column)| {
-                Helper::try_into_vector(column.clone()).context(schema::ConvertChunkSnafu {
+                Helper::try_into_vector(column.clone()).context(metadata::ConvertChunkSnafu {
                     name: self.column_name(i),
                 })
             })
@@ -87,13 +88,8 @@ impl StoreSchema {
         columns: &ColumnsMetadata,
         version: u32,
     ) -> Result<StoreSchema> {
-        let column_schemas: Vec<_> = columns
-            .iter_all_columns()
-            .map(|col| ColumnSchema::from(&col.desc))
-            .collect();
-
         StoreSchema::new(
-            column_schemas,
+            columns.columns().to_vec(),
             version,
             columns.timestamp_key_index(),
             columns.row_key_end(),
@@ -102,20 +98,25 @@ impl StoreSchema {
     }
 
     pub(crate) fn new(
-        column_schemas: Vec<ColumnSchema>,
+        columns: Vec<ColumnMetadata>,
         version: u32,
         timestamp_key_index: usize,
         row_key_end: usize,
         user_column_end: usize,
     ) -> Result<StoreSchema> {
+        let column_schemas = columns
+            .iter()
+            .map(|meta| meta.to_column_schema())
+            .collect::<Result<Vec<_>>>()?;
+
         let schema = SchemaBuilder::try_from(column_schemas)
-            .context(schema::ConvertSchemaSnafu)?
+            .context(metadata::ConvertSchemaSnafu)?
             .timestamp_index(timestamp_key_index)
             .version(version)
             .add_metadata(ROW_KEY_END_KEY, row_key_end.to_string())
             .add_metadata(USER_COLUMN_END_KEY, user_column_end.to_string())
             .build()
-            .context(schema::BuildSchemaSnafu)?;
+            .context(metadata::InvalidSchemaSnafu)?;
 
         assert_eq!(
             consts::SEQUENCE_COLUMN_NAME,
@@ -127,6 +128,7 @@ impl StoreSchema {
         );
 
         Ok(StoreSchema {
+            columns,
             schema: Arc::new(schema),
             row_key_end,
             user_column_end,
@@ -163,7 +165,7 @@ impl TryFrom<ArrowSchema> for StoreSchema {
     type Error = Error;
 
     fn try_from(arrow_schema: ArrowSchema) -> Result<StoreSchema> {
-        let schema = Schema::try_from(arrow_schema).context(schema::ConvertArrowSchemaSnafu)?;
+        let schema = Schema::try_from(arrow_schema).context(metadata::ConvertArrowSchemaSnafu)?;
         // Recover other metadata from schema.
         let row_key_end = parse_index_from_metadata(schema.metadata(), ROW_KEY_END_KEY)?;
         let user_column_end = parse_index_from_metadata(schema.metadata(), USER_COLUMN_END_KEY)?;
@@ -171,14 +173,22 @@ impl TryFrom<ArrowSchema> for StoreSchema {
         // There should be sequence and op_type columns.
         ensure!(
             consts::SEQUENCE_COLUMN_NAME == schema.column_schemas()[user_column_end].name,
-            schema::InvalidIndexSnafu
+            metadata::InvalidIndexSnafu
         );
         ensure!(
             consts::OP_TYPE_COLUMN_NAME == schema.column_schemas()[user_column_end + 1].name,
-            schema::InvalidIndexSnafu
+            metadata::InvalidIndexSnafu
         );
 
+        // Recover ColumnMetadata from schema.
+        let columns = schema
+            .column_schemas()
+            .iter()
+            .map(ColumnMetadata::from_column_schema)
+            .collect::<Result<_>>()?;
+
         Ok(StoreSchema {
+            columns,
             schema: Arc::new(schema),
             row_key_end,
             user_column_end,
@@ -189,21 +199,20 @@ impl TryFrom<ArrowSchema> for StoreSchema {
 fn parse_index_from_metadata(metadata: &Metadata, key: &str) -> Result<usize> {
     let value = metadata
         .get(key)
-        .context(schema::MissingMetaSnafu { key })?;
-    value.parse().context(schema::ParseIndexSnafu { value })
+        .context(metadata::MetaNotFoundSnafu { key })?;
+    value.parse().with_context(|_| metadata::ParseMetaIntSnafu {
+        key_value: format!("{}={}", key, value),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use datatypes::arrow::array::Array;
     use datatypes::arrow::chunk::Chunk as ArrowChunk;
-    use datatypes::type_id::LogicalTypeId;
-    use store_api::storage::consts;
 
     use super::*;
     use crate::read::Batch;
     use crate::schema::tests;
-    use crate::test_util::schema_util;
 
     fn check_chunk_batch(chunk: &ArrowChunk<Arc<dyn Array>>, batch: &Batch) {
         assert_eq!(5, chunk.columns().len());
@@ -224,22 +233,24 @@ mod tests {
         let sst_arrow_schema = store_schema.arrow_schema();
         let converted_store_schema = StoreSchema::try_from((**sst_arrow_schema).clone()).unwrap();
 
-        assert_eq!(*store_schema, converted_store_schema);
+        assert_eq!(**store_schema, converted_store_schema);
 
-        let expect_schema = schema_util::new_schema_with_version(
-            &[
-                ("k0", LogicalTypeId::Int64, false),
-                ("timestamp", LogicalTypeId::Timestamp, false),
-                ("v0", LogicalTypeId::Int64, true),
-                (consts::SEQUENCE_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                (consts::OP_TYPE_COLUMN_NAME, LogicalTypeId::UInt8, false),
-            ],
-            Some(1),
-            123,
-        );
+        let column_schemas: Vec<_> = region_schema
+            .columns()
+            .iter()
+            .map(|meta| meta.to_column_schema().unwrap())
+            .collect();
+        let expect_schema = SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .version(123)
+            .timestamp_index(1)
+            .build()
+            .unwrap();
+        // Only compare column schemas since SchemaRef in StoreSchema also contains other metadata that only used
+        // by StoreSchema.
         assert_eq!(
             expect_schema.column_schemas(),
-            store_schema.schema().column_schemas()
+            store_schema.schema().column_schemas(),
         );
         assert_eq!(3, store_schema.sequence_index());
         assert_eq!(4, store_schema.op_type_index());

@@ -2,16 +2,15 @@ use std::sync::Arc;
 
 use common_grpc::AsExcutionPlan;
 use common_grpc::DefaultAsPlanImpl;
+use common_query::physical_plan::PhysicalPlanAdapter;
+use common_query::physical_plan::PhysicalPlanRef;
 use common_query::Output;
 use datatypes::schema::Schema;
-use query::PhysicalPlanAdapter;
-use query::{plan::PhysicalPlan, QueryEngineRef};
+use query::QueryEngineRef;
 use snafu::ResultExt;
 
 use crate::error::Result;
 use crate::error::{ConvertSchemaSnafu, ExecutePhysicalPlanSnafu, IntoPhysicalPlanSnafu};
-
-pub type PhysicalPlanRef = Arc<dyn PhysicalPlan>;
 
 pub struct PhysicalPlanner {
     query_engine: QueryEngineRef,

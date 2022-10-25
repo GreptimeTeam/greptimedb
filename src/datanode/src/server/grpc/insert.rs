@@ -364,8 +364,8 @@ mod tests {
         insert_expr, Column, ColumnDataType,
     };
     use common_base::BitVec;
+    use common_query::physical_plan::PhysicalPlanRef;
     use common_query::prelude::Expr;
-    use common_recordbatch::SendableRecordBatchStream;
     use common_time::timestamp::Timestamp;
     use datatypes::{
         data_type::ConcreteDataType,
@@ -552,7 +552,7 @@ mod tests {
             _projection: &Option<Vec<usize>>,
             _filters: &[Expr],
             _limit: Option<usize>,
-        ) -> TableResult<SendableRecordBatchStream> {
+        ) -> TableResult<PhysicalPlanRef> {
             unimplemented!();
         }
     }

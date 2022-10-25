@@ -2,7 +2,6 @@
 name = "meta-client"
 version = "0.1.0"
 edition = "2021"
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 api = { path = "../api" }
@@ -13,6 +12,7 @@ etcd-client = "0.10"
 rand = "0.8"
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.18", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"
 
 [dev-dependencies]

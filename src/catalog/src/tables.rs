@@ -9,8 +9,9 @@ use async_stream::stream;
 use common_catalog::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
+use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStream};
 use datatypes::prelude::{ConcreteDataType, VectorBuilder};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
@@ -20,6 +21,7 @@ use snafu::ResultExt;
 use table::engine::TableEngineRef;
 use table::error::TablesRecordBatchSnafu;
 use table::metadata::{TableId, TableInfoRef};
+use table::table::scan::SimpleTableScan;
 use table::{Table, TableRef};
 
 use crate::error::{Error, InsertTableRecordSnafu};
@@ -64,7 +66,7 @@ impl Table for Tables {
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
-    ) -> table::error::Result<SendableRecordBatchStream> {
+    ) -> table::error::Result<PhysicalPlanRef> {
         let catalogs = self.catalogs.clone();
         let schema_ref = self.schema.clone();
         let engine_name = self.engine_name.clone();
@@ -117,10 +119,11 @@ impl Table for Tables {
             }
         });
 
-        Ok(Box::pin(TablesRecordBatchStream {
+        let stream = Box::pin(TablesRecordBatchStream {
             schema: self.schema.clone(),
             stream: Box::pin(stream),
-        }))
+        });
+        Ok(Arc::new(SimpleTableScan::new(stream)))
     }
 }
 
@@ -309,6 +312,7 @@ fn build_schema_for_tables() -> Schema {
 
 #[cfg(test)]
 mod tests {
+    use common_query::physical_plan::RuntimeEnv;
     use datatypes::arrow::array::Utf8Array;
     use datatypes::arrow::datatypes::DataType;
     use futures_util::StreamExt;
@@ -336,7 +340,11 @@ mod tests {
             .unwrap();
         let tables = Tables::new(catalog_list, "test_engine".to_string());
 
-        let mut tables_stream = tables.scan(&None, &[], None).await.unwrap();
+        let tables_stream = tables.scan(&None, &[], None).await.unwrap();
+        let mut tables_stream = tables_stream
+            .execute(0, Arc::new(RuntimeEnv::default()))
+            .await
+            .unwrap();
         if let Some(t) = tables_stream.next().await {
             let batch = t.unwrap().df_recordbatch;
             assert_eq!(1, batch.num_rows());

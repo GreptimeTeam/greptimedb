@@ -179,7 +179,7 @@ pub enum Error {
     #[snafu(display("Parquet file schema is invalid, source: {}", source))]
     InvalidParquetSchema {
         #[snafu(backtrace)]
-        source: crate::schema::Error,
+        source: MetadataError,
     },
 
     #[snafu(display("Region is under {} state, cannot proceed operation", state))]
@@ -223,7 +223,7 @@ pub enum Error {
     ConvertStoreSchema {
         file: String,
         #[snafu(backtrace)]
-        source: crate::schema::Error,
+        source: MetadataError,
     },
 
     #[snafu(display("Invalid raw region metadata, region: {}, source: {}", region, source))]
@@ -236,7 +236,7 @@ pub enum Error {
     #[snafu(display("Invalid projection, source: {}", source))]
     InvalidProjection {
         #[snafu(backtrace)]
-        source: crate::schema::Error,
+        source: MetadataError,
     },
 
     #[snafu(display("Failed to push data to batch builder, source: {}", source))]
@@ -295,6 +295,15 @@ pub enum Error {
         version: u32,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Failed to convert between ColumnSchema and ColumnMetadata, source: {}",
+        source
+    ))]
+    ConvertColumnSchema {
+        #[snafu(backtrace)]
+        source: MetadataError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -345,9 +354,9 @@ impl ErrorExt for Error {
             | InvalidRegionState { .. }
             | ReadWal { .. } => StatusCode::StorageUnavailable,
 
-            InvalidAlterRequest { source, .. } | InvalidRegionDesc { source, .. } => {
-                source.status_code()
-            }
+            InvalidAlterRequest { source, .. }
+            | InvalidRegionDesc { source, .. }
+            | ConvertColumnSchema { source, .. } => source.status_code(),
             PushBatch { source, .. } => source.status_code(),
             AddDefault { source, .. } => source.status_code(),
         }

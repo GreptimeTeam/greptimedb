@@ -104,6 +104,17 @@ pub enum Error {
     #[snafu(display("Illegal catalog manager state: {}", msg))]
     IllegalManagerState { backtrace: Backtrace, msg: String },
 
+    #[snafu(display("Failed to scan system catalog table, source: {}", source))]
+    SystemCatalogTableScan {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Failed to execute system catalog table scan, source: {}", source))]
+    SystemCatalogTableScanExec {
+        #[snafu(backtrace)]
+        source: common_query::error::Error,
+    },
     #[snafu(display("Cannot parse catalog value, source: {}", source))]
     InvalidCatalogValue {
         #[snafu(backtrace)]
@@ -145,7 +156,10 @@ impl ErrorExt for Error {
             | Error::CreateSystemCatalog { source, .. }
             | Error::InsertTableRecord { source, .. }
             | Error::OpenTable { source, .. }
-            | Error::CreateTable { source, .. } => source.status_code(),
+            | Error::CreateTable { source, .. }
+            | Error::SystemCatalogTableScan { source } => source.status_code(),
+
+            Error::SystemCatalogTableScanExec { source } => source.status_code(),
         }
     }
 

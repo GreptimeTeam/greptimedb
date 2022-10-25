@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use common_query::physical_plan::PhysicalPlan;
+
 use crate::error::Result;
-use crate::plan::{LogicalPlan, PhysicalPlan};
+use crate::plan::LogicalPlan;
 use crate::query_engine::QueryContext;
 
 /// Physical query planner that converts a `LogicalPlan` to an

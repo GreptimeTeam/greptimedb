@@ -16,7 +16,7 @@ pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 pub mod error;
 pub mod local;
 pub mod schema;
-mod system;
+pub mod system;
 pub mod tables;
 
 /// Represent a list of named catalogs

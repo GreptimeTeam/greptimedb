@@ -26,7 +26,7 @@ use query::QueryEngine;
 use rand::Rng;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
-use test_util::MemTable;
+use table::test_util::MemTable;
 
 use crate::pow::pow;
 

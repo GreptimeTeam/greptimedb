@@ -27,6 +27,7 @@ message ObjectExpr {
 message SelectExpr {
   oneof expr {
     string sql = 1;
+    bytes logical_plan = 2;
     PhysicalPlan physical_plan = 15;
   }
 }

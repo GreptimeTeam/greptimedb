@@ -94,7 +94,7 @@ mod tests {
 
     use catalog::SchemaProvider;
     use common_query::logical_plan::Expr;
-    use common_recordbatch::SendableRecordBatchStream;
+    use common_query::physical_plan::PhysicalPlanRef;
     use common_time::timestamp::Timestamp;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
@@ -148,7 +148,7 @@ mod tests {
             _projection: &Option<Vec<usize>>,
             _filters: &[Expr],
             _limit: Option<usize>,
-        ) -> TableResult<SendableRecordBatchStream> {
+        ) -> TableResult<PhysicalPlanRef> {
             unimplemented!();
         }
     }

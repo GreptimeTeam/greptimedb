@@ -2,8 +2,9 @@ use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStream};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::array::UInt32Array;
 use datatypes::data_type::ConcreteDataType;
@@ -13,6 +14,7 @@ use futures::Stream;
 
 use crate::error::Result;
 use crate::metadata::TableInfoRef;
+use crate::table::scan::SimpleTableScan;
 use crate::table::{Expr, Table};
 
 /// numbers table for test
@@ -53,12 +55,13 @@ impl Table for NumbersTable {
         _projection: &Option<Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
-    ) -> Result<SendableRecordBatchStream> {
-        Ok(Box::pin(NumbersStream {
+    ) -> Result<PhysicalPlanRef> {
+        let stream = Box::pin(NumbersStream {
             limit: limit.unwrap_or(100) as u32,
             schema: self.schema.clone(),
             already_run: false,
-        }))
+        });
+        Ok(Arc::new(SimpleTableScan::new(stream)))
     }
 }
 
