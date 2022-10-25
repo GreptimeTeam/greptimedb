@@ -5,8 +5,8 @@ use api::v1::{column, column::SemanticType, insert_expr, Column, ColumnDataType,
 
 use crate::error::{self, Result};
 
-pub const OPENTSDB_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
-pub const OPENTSDB_VALUE_COLUMN_NAME: &str = "value";
+pub const OPENTSDB_TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
+pub const OPENTSDB_VALUE_COLUMN_NAME: &str = "greptime_value";
 
 #[derive(Debug)]
 pub struct DataPoint {

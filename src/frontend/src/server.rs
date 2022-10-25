@@ -99,6 +99,9 @@ impl Services {
                 http_server.set_influxdb_handler(instance.clone());
             }
 
+            // FIXME(dennis): make it configurable
+            http_server.set_prom_handler(instance.clone());
+
             Some((Box::new(http_server) as _, http_addr))
         } else {
             None
