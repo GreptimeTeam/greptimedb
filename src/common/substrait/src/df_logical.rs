@@ -182,35 +182,35 @@ impl DFLogicalSubstraitConvertor {
             }
             .fail()?,
             LogicalPlan::Filter(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Filter",
             }
             .fail()?,
             LogicalPlan::Window(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Window",
             }
             .fail()?,
             LogicalPlan::Aggregate(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Aggregate",
             }
             .fail()?,
             LogicalPlan::Sort(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Sort",
             }
             .fail()?,
             LogicalPlan::Join(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Join",
             }
             .fail()?,
             LogicalPlan::CrossJoin(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical CrossJoin",
             }
             .fail()?,
             LogicalPlan::Repartition(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Repartition",
             }
             .fail()?,
             LogicalPlan::Union(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Union",
             }
             .fail()?,
             LogicalPlan::TableScan(table_scan) => {
@@ -220,11 +220,11 @@ impl DFLogicalSubstraitConvertor {
                 })
             }
             LogicalPlan::EmptyRelation(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical EmptyRelation",
             }
             .fail()?,
             LogicalPlan::Limit(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Limit",
             }
             .fail()?,
             LogicalPlan::CreateExternalTable(_)

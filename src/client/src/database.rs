@@ -107,6 +107,13 @@ impl Database {
         self.do_select(select_expr).await
     }
 
+    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<ObjectResult> {
+        let select_expr = SelectExpr {
+            expr: Some(select_expr::Expr::LogicalPlan(logical_plan)),
+        };
+        self.do_select(select_expr).await
+    }
+
     async fn do_select(&self, select_expr: SelectExpr) -> Result<ObjectResult> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
