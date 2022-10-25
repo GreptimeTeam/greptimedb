@@ -404,6 +404,7 @@ impl CatalogList for RemoteCatalogManager {
                     new_catalogs.insert(k.clone(), v.clone());
                 }
                 let prev = new_catalogs.insert(name, catalog);
+                catalogs.store(Arc::new(new_catalogs));
                 Ok(prev)
             })
         })
@@ -591,13 +592,14 @@ impl RemoteSchemaProvider {
             debug_assert_eq!(catalog_name, self.catalog_name);
             debug_assert_eq!(schema_name, self.schema_name);
 
-            if node_id == self.node_id {
-                if match res.get(&table_name) {
+            if node_id == self.node_id
+                && match res.get(&table_name) {
+                    // table not exist or some entry with newer version found
                     None => true,
                     Some(prev) => version > (*prev),
-                } {
-                    res.insert(table_name, version);
                 }
+            {
+                res.insert(table_name, version);
             }
         }
 
