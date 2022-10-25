@@ -74,12 +74,9 @@ async fn run() {
 
     let table_name = TableName::new("test_catlog", "test_schema", "test_table");
 
-    let create_req = CreateRequest {
-        table_name: Some(table_name),
-        ..Default::default()
-    }
-    .add_partition(p1)
-    .add_partition(p2);
+    let create_req = CreateRequest::new(table_name)
+        .add_partition(p1)
+        .add_partition(p2);
 
     let res = meta_client.create_route(create_req).await.unwrap();
     event!(Level::INFO, "create_route result: {:#?}", res);

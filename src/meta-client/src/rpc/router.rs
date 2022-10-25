@@ -39,9 +39,9 @@ impl RouteRequest {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CreateRequest {
-    pub table_name: Option<TableName>,
+    pub table_name: TableName,
     pub partitions: Vec<Partition>,
 }
 
@@ -49,7 +49,7 @@ impl From<CreateRequest> for PbCreateRequest {
     fn from(mut req: CreateRequest) -> Self {
         Self {
             header: None,
-            table_name: req.table_name.map(Into::into),
+            table_name: Some(req.table_name.into()),
             partitions: req.partitions.drain(..).map(Into::into).collect(),
         }
     }
@@ -59,7 +59,7 @@ impl CreateRequest {
     #[inline]
     pub fn new(table_name: TableName) -> Self {
         Self {
-            table_name: Some(table_name),
+            table_name,
             partitions: vec![],
         }
     }
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn test_create_request_trans() {
         let req = CreateRequest {
-            table_name: Some(TableName::new("c1", "s1", "t1")),
+            table_name: TableName::new("c1", "s1", "t1"),
             partitions: vec![
                 Partition {
                     column_list: vec![b"c1".to_vec(), b"c2".to_vec()],

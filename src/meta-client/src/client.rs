@@ -272,6 +272,7 @@ impl MetaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::TableName;
 
     #[tokio::test]
     async fn test_meta_client_builder() {
@@ -341,7 +342,8 @@ mod tests {
 
         meta_client.start(urls).await.unwrap();
 
-        let res = meta_client.create_route(CreateRequest::default()).await;
+        let req = CreateRequest::new(TableName::new("c", "s", "t"));
+        let res = meta_client.create_route(req).await;
 
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
