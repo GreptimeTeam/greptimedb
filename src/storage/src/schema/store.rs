@@ -5,7 +5,6 @@ use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk as ArrowChunk;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::schema::{Metadata, Schema, SchemaBuilder, SchemaRef};
-use datatypes::vectors::Helper;
 use store_api::storage::consts;
 
 use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, Error, Result};
@@ -48,23 +47,6 @@ impl StoreSchema {
         assert_eq!(self.schema.num_columns(), batch.num_columns());
 
         ArrowChunk::new(batch.columns().iter().map(|v| v.to_arrow_array()).collect())
-    }
-
-    // TODO(yingwen): Remove this method.
-    pub fn arrow_chunk_to_batch(&self, chunk: &ArrowChunk<Arc<dyn Array>>) -> Result<Batch> {
-        assert_eq!(self.schema.num_columns(), chunk.columns().len());
-
-        let columns = chunk
-            .iter()
-            .enumerate()
-            .map(|(i, column)| {
-                Helper::try_into_vector(column.clone()).context(metadata::ConvertChunkSnafu {
-                    name: self.column_name(i),
-                })
-            })
-            .collect::<Result<_>>()?;
-
-        Ok(Batch::new(columns))
     }
 
     pub(crate) fn contains_column(&self, name: &str) -> bool {
@@ -289,9 +271,5 @@ mod tests {
         // Convert batch to chunk.
         let chunk = store_schema.batch_to_arrow_chunk(&batch);
         check_chunk_batch(&chunk, &batch);
-
-        // Convert chunk to batch.
-        let converted_batch = store_schema.arrow_chunk_to_batch(&chunk).unwrap();
-        check_chunk_batch(&chunk, &converted_batch);
     }
 }
