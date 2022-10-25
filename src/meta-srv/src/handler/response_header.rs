@@ -2,7 +2,7 @@ use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::ResponseHeader;
 use api::v1::meta::PROTOCOL_VERSION;
 
-use super::Context;
+use super::HeartbeatAccumulator;
 use super::HeartbeatHandler;
 use crate::error::Result;
 use crate::service::store::kv::KvStoreRef;
@@ -14,7 +14,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &mut Context,
+        acc: &mut HeartbeatAccumulator,
         _store: KvStoreRef,
     ) -> Result<()> {
         let HeartbeatRequest { header, .. } = req;
@@ -23,7 +23,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
             cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
             ..Default::default()
         };
-        ctx.header = Some(res_header);
+        acc.header = Some(res_header);
         Ok(())
     }
 }
@@ -44,14 +44,18 @@ mod tests {
             header: request_header((1, 2)),
             ..Default::default()
         };
-        let mut ctx = Context::default();
+        let mut acc = HeartbeatAccumulator::default();
 
         let response_handler = ResponseHeaderHandler {};
         response_handler
-            .handle(&req, &mut ctx, kv_store)
+            .handle(&req, &mut acc, kv_store)
             .await
             .unwrap();
-        let res: HeartbeatResponse = ctx.into();
+        let header = std::mem::take(&mut acc.header);
+        let res = HeartbeatResponse {
+            header,
+            payload: acc.into_payload(),
+        };
         assert_eq!(1, res.header.unwrap().cluster_id);
     }
 }

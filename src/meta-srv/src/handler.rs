@@ -18,25 +18,22 @@ pub trait HeartbeatHandler: Send + Sync {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &mut Context,
+        ctx: &mut HeartbeatAccumulator,
         store: KvStoreRef,
     ) -> Result<()>;
 }
 
 #[derive(Debug, Default)]
-pub struct Context {
+pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
     pub states: Vec<State>,
     pub instructions: Vec<Instruction>,
 }
 
-impl From<Context> for HeartbeatResponse {
-    fn from(ctx: Context) -> Self {
-        Self {
-            header: ctx.header,
-            // TODO(jiachun): set other fields
-            ..Default::default()
-        }
+impl HeartbeatAccumulator {
+    pub fn into_payload(self) -> Vec<Vec<u8>> {
+        // TODO(jiachun): to HeartbeatResponse payload
+        vec![]
     }
 }
 
@@ -84,11 +81,16 @@ impl HeartbeatHandlers {
     }
 
     pub async fn handle(&self, req: HeartbeatRequest) -> Result<HeartbeatResponse> {
-        let mut ctx = Context::default();
+        let mut acc = HeartbeatAccumulator::default();
         let handlers = self.handlers.read().await;
         for h in handlers.iter() {
-            h.handle(&req, &mut ctx, self.kv_store.clone()).await?;
+            h.handle(&req, &mut acc, self.kv_store.clone()).await?;
         }
-        Ok(ctx.into())
+        let header = std::mem::take(&mut acc.header);
+        let res = HeartbeatResponse {
+            header,
+            payload: acc.into_payload(),
+        };
+        Ok(res)
     }
 }
