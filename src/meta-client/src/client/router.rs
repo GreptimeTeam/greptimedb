@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use api::v1::meta::request_header;
 use api::v1::meta::router_client::RouterClient;
 use api::v1::meta::CreateRequest;
-use api::v1::meta::RequestHeader;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
 use common_grpc::channel_manager::ChannelManager;
@@ -92,7 +92,7 @@ impl Inner {
 
     async fn route(&self, mut req: RouteRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-        req.header = Some(RequestHeader::new(self.id));
+        req.header = request_header(self.id);
         let res = client.route(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -100,7 +100,7 @@ impl Inner {
 
     async fn create(&self, mut req: CreateRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-        req.header = Some(RequestHeader::new(self.id));
+        req.header = request_header(self.id);
         let res = client.create(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -134,8 +134,6 @@ impl Inner {
 
 #[cfg(test)]
 mod test {
-    use api::v1::meta::RequestHeader;
-
     use super::*;
 
     #[tokio::test]
@@ -188,9 +186,8 @@ mod test {
         let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unavailable_peer"]).await.unwrap();
 
-        let header = RequestHeader::new((0, 0));
         let req = CreateRequest {
-            header: Some(header),
+            header: request_header((0, 0)),
             ..Default::default()
         };
         let res = client.create(req).await;
@@ -208,9 +205,8 @@ mod test {
         let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unavailable_peer"]).await.unwrap();
 
-        let header = RequestHeader::new((0, 0));
         let req = RouteRequest {
-            header: Some(header),
+            header: request_header((0, 0)),
             ..Default::default()
         };
         let res = client.route(req).await;

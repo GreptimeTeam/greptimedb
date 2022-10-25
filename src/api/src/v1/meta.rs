@@ -2,8 +2,13 @@ tonic::include_proto!("greptime.v1.meta");
 
 pub const PROTOCOL_VERSION: u64 = 1;
 
+pub const fn request_header((cluster_id, member_id): (u64, u64)) -> Option<RequestHeader> {
+    Some(RequestHeader::new((cluster_id, member_id)))
+}
+
 impl RequestHeader {
-    pub fn new((cluster_id, member_id): (u64, u64)) -> Self {
+    #[inline]
+    pub const fn new((cluster_id, member_id): (u64, u64)) -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION,
             cluster_id,

@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
+use api::v1::meta::request_header;
 use api::v1::meta::AskLeaderRequest;
 use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::HeartbeatResponse;
-use api::v1::meta::RequestHeader;
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::debug;
 use common_telemetry::info;
@@ -40,7 +40,7 @@ impl HeartbeatSender {
 
     #[inline]
     pub async fn send(&self, mut req: HeartbeatRequest) -> Result<()> {
-        req.header = Some(RequestHeader::new(self.id));
+        req.header = request_header(self.id);
         self.sender.send(req).await.map_err(|e| {
             error::SendHeartbeatSnafu {
                 err_msg: e.to_string(),
@@ -154,11 +154,11 @@ impl Inner {
             }
         );
 
-        let header = RequestHeader::new(self.id);
+        let header = request_header(self.id);
         let mut leader = None;
         for addr in &self.peers {
             let req = AskLeaderRequest {
-                header: Some(header.clone()),
+                header: header.clone(),
             };
             let mut client = self.make_client(addr)?;
             match client.ask_leader(req).await {
@@ -182,9 +182,9 @@ impl Inner {
         let mut leader = self.make_client(leader)?;
 
         let (sender, receiver) = mpsc::channel::<HeartbeatRequest>(128);
-        let header = RequestHeader::new(self.id);
+        let header = request_header(self.id);
         let handshake = HeartbeatRequest {
-            header: Some(header),
+            header,
             ..Default::default()
         };
         sender.send(handshake).await.map_err(|e| {

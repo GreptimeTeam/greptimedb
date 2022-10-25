@@ -37,7 +37,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::meta::RequestHeader;
+    use api::v1::meta::request_header;
 
     use super::*;
     use crate::service::store::noop::NoopKvStore;
@@ -46,9 +46,8 @@ mod tests {
     async fn test_handle_heartbeat_resp_header() {
         let kv_store = Arc::new(NoopKvStore {});
 
-        let header = RequestHeader::new((1, 2));
         let req = HeartbeatRequest {
-            header: Some(header),
+            header: request_header((1, 2)),
             ..Default::default()
         };
         let res = HeartbeatResponse::default();

@@ -70,9 +70,8 @@ mod tests {
         let kv_store = Arc::new(NoopKvStore {});
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
-        let header = RequestHeader::new((1, 1));
         let req = RouteRequest {
-            header: Some(header),
+            header: request_header((1, 1)),
             ..Default::default()
         };
         let req = req
@@ -88,10 +87,9 @@ mod tests {
         let kv_store = Arc::new(NoopKvStore {});
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
-        let header = RequestHeader::new((1, 1));
         let table_name = TableName::new("test_catalog", "test_db", "table1");
         let req = CreateRequest {
-            header: Some(header),
+            header: request_header((1, 1)),
             table_name: Some(table_name),
             ..Default::default()
         };

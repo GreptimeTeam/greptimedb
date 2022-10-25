@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use api::v1::meta::request_header;
 use api::v1::meta::store_client::StoreClient;
 use api::v1::meta::DeleteRangeRequest;
 use api::v1::meta::DeleteRangeResponse;
@@ -8,7 +9,6 @@ use api::v1::meta::PutRequest;
 use api::v1::meta::PutResponse;
 use api::v1::meta::RangeRequest;
 use api::v1::meta::RangeResponse;
-use api::v1::meta::RequestHeader;
 use common_grpc::channel_manager::ChannelManager;
 use snafu::ensure;
 use snafu::OptionExt;
@@ -100,7 +100,7 @@ impl Inner {
 
     async fn range(&self, mut req: RangeRequest) -> Result<RangeResponse> {
         let mut client = self.random_client()?;
-        req.header = Some(RequestHeader::new(self.id));
+        req.header = request_header(self.id);
         let res = client.range(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -108,7 +108,7 @@ impl Inner {
 
     async fn put(&self, mut req: PutRequest) -> Result<PutResponse> {
         let mut client = self.random_client()?;
-        req.header = Some(RequestHeader::new(self.id));
+        req.header = request_header(self.id);
         let res = client.put(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -116,7 +116,7 @@ impl Inner {
 
     async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let mut client = self.random_client()?;
-        req.header = Some(RequestHeader::new(self.id));
+        req.header = request_header(self.id);
         let res = client
             .delete_range(req)
             .await
