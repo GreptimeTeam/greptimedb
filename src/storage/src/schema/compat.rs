@@ -80,11 +80,7 @@ pub struct ReadResolver {
     indices_in_result: Vec<Option<usize>>,
     /// For each column in source schema, stores whether we need to read that column. All
     /// columns are needed by default.
-    is_needed: Vec<bool>,
-    /// End of row key columns in `is_needed`.
-    row_key_end: usize,
-    /// End of user key columns in `is_needed`.
-    user_column_end: usize,
+    is_source_needed: Vec<bool>,
 }
 
 impl ReadResolver {
@@ -105,7 +101,7 @@ impl ReadResolver {
         source_schema: StoreSchemaRef,
         dest_schema: ProjectedSchemaRef,
     ) -> Result<ReadResolver> {
-        let mut is_needed = vec![true; source_schema.num_columns()];
+        let mut is_source_needed = vec![true; source_schema.num_columns()];
         if source_schema.num_columns() != dest_schema.schema_to_read().num_columns() {
             // `dest_schema` might be projected, so we need to find out value columns that not be read
             // by the `dest_schema`.
@@ -113,20 +109,16 @@ impl ReadResolver {
             for (offset, value_column) in source_schema.value_columns().iter().enumerate() {
                 // Iterate value columns in source and mark those not in destination as unneeded.
                 if !dest_schema.is_needed(value_column.id()) {
-                    is_needed[source_schema.value_column_index_by_offset(offset)] = false;
+                    is_source_needed[source_schema.value_column_index_by_offset(offset)] = false;
                 }
             }
         }
 
-        let (row_key_end, user_column_end) =
-            (source_schema.row_key_end(), source_schema.user_column_end());
         Ok(ReadResolver {
             source_schema,
             dest_schema,
             indices_in_result: Vec::new(),
-            is_needed,
-            row_key_end,
-            user_column_end,
+            is_source_needed,
         })
     }
 
@@ -136,10 +128,7 @@ impl ReadResolver {
     ) -> Result<ReadResolver> {
         let schema_to_read = dest_schema.schema_to_read();
         let mut indices_in_result = vec![None; schema_to_read.num_columns()];
-        let mut is_needed = vec![true; source_schema.num_columns()];
-        let mut row_key_end = 0;
-        // Number of value columns.
-        let mut num_values = 0;
+        let mut is_source_needed = vec![true; source_schema.num_columns()];
         // Number of columns in result from source data.
         let mut num_columns_in_result = 0;
 
@@ -157,22 +146,14 @@ impl ReadResolver {
                     // the source column's index directly.
                     indices_in_result[dest_idx] = Some(num_columns_in_result);
                     num_columns_in_result += 1;
-
-                    if source_schema.is_key_column_index(idx) {
-                        // This column is also a key column in source schema.
-                        row_key_end += 1;
-                    } else if source_schema.is_user_column_index(idx) {
-                        // This column is not a key column but a value column.
-                        num_values += 1;
-                    }
                 } else {
                     // This column is not the same column in dest schema, should be fill by default value
                     // instead of reading from source data.
-                    is_needed[idx] = false;
+                    is_source_needed[idx] = false;
                 }
             } else {
                 // The column is not in `dest_schema`, we don't need to read it.
-                is_needed[idx] = false;
+                is_source_needed[idx] = false;
             }
         }
 
@@ -180,22 +161,21 @@ impl ReadResolver {
             source_schema,
             dest_schema,
             indices_in_result,
-            is_needed,
-            row_key_end,
-            user_column_end: row_key_end + num_values,
+            is_source_needed,
         })
     }
 
     /// Returns a bool slice to denote which key column in source is needed.
     #[inline]
     pub fn source_key_needed(&self) -> &[bool] {
-        &self.is_needed[..self.row_key_end]
+        &self.is_source_needed[..self.source_schema.row_key_end()]
     }
 
     /// Returns a bool slice to denote which value column in source is needed.
     #[inline]
     pub fn source_value_needed(&self) -> &[bool] {
-        &self.is_needed[self.row_key_end..self.user_column_end]
+        &self.is_source_needed
+            [self.source_schema.row_key_end()..self.source_schema.user_column_end()]
     }
 
     /// Construct a new [Batch] from row key, value, sequence and op_type.
@@ -242,7 +222,7 @@ impl ReadResolver {
             .arrow_schema()
             .fields
             .iter()
-            .zip(self.is_needed.iter())
+            .zip(self.is_source_needed.iter())
             .filter_map(|(field, is_needed)| {
                 if *is_needed {
                     Some(field.clone())
@@ -262,7 +242,7 @@ impl ReadResolver {
             .schema()
             .column_schemas()
             .iter()
-            .zip(self.is_needed.iter())
+            .zip(self.is_source_needed.iter())
             .filter_map(|(column_schema, is_needed)| {
                 if *is_needed {
                     Some(&column_schema.name)
