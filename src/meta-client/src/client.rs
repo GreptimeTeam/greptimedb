@@ -177,8 +177,8 @@ impl MetaClient {
                 name: "route_client",
             })?
             .create(req.into())
-            .await
-            .map(Into::into)
+            .await?
+            .try_into()
     }
 
     /// Fetch routing information for tables. The smallest unit is the complete
@@ -206,8 +206,8 @@ impl MetaClient {
                 name: "route_client",
             })?
             .route(req.into())
-            .await
-            .map(Into::into)
+            .await?
+            .try_into()
     }
 
     /// Range gets the keys in the range from the key-value store.
@@ -218,7 +218,7 @@ impl MetaClient {
             })?
             .range(req.into())
             .await
-            .map(RangeResponse::new)
+            .map(Into::into)
     }
 
     /// Put puts the given key into the key-value store.
@@ -229,7 +229,7 @@ impl MetaClient {
             })?
             .put(req.into())
             .await
-            .map(PutResponse::new)
+            .map(Into::into)
     }
 
     /// DeleteRange deletes the given range from the key-value store.
@@ -240,7 +240,7 @@ impl MetaClient {
             })?
             .delete_range(req.into())
             .await
-            .map(DeleteRangeResponse::new)
+            .map(Into::into)
     }
 
     #[inline]

@@ -89,6 +89,12 @@ impl RangeRequest {
 #[derive(Debug, Clone)]
 pub struct RangeResponse(PbRangeResponse);
 
+impl From<PbRangeResponse> for RangeResponse {
+    fn from(res: PbRangeResponse) -> Self {
+        Self::new(res)
+    }
+}
+
 impl RangeResponse {
     #[inline]
     pub fn new(res: PbRangeResponse) -> Self {
@@ -170,6 +176,12 @@ impl PutRequest {
 
 #[derive(Debug, Clone)]
 pub struct PutResponse(PbPutResponse);
+
+impl From<PbPutResponse> for PutResponse {
+    fn from(res: PbPutResponse) -> Self {
+        Self::new(res)
+    }
+}
 
 impl PutResponse {
     #[inline]
@@ -259,6 +271,12 @@ impl DeleteRangeRequest {
 
 #[derive(Debug, Clone)]
 pub struct DeleteRangeResponse(PbDeleteRangeResponse);
+
+impl From<PbDeleteRangeResponse> for DeleteRangeResponse {
+    fn from(res: PbDeleteRangeResponse) -> Self {
+        Self::new(res)
+    }
+}
 
 impl DeleteRangeResponse {
     #[inline]
@@ -412,7 +430,7 @@ mod tests {
             ],
         };
 
-        let mut res = DeleteRangeResponse::new(pb_res);
+        let mut res: DeleteRangeResponse = pb_res.into();
         assert!(res.take_header().is_none());
         assert_eq!(2, res.deleted());
         let mut kvs = res.take_prev_kvs();

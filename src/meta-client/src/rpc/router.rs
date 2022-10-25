@@ -6,9 +6,12 @@ use api::v1::meta::Region as PbRegion;
 use api::v1::meta::RouteRequest as PbRouteRequest;
 use api::v1::meta::RouteResponse as PbRouteResponse;
 use api::v1::meta::Table as PbTable;
+use snafu::OptionExt;
 
 use super::Peer;
 use super::TableName;
+use crate::error;
+use crate::error::Result;
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteRequest {
@@ -76,65 +79,76 @@ pub struct RouteResponse {
     pub table_routes: Vec<TableRoute>,
 }
 
-impl From<PbRouteResponse> for RouteResponse {
-    fn from(res: PbRouteResponse) -> Self {
-        let peers: Vec<Peer> = res.peers.into_iter().map(From::from).collect();
-        let table_routes = res
-            .table_routes
-            .into_iter()
-            .map(|table_route| {
-                let table = table_route.table.map(From::from);
-                let region_routes = table_route
-                    .region_routes
-                    .into_iter()
-                    .map(|region_route| {
-                        let region = region_route.region.map(From::from);
-                        let leader_peer = peers
-                            .get(region_route.leader_peer_index as usize)
-                            .map(ToOwned::to_owned);
-                        let follower_peers = region_route
-                            .follower_peer_indexes
-                            .into_iter()
-                            .filter_map(|i| peers.get(i as usize).map(ToOwned::to_owned))
-                            .collect::<Vec<_>>();
+impl TryFrom<PbRouteResponse> for RouteResponse {
+    type Error = error::Error;
 
-                        RegionRoute {
-                            region,
-                            leader_peer,
-                            follower_peers,
-                        }
-                    })
-                    .collect::<Vec<_>>();
+    fn try_from(pb: PbRouteResponse) -> Result<Self> {
+        let peers: Vec<Peer> = pb.peers.into_iter().map(Into::into).collect();
+        let get_peer = |index: u64| peers.get(index as usize).map(ToOwned::to_owned);
+        let mut table_routes = Vec::with_capacity(pb.table_routes.len());
+        for table_route in pb.table_routes.into_iter() {
+            let table = table_route
+                .table
+                .context(error::RouteInfoCorruptedSnafu {
+                    err_msg: "table required",
+                })?
+                .try_into()?;
+            let region_routes = table_route
+                .region_routes
+                .into_iter()
+                .map(|region_route| {
+                    let region = region_route.region.map(Into::into);
+                    let leader_peer = get_peer(region_route.leader_peer_index);
+                    let follower_peers = region_route
+                        .follower_peer_indexes
+                        .into_iter()
+                        .filter_map(get_peer)
+                        .collect::<Vec<_>>();
 
-                TableRoute {
-                    table,
-                    region_routes,
-                }
-            })
-            .collect::<Vec<_>>();
+                    RegionRoute {
+                        region,
+                        leader_peer,
+                        follower_peers,
+                    }
+                })
+                .collect::<Vec<_>>();
 
-        Self { table_routes }
+            table_routes.push(TableRoute {
+                table,
+                region_routes,
+            });
+        }
+
+        Ok(Self { table_routes })
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TableRoute {
-    pub table: Option<Table>,
+    pub table: Table,
     pub region_routes: Vec<RegionRoute>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Table {
-    pub table_name: Option<TableName>,
+    pub table_name: TableName,
     pub table_schema: Vec<u8>,
 }
 
-impl From<PbTable> for Table {
-    fn from(tb: PbTable) -> Self {
-        Self {
-            table_name: tb.table_name.map(Into::into),
-            table_schema: tb.table_schema,
-        }
+impl TryFrom<PbTable> for Table {
+    type Error = error::Error;
+
+    fn try_from(t: PbTable) -> Result<Self> {
+        let table_name = t
+            .table_name
+            .context(error::RouteInfoCorruptedSnafu {
+                err_msg: "table name requied",
+            })?
+            .into();
+        Ok(Self {
+            table_name,
+            table_schema: t.table_schema,
+        })
     }
 }
 
@@ -302,14 +316,14 @@ mod tests {
             }],
         };
 
-        let res: RouteResponse = res.into();
+        let res: RouteResponse = res.try_into().unwrap();
         let mut table_routes = res.table_routes;
         assert_eq!(1, table_routes.len());
         let table_route = table_routes.remove(0);
-        let table = table_route.table.unwrap();
-        assert_eq!("c1", table.table_name.as_ref().unwrap().catalog_name);
-        assert_eq!("s1", table.table_name.as_ref().unwrap().schema_name);
-        assert_eq!("t1", table.table_name.as_ref().unwrap().table_name);
+        let table = table_route.table;
+        assert_eq!("c1", table.table_name.catalog_name);
+        assert_eq!("s1", table.table_name.schema_name);
+        assert_eq!("t1", table.table_name.table_name);
 
         let mut region_routes = table_route.region_routes;
         assert_eq!(1, region_routes.len());
