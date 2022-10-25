@@ -1,13 +1,16 @@
 mod columns;
-mod range;
+pub(crate) mod range;
 
 use std::fmt::Debug;
+use std::sync::Arc;
 
 pub use datafusion_expr::Operator;
 use datatypes::prelude::Value;
 use store_api::storage::RegionId;
 
-pub trait PartitionRule {
+pub(crate) type PartitionRuleRef<E> = Arc<dyn PartitionRule<Error = E>>;
+
+pub trait PartitionRule: Sync + Send {
     type Error: Debug;
 
     fn partition_columns(&self) -> Vec<String>;
@@ -36,6 +39,14 @@ pub struct PartitionExpr {
 }
 
 impl PartitionExpr {
+    pub(crate) fn new(column: impl Into<String>, op: Operator, value: Value) -> Self {
+        Self {
+            column: column.into(),
+            op,
+            value,
+        }
+    }
+
     pub fn value(&self) -> &Value {
         &self.value
     }
