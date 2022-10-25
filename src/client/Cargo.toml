@@ -31,7 +31,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 package = "substrait"
 version = "0.2"
 
-# TODO: upgrade to 0.11 once substrait-rs supports it.
+# TODO(ruihang): upgrade to 0.11 once substrait-rs supports it.
 [dev-dependencies.prost_09]
 package = "prost"
 version = "0.9"
