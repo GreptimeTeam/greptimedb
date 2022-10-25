@@ -40,10 +40,7 @@ impl fmt::Debug for QueryEngineState {
 impl QueryEngineState {
     pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
         let config = ExecutionConfig::new()
-            .with_default_catalog_and_schema(
-                catalog::DEFAULT_CATALOG_NAME,
-                catalog::DEFAULT_SCHEMA_NAME,
-            )
+            .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
             .with_optimizer_rules(vec![
                 // TODO(hl): SimplifyExpressions is not exported.
                 Arc::new(TypeConversionRule {}),

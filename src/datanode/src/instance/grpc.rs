@@ -14,8 +14,8 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::AddColumnRequest;
 
 use crate::error::{
-    self, DecodeLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, Result, TableNotFoundSnafu,
-    UnsupportedExprSnafu,
+    self, CatalogSnafu, DecodeLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, Result,
+    TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};

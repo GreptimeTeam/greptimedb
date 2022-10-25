@@ -659,7 +659,6 @@ dependencies = [
  "table",
  "table-engine",
  "tempdir",
- "test-util",
  "tokio",
 ]
 
@@ -898,7 +897,6 @@ dependencies = [
  "snafu",
  "table",
  "tempdir",
- "test-util",
  "tokio",
 ]
 
@@ -5078,6 +5076,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "catalog",
+ "common-catalog",
  "common-error",
  "datafusion",
  "datatypes",
