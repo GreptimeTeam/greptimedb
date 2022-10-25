@@ -5,7 +5,9 @@ use crate::statements::alter::AlterTable;
 use crate::statements::create_table::CreateTable;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
-use crate::statements::show::{ShowDatabases, ShowTables};
+use crate::statements::show::{ShowDatabases, ShowTables, ShowCreateTable};
+
+//use super::show::ShowCreateTable;
 
 /// Tokens parsed by `DFParser` are converted into these values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +24,8 @@ pub enum Statement {
     ShowDatabases(ShowDatabases),
     // SHOW TABLES
     ShowTables(ShowTables),
+    // SHOW CREATE TABLE
+    ShowCreateTable(ShowCreateTable),
 }
 
 /// Converts Statement to sqlparser statement
@@ -35,6 +39,9 @@ impl TryFrom<Statement> for SpStatement {
             )),
             Statement::ShowTables(_) => Err(ParserError::ParserError(
                 "sqlparser does not support SHOW TABLES query.".to_string(),
+            )),
+            Statement::ShowCreateTable(_) => Err(ParserError::ParserError(
+                "sqlparser does not support SHOW CREATE TABLE query.".to_string(),
             )),
             Statement::Query(s) => Ok(SpStatement::Query(Box::new(s.inner))),
             Statement::Insert(i) => Ok(i.inner),
