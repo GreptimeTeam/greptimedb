@@ -134,35 +134,44 @@ impl RemoteCatalogManager {
         let mut max_table_id = TableId::MIN;
 
         // initiate default catalog and schema
-        self.initiate_default_catalog().await?;
+        let default_catalog = self.initiate_default_catalog().await?;
+        res.insert(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
         info!("Default catalog and schema registered");
 
-        let mut catalogs = self.backend.range(build_catalog_prefix().as_bytes());
+        let catalog_range_prefix = build_catalog_prefix();
+        info!("catalog_range_prefix: {}", catalog_range_prefix);
+        let mut catalogs = self.backend.range(catalog_range_prefix.as_bytes());
         while let Some(r) = catalogs.next().await {
-            let CatalogKey { catalog_name, .. } =
-                CatalogKey::parse(&String::from_utf8_lossy(&r?.0))
-                    .context(InvalidCatalogValueSnafu)?;
+            let Kv(k, _) = r?;
+            if !k.starts_with(catalog_range_prefix.as_bytes()) {
+                debug!("Ignoring non-catalog key: {}", String::from_utf8_lossy(&k));
+                continue;
+            }
+
+            let CatalogKey { catalog_name, .. } = CatalogKey::parse(&String::from_utf8_lossy(&k))
+                .context(InvalidCatalogValueSnafu)?;
 
             info!("Fetch catalog from metasrv: {}", &catalog_name);
             let catalog = res
                 .entry(catalog_name.clone())
                 .or_insert_with(|| self.new_catalog_provider(&catalog_name));
-            info!("Found catalog: {}", &catalog_name);
 
-            let mut schemas = self
-                .backend
-                .range(build_schema_prefix(&catalog_name).as_bytes());
+            let schema_prefix = build_schema_prefix(&catalog_name);
+            let mut schemas = self.backend.range(schema_prefix.as_bytes());
 
-            info!("List schema from metasrv");
             while let Some(r) = schemas.next().await {
-                let SchemaKey { schema_name, .. } =
-                    SchemaKey::parse(&String::from_utf8_lossy(&r?.0))
-                        .context(InvalidCatalogValueSnafu)?;
+                let Kv(k, _) = r?;
+                if !k.starts_with(schema_prefix.as_bytes()) {
+                    debug!("Ignoring non-schema key: {}", String::from_utf8_lossy(&k));
+                    continue;
+                }
+
+                let SchemaKey { schema_name, .. } = SchemaKey::parse(&String::from_utf8_lossy(&k))
+                    .context(InvalidCatalogValueSnafu)?;
                 info!("Found schema: {}", &schema_name);
                 let schema = match catalog.schema(&schema_name)? {
                     None => {
                         let schema = self.new_schema_provider(&catalog_name, &schema_name);
-                        info!("Register schema: {}", &schema_name);
                         catalog.register_schema(schema_name.clone(), schema.clone())?;
                         info!("Registered schema: {}", &schema_name);
                         schema
@@ -175,21 +184,23 @@ impl RemoteCatalogManager {
                     &catalog_name, &schema_name
                 );
 
-                let mut tables = self
-                    .backend
-                    .range(build_table_prefix(&catalog_name, &schema_name).as_bytes());
+                let table_prefix = build_table_prefix(&catalog_name, &schema_name);
+                let mut tables = self.backend.range(table_prefix.as_bytes());
 
                 while let Some(r) = tables.next().await {
                     let Kv(k, v) = r?;
+                    if !k.starts_with(table_prefix.as_bytes()) {
+                        debug!("Ignoring non-table prefix: {}", String::from_utf8_lossy(&k));
+                        continue;
+                    }
                     let table_key = TableKey::parse(&String::from_utf8_lossy(&k))
                         .context(InvalidCatalogValueSnafu)?;
                     let table_value = TableValue::parse(&String::from_utf8_lossy(&v))
                         .context(InvalidCatalogValueSnafu)?;
 
                     let table_ref = self.open_or_create_table(&table_key, &table_value).await?;
-                    info!("Try to register table: {}", &table_key.table_name);
                     schema.register_table(table_key.table_name.to_string(), table_ref)?;
-                    info!("Table {} registered", &table_key.table_name);
+                    info!("Registered table {}", &table_key.table_name);
                     max_table_id = max_table_id.max(table_value.id);
                 }
             }
@@ -293,6 +304,10 @@ impl RemoteCatalogManager {
 impl CatalogManager for RemoteCatalogManager {
     async fn start(&self) -> Result<()> {
         let (catalogs, max_table_id) = self.initiate_catalogs().await?;
+        info!(
+            "Initialized catalogs: {:?}",
+            catalogs.keys().cloned().collect::<Vec<_>>()
+        );
         self.catalogs.store(Arc::new(catalogs));
         self.next_table_id
             .store(max_table_id + 1, Ordering::Relaxed);
@@ -516,9 +531,7 @@ impl CatalogProvider for RemoteCatalogProvider {
                     .await?;
                 let prev_schemas = schemas.load();
                 let mut new_schemas = HashMap::with_capacity(prev_schemas.len() + 1);
-                for (k, v) in prev_schemas.iter() {
-                    new_schemas.insert(k.clone(), v.clone());
-                }
+                new_schemas.clone_from(&prev_schemas);
                 let prev_schema = new_schemas.insert(name, schema);
                 schemas.store(Arc::new(new_schemas));
                 Ok(prev_schema)
@@ -684,9 +697,7 @@ impl SchemaProvider for RemoteSchemaProvider {
 
                 let prev_tables = tables.load();
                 let mut new_tables = HashMap::with_capacity(prev_tables.len() + 1);
-                for (k, v) in prev_tables.iter() {
-                    new_tables.insert(k.clone(), v.clone());
-                }
+                new_tables.clone_from(&prev_tables);
                 let prev = new_tables.insert(name, table);
                 tables.store(Arc::new(new_tables));
                 prev
@@ -721,9 +732,7 @@ impl SchemaProvider for RemoteSchemaProvider {
 
                 let prev_tables = tables.load();
                 let mut new_tables = HashMap::with_capacity(prev_tables.len() + 1);
-                for (k, v) in prev_tables.iter() {
-                    new_tables.insert(k.clone(), v.clone());
-                }
+                new_tables.clone_from(&prev_tables);
                 let prev = new_tables.remove(&table_name);
                 tables.store(Arc::new(new_tables));
                 prev

@@ -8,7 +8,6 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use catalog::error::Error;
     use catalog::remote::{
         KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider,
     };
@@ -134,7 +133,10 @@ mod tests {
         let res = catalog_manager.register_table(reg_req).await;
 
         // because nonexistent_catalog does not exist yet.
-        assert_matches!(res.err().unwrap(), Error::CatalogNotFound { .. });
+        assert_matches!(
+            res.err().unwrap(),
+            catalog::error::Error::CatalogNotFound { .. }
+        );
     }
 
     #[tokio::test]
@@ -246,7 +248,7 @@ mod tests {
                 .register_table(reg_req.clone())
                 .await
                 .unwrap_err(),
-            Error::SchemaNotFound { .. }
+            catalog::error::Error::SchemaNotFound { .. }
         );
 
         let new_catalog = catalog_manager

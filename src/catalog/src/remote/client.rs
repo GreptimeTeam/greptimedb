@@ -38,7 +38,7 @@ impl KvBackend for MetaKvBackend {
                     .range(RangeRequest {
                         header: None,
                         key: start_key.to_vec(),
-                        range_end: vec![],
+                        range_end: vec![0],
                         limit: 0,
                         keys_only: false,
                     })
@@ -154,9 +154,6 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use api::v1::meta::KeyValue;
-    use lazy_static::lazy_static;
-
     use super::*;
     use crate::remote::KvBackendRef;
 
@@ -242,82 +239,5 @@ mod tests {
                 .collect::<HashSet<_>>(),
             collect_file_names(backend.clone(), "w").await
         );
-    }
-
-    lazy_static! {
-        static ref RUNTIME: tokio::runtime::Runtime = tokio::runtime::Runtime::new().unwrap();
-    }
-
-    fn sync_get(client: Arc<MetaClient>) -> Vec<KeyValue> {
-        std::thread::spawn(move || {
-            common_runtime::block_on_read(async {
-                let resp = client
-                    .range(api::v1::meta::RangeRequest {
-                        key: "__s-greptime-public-localhost".as_bytes().to_vec(),
-                        ..Default::default()
-                    })
-                    .await
-                    .unwrap();
-                resp.kvs
-            })
-        })
-        .join()
-        .unwrap()
-    }
-
-    fn sync_put(client: Arc<MetaClient>) {
-        std::thread::spawn(move || {
-            common_runtime::block_on_read(async {
-                let resp = client
-                    .put(api::v1::meta::PutRequest {
-                        key: "__s-greptime-public-localhost".as_bytes().to_vec(),
-                        value: "hello, metasrv".as_bytes().to_vec(),
-                        ..Default::default()
-                    })
-                    .await
-                    .unwrap();
-                info!("Put response: {:?}", resp);
-            })
-        })
-        .join()
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn test_meta_client() {
-        common_telemetry::init_default_ut_logging();
-        let config = common_grpc::channel_manager::ChannelConfig::new()
-            .timeout(std::time::Duration::from_secs(3))
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .tcp_nodelay(true);
-
-        let channel_manager = common_grpc::channel_manager::ChannelManager::with_config(config);
-        let mut meta_client = meta_client::client::MetaClientBuilder::new()
-            .heartbeat_client(true)
-            .router_client(true)
-            .store_client(true)
-            .channel_manager(channel_manager)
-            .build();
-
-        meta_client
-            .start(&["proxy.huanglei.rocks:22009"])
-            .await
-            .unwrap();
-        // meta_client.ask_leader().await.unwrap();
-        // info!("Ask leader success");
-
-        let client = Arc::new(meta_client);
-        for kv in sync_get(client.clone()) {
-            info!("Recv key: {}", String::from_utf8_lossy(&kv.key));
-        }
-
-        sync_put(client.clone());
-        for kv in sync_get(client.clone()) {
-            info!(
-                "Recv key: {}, value: {}",
-                String::from_utf8_lossy(&kv.key),
-                String::from_utf8_lossy(&kv.value)
-            );
-        }
     }
 }
