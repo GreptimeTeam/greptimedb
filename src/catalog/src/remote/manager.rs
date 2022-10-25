@@ -16,7 +16,7 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableIdent, TableVersion};
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::TableRef;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::error::Result;
 use crate::error::{
@@ -32,11 +32,12 @@ use crate::{
 /// Catalog manager based on metasrv.
 pub struct RemoteCatalogManager {
     node_id: String,
-    pub backend: KvBackendRef,
-    catalogs: Arc<RwLock<HashMap<String, CatalogProviderRef>>>,
+    backend: KvBackendRef,
+    catalogs: Arc<ArcSwap<HashMap<String, CatalogProviderRef>>>,
     next_table_id: Arc<AtomicU32>,
     engine: TableEngineRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
+    mutex: Arc<Mutex<()>>,
 }
 
 impl RemoteCatalogManager {
@@ -45,9 +46,10 @@ impl RemoteCatalogManager {
             engine,
             node_id,
             backend,
-            catalogs: Arc::new(Default::default()),
-            next_table_id: Arc::new(Default::default()),
+            catalogs: Default::default(),
+            next_table_id: Default::default(),
             system_table_requests: Default::default(),
+            mutex: Default::default(),
         }
     }
 
@@ -69,12 +71,7 @@ impl RemoteCatalogManager {
 
     #[inline]
     async fn local_catalogs(&self) -> HashSet<String> {
-        self.catalogs
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect::<HashSet<_>>()
+        self.catalogs.load().keys().cloned().collect::<HashSet<_>>()
     }
 
     pub async fn sync(&self) -> Result<()> {
@@ -93,7 +90,7 @@ impl RemoteCatalogManager {
                 .await?
         }
 
-        for (_, catalog) in self.catalogs.read().await.iter() {
+        for (_, catalog) in self.catalogs.load().iter() {
             let catalog_provider = catalog
                 .as_any()
                 .downcast_ref::<RemoteCatalogProvider>()
@@ -296,7 +293,7 @@ impl RemoteCatalogManager {
 impl CatalogManager for RemoteCatalogManager {
     async fn start(&self) -> Result<()> {
         let (catalogs, max_table_id) = self.initiate_catalogs().await?;
-        *(self.catalogs.write().await) = catalogs;
+        self.catalogs.store(Arc::new(catalogs));
         self.next_table_id
             .store(max_table_id + 1, Ordering::Relaxed);
         info!("Max table id allocated: {}", max_table_id);
@@ -370,60 +367,43 @@ impl CatalogList for RemoteCatalogManager {
         name: String,
         catalog: CatalogProviderRef,
     ) -> Result<Option<CatalogProviderRef>> {
-        futures::executor::block_on(async move {
-            let key = self.build_catalog_key(&name).to_string();
-            let prev = match self.backend.get(key.as_bytes()).await? {
-                None => None,
-                Some(_) => self.catalogs.read().await.get(&name).cloned(),
-            };
-            self.backend
-                .set(
-                    key.as_bytes(),
-                    &CatalogValue {}
-                        .to_bytes()
-                        .context(InvalidCatalogValueSnafu)?,
-                )
-                .await?;
-            let mut catalogs = self.catalogs.write().await;
-            catalogs.insert(name, catalog);
-            Ok(prev)
+        let key = self.build_catalog_key(&name).to_string();
+        let backend = self.backend.clone();
+        let mutex = self.mutex.clone();
+        let catalogs = self.catalogs.clone();
+
+        std::thread::spawn(|| {
+            common_runtime::block_on_write(async move {
+                let _guard = mutex.lock().await;
+                backend
+                    .set(
+                        key.as_bytes(),
+                        &CatalogValue {}
+                            .to_bytes()
+                            .context(InvalidCatalogValueSnafu)?,
+                    )
+                    .await?;
+                let prev_catalogs = catalogs.load();
+                let mut new_catalogs = HashMap::with_capacity(prev_catalogs.len() + 1);
+                for (k, v) in prev_catalogs.iter() {
+                    new_catalogs.insert(k.clone(), v.clone());
+                }
+                let prev = new_catalogs.insert(name, catalog);
+                Ok(prev)
+            })
         })
+        .join()
+        .unwrap()
     }
 
     /// List all catalogs from metasrv
     fn catalog_names(&self) -> Result<Vec<String>> {
-        futures::executor::block_on(async move {
-            let mut res = HashSet::new();
-            let mut catalog_iter = self.backend.range(build_catalog_prefix().as_bytes());
-            while let Some(v) = catalog_iter.next().await {
-                let CatalogKey {
-                    node_id,
-                    catalog_name,
-                } = CatalogKey::parse(&String::from_utf8_lossy(&v?.0))
-                    .context(InvalidCatalogValueSnafu)?;
-
-                if node_id == self.node_id {
-                    res.insert(catalog_name);
-                }
-            }
-            Ok(res.into_iter().collect())
-        })
+        Ok(self.catalogs.load().keys().cloned().collect::<Vec<_>>())
     }
 
     /// Read catalog info of given name from metasrv.
     fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
-        futures::executor::block_on(async move {
-            let key = CatalogKey {
-                catalog_name: name.to_string(),
-                node_id: self.node_id.clone(),
-            }
-            .to_string();
-
-            match self.backend.get(key.as_bytes()).await? {
-                None => Ok(None),
-                Some(_) => Ok(self.catalogs.read().await.get(name).cloned()),
-            }
-        })
+        Ok(self.catalogs.load().get(name).cloned())
     }
 }
 
