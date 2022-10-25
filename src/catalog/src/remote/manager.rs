@@ -113,9 +113,10 @@ impl RemoteCatalogManager {
     fn new_catalog_provider(&self, catalog_name: &str) -> CatalogProviderRef {
         Arc::new(RemoteCatalogProvider {
             catalog_name: catalog_name.to_string(),
-            schemas: Default::default(),
             node_id: self.node_id.clone(),
             backend: self.backend.clone(),
+            schemas: Default::default(),
+            mutex: Default::default(),
         }) as _
     }
 
@@ -430,7 +431,8 @@ pub struct RemoteCatalogProvider {
     catalog_name: String,
     node_id: String,
     backend: KvBackendRef,
-    schemas: Arc<RwLock<HashMap<String, SchemaProviderRef>>>,
+    schemas: Arc<ArcSwap<HashMap<String, SchemaProviderRef>>>,
+    mutex: Arc<Mutex<()>>,
 }
 
 impl RemoteCatalogProvider {
@@ -440,6 +442,7 @@ impl RemoteCatalogProvider {
             node_id,
             backend,
             schemas: Default::default(),
+            mutex: Default::default(),
         }
     }
 
@@ -466,12 +469,7 @@ impl RemoteCatalogProvider {
 
     #[inline]
     async fn local_schemas(&self) -> HashSet<String> {
-        self.schemas
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect::<HashSet<_>>()
+        self.schemas.load().keys().cloned().collect::<HashSet<_>>()
     }
 
     pub async fn sync(&self) -> Result<()> {
@@ -486,7 +484,8 @@ impl RemoteCatalogProvider {
             self.backend.set(key.as_bytes(), &val).await?;
         }
 
-        for schema in self.schemas.read().await.values() {
+        let schemas = self.schemas.load();
+        for schema in schemas.values() {
             let schema = schema
                 .as_any()
                 .downcast_ref::<RemoteSchemaProvider>()
@@ -511,25 +510,7 @@ impl CatalogProvider for RemoteCatalogProvider {
     }
 
     fn schema_names(&self) -> Result<Vec<String>> {
-        let key_prefix = build_schema_prefix(&self.catalog_name);
-        futures::executor::block_on(async move {
-            let mut res = HashSet::new();
-            let mut iter = self.backend.range(key_prefix.as_bytes());
-            while let Some(r) = iter.next().await {
-                let kv = r?;
-                let key = String::from_utf8_lossy(&kv.0).to_string();
-                let SchemaKey {
-                    node_id,
-                    schema_name,
-                    catalog_name,
-                } = SchemaKey::parse(&key).context(InvalidCatalogValueSnafu)?;
-                assert_eq!(self.catalog_name, catalog_name);
-                if node_id == self.node_id {
-                    res.insert(schema_name);
-                }
-            }
-            Ok(res.into_iter().collect())
-        })
+        Ok(self.schemas.load().keys().cloned().collect::<Vec<_>>())
     }
 
     fn register_schema(
@@ -537,39 +518,38 @@ impl CatalogProvider for RemoteCatalogProvider {
         name: String,
         schema: SchemaProviderRef,
     ) -> Result<Option<SchemaProviderRef>> {
-        let _ = schema;
         let key = self.build_schema_key(&name).to_string();
-        futures::executor::block_on(async move {
-            let prev = match self.backend.get(key.as_bytes()).await? {
-                None => None,
-                Some(_) => self.schemas.read().await.get(&name).cloned(),
-            };
+        let backend = self.backend.clone();
+        let mutex = self.mutex.clone();
+        let schemas = self.schemas.clone();
 
-            self.backend
-                .set(
-                    key.as_bytes(),
-                    &SchemaValue {}
-                        .to_bytes()
-                        .context(InvalidCatalogValueSnafu)?,
-                )
-                .await?;
-            let mut schemas = self.schemas.write().await;
-            schemas.insert(name, schema);
-            Ok(prev)
+        std::thread::spawn(|| {
+            common_runtime::block_on_write(async move {
+                let _guard = mutex.lock().await;
+                backend
+                    .set(
+                        key.as_bytes(),
+                        &SchemaValue {}
+                            .to_bytes()
+                            .context(InvalidCatalogValueSnafu)?,
+                    )
+                    .await?;
+                let prev_schemas = schemas.load();
+                let mut new_schemas = HashMap::with_capacity(prev_schemas.len() + 1);
+                for (k, v) in prev_schemas.iter() {
+                    new_schemas.insert(k.clone(), v.clone());
+                }
+                let prev_schema = new_schemas.insert(name, schema);
+                schemas.store(Arc::new(new_schemas));
+                Ok(prev_schema)
+            })
         })
+        .join()
+        .unwrap()
     }
 
     fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
-        futures::executor::block_on(async move {
-            let key = self.build_schema_key(name).to_string();
-            match self.backend.get(key.as_bytes()).await? {
-                None => {
-                    info!("Schema key does not exist on backend: {}", key);
-                    Ok(None)
-                }
-                Some(_) => Ok(self.schemas.read().await.get(name).cloned()),
-            }
-        })
+        Ok(self.schemas.load().get(name).cloned())
     }
 }
 
