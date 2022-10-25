@@ -1,6 +1,10 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_query::logical_plan::Expr;
+use datafusion_common::ScalarValue;
+
+use crate::mock::Region;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -82,6 +86,29 @@ pub enum Error {
         reason: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Failed to convert DataFusion's ScalarValue: {:?}, source: {}",
+        value,
+        source
+    ))]
+    ConvertScalarValue {
+        value: ScalarValue,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to find regions by filters: {:?}", filters))]
+    FindRegions {
+        filters: Vec<Expr>,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to find Datanode by region: {:?}", region))]
+    FindDatanode {
+        region: Region,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -89,15 +116,22 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ConnectDatanode { .. } | Error::ParseAddr { .. } | Error::InvalidSql { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::ConnectDatanode { .. }
+            | Error::ParseAddr { .. }
+            | Error::InvalidSql { .. }
+            | Error::FindRegions { .. } => StatusCode::InvalidArguments,
+
             Error::RuntimeResource { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
             Error::ParseSql { source } => source.status_code(),
-            Error::ConvertColumnDefaultConstraint { source, .. } => source.status_code(),
+
+            Error::ConvertColumnDefaultConstraint { source, .. }
+            | Error::ConvertScalarValue { source, .. } => source.status_code(),
+
             Error::RequestDatanode { source } => source.status_code(),
-            Error::ColumnDataType { .. } => StatusCode::Internal,
+
+            Error::ColumnDataType { .. } | Error::FindDatanode { .. } => StatusCode::Internal,
+
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
                 StatusCode::Unexpected
             }
