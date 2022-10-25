@@ -12,7 +12,6 @@ use datafusion::catalog::{
 };
 use datafusion::datasource::TableProvider as DfTableProvider;
 use datafusion::error::Result as DataFusionResult;
-use datafusion::execution::runtime_env::RuntimeEnv;
 use snafu::ResultExt;
 use table::{
     table::adapter::{DfTableProviderAdapter, TableAdapter},
@@ -22,16 +21,12 @@ use table::{
 use crate::datafusion::error;
 
 pub struct DfCatalogListAdapter {
-    runtime: Arc<RuntimeEnv>,
     catalog_list: CatalogListRef,
 }
 
 impl DfCatalogListAdapter {
-    pub fn new(runtime: Arc<RuntimeEnv>, catalog_list: CatalogListRef) -> DfCatalogListAdapter {
-        DfCatalogListAdapter {
-            runtime,
-            catalog_list,
-        }
+    pub fn new(catalog_list: CatalogListRef) -> DfCatalogListAdapter {
+        DfCatalogListAdapter { catalog_list }
     }
 }
 
@@ -47,16 +42,10 @@ impl DfCatalogList for DfCatalogListAdapter {
     ) -> Option<Arc<dyn DfCatalogProvider>> {
         let catalog_adapter = Arc::new(CatalogProviderAdapter {
             df_catalog_provider: catalog,
-            runtime: self.runtime.clone(),
         });
         self.catalog_list
             .register_catalog(name, catalog_adapter)
-            .map(|catalog_provider| {
-                Arc::new(DfCatalogProviderAdapter {
-                    catalog_provider,
-                    runtime: self.runtime.clone(),
-                }) as _
-            })
+            .map(|catalog_provider| Arc::new(DfCatalogProviderAdapter { catalog_provider }) as _)
     }
 
     fn catalog_names(&self) -> Vec<String> {
@@ -64,19 +53,15 @@ impl DfCatalogList for DfCatalogListAdapter {
     }
 
     fn catalog(&self, name: &str) -> Option<Arc<dyn DfCatalogProvider>> {
-        self.catalog_list.catalog(name).map(|catalog_provider| {
-            Arc::new(DfCatalogProviderAdapter {
-                catalog_provider,
-                runtime: self.runtime.clone(),
-            }) as _
-        })
+        self.catalog_list
+            .catalog(name)
+            .map(|catalog_provider| Arc::new(DfCatalogProviderAdapter { catalog_provider }) as _)
     }
 }
 
 /// Datafusion's CatalogProvider ->  greptime CatalogProvider
 struct CatalogProviderAdapter {
     df_catalog_provider: Arc<dyn DfCatalogProvider>,
-    runtime: Arc<RuntimeEnv>,
 }
 
 impl CatalogProvider for CatalogProviderAdapter {
@@ -99,19 +84,13 @@ impl CatalogProvider for CatalogProviderAdapter {
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
         self.df_catalog_provider
             .schema(name)
-            .map(|df_schema_provider| {
-                Arc::new(SchemaProviderAdapter {
-                    df_schema_provider,
-                    runtime: self.runtime.clone(),
-                }) as _
-            })
+            .map(|df_schema_provider| Arc::new(SchemaProviderAdapter { df_schema_provider }) as _)
     }
 }
 
 ///Greptime CatalogProvider -> datafusion's CatalogProvider
 struct DfCatalogProviderAdapter {
     catalog_provider: CatalogProviderRef,
-    runtime: Arc<RuntimeEnv>,
 }
 
 impl DfCatalogProvider for DfCatalogProviderAdapter {
@@ -124,19 +103,15 @@ impl DfCatalogProvider for DfCatalogProviderAdapter {
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn DfSchemaProvider>> {
-        self.catalog_provider.schema(name).map(|schema_provider| {
-            Arc::new(DfSchemaProviderAdapter {
-                schema_provider,
-                runtime: self.runtime.clone(),
-            }) as _
-        })
+        self.catalog_provider
+            .schema(name)
+            .map(|schema_provider| Arc::new(DfSchemaProviderAdapter { schema_provider }) as _)
     }
 }
 
 /// Greptime SchemaProvider -> datafusion SchemaProvider
 struct DfSchemaProviderAdapter {
     schema_provider: Arc<dyn SchemaProvider>,
-    runtime: Arc<RuntimeEnv>,
 }
 
 impl DfSchemaProvider for DfSchemaProviderAdapter {
@@ -159,7 +134,7 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
         name: String,
         table: Arc<dyn DfTableProvider>,
     ) -> DataFusionResult<Option<Arc<dyn DfTableProvider>>> {
-        let table = Arc::new(TableAdapter::new(table, self.runtime.clone())?);
+        let table = Arc::new(TableAdapter::new(table)?);
         match self.schema_provider.register_table(name, table)? {
             Some(p) => Ok(Some(Arc::new(DfTableProviderAdapter::new(p)))),
             None => Ok(None),
@@ -181,7 +156,6 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
 /// Datafusion SchemaProviderAdapter -> greptime SchemaProviderAdapter
 struct SchemaProviderAdapter {
     df_schema_provider: Arc<dyn DfSchemaProvider>,
-    runtime: Arc<RuntimeEnv>,
 }
 
 impl SchemaProvider for SchemaProviderAdapter {
@@ -203,8 +177,8 @@ impl SchemaProvider for SchemaProviderAdapter {
                 Some(adapter) => adapter.table(),
                 None => {
                     // TODO(yingwen): Avoid panic here.
-                    let adapter = TableAdapter::new(table_provider, self.runtime.clone())
-                        .expect("convert datafusion table");
+                    let adapter =
+                        TableAdapter::new(table_provider).expect("convert datafusion table");
                     Arc::new(adapter) as _
                 }
             }
@@ -233,8 +207,7 @@ impl SchemaProvider for SchemaProviderAdapter {
                 msg: "Fail to deregister table from datafusion",
             })?
             .map(|table| {
-                let adapter = TableAdapter::new(table, self.runtime.clone())
-                    .context(error::TableSchemaMismatchSnafu)?;
+                let adapter = TableAdapter::new(table).context(error::TableSchemaMismatchSnafu)?;
                 Ok(Arc::new(adapter) as _)
             })
             .transpose()
@@ -259,7 +232,6 @@ mod tests {
             df_catalog_provider: Arc::new(
                 datafusion::catalog::catalog::MemoryCatalogProvider::new(),
             ),
-            runtime: Arc::new(RuntimeEnv::default()),
         };
 
         adapter.register_schema(
@@ -271,7 +243,6 @@ mod tests {
     #[test]
     pub fn test_register_table() {
         let adapter = DfSchemaProviderAdapter {
-            runtime: Arc::new(RuntimeEnv::default()),
             schema_provider: Arc::new(MemorySchemaProvider::new()),
         };
 
@@ -288,9 +259,7 @@ mod tests {
 
     #[test]
     pub fn test_register_catalog() {
-        let rt = Arc::new(RuntimeEnv::default());
         let catalog_list = DfCatalogListAdapter {
-            runtime: rt.clone(),
             catalog_list: new_memory_catalog_list().unwrap(),
         };
         assert!(catalog_list
@@ -298,7 +267,6 @@ mod tests {
                 "test_catalog".to_string(),
                 Arc::new(DfCatalogProviderAdapter {
                     catalog_provider: Arc::new(MemoryCatalogProvider::new()),
-                    runtime: rt,
                 }),
             )
             .is_none());

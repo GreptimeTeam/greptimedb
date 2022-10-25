@@ -62,6 +62,36 @@ pub enum InnerError {
 
     #[snafu(display("unexpected: not constant column"))]
     InvalidInputCol { backtrace: Backtrace },
+
+    #[snafu(display("Not expected to run ExecutionPlan more than once"))]
+    ExecuteRepeatedly { backtrace: Backtrace },
+
+    #[snafu(display("General DataFusion error, source: {}", source))]
+    GeneralDataFusion {
+        source: DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to execute DataFusion ExecutionPlan, source: {}", source))]
+    DataFusionExecutionPlan {
+        source: DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to convert DataFusion's recordbatch stream, source: {}",
+        source
+    ))]
+    ConvertDfRecordBatchStream {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to convert arrow schema, source: {}", source))]
+    ConvertArrowSchema {
+        #[snafu(backtrace)]
+        source: DataTypeError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -76,9 +106,17 @@ impl ErrorExt for InnerError {
             | InnerError::InvalidInputState { .. }
             | InnerError::InvalidInputCol { .. }
             | InnerError::BadAccumulatorImpl { .. } => StatusCode::EngineExecuteQuery,
-            InnerError::InvalidInputs { source, .. } => source.status_code(),
-            InnerError::IntoVector { source, .. } => source.status_code(),
-            InnerError::FromScalarValue { source } => source.status_code(),
+
+            InnerError::InvalidInputs { source, .. }
+            | InnerError::IntoVector { source, .. }
+            | InnerError::FromScalarValue { source }
+            | InnerError::ConvertArrowSchema { source } => source.status_code(),
+
+            InnerError::ExecuteRepeatedly { .. }
+            | InnerError::GeneralDataFusion { .. }
+            | InnerError::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
+
+            InnerError::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
         }
     }
 
@@ -105,6 +143,7 @@ impl From<Error> for DataFusionError {
 
 #[cfg(test)]
 mod tests {
+    use arrow::error::ArrowError;
     use snafu::GenerateImplicitData;
 
     use super::*;
@@ -127,6 +166,48 @@ mod tests {
             .unwrap()
             .into();
         assert_error(&err, StatusCode::EngineExecuteQuery);
+
+        let err: Error = throw_df_error()
+            .context(GeneralDataFusionSnafu)
+            .err()
+            .unwrap()
+            .into();
+        assert_error(&err, StatusCode::Unexpected);
+
+        let err: Error = throw_df_error()
+            .context(DataFusionExecutionPlanSnafu)
+            .err()
+            .unwrap()
+            .into();
+        assert_error(&err, StatusCode::Unexpected);
+    }
+
+    #[test]
+    fn test_execute_repeatedly_error() {
+        let error: Error = None::<i32>
+            .context(ExecuteRepeatedlySnafu)
+            .err()
+            .unwrap()
+            .into();
+        assert_eq!(error.inner.status_code(), StatusCode::Unexpected);
+        assert!(error.backtrace_opt().is_some());
+    }
+
+    #[test]
+    fn test_convert_df_recordbatch_stream_error() {
+        let result: std::result::Result<i32, common_recordbatch::error::Error> =
+            Err(common_recordbatch::error::InnerError::PollStream {
+                source: ArrowError::Overflow,
+                backtrace: Backtrace::generate(),
+            }
+            .into());
+        let error: Error = result
+            .context(ConvertDfRecordBatchStreamSnafu)
+            .err()
+            .unwrap()
+            .into();
+        assert_eq!(error.inner.status_code(), StatusCode::Internal);
+        assert!(error.backtrace_opt().is_some());
     }
 
     fn raise_datatype_error() -> std::result::Result<(), DataTypeError> {

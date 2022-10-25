@@ -1,11 +1,13 @@
 pub mod adapter;
 pub mod numbers;
+pub mod scan;
 
 use std::any::Any;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use common_query::logical_plan::Expr;
-use common_recordbatch::SendableRecordBatchStream;
+use common_query::physical_plan::PhysicalPlanRef;
 use datatypes::schema::SchemaRef;
 
 use crate::error::Result;
@@ -13,7 +15,7 @@ use crate::metadata::{FilterPushDownType, TableInfoRef, TableType};
 use crate::requests::{AlterTableRequest, InsertRequest};
 
 /// Table abstraction.
-#[async_trait::async_trait]
+#[async_trait]
 pub trait Table: Send + Sync {
     /// Returns the table as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.
@@ -45,7 +47,7 @@ pub trait Table: Send + Sync {
         // If set, it contains the amount of rows needed by the `LogicalPlan`,
         // The datasource should return *at least* this number of rows if available.
         limit: Option<usize>,
-    ) -> Result<SendableRecordBatchStream>;
+    ) -> Result<PhysicalPlanRef>;
 
     /// Tests whether the table provider can make use of a filter expression
     /// to optimise data retrieval.

@@ -937,6 +937,7 @@ name = "common-query"
 version = "0.1.0"
 dependencies = [
  "arrow2",
+ "async-trait",
  "common-base",
  "common-error",
  "common-recordbatch",
@@ -955,6 +956,7 @@ name = "common-recordbatch"
 version = "0.1.0"
 dependencies = [
  "common-error",
+ "datafusion",
  "datafusion-common",
  "datatypes",
  "futures",
@@ -5135,6 +5137,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "common-time",
+ "datafusion",
  "datafusion-common",
  "datatypes",
  "futures",

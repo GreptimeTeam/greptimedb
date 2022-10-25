@@ -28,9 +28,6 @@ pub enum InnerError {
     #[snafu(display("Missing column when insert, column: {}", name))]
     MissingColumn { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Not expected to run ExecutionPlan more than once"))]
-    ExecuteRepeatedly { backtrace: Backtrace },
-
     #[snafu(display("Poll stream failed, source: {}", source))]
     PollStream {
         source: ArrowError,
@@ -58,7 +55,6 @@ impl ErrorExt for InnerError {
             | InnerError::SchemaConversion { .. }
             | InnerError::TableProjection { .. } => StatusCode::EngineExecuteQuery,
             InnerError::MissingColumn { .. } => StatusCode::InvalidArguments,
-            InnerError::ExecuteRepeatedly { .. } => StatusCode::Unexpected,
         }
     }
 
@@ -97,10 +93,6 @@ mod tests {
         Err(DataFusionError::NotImplemented("table test".to_string())).context(DatafusionSnafu)?
     }
 
-    fn throw_repeatedly() -> Result<()> {
-        ExecuteRepeatedlySnafu {}.fail()?
-    }
-
     fn throw_missing_column_inner() -> std::result::Result<(), InnerError> {
         MissingColumnSnafu { name: "test" }.fail()
     }
@@ -118,10 +110,6 @@ mod tests {
         let err = throw_df_error().err().unwrap();
         assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::EngineExecuteQuery, err.status_code());
-
-        let err = throw_repeatedly().err().unwrap();
-        assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::Unexpected, err.status_code());
 
         let err = throw_missing_column().err().unwrap();
         assert!(err.backtrace_opt().is_some());

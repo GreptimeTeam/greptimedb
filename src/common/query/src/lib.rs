@@ -4,6 +4,7 @@ pub mod columnar_value;
 pub mod error;
 mod function;
 pub mod logical_plan;
+pub mod physical_plan;
 pub mod prelude;
 mod signature;
 
@@ -13,3 +14,5 @@ pub enum Output {
     RecordBatches(RecordBatches),
     Stream(SendableRecordBatchStream),
 }
+
+pub use datafusion::physical_plan::ExecutionPlan as DfPhysicalPlan;

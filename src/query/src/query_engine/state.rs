@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
+use common_query::physical_plan::RuntimeEnv;
 use common_query::prelude::ScalarUdf;
 use datafusion::optimizer::common_subexpr_eliminate::CommonSubexprEliminate;
 use datafusion::optimizer::eliminate_limit::EliminateLimit;
@@ -15,7 +16,6 @@ use datafusion::optimizer::to_approx_perc::ToApproxPerc;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 
 use crate::datafusion::DfCatalogListAdapter;
-use crate::executor::Runtime;
 use crate::optimizer::TypeConversionRule;
 
 /// Query engine global state
@@ -58,10 +58,8 @@ impl QueryEngineState {
 
         let df_context = ExecutionContext::with_config(config);
 
-        df_context.state.lock().catalog_list = Arc::new(DfCatalogListAdapter::new(
-            df_context.runtime_env(),
-            catalog_list.clone(),
-        ));
+        df_context.state.lock().catalog_list =
+            Arc::new(DfCatalogListAdapter::new(catalog_list.clone()));
 
         Self {
             df_context,
@@ -108,7 +106,7 @@ impl QueryEngineState {
     }
 
     #[inline]
-    pub(crate) fn runtime(&self) -> Runtime {
-        self.df_context.runtime_env().into()
+    pub(crate) fn runtime(&self) -> Arc<RuntimeEnv> {
+        self.df_context.runtime_env()
     }
 }
