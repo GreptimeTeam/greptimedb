@@ -677,30 +677,41 @@ impl SchemaProvider for RemoteSchemaProvider {
     }
 
     fn table_names(&self) -> Result<Vec<String>> {
-        futures::executor::block_on(async move {
-            let prefix = build_table_prefix(&self.catalog_name, &self.schema_name);
-            let mut iter = self.backend.range(prefix.as_bytes());
-            let mut res = HashSet::new();
-            while let Some(r) = iter.next().await {
-                let kv = r?;
-                let key = String::from_utf8_lossy(&kv.0).to_string();
-                let TableKey {
-                    node_id,
-                    schema_name,
-                    catalog_name,
-                    table_name,
-                    ..
-                } = TableKey::parse(key).context(InvalidCatalogValueSnafu)?;
+        let self_catalog_name = self.catalog_name.clone();
+        let self_schema_name = self.schema_name.clone();
+        let self_node_id = self.node_id.clone();
+        let backend = self.backend.clone();
+        let prefix = build_table_prefix(&self_catalog_name, &self_schema_name);
 
-                assert_eq!(self.schema_name, schema_name);
-                assert_eq!(self.catalog_name, catalog_name);
+        let result = std::thread::spawn(|| {
+            let res = common_runtime::block_on_read(async move {
+                let mut res = HashSet::new();
+                let mut iter = backend.range(prefix.as_bytes());
+                while let Some(r) = iter.next().await {
+                    let kv = r?;
+                    let key = String::from_utf8_lossy(&kv.0).to_string();
+                    let TableKey {
+                        node_id,
+                        schema_name,
+                        catalog_name,
+                        table_name,
+                        ..
+                    } = TableKey::parse(key).context(InvalidCatalogValueSnafu)?;
 
-                if node_id == self.node_id {
-                    res.insert(table_name);
+                    assert_eq!(self_schema_name, schema_name);
+                    assert_eq!(self_catalog_name, catalog_name);
+
+                    if node_id == self_node_id {
+                        res.insert(table_name);
+                    }
                 }
-            }
-            Ok(res.into_iter().collect())
+                Ok(res.into_iter().collect())
+            });
+            res
         })
+        .join()
+        .unwrap();
+        result
     }
 
     fn table(&self, name: &str) -> Result<Option<TableRef>> {
