@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{
     build_catalog_prefix, build_schema_prefix, build_table_prefix, CatalogKey, CatalogValue,
@@ -10,7 +11,7 @@ use common_catalog::{
 };
 use common_telemetry::{debug, info};
 use futures_util::StreamExt;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableIdent, TableVersion};
 use table::requests::{CreateTableRequest, OpenTableRequest};
@@ -19,8 +20,8 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::error::Result;
 use crate::error::{
-    CatalogNotFoundSnafu, CatalogStateInconsistentSnafu, CreateTableSnafu,
-    InvalidCatalogValueSnafu, OpenTableSnafu, SchemaNotFoundSnafu, TableExistsSnafu,
+    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu,
+    SchemaNotFoundSnafu, TableExistsSnafu,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
@@ -125,6 +126,7 @@ impl RemoteCatalogManager {
             tables: Default::default(),
             node_id: self.node_id.clone(),
             backend: self.backend.clone(),
+            mutex: Default::default(),
         }) as _
     }
 
@@ -576,7 +578,8 @@ pub struct RemoteSchemaProvider {
     schema_name: String,
     node_id: String,
     backend: KvBackendRef,
-    tables: Arc<RwLock<HashMap<String, TableRef>>>,
+    tables: Arc<ArcSwap<HashMap<String, TableRef>>>,
+    mutex: Arc<Mutex<()>>,
 }
 
 impl RemoteSchemaProvider {
@@ -592,6 +595,7 @@ impl RemoteSchemaProvider {
             node_id,
             backend,
             tables: Default::default(),
+            mutex: Default::default(),
         }
     }
 
@@ -630,9 +634,9 @@ impl RemoteSchemaProvider {
     /// Refresh tables in schema according to table list from metasrv
     pub async fn sync(&self) -> Result<()> {
         let remote_tables = self.fetch_remote_tables().await?;
-        for (table_name, table_ref) in self.tables.read().await.iter() {
+        let local_tables = self.tables.load();
+        for (table_name, table_ref) in local_tables.iter() {
             let TableIdent { table_id, version } = table_ref.table_info().ident;
-
             let need_register = match remote_tables.get(table_name) {
                 None => true,
                 Some(prev_ver) => *prev_ver < version, // remote version obsolete
@@ -677,66 +681,11 @@ impl SchemaProvider for RemoteSchemaProvider {
     }
 
     fn table_names(&self) -> Result<Vec<String>> {
-        let self_catalog_name = self.catalog_name.clone();
-        let self_schema_name = self.schema_name.clone();
-        let self_node_id = self.node_id.clone();
-        let backend = self.backend.clone();
-        let prefix = build_table_prefix(&self_catalog_name, &self_schema_name);
-
-        let result = std::thread::spawn(|| {
-            let res = common_runtime::block_on_read(async move {
-                let mut res = HashSet::new();
-                let mut iter = backend.range(prefix.as_bytes());
-                while let Some(r) = iter.next().await {
-                    let kv = r?;
-                    let key = String::from_utf8_lossy(&kv.0).to_string();
-                    let TableKey {
-                        node_id,
-                        schema_name,
-                        catalog_name,
-                        table_name,
-                        ..
-                    } = TableKey::parse(key).context(InvalidCatalogValueSnafu)?;
-
-                    assert_eq!(self_schema_name, schema_name);
-                    assert_eq!(self_catalog_name, catalog_name);
-
-                    if node_id == self_node_id {
-                        res.insert(table_name);
-                    }
-                }
-                Ok(res.into_iter().collect())
-            });
-            res
-        })
-        .join()
-        .unwrap();
-        result
+        Ok(self.tables.load().keys().cloned().collect::<Vec<_>>())
     }
 
     fn table(&self, name: &str) -> Result<Option<TableRef>> {
-        futures::executor::block_on(async move {
-            let table = match self.tables.read().await.get(name).cloned() {
-                None => return Ok(None),
-                Some(t) => t,
-            };
-            let table_version = table.table_info().ident.version;
-            let key = self.build_table_key(&name, table_version).to_string();
-
-            // Also check if table info exists on metasrv
-            let metasrv_entry = self.backend.get(key.as_bytes()).await?;
-            ensure!(
-                metasrv_entry.is_some(),
-                CatalogStateInconsistentSnafu {
-                    msg: format!(
-                        "Local table info: {:?}, but entry with key {} does not exist in metasrv",
-                        table.table_info(),
-                        key
-                    )
-                }
-            );
-            Ok(Some(table))
-        })
+        Ok(self.tables.load().get(name).cloned())
     }
 
     fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
@@ -747,48 +696,86 @@ impl SchemaProvider for RemoteSchemaProvider {
             id: table_info.ident.table_id,
             node_id: self.node_id.clone(),
         };
+        let backend = self.backend.clone();
+        let mutex = self.mutex.clone();
+        let tables = self.tables.clone();
 
-        futures::executor::block_on(async move {
-            let key = self
-                .build_table_key(name.clone(), table_version)
-                .to_string();
-            let prev = match self.backend.get(key.as_bytes()).await? {
-                None => None,
-                Some(_) => self.tables.read().await.get(&key).cloned(),
-            };
-            self.backend
-                .set(
-                    key.as_bytes(),
-                    &table_value.as_bytes().context(InvalidCatalogValueSnafu)?,
-                )
-                .await?;
-            debug!(
-                "Successfully set catalog table entry, key: {}, table value: {:?}",
-                key, table_value
-            );
-            let mut tables = self.tables.write().await;
-            tables.insert(name, table);
-            Ok(prev)
+        let table_key = self
+            .build_table_key(name.clone(), table_version)
+            .to_string();
+
+        let prev = std::thread::spawn(move || {
+            common_runtime::block_on_read(async move {
+                let _guard = mutex.lock().await;
+                backend
+                    .set(
+                        table_key.as_bytes(),
+                        &table_value
+                            .as_bytes()
+                            .context(InvalidCatalogValueSnafu)
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                debug!(
+                    "Successfully set catalog table entry, key: {}, table value: {:?}",
+                    table_key, table_value
+                );
+
+                let prev_tables = tables.load();
+                let mut new_tables = HashMap::with_capacity(prev_tables.len() + 1);
+                for (k, v) in prev_tables.iter() {
+                    new_tables.insert(k.clone(), v.clone());
+                }
+                let prev = new_tables.insert(name, table);
+                tables.store(Arc::new(new_tables));
+                prev
+            })
         })
+        .join()
+        .unwrap();
+        Ok(prev)
     }
 
     fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
-        futures::executor::block_on(async move {
-            let table_version = match self.tables.read().await.get(name) {
-                None => return Ok(None),
-                Some(t) => t.table_info().ident.version,
-            };
-            let key = self.build_table_key(&name, table_version).to_string();
-            // TODO(hl): Shall we also delete entries with older versions?
-            self.backend.delete_range(key.as_bytes(), &[]).await?;
-            let mut tables = self.tables.write().await;
-            Ok(tables.remove(&key))
+        let table_version = match self.tables.load().get(name) {
+            None => return Ok(None),
+            Some(t) => t.table_info().ident.version,
+        };
+
+        let table_name = name.to_string();
+        let table_key = self.build_table_key(&table_name, table_version).to_string();
+
+        let backend = self.backend.clone();
+        let mutex = self.mutex.clone();
+        let tables = self.tables.clone();
+
+        let prev = std::thread::spawn(move || {
+            common_runtime::block_on_read(async move {
+                let _guard = mutex.lock().await;
+                backend.delete(table_key.as_bytes()).await.unwrap();
+                debug!(
+                    "Successfully deleted catalog table entry, key: {}",
+                    table_key
+                );
+
+                let prev_tables = tables.load();
+                let mut new_tables = HashMap::with_capacity(prev_tables.len() + 1);
+                for (k, v) in prev_tables.iter() {
+                    new_tables.insert(k.clone(), v.clone());
+                }
+                let prev = new_tables.remove(&table_name);
+                tables.store(Arc::new(new_tables));
+                prev
+            })
         })
+        .join()
+        .unwrap();
+        Ok(prev)
     }
 
     /// Checks if table exists in schema provider based on locally opened table map.
-    /// TODO(hl): Also check if table existence on metasrv differs from local table map?
     fn table_exist(&self, name: &str) -> Result<bool> {
-        futures::executor::block_on(async move { Ok(self.tables.read().await.contains_key(name)) })
+        Ok(self.tables.load().contains_key(name))
     }
 }

@@ -634,6 +634,7 @@ name = "catalog"
 version = "0.1.0"
 dependencies = [
  "api",
+ "arc-swap",
  "async-stream",
  "async-trait",
  "chrono",
