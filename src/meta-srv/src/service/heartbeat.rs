@@ -1,4 +1,6 @@
 use std::io::ErrorKind;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use api::v1::meta::heartbeat_server;
 use api::v1::meta::AskLeaderRequest;
@@ -23,6 +25,8 @@ use crate::error;
 use crate::error::Result;
 use crate::metasrv::MetaSrv;
 
+static PUSHER_ID: AtomicU64 = AtomicU64::new(0);
+
 #[async_trait::async_trait]
 impl heartbeat_server::Heartbeat for MetaSrv {
     type HeartbeatStream = GrpcStream<HeartbeatResponse>;
@@ -36,13 +40,17 @@ impl heartbeat_server::Heartbeat for MetaSrv {
         let handlers = self.heartbeat_handlers();
         common_runtime::spawn_bg(async move {
             let mut pusher_key = None;
-
             while let Some(msg) = in_stream.next().await {
                 match msg {
                     Ok(req) => {
                         if pusher_key.is_none() {
                             if let Some(ref peer) = req.peer {
-                                let key = format!("{}/{}", peer.id, peer.addr);
+                                let key = format!(
+                                    "{}-{}-{}",
+                                    peer.addr,
+                                    peer.id,
+                                    PUSHER_ID.fetch_add(1, Ordering::Relaxed)
+                                );
                                 handlers.register(&key, tx.clone()).await;
                                 pusher_key = Some(key);
                             }
@@ -68,12 +76,10 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                     }
                 }
             }
-
             info!(
                 "Heartbeat stream broken: {:?}",
                 pusher_key.as_ref().unwrap_or(&"unknow".to_string())
             );
-
             if let Some(key) = pusher_key {
                 let _ = handlers.unregister(&key);
             }
@@ -81,7 +87,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
 
         let out_stream = ReceiverStream::new(rx);
 
-        Ok(Response::new(Box::pin(out_stream) as Self::HeartbeatStream))
+        Ok(Response::new(Box::pin(out_stream)))
     }
 
     async fn ask_leader(&self, req: Request<AskLeaderRequest>) -> GrpcResult<AskLeaderResponse> {

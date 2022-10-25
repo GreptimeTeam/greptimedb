@@ -216,6 +216,9 @@ pub struct DeleteRangeRequest {
     /// If prev_kv is set, gets the previous key-value pairs before deleting it.
     /// The previous key-value pairs will be returned in the delete response.
     pub prev_kv: bool,
+    // TODO(jiachun):
+    // Add a "limit" in delete request?
+    // To avoid a huge delete block everything.
 }
 
 impl From<DeleteRangeRequest> for PbDeleteRangeRequest {

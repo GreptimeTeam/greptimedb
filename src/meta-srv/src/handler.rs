@@ -1,6 +1,6 @@
 pub(crate) mod response_header;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use api::v1::meta::HeartbeatRequest;
@@ -49,7 +49,7 @@ pub type Pusher = Sender<std::result::Result<HeartbeatResponse, tonic::Status>>;
 pub struct HeartbeatHandlers {
     kv_store: KvStoreRef,
     handlers: Arc<RwLock<Vec<Box<dyn HeartbeatHandler>>>>,
-    pushers: Arc<RwLock<HashMap<String, Pusher>>>,
+    pushers: Arc<RwLock<BTreeMap<String, Pusher>>>,
 }
 
 impl HeartbeatHandlers {
