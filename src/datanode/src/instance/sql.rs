@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::{
@@ -38,8 +38,10 @@ impl Instance {
                 let schema_provider = self
                     .catalog_manager
                     .catalog(DEFAULT_CATALOG_NAME)
+                    .expect("datafusion does not accept fallible catalog access")
                     .unwrap()
                     .schema(DEFAULT_SCHEMA_NAME)
+                    .expect("datafusion does not accept fallible catalog access")
                     .unwrap();
 
                 let request = self.sql_handler.insert_to_request(schema_provider, *i)?;
@@ -52,9 +54,9 @@ impl Instance {
                 // TODO(hl): Select table engine by engine_name
 
                 let request = self.sql_handler.create_to_request(table_id, c)?;
-                let catalog_name = request.catalog_name.clone();
-                let schema_name = request.schema_name.clone();
-                let table_name = request.table_name.clone();
+                let catalog_name = &request.catalog_name;
+                let schema_name = &request.schema_name;
+                let table_name = &request.table_name;
                 let table_id = request.id;
                 info!(
                     "Creating table, catalog: {:?}, schema: {:?}, table name: {:?}, table id: {}",

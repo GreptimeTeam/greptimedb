@@ -16,6 +16,12 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to decode logical plan, source: {}", source))]
+    DecodeLogicalPlan {
+        #[snafu(backtrace)]
+        source: substrait::error::Error,
+    },
+
     #[snafu(display("Failed to execute physical plan, source: {}", source))]
     ExecutePhysicalPlan {
         #[snafu(backtrace)]
@@ -261,6 +267,18 @@ pub enum Error {
         duplicated: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to access catalog, source: {}", source))]
+    Catalog {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
+    #[snafu(display("Failed to find table {} from catalog, source: {}", table_name, source))]
+    FindTable {
+        table_name: String,
+        source: catalog::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -269,9 +287,10 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::ExecuteSql { source } => source.status_code(),
+            Error::DecodeLogicalPlan { source } => source.status_code(),
             Error::ExecutePhysicalPlan { source } => source.status_code(),
             Error::NewCatalog { source } => source.status_code(),
-
+            Error::FindTable { source, .. } => source.status_code(),
             Error::CreateTable { source, .. }
             | Error::GetTable { source, .. }
             | Error::AlterTable { source, .. } => source.status_code(),
@@ -314,7 +333,8 @@ impl ErrorExt for Error {
             | Error::Conversion { .. }
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }
-            | Error::ColumnDataType { .. } => StatusCode::Internal,
+            | Error::ColumnDataType { .. }
+            | Error::Catalog { .. } => StatusCode::Internal,
 
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
@@ -359,7 +379,7 @@ mod tests {
         )))
     }
 
-    fn throw_catalog_error() -> std::result::Result<(), catalog::error::Error> {
+    fn throw_catalog_error() -> catalog::error::Result<()> {
         Err(catalog::error::Error::RegisterTable {
             source: BoxedError::new(MockError::with_backtrace(StatusCode::Internal)),
         })

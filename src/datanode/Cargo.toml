@@ -5,9 +5,7 @@ edition = "2021"
 
 [features]
 default = ["python"]
-python = [
-  "dep:script"
-]
+python = ["dep:script"]
 
 [dependencies]
 api = { path = "../api" }
@@ -16,6 +14,7 @@ axum = "0.6.0-rc.2"
 axum-macros = "0.3.0-rc.1"
 catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
+common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-query = { path = "../common/query" }
@@ -23,7 +22,9 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
+  "simd",
+] }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 hyper = { version = "0.14", features = ["full"] }
@@ -39,6 +40,7 @@ snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
 storage = { path = "../storage" }
 store-api = { path = "../store-api" }
+substrait = { path = "../common/substrait" }
 table = { path = "../table" }
 table-engine = { path = "../table-engine", features = ["test"] }
 tokio = { version = "1.18", features = ["full"] }
@@ -46,22 +48,41 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies.arrow]
 package = "arrow2"
 version = "0.10"
-features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+features = [
+  "io_csv",
+  "io_json",
+  "io_parquet",
+  "io_parquet_compression",
+  "io_ipc",
+  "ahash",
+  "compute",
+  "serde_types",
+]
 
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 client = { path = "../client" }
 common-query = { path = "../common/query" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
+  "simd",
+] }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 tempdir = "0.3"
 
 [dev-dependencies.arrow]
 package = "arrow2"
 version = "0.10"
-features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+features = [
+  "io_csv",
+  "io_json",
+  "io_parquet",
+  "io_parquet_compression",
+  "io_ipc",
+  "ahash",
+  "compute",
+  "serde_types",
+]

@@ -6,6 +6,7 @@ edition = "2021"
 
 [dependencies]
 catalog = { path = "../catalog" }
+common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }

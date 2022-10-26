@@ -47,9 +47,12 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
         let rel = self.convert_plan(plan)?;
+        let plan_rel = PlanRel {
+            rel_type: Some(PlanRelType::Rel(rel)),
+        };
 
         let mut buf = BytesMut::new();
-        rel.encode(&mut buf).context(EncodeRelSnafu)?;
+        plan_rel.encode(&mut buf).context(EncodeRelSnafu)?;
 
         Ok(buf.freeze())
     }
@@ -148,7 +151,7 @@ impl DFLogicalSubstraitConvertor {
         // Get table handle from catalog manager
         let table_ref = self
             .catalog_manager
-            .table(Some(&catalog_name), Some(&schema_name), &table_name)
+            .table(&catalog_name, &schema_name, &table_name)
             .map_err(BoxedError::new)
             .context(InternalSnafu)?
             .context(TableNotFoundSnafu {
@@ -182,35 +185,35 @@ impl DFLogicalSubstraitConvertor {
             }
             .fail()?,
             LogicalPlan::Filter(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Filter",
             }
             .fail()?,
             LogicalPlan::Window(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Window",
             }
             .fail()?,
             LogicalPlan::Aggregate(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Aggregate",
             }
             .fail()?,
             LogicalPlan::Sort(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Sort",
             }
             .fail()?,
             LogicalPlan::Join(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Join",
             }
             .fail()?,
             LogicalPlan::CrossJoin(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical CrossJoin",
             }
             .fail()?,
             LogicalPlan::Repartition(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Repartition",
             }
             .fail()?,
             LogicalPlan::Union(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Union",
             }
             .fail()?,
             LogicalPlan::TableScan(table_scan) => {
@@ -220,11 +223,11 @@ impl DFLogicalSubstraitConvertor {
                 })
             }
             LogicalPlan::EmptyRelation(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical EmptyRelation",
             }
             .fail()?,
             LogicalPlan::Limit(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Projection",
+                name: "DataFusion Logical Limit",
             }
             .fail()?,
             LogicalPlan::CreateExternalTable(_)
@@ -276,11 +279,12 @@ impl DFLogicalSubstraitConvertor {
 
 #[cfg(test)]
 mod test {
+    use catalog::local::LocalCatalogManager;
     use catalog::{
-        memory::{MemoryCatalogProvider, MemorySchemaProvider},
-        CatalogList, CatalogProvider, LocalCatalogManager, RegisterTableRequest,
-        DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+        local::{MemoryCatalogProvider, MemorySchemaProvider},
+        CatalogList, CatalogProvider, RegisterTableRequest,
     };
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::schema::Schema;
     use table::{requests::CreateTableRequest, test_util::EmptyTable, test_util::MockTableEngine};
 
@@ -297,8 +301,12 @@ mod test {
         );
         let schema_provider = Arc::new(MemorySchemaProvider::new());
         let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-        catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
-        catalog_manager.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
+        catalog_provider
+            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
+            .unwrap();
+        catalog_manager
+            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+            .unwrap();
 
         catalog_manager.init().await.unwrap();
         catalog_manager
@@ -321,8 +329,8 @@ mod test {
     async fn logical_plan_round_trip(plan: LogicalPlan, catalog: CatalogManagerRef) {
         let convertor = DFLogicalSubstraitConvertor::new(catalog);
 
-        let rel = convertor.convert_plan(plan.clone()).unwrap();
-        let tripped_plan = convertor.convert_rel(rel).unwrap();
+        let proto = convertor.encode(plan.clone()).unwrap();
+        let tripped_plan = convertor.decode(proto).unwrap();
 
         assert_eq!(format!("{:?}", plan), format!("{:?}", tripped_plan));
     }
@@ -335,8 +343,8 @@ mod test {
         )));
         catalog_manager
             .register_table(RegisterTableRequest {
-                catalog: Some(DEFAULT_CATALOG_NAME.to_string()),
-                schema: Some(DEFAULT_SCHEMA_NAME.to_string()),
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name: DEFAULT_TABLE_NAME.to_string(),
                 table_id: 1,
                 table: table_ref.clone(),

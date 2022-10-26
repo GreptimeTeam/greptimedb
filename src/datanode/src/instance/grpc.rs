@@ -3,15 +3,20 @@ use api::v1::{
     ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
-use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
+use query::plan::LogicalPlan;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
 use snafu::prelude::*;
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::AddColumnRequest;
 
-use crate::error::{self, InsertSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu};
+use crate::error::{
+    self, CatalogSnafu, DecodeLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, Result,
+    TableNotFoundSnafu, UnsupportedExprSnafu,
+};
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 use crate::server::grpc::insert::{self, insertion_expr_to_request};
@@ -94,13 +99,15 @@ impl Instance {
             .catalog_manager
             .catalog(catalog_name)
             .unwrap()
+            .expect("default catalog must exist")
             .schema(schema_name)
+            .expect("default schema must exist")
             .unwrap();
 
         let insert_batches = insert::insert_batches(values.values)?;
         ensure!(!insert_batches.is_empty(), error::IllegalInsertDataSnafu);
 
-        let table = if let Some(table) = schema_provider.table(table_name) {
+        let table = if let Some(table) = schema_provider.table(table_name).context(CatalogSnafu)? {
             let schema = table.schema();
             if let Some(add_columns) = insert::find_new_columns(&schema, &insert_batches)? {
                 self.add_new_columns_to_table(table_name, add_columns)
@@ -119,6 +126,7 @@ impl Instance {
 
             schema_provider
                 .table(table_name)
+                .context(CatalogSnafu)?
                 .context(TableNotFoundSnafu { table_name })?
         };
 
@@ -155,6 +163,7 @@ impl Instance {
         let expr = select_expr.expr;
         match expr {
             Some(select_expr::Expr::Sql(sql)) => self.execute_sql(&sql).await,
+            Some(select_expr::Expr::LogicalPlan(plan)) => self.execute_logical(plan).await,
             Some(select_expr::Expr::PhysicalPlan(api::v1::PhysicalPlan { original_ql, plan })) => {
                 self.physical_planner
                     .execute(PhysicalPlanner::parse(plan)?, original_ql)
@@ -165,6 +174,18 @@ impl Instance {
             }
             .fail(),
         }
+    }
+
+    async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
+        let logical_plan_converter = DFLogicalSubstraitConvertor::new(self.catalog_manager.clone());
+        let logical_plan = logical_plan_converter
+            .decode(plan_bytes.as_slice())
+            .context(DecodeLogicalPlanSnafu)?;
+
+        self.query_engine
+            .execute(&LogicalPlan::DfPlan(logical_plan))
+            .await
+            .context(ExecuteSqlSnafu)
     }
 }
 

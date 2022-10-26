@@ -45,6 +45,12 @@ pub enum Error {
 
     #[snafu(display("Failed create heartbeat stream to server"))]
     CreateHeartbeatStream { backtrace: Backtrace },
+
+    #[snafu(display("Route info corruped: {}", err_msg))]
+    RouteInfoCorrupted {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 #[allow(dead_code)]
@@ -70,6 +76,7 @@ impl ErrorExt for Error {
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
             | Error::CreateChannel { .. } => StatusCode::Internal,
+            Error::RouteInfoCorrupted { .. } => StatusCode::Unexpected,
         }
     }
 }
@@ -178,5 +185,16 @@ mod tests {
 
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
+    }
+
+    #[test]
+    fn test_route_info_corruped_error() {
+        let e = throw_none_option()
+            .context(RouteInfoCorruptedSnafu { err_msg: "" })
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Unexpected);
     }
 }

@@ -2,8 +2,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, SCRIPTS_TABLE_ID};
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, SCRIPTS_TABLE_ID};
 use common_query::Output;
 use common_recordbatch::util as record_util;
 use common_telemetry::logging;
@@ -107,8 +107,8 @@ impl ScriptsTable {
         let table = self
             .catalog_manager
             .table(
-                Some(DEFAULT_CATALOG_NAME),
-                Some(DEFAULT_SCHEMA_NAME),
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
                 SCRIPTS_TABLE_NAME,
             )
             .context(FindScriptsTableSnafu)?

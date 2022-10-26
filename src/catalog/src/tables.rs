@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_stream::stream;
+use common_catalog::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
+use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
@@ -17,12 +19,12 @@ use datatypes::vectors::VectorRef;
 use futures::Stream;
 use snafu::ResultExt;
 use table::engine::TableEngineRef;
+use table::error::TablesRecordBatchSnafu;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::SimpleTableScan;
 use table::{Table, TableRef};
 
-use crate::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
-use crate::error::InsertTableRecordSnafu;
+use crate::error::{Error, InsertTableRecordSnafu};
 use crate::system::{build_table_insert_request, SystemCatalogTable};
 use crate::{
     format_full_table_name, CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef,
@@ -70,12 +72,38 @@ impl Table for Tables {
         let engine_name = self.engine_name.clone();
 
         let stream = stream!({
-            for catalog_name in catalogs.catalog_names() {
-                let catalog = catalogs.catalog(&catalog_name).unwrap();
-                for schema_name in catalog.schema_names() {
-                    let mut tables_in_schema = Vec::with_capacity(catalog.schema_names().len());
-                    let schema = catalog.schema(&schema_name).unwrap();
-                    for table_name in schema.table_names() {
+            for catalog_name in catalogs
+                .catalog_names()
+                .map_err(BoxedError::new)
+                .context(TablesRecordBatchSnafu)?
+            {
+                let catalog = catalogs
+                    .catalog(&catalog_name)
+                    .map_err(BoxedError::new)
+                    .context(TablesRecordBatchSnafu)?
+                    .unwrap();
+                for schema_name in catalog
+                    .schema_names()
+                    .map_err(BoxedError::new)
+                    .context(TablesRecordBatchSnafu)?
+                {
+                    let mut tables_in_schema = Vec::with_capacity(
+                        catalog
+                            .schema_names()
+                            .map_err(BoxedError::new)
+                            .context(TablesRecordBatchSnafu)?
+                            .len(),
+                    );
+                    let schema = catalog
+                        .schema(&schema_name)
+                        .map_err(BoxedError::new)
+                        .context(TablesRecordBatchSnafu)?
+                        .unwrap();
+                    for table_name in schema
+                        .table_names()
+                        .map_err(BoxedError::new)
+                        .context(TablesRecordBatchSnafu)?
+                    {
                         tables_in_schema.push(table_name);
                     }
 
@@ -159,17 +187,20 @@ impl SchemaProvider for InformationSchema {
         self
     }
 
-    fn table_names(&self) -> Vec<String> {
-        vec!["tables".to_string(), SYSTEM_CATALOG_TABLE_NAME.to_string()]
+    fn table_names(&self) -> Result<Vec<String>, Error> {
+        Ok(vec![
+            "tables".to_string(),
+            SYSTEM_CATALOG_TABLE_NAME.to_string(),
+        ])
     }
 
-    fn table(&self, name: &str) -> Option<TableRef> {
+    fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {
         if name.eq_ignore_ascii_case("tables") {
-            Some(self.tables.clone())
+            Ok(Some(self.tables.clone()))
         } else if name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME) {
-            Some(self.system.clone())
+            Ok(Some(self.system.clone()))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -185,8 +216,9 @@ impl SchemaProvider for InformationSchema {
         panic!("System catalog & schema does not support deregister table")
     }
 
-    fn table_exist(&self, name: &str) -> bool {
-        name.eq_ignore_ascii_case("tables") || name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME)
+    fn table_exist(&self, name: &str) -> Result<bool, Error> {
+        Ok(name.eq_ignore_ascii_case("tables")
+            || name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME))
     }
 }
 
@@ -231,23 +263,23 @@ impl CatalogProvider for SystemCatalog {
         self
     }
 
-    fn schema_names(&self) -> Vec<String> {
-        vec![INFORMATION_SCHEMA_NAME.to_string()]
+    fn schema_names(&self) -> Result<Vec<String>, Error> {
+        Ok(vec![INFORMATION_SCHEMA_NAME.to_string()])
     }
 
     fn register_schema(
         &self,
         _name: String,
         _schema: SchemaProviderRef,
-    ) -> Option<SchemaProviderRef> {
+    ) -> Result<Option<SchemaProviderRef>, Error> {
         panic!("System catalog does not support registering schema!")
     }
 
-    fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
+    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>, Error> {
         if name.eq_ignore_ascii_case(INFORMATION_SCHEMA_NAME) {
-            Some(self.information_schema.clone())
+            Ok(Some(self.information_schema.clone()))
         } else {
-            None
+            Ok(None)
         }
     }
 }
@@ -287,7 +319,9 @@ mod tests {
     use table::table::numbers::NumbersTable;
 
     use super::*;
-    use crate::memory::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
+    use crate::local::memory::{
+        new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider,
+    };
     use crate::CatalogList;
 
     #[tokio::test]
@@ -298,8 +332,12 @@ mod tests {
         schema
             .register_table("test_table".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
-        catalog_provider.register_schema("test_schema".to_string(), schema);
-        catalog_list.register_catalog("test_catalog".to_string(), catalog_provider);
+        catalog_provider
+            .register_schema("test_schema".to_string(), schema)
+            .unwrap();
+        catalog_list
+            .register_catalog("test_catalog".to_string(), catalog_provider)
+            .unwrap();
         let tables = Tables::new(catalog_list, "test_engine".to_string());
 
         let tables_stream = tables.scan(&None, &[], None).await.unwrap();

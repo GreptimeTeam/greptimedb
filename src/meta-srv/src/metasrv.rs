@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::handler::response_header::ResponseHeaderHandler;
+use crate::handler::HeartbeatHandlers;
 use crate::service::store::kv::KvStoreRef;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,18 +26,32 @@ impl Default for MetaSrvOptions {
 pub struct MetaSrv {
     options: MetaSrvOptions,
     kv_store: KvStoreRef,
+    heartbeat_handlers: HeartbeatHandlers,
 }
 
 impl MetaSrv {
-    pub fn new(options: MetaSrvOptions, kv_store: KvStoreRef) -> Self {
-        Self { options, kv_store }
+    pub async fn new(options: MetaSrvOptions, kv_store: KvStoreRef) -> Self {
+        let heartbeat_handlers = HeartbeatHandlers::new(kv_store.clone());
+        heartbeat_handlers.add_handler(ResponseHeaderHandler).await;
+        Self {
+            options,
+            kv_store,
+            heartbeat_handlers,
+        }
     }
 
+    #[inline]
     pub fn options(&self) -> &MetaSrvOptions {
         &self.options
     }
 
+    #[inline]
     pub fn kv_store(&self) -> KvStoreRef {
         self.kv_store.clone()
+    }
+
+    #[inline]
+    pub fn heartbeat_handlers(&self) -> HeartbeatHandlers {
+        self.heartbeat_handlers.clone()
     }
 }

@@ -12,10 +12,10 @@ pub trait SchemaProvider: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
     /// Retrieves the list of available table names in this schema.
-    fn table_names(&self) -> Vec<String>;
+    fn table_names(&self) -> Result<Vec<String>>;
 
     /// Retrieves a specific table from the schema by name, provided it exists.
-    fn table(&self, name: &str) -> Option<TableRef>;
+    fn table(&self, name: &str) -> Result<Option<TableRef>>;
 
     /// If supported by the implementation, adds a new table to this schema.
     /// If a table of the same name existed before, it returns "Table already exists" error.
@@ -28,7 +28,7 @@ pub trait SchemaProvider: Sync + Send {
     /// If supported by the implementation, checks the table exist in the schema provider or not.
     /// If no matched table in the schema provider, return false.
     /// Otherwise, return true.
-    fn table_exist(&self, name: &str) -> bool;
+    fn table_exist(&self, name: &str) -> Result<bool>;
 }
 
 pub type SchemaProviderRef = Arc<dyn SchemaProvider>;

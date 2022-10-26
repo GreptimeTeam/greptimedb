@@ -15,26 +15,69 @@ use futures::Stream;
 use snafu::prelude::*;
 
 use crate::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
-use crate::metadata::TableInfoRef;
+use crate::metadata::{
+    TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType, TableVersion,
+};
 use crate::table::scan::SimpleTableScan;
 use crate::Table;
 
 #[derive(Debug, Clone)]
 pub struct MemTable {
-    table_name: String,
+    info: TableInfoRef,
     recordbatch: RecordBatch,
 }
 
 impl MemTable {
     pub fn new(table_name: impl Into<String>, recordbatch: RecordBatch) -> Self {
-        Self {
-            table_name: table_name.into(),
+        Self::new_with_catalog(
+            table_name,
             recordbatch,
-        }
+            0,
+            "greptime".to_string(),
+            "public".to_string(),
+        )
+    }
+
+    pub fn new_with_catalog(
+        table_name: impl Into<String>,
+        recordbatch: RecordBatch,
+        table_id: TableId,
+        catalog_name: String,
+        schema_name: String,
+    ) -> Self {
+        let schema = recordbatch.schema.clone();
+
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .value_indices(vec![])
+            .engine("mock".to_string())
+            .next_column_id(0)
+            .engine_options(Default::default())
+            .options(Default::default())
+            .created_on(Default::default())
+            .build()
+            .unwrap();
+
+        let info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(table_id)
+                .table_version(0 as TableVersion)
+                .name(table_name.into())
+                .schema_name(schema_name)
+                .catalog_name(catalog_name)
+                .desc(None)
+                .table_type(TableType::Base)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+
+        Self { info, recordbatch }
     }
 
     pub fn table_name(&self) -> &str {
-        &self.table_name
+        &self.info.name
     }
 
     /// Creates a 1 column 100 rows table, with table name "numbers", column name "uint32s" and
@@ -65,7 +108,7 @@ impl Table for MemTable {
     }
 
     fn table_info(&self) -> TableInfoRef {
-        unimplemented!()
+        self.info.clone()
     }
 
     async fn scan(

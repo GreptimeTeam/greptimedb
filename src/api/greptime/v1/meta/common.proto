@@ -24,11 +24,7 @@ message Error {
 
 message Peer {
   uint64 id = 1;
-  Endpoint endpoint = 2;
-}
-
-message Endpoint {
-  string addr = 1;
+  string addr = 2;
 }
 
 message TableName {

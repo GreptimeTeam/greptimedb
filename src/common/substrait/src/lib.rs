@@ -1,5 +1,5 @@
 mod df_logical;
-mod error;
+pub mod error;
 mod schema;
 mod types;
 

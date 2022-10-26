@@ -1,16 +1,16 @@
 use std::time::Duration;
 
-use api::v1::meta::CreateRequest;
-use api::v1::meta::DeleteRangeRequest;
 use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::Partition;
-use api::v1::meta::PutRequest;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::RequestHeader;
-use api::v1::meta::TableName;
+use api::v1::meta::Peer;
 use common_grpc::channel_manager::ChannelConfig;
 use common_grpc::channel_manager::ChannelManager;
 use meta_client::client::MetaClientBuilder;
+use meta_client::rpc::CreateRequest;
+use meta_client::rpc::DeleteRangeRequest;
+use meta_client::rpc::Partition;
+use meta_client::rpc::PutRequest;
+use meta_client::rpc::RangeRequest;
+use meta_client::rpc::TableName;
 use tracing::event;
 use tracing::subscriber;
 use tracing::Level;
@@ -44,28 +44,37 @@ async fn run() {
     // send heartbeats
     tokio::spawn(async move {
         for _ in 0..5 {
-            let req = HeartbeatRequest::new(RequestHeader::with_id(id));
+            let req = HeartbeatRequest {
+                peer: Some(Peer {
+                    id: 1,
+                    addr: "meta_client_peer".to_string(),
+                }),
+                ..Default::default()
+            };
             sender.send(req).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    });
+
+    tokio::spawn(async move {
+        while let Some(res) = receiver.message().await.unwrap() {
+            event!(Level::INFO, "heartbeat response: {:#?}", res);
         }
     });
 
-    while let Some(res) = receiver.message().await.unwrap() {
-        event!(Level::INFO, "heartbeat response: {:#?}", res);
-    }
+    let p1 = Partition {
+        column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
+        value_list: vec![b"k1".to_vec(), b"k2".to_vec()],
+    };
 
-    let header = RequestHeader::with_id(id);
-
-    let p1 = Partition::new()
-        .column_list(vec![b"col_1".to_vec(), b"col_2".to_vec()])
-        .value_list(vec![b"k1".to_vec(), b"k2".to_vec()]);
-
-    let p2 = Partition::new()
-        .column_list(vec![b"col_1".to_vec(), b"col_2".to_vec()])
-        .value_list(vec![b"Max1".to_vec(), b"Max2".to_vec()]);
+    let p2 = Partition {
+        column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
+        value_list: vec![b"Max1".to_vec(), b"Max2".to_vec()],
+    };
 
     let table_name = TableName::new("test_catlog", "test_schema", "test_table");
 
-    let create_req = CreateRequest::new(header, table_name)
+    let create_req = CreateRequest::new(table_name)
         .add_partition(p1)
         .add_partition(p2);
 
@@ -73,32 +82,24 @@ async fn run() {
     event!(Level::INFO, "create_route result: {:#?}", res);
 
     // put
-    let put_req = PutRequest {
-        key: b"key1".to_vec(),
-        value: b"value1".to_vec(),
-        prev_kv: true,
-        ..Default::default()
-    };
-    let res = meta_client.put(put_req).await.unwrap();
+    let put = PutRequest::new()
+        .with_key(b"key1".to_vec())
+        .with_value(b"value1".to_vec())
+        .with_prev_kv();
+    let res = meta_client.put(put).await.unwrap();
     event!(Level::INFO, "put result: {:#?}", res);
 
     // get
-    let range_req = RangeRequest {
-        key: b"key1".to_vec(),
-        ..Default::default()
-    };
-    let res = meta_client.range(range_req.clone()).await.unwrap();
+    let range = RangeRequest::new().with_key(b"key2".to_vec());
+    let res = meta_client.range(range.clone()).await.unwrap();
     event!(Level::INFO, "get range result: {:#?}", res);
 
     // delete
-    let delete_range_req = DeleteRangeRequest {
-        key: b"key1".to_vec(),
-        ..Default::default()
-    };
-    let res = meta_client.delete_range(delete_range_req).await.unwrap();
+    let delete_range = DeleteRangeRequest::new().with_key(b"key1".to_vec());
+    let res = meta_client.delete_range(delete_range).await.unwrap();
     event!(Level::INFO, "delete range result: {:#?}", res);
 
     // get none
-    let res = meta_client.range(range_req).await;
+    let res = meta_client.range(range).await.unwrap();
     event!(Level::INFO, "get range result: {:#?}", res);
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use snafu::ResultExt;
@@ -81,7 +81,9 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
         .catalog_manager()
         .catalog(DEFAULT_CATALOG_NAME)
         .unwrap()
+        .unwrap()
         .schema(DEFAULT_SCHEMA_NAME)
+        .unwrap()
         .unwrap();
     schema_provider
         .register_table(table_name.to_string(), table)
@@ -97,7 +99,7 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
         object_store,
     ));
     let catalog_manager = Arc::new(
-        catalog::LocalCatalogManager::try_new(mock_engine.clone())
+        catalog::local::LocalCatalogManager::try_new(mock_engine.clone())
             .await
             .unwrap(),
     );

@@ -635,18 +635,23 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "chrono",
+ "common-catalog",
  "common-error",
  "common-query",
  "common-recordbatch",
+ "common-runtime",
  "common-telemetry",
  "common-time",
  "datafusion",
  "datatypes",
  "futures",
  "futures-util",
+ "lazy_static",
  "log-store",
  "object-store",
  "opendal",
+ "regex",
  "serde",
  "serde_json",
  "snafu",
@@ -805,7 +810,10 @@ dependencies = [
  "datafusion",
  "datanode",
  "datatypes",
+ "prost 0.9.0",
  "snafu",
+ "substrait 0.1.0",
+ "substrait 0.2.0",
  "tokio",
  "tonic",
  "tracing",
@@ -871,6 +879,25 @@ dependencies = [
  "paste",
  "serde",
  "snafu",
+]
+
+[[package]]
+name = "common-catalog"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "common-error",
+ "common-telemetry",
+ "datatypes",
+ "lazy_static",
+ "regex",
+ "serde",
+ "serde_json",
+ "snafu",
+ "table",
+ "tempdir",
+ "tokio",
 ]
 
 [[package]]
@@ -1394,6 +1421,7 @@ dependencies = [
  "catalog",
  "client",
  "common-base",
+ "common-catalog",
  "common-error",
  "common-grpc",
  "common-query",
@@ -1418,6 +1446,7 @@ dependencies = [
  "sql",
  "storage",
  "store-api",
+ "substrait 0.1.0",
  "table",
  "table-engine",
  "tempdir",
@@ -3739,6 +3768,7 @@ dependencies = [
  "arrow2",
  "async-trait",
  "catalog",
+ "common-catalog",
  "common-error",
  "common-function",
  "common-function-macro",
@@ -4464,6 +4494,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "catalog",
+ "common-catalog",
  "common-error",
  "common-function",
  "common-query",
@@ -4604,6 +4635,7 @@ dependencies = [
  "bytes",
  "catalog",
  "common-base",
+ "common-catalog",
  "common-error",
  "common-grpc",
  "common-query",
@@ -4812,6 +4844,7 @@ name = "sql"
 version = "0.1.0"
 dependencies = [
  "catalog",
+ "common-catalog",
  "common-error",
  "common-time",
  "datatypes",
@@ -5043,6 +5076,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "catalog",
+ "common-catalog",
  "common-error",
  "datafusion",
  "datatypes",

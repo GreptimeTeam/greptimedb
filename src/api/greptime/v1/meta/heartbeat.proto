@@ -88,5 +88,5 @@ message AskLeaderRequest {
 message AskLeaderResponse {
   ResponseHeader header = 1;
 
-  Endpoint leader = 2;
+  Peer leader = 2;
 }

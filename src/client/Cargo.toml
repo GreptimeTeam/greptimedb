@@ -13,13 +13,25 @@ common-grpc = { path = "../common/grpc" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-time = { path = "../common/time" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
+    "simd",
+] }
 datatypes = { path = "../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 tonic = "0.8"
 
 [dev-dependencies]
 datanode = { path = "../datanode" }
+substrait = { path = "../common/substrait" }
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# TODO(ruihang): upgrade to 0.11 once substrait-rs supports it.
+[dev-dependencies.prost_09]
+package = "prost"
+version = "0.9"
+
+[dev-dependencies.substrait_proto]
+package = "substrait"
+version = "0.2"

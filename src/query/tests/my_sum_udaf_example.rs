@@ -2,10 +2,9 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{
-    CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-};
+use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMeta;
 use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::CreateAccumulatorSnafu;
@@ -246,8 +245,12 @@ fn new_query_engine_factory(table: MemTable) -> QueryEngineFactory {
     let catalog_list = Arc::new(MemoryCatalogList::default());
 
     schema_provider.register_table(table_name, table).unwrap();
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
-    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
+    catalog_provider
+        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
+        .unwrap();
+    catalog_list
+        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .unwrap();
 
     QueryEngineFactory::new(catalog_list)
 }
