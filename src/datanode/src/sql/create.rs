@@ -23,6 +23,7 @@ use crate::sql::SqlHandler;
 impl SqlHandler {
     pub(crate) async fn create(&self, req: CreateTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
+        // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
         let table_id = req.id;
 
