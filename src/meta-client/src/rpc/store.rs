@@ -5,8 +5,10 @@ use api::v1::meta::PutResponse as PbPutResponse;
 use api::v1::meta::RangeRequest as PbRangeRequest;
 use api::v1::meta::RangeResponse as PbRangeResponse;
 
+use super::util;
 use super::KeyValue;
 use super::ResponseHeader;
+use crate::error;
 
 #[derive(Debug, Clone, Default)]
 pub struct RangeRequest {
@@ -89,9 +91,13 @@ impl RangeRequest {
 #[derive(Debug, Clone)]
 pub struct RangeResponse(PbRangeResponse);
 
-impl From<PbRangeResponse> for RangeResponse {
-    fn from(res: PbRangeResponse) -> Self {
-        Self::new(res)
+impl TryFrom<PbRangeResponse> for RangeResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbRangeResponse) -> Result<Self, Self::Error> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self::new(pb))
     }
 }
 
@@ -177,9 +183,13 @@ impl PutRequest {
 #[derive(Debug, Clone)]
 pub struct PutResponse(PbPutResponse);
 
-impl From<PbPutResponse> for PutResponse {
-    fn from(res: PbPutResponse) -> Self {
-        Self::new(res)
+impl TryFrom<PbPutResponse> for PutResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbPutResponse) -> Result<Self, Self::Error> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self::new(pb))
     }
 }
 
@@ -275,9 +285,13 @@ impl DeleteRangeRequest {
 #[derive(Debug, Clone)]
 pub struct DeleteRangeResponse(PbDeleteRangeResponse);
 
-impl From<PbDeleteRangeResponse> for DeleteRangeResponse {
-    fn from(res: PbDeleteRangeResponse) -> Self {
-        Self::new(res)
+impl TryFrom<PbDeleteRangeResponse> for DeleteRangeResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbDeleteRangeResponse) -> Result<Self, Self::Error> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self::new(pb))
     }
 }
 
@@ -433,7 +447,7 @@ mod tests {
             ],
         };
 
-        let mut res: DeleteRangeResponse = pb_res.into();
+        let mut res: DeleteRangeResponse = pb_res.try_into().unwrap();
         assert!(res.take_header().is_none());
         assert_eq!(2, res.deleted());
         let mut kvs = res.take_prev_kvs();

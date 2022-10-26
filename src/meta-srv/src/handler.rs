@@ -19,9 +19,27 @@ pub trait HeartbeatHandler: Send + Sync {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &mut HeartbeatAccumulator,
-        store: KvStoreRef,
+        ctx: &Context,
+        acc: &mut HeartbeatAccumulator,
     ) -> Result<()>;
+}
+
+#[derive(Clone)]
+pub struct Context {
+    pub server_addr: String, // also server_id
+    pub kv_store: KvStoreRef,
+}
+
+impl Context {
+    #[inline]
+    pub fn server_addr(&self) -> &str {
+        &self.server_addr
+    }
+
+    #[inline]
+    pub fn kv_store(&self) -> KvStoreRef {
+        self.kv_store.clone()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -46,20 +64,15 @@ pub enum Instruction {}
 
 pub type Pusher = Sender<std::result::Result<HeartbeatResponse, tonic::Status>>;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct HeartbeatHandlers {
-    kv_store: KvStoreRef,
     handlers: Arc<RwLock<Vec<Box<dyn HeartbeatHandler>>>>,
     pushers: Arc<RwLock<BTreeMap<String, Pusher>>>,
 }
 
 impl HeartbeatHandlers {
-    pub fn new(kv_store: KvStoreRef) -> Self {
-        Self {
-            kv_store,
-            handlers: Arc::new(RwLock::new(Default::default())),
-            pushers: Arc::new(RwLock::new(Default::default())),
-        }
+    pub fn new() -> Self {
+        Default::default()
     }
 
     pub async fn add_handler(&self, handler: impl HeartbeatHandler + 'static) {
@@ -81,11 +94,11 @@ impl HeartbeatHandlers {
         pushers.remove(key)
     }
 
-    pub async fn handle(&self, req: HeartbeatRequest) -> Result<HeartbeatResponse> {
+    pub async fn handle(&self, req: HeartbeatRequest, ctx: Context) -> Result<HeartbeatResponse> {
         let mut acc = HeartbeatAccumulator::default();
         let handlers = self.handlers.read().await;
         for h in handlers.iter() {
-            h.handle(&req, &mut acc, self.kv_store.clone()).await?;
+            h.handle(&req, &ctx, &mut acc).await?;
         }
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {

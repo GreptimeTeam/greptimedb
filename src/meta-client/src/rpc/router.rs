@@ -8,6 +8,7 @@ use api::v1::meta::RouteResponse as PbRouteResponse;
 use api::v1::meta::Table as PbTable;
 use snafu::OptionExt;
 
+use super::util;
 use super::Peer;
 use super::TableName;
 use crate::error;
@@ -83,6 +84,8 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbRouteResponse) -> Result<Self> {
+        util::check_response_header(pb.header.as_ref())?;
+
         let peers: Vec<Peer> = pb.peers.into_iter().map(Into::into).collect();
         let get_peer = |index: u64| peers.get(index as usize).map(ToOwned::to_owned);
         let mut table_routes = Vec::with_capacity(pb.table_routes.len());

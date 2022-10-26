@@ -32,7 +32,7 @@ pub struct MetaSrv {
 
 impl MetaSrv {
     pub async fn new(options: MetaSrvOptions, kv_store: KvStoreRef) -> Self {
-        let heartbeat_handlers = HeartbeatHandlers::new(kv_store.clone());
+        let heartbeat_handlers = HeartbeatHandlers::default();
         heartbeat_handlers.add_handler(ResponseHeaderHandler).await;
         heartbeat_handlers.add_handler(DatanodeLeaseHandler).await;
 
