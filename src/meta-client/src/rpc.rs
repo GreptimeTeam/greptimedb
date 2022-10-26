@@ -1,5 +1,6 @@
 mod router;
 mod store;
+mod util;
 
 use api::v1::meta::KeyValue as PbKeyValue;
 use api::v1::meta::Peer as PbPeer;

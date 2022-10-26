@@ -5,8 +5,10 @@ use api::v1::meta::PutResponse as PbPutResponse;
 use api::v1::meta::RangeRequest as PbRangeRequest;
 use api::v1::meta::RangeResponse as PbRangeResponse;
 
+use super::util;
 use super::KeyValue;
 use super::ResponseHeader;
+use crate::error;
 
 #[derive(Debug, Clone, Default)]
 pub struct RangeRequest {
@@ -58,6 +60,9 @@ impl RangeRequest {
         self
     }
 
+    /// key is the first key for the range, If range_end is not given, the
+    /// request only looks up key.
+    ///
     /// range_end is the upper bound on the requested range [key, range_end).
     /// If range_end is '\0', the range is all keys >= key.
     /// If range_end is key plus one (e.g., "aa"+1 == "ab", "a\xff"+1 == "b"),
@@ -65,8 +70,22 @@ impl RangeRequest {
     /// If both key and range_end are '\0', then the range request returns all
     /// keys.
     #[inline]
-    pub fn with_range_end(mut self, range_end: impl Into<Vec<u8>>) -> Self {
+    pub fn with_key_range(
+        mut self,
+        key: impl Into<Vec<u8>>,
+        range_end: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.key = key.into();
         self.range_end = range_end.into();
+        self
+    }
+
+    /// Gets all keys prefixed with key.
+    /// range_end is the key plus one (e.g., "aa"+1 == "ab", "a\xff"+1 == "b"),
+    #[inline]
+    pub fn with_prefix(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.key = key.into();
+        self.range_end = util::get_prefix(&self.key);
         self
     }
 
@@ -89,9 +108,13 @@ impl RangeRequest {
 #[derive(Debug, Clone)]
 pub struct RangeResponse(PbRangeResponse);
 
-impl From<PbRangeResponse> for RangeResponse {
-    fn from(res: PbRangeResponse) -> Self {
-        Self::new(res)
+impl TryFrom<PbRangeResponse> for RangeResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbRangeResponse) -> Result<Self, Self::Error> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self::new(pb))
     }
 }
 
@@ -177,9 +200,13 @@ impl PutRequest {
 #[derive(Debug, Clone)]
 pub struct PutResponse(PbPutResponse);
 
-impl From<PbPutResponse> for PutResponse {
-    fn from(res: PbPutResponse) -> Self {
-        Self::new(res)
+impl TryFrom<PbPutResponse> for PutResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbPutResponse) -> Result<Self, Self::Error> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self::new(pb))
     }
 }
 
@@ -242,13 +269,16 @@ impl DeleteRangeRequest {
         }
     }
 
-    /// key is the first key to delete in the range.
+    /// key is the first key to delete in the range. If range_end is not given,
+    /// the range is defined to contain only the key argument.
     #[inline]
     pub fn with_key(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self
     }
 
+    /// key is the first key to delete in the range.
+    ///
     /// range_end is the key following the last key to delete for the range
     /// [key, range_end).
     /// If range_end is not given, the range is defined to contain only the key
@@ -258,8 +288,22 @@ impl DeleteRangeRequest {
     /// If range_end is '\0', the range is all keys greater than or equal to the
     /// key argument.
     #[inline]
-    pub fn with_range_end(mut self, range_end: impl Into<Vec<u8>>) -> Self {
+    pub fn with_key_range(
+        mut self,
+        key: impl Into<Vec<u8>>,
+        range_end: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.key = key.into();
         self.range_end = range_end.into();
+        self
+    }
+
+    /// Deletes all keys prefixed with key.
+    /// range_end is one bit larger than the given key.
+    #[inline]
+    pub fn with_prefix(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.key = key.into();
+        self.range_end = util::get_prefix(&self.key);
         self
     }
 
@@ -275,9 +319,13 @@ impl DeleteRangeRequest {
 #[derive(Debug, Clone)]
 pub struct DeleteRangeResponse(PbDeleteRangeResponse);
 
-impl From<PbDeleteRangeResponse> for DeleteRangeResponse {
-    fn from(res: PbDeleteRangeResponse) -> Self {
-        Self::new(res)
+impl TryFrom<PbDeleteRangeResponse> for DeleteRangeResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbDeleteRangeResponse) -> Result<Self, Self::Error> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self::new(pb))
     }
 }
 
@@ -319,8 +367,7 @@ mod tests {
         let (key, range_end, limit) = (b"test_key1".to_vec(), b"test_range_end1".to_vec(), 1);
 
         let req = RangeRequest::new()
-            .with_key(key.clone())
-            .with_range_end(range_end.clone())
+            .with_key_range(key.clone(), range_end.clone())
             .with_limit(limit)
             .with_keys_only();
 
@@ -328,6 +375,23 @@ mod tests {
         assert!(into_req.header.is_none());
         assert_eq!(key, into_req.key);
         assert_eq!(range_end, into_req.range_end);
+        assert_eq!(limit, into_req.limit);
+        assert!(into_req.keys_only);
+    }
+
+    #[test]
+    fn test_prefix_request_trans() {
+        let (key, limit) = (b"test_key1".to_vec(), 1);
+
+        let req = RangeRequest::new()
+            .with_prefix(key.clone())
+            .with_limit(limit)
+            .with_keys_only();
+
+        let into_req: PbRangeRequest = req.into();
+        assert!(into_req.header.is_none());
+        assert_eq!(key, into_req.key);
+        assert_eq!(b"test_key2".to_vec(), into_req.range_end);
         assert_eq!(limit, into_req.limit);
         assert!(into_req.keys_only);
     }
@@ -405,14 +469,28 @@ mod tests {
         let (key, range_end) = (b"test_key1".to_vec(), b"test_range_end1".to_vec());
 
         let req = DeleteRangeRequest::new()
-            .with_key(key.clone())
-            .with_range_end(range_end.clone())
+            .with_key_range(key.clone(), range_end.clone())
             .with_prev_kv();
 
         let into_req: PbDeleteRangeRequest = req.into();
         assert!(into_req.header.is_none());
         assert_eq!(key, into_req.key);
         assert_eq!(range_end, into_req.range_end);
+        assert!(into_req.prev_kv);
+    }
+
+    #[test]
+    fn test_delete_prefix_request_trans() {
+        let key = b"test_key1".to_vec();
+
+        let req = DeleteRangeRequest::new()
+            .with_prefix(key.clone())
+            .with_prev_kv();
+
+        let into_req: PbDeleteRangeRequest = req.into();
+        assert!(into_req.header.is_none());
+        assert_eq!(key, into_req.key);
+        assert_eq!(b"test_key2".to_vec(), into_req.range_end);
         assert!(into_req.prev_kv);
     }
 
@@ -433,7 +511,7 @@ mod tests {
             ],
         };
 
-        let mut res: DeleteRangeResponse = pb_res.into();
+        let mut res: DeleteRangeResponse = pb_res.try_into().unwrap();
         assert!(res.take_header().is_none());
         assert_eq!(2, res.deleted());
         let mut kvs = res.take_prev_kvs();

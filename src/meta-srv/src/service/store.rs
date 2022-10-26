@@ -1,5 +1,7 @@
 pub mod etcd;
+pub mod helper;
 pub mod kv;
+#[cfg(test)]
 pub(crate) mod noop;
 
 use api::v1::meta::store_server;

@@ -217,8 +217,8 @@ impl MetaClient {
                 name: "store_client",
             })?
             .range(req.into())
-            .await
-            .map(Into::into)
+            .await?
+            .try_into()
     }
 
     /// Put puts the given key into the key-value store.
@@ -228,8 +228,8 @@ impl MetaClient {
                 name: "store_client",
             })?
             .put(req.into())
-            .await
-            .map(Into::into)
+            .await?
+            .try_into()
     }
 
     /// DeleteRange deletes the given range from the key-value store.
@@ -239,8 +239,8 @@ impl MetaClient {
                 name: "store_client",
             })?
             .delete_range(req.into())
-            .await
-            .map(Into::into)
+            .await?
+            .try_into()
     }
 
     #[inline]
