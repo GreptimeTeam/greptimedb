@@ -28,6 +28,7 @@ pub struct DatanodeOptions {
     pub mysql_runtime_size: u32,
     pub postgres_addr: String,
     pub postgres_runtime_size: u32,
+    pub meta_client_opts: MetaClientOpts,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
 }
@@ -41,6 +42,7 @@ impl Default for DatanodeOptions {
             mysql_runtime_size: 2,
             postgres_addr: "0.0.0.0:5432".to_string(),
             postgres_runtime_size: 2,
+            meta_client_opts: MetaClientOpts::default(),
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
         }
@@ -68,5 +70,25 @@ impl Datanode {
     pub async fn start(&mut self) -> Result<()> {
         self.instance.start().await?;
         self.services.start(&self.opts).await
+    }
+}
+
+// Options for meta client in datanode instance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MetaClientOpts {
+    pub metasrv_addr: String,
+    pub timeout_millis: u64,
+    pub connect_timeout_millis: u64,
+    pub tcp_nodelay: bool,
+}
+
+impl Default for MetaClientOpts {
+    fn default() -> Self {
+        Self {
+            metasrv_addr: "127.0.0.1:3002".to_string(),
+            timeout_millis: 3_000u64,
+            connect_timeout_millis: 5_000u64,
+            tcp_nodelay: true,
+        }
     }
 }

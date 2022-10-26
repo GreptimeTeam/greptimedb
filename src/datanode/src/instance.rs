@@ -1,8 +1,11 @@
+use std::time::Duration;
 use std::{fs, path, sync::Arc};
 
 use catalog::CatalogManagerRef;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
+use meta_client::client::{MetaClient, MetaClientBuilder};
 use object_store::{services::fs::Builder, util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use snafu::prelude::*;
@@ -10,8 +13,9 @@ use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
-use crate::error::{self, NewCatalogSnafu, Result};
+use crate::datanode::{DatanodeOptions, MetaClientOpts, ObjectStoreConfig};
+use crate::error::{self, MetaClientInitSnafu, NewCatalogSnafu, Result};
+use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
 use crate::server::grpc::plan::PhysicalPlanner;
 use crate::sql::SqlHandler;
@@ -28,6 +32,9 @@ pub struct Instance {
     catalog_manager: CatalogManagerRef,
     physical_planner: PhysicalPlanner,
     script_executor: ScriptExecutor,
+    #[allow(unused)]
+    meta_client: MetaClient,
+    heartbeat_task: HeartbeatTask,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -36,6 +43,7 @@ impl Instance {
     pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
+        let meta_client = new_metasrv_client(&opts.meta_client_opts).await?;
 
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
@@ -56,12 +64,19 @@ impl Instance {
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
+        let heartbeat_task = HeartbeatTask::new(
+            1, /*node id not set*/
+            opts.rpc_addr.clone(),
+            meta_client.clone(),
+        );
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
             catalog_manager,
             physical_planner: PhysicalPlanner::new(query_engine),
             script_executor,
+            meta_client,
+            heartbeat_task,
         })
     }
 
@@ -70,6 +85,7 @@ impl Instance {
             .start()
             .await
             .context(NewCatalogSnafu)?;
+        self.heartbeat_task.start().await?;
         Ok(())
     }
 
@@ -116,6 +132,8 @@ impl Instance {
             catalog_manager,
             physical_planner,
             script_executor,
+            meta_client: Default::default(),
+            heartbeat_task: Default::default(),
         })
     }
 }
@@ -137,6 +155,35 @@ async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStor
         .context(error::InitBackendSnafu { dir: &data_dir })?;
 
     Ok(ObjectStore::new(accessor))
+}
+
+/// Create metasrv client instance and spawn heartbeat loop.
+async fn new_metasrv_client(meta_config: &MetaClientOpts) -> Result<MetaClient> {
+    let cluster_id = 0; // TODO(hl): read from config
+    let member_id = 1; // TODO(hl): read from config
+
+    let config = ChannelConfig::new()
+        .timeout(Duration::from_millis(meta_config.timeout_millis))
+        .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
+        .tcp_nodelay(meta_config.tcp_nodelay);
+    let channel_manager = ChannelManager::with_config(config);
+    let mut meta_client = MetaClientBuilder::new(cluster_id, member_id)
+        .enable_heartbeat()
+        .enable_router()
+        .enable_store()
+        .channel_manager(channel_manager)
+        .build();
+    meta_client
+        .start(&[&meta_config.metasrv_addr])
+        .await
+        .context(MetaClientInitSnafu)?;
+
+    // required only when the heartbeat_client is enabled
+    meta_client
+        .ask_leader()
+        .await
+        .context(MetaClientInitSnafu)?;
+    Ok(meta_client)
 }
 
 async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFileLogStore> {

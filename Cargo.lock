@@ -1435,6 +1435,7 @@ dependencies = [
  "futures",
  "hyper",
  "log-store",
+ "meta-client",
  "metrics",
  "object-store",
  "query",

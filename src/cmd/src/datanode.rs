@@ -41,6 +41,8 @@ struct StartCommand {
     mysql_addr: Option<String>,
     #[clap(long)]
     postgres_addr: Option<String>,
+    #[clap(long)]
+    metasrv_addr: Option<String>,
     #[clap(short, long)]
     config_file: Option<String>,
 }
@@ -83,7 +85,9 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_addr = addr;
         }
-
+        if let Some(addr) = cmd.metasrv_addr {
+            opts.meta_client_opts.metasrv_addr = addr;
+        }
         Ok(opts)
     }
 }
@@ -101,6 +105,7 @@ mod tests {
             rpc_addr: None,
             mysql_addr: None,
             postgres_addr: None,
+            metasrv_addr: None,
             config_file: Some(format!(
                 "{}/../../config/datanode.example.toml",
                 std::env::current_dir().unwrap().as_path().to_str().unwrap()
@@ -112,6 +117,10 @@ mod tests {
         assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal_dir);
         assert_eq!("0.0.0.0:3306".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
+        assert_eq!(
+            "127.0.0.1:3002".to_string(),
+            options.meta_client_opts.metasrv_addr
+        );
 
         assert_eq!("0.0.0.0:5432".to_string(), options.postgres_addr);
         assert_eq!(4, options.postgres_runtime_size);
