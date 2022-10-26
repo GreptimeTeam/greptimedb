@@ -17,15 +17,15 @@ pub type ColumnName = String;
 pub type ValueList = Vec<Value>;
 pub type DistInsertRequest = HashMap<RegionId, InsertRequest>;
 
-pub struct WriteSpliter<P> {
-    partition_rule: Arc<P>,
+pub struct WriteSpliter<'a, P> {
+    partition_rule: &'a P,
 }
 
-impl<P> WriteSpliter<P>
+impl<'a, P> WriteSpliter<'a, P>
 where
     P: PartitionRule,
 {
-    pub fn with_patition_rule(rule: Arc<P>) -> Self {
+    pub fn with_patition_rule(rule: &'a P) -> Self {
         Self {
             partition_rule: rule,
         }
@@ -129,7 +129,7 @@ fn partition_insert_request(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, result::Result, sync::Arc};
+    use std::{collections::HashMap, result::Result};
 
     use datatypes::{
         data_type::ConcreteDataType,
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn test_writer_spliter() {
         let insert = mock_insert_request();
-        let spliter = WriteSpliter::with_patition_rule(Arc::new(MockPartitionRule));
+        let spliter = WriteSpliter::with_patition_rule(&MockPartitionRule);
         let ret = spliter.split(insert).unwrap();
 
         assert_eq!(2, ret.len());
