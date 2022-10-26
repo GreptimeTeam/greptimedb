@@ -1,14 +1,15 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use datatypes::value::Value;
 use datatypes::vectors::VectorBuilder;
 use datatypes::vectors::VectorRef;
+use snafu::ensure;
 use snafu::OptionExt;
 use table::requests::InsertRequest;
 
 use crate::error::FindPartitionColumnSnafu;
 use crate::error::FindRegionSnafu;
+use crate::error::InvalidInsertRequestSnafu;
 use crate::error::Result;
 use crate::partition::PartitionRule;
 
@@ -32,23 +33,28 @@ where
     }
 
     pub fn split(&self, insert: InsertRequest) -> Result<DistInsertRequest> {
+        check_req(&insert)?;
+
         let column_names = self.partition_rule.partition_columns();
-        let partition_columns = partition_columns(&insert, &column_names)?;
-        let region_map = self.region_map(&partition_columns)?;
+        let partition_columns = find_partitioning_values(&insert, &column_names)?;
+        let region_map = self.split_partitioning_values(&partition_columns)?;
 
         Ok(partition_insert_request(&insert, region_map))
     }
 
-    fn region_map(&self, partition_columns: &[VectorRef]) -> Result<HashMap<RegionId, Vec<usize>>> {
-        if partition_columns.is_empty() {
+    fn split_partitioning_values(
+        &self,
+        values: &[VectorRef],
+    ) -> Result<HashMap<RegionId, Vec<usize>>> {
+        if values.is_empty() {
             return Ok(HashMap::default());
         }
         let mut region_map: HashMap<RegionId, Vec<usize>> = HashMap::new();
-        let row_count = partition_columns[0].len();
+        let row_count = values[0].len();
         for idx in 0..row_count {
             let region_id = match self
                 .partition_rule
-                .find_region(&partition_values(partition_columns, idx))
+                .find_region(&partition_values(values, idx))
             {
                 Ok(region_id) => region_id,
                 Err(e) => {
@@ -65,18 +71,41 @@ where
     }
 }
 
-fn partition_columns(insert: &InsertRequest, column_names: &[String]) -> Result<Vec<VectorRef>> {
-    let values = &insert.columns_values;
-    let mut column_vec = Vec::with_capacity(column_names.len());
+fn check_req(insert: &InsertRequest) -> Result<()> {
+    check_vectors_len(insert)
+}
 
-    for column_name in column_names {
-        let column = values
-            .get(column_name)
-            .map(Arc::clone)
-            .context(FindPartitionColumnSnafu { column_name })?;
-        column_vec.push(column);
+fn check_vectors_len(insert: &InsertRequest) -> Result<()> {
+    let mut len: Option<usize> = None;
+    for vector in insert.columns_values.values() {
+        match len {
+            Some(len) => ensure!(
+                len == vector.len(),
+                InvalidInsertRequestSnafu {
+                    reason: "the lengths of vectors are not the same"
+                }
+            ),
+            None => len = Some(vector.len()),
+        }
     }
-    Ok(column_vec)
+    Ok(())
+}
+
+fn find_partitioning_values(
+    insert: &InsertRequest,
+    partition_columns: &[String],
+) -> Result<Vec<VectorRef>> {
+    let values = &insert.columns_values;
+
+    partition_columns
+        .iter()
+        .map(|column_name| {
+            values
+                .get(column_name)
+                .cloned()
+                .context(FindPartitionColumnSnafu { column_name })
+        })
+        .collect()
 }
 
 fn partition_values(partition_columns: &[VectorRef], idx: usize) -> ValueList {
@@ -90,7 +119,7 @@ fn partition_insert_request(
     insert: &InsertRequest,
     region_map: HashMap<RegionId, Vec<usize>>,
 ) -> DistInsertRequest {
-    let mut dist_insert: HashMap<RegionId, HashMap<String, VectorBuilder>> =
+    let mut dist_insert: HashMap<RegionId, HashMap<&str, VectorBuilder>> =
         HashMap::with_capacity(region_map.len());
 
     let column_count = insert.columns_values.len();
@@ -100,7 +129,7 @@ fn partition_insert_request(
                 .entry(*region_id)
                 .or_insert_with(|| HashMap::with_capacity(column_count));
             let builder = region_insert
-                .entry(column_name.to_string())
+                .entry(column_name)
                 .or_insert_with(|| VectorBuilder::new(vector.data_type()));
             val_idxs
                 .iter()
@@ -114,7 +143,7 @@ fn partition_insert_request(
         .map(|(region_id, vector_map)| {
             let columns_values = vector_map
                 .into_iter()
-                .map(|(column_name, mut builder)| (column_name, builder.finish()))
+                .map(|(column_name, mut builder)| (column_name.to_string(), builder.finish()))
                 .collect();
             (
                 region_id,
@@ -140,9 +169,20 @@ mod tests {
     use table::requests::InsertRequest;
 
     use super::{
-        partition_columns, partition_insert_request, partition_values, ColumnName, PartitionRule,
-        RegionId, WriteSpliter,
+        check_req, find_partitioning_values, partition_insert_request, partition_values,
+        ColumnName, PartitionRule, RegionId, WriteSpliter,
     };
+
+    #[test]
+    fn test_insert_req_check() {
+        let right = mock_insert_request();
+        let ret = check_req(&right);
+        assert!(ret.is_ok());
+
+        let wrong = mock_wrong_insert_request();
+        let ret = check_req(&wrong);
+        assert!(ret.is_err());
+    }
 
     #[test]
     fn test_writer_spliter() {
@@ -266,7 +306,7 @@ mod tests {
         let insert = mock_insert_request();
 
         let partition_column_names = vec!["host".to_string(), "id".to_string()];
-        let columns = partition_columns(&insert, &partition_column_names).unwrap();
+        let columns = find_partitioning_values(&insert, &partition_column_names).unwrap();
 
         let host_column = columns[0].clone();
         assert_eq!(
@@ -327,6 +367,31 @@ mod tests {
         builder.push(&1_i16.into());
         builder.push(&2_i16.into());
         builder.push(&3_i16.into());
+        columns_values.insert("id".to_string(), builder.finish());
+
+        InsertRequest {
+            table_name: "demo".to_string(),
+            columns_values,
+        }
+    }
+
+    fn mock_wrong_insert_request() -> InsertRequest {
+        let mut columns_values = HashMap::with_capacity(4);
+        let mut builder = VectorBuilder::new(ConcreteDataType::Boolean(BooleanType));
+        builder.push(&true.into());
+        builder.push(&false.into());
+        builder.push(&true.into());
+        columns_values.insert("enable_reboot".to_string(), builder.finish());
+
+        let mut builder = VectorBuilder::new(ConcreteDataType::String(StringType));
+        builder.push(&"host1".into());
+        builder.push_null();
+        builder.push(&"host3".into());
+        columns_values.insert("host".to_string(), builder.finish());
+
+        let mut builder = VectorBuilder::new(ConcreteDataType::int16_datatype());
+        builder.push(&1_i16.into());
+        // two values are missing
         columns_values.insert("id".to_string(), builder.finish());
 
         InsertRequest {

@@ -83,7 +83,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to find partition column, column_name: {}", column_name))]
+    #[snafu(display("Failed to find partition column: {}", column_name))]
     FindPartitionColumn {
         column_name: String,
         backtrace: Backtrace,
@@ -91,6 +91,12 @@ pub enum Error {
 
     #[snafu(display("Failed to find region, reason: {}", reason))]
     FindRegion {
+        reason: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invaild InsertRequest, reason: {}", reason))]
+    InvalidInsertRequest {
         reason: String,
         backtrace: Backtrace,
     },
@@ -105,6 +111,7 @@ impl ErrorExt for Error {
             | Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::FindRegion { .. }
+            | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. } => StatusCode::InvalidArguments,
             Error::RuntimeResource { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
