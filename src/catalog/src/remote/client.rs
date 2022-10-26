@@ -1,12 +1,12 @@
 use std::fmt::Debug;
 
-use api::v1::meta::{DeleteRangeRequest, PutRequest, RangeRequest};
 use async_stream::stream;
 use common_telemetry::{debug, info};
 use futures_util::io::Cursor;
 use futures_util::AsyncReadExt;
 use futures_util::StreamExt;
 use meta_client::client::MetaClient;
+use meta_client::rpc::{DeleteRangeRequest, PutRequest, RangeRequest};
 use opendal::ops::{OpDelete, OpList, OpRead, OpWrite};
 use opendal::{Accessor, BytesReader};
 use snafu::ResultExt;
@@ -30,56 +30,52 @@ impl KvBackend for MetaKvBackend {
         'a: 'b,
     {
         let mut start_key = key.to_vec();
+
         Box::pin(stream!({
             let mut more = true;
             while more {
-                let resp = self
+                let mut resp = self
                     .client
-                    .range(RangeRequest {
-                        header: None,
-                        key: start_key.to_vec(),
-                        range_end: vec![0],
-                        limit: 0,
-                        keys_only: false,
-                    })
+                    .range(
+                        RangeRequest::new()
+                            .with_key(start_key.clone())
+                            .with_range_end(vec![0]),
+                    )
                     .await
                     .context(MetaSrvSnafu)?;
 
-                more = resp.more;
-                let kvs = resp.kvs;
-                start_key = kvs.last().map(|kv| &kv.key).unwrap_or(&start_key).clone();
-                for kv in kvs.into_iter() {
-                    yield Ok(Kv(kv.key, kv.value));
+                more = resp.more();
+                let kvs = resp.take_kvs();
+                start_key = kvs
+                    .last()
+                    .map(|kv| kv.key().to_vec())
+                    .unwrap_or(start_key)
+                    .clone();
+                for mut kv in kvs.into_iter() {
+                    yield Ok(Kv(kv.take_key(), kv.take_value()))
                 }
             }
         }))
     }
 
     async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
-        let req = PutRequest {
-            key: key.to_vec(),
-            value: val.to_vec(),
-            prev_kv: false,
-            header: None,
-        };
+        let req = PutRequest::new()
+            .with_key(key.to_vec())
+            .with_value(val.to_vec());
         let _ = self.client.put(req).await.context(MetaSrvSnafu)?;
         Ok(())
     }
 
     async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
-        let req = DeleteRangeRequest {
-            header: None,
-            key: key.to_vec(),
-            range_end: end.to_vec(),
-            prev_kv: false,
-        };
-
+        let req = DeleteRangeRequest::new()
+            .with_key(key.to_vec())
+            .with_range_end(end.to_vec());
         let resp = self.client.delete_range(req).await.context(MetaSrvSnafu)?;
         info!(
             "Delete range, key: {}, end: {}, deleted: {}",
             String::from_utf8_lossy(key),
             String::from_utf8_lossy(end),
-            resp.deleted
+            resp.deleted()
         );
 
         Ok(())
