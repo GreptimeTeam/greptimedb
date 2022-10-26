@@ -51,3 +51,43 @@ pub fn from_schema(schema: &Schema) -> Result<NamedStruct> {
         r#struct: Some(substrait_struct),
     })
 }
+
+#[cfg(test)]
+mod test {
+    use datatypes::prelude::{ConcreteDataType, DataType};
+
+    use super::*;
+
+    #[test]
+    fn supported_types_round_trip() {
+        let column_schemas = [
+            ConcreteDataType::null_datatype(),
+            ConcreteDataType::boolean_datatype(),
+            ConcreteDataType::int8_datatype(),
+            ConcreteDataType::int16_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::uint8_datatype(),
+            ConcreteDataType::uint16_datatype(),
+            ConcreteDataType::uint32_datatype(),
+            ConcreteDataType::uint64_datatype(),
+            ConcreteDataType::float32_datatype(),
+            ConcreteDataType::float64_datatype(),
+            ConcreteDataType::binary_datatype(),
+            ConcreteDataType::string_datatype(),
+            ConcreteDataType::date_datatype(),
+            ConcreteDataType::timestamp_datatype(Default::default()),
+            // DateTime and List type are not supported now
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, ty)| ColumnSchema::new(ty.name().to_string(), ty, ordinal % 2 == 0))
+        .collect();
+        let schema = Schema::new(column_schemas);
+
+        let named_struct = from_schema(&schema).unwrap();
+        let converted_schema = to_schema(named_struct).unwrap();
+
+        assert_eq!(schema, converted_schema);
+    }
+}
