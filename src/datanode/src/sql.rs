@@ -1,9 +1,7 @@
 //! sql handler
 
-use catalog::{
-    schema::SchemaProviderRef, CatalogManagerRef, CatalogProviderRef, DEFAULT_CATALOG_NAME,
-    DEFAULT_SCHEMA_NAME,
-};
+use catalog::{schema::SchemaProviderRef, CatalogManagerRef, CatalogProviderRef};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::show::{ShowDatabases, ShowTables};
@@ -12,7 +10,8 @@ use table::requests::*;
 use table::TableRef;
 
 use crate::error::{
-    CatalogNotFoundSnafu, GetTableSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
+    CatalogNotFoundSnafu, CatalogSnafu, GetTableSnafu, Result, SchemaNotFoundSnafu,
+    TableNotFoundSnafu,
 };
 
 mod alter;
@@ -63,6 +62,7 @@ impl SqlHandler {
     pub(crate) fn get_default_catalog(&self) -> Result<CatalogProviderRef> {
         self.catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
+            .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 name: DEFAULT_CATALOG_NAME,
             })
@@ -71,10 +71,12 @@ impl SqlHandler {
     pub(crate) fn get_default_schema(&self) -> Result<SchemaProviderRef> {
         self.catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
+            .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 name: DEFAULT_CATALOG_NAME,
             })?
             .schema(DEFAULT_SCHEMA_NAME)
+            .context(CatalogSnafu)?
             .context(SchemaNotFoundSnafu {
                 name: DEFAULT_SCHEMA_NAME,
             })
@@ -158,13 +160,13 @@ mod tests {
             self
         }
 
-        fn table_names(&self) -> Vec<String> {
-            vec!["demo".to_string()]
+        fn table_names(&self) -> catalog::error::Result<Vec<String>> {
+            Ok(vec!["demo".to_string()])
         }
 
-        fn table(&self, name: &str) -> Option<TableRef> {
+        fn table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
             assert_eq!(name, "demo");
-            Some(Arc::new(DemoTable {}))
+            Ok(Some(Arc::new(DemoTable {})))
         }
 
         fn register_table(
@@ -177,8 +179,8 @@ mod tests {
         fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {
             unimplemented!();
         }
-        fn table_exist(&self, name: &str) -> bool {
-            name == "demo"
+        fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
+            Ok(name == "demo")
         }
     }
 
@@ -205,7 +207,7 @@ mod tests {
         ));
 
         let catalog_list = Arc::new(
-            catalog::LocalCatalogManager::try_new(table_engine.clone())
+            catalog::local::LocalCatalogManager::try_new(table_engine.clone())
                 .await
                 .unwrap(),
         );

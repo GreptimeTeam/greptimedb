@@ -1,9 +1,8 @@
 use std::sync::Arc;
 mod function;
-use catalog::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{
-    CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-};
+use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
@@ -137,8 +136,12 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
         .register_table(number_table.table_name().to_string(), number_table)
         .unwrap();
 
-    catalog_provider.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider);
-    catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider);
+    catalog_provider
+        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
+        .unwrap();
+    catalog_list
+        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .unwrap();
 
     let factory = QueryEngineFactory::new(catalog_list);
     factory.query_engine().clone()

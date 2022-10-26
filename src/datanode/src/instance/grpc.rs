@@ -3,7 +3,7 @@ use api::v1::{
     ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
-use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
@@ -14,8 +14,8 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::AddColumnRequest;
 
 use crate::error::{
-    self, DecodeLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, Result, TableNotFoundSnafu,
-    UnsupportedExprSnafu,
+    self, CatalogSnafu, DecodeLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, Result,
+    TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
@@ -99,13 +99,15 @@ impl Instance {
             .catalog_manager
             .catalog(catalog_name)
             .unwrap()
+            .expect("default catalog must exist")
             .schema(schema_name)
+            .expect("default schema must exist")
             .unwrap();
 
         let insert_batches = insert::insert_batches(values.values)?;
         ensure!(!insert_batches.is_empty(), error::IllegalInsertDataSnafu);
 
-        let table = if let Some(table) = schema_provider.table(table_name) {
+        let table = if let Some(table) = schema_provider.table(table_name).context(CatalogSnafu)? {
             let schema = table.schema();
             if let Some(add_columns) = insert::find_new_columns(&schema, &insert_batches)? {
                 self.add_new_columns_to_table(table_name, add_columns)
@@ -124,6 +126,7 @@ impl Instance {
 
             schema_provider
                 .table(table_name)
+                .context(CatalogSnafu)?
                 .context(TableNotFoundSnafu { table_name })?
         };
 

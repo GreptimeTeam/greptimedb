@@ -233,10 +233,9 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::UInt64Array;
-    use catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{
-        CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-    };
+    use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
+    use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
     use datafusion::field_util::FieldExt;
@@ -246,15 +245,19 @@ mod tests {
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
     fn create_test_engine() -> QueryEngineRef {
-        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
         default_schema
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema);
-        catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
+        default_catalog
+            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+            .unwrap();
+        catalog_list
+            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+            .unwrap();
 
         let factory = QueryEngineFactory::new(catalog_list);
         factory.query_engine().clone()

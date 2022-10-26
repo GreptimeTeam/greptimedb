@@ -10,8 +10,8 @@ use sql::statements::{self, insert::Insert};
 use table::requests::*;
 
 use crate::error::{
-    ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu, ParseSqlValueSnafu, Result,
-    TableNotFoundSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu,
+    ParseSqlValueSnafu, Result, TableNotFoundSnafu,
 };
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -41,6 +41,7 @@ impl SqlHandler {
 
         let table = schema_provider
             .table(&table_name)
+            .context(CatalogSnafu)?
             .context(TableNotFoundSnafu {
                 table_name: &table_name,
             })?;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
-use catalog::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
 use datatypes::schema::ColumnDefaultConstraint;
@@ -173,7 +173,6 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
 mod tests {
     use std::collections::HashMap;
 
-    use catalog::MIN_USER_TABLE_ID;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
 
@@ -188,7 +187,7 @@ mod tests {
 
         let expr = testing_create_expr();
         let request = instance.create_expr_to_request(expr).unwrap();
-        assert_eq!(request.id, MIN_USER_TABLE_ID);
+        assert_eq!(request.id, common_catalog::consts::MIN_USER_TABLE_ID);
         assert_eq!(request.catalog_name, "greptime".to_string());
         assert_eq!(request.schema_name, "public".to_string());
         assert_eq!(request.table_name, "my-metrics");

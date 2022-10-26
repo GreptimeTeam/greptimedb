@@ -45,6 +45,12 @@ pub enum InnerError {
         source: ArrowError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to create record batch for Tables, source: {}", source))]
+    TablesRecordBatch {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 impl ErrorExt for InnerError {
@@ -55,6 +61,7 @@ impl ErrorExt for InnerError {
             | InnerError::SchemaConversion { .. }
             | InnerError::TableProjection { .. } => StatusCode::EngineExecuteQuery,
             InnerError::MissingColumn { .. } => StatusCode::InvalidArguments,
+            InnerError::TablesRecordBatch { .. } => StatusCode::Unexpected,
         }
     }
 

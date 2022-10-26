@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 bytes = "1.1"
 catalog = { path = "../../catalog" }
+common-catalog = { path = "../catalog" }
 common-error = { path = "../error" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
     "simd",

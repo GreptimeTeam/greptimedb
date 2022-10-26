@@ -23,7 +23,7 @@ impl MemoryCatalogList {
     pub fn register_catalog_if_absent(
         &self,
         name: String,
-        catalog: Arc<dyn CatalogProvider>,
+        catalog: CatalogProviderRef,
     ) -> Option<CatalogProviderRef> {
         let mut catalogs = self.catalogs.write().unwrap();
         let entry = catalogs.entry(name);
@@ -46,19 +46,19 @@ impl CatalogList for MemoryCatalogList {
         &self,
         name: String,
         catalog: CatalogProviderRef,
-    ) -> Option<CatalogProviderRef> {
+    ) -> Result<Option<CatalogProviderRef>> {
         let mut catalogs = self.catalogs.write().unwrap();
-        catalogs.insert(name, catalog)
+        Ok(catalogs.insert(name, catalog))
     }
 
-    fn catalog_names(&self) -> Vec<String> {
+    fn catalog_names(&self) -> Result<Vec<String>> {
         let catalogs = self.catalogs.read().unwrap();
-        catalogs.keys().map(|s| s.to_string()).collect()
+        Ok(catalogs.keys().map(|s| s.to_string()).collect())
     }
 
-    fn catalog(&self, name: &str) -> Option<CatalogProviderRef> {
+    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
         let catalogs = self.catalogs.read().unwrap();
-        catalogs.get(name).cloned()
+        Ok(catalogs.get(name).cloned())
     }
 }
 
@@ -87,23 +87,23 @@ impl CatalogProvider for MemoryCatalogProvider {
         self
     }
 
-    fn schema_names(&self) -> Vec<String> {
+    fn schema_names(&self) -> Result<Vec<String>> {
         let schemas = self.schemas.read().unwrap();
-        schemas.keys().cloned().collect()
+        Ok(schemas.keys().cloned().collect())
     }
 
     fn register_schema(
         &self,
         name: String,
         schema: SchemaProviderRef,
-    ) -> Option<SchemaProviderRef> {
+    ) -> Result<Option<SchemaProviderRef>> {
         let mut schemas = self.schemas.write().unwrap();
-        schemas.insert(name, schema)
+        Ok(schemas.insert(name, schema))
     }
 
-    fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
+    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
         let schemas = self.schemas.read().unwrap();
-        schemas.get(name).cloned()
+        Ok(schemas.get(name).cloned())
     }
 }
 
@@ -132,18 +132,18 @@ impl SchemaProvider for MemorySchemaProvider {
         self
     }
 
-    fn table_names(&self) -> Vec<String> {
+    fn table_names(&self) -> Result<Vec<String>> {
         let tables = self.tables.read().unwrap();
-        tables.keys().cloned().collect()
+        Ok(tables.keys().cloned().collect())
     }
 
-    fn table(&self, name: &str) -> Option<TableRef> {
+    fn table(&self, name: &str) -> Result<Option<TableRef>> {
         let tables = self.tables.read().unwrap();
-        tables.get(name).cloned()
+        Ok(tables.get(name).cloned())
     }
 
     fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
-        if self.table_exist(name.as_str()) {
+        if self.table_exist(name.as_str())? {
             return TableExistsSnafu { table: name }.fail()?;
         }
         let mut tables = self.tables.write().unwrap();
@@ -155,9 +155,9 @@ impl SchemaProvider for MemorySchemaProvider {
         Ok(tables.remove(name))
     }
 
-    fn table_exist(&self, name: &str) -> bool {
+    fn table_exist(&self, name: &str) -> Result<bool> {
         let tables = self.tables.read().unwrap();
-        tables.contains_key(name)
+        Ok(tables.contains_key(name))
     }
 }
 
@@ -168,40 +168,50 @@ pub fn new_memory_catalog_list() -> Result<Arc<MemoryCatalogList>> {
 
 #[cfg(test)]
 mod tests {
+    use common_catalog::consts::*;
     use common_error::ext::ErrorExt;
     use common_error::prelude::StatusCode;
     use table::table::numbers::NumbersTable;
 
     use super::*;
-    use crate::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
     #[test]
     fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_list().unwrap();
 
-        assert!(catalog_list.catalog(DEFAULT_CATALOG_NAME).is_none());
+        assert!(catalog_list
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .is_none());
         let default_catalog = Arc::new(MemoryCatalogProvider::default());
-        catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog.clone());
+        catalog_list
+            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog.clone())
+            .unwrap();
 
-        assert!(default_catalog.schema(DEFAULT_SCHEMA_NAME).is_none());
+        assert!(default_catalog
+            .schema(DEFAULT_SCHEMA_NAME)
+            .unwrap()
+            .is_none());
         let default_schema = Arc::new(MemorySchemaProvider::default());
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema.clone());
+        default_catalog
+            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema.clone())
+            .unwrap();
 
         default_schema
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
 
-        let table = default_schema.table("numbers");
+        let table = default_schema.table("numbers").unwrap();
         assert!(table.is_some());
 
-        assert!(default_schema.table("not_exists").is_none());
+        assert!(default_schema.table("not_exists").unwrap().is_none());
     }
 
     #[tokio::test]
     async fn test_mem_provider() {
         let provider = MemorySchemaProvider::new();
         let table_name = "numbers";
-        assert!(!provider.table_exist(table_name));
+        assert!(!provider.table_exist(table_name).unwrap());
         assert!(provider.deregister_table(table_name).unwrap().is_none());
         let test_table = NumbersTable::default();
         // register table successfully
@@ -209,7 +219,7 @@ mod tests {
             .register_table(table_name.to_string(), Arc::new(test_table))
             .unwrap()
             .is_none());
-        assert!(provider.table_exist(table_name));
+        assert!(provider.table_exist(table_name).unwrap());
         let other_table = NumbersTable::default();
         let result = provider.register_table(table_name.to_string(), Arc::new(other_table));
         let err = result.err().unwrap();

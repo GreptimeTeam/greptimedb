@@ -133,10 +133,9 @@ impl ScriptEngine for PyEngine {
 
 #[cfg(test)]
 mod tests {
-    use catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{
-        CatalogList, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-    };
+    use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
+    use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_recordbatch::util;
     use datafusion_common::field_util::FieldExt;
     use datafusion_common::field_util::SchemaExt;
@@ -149,15 +148,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_compile_execute() {
-        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
         default_schema
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema);
-        catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
+        default_catalog
+            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+            .unwrap();
+        catalog_list
+            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+            .unwrap();
 
         let factory = QueryEngineFactory::new(catalog_list);
         let query_engine = factory.query_engine();

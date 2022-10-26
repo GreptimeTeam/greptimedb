@@ -3,18 +3,18 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use common_telemetry::info;
+use snafu::ResultExt;
+use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::CreateTableRequest;
 use table::TableRef;
 
-pub use crate::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
-pub use crate::manager::LocalCatalogManager;
+use crate::error::{CreateTableSnafu, Result};
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
-pub mod consts;
 pub mod error;
-mod manager;
-pub mod memory;
+pub mod local;
 pub mod schema;
 pub mod system;
 pub mod tables;
@@ -31,13 +31,13 @@ pub trait CatalogList: Sync + Send {
         &self,
         name: String,
         catalog: CatalogProviderRef,
-    ) -> Option<CatalogProviderRef>;
+    ) -> Result<Option<CatalogProviderRef>>;
 
     /// Retrieves the list of available catalog names
-    fn catalog_names(&self) -> Vec<String>;
+    fn catalog_names(&self) -> Result<Vec<String>>;
 
     /// Retrieves a specific catalog by name, provided it exists.
-    fn catalog(&self, name: &str) -> Option<CatalogProviderRef>;
+    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>>;
 }
 
 /// Represents a catalog, comprising a number of named schemas.
@@ -47,14 +47,17 @@ pub trait CatalogProvider: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
     /// Retrieves the list of available schema names in this catalog.
-    fn schema_names(&self) -> Vec<String>;
+    fn schema_names(&self) -> Result<Vec<String>>;
 
     /// Registers schema to this catalog.
-    fn register_schema(&self, name: String, schema: SchemaProviderRef)
-        -> Option<SchemaProviderRef>;
+    fn register_schema(
+        &self,
+        name: String,
+        schema: SchemaProviderRef,
+    ) -> Result<Option<SchemaProviderRef>>;
 
     /// Retrieves a specific schema from the catalog by name, provided it exists.
-    fn schema(&self, name: &str) -> Option<SchemaProviderRef>;
+    fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>>;
 }
 
 pub type CatalogListRef = Arc<dyn CatalogList>;
@@ -79,8 +82,8 @@ pub trait CatalogManager: CatalogList {
     /// Returns the table by catalog, schema and table name.
     fn table(
         &self,
-        catalog: Option<&str>,
-        schema: Option<&str>,
+        catalog: &str,
+        schema: &str,
         table_name: &str,
     ) -> error::Result<Option<TableRef>>;
 }
@@ -99,9 +102,10 @@ pub struct RegisterSystemTableRequest {
     pub open_hook: Option<OpenSystemTableHook>,
 }
 
+#[derive(Clone)]
 pub struct RegisterTableRequest {
-    pub catalog: Option<String>,
-    pub schema: Option<String>,
+    pub catalog: String,
+    pub schema: String,
     pub table_name: String,
     pub table_id: TableId,
     pub table: TableRef,
@@ -110,4 +114,54 @@ pub struct RegisterTableRequest {
 /// Formats table fully-qualified name
 pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {
     format!("{}.{}.{}", catalog, schema, table)
+}
+
+pub trait CatalogProviderFactory {
+    fn create(&self, catalog_name: String) -> CatalogProviderRef;
+}
+
+pub trait SchemaProviderFactory {
+    fn create(&self, catalog_name: String, schema_name: String) -> SchemaProviderRef;
+}
+
+pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
+    manager: &'a M,
+    engine: TableEngineRef,
+    sys_table_requests: &'a mut Vec<RegisterSystemTableRequest>,
+) -> Result<()> {
+    for req in sys_table_requests.drain(..) {
+        let catalog_name = &req.create_table_request.catalog_name;
+        let schema_name = &req.create_table_request.schema_name;
+        let table_name = &req.create_table_request.table_name;
+        let table_id = req.create_table_request.id;
+
+        let table = if let Some(table) = manager.table(catalog_name, schema_name, table_name)? {
+            table
+        } else {
+            let table = engine
+                .create_table(&EngineContext::default(), req.create_table_request.clone())
+                .await
+                .with_context(|_| CreateTableSnafu {
+                    table_info: format!(
+                        "{}.{}.{}, id: {}",
+                        catalog_name, schema_name, table_name, table_id,
+                    ),
+                })?;
+            manager
+                .register_table(RegisterTableRequest {
+                    catalog: catalog_name.clone(),
+                    schema: schema_name.clone(),
+                    table_name: table_name.clone(),
+                    table_id,
+                    table: table.clone(),
+                })
+                .await?;
+            info!("Created and registered system table: {}", table_name);
+            table
+        };
+        if let Some(hook) = req.open_hook {
+            (hook)(table)?;
+        }
+    }
+    Ok(())
 }

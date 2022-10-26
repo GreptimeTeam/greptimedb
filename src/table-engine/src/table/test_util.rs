@@ -58,6 +58,8 @@ pub fn build_test_table_info() -> TableInfo {
         .ident(0)
         .table_version(0u64)
         .table_type(TableType::Base)
+        .catalog_name("greptime".to_string())
+        .schema_name("public".to_string())
         .build()
         .unwrap()
 }

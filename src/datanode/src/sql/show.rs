@@ -11,8 +11,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
 
 use crate::error::{
-    ArrowComputationSnafu, CastVectorSnafu, NewRecordBatchSnafu, NewRecordBatchesSnafu, Result,
-    SchemaNotFoundSnafu, UnsupportedExprSnafu,
+    ArrowComputationSnafu, CastVectorSnafu, CatalogSnafu, NewRecordBatchSnafu,
+    NewRecordBatchesSnafu, Result, SchemaNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -43,7 +43,7 @@ impl SqlHandler {
 
         let catalog = self.get_default_catalog()?;
         // TODO(dennis): return an iterator or stream would be better.
-        let schemas = catalog.schema_names();
+        let schemas = catalog.schema_names().context(CatalogSnafu)?;
 
         let column_schemas = vec![ColumnSchema::new(
             SCHEMAS_COLUMN,
@@ -77,11 +77,14 @@ impl SqlHandler {
 
         let schema = if let Some(name) = &stmt.database {
             let catalog = self.get_default_catalog()?;
-            catalog.schema(name).context(SchemaNotFoundSnafu { name })?
+            catalog
+                .schema(name)
+                .context(CatalogSnafu)?
+                .context(SchemaNotFoundSnafu { name })?
         } else {
             self.get_default_schema()?
         };
-        let tables = schema.table_names();
+        let tables = schema.table_names().context(CatalogSnafu)?;
 
         let column_schemas = vec![ColumnSchema::new(
             TABLES_COLUMN,
