@@ -37,6 +37,34 @@ pub enum Error {
 
     #[snafu(display("Empty table name"))]
     EmptyTableName { backtrace: Backtrace },
+
+    #[snafu(display("Invalid datanode key: {}", key))]
+    InvalidDatanodeKey { key: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to parse datanode key from utf8: {}", source))]
+    DatanodeKeyFromUtf8 {
+        source: std::string::FromUtf8Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to serialize datanode value"))]
+    SerializeDatanodeValue {
+        source: serde_json::error::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to deserialize datanode value"))]
+    DeserializeDatanodeValue {
+        source: serde_json::error::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to parse number: {}, source: {}", err_msg, source))]
+    ParseNum {
+        err_msg: String,
+        source: std::num::ParseIntError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -63,7 +91,13 @@ impl ErrorExt for Error {
             | Error::ConnectEtcd { .. }
             | Error::TcpBind { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
-            Error::EmptyKey { .. } | Error::EmptyTableName { .. } => StatusCode::InvalidArguments,
+            Error::EmptyKey { .. }
+            | Error::EmptyTableName { .. }
+            | Error::InvalidDatanodeKey { .. }
+            | Error::ParseNum { .. } => StatusCode::InvalidArguments,
+            Error::DatanodeKeyFromUtf8 { .. }
+            | Error::SerializeDatanodeValue { .. }
+            | Error::DeserializeDatanodeValue { .. } => StatusCode::Unexpected,
         }
     }
 }
@@ -174,6 +208,17 @@ mod tests {
     fn test_empty_table_error() {
         let e = throw_none_option()
             .context(EmptyTableNameSnafu)
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_invalid_datanode_key_error() {
+        let e = throw_none_option()
+            .context(InvalidDatanodeKeySnafu { key: "test" })
             .err()
             .unwrap();
 

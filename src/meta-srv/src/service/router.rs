@@ -1,8 +1,13 @@
 use api::v1::meta::router_server;
 use api::v1::meta::CreateRequest;
-use api::v1::meta::Peer;
+use api::v1::meta::Region;
+use api::v1::meta::RegionRoute;
+use api::v1::meta::ResponseHeader;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
+use api::v1::meta::Table;
+use api::v1::meta::TableRoute;
+use common_time::util as time_util;
 use snafu::OptionExt;
 use tonic::Request;
 use tonic::Response;
@@ -11,44 +16,87 @@ use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use crate::error;
 use crate::error::Result;
+use crate::keys::LeaseKey;
+use crate::keys::LeaseValue;
+use crate::lease;
 use crate::metasrv::MetaSrv;
+
+#[derive(Clone)]
+struct Context {
+    pub dn_lease_secs: i64,
+    pub kv_store: KvStoreRef,
+}
 
 #[async_trait::async_trait]
 impl router_server::Router for MetaSrv {
     async fn route(&self, req: Request<RouteRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
-        let kv_store = self.kv_store();
-        let res = handle_route(req, kv_store).await?;
+        let ctx = Context {
+            dn_lease_secs: self.options().dn_lease_secs,
+            kv_store: self.kv_store(),
+        };
+        let res = handle_route(req, ctx).await?;
 
         Ok(Response::new(res))
     }
 
     async fn create(&self, req: Request<CreateRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
-        let kv_store = self.kv_store();
-        let res = handle_create(req, kv_store).await?;
+        let ctx = Context {
+            dn_lease_secs: self.options().dn_lease_secs,
+            kv_store: self.kv_store(),
+        };
+        let res = handle_create(req, ctx).await?;
 
         Ok(Response::new(res))
     }
 }
 
-async fn handle_route(_req: RouteRequest, _kv_store: KvStoreRef) -> Result<RouteResponse> {
+async fn handle_route(_req: RouteRequest, _ctx: Context) -> Result<RouteResponse> {
     todo!()
 }
 
-async fn handle_create(req: CreateRequest, _kv_store: KvStoreRef) -> Result<RouteResponse> {
-    let CreateRequest { table_name, .. } = req;
-    let _table_name = table_name.context(error::EmptyTableNameSnafu)?;
+async fn handle_create(req: CreateRequest, ctx: Context) -> Result<RouteResponse> {
+    let CreateRequest {
+        header,
+        table_name,
+        partitions,
+    } = req;
+    let table_name = table_name.context(error::EmptyTableNameSnafu)?;
+    let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
 
-    // TODO(jiachun):
-    let peers = vec![Peer {
-        id: 0,
-        addr: "127.0.0.1:3000".to_string(),
-    }];
+    // filter out the nodes out lease
+    let now = time_util::current_time_millis();
+    let lease_filter = |_: &LeaseKey, v: &LeaseValue| now - v.timestamp_millis < ctx.dn_lease_secs;
+    let peers = lease::find_datanodes(cluster_id, ctx.kv_store, lease_filter).await?;
+
+    let table = Table {
+        table_name: Some(table_name),
+        ..Default::default()
+    };
+    let region_num = partitions.len();
+    let mut region_routes = Vec::with_capacity(region_num);
+    for i in 0..region_num {
+        let region = Region {
+            id: i as u64,
+            ..Default::default()
+        };
+        let region_route = RegionRoute {
+            region: Some(region),
+            leader_peer_index: (i % peers.len()) as u64,
+            follower_peer_indexes: vec![(i % peers.len()) as u64],
+        };
+        region_routes.push(region_route);
+    }
+    let table_route = TableRoute {
+        table: Some(table),
+        region_routes,
+    };
 
     Ok(RouteResponse {
+        header: ResponseHeader::success(cluster_id),
         peers,
-        ..Default::default()
+        table_routes: vec![table_route],
     })
 }
 
@@ -71,7 +119,7 @@ mod tests {
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
         let req = RouteRequest {
-            header: request_header((1, 1)),
+            header: RequestHeader::new((1, 1)),
             ..Default::default()
         };
         let req = req
@@ -89,7 +137,7 @@ mod tests {
 
         let table_name = TableName::new("test_catalog", "test_db", "table1");
         let req = CreateRequest {
-            header: request_header((1, 1)),
+            header: RequestHeader::new((1, 1)),
             table_name: Some(table_name),
             ..Default::default()
         };

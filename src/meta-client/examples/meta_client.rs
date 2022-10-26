@@ -90,9 +90,14 @@ async fn run() {
     event!(Level::INFO, "put result: {:#?}", res);
 
     // get
-    let range = RangeRequest::new().with_key(b"key2".to_vec());
+    let range = RangeRequest::new().with_key(b"key1".to_vec());
     let res = meta_client.range(range.clone()).await.unwrap();
     event!(Level::INFO, "get range result: {:#?}", res);
+
+    // get prefix
+    let range2 = RangeRequest::new().with_prefix(b"key1".to_vec());
+    let res = meta_client.range(range2.clone()).await.unwrap();
+    event!(Level::INFO, "get prefix result: {:#?}", res);
 
     // delete
     let delete_range = DeleteRangeRequest::new().with_key(b"key1".to_vec());
