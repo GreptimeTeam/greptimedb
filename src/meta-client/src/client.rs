@@ -3,15 +3,6 @@ mod load_balance;
 mod router;
 mod store;
 
-use api::v1::meta::CreateRequest;
-use api::v1::meta::DeleteRangeRequest;
-use api::v1::meta::DeleteRangeResponse;
-use api::v1::meta::PutRequest;
-use api::v1::meta::PutResponse;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::RangeResponse;
-use api::v1::meta::RouteRequest;
-use api::v1::meta::RouteResponse;
 use common_grpc::channel_manager::ChannelConfig;
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::info;
@@ -24,6 +15,15 @@ use self::heartbeat::HeartbeatSender;
 use self::heartbeat::HeartbeatStream;
 use crate::error;
 use crate::error::Result;
+use crate::rpc::CreateRequest;
+use crate::rpc::DeleteRangeRequest;
+use crate::rpc::DeleteRangeResponse;
+use crate::rpc::PutRequest;
+use crate::rpc::PutResponse;
+use crate::rpc::RangeRequest;
+use crate::rpc::RangeResponse;
+use crate::rpc::RouteRequest;
+use crate::rpc::RouteResponse;
 
 pub type Id = (u64, u64);
 
@@ -176,8 +176,9 @@ impl MetaClient {
             .context(error::NotStartedSnafu {
                 name: "route_client",
             })?
-            .create(req)
-            .await
+            .create(req.into())
+            .await?
+            .try_into()
     }
 
     /// Fetch routing information for tables. The smallest unit is the complete
@@ -189,11 +190,11 @@ impl MetaClient {
     ///    table_schema
     ///    regions
     ///      region_1
-    ///        mutate_endpoint
-    ///        select_endpoint_1, select_endpoint_2
+    ///        leader_peer
+    ///        follower_peer_1, follower_peer_2
     ///      region_2
-    ///        mutate_endpoint
-    ///        select_endpoint_1, select_endpoint_2, select_endpoint_3
+    ///        leader_peer
+    ///        follower_peer_1, follower_peer_2, follower_peer_3
     ///      region_xxx
     /// table_2
     ///    ...
@@ -204,8 +205,9 @@ impl MetaClient {
             .context(error::NotStartedSnafu {
                 name: "route_client",
             })?
-            .route(req)
-            .await
+            .route(req.into())
+            .await?
+            .try_into()
     }
 
     /// Range gets the keys in the range from the key-value store.
@@ -214,8 +216,9 @@ impl MetaClient {
             .context(error::NotStartedSnafu {
                 name: "store_client",
             })?
-            .range(req)
+            .range(req.into())
             .await
+            .map(Into::into)
     }
 
     /// Put puts the given key into the key-value store.
@@ -224,8 +227,9 @@ impl MetaClient {
             .context(error::NotStartedSnafu {
                 name: "store_client",
             })?
-            .put(req)
+            .put(req.into())
             .await
+            .map(Into::into)
     }
 
     /// DeleteRange deletes the given range from the key-value store.
@@ -234,8 +238,9 @@ impl MetaClient {
             .context(error::NotStartedSnafu {
                 name: "store_client",
             })?
-            .delete_range(req)
+            .delete_range(req.into())
             .await
+            .map(Into::into)
     }
 
     #[inline]
@@ -267,6 +272,7 @@ impl MetaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::TableName;
 
     #[tokio::test]
     async fn test_meta_client_builder() {
@@ -336,7 +342,8 @@ mod tests {
 
         meta_client.start(urls).await.unwrap();
 
-        let res = meta_client.create_route(CreateRequest::default()).await;
+        let req = CreateRequest::new(TableName::new("c", "s", "t"));
+        let res = meta_client.create_route(req).await;
 
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }

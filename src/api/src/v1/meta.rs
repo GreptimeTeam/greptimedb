@@ -2,54 +2,17 @@ tonic::include_proto!("greptime.v1.meta");
 
 pub const PROTOCOL_VERSION: u64 = 1;
 
-impl Peer {
-    pub fn new(id: u64, addr: impl AsRef<str>) -> Self {
-        Self {
-            id,
-            endpoint: Some(addr.as_ref().into()),
-        }
-    }
-}
-
-impl From<&str> for Endpoint {
-    fn from(s: &str) -> Self {
-        Self {
-            addr: s.to_string(),
-        }
-    }
+pub const fn request_header((cluster_id, member_id): (u64, u64)) -> Option<RequestHeader> {
+    Some(RequestHeader::new((cluster_id, member_id)))
 }
 
 impl RequestHeader {
-    pub fn new(cluster_id: u64, member_id: u64) -> Self {
+    #[inline]
+    pub const fn new((cluster_id, member_id): (u64, u64)) -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION,
             cluster_id,
             member_id,
-        }
-    }
-
-    pub fn with_id((cluster_id, member_id): (u64, u64)) -> Self {
-        Self {
-            protocol_version: PROTOCOL_VERSION,
-            cluster_id,
-            member_id,
-        }
-    }
-}
-
-impl HeartbeatRequest {
-    pub fn new(header: RequestHeader) -> Self {
-        Self {
-            header: Some(header),
-            ..Default::default()
-        }
-    }
-}
-
-impl AskLeaderRequest {
-    pub fn new(header: RequestHeader) -> Self {
-        Self {
-            header: Some(header),
         }
     }
 }
@@ -69,13 +32,6 @@ impl TableName {
 }
 
 impl RouteRequest {
-    pub fn new(header: RequestHeader) -> Self {
-        Self {
-            header: Some(header),
-            ..Default::default()
-        }
-    }
-
     pub fn add_table(mut self, table_name: TableName) -> Self {
         self.table_names.push(table_name);
         self
@@ -83,14 +39,6 @@ impl RouteRequest {
 }
 
 impl CreateRequest {
-    pub fn new(header: RequestHeader, table_name: TableName) -> Self {
-        Self {
-            header: Some(header),
-            table_name: Some(table_name),
-            ..Default::default()
-        }
-    }
-
     pub fn add_partition(mut self, partition: Partition) -> Self {
         self.partitions.push(partition);
         self
@@ -126,22 +74,5 @@ impl Partition {
     pub fn value_list(mut self, value_list: Vec<Vec<u8>>) -> Self {
         self.value_list = value_list;
         self
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_peer() {
-        let peer = Peer::new(1, "test_addr");
-        assert_eq!(1, peer.id);
-        assert_eq!(
-            Endpoint {
-                addr: "test_addr".to_string()
-            },
-            peer.endpoint.unwrap()
-        );
     }
 }

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use api::v1::meta::request_header;
 use api::v1::meta::router_client::RouterClient;
 use api::v1::meta::CreateRequest;
 use api::v1::meta::RouteRequest;
@@ -60,8 +61,7 @@ impl Client {
 
 #[derive(Debug)]
 struct Inner {
-    #[allow(dead_code)]
-    id: Id, // TODO(jiachun): will use it later
+    id: Id,
     channel_manager: ChannelManager,
     peers: Vec<String>,
 }
@@ -90,17 +90,17 @@ impl Inner {
         Ok(())
     }
 
-    async fn route(&self, req: RouteRequest) -> Result<RouteResponse> {
+    async fn route(&self, mut req: RouteRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-
+        req.header = request_header(self.id);
         let res = client.route(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
     }
 
-    async fn create(&self, req: CreateRequest) -> Result<RouteResponse> {
+    async fn create(&self, mut req: CreateRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-
+        req.header = request_header(self.id);
         let res = client.create(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -134,8 +134,6 @@ impl Inner {
 
 #[cfg(test)]
 mod test {
-    use api::v1::meta::{RequestHeader, TableName};
-
     use super::*;
 
     #[tokio::test]
@@ -188,8 +186,10 @@ mod test {
         let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unavailable_peer"]).await.unwrap();
 
-        let header = RequestHeader::new(0, 0);
-        let req = CreateRequest::new(header, TableName::default());
+        let req = CreateRequest {
+            header: request_header((0, 0)),
+            ..Default::default()
+        };
         let res = client.create(req).await;
 
         assert!(res.is_err());
@@ -205,8 +205,10 @@ mod test {
         let mut client = Client::new((0, 0), ChannelManager::default());
         client.start(&["unavailable_peer"]).await.unwrap();
 
-        let header = RequestHeader::new(0, 0);
-        let req = RouteRequest::new(header);
+        let req = RouteRequest {
+            header: request_header((0, 0)),
+            ..Default::default()
+        };
         let res = client.route(req).await;
 
         assert!(res.is_err());
