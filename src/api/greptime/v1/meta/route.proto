@@ -8,19 +8,21 @@ service Router {
   // Fetch routing information for tables. The smallest unit is the complete
   // routing information(all regions) of a table.
   // 
+  // ```text
   // table_1
   //    table_name
   //    table_schema
   //    regions
   //      region_1
-  //        mutate_endpoint
-  //        select_endpoint_1, select_endpoint_2
+  //        leader_peer
+  //        follower_peer_1, follower_peer_2
   //      region_2
-  //        mutate_endpoint
-  //        select_endpoint_1, select_endpoint_2, select_endpoint_3
+  //        leader_peer
+  //        follower_peer_1, follower_peer_2, follower_peer_3
   //      region_xxx
   // table_2
   //    ...
+  // ```
   //
   rpc Route(RouteRequest) returns (RouteResponse) {}
 

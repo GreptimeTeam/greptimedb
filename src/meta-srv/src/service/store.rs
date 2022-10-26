@@ -1,5 +1,6 @@
 pub mod etcd;
 pub mod kv;
+pub(crate) mod noop;
 
 use api::v1::meta::store_server;
 use api::v1::meta::DeleteRangeRequest;
@@ -51,32 +52,12 @@ mod tests {
 
     use super::*;
     use crate::metasrv::MetaSrvOptions;
-    use crate::service::store::kv::KvStore;
-
-    struct MockKvStore;
-
-    #[async_trait::async_trait]
-    impl KvStore for MockKvStore {
-        async fn range(&self, _req: RangeRequest) -> crate::Result<RangeResponse> {
-            Ok(RangeResponse::default())
-        }
-
-        async fn put(&self, _req: PutRequest) -> crate::Result<PutResponse> {
-            Ok(PutResponse::default())
-        }
-
-        async fn delete_range(
-            &self,
-            _req: DeleteRangeRequest,
-        ) -> crate::Result<DeleteRangeResponse> {
-            Ok(DeleteRangeResponse::default())
-        }
-    }
+    use crate::service::store::noop::NoopKvStore;
 
     #[tokio::test]
     async fn test_range() {
-        let kv_store = Arc::new(MockKvStore {});
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
+        let kv_store = Arc::new(NoopKvStore {});
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
         let req = RangeRequest::default();
         let res = meta_srv.range(req.into_request()).await;
 
@@ -85,8 +66,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_put() {
-        let kv_store = Arc::new(MockKvStore {});
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
+        let kv_store = Arc::new(NoopKvStore {});
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
         let req = PutRequest::default();
         let res = meta_srv.put(req.into_request()).await;
 
@@ -95,8 +76,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_range() {
-        let kv_store = Arc::new(MockKvStore {});
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store);
+        let kv_store = Arc::new(NoopKvStore {});
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
         let req = DeleteRangeRequest::default();
         let res = meta_srv.delete_range(req.into_request()).await;
 

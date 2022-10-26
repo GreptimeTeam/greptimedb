@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use api::v1::meta::request_header;
 use api::v1::meta::store_client::StoreClient;
 use api::v1::meta::DeleteRangeRequest;
 use api::v1::meta::DeleteRangeResponse;
@@ -68,8 +69,7 @@ impl Client {
 
 #[derive(Debug)]
 struct Inner {
-    #[allow(dead_code)]
-    id: Id, // TODO(jiachun): will use it later
+    id: Id,
     channel_manager: ChannelManager,
     peers: Vec<String>,
 }
@@ -98,25 +98,25 @@ impl Inner {
         Ok(())
     }
 
-    async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+    async fn range(&self, mut req: RangeRequest) -> Result<RangeResponse> {
         let mut client = self.random_client()?;
-
+        req.header = request_header(self.id);
         let res = client.range(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
     }
 
-    async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+    async fn put(&self, mut req: PutRequest) -> Result<PutResponse> {
         let mut client = self.random_client()?;
-
+        req.header = request_header(self.id);
         let res = client.put(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
     }
 
-    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+    async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let mut client = self.random_client()?;
-
+        req.header = request_header(self.id);
         let res = client
             .delete_range(req)
             .await
