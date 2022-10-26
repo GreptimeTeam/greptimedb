@@ -1,3 +1,4 @@
+pub(crate) mod datanode_lease;
 pub(crate) mod response_header;
 
 use std::collections::BTreeMap;

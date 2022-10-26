@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::handler::datanode_lease::DatanodeLeaseHandler;
 use crate::handler::response_header::ResponseHeaderHandler;
 use crate::handler::HeartbeatHandlers;
 use crate::service::store::kv::KvStoreRef;
@@ -33,6 +34,8 @@ impl MetaSrv {
     pub async fn new(options: MetaSrvOptions, kv_store: KvStoreRef) -> Self {
         let heartbeat_handlers = HeartbeatHandlers::new(kv_store.clone());
         heartbeat_handlers.add_handler(ResponseHeaderHandler).await;
+        heartbeat_handlers.add_handler(DatanodeLeaseHandler).await;
+
         Self {
             options,
             kv_store,
