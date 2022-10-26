@@ -2,7 +2,9 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
+use api::prometheus::remote::{
+    label_matcher::Type as MatcherType, Label, Query, Sample, TimeSeries, WriteRequest,
+};
 use api::v1::codec::InsertBatch;
 use api::v1::{
     codec::SelectResult, column, column::SemanticType, insert_expr, Column, ColumnDataType,
@@ -41,16 +43,51 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
             msg: "missing '__name__' label in timeseries",
         })?;
 
+    let mut conditions = format!(
+        "{}>={} and {}<={}",
+        TIMESTAMP_COLUMN_NAME, start_timestamp_ms, TIMESTAMP_COLUMN_NAME, end_timestamp_ms,
+    );
+
+    let mut label_conditions: Vec<String> = Vec::with_capacity(label_matches.len());
+    for m in label_matches {
+        let name = &m.name;
+
+        if name == METRIC_NAME_LABEL {
+            continue;
+        }
+
+        let value = &m.value;
+        let m_type =
+            MatcherType::from_i32(m.r#type).context(error::InvalidPromRemoteRequstSnafu {
+                msg: format!("invaid LabelMatcher type: {}", m.r#type),
+            })?;
+
+        match m_type {
+            MatcherType::Eq => {
+                label_conditions.push(format!("{}='{}'", name, value));
+            }
+            MatcherType::Neq => {
+                label_conditions.push(format!("{}!='{}'", name, value));
+            }
+            MatcherType::Re => {
+                label_conditions.push(format!("{}~*'{}'", name, value));
+            }
+            MatcherType::Nre => {
+                label_conditions.push(format!("{}!~*'{}'", name, value));
+            }
+        }
+    }
+
+    if !label_conditions.is_empty() {
+        conditions.push_str(" and ");
+        conditions.push_str(&label_conditions.join(" and "));
+    }
+
     Ok((
         table_name.to_string(),
         format!(
-            "select * from {} where {}>={} and {}<={} order by {}",
-            table_name,
-            TIMESTAMP_COLUMN_NAME,
-            start_timestamp_ms,
-            TIMESTAMP_COLUMN_NAME,
-            end_timestamp_ms,
-            TIMESTAMP_COLUMN_NAME,
+            "select * from {} where {} order by {}",
+            table_name, conditions, TIMESTAMP_COLUMN_NAME,
         ),
     ))
 }
@@ -66,7 +103,7 @@ struct TimeSeriesId {
     labels: Vec<Label>,
 }
 
-/// Because Label in protobuf doesn't impl `Eq`, so we have to do it by ourself.
+/// Because Label in protobuf doesn't impl `Eq`, so we have to do it by ourselves.
 impl PartialEq for TimeSeriesId {
     fn eq(&self, other: &Self) -> bool {
         if self.labels.len() != other.labels.len() {
@@ -227,7 +264,7 @@ fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
         let tagk = label.name;
         let tagv = label.value;
 
-        // The metric name is a special lable
+        // The metric name is a special label
         if tagk == METRIC_NAME_LABEL {
             table_name = Some(tagv);
             continue;

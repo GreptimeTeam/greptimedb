@@ -61,9 +61,9 @@ pub trait OpentsdbProtocolHandler {
 
 #[async_trait]
 pub trait PrometheusProtocolHandler {
-    /// Handling protometheus remote write requests
+    /// Handling prometheus remote write requests
     async fn write(&self, request: WriteRequest) -> Result<()>;
-    /// Handling protometheus remote read requests
+    /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest) -> Result<HttpResponse>;
     /// Handling push gateway requests
     async fn inject_metrics(&self, metrics: Metrics) -> Result<()>;
