@@ -6,7 +6,11 @@ pub mod prometheus;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use aide::axum::routing as apirouting;
+use aide::axum::{ApiRouter, IntoApiResponse};
+use aide::openapi::{Info, OpenApi};
 use async_trait::async_trait;
+use axum::Extension;
 use axum::{
     error_handling::HandleErrorLayer,
     http::header,
@@ -17,7 +21,10 @@ use axum::{
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
+use datatypes::data_type::DataType;
+use schemars::JsonSchema;
 use serde::Serialize;
+use serde_json::Value;
 use snafu::ResultExt;
 use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
@@ -39,10 +46,10 @@ pub struct HttpServer {
     prom_handler: Option<PrometheusProtocolHandlerRef>,
 }
 
-#[derive(Serialize, Debug)]
-pub enum JsonOutput {
-    AffectedRows(usize),
-    Rows(Vec<RecordBatch>),
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ColumnSchema {
+    name: String,
+    data_type: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -52,37 +59,79 @@ pub struct BytesResponse {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Serialize, Debug)]
-pub enum HttpResponse {
-    Json(JsonResponse),
-    Text(String),
-    Bytes(BytesResponse),
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct Schema {
+    column_schemas: Vec<ColumnSchema>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct HttpRecordsOutput {
+    schema: Option<Schema>,
+    rows: Vec<Vec<Value>>,
+}
+
+impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
+    type Error = String;
+
+    fn try_from(
+        recordbatches: Vec<RecordBatch>,
+    ) -> std::result::Result<HttpRecordsOutput, Self::Error> {
+        if recordbatches.is_empty() {
+            Ok(HttpRecordsOutput {
+                schema: None,
+                rows: vec![],
+            })
+        } else {
+            // safety ensured by previous empty check
+            let first = &recordbatches[0];
+            let schema = Schema {
+                column_schemas: first
+                    .schema
+                    .column_schemas()
+                    .iter()
+                    .map(|cs| ColumnSchema {
+                        name: cs.name.clone(),
+                        data_type: cs.data_type.name().to_owned(),
+                    })
+                    .collect(),
+            };
+
+            let mut rows = Vec::new();
+
+            for recordbatch in recordbatches {
+                for row in recordbatch.rows() {
+                    let row = row.map_err(|e| e.to_string())?;
+                    let value_row = row
+                        .into_iter()
+                        .map(|f| Value::try_from(f).map_err(|err| err.to_string()))
+                        .collect::<std::result::Result<Vec<Value>, _>>()?;
+
+                    rows.push(value_row);
+                }
+            }
+
+            Ok(HttpRecordsOutput {
+                schema: Some(schema),
+                rows,
+            })
+        }
+    }
+}
+
+#[derive(Serialize, Debug, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum JsonOutput {
+    AffectedRows(usize),
+    Rows(HttpRecordsOutput),
+}
+
+#[derive(Serialize, Debug, JsonSchema)]
 pub struct JsonResponse {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<JsonOutput>,
-}
-
-impl IntoResponse for HttpResponse {
-    fn into_response(self) -> Response {
-        match self {
-            HttpResponse::Json(json) => Json(json).into_response(),
-            HttpResponse::Text(text) => text.into_response(),
-            HttpResponse::Bytes(resp) => (
-                [
-                    (header::CONTENT_TYPE, resp.content_type),
-                    (header::CONTENT_ENCODING, resp.content_encoding),
-                ],
-                resp.bytes,
-            )
-                .into_response(),
-        }
-    }
 }
 
 impl JsonResponse {
@@ -109,11 +158,17 @@ impl JsonResponse {
                 Self::with_output(Some(JsonOutput::AffectedRows(rows)))
             }
             Ok(Output::Stream(stream)) => match util::collect(stream).await {
-                Ok(rows) => Self::with_output(Some(JsonOutput::Rows(rows))),
+                Ok(rows) => match HttpRecordsOutput::try_from(rows) {
+                    Ok(rows) => Self::with_output(Some(JsonOutput::Rows(rows))),
+                    Err(err) => Self::with_error(Some(format!(": {}", err))),
+                },
                 Err(e) => Self::with_error(Some(format!("Recordbatch error: {}", e))),
             },
             Ok(Output::RecordBatches(recordbatches)) => {
-                Self::with_output(Some(JsonOutput::Rows(recordbatches.take())))
+                match HttpRecordsOutput::try_from(recordbatches.take()) {
+                    Ok(rows) => Self::with_output(Some(JsonOutput::Rows(rows))),
+                    Err(err) => Self::with_error(Some(format!(": {}", err))),
+                }
             }
             Err(e) => Self::with_error(Some(format!("Query engine output error: {}", e))),
         }
@@ -138,6 +193,10 @@ async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("failed to install CTRL+C signal handler");
+}
+
+async fn serve_api(Extension(api): Extension<OpenApi>) -> impl IntoApiResponse {
+    Json(api)
 }
 
 impl HttpServer {
@@ -175,6 +234,15 @@ impl HttpServer {
     }
 
     pub fn make_app(&self) -> Router {
+        // TODO
+        let mut api = OpenApi {
+            info: Info {
+                description: Some("an example API".to_string()),
+                ..Info::default()
+            },
+            ..OpenApi::default()
+        };
+
         // TODO(LFC): Use released Axum.
         // Axum version 0.6 introduces state within router, making router methods far more elegant
         // to write. Though version 0.6 is rc, I think it's worth to upgrade.
@@ -182,10 +250,14 @@ impl HttpServer {
         // handlers amongst router methods. That requires us to pack all query handlers in a shared
         // state, and check-then-get the desired query handler in different router methods, which
         // is a lot of tedious work.
-        let sql_router = Router::with_state(self.sql_handler.clone())
-            .route("/sql", routing::any(handler::sql))
-            .route("/scripts", routing::post(handler::scripts))
-            .route("/run-script", routing::post(handler::run_script));
+        let sql_router = ApiRouter::with_state(self.sql_handler.clone())
+            .api_route("/sql", apirouting::get(handler::sql))
+            .api_route("/sql", apirouting::post(handler::sql))
+            .api_route("/scripts", apirouting::post(handler::scripts))
+            .api_route("/run-script", apirouting::post(handler::run_script))
+            .route("/api.json", apirouting::get(serve_api))
+            .finish_api(&mut api)
+            .layer(Extension(api));
 
         let mut router = Router::new().nest(&format!("/{}", HTTP_API_VERSION), sql_router);
 
@@ -212,8 +284,10 @@ impl HttpServer {
             router = router.nest(&format!("/{}/prometheus", HTTP_API_VERSION), prom_router);
         }
 
+        let metrics_router = Router::new().route("/", routing::get(handler::metrics));
+        router = router.nest(&format!("/{}/metrics", HTTP_API_VERSION), metrics_router);
+
         router
-            .route("/metrics", routing::get(handler::metrics))
             // middlewares
             .layer(
                 ServiceBuilder::new()

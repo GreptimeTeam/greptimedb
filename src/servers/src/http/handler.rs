@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 
+use aide::axum::IntoApiResponse;
 use axum::extract::{Json, Query, State};
+use axum::response::IntoResponse;
 use common_telemetry::metric;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::http::{HttpResponse, JsonResponse};
+use crate::http::JsonResponse;
 use crate::query_handler::SqlQueryHandlerRef;
 
 /// Handler to execute sql
@@ -12,11 +15,11 @@ use crate::query_handler::SqlQueryHandlerRef;
 pub async fn sql(
     State(sql_handler): State<SqlQueryHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
-) -> HttpResponse {
+) -> impl IntoApiResponse {
     if let Some(sql) = params.get("sql") {
-        HttpResponse::Json(JsonResponse::from_output(sql_handler.do_query(sql).await).await)
+        Json(JsonResponse::from_output(sql_handler.do_query(sql).await).await)
     } else {
-        HttpResponse::Json(JsonResponse::with_error(Some(
+        Json(JsonResponse::with_error(Some(
             "sql parameter is required.".to_string(),
         )))
     }
@@ -24,15 +27,15 @@ pub async fn sql(
 
 /// Handler to export metrics
 #[axum_macros::debug_handler]
-pub async fn metrics(Query(_params): Query<HashMap<String, String>>) -> HttpResponse {
+pub async fn metrics(Query(_params): Query<HashMap<String, String>>) -> impl IntoResponse {
     if let Some(handle) = metric::try_handle() {
-        HttpResponse::Text(handle.render())
+        handle.render()
     } else {
-        HttpResponse::Text("Prometheus handle not initialized.".to_string())
+        "Prometheus handle not initialized.".to_owned()
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 pub struct ScriptExecution {
     pub name: String,
     pub script: String,
@@ -43,9 +46,9 @@ pub struct ScriptExecution {
 pub async fn scripts(
     State(query_handler): State<SqlQueryHandlerRef>,
     Json(payload): Json<ScriptExecution>,
-) -> HttpResponse {
+) -> impl IntoApiResponse {
     if payload.name.is_empty() || payload.script.is_empty() {
-        return HttpResponse::Json(JsonResponse::with_error(Some(
+        return Json(JsonResponse::with_error(Some(
             "Invalid name or script".to_string(),
         )));
     }
@@ -58,7 +61,7 @@ pub async fn scripts(
         Err(e) => JsonResponse::with_error(Some(format!("Insert script error: {}", e))),
     };
 
-    HttpResponse::Json(body)
+    Json(body)
 }
 
 /// Handler to execute script
@@ -66,14 +69,14 @@ pub async fn scripts(
 pub async fn run_script(
     State(query_handler): State<SqlQueryHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
-) -> HttpResponse {
+) -> impl IntoApiResponse {
     let name = params.get("name");
 
     if name.is_none() || name.unwrap().is_empty() {
-        return HttpResponse::Json(JsonResponse::with_error(Some("Invalid name".to_string())));
+        return Json(JsonResponse::with_error(Some("Invalid name".to_string())));
     }
 
     let output = query_handler.execute_script(name.unwrap()).await;
 
-    HttpResponse::Json(JsonResponse::from_output(output).await)
+    Json(JsonResponse::from_output(output).await)
 }
