@@ -1,16 +1,15 @@
 use std::sync::Arc;
 
 use common_time::Timestamp;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::prelude::ScalarVector;
-use datatypes::vectors::Int64Vector;
-use datatypes::vectors::TimestampVector;
+use datatypes::prelude::*;
+use datatypes::vectors::{Int64Vector, TimestampVector};
 use log_store::fs::log::LocalFileLogStore;
 use store_api::storage::PutOperation;
 use store_api::storage::WriteRequest;
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder, ColumnId,
-    Region, RegionMeta, SchemaRef, WriteResponse,
+    AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
+    ColumnDescriptorBuilder, ColumnId, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot,
+    WriteResponse,
 };
 use tempdir::TempDir;
 
@@ -38,6 +37,7 @@ struct AlterTester {
     base: Option<FileTesterBase>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 struct DataRow {
     key: Option<i64>,
     ts: Timestamp,
@@ -145,8 +145,58 @@ impl AlterTester {
         metadata.version()
     }
 
-    async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
+    async fn full_scan_with_init_schema(&self) -> Vec<(i64, Option<i64>)> {
         self.base().full_scan().await
+    }
+
+    async fn full_scan(&self) -> Vec<DataRow> {
+        let read_ctx = &self.base().read_ctx;
+        let snapshot = self.base().region.snapshot(read_ctx).unwrap();
+
+        let resp = snapshot
+            .scan(read_ctx, ScanRequest::default())
+            .await
+            .unwrap();
+        let mut reader = resp.reader;
+
+        let metadata = self.base().region.in_memory_metadata();
+        assert_eq!(metadata.schema(), reader.schema());
+
+        let mut dst = Vec::new();
+        while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            append_chunk_to(&chunk, &mut dst);
+        }
+
+        dst
+    }
+}
+
+fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<DataRow>) {
+    assert_eq!(4, chunk.columns.len());
+
+    let k0_vector = chunk.columns[0]
+        .as_any()
+        .downcast_ref::<Int64Vector>()
+        .unwrap();
+    let ts_vector = chunk.columns[1]
+        .as_any()
+        .downcast_ref::<TimestampVector>()
+        .unwrap();
+    let v0_vector = chunk.columns[2]
+        .as_any()
+        .downcast_ref::<Int64Vector>()
+        .unwrap();
+    let v1_vector = chunk.columns[3]
+        .as_any()
+        .downcast_ref::<Int64Vector>()
+        .unwrap();
+    for i in 0..k0_vector.len() {
+        dst.push(DataRow::new(
+            k0_vector.get_data(i),
+            ts_vector.get_data(i).unwrap().value(),
+            v0_vector.get_data(i),
+            v1_vector.get_data(i),
+        ));
     }
 }
 
@@ -200,12 +250,8 @@ async fn test_alter_region_with_reopen() {
     let mut tester = AlterTester::new(store_dir).await;
 
     let data = vec![(1000, Some(100)), (1001, Some(101)), (1002, Some(102))];
-
     tester.put_with_init_schema(&data).await;
-    assert_eq!(3, tester.full_scan().await.len());
-
-    let schema = tester.schema();
-    check_schema_names(&schema, &["timestamp", "v0"]);
+    assert_eq!(3, tester.full_scan_with_init_schema().await.len());
 
     let req = add_column_req(&[
         (new_column_desc(4, "k0"), true),  // key column k0
@@ -216,6 +262,7 @@ async fn test_alter_region_with_reopen() {
     let schema = tester.schema();
     check_schema_names(&schema, &["k0", "timestamp", "v0", "v1"]);
 
+    // Put data after schema altered.
     let data = vec![
         DataRow::new(Some(10000), 1003, Some(103), Some(201)),
         DataRow::new(Some(10001), 1004, Some(104), Some(202)),
@@ -223,14 +270,26 @@ async fn test_alter_region_with_reopen() {
     ];
     tester.put(&data).await;
 
+    // Scan with new schema before reopen.
+    let mut expect = vec![
+        DataRow::new(None, 1000, Some(100), None),
+        DataRow::new(None, 1001, Some(101), None),
+        DataRow::new(None, 1002, Some(102), None),
+    ];
+    expect.extend_from_slice(&data);
+    let scanned = tester.full_scan().await;
+    assert_eq!(expect, scanned);
+
+    // Reopen and put more data.
     tester.reopen().await;
     let data = vec![
         DataRow::new(Some(10003), 1006, Some(106), Some(204)),
         DataRow::new(Some(10004), 1007, Some(107), Some(205)),
         DataRow::new(Some(10005), 1008, Some(108), Some(206)),
     ];
-
     tester.put(&data).await;
+    // Extend expected result.
+    expect.extend_from_slice(&data);
 
     // add columns,then remove them without writing data.
     let req = add_column_req(&[
@@ -248,8 +307,12 @@ async fn test_alter_region_with_reopen() {
     check_schema_names(&schema, &["k0", "timestamp", "v0", "v1"]);
 
     let data = vec![DataRow::new(Some(10006), 1009, Some(109), Some(207))];
-
     tester.put(&data).await;
+    expect.extend_from_slice(&data);
+
+    // Scan with new schema after reopen and write.
+    let scanned = tester.full_scan().await;
+    assert_eq!(expect, scanned);
 }
 
 #[tokio::test]
@@ -308,11 +371,23 @@ async fn test_put_old_schema_after_alter() {
     tester.alter(req).await;
 
     // Put with old schema.
-    let data = vec![(1003, Some(103)), (1004, Some(104))];
+    let data = vec![(1005, Some(105)), (1006, Some(106))];
     tester.put_with_init_schema(&data).await;
 
     // Put data with old schema directly to the inner writer, to check that the region
     // writer could compat the schema of write batch.
     let data = vec![(1003, Some(103)), (1004, Some(104))];
     tester.put_inner_with_init_schema(&data).await;
+
+    let expect = vec![
+        DataRow::new(None, 1000, Some(100), None),
+        DataRow::new(None, 1001, Some(101), None),
+        DataRow::new(None, 1002, Some(102), None),
+        DataRow::new(None, 1003, Some(103), None),
+        DataRow::new(None, 1004, Some(104), None),
+        DataRow::new(None, 1005, Some(105), None),
+        DataRow::new(None, 1006, Some(106), None),
+    ];
+    let scanned = tester.full_scan().await;
+    assert_eq!(expect, scanned);
 }

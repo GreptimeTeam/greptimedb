@@ -18,7 +18,7 @@ use crate::memtable::{
     BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId, RowOrdering,
 };
 use crate::read::Batch;
-use crate::schema::compat::ReadResolver;
+use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 
 type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
@@ -86,7 +86,7 @@ struct BTreeIterator {
     schema: RegionSchemaRef,
     /// Projected schema that user expect to read.
     projected_schema: ProjectedSchemaRef,
-    resolver: ReadResolver,
+    adapter: ReadAdapter,
     map: Arc<RwLockMap>,
     last_key: Option<InnerKey>,
 }
@@ -119,13 +119,13 @@ impl BTreeIterator {
             .projected_schema
             .clone()
             .unwrap_or_else(|| Arc::new(ProjectedSchema::no_projection(schema.clone())));
-        let resolver = ReadResolver::new(schema.store_schema().clone(), projected_schema.clone())?;
+        let adapter = ReadAdapter::new(schema.store_schema().clone(), projected_schema.clone())?;
 
         Ok(BTreeIterator {
             ctx,
             schema,
             projected_schema,
-            resolver,
+            adapter,
             map,
             last_key: None,
         })
@@ -166,16 +166,16 @@ impl BTreeIterator {
 
         let key_columns = rows_to_vectors(
             key_data_types,
-            self.resolver.source_key_needed(),
+            self.adapter.source_key_needed(),
             keys.as_slice(),
         );
         let value_columns = rows_to_vectors(
             value_data_types,
-            self.resolver.source_value_needed(),
+            self.adapter.source_value_needed(),
             values.as_slice(),
         );
 
-        let batch = self.resolver.batch_from_parts(
+        let batch = self.adapter.batch_from_parts(
             key_columns,
             value_columns,
             Arc::new(sequences),

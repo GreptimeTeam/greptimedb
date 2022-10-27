@@ -27,7 +27,7 @@ use table::predicate::Predicate;
 use crate::error::{self, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
-use crate::schema::compat::ReadResolver;
+use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchemaRef, StoreSchema};
 use crate::sst;
 
@@ -219,13 +219,13 @@ impl<'a> ParquetReader<'a> {
                 .context(error::ConvertStoreSchemaSnafu { file: &file_path })?,
         );
 
-        let resolver = ReadResolver::new(store_schema.clone(), self.projected_schema.clone())?;
+        let adapter = ReadAdapter::new(store_schema.clone(), self.projected_schema.clone())?;
 
         let pruned_row_groups = self
             .predicate
             .prune_row_groups(store_schema.schema().clone(), &metadata.row_groups);
 
-        let projected_fields = resolver.fields_to_read();
+        let projected_fields = adapter.fields_to_read();
         let chunk_stream = try_stream!({
             for (idx, valid) in pruned_row_groups.iter().enumerate() {
                 if !valid {
@@ -252,20 +252,20 @@ impl<'a> ParquetReader<'a> {
             }
         });
 
-        ChunkStream::new(resolver, Box::pin(chunk_stream))
+        ChunkStream::new(adapter, Box::pin(chunk_stream))
     }
 }
 
 pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk<Arc<dyn Array>>>> + Send>>;
 
 pub struct ChunkStream {
-    resolver: ReadResolver,
+    adapter: ReadAdapter,
     stream: SendableChunkStream,
 }
 
 impl ChunkStream {
-    pub fn new(resolver: ReadResolver, stream: SendableChunkStream) -> Result<Self> {
-        Ok(Self { resolver, stream })
+    pub fn new(adapter: ReadAdapter, stream: SendableChunkStream) -> Result<Self> {
+        Ok(Self { adapter, stream })
     }
 }
 
@@ -275,7 +275,7 @@ impl BatchReader for ChunkStream {
         self.stream
             .try_next()
             .await?
-            .map(|chunk| self.resolver.arrow_chunk_to_batch(&chunk))
+            .map(|chunk| self.adapter.arrow_chunk_to_batch(&chunk))
             .transpose()
     }
 }

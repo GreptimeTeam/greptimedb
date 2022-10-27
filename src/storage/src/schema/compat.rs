@@ -75,9 +75,9 @@ fn is_source_column_readable(
     Ok(true)
 }
 
-/// Read data in source schema as dest schema.
+/// Adapter to help reading data with source schema as data with dest schema.
 #[derive(Debug)]
-pub struct ReadResolver {
+pub struct ReadAdapter {
     /// Schema of data source.
     source_schema: StoreSchemaRef,
     /// Schema user expects to read.
@@ -92,24 +92,24 @@ pub struct ReadResolver {
     is_source_needed: Vec<bool>,
 }
 
-impl ReadResolver {
-    /// Creates a new [ReadResolver] that could convert data with `source_schema` into data
+impl ReadAdapter {
+    /// Creates a new [ReadAdapter] that could convert data with `source_schema` into data
     /// with `dest_schema`.
     pub fn new(
         source_schema: StoreSchemaRef,
         dest_schema: ProjectedSchemaRef,
-    ) -> Result<ReadResolver> {
+    ) -> Result<ReadAdapter> {
         if source_schema.version() == dest_schema.schema_to_read().version() {
-            ReadResolver::from_same_version(source_schema, dest_schema)
+            ReadAdapter::from_same_version(source_schema, dest_schema)
         } else {
-            ReadResolver::from_different_version(source_schema, dest_schema)
+            ReadAdapter::from_different_version(source_schema, dest_schema)
         }
     }
 
     fn from_same_version(
         source_schema: StoreSchemaRef,
         dest_schema: ProjectedSchemaRef,
-    ) -> Result<ReadResolver> {
+    ) -> Result<ReadAdapter> {
         let mut is_source_needed = vec![true; source_schema.num_columns()];
         if source_schema.num_columns() != dest_schema.schema_to_read().num_columns() {
             // `dest_schema` might be projected, so we need to find out value columns that not be read
@@ -123,7 +123,7 @@ impl ReadResolver {
             }
         }
 
-        Ok(ReadResolver {
+        Ok(ReadAdapter {
             source_schema,
             dest_schema,
             indices_in_result: Vec::new(),
@@ -134,7 +134,7 @@ impl ReadResolver {
     fn from_different_version(
         source_schema: StoreSchemaRef,
         dest_schema: ProjectedSchemaRef,
-    ) -> Result<ReadResolver> {
+    ) -> Result<ReadAdapter> {
         let schema_to_read = dest_schema.schema_to_read();
         let mut indices_in_result = vec![None; schema_to_read.num_columns()];
         let mut is_source_needed = vec![true; source_schema.num_columns()];
@@ -166,7 +166,7 @@ impl ReadResolver {
             }
         }
 
-        Ok(ReadResolver {
+        Ok(ReadAdapter {
             source_schema,
             dest_schema,
             indices_in_result,
@@ -244,7 +244,7 @@ impl ReadResolver {
 
     /// Convert chunk read from the parquet file into [Batch].
     ///
-    /// The chunk should have the same schema as [`ReadResolver::fields_to_read()`].
+    /// The chunk should have the same schema as [`ReadAdapter::fields_to_read()`].
     pub fn arrow_chunk_to_batch(&self, chunk: &Chunk<Arc<dyn Array>>) -> Result<Batch> {
         let names = self
             .source_schema
@@ -327,7 +327,7 @@ mod tests {
     }
 
     fn call_batch_from_parts(
-        resolver: &ReadResolver,
+        adapter: &ReadAdapter,
         batch: &Batch,
         num_value_columns: usize,
     ) -> Batch {
@@ -336,28 +336,28 @@ mod tests {
         let sequence = batch.column(2 + num_value_columns).clone();
         let op_type = batch.column(2 + num_value_columns + 1).clone();
 
-        resolver
+        adapter
             .batch_from_parts(key, value, sequence, op_type)
             .unwrap()
     }
 
     fn check_batch_from_parts_without_padding(
-        resolver: &ReadResolver,
+        adapter: &ReadAdapter,
         batch: &Batch,
         num_value_columns: usize,
     ) {
-        let new_batch = call_batch_from_parts(resolver, batch, num_value_columns);
+        let new_batch = call_batch_from_parts(adapter, batch, num_value_columns);
         assert_eq!(*batch, new_batch);
     }
 
-    fn call_arrow_chunk_to_batch(resolver: &ReadResolver, batch: &Batch) -> Batch {
+    fn call_arrow_chunk_to_batch(adapter: &ReadAdapter, batch: &Batch) -> Batch {
         let arrays = batch.columns().iter().map(|v| v.to_arrow_array()).collect();
         let chunk = Chunk::new(arrays);
-        resolver.arrow_chunk_to_batch(&chunk).unwrap()
+        adapter.arrow_chunk_to_batch(&chunk).unwrap()
     }
 
-    fn check_arrow_chunk_to_batch_without_padding(resolver: &ReadResolver, batch: &Batch) {
-        let new_batch = call_arrow_chunk_to_batch(resolver, batch);
+    fn check_arrow_chunk_to_batch_without_padding(adapter: &ReadAdapter, batch: &Batch) {
+        let new_batch = call_arrow_chunk_to_batch(adapter, batch);
         assert_eq!(*batch, new_batch);
     }
 
@@ -394,16 +394,16 @@ mod tests {
         let projected_schema = Arc::new(ProjectedSchema::no_projection(region_schema.clone()));
 
         let source_schema = region_schema.store_schema().clone();
-        let resolver = ReadResolver::new(source_schema, projected_schema).unwrap();
+        let adapter = ReadAdapter::new(source_schema, projected_schema).unwrap();
 
-        assert_eq!(&[true, true], resolver.source_key_needed());
-        assert_eq!(&[true, true], resolver.source_value_needed());
+        assert_eq!(&[true, true], adapter.source_key_needed());
+        assert_eq!(&[true, true], adapter.source_value_needed());
 
         let batch = tests::new_batch_with_num_values(2);
-        check_batch_from_parts_without_padding(&resolver, &batch, 2);
+        check_batch_from_parts_without_padding(&adapter, &batch, 2);
 
         check_fields(
-            &resolver.fields_to_read(),
+            &adapter.fields_to_read(),
             &[
                 "k0",
                 "timestamp",
@@ -414,7 +414,7 @@ mod tests {
             ],
         );
 
-        check_arrow_chunk_to_batch_without_padding(&resolver, &batch);
+        check_arrow_chunk_to_batch_without_padding(&adapter, &batch);
     }
 
     #[test]
@@ -426,17 +426,17 @@ mod tests {
             Arc::new(ProjectedSchema::new(region_schema.clone(), Some(vec![2, 0])).unwrap());
 
         let source_schema = region_schema.store_schema().clone();
-        let resolver = ReadResolver::new(source_schema, projected_schema).unwrap();
+        let adapter = ReadAdapter::new(source_schema, projected_schema).unwrap();
 
-        assert_eq!(&[true, true], resolver.source_key_needed());
-        assert_eq!(&[true, false], resolver.source_value_needed());
+        assert_eq!(&[true, true], adapter.source_key_needed());
+        assert_eq!(&[true, false], adapter.source_value_needed());
 
         // One value column has been filtered out, so the result batch should only contains one value column.
         let batch = tests::new_batch_with_num_values(1);
-        check_batch_from_parts_without_padding(&resolver, &batch, 1);
+        check_batch_from_parts_without_padding(&adapter, &batch, 1);
 
         check_fields(
-            &resolver.fields_to_read(),
+            &adapter.fields_to_read(),
             &[
                 "k0",
                 "timestamp",
@@ -446,7 +446,7 @@ mod tests {
             ],
         );
 
-        check_arrow_chunk_to_batch_without_padding(&resolver, &batch);
+        check_arrow_chunk_to_batch_without_padding(&adapter, &batch);
     }
 
     #[test]
@@ -461,16 +461,16 @@ mod tests {
             Arc::new(ProjectedSchema::new(region_schema_new, Some(vec![2, 0])).unwrap());
 
         let source_schema = region_schema_old.store_schema().clone();
-        let resolver = ReadResolver::new(source_schema, projected_schema).unwrap();
+        let adapter = ReadAdapter::new(source_schema, projected_schema).unwrap();
 
-        assert_eq!(&[true, true], resolver.source_key_needed());
-        assert_eq!(&[true], resolver.source_value_needed());
+        assert_eq!(&[true, true], adapter.source_key_needed());
+        assert_eq!(&[true], adapter.source_value_needed());
 
         let batch = tests::new_batch_with_num_values(1);
-        check_batch_from_parts_without_padding(&resolver, &batch, 1);
+        check_batch_from_parts_without_padding(&adapter, &batch, 1);
 
         check_fields(
-            &resolver.fields_to_read(),
+            &adapter.fields_to_read(),
             &[
                 "k0",
                 "timestamp",
@@ -480,7 +480,7 @@ mod tests {
             ],
         );
 
-        check_arrow_chunk_to_batch_without_padding(&resolver, &batch);
+        check_arrow_chunk_to_batch_without_padding(&adapter, &batch);
     }
 
     #[test]
@@ -495,20 +495,20 @@ mod tests {
             Arc::new(ProjectedSchema::new(region_schema_new, Some(vec![4, 2, 0])).unwrap());
 
         let source_schema = region_schema_old.store_schema().clone();
-        let resolver = ReadResolver::new(source_schema, projected_schema).unwrap();
+        let adapter = ReadAdapter::new(source_schema, projected_schema).unwrap();
 
-        assert_eq!(&[true, true], resolver.source_key_needed());
-        assert_eq!(&[true, false], resolver.source_value_needed());
+        assert_eq!(&[true, true], adapter.source_key_needed());
+        assert_eq!(&[true, false], adapter.source_value_needed());
 
         // Only read one value column from source.
         let batch = tests::new_batch_with_num_values(1);
         // New batch should contains k0, timestamp, v0, sequence, op_type.
-        let new_batch = call_batch_from_parts(&resolver, &batch, 1);
+        let new_batch = call_batch_from_parts(&adapter, &batch, 1);
         // v2 is filled by null.
         check_batch_with_null_padding(&batch, &new_batch, &[3]);
 
         check_fields(
-            &resolver.fields_to_read(),
+            &adapter.fields_to_read(),
             &[
                 "k0",
                 "timestamp",
@@ -518,7 +518,7 @@ mod tests {
             ],
         );
 
-        let new_batch = call_arrow_chunk_to_batch(&resolver, &batch);
+        let new_batch = call_arrow_chunk_to_batch(&adapter, &batch);
         check_batch_with_null_padding(&batch, &new_batch, &[3]);
     }
 
@@ -537,11 +537,11 @@ mod tests {
 
         let projected_schema = Arc::new(ProjectedSchema::no_projection(region_schema_new));
         let source_schema = region_schema_old.store_schema().clone();
-        let resolver = ReadResolver::new(source_schema, projected_schema).unwrap();
+        let adapter = ReadAdapter::new(source_schema, projected_schema).unwrap();
 
-        assert_eq!(&[true, true], resolver.source_key_needed());
+        assert_eq!(&[true, true], adapter.source_key_needed());
         // v0 is discarded as it has different column id than new schema's.
-        assert_eq!(&[false, true], resolver.source_value_needed());
+        assert_eq!(&[false, true], adapter.source_value_needed());
 
         // New batch should contains k0, timestamp, v1, sequence, op_type, so we need to remove v0
         // from the created batch.
@@ -551,12 +551,12 @@ mod tests {
         columns.remove(2);
         let batch = Batch::new(columns);
 
-        let new_batch = call_batch_from_parts(&resolver, &batch, 1);
+        let new_batch = call_batch_from_parts(&adapter, &batch, 1);
         // v0 is filled by null.
         check_batch_with_null_padding(&batch, &new_batch, &[2]);
 
         check_fields(
-            &resolver.fields_to_read(),
+            &adapter.fields_to_read(),
             &[
                 "k0",
                 "timestamp",
@@ -566,7 +566,7 @@ mod tests {
             ],
         );
 
-        let new_batch = call_arrow_chunk_to_batch(&resolver, &batch);
+        let new_batch = call_arrow_chunk_to_batch(&adapter, &batch);
         check_batch_with_null_padding(&batch, &new_batch, &[2]);
     }
 
