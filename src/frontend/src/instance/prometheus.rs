@@ -18,10 +18,10 @@ use snafu::{OptionExt, ResultExt};
 use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
-const STREAM_RESPONSE_TYPE: i32 = ResponseType::StreamedXorChunks as i32;
 
+/// Only supports samples request right now
 fn supported_response_type(response_type: i32) -> bool {
-    matches!(response_type, SAMPLES_RESPONSE_TYPE | STREAM_RESPONSE_TYPE)
+    response_type == SAMPLES_RESPONSE_TYPE
 }
 
 /// Negotiating the content type of the remote read response.
@@ -44,8 +44,7 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
             ),
         })?;
 
-    // It's safe to unwrap here, we known that it should be either SAMPLES_RESPONSE_TYPE
-    // or STREAM_RESPONSE_TYPE
+    // It's safe to unwrap here, we known that it should be SAMPLES_RESPONSE_TYPE
     Ok(ResponseType::from_i32(*response_type).unwrap())
 }
 
@@ -127,13 +126,14 @@ impl PrometheusProtocolHandler for Instance {
                     bytes: response.encode_to_vec(),
                 }))
             }
-            ResponseType::StreamedXorChunks => {
-                unimplemented!()
+            ResponseType::StreamedXorChunks => error::NotSupportedSnafu {
+                feat: "streamed remote read",
             }
+            .fail(),
         }
     }
 
     async fn inject_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
-        unimplemented!();
+        todo!();
     }
 }

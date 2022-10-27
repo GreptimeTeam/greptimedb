@@ -69,11 +69,13 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
             MatcherType::Neq => {
                 label_conditions.push(format!("{}!='{}'", name, value));
             }
+            // Case senstive regexp match
             MatcherType::Re => {
-                label_conditions.push(format!("{}~*'{}'", name, value));
+                label_conditions.push(format!("{}~'{}'", name, value));
             }
+            // Case senstive regexp not match
             MatcherType::Nre => {
-                label_conditions.push(format!("{}!~*'{}'", name, value));
+                label_conditions.push(format!("{}!~'{}'", name, value));
             }
         }
     }

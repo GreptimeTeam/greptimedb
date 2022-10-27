@@ -206,8 +206,8 @@ impl HttpServer {
 
         if let Some(prom_handler) = self.prom_handler.clone() {
             let prom_router = Router::with_state(prom_handler)
-                .route("/remote/write", routing::post(prometheus::remote_write))
-                .route("/remote/read", routing::post(prometheus::remote_read));
+                .route("/write", routing::post(prometheus::remote_write))
+                .route("/read", routing::post(prometheus::remote_read));
 
             router = router.nest(&format!("/{}/prometheus", HTTP_API_VERSION), prom_router);
         }
