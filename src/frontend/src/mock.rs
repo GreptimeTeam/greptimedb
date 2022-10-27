@@ -3,7 +3,9 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
+use api::v1::InsertExpr;
 use catalog::CatalogListRef;
+use client::ObjectResult;
 use client::{Database, Select};
 use common_query::prelude::Expr;
 use common_query::Output;
@@ -186,6 +188,10 @@ impl DatanodeInstance {
     #[allow(dead_code)]
     pub(crate) fn new(catalog_list: CatalogListRef, db: Database) -> Self {
         Self { catalog_list, db }
+    }
+
+    pub(crate) async fn grpc_insert(&self, request: InsertExpr) -> client::Result<ObjectResult> {
+        self.db.insert(request).await
     }
 
     pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> RecordBatches {

@@ -1,3 +1,5 @@
+pub mod insert;
+
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -22,6 +24,7 @@ use crate::error::{self, Result};
 use crate::mock::{
     Datanode, DatanodeInstance, PartitionExpr, RangePartitionRule, Region, TableScanPlan,
 };
+use crate::spliter::WriteSpliter;
 
 pub struct DistTable {
     pub table_name: String,
@@ -43,6 +46,17 @@ impl Table for DistTable {
 
     fn table_info(&self) -> TableInfoRef {
         unimplemented!()
+    }
+
+    async fn insert(&self, request: table::requests::InsertRequest) -> table::Result<usize> {
+        let spliter = WriteSpliter::with_patition_rule(&self.partition_rule);
+        let inserts = spliter.split(request).map_err(TableError::new)?;
+        let result = self.dist_insert(inserts).await.map_err(TableError::new)?;
+        let ret = match result {
+            client::ObjectResult::Select(_) => unreachable!(),
+            client::ObjectResult::Mutate(ret) => ret,
+        };
+        Ok(ret.success as usize)
     }
 
     async fn scan(
