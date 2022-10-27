@@ -127,6 +127,11 @@ pub enum Error {
         reason: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Invalid catalog key"))]
+    InvalidCatalog {
+        source: common_catalog::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -157,6 +162,7 @@ impl ErrorExt for Error {
                 StatusCode::Unexpected
             }
             Error::ExecOpentsdbPut { .. } => StatusCode::Internal,
+            Error::InvalidCatalog { .. } => StatusCode::Unexpected,
         }
     }
 

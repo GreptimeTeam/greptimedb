@@ -1771,12 +1771,14 @@ name = "frontend"
 version = "0.1.0"
 dependencies = [
  "api",
+ "arc-swap",
  "arrow2",
  "async-stream",
  "async-trait",
  "catalog",
  "client",
  "common-base",
+ "common-catalog",
  "common-error",
  "common-query",
  "common-recordbatch",
@@ -1790,6 +1792,7 @@ dependencies = [
  "datatypes",
  "futures",
  "itertools",
+ "meta-client",
  "query",
  "serde",
  "servers",

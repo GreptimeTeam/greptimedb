@@ -8,6 +8,7 @@ use servers::grpc::GrpcServer;
 use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
 use servers::postgres::PostgresServer;
+use servers::query_handler::{SqlQueryHandler, SqlQueryHandlerRef};
 use servers::server::Server;
 use snafu::ResultExt;
 use tokio::try_join;
@@ -41,10 +42,10 @@ impl Services {
                 .context(error::RuntimeResourceSnafu)?,
         );
         Ok(Self {
-            http_server: HttpServer::new(instance.clone()),
-            grpc_server: GrpcServer::new(instance.clone(), instance.clone()),
-            mysql_server: MysqlServer::create_server(instance.clone(), mysql_io_runtime),
-            postgres_server: Box::new(PostgresServer::new(instance, postgres_io_runtime)),
+            http_server: HttpServer::new(instance.clone() as SqlQueryHandlerRef),
+            grpc_server: GrpcServer::new(instance.clone() as _, instance.clone() as _),
+            mysql_server: MysqlServer::create_server(instance.clone() as _, mysql_io_runtime),
+            postgres_server: Box::new(PostgresServer::new(instance as _, postgres_io_runtime)),
         })
     }
 

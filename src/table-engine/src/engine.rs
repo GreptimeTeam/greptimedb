@@ -10,8 +10,8 @@ use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{
     ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
-    CreateOptions, EngineContext as StorageEngineContext, OpenOptions, RegionDescriptorBuilder,
-    RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
+    CreateOptions, EngineContext as StorageEngineContext, OpenOptions, Region,
+    RegionDescriptorBuilder, RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
