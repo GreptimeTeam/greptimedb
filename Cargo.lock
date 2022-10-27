@@ -41,19 +41,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ahash"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57e6e951cfbb2db8de1828d49073a113a29fd7117b1596caa781a258c7e38d72"
-dependencies = [
- "cfg-if",
- "getrandom",
- "once_cell",
- "serde",
- "version_check",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "0.7.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -187,7 +174,7 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e387b20dd573a96f36b173d9027483898f944d696521afd74e2caa3c813d86e"
 dependencies = [
- "ahash 0.7.6",
+ "ahash",
  "arrow-format",
  "base64",
  "bytemuck",
@@ -413,24 +400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-jsonschema"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d4b9fcccef8d5374b8dcd15488544440d15e0da3581d27b909f471604b90690"
-dependencies = [
- "aide",
- "async-trait",
- "axum 0.6.0-rc.2",
- "http",
- "http-body",
- "jsonschema",
- "schemars",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "axum-macros"
 version = "0.3.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -532,21 +501,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bit-set"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0700ddab506f33b20a03b13996eccd309a48e5ff77d0d95926aa0210fb4e95f1"
-dependencies = [
- "bit-vec",
-]
-
-[[package]]
-name = "bit-vec"
-version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
-
-[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -643,12 +597,6 @@ name = "bumpalo"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1ad822118d20d2c234f427000d5acc36eabe1e29a348c89b63dd60b13f28e5d"
-
-[[package]]
-name = "bytecount"
-version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c676a478f63e9fa2dd5368a42f28bba0d6c560b775f38583c8bbaa7fcd67c9c"
 
 [[package]]
 name = "bytemuck"
@@ -1415,7 +1363,7 @@ name = "datafusion"
 version = "7.0.0"
 source = "git+https://github.com/apache/arrow-datafusion.git?branch=arrow2#744b2626081db95a254fc882820fc7812f95aa51"
 dependencies = [
- "ahash 0.7.6",
+ "ahash",
  "arrow2",
  "async-trait",
  "chrono",
@@ -1457,7 +1405,7 @@ name = "datafusion-expr"
 version = "7.0.0"
 source = "git+https://github.com/apache/arrow-datafusion.git?branch=arrow2#744b2626081db95a254fc882820fc7812f95aa51"
 dependencies = [
- "ahash 0.7.6",
+ "ahash",
  "arrow2",
  "datafusion-common",
  "sqlparser",
@@ -1468,7 +1416,7 @@ name = "datafusion-physical-expr"
 version = "7.0.0"
 source = "git+https://github.com/apache/arrow-datafusion.git?branch=arrow2#744b2626081db95a254fc882820fc7812f95aa51"
 dependencies = [
- "ahash 0.7.6",
+ "ahash",
  "arrow2",
  "blake2",
  "blake3",
@@ -1777,16 +1725,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
-name = "fancy-regex"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0678ab2d46fa5195aaf59ad034c083d351377d4af57f3e073c074d0da3e3c766"
-dependencies = [
- "bit-set",
- "regex",
-]
-
-[[package]]
 name = "fastrand"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1851,16 +1789,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "14ac05eb8d2eb4ed1eeff847911deae077b0b53332465de9d6a26b0ea9961bc8"
 dependencies = [
  "regex",
-]
-
-[[package]]
-name = "fraction"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99df8100674344d1cee346c764684f7ad688a4dcaa1a3efb2fdb45daf9acf4f9"
-dependencies = [
- "lazy_static",
- "num",
 ]
 
 [[package]]
@@ -2156,7 +2084,7 @@ version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 dependencies = [
- "ahash 0.7.6",
+ "ahash",
 ]
 
 [[package]]
@@ -2417,15 +2345,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iso8601"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f21abb3d09069861499d93d41a970243a90e215df0cf763ac9a31b9b27178d0"
-dependencies = [
- "nom",
-]
-
-[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2462,33 +2381,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49409df3e3bf0856b916e2ceaca09ee28e6871cf7d9ce97a692cacfdb2a25a47"
 dependencies = [
  "wasm-bindgen",
-]
-
-[[package]]
-name = "jsonschema"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ca9e2b45609132ae2214d50482c03aeee78826cd6fd53a8940915b81acedf16"
-dependencies = [
- "ahash 0.8.0",
- "anyhow",
- "base64",
- "bytecount",
- "fancy-regex",
- "fraction",
- "iso8601",
- "itoa 1.0.3",
- "lazy_static",
- "memchr",
- "num-cmp",
- "parking_lot",
- "percent-encoding",
- "regex",
- "serde",
- "serde_json",
- "time 0.3.14",
- "url",
- "uuid",
 ]
 
 [[package]]
@@ -2846,7 +2738,7 @@ version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b9b8653cec6897f73b519a43fba5ee3d50f62fe9af80b428accdcc093b4a849"
 dependencies = [
- "ahash 0.7.6",
+ "ahash",
  "metrics-macros",
  "portable-atomic",
 ]
@@ -3121,12 +3013,6 @@ dependencies = [
  "num-traits",
  "serde",
 ]
-
-[[package]]
-name = "num-cmp"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63335b2e2c34fae2fb0aa2cecfd9f0832a1e24b3b32ecec612c3426d46dc8aaa"
 
 [[package]]
 name = "num-complex"
@@ -4491,7 +4377,7 @@ name = "rustpython-compiler-core"
 version = "0.1.2"
 source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
- "ahash 0.7.6",
+ "ahash",
  "indexmap",
  "itertools",
  "log",
@@ -4533,7 +4419,7 @@ name = "rustpython-parser"
 version = "0.1.2"
 source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
- "ahash 0.7.6",
+ "ahash",
  "lalrpop-util",
  "log",
  "num-bigint",
@@ -4558,7 +4444,7 @@ version = "0.1.2"
 source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
 dependencies = [
  "adler32",
- "ahash 0.7.6",
+ "ahash",
  "ascii",
  "atty",
  "bitflags",
@@ -4872,7 +4758,6 @@ dependencies = [
  "api",
  "async-trait",
  "axum 0.6.0-rc.2",
- "axum-jsonschema",
  "axum-macros",
  "axum-test-helper",
  "bytes",

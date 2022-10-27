@@ -260,8 +260,14 @@ impl HttpServer {
         // state, and check-then-get the desired query handler in different router methods, which
         // is a lot of tedious work.
         let sql_router = ApiRouter::with_state(self.sql_handler.clone())
-            .api_route("/sql", apirouting::get(handler::sql))
-            .api_route("/sql", apirouting::post(handler::sql))
+            .api_route(
+                "/sql",
+                apirouting::get_with(handler::sql, handler::sql_docs),
+            )
+            .api_route(
+                "/sql",
+                apirouting::post_with(handler::sql, handler::sql_docs),
+            )
             .api_route("/scripts", apirouting::post(handler::scripts))
             .api_route("/run-script", apirouting::post(handler::run_script))
             .route("/api.json", apirouting::get(serve_api))

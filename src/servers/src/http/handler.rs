@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use common_telemetry::metric;
 use schemars::JsonSchema;
@@ -21,6 +22,12 @@ pub async fn sql(
             "sql parameter is required.".to_string(),
         )))
     }
+}
+
+pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
+    op.id("sql")
+        .description("Execute SQL query provided by `sql` parameter")
+        .response::<200, Json<JsonResponse>>()
 }
 
 /// Handler to export metrics

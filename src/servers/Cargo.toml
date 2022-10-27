@@ -8,7 +8,6 @@ aide = { version = "0.6", features = ["axum"] }
 api = { path = "../api" }
 async-trait = "0.1"
 axum = "0.6.0-rc.2"
-axum-jsonschema = { version = "0.2", features = [ "aide" ] }
 axum-macros = "0.3.0-rc.1"
 bytes = "1.2"
 common-base = { path = "../common/base" }
