@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    insert_expr, AdminExpr, AdminResult, ColumnDataType, ColumnDef as GrpcColumnDef, CreateExpr,
-    InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
+    AdminExpr, AdminResult, ColumnDataType, ColumnDef as GrpcColumnDef, CreateExpr, ObjectExpr,
+    ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogListRef, CatalogProvider};
 use client::admin::{admin_result_to_output, Admin};
-use client::{Client, Database, Select};
+use client::{Client, Database};
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -23,18 +23,19 @@ use servers::error as server_error;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
 use snafu::prelude::*;
 use sql::ast::{ColumnDef, TableConstraint};
+use sql::statements::column_def_to_schema;
 use sql::statements::create_table::{CreateTable, TIME_INDEX};
 use sql::statements::statement::Statement;
 use sql::statements::{
-    column_def_to_schema, sql_data_type_to_concrete_data_type, sql_value_to_value,
-    table_idents_to_full_name,
+    sql_data_type_to_concrete_data_type, sql_value_to_value, table_idents_to_full_name,
 };
 use sql::{dialect::GenericDialect, parser::ParserContext};
 use tokio::sync::Mutex;
 
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
-use crate::mock::{Datanode, DatanodeInstance, PartitionColumn, RangePartitionRule, Region};
+use crate::mock::{Datanode, DatanodeInstance, RangePartitionRule, Region};
+use crate::sql::insert_to_request;
 use crate::table::DistTable;
 
 pub(crate) type InstanceRef = Arc<Instance>;
@@ -193,17 +194,14 @@ impl SqlQueryHandler for Instance {
                 Ok(output)
             }
             Statement::Insert(insert) => {
-                // let table_name = insert.table_name();
-                // let expr = InsertExpr {
-                //     table_name,
-                //     expr: Some(insert_expr::Expr::Sql(query.to_string())),
-                //     options: HashMap::default(),
-                // };
-                // self.db
-                //     .insert(expr)
-                //     .await
-                //     .and_then(|object_result| object_result.try_into())
-                todo!()
+                let table_name = insert.table_name().clone();
+                let catalog = self.catalog_list.catalog("greptime").unwrap().unwrap();
+                let schema_provider = catalog.schema("public").unwrap().unwrap();
+                // TODO(fys): remove unwrap()
+                let inert_request = insert_to_request(&schema_provider, *insert).unwrap();
+                let table = schema_provider.table(&table_name).unwrap().unwrap();
+                let ret = table.insert(inert_request).await.unwrap();
+                Ok(Output::AffectedRows(ret))
             }
             Statement::Create(create) => {
                 if create.partitions.is_some() {
@@ -832,6 +830,7 @@ mod tests {
                 v,
                 i + 1
             );
+            println!("sql: {}", sql);
             let insert_expr = InsertExpr {
                 table_name: table_name.clone(),
                 expr: Some(insert_expr::Expr::Sql(sql)),

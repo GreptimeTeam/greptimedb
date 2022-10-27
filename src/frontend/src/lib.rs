@@ -11,6 +11,7 @@ mod partition;
 pub mod postgres;
 mod server;
 mod spliter;
+mod sql;
 mod table;
 #[cfg(test)]
 mod tests;

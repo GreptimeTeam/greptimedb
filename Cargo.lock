@@ -1795,6 +1795,7 @@ dependencies = [
  "servers",
  "snafu",
  "sql",
+ "sqlparser",
  "table",
  "tempdir",
  "tokio",
