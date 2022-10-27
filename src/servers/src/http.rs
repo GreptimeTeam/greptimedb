@@ -136,7 +136,7 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
 #[serde(rename_all = "lowercase")]
 pub enum JsonOutput {
     AffectedRows(usize),
-    Rows(HttpRecordsOutput),
+    Records(HttpRecordsOutput),
 }
 
 #[derive(Serialize, Debug, JsonSchema)]
@@ -173,14 +173,14 @@ impl JsonResponse {
             }
             Ok(Output::Stream(stream)) => match util::collect(stream).await {
                 Ok(rows) => match HttpRecordsOutput::try_from(rows) {
-                    Ok(rows) => Self::with_output(Some(JsonOutput::Rows(rows))),
+                    Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
                     Err(err) => Self::with_error(Some(format!(": {}", err))),
                 },
                 Err(e) => Self::with_error(Some(format!("Recordbatch error: {}", e))),
             },
             Ok(Output::RecordBatches(recordbatches)) => {
                 match HttpRecordsOutput::try_from(recordbatches.take()) {
-                    Ok(rows) => Self::with_output(Some(JsonOutput::Rows(rows))),
+                    Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
                     Err(err) => Self::with_error(Some(format!(": {}", err))),
                 }
             }
