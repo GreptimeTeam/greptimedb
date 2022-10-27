@@ -1,12 +1,17 @@
 use api::v1::meta::router_server;
 use api::v1::meta::CreateRequest;
-use api::v1::meta::Peer;
+use api::v1::meta::Region;
+use api::v1::meta::RegionRoute;
+use api::v1::meta::ResponseHeader;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
+use api::v1::meta::Table;
+use api::v1::meta::TableRoute;
 use snafu::OptionExt;
 use tonic::Request;
 use tonic::Response;
 
+use super::store::helper;
 use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use crate::error;
@@ -36,19 +41,47 @@ async fn handle_route(_req: RouteRequest, _kv_store: KvStoreRef) -> Result<Route
     todo!()
 }
 
-async fn handle_create(req: CreateRequest, _kv_store: KvStoreRef) -> Result<RouteResponse> {
-    let CreateRequest { table_name, .. } = req;
-    let _table_name = table_name.context(error::EmptyTableNameSnafu)?;
+async fn handle_create(req: CreateRequest, kv_store: KvStoreRef) -> Result<RouteResponse> {
+    let CreateRequest {
+        header,
+        table_name,
+        partitions,
+    } = req;
+    let table_name = table_name.context(error::EmptyTableNameSnafu)?;
+    let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
+    // TODO(jiachun): now we just return all
+    let peers = helper::find_all_datanodes(cluster_id, kv_store).await?;
 
-    // TODO(jiachun):
-    let peers = vec![Peer {
-        id: 0,
-        addr: "127.0.0.1:3000".to_string(),
-    }];
-
-    Ok(RouteResponse {
-        peers,
+    let table = Table {
+        table_name: Some(table_name),
+        ..Default::default() // TODO(jiachun) return schema
+    };
+    let region_num = partitions.len();
+    let mut region_routes = Vec::with_capacity(region_num);
+    for i in 0..region_num {
+        let region = Region {
+            id: i as u64,
+            ..Default::default()
+        };
+        let region_route = RegionRoute {
+            region: Some(region),
+            leader_peer_index: (i % peers.len()) as u64,
+            follower_peer_indexes: vec![(i % peers.len()) as u64],
+        };
+        region_routes.push(region_route);
+    }
+    let table_route = TableRoute {
+        table: Some(table),
+        region_routes,
+    };
+    let res_header = ResponseHeader {
+        cluster_id,
         ..Default::default()
+    };
+    Ok(RouteResponse {
+        header: Some(res_header),
+        peers,
+        table_routes: vec![table_route],
     })
 }
 

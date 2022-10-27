@@ -21,13 +21,15 @@ impl HeartbeatHandler for DatanodeLeaseHandler {
         ctx: &Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if let Some(ref peer) = req.peer {
+        let HeartbeatRequest { header, peer, .. } = req;
+        if let Some(ref peer) = peer {
             let key = DatanodeKey {
-                addr: peer.addr.to_string(),
-                id: peer.id.to_string(),
+                cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
+                node_id: peer.id,
             };
             let value = DatanodeValue {
                 timestamp_millis: time_util::current_time_millis(),
+                node_addr: peer.addr.clone(),
             };
 
             info!("Receive a heartbeat from datanode: {:?}, {:?}", key, value);

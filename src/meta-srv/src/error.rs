@@ -58,6 +58,13 @@ pub enum Error {
         source: serde_json::error::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to parse number: {}, source: {}", err_msg, source))]
+    ParseNum {
+        err_msg: String,
+        source: std::num::ParseIntError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -86,7 +93,8 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }
-            | Error::InvalidDatanodeKey { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidDatanodeKey { .. }
+            | Error::ParseNum { .. } => StatusCode::InvalidArguments,
             Error::DatanodeKeyFromUtf8 { .. }
             | Error::SerializeDatanodeValue { .. }
             | Error::DeserializeDatanodeValue { .. } => StatusCode::Unexpected,

@@ -1,4 +1,5 @@
 pub mod etcd;
+pub mod helper;
 pub mod kv;
 #[cfg(test)]
 pub(crate) mod noop;
