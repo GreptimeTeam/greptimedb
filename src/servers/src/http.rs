@@ -183,7 +183,7 @@ impl HttpServer {
         // state, and check-then-get the desired query handler in different router methods, which
         // is a lot of tedious work.
         let sql_router = Router::with_state(self.sql_handler.clone())
-            .route("/sql", routing::get(handler::sql))
+            .route("/sql", routing::any(handler::sql))
             .route("/scripts", routing::post(handler::scripts))
             .route("/run-script", routing::post(handler::run_script));
 
