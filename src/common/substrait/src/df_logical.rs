@@ -172,7 +172,7 @@ impl DFLogicalSubstraitConvertor {
         let retrived_schema = to_schema(read_rel.base_schema.unwrap_or_default())?;
         let retrived_arrow_schema = retrived_schema.arrow_schema();
         ensure!(
-            &stored_schema.fields == &retrived_arrow_schema.fields,
+            stored_schema.fields == retrived_arrow_schema.fields,
             SchemaNotMatchSnafu {
                 substrait_schema: retrived_arrow_schema.clone(),
                 storage_schema: stored_schema
