@@ -17,7 +17,7 @@ use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
 
-/// Only supports samples request right now
+/// Only supports samples response right now
 fn supported_response_type(response_type: i32) -> bool {
     response_type == SAMPLES_RESPONSE_TYPE
 }
