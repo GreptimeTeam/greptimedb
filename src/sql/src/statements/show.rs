@@ -110,9 +110,8 @@ mod tests {
         assert_matches!(&stmts[0], Statement::ShowCreateTable { .. });
         match &stmts[0] {
             Statement::ShowCreateTable(show) => {
-                let t = show.tablename.as_ref();
-                let s = t.unwrap();
-                assert_eq!(s, "test");
+                let tablename = show.tablename.as_ref();
+                assert_eq!(tablename.unwrap(), "test");
             }
             _ => {
                 unreachable!();
