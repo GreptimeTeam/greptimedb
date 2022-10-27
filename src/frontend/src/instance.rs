@@ -63,8 +63,15 @@ impl Instance {
         ));
 
         info!(
-            "Starting frontend instance, catalogs: {:?}",
-            catalog_list.catalog_names()
+            "Starting frontend instance, default tables: {:?}",
+            catalog_list
+                .catalog("greptime")
+                .unwrap()
+                .unwrap()
+                .schema("public")
+                .unwrap()
+                .unwrap()
+                .table_names()
         );
 
         let factory = QueryEngineFactory::new(catalog_list.clone());

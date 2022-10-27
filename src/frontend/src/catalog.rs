@@ -59,6 +59,9 @@ impl CatalogList for FrontendCatalogList {
 
                 while let Some(r) = iter.next().await {
                     let Kv(k, _) = r.unwrap();
+                    if !k.starts_with(key.as_bytes()) {
+                        continue;
+                    }
                     let key = CatalogKey::parse(String::from_utf8_lossy(&k)).unwrap();
                     res.insert(key.catalog_name);
                 }
@@ -108,6 +111,9 @@ impl CatalogProvider for FrontendCatalogProvider {
 
                 while let Some(r) = iter.next().await {
                     let Kv(k, _) = r.unwrap();
+                    if !k.starts_with(key.as_bytes()) {
+                        continue;
+                    }
                     let key = SchemaKey::parse(String::from_utf8_lossy(&k)).unwrap();
                     res.insert(key.schema_name);
                 }
@@ -173,14 +179,20 @@ impl SchemaProvider for FrontendSchemaProvider {
 
     fn table_names(&self) -> catalog::error::Result<Vec<String>> {
         let backend = self.backend.clone();
+        let catalog_name = self.catalog_name.clone();
+        let schema_name = self.schema_name.clone();
+
         let res = std::thread::spawn(|| {
             common_runtime::block_on_read(async move {
-                let key = common_catalog::build_catalog_prefix();
+                let key = common_catalog::build_table_prefix(catalog_name, schema_name);
                 let mut iter = backend.range(key.as_bytes());
                 let mut res = HashSet::new();
 
                 while let Some(r) = iter.next().await {
                     let Kv(k, _) = r.unwrap();
+                    if !k.starts_with(key.as_bytes()) {
+                        continue;
+                    }
                     let key = TableKey::parse(String::from_utf8_lossy(&k)).unwrap();
                     res.insert(key.table_name);
                 }
