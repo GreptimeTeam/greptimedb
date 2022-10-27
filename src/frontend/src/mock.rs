@@ -16,9 +16,11 @@ use datafusion_expr::Operator;
 use datatypes::prelude::Value;
 use datatypes::schema::SchemaRef;
 use query::plan::LogicalPlan;
+use sql::statements::create_table::{CreateTable, Partitions as SqlPartitions};
+use sql::statements::sql_value_to_value;
 use table::table::adapter::DfTableProviderAdapter;
 
-struct PartitionColumn {
+pub struct PartitionColumn {
     column_name: String,
     // Does not store the last "MAXVALUE" bound because it can make our binary search in finding regions easier
     // (besides, it's hard to represent "MAXVALUE" in our `Value`).
@@ -28,7 +30,6 @@ struct PartitionColumn {
 }
 
 impl PartitionColumn {
-    #[allow(dead_code)]
     fn new(
         column_name: impl Into<String>,
         partition_points: Vec<Value>,
@@ -75,7 +76,6 @@ pub struct RangePartitionRule {
 }
 
 impl RangePartitionRule {
-    #[allow(dead_code)]
     pub(crate) fn new(
         column_name: impl Into<String>,
         partition_points: Vec<Value>,

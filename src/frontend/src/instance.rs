@@ -10,43 +10,71 @@ use api::v1::{
     InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
+use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::{CatalogList, CatalogListRef, CatalogProvider};
 use client::admin::{admin_result_to_output, Admin};
 use client::{Client, Database, Select};
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use datatypes::schema::ColumnSchema;
-use query::QueryEngineRef;
+use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::value::Value;
+use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
 use snafu::prelude::*;
 use sql::ast::{ColumnDef, TableConstraint};
 use sql::statements::create_table::{CreateTable, TIME_INDEX};
 use sql::statements::statement::Statement;
-use sql::statements::{column_def_to_schema, table_idents_to_full_name};
+use sql::statements::{
+    column_def_to_schema, sql_data_type_to_concrete_data_type, sql_value_to_value,
+    table_idents_to_full_name,
+};
 use sql::{dialect::GenericDialect, parser::ParserContext};
+use tokio::sync::Mutex;
 
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
+use crate::mock::{Datanode, DatanodeInstance, PartitionColumn, RangePartitionRule, Region};
+use crate::table::DistTable;
 
 pub(crate) type InstanceRef = Arc<Instance>;
 
 pub struct Instance {
     dbs: Vec<Database>,
-    admin: Admin,
-    pub query_engine: Option<QueryEngineRef>,
+    admins: Vec<Admin>,
+    query_engine: QueryEngineRef,
+    catalog_list: CatalogListRef,
 }
 
 impl Instance {
     pub(crate) fn new() -> Self {
-        let admin = Admin::new("greptime", Client::default());
+        let catalog_list = catalog::local::memory::new_memory_catalog_list().unwrap();
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        let schema = Arc::new(MemorySchemaProvider::new());
+
+        catalog
+            .register_schema("public".to_string(), schema)
+            .unwrap();
+        catalog_list
+            .register_catalog("greptime".to_string(), catalog)
+            .unwrap();
+
+        let factory = QueryEngineFactory::new(catalog_list.clone());
+        let query_engine = factory.query_engine().clone();
+
         Self {
             dbs: vec![
                 Database::new("greptime", Client::default()),
                 Database::new("greptime", Client::default()),
                 Database::new("greptime", Client::default()),
             ],
-            admin,
-            query_engine: None,
+            admins: vec![
+                Admin::new("greptime", Client::default()),
+                Admin::new("greptime", Client::default()),
+                Admin::new("greptime", Client::default()),
+            ],
+            query_engine,
+            catalog_list,
         }
     }
 
@@ -55,22 +83,89 @@ impl Instance {
         self.dbs[1].start("http://127.0.0.1:4200").await.unwrap();
         self.dbs[2].start("http://127.0.0.1:4300").await.unwrap();
 
-        let addr = opts.datanode_grpc_addr();
-        self.admin
-            .start(addr.clone())
-            .await
-            .context(error::ConnectDatanodeSnafu { addr })?;
+        self.admins[0].start("http://127.0.0.1:4100").await.unwrap();
+        self.admins[1].start("http://127.0.0.1:4200").await.unwrap();
+        self.admins[2].start("http://127.0.0.1:4300").await.unwrap();
+
+        // let addr = opts.datanode_grpc_addr();
+        // self.admin
+        //     .start(addr.clone())
+        //     .await
+        //     .context(error::ConnectDatanodeSnafu { addr })?;
         Ok(())
+    }
+
+    async fn register_dist_table(&self, create_table: &CreateTable) {
+        let (catalog_name, schema_name, table_name) =
+            table_idents_to_full_name(&create_table.name).unwrap();
+
+        let column_schemas = create_table
+            .columns
+            .iter()
+            .map(|x| column_def_to_schema(x).unwrap())
+            .collect::<Vec<ColumnSchema>>();
+        let table_schema = Schema::new(column_schemas);
+
+        let partition_rule = create_partition_rule(&create_table);
+
+        let mut region_dist_map = HashMap::new();
+        let partitions = create_table.partitions.as_ref().unwrap().entries.len();
+        assert_eq!(partitions, 3, "currently only 3 partitions are allowed");
+        for i in 0..partitions {
+            region_dist_map.insert(
+                Region::new(i as u64 + 1),
+                Datanode::new((i as u64 + 1) * 100),
+            );
+        }
+
+        let dist_table = Arc::new(DistTable {
+            table_name: table_name.clone(),
+            schema: Arc::new(table_schema),
+            partition_rule,
+            region_dist_map,
+            datanode_instances: Arc::new(Mutex::new(HashMap::new())),
+        });
+
+        let catalog_list = self.catalog_list.clone();
+        let datanode_instance1 = DatanodeInstance::new(catalog_list.clone(), self.dbs[0].clone());
+        let datanode_instance2 = DatanodeInstance::new(catalog_list.clone(), self.dbs[1].clone());
+        let datanode_instance3 = DatanodeInstance::new(catalog_list.clone(), self.dbs[2].clone());
+
+        let mut datanode_instances = dist_table.datanode_instances.lock().await;
+        datanode_instances.insert(Datanode::new(100), datanode_instance1);
+        datanode_instances.insert(Datanode::new(200), datanode_instance2);
+        datanode_instances.insert(Datanode::new(300), datanode_instance3);
+
+        let catalog_provider = catalog_list.catalog(&catalog_name).unwrap().unwrap();
+        let schema_provider = catalog_provider.schema(&schema_name).unwrap().unwrap();
+        schema_provider
+            .register_table(table_name, dist_table.clone())
+            .unwrap();
     }
 }
 
 #[cfg(test)]
 impl Instance {
     pub fn with_client(client: Client) -> Self {
+        let catalog_list = catalog::local::memory::new_memory_catalog_list().unwrap();
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        let schema = Arc::new(MemorySchemaProvider::new());
+
+        catalog
+            .register_schema("public".to_string(), schema)
+            .unwrap();
+        catalog_list
+            .register_catalog("greptime".to_string(), catalog)
+            .unwrap();
+
+        let factory = QueryEngineFactory::new(catalog_list.clone());
+        let query_engine = factory.query_engine().clone();
+
         Self {
             dbs: vec![Database::new("greptime", client.clone())],
-            admin: Admin::new("greptime", client),
-            query_engine: None,
+            admins: vec![Admin::new("greptime", client)],
+            query_engine,
+            catalog_list,
         }
     }
 }
@@ -93,9 +188,8 @@ impl SqlQueryHandler for Instance {
 
         match stmt {
             Statement::Query(_) => {
-                let query_engine = self.query_engine.as_ref().unwrap();
-                let plan = query_engine.statement_to_plan(stmt).unwrap();
-                let output = query_engine.execute(&plan).await.unwrap();
+                let plan = self.query_engine.statement_to_plan(stmt).unwrap();
+                let output = self.query_engine.execute(&plan).await.unwrap();
                 Ok(output)
             }
             Statement::Insert(insert) => {
@@ -112,15 +206,25 @@ impl SqlQueryHandler for Instance {
                 todo!()
             }
             Statement::Create(create) => {
+                if create.partitions.is_some() {
+                    self.register_dist_table(&create).await;
+                }
+
                 let expr = create_to_expr(create)
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu { query })?;
-                self.admin
-                    .create(expr)
-                    .await
-                    .and_then(admin_result_to_output)
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })
+                let mut output = None;
+                for admin in &self.admins {
+                    output = Some(
+                        admin
+                            .create(expr.clone())
+                            .await
+                            .and_then(admin_result_to_output)
+                            .map_err(BoxedError::new)
+                            .context(server_error::ExecuteQuerySnafu { query })?,
+                    );
+                }
+                Ok(output.unwrap())
             }
             // TODO(LFC): Support other SQL execution,
             // update, delete, alter, explain, etc.
@@ -141,6 +245,39 @@ impl SqlQueryHandler for Instance {
         }
         .fail()
     }
+}
+
+fn create_partition_rule(create: &CreateTable) -> RangePartitionRule {
+    let sql_partition = create.partitions.as_ref().unwrap();
+    assert_eq!(
+        sql_partition.column_list.len(),
+        1,
+        "currently only one partition column is allowed"
+    );
+    let i = 0;
+    let column = &sql_partition.column_list[i];
+
+    let partition_points = sql_partition
+        .entries
+        .iter()
+        .take(&sql_partition.entries.len() - 1)
+        .map(|x| {
+            let sql_value = &x.value_list[i];
+            let column_def = create
+                .columns
+                .iter()
+                .find(|x| x.name.value == column.value)
+                .unwrap();
+            let data_type = sql_data_type_to_concrete_data_type(&column_def.data_type).unwrap();
+            sql_value_to_value(&column.value, &data_type, sql_value).unwrap()
+        })
+        .collect::<Vec<Value>>();
+
+    let regions = (0..=partition_points.len())
+        .map(|x| Region::new((x + 1) as u64))
+        .collect::<Vec<Region>>();
+
+    RangePartitionRule::new(&column.value, partition_points, regions)
 }
 
 fn create_to_expr(create: CreateTable) -> Result<CreateExpr> {
@@ -259,13 +396,14 @@ impl GrpcQueryHandler for Instance {
 #[async_trait]
 impl GrpcAdminHandler for Instance {
     async fn exec_admin_request(&self, expr: AdminExpr) -> server_error::Result<AdminResult> {
-        self.admin
-            .do_request(expr.clone())
-            .await
-            .map_err(BoxedError::new)
-            .with_context(|_| server_error::ExecuteQuerySnafu {
-                query: format!("{:?}", expr),
-            })
+        // self.admin
+        //     .do_request(expr.clone())
+        //     .await
+        //     .map_err(BoxedError::new)
+        //     .with_context(|_| server_error::ExecuteQuerySnafu {
+        //         query: format!("{:?}", expr),
+        //     })
+        todo!()
     }
 }
 
@@ -564,10 +702,6 @@ mod tests {
         }
     }
 
-    // TODO(LFC): For demo.
-    // cargo run -- datanode start --rpc-addr=0.0.0.0:4100 --http-addr=0.0.0.0:4101 --mysql-addr=0.0.0.0:4102 --postgres-addr=0.0.0.0:4103
-    // cargo run -- datanode start --rpc-addr=0.0.0.0:4200 --http-addr=0.0.0.0:4201 --mysql-addr=0.0.0.0:4202 --postgres-addr=0.0.0.0:4203
-    // cargo run -- datanode start --rpc-addr=0.0.0.0:4300 --http-addr=0.0.0.0:4301 --mysql-addr=0.0.0.0:4302 --postgres-addr=0.0.0.0:4303
     #[tokio::test]
     async fn create_tables_in_datanodes() {
         let column_defs = vec![
@@ -685,65 +819,7 @@ mod tests {
     }
 
     async fn new_frontend_instance() -> Instance {
-        let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
-            ColumnSchema::new("n", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("row_id", ConcreteDataType::uint32_datatype(), true),
-        ]));
-
-        // PARTITION BY RANGE (a) (
-        //   PARTITION r1 VALUES LESS THAN (10),
-        //   PARTITION r2 VALUES LESS THAN (50),
-        //   PARTITION r3 VALUES LESS THAN (MAXVALUE),
-        // )
-        let partition_rule = RangePartitionRule::new(
-            "n",
-            vec![10_i32.into(), 50_i32.into()],
-            vec![Region::new(1), Region::new(2), Region::new(3)],
-        );
-
-        let table_name = "dist_table".to_string();
-
-        let dist_table = Arc::new(DistTable {
-            table_name: table_name.to_string(),
-            schema,
-            partition_rule,
-            region_dist_map: HashMap::from([
-                (Region::new(1), Datanode::new(100)),
-                (Region::new(2), Datanode::new(200)),
-                (Region::new(3), Datanode::new(300)),
-            ]),
-            datanode_instances: Arc::new(Mutex::new(HashMap::new())),
-        });
-
-        let catalog_list = new_catalog_list(&table_name, dist_table.clone());
-
-        let client1 = Client::default();
-        let mut db1 = Database::new("greptime", client1.clone());
-        db1.start("http://127.0.0.1:4100").await.unwrap();
-
-        let client2 = Client::default();
-        let mut db2 = Database::new("greptime", client2.clone());
-        db2.start("http://127.0.0.1:4200").await.unwrap();
-
-        let client3 = Client::default();
-        let mut db3 = Database::new("greptime", client3.clone());
-        db3.start("http://127.0.0.1:4300").await.unwrap();
-
-        let datanode_instance1 = DatanodeInstance::new(catalog_list.clone(), db1);
-        let datanode_instance2 = DatanodeInstance::new(catalog_list.clone(), db2);
-        let datanode_instance3 = DatanodeInstance::new(catalog_list.clone(), db3);
-
-        let mut datanode_instances = dist_table.datanode_instances.lock().await;
-        datanode_instances.insert(Datanode::new(100), datanode_instance1);
-        datanode_instances.insert(Datanode::new(200), datanode_instance2);
-        datanode_instances.insert(Datanode::new(300), datanode_instance3);
-
-        let factory = QueryEngineFactory::new(catalog_list);
-        let query_engine = factory.query_engine();
-
         let mut instance = Instance::new();
-        instance.query_engine = Some(query_engine.clone());
         instance.start(&FrontendOptions::default()).await.unwrap();
         instance
     }
@@ -763,23 +839,5 @@ mod tests {
             };
             db.insert(insert_expr).await.unwrap();
         }
-    }
-
-    fn new_catalog_list(table_name: &String, dist_table: TableRef) -> CatalogListRef {
-        let catalog_list = catalog::local::memory::new_memory_catalog_list().unwrap();
-        let catalog = Arc::new(MemoryCatalogProvider::new());
-        let schema = Arc::new(MemorySchemaProvider::new());
-
-        schema
-            .register_table(table_name.to_string(), dist_table)
-            .unwrap();
-        catalog
-            .register_schema("public".to_string(), schema)
-            .unwrap();
-        catalog_list
-            .register_catalog("greptime".to_string(), catalog)
-            .unwrap();
-
-        catalog_list
     }
 }
