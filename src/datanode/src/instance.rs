@@ -1,6 +1,7 @@
 use std::time::Duration;
 use std::{fs, path, sync::Arc};
 
+use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
@@ -54,11 +55,16 @@ impl Instance {
             ),
             object_store,
         ));
-        let catalog_manager = Arc::new(
-            catalog::local::LocalCatalogManager::try_new(table_engine.clone())
-                .await
-                .context(NewCatalogSnafu)?,
-        );
+
+        // create remote catalog manager
+        let catalog_manager = Arc::new(catalog::remote::RemoteCatalogManager::new(
+            table_engine.clone(),
+            opts.node_id,
+            Arc::new(MetaKvBackend {
+                client: meta_client.clone(),
+            }),
+        ));
+
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine().clone();
         let script_executor =
