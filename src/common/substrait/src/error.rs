@@ -72,6 +72,19 @@ pub enum Error {
 
     #[snafu(display("Cannot convert plan doesn't belong to GrepTimeDB"))]
     UnknownPlan { backtrace: Backtrace },
+
+    #[snafu(display(
+        "Schema from Substrait proto doesn't match with the schema in storage.
+        Substrait schema: {:?}
+        Storage schema: {:?}",
+        substrait_schema,
+        storage_schema
+    ))]
+    SchemaNotMatch {
+        substrait_schema: datafusion::arrow::datatypes::SchemaRef,
+        storage_schema: datafusion::arrow::datatypes::SchemaRef,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -90,7 +103,8 @@ impl ErrorExt for Error {
             | Error::EmptyExpr { .. }
             | Error::MissingField { .. }
             | Error::InvalidParameters { .. }
-            | Error::TableNotFound { .. } => StatusCode::InvalidArguments,
+            | Error::TableNotFound { .. }
+            | Error::SchemaNotMatch { .. } => StatusCode::InvalidArguments,
             Error::DFInternal { .. } | Error::Internal { .. } => StatusCode::Internal,
         }
     }

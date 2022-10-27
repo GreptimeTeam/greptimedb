@@ -53,14 +53,13 @@ pub fn from_schema(schema: &Schema) -> Result<NamedStruct> {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use datatypes::prelude::{ConcreteDataType, DataType};
 
     use super::*;
 
-    #[test]
-    fn supported_types_round_trip() {
-        let column_schemas = [
+    pub(crate) fn supported_types() -> Vec<ColumnSchema> {
+        [
             ConcreteDataType::null_datatype(),
             ConcreteDataType::boolean_datatype(),
             ConcreteDataType::int8_datatype(),
@@ -82,7 +81,12 @@ mod test {
         .into_iter()
         .enumerate()
         .map(|(ordinal, ty)| ColumnSchema::new(ty.name().to_string(), ty, ordinal % 2 == 0))
-        .collect();
+        .collect()
+    }
+
+    #[test]
+    fn supported_types_round_trip() {
+        let column_schemas = supported_types();
         let schema = Schema::new(column_schemas);
 
         let named_struct = from_schema(&schema).unwrap();
