@@ -300,7 +300,14 @@ fn expr_to_sql(expr: &DfExpr) -> String {
             expr_to_sql(right.as_ref())
         ),
         DfExpr::Column(c) => c.name.clone(),
-        DfExpr::Literal(v) => v.to_string(),
+        DfExpr::Literal(sv) => {
+            let v: Value = Value::try_from(sv.clone()).unwrap();
+            if v.data_type().is_string() {
+                format!("'{}'", sv)
+            } else {
+                format!("{}", sv)
+            }
+        }
         _ => unimplemented!("not implemented for {:?}", expr),
     }
 }
