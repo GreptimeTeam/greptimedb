@@ -5,7 +5,7 @@ use crate::statements::alter::AlterTable;
 use crate::statements::create_table::CreateTable;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
-use crate::statements::show::{ShowDatabases, ShowTables, ShowCreateTable};
+use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
 
 //use super::show::ShowCreateTable;
 

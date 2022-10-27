@@ -6,7 +6,7 @@ use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::error::{self, InvalidDatabaseNameSnafu, Result, SyntaxSnafu, TokenizerSnafu};
-use crate::statements::show::{ShowDatabases, ShowKind, ShowTables, ShowCreateTable};
+use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
@@ -102,12 +102,12 @@ impl<'a> ParserContext<'a> {
         } else if self.matches_keyword(Keyword::TABLES) {
             self.parser.next_token();
             self.parse_show_tables()
-        } else if self.matches_keyword(Keyword::CREATE){
+        } else if self.matches_keyword(Keyword::CREATE) {
             self.parser.next_token();
-            if self.matches_keyword(Keyword::TABLE){
+            if self.matches_keyword(Keyword::TABLE) {
                 self.parser.next_token();
                 self.parse_show_create_table()
-            } else{
+            } else {
                 self.unsupported(self.peek_token_as_string())
             }
         } else {
@@ -118,22 +118,23 @@ impl<'a> ParserContext<'a> {
     /// Parser SHOW CREATE TABLE statement
     fn parse_show_create_table(&mut self) -> Result<Statement> {
         let tablename: Option<String> = match self.parser.peek_token() {
-            Token::EOF | Token::SemiColon =>{
+            Token::EOF | Token::SemiColon => {
                 return Ok(Statement::ShowCreateTable(ShowCreateTable {
                     tablename: None,
                 }));
             }
             _ => {
-                let db_name=self.parser.parse_object_name().with_context(|_| {
-                    error::UnexpectedSnafu{
-                        sql: self.sql,
-                        expected: "a database name",
-                        actual: self.peek_token_as_string(),
-                    }
-                })?;
+                let db_name =
+                    self.parser
+                        .parse_object_name()
+                        .with_context(|_| error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "a database name",
+                            actual: self.peek_token_as_string(),
+                        })?;
                 ensure!(
                     db_name.0.len() == 1,
-                    InvalidDatabaseNameSnafu{
+                    InvalidDatabaseNameSnafu {
                         name: db_name.to_string(),
                     }
                 );
