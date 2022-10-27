@@ -55,7 +55,7 @@ struct StartCommand {
 impl StartCommand {
     async fn run(self) -> Result<()> {
         let opts = self.try_into()?;
-        let mut frontend = Frontend::new(opts);
+        let mut frontend = Frontend::new(opts).await;
         frontend.start().await.context(error::StartFrontendSnafu)
     }
 }

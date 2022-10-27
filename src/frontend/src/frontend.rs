@@ -47,8 +47,8 @@ pub struct Frontend {
 }
 
 impl Frontend {
-    pub fn new(opts: FrontendOptions) -> Self {
-        let instance = Instance::new();
+    pub async fn new(opts: FrontendOptions) -> Self {
+        let instance = Instance::new().await;
         Self {
             opts,
             instance: Some(instance),

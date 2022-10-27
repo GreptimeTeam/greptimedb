@@ -2,18 +2,14 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
     CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef, SchemaProvider,
     SchemaProviderRef,
 };
 use client::Database;
-use common_catalog::error::InvalidCatalogSnafu;
 use common_catalog::{CatalogKey, SchemaKey, TableKey, TableValue};
 use futures::StreamExt;
-use snafu::ResultExt;
-use table::engine::TableEngineRef;
 use table::TableRef;
 use tokio::sync::{Mutex, RwLock};
 
@@ -23,27 +19,20 @@ use crate::table::DistTable;
 
 pub struct FrontendCatalogList {
     backend: KvBackendRef,
-    range_rules: RangePartitionRule,
+    range_rules: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
     datanode_instances: Arc<RwLock<HashMap<u64, Database>>>,
-    catalog_ref: Option<Arc<dyn CatalogList>>,
 }
 
 impl FrontendCatalogList {
-    pub fn new(backend: KvBackendRef, range_rules: RangePartitionRule) -> Arc<Self> {
-        let list = Self {
+    pub fn new(
+        backend: KvBackendRef,
+        range_rules: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
+    ) -> Self {
+        Self {
             backend,
             range_rules,
             datanode_instances: Arc::new(Default::default()),
-            catalog_ref: None,
-        };
-
-        let mut arc = Arc::new(list);
-        Arc::get_mut(&mut arc).unwrap().catalog_ref = Some(arc.clone());
-        arc
-    }
-
-    pub async fn start(&self) -> Result<()> {
-        Ok(())
+        }
     }
 }
 
@@ -99,7 +88,7 @@ impl CatalogList for FrontendCatalogList {
 pub struct FrontendCatalogProvider {
     catalog_name: String,
     backend: KvBackendRef,
-    range_rules: RangePartitionRule,
+    range_rules: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
     datanode_instances: Arc<RwLock<HashMap<u64, Database>>>,
 }
 
@@ -158,7 +147,7 @@ pub struct FrontendSchemaProvider {
     catalog_name: String,
     schema_name: String,
     backend: KvBackendRef,
-    range_rules: RangePartitionRule,
+    range_rules: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
     datanode_instances: Arc<RwLock<HashMap<u64, Database>>>,
 }
 
@@ -215,10 +204,17 @@ impl SchemaProvider for FrontendSchemaProvider {
         let catalog_ref = self.build_query_catalog();
         let instances = self.datanode_instances.clone();
         let backend = self.backend.clone();
+
         let range_rules = self.range_rules.clone();
+
         let table_name = name.to_string();
         let result: Result<Option<TableRef>> = std::thread::spawn(|| {
             common_runtime::block_on_read(async move {
+                let range_rules = match range_rules.read().await.get(&table_name) {
+                    None => panic!("Please call create table first!"),
+                    Some(r) => r.clone(),
+                };
+
                 let mut datanode_instances = HashMap::new();
                 let mut iter = backend.range(table_prefix.as_bytes());
 
