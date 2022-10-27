@@ -20,6 +20,7 @@ serde = "1.0"
 servers = { path = "../servers" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
+table = { path = "../table" }
 tokio = { version = "1.18", features = ["full"] }
 
 [dependencies.arrow]
