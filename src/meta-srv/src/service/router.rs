@@ -7,6 +7,7 @@ use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
 use api::v1::meta::Table;
 use api::v1::meta::TableRoute;
+use common_telemetry::info;
 use snafu::OptionExt;
 use tonic::Request;
 use tonic::Response;
@@ -78,11 +79,14 @@ async fn handle_create(req: CreateRequest, kv_store: KvStoreRef) -> Result<Route
         cluster_id,
         ..Default::default()
     };
-    Ok(RouteResponse {
+    let res = RouteResponse {
         header: Some(res_header),
         peers,
         table_routes: vec![table_route],
-    })
+    };
+
+    info!("Create route response: {:?}", res);
+    Ok(res)
 }
 
 #[cfg(test)]
