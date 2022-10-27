@@ -458,7 +458,7 @@ mod tests {
 
         // Just read v0, k0
         let projected_schema =
-            Arc::new(ProjectedSchema::new(region_schema_new.clone(), Some(vec![2, 0])).unwrap());
+            Arc::new(ProjectedSchema::new(region_schema_new, Some(vec![2, 0])).unwrap());
 
         let source_schema = region_schema_old.store_schema().clone();
         let resolver = ReadResolver::new(source_schema, projected_schema).unwrap();
@@ -492,7 +492,7 @@ mod tests {
 
         // Just read v2, v0, k0
         let projected_schema =
-            Arc::new(ProjectedSchema::new(region_schema_new.clone(), Some(vec![4, 2, 0])).unwrap());
+            Arc::new(ProjectedSchema::new(region_schema_new, Some(vec![4, 2, 0])).unwrap());
 
         let source_schema = region_schema_old.store_schema().clone();
         let resolver = ReadResolver::new(source_schema, projected_schema).unwrap();
@@ -535,7 +535,7 @@ mod tests {
         // (k0, timestamp, v0, v1) with version 2, and v0 has different column id.
         let region_schema_new = Arc::new(RegionSchema::new(columns, 2).unwrap());
 
-        let projected_schema = Arc::new(ProjectedSchema::no_projection(region_schema_new.clone()));
+        let projected_schema = Arc::new(ProjectedSchema::no_projection(region_schema_new));
         let source_schema = region_schema_old.store_schema().clone();
         let resolver = ReadResolver::new(source_schema, projected_schema).unwrap();
 
