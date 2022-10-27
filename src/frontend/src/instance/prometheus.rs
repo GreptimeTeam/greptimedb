@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use api::prometheus::remote::{
     read_request::ResponseType, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
@@ -65,8 +63,8 @@ fn object_result_to_query_result(
 async fn handle_remote_queries(
     db: &Database,
     quires: &[Query],
-) -> ServerResult<HashMap<String, ObjectResult>> {
-    let mut results = HashMap::with_capacity(quires.len());
+) -> ServerResult<Vec<(String, ObjectResult)>> {
+    let mut results = Vec::with_capacity(quires.len());
 
     for q in quires {
         let (table_name, sql) = prometheus::query_to_sql(q)?;
@@ -83,7 +81,7 @@ async fn handle_remote_queries(
             .map_err(BoxedError::new)
             .context(error::ExecuteQuerySnafu { query: sql })?;
 
-        results.insert(table_name, object_result);
+        results.push((table_name, object_result));
     }
 
     Ok(results)

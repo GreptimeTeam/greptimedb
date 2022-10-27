@@ -7,6 +7,7 @@ pub mod instance;
 pub mod mysql;
 pub mod opentsdb;
 pub mod postgres;
+pub mod prometheus;
 mod server;
 #[cfg(test)]
 mod tests;

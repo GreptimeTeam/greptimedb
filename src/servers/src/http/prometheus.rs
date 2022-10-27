@@ -43,7 +43,7 @@ pub async fn remote_read(
 }
 
 #[inline]
-fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
+pub fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = Decoder::new();
     decoder
         .decompress_vec(buf)
@@ -51,7 +51,7 @@ fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[inline]
-fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
+pub fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = Encoder::new();
     encoder
         .compress_vec(buf)
