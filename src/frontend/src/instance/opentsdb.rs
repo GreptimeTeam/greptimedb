@@ -26,29 +26,30 @@ impl OpentsdbProtocolHandler for Instance {
 
 impl Instance {
     async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> Result<()> {
-        let expr = data_point.as_grpc_insert();
-
-        let result = self.db.insert(expr.clone()).await;
-
-        let object_result = match result {
-            Ok(result) => result,
-            Err(_) => {
-                return Err(result.context(error::RequestDatanodeSnafu).unwrap_err());
-            }
-        };
-
-        match object_result {
-            ObjectResult::Mutate(mutate) => {
-                if mutate.success != 1 || mutate.failure != 0 {
-                    return error::ExecOpentsdbPutSnafu {
-                        reason: format!("illegal result: {:?}", mutate),
-                    }
-                    .fail();
-                }
-            }
-            ObjectResult::Select(_) => unreachable!(),
-        }
-        Ok(())
+        // let expr = data_point.as_grpc_insert();
+        //
+        // let result = self.db.insert(expr.clone()).await;
+        //
+        // let object_result = match result {
+        //     Ok(result) => result,
+        //     Err(_) => {
+        //         return Err(result.context(error::RequestDatanodeSnafu).unwrap_err());
+        //     }
+        // };
+        //
+        // match object_result {
+        //     ObjectResult::Mutate(mutate) => {
+        //         if mutate.success != 1 || mutate.failure != 0 {
+        //             return error::ExecOpentsdbPutSnafu {
+        //                 reason: format!("illegal result: {:?}", mutate),
+        //             }
+        //             .fail();
+        //         }
+        //     }
+        //     ObjectResult::Select(_) => unreachable!(),
+        // }
+        // Ok(())
+        todo!()
     }
 }
 

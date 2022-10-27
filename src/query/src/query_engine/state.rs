@@ -7,10 +7,13 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::RuntimeEnv;
 use common_query::prelude::ScalarUdf;
+use datafusion::execution::context::ExecutionProps;
+use datafusion::logical_plan::LogicalPlan;
 use datafusion::optimizer::common_subexpr_eliminate::CommonSubexprEliminate;
 use datafusion::optimizer::eliminate_limit::EliminateLimit;
 use datafusion::optimizer::filter_push_down::FilterPushDown;
 use datafusion::optimizer::limit_push_down::LimitPushDown;
+use datafusion::optimizer::optimizer::OptimizerRule;
 use datafusion::optimizer::projection_push_down::ProjectionPushDown;
 use datafusion::optimizer::single_distinct_to_groupby::SingleDistinctToGroupBy;
 use datafusion::optimizer::to_approx_perc::ToApproxPerc;
@@ -37,6 +40,26 @@ impl fmt::Debug for QueryEngineState {
     }
 }
 
+pub struct PrintLogicalPlan {
+    next_optimizer: String,
+}
+
+impl OptimizerRule for PrintLogicalPlan {
+    fn optimize(
+        &self,
+        plan: &LogicalPlan,
+        _: &ExecutionProps,
+    ) -> datafusion_common::Result<LogicalPlan> {
+        println!("before next optimizer {}:", self.next_optimizer);
+        println!("{:?}", plan);
+        Ok(plan.clone())
+    }
+
+    fn name(&self) -> &str {
+        "print"
+    }
+}
+
 impl QueryEngineState {
     pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
         let config = ExecutionConfig::new()
@@ -47,11 +70,23 @@ impl QueryEngineState {
                 // These are the default optimizer in datafusion
                 Arc::new(CommonSubexprEliminate::new()),
                 Arc::new(EliminateLimit::new()),
+                Arc::new(PrintLogicalPlan {
+                    next_optimizer: "ProjectionPushDown".to_string(),
+                }),
                 Arc::new(ProjectionPushDown::new()),
+                Arc::new(PrintLogicalPlan {
+                    next_optimizer: "FilterPushDown".to_string(),
+                }),
                 Arc::new(FilterPushDown::new()),
+                Arc::new(PrintLogicalPlan {
+                    next_optimizer: "LimitPushDown".to_string(),
+                }),
                 Arc::new(LimitPushDown::new()),
                 Arc::new(SingleDistinctToGroupBy::new()),
                 Arc::new(ToApproxPerc::new()),
+                Arc::new(PrintLogicalPlan {
+                    next_optimizer: "none".to_string(),
+                }),
             ]);
 
         let df_context = ExecutionContext::with_config(config);

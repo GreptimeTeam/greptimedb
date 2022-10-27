@@ -11,24 +11,24 @@ use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::Expr as DfExpr;
 use datafusion::physical_plan::Partitioning;
 use datafusion_expr::Operator;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use snafu::prelude::*;
 use table::error::Error as TableError;
 use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::Table;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::error::{self, Result};
 use crate::mock::{
     Datanode, DatanodeInstance, PartitionExpr, RangePartitionRule, Region, TableScanPlan,
 };
 
-struct DistTable {
-    table_name: String,
-    schema: SchemaRef,
-    partition_rule: RangePartitionRule,
-    region_dist_map: HashMap<Region, Datanode>,
-    datanode_instances: HashMap<Datanode, DatanodeInstance>,
+pub struct DistTable {
+    pub table_name: String,
+    pub schema: SchemaRef,
+    pub partition_rule: RangePartitionRule,
+    pub region_dist_map: HashMap<Region, Datanode>,
+    pub datanode_instances: Arc<Mutex<HashMap<Datanode, DatanodeInstance>>>,
 }
 
 #[async_trait]
@@ -54,10 +54,12 @@ impl Table for DistTable {
         let regions = self.find_regions(filters).map_err(TableError::new)?;
         let datanodes = self.find_datanodes(regions).map_err(TableError::new)?;
 
+        let datanode_instances = self.datanode_instances.lock().await;
+
         let partition_execs = datanodes
             .iter()
             .map(|(datanode, regions)| {
-                let datanode_instance = self.datanode_instances.get(datanode).unwrap().clone();
+                let datanode_instance = datanode_instances.get(datanode).unwrap().clone();
                 PartitionExec {
                     table_name: self.table_name.clone(),
                     datanode_instance,
@@ -71,7 +73,7 @@ impl Table for DistTable {
             .collect::<Vec<PartitionExec>>();
 
         let dist_scan = DistTableScan {
-            schema: self.schema(),
+            schema: project_schema(self.schema(), projection),
             partition_execs,
         };
         Ok(Arc::new(dist_scan))
@@ -185,6 +187,19 @@ impl DistTable {
     }
 }
 
+fn project_schema(table_schema: SchemaRef, projection: &Option<Vec<usize>>) -> SchemaRef {
+    if let Some(projection) = &projection {
+        let columns = table_schema.column_schemas();
+        let projected = projection
+            .iter()
+            .map(|x| columns[*x].clone())
+            .collect::<Vec<ColumnSchema>>();
+        Arc::new(Schema::new(projected))
+    } else {
+        table_schema
+    }
+}
+
 fn is_compare_op(op: &Operator) -> bool {
     matches!(
         *op,
@@ -292,11 +307,9 @@ impl PartitionExec {
 #[allow(clippy::print_stdout)]
 #[cfg(test)]
 mod test {
-    use catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{
-        CatalogList, CatalogListRef, CatalogProvider, SchemaProvider, DEFAULT_CATALOG_NAME,
-        DEFAULT_SCHEMA_NAME,
-    };
+    use catalog::local::memory::{MemoryCatalogProvider, MemorySchemaProvider};
+    use catalog::{CatalogList, CatalogListRef, CatalogProvider, SchemaProvider};
+    use client::{Client, Database};
     use common_recordbatch::{util, RecordBatch};
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
@@ -306,7 +319,6 @@ mod test {
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int32Vector, UInt32Vector};
-    use query::QueryEngineFactory;
     use table::test_util::MemTable;
     use table::TableRef;
 
@@ -314,7 +326,7 @@ mod test {
 
     #[tokio::test]
     async fn test_dist_table_scan() {
-        let table = Arc::new(new_dist_table());
+        let table = Arc::new(new_dist_table().await);
 
         let sql = "select a, row_id from numbers where a < 10 and row_id >= 10";
         println!("{}", sql);
@@ -377,7 +389,7 @@ mod test {
         }
     }
 
-    fn new_dist_table() -> DistTable {
+    async fn new_dist_table() -> DistTable {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("row_id", ConcreteDataType::uint32_datatype(), true),
@@ -408,23 +420,15 @@ mod test {
         let catalog_list1 = new_catalog_list(vec![memtable1, memtable2, memtable3]);
         let catalog_list2 = new_catalog_list(vec![memtable4]);
 
-        let factory1 = QueryEngineFactory::new(catalog_list1.clone());
-        let factory2 = QueryEngineFactory::new(catalog_list2.clone());
-        let query_engine1 = factory1.query_engine();
-        let query_engine2 = factory2.query_engine();
+        let client1 = Client::default();
+        let mut db1 = Database::new("greptime", client1.clone());
+        db1.start("127.0.0.1:4100").await.unwrap();
+        let datanode_instance1 = DatanodeInstance::new(catalog_list1, db1);
 
-        let datanode_instance1 = DatanodeInstance::new(
-            catalog_list1,
-            HashMap::from([
-                (Region::new(1), query_engine1.clone()),
-                (Region::new(2), query_engine1.clone()),
-                (Region::new(3), query_engine1.clone()),
-            ]),
-        );
-        let datanode_instance2 = DatanodeInstance::new(
-            catalog_list2,
-            HashMap::from([(Region::new(4), query_engine2.clone())]),
-        );
+        let client2 = Client::default();
+        let mut db2 = Database::new("greptime", client2.clone());
+        db2.start("127.0.0.1:4200").await.unwrap();
+        let datanode_instance2 = DatanodeInstance::new(catalog_list2, db2);
 
         let datanode_instances = HashMap::from([
             (Datanode::new(100), datanode_instance1),
@@ -441,7 +445,7 @@ mod test {
                 (Region::new(3), Datanode::new(100)),
                 (Region::new(4), Datanode::new(200)),
             ]),
-            datanode_instances,
+            datanode_instances: Arc::new(Mutex::new(datanode_instances)),
         }
     }
 
@@ -459,7 +463,7 @@ mod test {
     }
 
     fn new_catalog_list(tables: Vec<MemTable>) -> CatalogListRef {
-        let catalog_list = catalog::memory::new_memory_catalog_list().unwrap();
+        let catalog_list = catalog::local::memory::new_memory_catalog_list().unwrap();
         let catalog = Arc::new(MemoryCatalogProvider::new());
         let schema = Arc::new(MemorySchemaProvider::new());
 
@@ -468,15 +472,19 @@ mod test {
                 .register_table(table.table_name().to_string(), Arc::new(table))
                 .unwrap();
         }
-        catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema);
-        catalog_list.register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog);
+        catalog
+            .register_schema("public".to_string(), schema)
+            .unwrap();
+        catalog_list
+            .register_catalog("greptime".to_string(), catalog)
+            .unwrap();
 
         catalog_list
     }
 
-    #[test]
-    fn test_find_datanode() {
-        let table = new_dist_table();
+    #[tokio::test]
+    async fn test_find_datanode() {
+        let table = new_dist_table().await;
 
         let datanodes = table
             .find_datanodes(vec![Region::new(1), Region::new(2)])
@@ -507,9 +515,9 @@ mod test {
         ));
     }
 
-    #[test]
-    fn test_find_regions() {
-        let table = new_dist_table();
+    #[tokio::test]
+    async fn test_find_regions() {
+        let table = new_dist_table().await;
 
         let test = |filters: Vec<Expr>, expect_regions: Vec<u64>| {
             let mut regions = table.find_regions(filters.as_slice()).unwrap();

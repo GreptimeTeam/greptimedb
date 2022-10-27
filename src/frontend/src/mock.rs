@@ -1,21 +1,22 @@
 // FIXME(LFC): no mock
 
-use std::collections::HashMap;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use catalog::{CatalogListRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::CatalogListRef;
+use client::{Database, Select};
 use common_query::prelude::Expr;
 use common_query::Output;
 use common_recordbatch::util;
 use common_recordbatch::RecordBatches;
+use datafusion::logical_plan::LogicalPlan as DfLogicPlan;
 use datafusion::logical_plan::LogicalPlanBuilder;
+use datafusion_expr::Expr as DfExpr;
 use datafusion_expr::Operator;
 use datatypes::prelude::Value;
+use datatypes::schema::SchemaRef;
 use query::plan::LogicalPlan;
-use query::QueryEngineRef;
 use table::table::adapter::DfTableProviderAdapter;
-use tokio::sync::Mutex;
 
 struct PartitionColumn {
     column_name: String,
@@ -69,7 +70,7 @@ impl PartitionColumn {
     }
 }
 
-pub(crate) struct RangePartitionRule {
+pub struct RangePartitionRule {
     partition_column: PartitionColumn,
 }
 
@@ -132,7 +133,7 @@ impl PartitionExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct Datanode {
+pub struct Datanode {
     id: u64,
 }
 
@@ -144,9 +145,9 @@ impl Datanode {
 }
 
 #[derive(Clone)]
-pub(crate) struct DatanodeInstance {
+pub struct DatanodeInstance {
     catalog_list: CatalogListRef,
-    query_engines: Arc<Mutex<HashMap<Region, QueryEngineRef>>>,
+    db: Database,
 }
 
 impl std::fmt::Debug for DatanodeInstance {
@@ -157,27 +158,22 @@ impl std::fmt::Debug for DatanodeInstance {
 
 impl DatanodeInstance {
     #[allow(dead_code)]
-    pub(crate) fn new(
-        catalog_list: CatalogListRef,
-        query_engines: HashMap<Region, QueryEngineRef>,
-    ) -> Self {
-        Self {
-            catalog_list,
-            query_engines: Arc::new(Mutex::new(query_engines)),
-        }
+    pub(crate) fn new(catalog_list: CatalogListRef, db: Database) -> Self {
+        Self { catalog_list, db }
     }
 
     pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> RecordBatches {
-        let query_engines = self.query_engines.lock().await;
-
         let mut recordbatches = Vec::new();
         for region in plan.regions.iter() {
             let logical_plan = self.build_logical_plan(&plan, region);
-            let engine = query_engines.get(region).unwrap();
-            let output = engine.execute(&logical_plan).await.unwrap();
+            let sql = to_sql(logical_plan);
+            println!("build sql: {} for region {}", sql, region.id);
+            let result = self.db.select(Select::Sql(sql)).await.unwrap();
+            let output: Output = result.try_into().unwrap();
 
             let regional_recordbatches = &mut match output {
                 Output::Stream(stream) => util::collect(stream).await.unwrap(),
+                Output::RecordBatches(x) => x.take(),
                 _ => unreachable!(),
             };
             recordbatches.append(regional_recordbatches);
@@ -188,28 +184,79 @@ impl DatanodeInstance {
     }
 
     fn build_logical_plan(&self, table_scan: &TableScanPlan, region: &Region) -> LogicalPlan {
-        let table_name = format!("{}-region-{}", table_scan.table_name, region.id);
-
-        let catalog = self.catalog_list.catalog(DEFAULT_CATALOG_NAME).unwrap();
-        let schema = catalog.schema(DEFAULT_SCHEMA_NAME).unwrap();
-        let table = schema.table(&table_name).unwrap();
+        let catalog = self.catalog_list.catalog("greptime").unwrap().unwrap();
+        let schema = catalog.schema("public").unwrap().unwrap();
+        let table = schema.table(&table_scan.table_name).unwrap().unwrap();
         let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
 
-        let mut builder = LogicalPlanBuilder::scan(
+        let mut builder = LogicalPlanBuilder::scan_with_filters(
             table_scan.table_name.clone(),
             table_provider,
             table_scan.projection.clone(),
+            table_scan
+                .filters
+                .iter()
+                .map(|x| x.df_expr().clone())
+                .collect::<Vec<_>>(),
         )
         .unwrap();
         if let Some(limit) = table_scan.limit {
             builder = builder.limit(limit).unwrap();
         }
-        for filter in table_scan.filters.iter() {
-            builder = builder.filter(filter.df_expr().clone()).unwrap();
-        }
 
-        LogicalPlan::DfPlan(builder.build().unwrap())
+        let plan = builder.build().unwrap();
+        println!("build logical plan: {:?}", plan);
+        LogicalPlan::DfPlan(plan)
     }
+}
+
+fn to_sql(plan: LogicalPlan) -> String {
+    let plan = match plan {
+        LogicalPlan::DfPlan(df_plan) => df_plan,
+    };
+    let table_scan = match plan {
+        DfLogicPlan::TableScan(table_scan) => table_scan,
+        _ => unreachable!("unknown plan: {:?}", plan),
+    };
+
+    let schema: SchemaRef = Arc::new(table_scan.source.schema().try_into().unwrap());
+
+    let projection = table_scan
+        .projection
+        .map(|x| {
+            x.iter()
+                .map(|i| schema.column_name_by_index(*i).to_string())
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_else(|| {
+            schema
+                .column_schemas()
+                .iter()
+                .map(|x| x.name.clone())
+                .collect::<Vec<String>>()
+        })
+        .join(", ");
+
+    let mut sql = format!("select {} from {}", projection, &table_scan.table_name);
+
+    let filters = table_scan
+        .filters
+        .iter()
+        .map(expr_to_sql)
+        .collect::<Vec<String>>()
+        .join(" AND ");
+    if !filters.is_empty() {
+        sql.push_str(&format!(" where {}", filters));
+    }
+
+    if let Some(limit) = table_scan.limit {
+        sql.push_str(&format!(" limit {}", limit));
+    }
+    sql
+}
+
+fn expr_to_sql(expr: &DfExpr) -> String {
+    todo!()
 }
 
 #[derive(Debug)]
