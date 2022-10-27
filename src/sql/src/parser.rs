@@ -124,22 +124,22 @@ impl<'a> ParserContext<'a> {
                 }));
             }
             _ => {
-                let db_name =
+                let tabname =
                     self.parser
                         .parse_object_name()
                         .with_context(|_| error::UnexpectedSnafu {
                             sql: self.sql,
-                            expected: "a database name",
+                            expected: "a table name",
                             actual: self.peek_token_as_string(),
                         })?;
                 ensure!(
-                    db_name.0.len() == 1,
+                    tabname.0.len() == 1,
                     InvalidDatabaseNameSnafu {
-                        name: db_name.to_string(),
+                        name: tabname.to_string(),
                     }
                 );
 
-                Some(db_name.to_string())
+                Some(tabname.to_string())
             }
         };
         Ok(Statement::ShowCreateTable(ShowCreateTable { tablename }))
