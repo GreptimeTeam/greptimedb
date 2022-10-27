@@ -126,6 +126,15 @@ pub enum Error {
         backtrace: Backtrace,
         source: std::io::Error,
     },
+
+    #[snafu(display("Local and remote catalog data are inconsistent, msg: {}", msg))]
+    CatalogStateInconsistent { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to perform metasrv operation, source: {}", source))]
+    MetaSrv {
+        #[snafu(backtrace)]
+        source: meta_client::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -138,7 +147,8 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. }
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
-            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
+            | Error::InvalidEntryType { .. }
+            | Error::CatalogStateInconsistent { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue
@@ -156,9 +166,9 @@ impl ErrorExt for Error {
             | Error::CreateSystemCatalog { source, .. }
             | Error::InsertTableRecord { source, .. }
             | Error::OpenTable { source, .. }
-            | Error::CreateTable { source, .. }
-            | Error::SystemCatalogTableScan { source } => source.status_code(),
-
+            | Error::CreateTable { source, .. } => source.status_code(),
+            Error::MetaSrv { source, .. } => source.status_code(),
+            Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
         }
     }
