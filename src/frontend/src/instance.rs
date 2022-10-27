@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::iter;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -15,27 +16,31 @@ use client::{Client, Database};
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::info;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use meta_client::client::MetaClient;
+use meta_client::rpc::{CreateRequest, Partition, TableName};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
 use snafu::prelude::*;
 use sql::ast::{ColumnDef, TableConstraint};
 use sql::statements::column_def_to_schema;
+use sql::statements::create_table::Partitions as SqlPartitions;
 use sql::statements::create_table::{CreateTable, TIME_INDEX};
 use sql::statements::statement::Statement;
 use sql::statements::{
     sql_data_type_to_concrete_data_type, sql_value_to_value, table_idents_to_full_name,
 };
 use sql::{dialect::GenericDialect, parser::ParserContext};
+use sqlparser::ast::Value as SqlValue;
+use sqlparser::ast::{Ident, SqlOption};
 use tokio::sync::RwLock;
 
 use crate::catalog::FrontendCatalogList;
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
-use crate::mock::{RangePartitionRule, Region};
+use crate::mock::{Datanode, RangePartitionRule, Region};
 use crate::sql::insert_to_request;
 
 mod influxdb;
@@ -44,22 +49,24 @@ mod opentsdb;
 pub(crate) type InstanceRef = Arc<Instance>;
 
 pub struct Instance {
-    dbs: Vec<Database>,
-    admins: Vec<Admin>,
     query_engine: QueryEngineRef,
     catalog_list: CatalogListRef,
     partition_rule: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
+    meta_client: MetaClient,
+    datanode_instances: Arc<RwLock<HashMap<u64, Database>>>,
 }
 
 impl Instance {
     pub(crate) async fn new() -> Self {
         let meta_client = Self::prepare_meta_client().await;
         let partition_rules = Arc::new(RwLock::new(HashMap::new()));
+        let datanode_instances = Arc::new(RwLock::new(HashMap::new()));
         let catalog_list = Arc::new(FrontendCatalogList::new(
             Arc::new(MetaKvBackend {
-                client: meta_client,
+                client: meta_client.clone(),
             }),
             partition_rules.clone(),
+            datanode_instances.clone(),
         ));
 
         info!(
@@ -78,19 +85,11 @@ impl Instance {
         let query_engine = factory.query_engine().clone();
 
         Self {
-            dbs: vec![
-                Database::new("greptime", Client::default()),
-                Database::new("greptime", Client::default()),
-                Database::new("greptime", Client::default()),
-            ],
-            admins: vec![
-                Admin::new("greptime", Client::default()),
-                Admin::new("greptime", Client::default()),
-                Admin::new("greptime", Client::default()),
-            ],
             query_engine,
             catalog_list,
             partition_rule: partition_rules,
+            meta_client,
+            datanode_instances,
         }
     }
 
@@ -108,77 +107,17 @@ impl Instance {
             .channel_manager(channel_manager)
             .build();
 
-        meta_client
-            .start(&["proxy.huanglei.rocks:22009"])
-            .await
-            .unwrap();
+        meta_client.start(&["127.0.0.1:3002"]).await.unwrap();
         meta_client
     }
 
     pub(crate) async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
-        self.dbs[0].start("http://127.0.0.1:4100").await.unwrap();
-        self.dbs[1].start("http://127.0.0.1:4200").await.unwrap();
-        self.dbs[2].start("http://127.0.0.1:4300").await.unwrap();
-
-        self.admins[0].start("http://127.0.0.1:4100").await.unwrap();
-        self.admins[1].start("http://127.0.0.1:4200").await.unwrap();
-        self.admins[2].start("http://127.0.0.1:4300").await.unwrap();
-
         // let addr = opts.datanode_grpc_addr();
         // self.admin
         //     .start(addr.clone())
         //     .await
         //     .context(error::ConnectDatanodeSnafu { addr })?;
         Ok(())
-    }
-
-    async fn register_dist_table(&self, create_table: &CreateTable) {
-        let (catalog_name, schema_name, table_name) =
-            table_idents_to_full_name(&create_table.name).unwrap();
-
-        let column_schemas = create_table
-            .columns
-            .iter()
-            .map(|x| column_def_to_schema(x).unwrap())
-            .collect::<Vec<ColumnSchema>>();
-        // let table_schema = Schema::new(column_schemas);
-
-        let partition_rule = create_partition_rule(&create_table);
-        let mut this_partition_rule = self.partition_rule.write().await;
-        this_partition_rule.insert(table_name, partition_rule);
-
-        // let mut region_dist_map = HashMap::new();
-        // let partitions = create_table.partitions.as_ref().unwrap().entries.len();
-        // for i in 0..partitions {
-        //     region_dist_map.insert(
-        //         Region::new(i as u64 + 1),
-        //         Datanode::new((i as u64 + 1) * 100),
-        //     );
-        // }
-        //
-        // let dist_table = Arc::new(DistTable {
-        //     table_name: table_name.clone(),
-        //     schema: Arc::new(table_schema),
-        //     partition_rule,
-        //     region_dist_map,
-        //     datanode_instances: Arc::new(Mutex::new(HashMap::new())),
-        // });
-        //
-        // let catalog_list = self.catalog_list.clone();
-        // let datanode_instance1 = DatanodeInstance::new(catalog_list.clone(), self.dbs[0].clone());
-        // let datanode_instance2 = DatanodeInstance::new(catalog_list.clone(), self.dbs[1].clone());
-        // let datanode_instance3 = DatanodeInstance::new(catalog_list.clone(), self.dbs[2].clone());
-        //
-        // let mut datanode_instances = dist_table.datanode_instances.lock().await;
-        // datanode_instances.insert(Datanode::new(100), datanode_instance1);
-        // datanode_instances.insert(Datanode::new(200), datanode_instance2);
-        // datanode_instances.insert(Datanode::new(300), datanode_instance3);
-        //
-        // let catalog_provider = catalog_list.catalog(&catalog_name).unwrap().unwrap();
-        // let schema_provider = catalog_provider.schema(&schema_name).unwrap().unwrap();
-        // schema_provider
-        //     .register_table(table_name, dist_table.clone())
-        //     .unwrap();
     }
 }
 
@@ -199,13 +138,14 @@ impl Instance {
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine().clone();
 
-        Self {
-            dbs: vec![Database::new("greptime", client.clone())],
-            admins: vec![Admin::new("greptime", client)],
-            query_engine,
-            catalog_list,
-            partition_rule: Arc::new(Default::default()),
-        }
+        // Self {
+        //     dbs: vec![Database::new("greptime", client.clone())],
+        //     admins: vec![Admin::new("greptime", client)],
+        //     query_engine,
+        //     catalog_list,
+        //     partition_rule: Arc::new(Default::default()),
+        // }
+        todo!()
     }
 }
 
@@ -242,18 +182,99 @@ impl SqlQueryHandler for Instance {
                 Ok(Output::AffectedRows(ret))
             }
             Statement::Create(create) => {
-                if create.partitions.is_some() {
-                    self.register_dist_table(&create).await;
+                let (catalog_name, schema_name, table_name) =
+                    table_idents_to_full_name(&create.name).unwrap();
+
+                let mut create_request = CreateRequest::new(TableName::new(
+                    catalog_name,
+                    schema_name,
+                    table_name.clone(),
+                ));
+
+                let column_schemas = create
+                    .columns
+                    .iter()
+                    .map(|x| column_def_to_schema(x).unwrap())
+                    .collect::<Vec<ColumnSchema>>();
+                let table_schema = Schema::new(column_schemas);
+
+                if let Some(sql_partitions) = &create.partitions {
+                    let partition_rule = create_partition_rule(&create);
+
+                    let column_list = vec![partition_rule
+                        .partition_column
+                        .column_name()
+                        .clone()
+                        .into_bytes()];
+
+                    let partition_points = partition_rule.partition_column.partition_points();
+                    for value in partition_points
+                        .iter()
+                        .map(|x| (format!("{:?}", x).into_bytes()))
+                        .chain(iter::once(b"MAXVALUE".to_vec()))
+                        .into_iter()
+                    {
+                        let partition_proto = Partition {
+                            column_list: column_list.clone(),
+                            value_list: vec![value],
+                        };
+
+                        create_request = create_request.add_partition(partition_proto);
+                    }
+
+                    let mut rules = self.partition_rule.write().await;
+                    rules.insert(table_name.clone(), partition_rule);
                 }
+
+                let response = self.meta_client.create_route(create_request).await.unwrap();
+
+                let table_route = response.table_routes.first().unwrap();
+
+                {
+                    let mut datanode_instances = self.datanode_instances.write().await;
+                    for route in table_route.region_routes.iter() {
+                        let leader = route.leader_peer.as_ref().unwrap();
+
+                        match datanode_instances.get(&leader.id) {
+                            None => {
+                                let mut db = Database::new("greptime", Client::default());
+                                db.start(format!("http://{}", leader.addr)).await.unwrap();
+                                datanode_instances.insert(leader.id, db);
+                            }
+                            Some(_) => {
+                                info!("datanode instance already exist for node id {}", leader.id);
+                            }
+                        }
+                    }
+                }
+
+                let region_id_and_peer_addr = table_route
+                    .region_routes
+                    .iter()
+                    .map(|x| {
+                        (
+                            x.region.as_ref().unwrap().id,
+                            x.leader_peer.as_ref().map(|p| p.addr.clone()).unwrap(),
+                        )
+                    })
+                    .collect::<Vec<(u64, String)>>();
 
                 let expr = create_to_expr(create)
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu { query })?;
+
                 let mut output = None;
-                for admin in &self.admins {
+                for (region_id, peer_addr) in region_id_and_peer_addr {
+                    let mut admin = Admin::new("greptime", Client::default());
+                    admin.start(format!("http://{}", peer_addr)).await.unwrap();
+
+                    let mut expr = expr.clone();
+                    expr.table_options
+                        .insert("region_id".to_string(), region_id.to_string());
+
                     output = Some(
                         admin
-                            .create(expr.clone())
+                            .create(expr)
                             .await
                             .and_then(admin_result_to_output)
                             .map_err(BoxedError::new)
@@ -310,7 +331,7 @@ fn create_partition_rule(create: &CreateTable) -> RangePartitionRule {
         .collect::<Vec<Value>>();
 
     let regions = (0..=partition_points.len())
-        .map(|x| Region::new((x + 1) as u64))
+        .map(|x| Region::new(x as u64))
         .collect::<Vec<Region>>();
 
     RangePartitionRule::new(&column.value, partition_points, regions)

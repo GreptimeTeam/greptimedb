@@ -84,6 +84,14 @@ impl Instance {
         let schema_name = expr
             .schema_name
             .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+
+        let region_id = expr
+            .table_options
+            .get(&"region_id".to_string())
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+
         Ok(CreateTableRequest {
             id: table_id,
             catalog_name,
@@ -91,7 +99,7 @@ impl Instance {
             table_name: expr.table_name,
             desc: expr.desc,
             schema,
-            region_numbers: vec![0],
+            region_numbers: vec![region_id],
             primary_key_indices,
             create_if_not_exists: expr.create_if_not_exists,
             table_options: expr.table_options,

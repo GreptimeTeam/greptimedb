@@ -27,11 +27,12 @@ impl FrontendCatalogList {
     pub fn new(
         backend: KvBackendRef,
         range_rules: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
+        datanode_instances: Arc<RwLock<HashMap<u64, Database>>>,
     ) -> Self {
         Self {
             backend,
             range_rules,
-            datanode_instances: Arc::new(Default::default()),
+            datanode_instances,
         }
     }
 }
@@ -207,7 +208,6 @@ impl SchemaProvider for FrontendSchemaProvider {
     fn table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
         let mut table_prefix =
             common_catalog::build_table_prefix(&self.catalog_name, &self.schema_name);
-        table_prefix.push_str("-");
         table_prefix.push_str(name);
         table_prefix.push_str("-");
 
@@ -234,12 +234,17 @@ impl SchemaProvider for FrontendSchemaProvider {
                 let mut schema_opt = None;
                 while let Some(r) = iter.next().await {
                     let Kv(k, v) = r.unwrap();
+                    if !k.starts_with(table_prefix.as_bytes()) {
+                        continue;
+                    }
                     let key = TableKey::parse(String::from_utf8_lossy(&k)).unwrap();
                     let val = TableValue::parse(String::from_utf8_lossy(&v)).unwrap();
                     let node_id = val.node_id;
                     let region_ids = val.regions_ids;
                     let database = match instances.read().await.get(&node_id) {
-                        None => return Ok(None),
+                        None => {
+                            return Ok(None);
+                        }
                         Some(datanode) => datanode.clone(),
                     };
 

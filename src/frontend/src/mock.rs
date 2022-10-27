@@ -48,8 +48,12 @@ impl PartitionColumn {
         }
     }
 
-    fn column_name(&self) -> &String {
+    pub fn column_name(&self) -> &String {
         &self.column_name
+    }
+
+    pub fn partition_points(&self) -> &Vec<Value> {
+        &self.partition_points
     }
 
     fn all_regions(&self) -> Vec<Region> {
@@ -86,7 +90,7 @@ impl PartitionColumn {
 
 #[derive(Clone)]
 pub struct RangePartitionRule {
-    partition_column: PartitionColumn,
+    pub partition_column: PartitionColumn,
 }
 
 impl PartitionRule for RangePartitionRule {
@@ -134,7 +138,6 @@ pub struct Region {
     id: u64,
 }
 
-#[allow(dead_code)]
 impl Region {
     pub(crate) fn new(id: u64) -> Self {
         Self { id }
