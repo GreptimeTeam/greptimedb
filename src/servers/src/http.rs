@@ -11,13 +11,7 @@ use aide::axum::{ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi};
 use async_trait::async_trait;
 use axum::Extension;
-use axum::{
-    error_handling::HandleErrorLayer,
-    http::header,
-    response::IntoResponse,
-    response::{Json, Response},
-    routing, BoxError, Router,
-};
+use axum::{error_handling::HandleErrorLayer, response::Json, routing, BoxError, Router};
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
