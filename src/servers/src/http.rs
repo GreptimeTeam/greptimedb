@@ -70,6 +70,20 @@ pub struct HttpRecordsOutput {
     rows: Vec<Vec<Value>>,
 }
 
+impl HttpRecordsOutput {
+    pub fn num_rows(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn num_cols(&self) -> usize {
+        if let Some(schema) = &self.schema {
+            schema.column_schemas.len()
+        } else {
+            0
+        }
+    }
+}
+
 impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
     type Error = String;
 
