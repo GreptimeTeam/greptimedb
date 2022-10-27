@@ -651,18 +651,18 @@ mod tests {
     async fn test_dist_table_scan() {
         let instance = Arc::new(new_frontend_instance().await);
 
-        let sql = "select n, row_id from dist_table order by n";
-        // let sql = "select n, row_id from dist_table where n < 10";
+        // let sql = "select n, row_id from dist_table order by n";
+        let sql = "select n, row_id from dist_table where n < 10";
         println!("{}", sql);
         exec_table_scan(instance.clone(), sql).await;
 
-        // let sql = "select n, row_id from dist_table where n < 50 and n >= 20";
-        // println!("{}", sql);
-        // exec_table_scan(instance.clone(), sql).await;
-        //
-        // let sql = "select n, row_id from dist_table where n < 1000 and row_id == 1";
-        // println!("{}", sql);
-        // exec_table_scan(instance.clone(), sql).await;
+        let sql = "select n, row_id from dist_table where n < 50 and n >= 20";
+        println!("{}", sql);
+        exec_table_scan(instance.clone(), sql).await;
+
+        let sql = "select n, row_id from dist_table where n < 1000 and row_id = 1";
+        println!("{}", sql);
+        exec_table_scan(instance.clone(), sql).await;
     }
 
     async fn exec_table_scan(instance: InstanceRef, sql: &str) {

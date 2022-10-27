@@ -256,7 +256,21 @@ fn to_sql(plan: LogicalPlan) -> String {
 }
 
 fn expr_to_sql(expr: &DfExpr) -> String {
-    todo!()
+    match expr {
+        DfExpr::BinaryExpr {
+            ref left,
+            ref right,
+            ref op,
+        } => format!(
+            "{} {} {}",
+            expr_to_sql(left.as_ref()),
+            op,
+            expr_to_sql(right.as_ref())
+        ),
+        DfExpr::Column(c) => c.name.clone(),
+        DfExpr::Literal(v) => v.to_string(),
+        _ => unimplemented!("not implemented for {:?}", expr),
+    }
 }
 
 #[derive(Debug)]
