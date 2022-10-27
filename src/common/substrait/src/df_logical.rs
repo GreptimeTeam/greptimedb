@@ -4,7 +4,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use datafusion::datasource::TableProvider;
-use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
+use datafusion::logical_plan::{DFSchema, LogicalPlan, TableScan, ToDFSchema};
 use prost::Message;
 use snafu::ensure;
 use snafu::{OptionExt, ResultExt};
@@ -167,7 +167,7 @@ impl DFLogicalSubstraitConvertor {
             })?;
         let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
 
-        // Get schema direct from the table, and compare it with the schema retrived from substrait proto.
+        // Get schema directly from the table, and compare it with the schema retrived from substrait proto.
         let stored_schema = adapter.schema();
         let retrived_schema = to_schema(read_rel.base_schema.unwrap_or_default())?;
         let retrived_arrow_schema = retrived_schema.arrow_schema();
@@ -179,12 +179,33 @@ impl DFLogicalSubstraitConvertor {
             }
         );
 
+        // Calculate the projected schema
+        let df_schema = stored_schema.to_dfschema().context(DFInternalSnafu)?;
+        let projected_fields = if let Some(projection) = &projection {
+            projection
+                .iter()
+                .map(|index| df_schema.fields().get(*index).cloned())
+                .collect::<Option<_>>()
+                .context(InvalidParametersSnafu {
+                    reason: format!(
+                        "projection {:?} out of bounds, schema {}",
+                        projection, df_schema
+                    ),
+                })?
+        } else {
+            vec![]
+        };
+        let projected_schema = Arc::new(
+            DFSchema::new_with_metadata(projected_fields, Default::default())
+                .context(DFInternalSnafu)?,
+        );
+
         // TODO(ruihang): Support filters and limit
         Ok(LogicalPlan::TableScan(TableScan {
             table_name,
             source: adapter,
             projection,
-            projected_schema: stored_schema.to_dfschema_ref().context(DFInternalSnafu)?,
+            projected_schema,
             filters: vec![],
             limit: None,
         }))
@@ -401,13 +422,20 @@ mod test {
             .await
             .unwrap();
         let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
-        let schema = adapter.schema().to_dfschema_ref().unwrap();
+        let projection = vec![1, 3, 5];
+        let df_schema = adapter.schema().to_dfschema().unwrap();
+        let projected_fields = projection
+            .iter()
+            .map(|index| df_schema.field(*index).clone())
+            .collect();
+        let projected_schema =
+            Arc::new(DFSchema::new_with_metadata(projected_fields, Default::default()).unwrap());
 
         let table_scan_plan = LogicalPlan::TableScan(TableScan {
             table_name: DEFAULT_TABLE_NAME.to_string(),
             source: adapter,
-            projection: Some(vec![1, 3, 5]),
-            projected_schema: schema,
+            projection: Some(projection),
+            projected_schema,
             filters: vec![],
             limit: None,
         });
