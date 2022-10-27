@@ -34,6 +34,8 @@ impl SubCommand {
 #[derive(Debug, Parser)]
 struct StartCommand {
     #[clap(long)]
+    node_id: Option<u64>,
+    #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
     rpc_addr: Option<String>,
@@ -73,6 +75,9 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             DatanodeOptions::default()
         };
 
+        if let Some(node_id) = cmd.node_id {
+            opts.node_id = node_id;
+        }
         if let Some(addr) = cmd.http_addr {
             opts.http_addr = addr;
         }
@@ -101,6 +106,7 @@ mod tests {
     #[test]
     fn test_read_from_config_file() {
         let cmd = StartCommand {
+            node_id: None,
             http_addr: None,
             rpc_addr: None,
             mysql_addr: None,
@@ -118,9 +124,12 @@ mod tests {
         assert_eq!("0.0.0.0:3306".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
         assert_eq!(
-            "127.0.0.1:3002".to_string(),
+            "1.1.1.1:3002".to_string(),
             options.meta_client_opts.metasrv_addr
         );
+        assert_eq!(5000, options.meta_client_opts.connect_timeout_millis);
+        assert_eq!(3000, options.meta_client_opts.timeout_millis);
+        assert!(options.meta_client_opts.tcp_nodelay);
 
         assert_eq!("0.0.0.0:5432".to_string(), options.postgres_addr);
         assert_eq!(4, options.postgres_runtime_size);
