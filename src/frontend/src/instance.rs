@@ -1,6 +1,3 @@
-mod influxdb;
-mod opentsdb;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -11,13 +8,16 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::remote::MetaKvBackend;
 use catalog::{CatalogList, CatalogListRef, CatalogProvider};
 use client::admin::{admin_result_to_output, Admin};
 use client::{Client, Database};
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use datatypes::schema::{ColumnSchema, Schema};
+use common_telemetry::info;
+use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
+use meta_client::client::MetaClient;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
@@ -30,13 +30,16 @@ use sql::statements::{
     sql_data_type_to_concrete_data_type, sql_value_to_value, table_idents_to_full_name,
 };
 use sql::{dialect::GenericDialect, parser::ParserContext};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
+use crate::catalog::FrontendCatalogList;
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
-use crate::mock::{Datanode, DatanodeInstance, RangePartitionRule, Region};
+use crate::mock::{RangePartitionRule, Region};
 use crate::sql::insert_to_request;
-use crate::table::DistTable;
+
+mod influxdb;
+mod opentsdb;
 
 pub(crate) type InstanceRef = Arc<Instance>;
 
@@ -45,20 +48,31 @@ pub struct Instance {
     admins: Vec<Admin>,
     query_engine: QueryEngineRef,
     catalog_list: CatalogListRef,
+    partition_rule: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
 }
 
 impl Instance {
-    pub(crate) fn new() -> Self {
-        let catalog_list = catalog::local::memory::new_memory_catalog_list().unwrap();
-        let catalog = Arc::new(MemoryCatalogProvider::new());
-        let schema = Arc::new(MemorySchemaProvider::new());
+    pub(crate) async fn new() -> Self {
+        let meta_client = Self::prepare_meta_client().await;
+        let partition_rules = Arc::new(RwLock::new(HashMap::new()));
+        let catalog_list = Arc::new(FrontendCatalogList::new(
+            Arc::new(MetaKvBackend {
+                client: meta_client,
+            }),
+            partition_rules.clone(),
+        ));
 
-        catalog
-            .register_schema("public".to_string(), schema)
-            .unwrap();
-        catalog_list
-            .register_catalog("greptime".to_string(), catalog)
-            .unwrap();
+        info!(
+            "Starting frontend instance, default tables: {:?}",
+            catalog_list
+                .catalog("greptime")
+                .unwrap()
+                .unwrap()
+                .schema("public")
+                .unwrap()
+                .unwrap()
+                .table_names()
+        );
 
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine().clone();
@@ -76,7 +90,29 @@ impl Instance {
             ],
             query_engine,
             catalog_list,
+            partition_rule: partition_rules,
         }
+    }
+
+    pub async fn prepare_meta_client() -> MetaClient {
+        let config = common_grpc::channel_manager::ChannelConfig::new()
+            .timeout(std::time::Duration::from_secs(3))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .tcp_nodelay(true);
+
+        let channel_manager = common_grpc::channel_manager::ChannelManager::with_config(config);
+        let mut meta_client = meta_client::client::MetaClientBuilder::new(0, 1)
+            .enable_heartbeat()
+            .enable_router()
+            .enable_store()
+            .channel_manager(channel_manager)
+            .build();
+
+        meta_client
+            .start(&["proxy.huanglei.rocks:22009"])
+            .await
+            .unwrap();
+        meta_client
     }
 
     pub(crate) async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
@@ -105,43 +141,44 @@ impl Instance {
             .iter()
             .map(|x| column_def_to_schema(x).unwrap())
             .collect::<Vec<ColumnSchema>>();
-        let table_schema = Schema::new(column_schemas);
+        // let table_schema = Schema::new(column_schemas);
 
         let partition_rule = create_partition_rule(&create_table);
+        let mut this_partition_rule = self.partition_rule.write().await;
+        this_partition_rule.insert(table_name, partition_rule);
 
-        let mut region_dist_map = HashMap::new();
-        let partitions = create_table.partitions.as_ref().unwrap().entries.len();
-        assert_eq!(partitions, 3, "currently only 3 partitions are allowed");
-        for i in 0..partitions {
-            region_dist_map.insert(
-                Region::new(i as u64 + 1),
-                Datanode::new((i as u64 + 1) * 100),
-            );
-        }
-
-        let dist_table = Arc::new(DistTable {
-            table_name: table_name.clone(),
-            schema: Arc::new(table_schema),
-            partition_rule,
-            region_dist_map,
-            datanode_instances: Arc::new(Mutex::new(HashMap::new())),
-        });
-
-        let catalog_list = self.catalog_list.clone();
-        let datanode_instance1 = DatanodeInstance::new(catalog_list.clone(), self.dbs[0].clone());
-        let datanode_instance2 = DatanodeInstance::new(catalog_list.clone(), self.dbs[1].clone());
-        let datanode_instance3 = DatanodeInstance::new(catalog_list.clone(), self.dbs[2].clone());
-
-        let mut datanode_instances = dist_table.datanode_instances.lock().await;
-        datanode_instances.insert(Datanode::new(100), datanode_instance1);
-        datanode_instances.insert(Datanode::new(200), datanode_instance2);
-        datanode_instances.insert(Datanode::new(300), datanode_instance3);
-
-        let catalog_provider = catalog_list.catalog(&catalog_name).unwrap().unwrap();
-        let schema_provider = catalog_provider.schema(&schema_name).unwrap().unwrap();
-        schema_provider
-            .register_table(table_name, dist_table.clone())
-            .unwrap();
+        // let mut region_dist_map = HashMap::new();
+        // let partitions = create_table.partitions.as_ref().unwrap().entries.len();
+        // for i in 0..partitions {
+        //     region_dist_map.insert(
+        //         Region::new(i as u64 + 1),
+        //         Datanode::new((i as u64 + 1) * 100),
+        //     );
+        // }
+        //
+        // let dist_table = Arc::new(DistTable {
+        //     table_name: table_name.clone(),
+        //     schema: Arc::new(table_schema),
+        //     partition_rule,
+        //     region_dist_map,
+        //     datanode_instances: Arc::new(Mutex::new(HashMap::new())),
+        // });
+        //
+        // let catalog_list = self.catalog_list.clone();
+        // let datanode_instance1 = DatanodeInstance::new(catalog_list.clone(), self.dbs[0].clone());
+        // let datanode_instance2 = DatanodeInstance::new(catalog_list.clone(), self.dbs[1].clone());
+        // let datanode_instance3 = DatanodeInstance::new(catalog_list.clone(), self.dbs[2].clone());
+        //
+        // let mut datanode_instances = dist_table.datanode_instances.lock().await;
+        // datanode_instances.insert(Datanode::new(100), datanode_instance1);
+        // datanode_instances.insert(Datanode::new(200), datanode_instance2);
+        // datanode_instances.insert(Datanode::new(300), datanode_instance3);
+        //
+        // let catalog_provider = catalog_list.catalog(&catalog_name).unwrap().unwrap();
+        // let schema_provider = catalog_provider.schema(&schema_name).unwrap().unwrap();
+        // schema_provider
+        //     .register_table(table_name, dist_table.clone())
+        //     .unwrap();
     }
 }
 
@@ -167,6 +204,7 @@ impl Instance {
             admins: vec![Admin::new("greptime", client)],
             query_engine,
             catalog_list,
+            partition_rule: Arc::new(Default::default()),
         }
     }
 }
@@ -411,19 +449,15 @@ mod tests {
 
     use api::v1::codec::{InsertBatch, SelectResult};
     use api::v1::{
-        admin_expr, admin_result, column, column::SemanticType, object_expr, object_result,
-        select_expr, Column, ExprHeader, MutateResult, SelectExpr,
+        admin_expr, admin_result, column, column::SemanticType, insert_expr, object_expr,
+        object_result, select_expr, Column, ExprHeader, InsertExpr, MutateResult, SelectExpr,
     };
-    use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, CatalogListRef, CatalogProvider, SchemaProvider};
+    use catalog::{CatalogProvider, SchemaProvider};
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, Schema};
     use datatypes::value::Value;
-    use query::QueryEngineFactory;
-    use table::TableRef;
-    use tokio::sync::Mutex;
 
     use super::*;
     use crate::mock::{Datanode, DatanodeInstance, RangePartitionRule, Region};
@@ -817,7 +851,7 @@ mod tests {
     }
 
     async fn new_frontend_instance() -> Instance {
-        let mut instance = Instance::new();
+        let mut instance = Instance::new().await;
         instance.start(&FrontendOptions::default()).await.unwrap();
         instance
     }

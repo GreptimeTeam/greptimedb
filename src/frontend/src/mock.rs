@@ -25,6 +25,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::error::Error;
 use crate::partition::PartitionRule;
 
+#[derive(Clone)]
 pub struct PartitionColumn {
     column_name: String,
     // Does not store the last "MAXVALUE" bound because it can make our binary search in finding regions easier
@@ -83,6 +84,7 @@ impl PartitionColumn {
     }
 }
 
+#[derive(Clone)]
 pub struct RangePartitionRule {
     partition_column: PartitionColumn,
 }

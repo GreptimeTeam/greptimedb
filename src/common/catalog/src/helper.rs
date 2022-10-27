@@ -102,6 +102,7 @@ impl TableKey {
 pub struct TableValue {
     pub id: TableId,
     pub node_id: u64,
+    pub regions_ids: Vec<u64>,
     pub meta: TableMeta,
 }
 
@@ -285,6 +286,7 @@ mod tests {
         let value = TableValue {
             id: 42,
             node_id: 32,
+            regions_ids: vec![1, 2, 3],
             meta,
         };
         let serialized = serde_json::to_string(&value).unwrap();
