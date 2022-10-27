@@ -72,6 +72,7 @@ pub async fn create_test_table(instance: &Instance) -> Result<()> {
                 create_if_not_exists: true,
                 primary_key_indices: vec![3, 0], // "host" and "ts" are primary keys
                 table_options: HashMap::new(),
+                region_numbers: vec![0],
             },
         )
         .await

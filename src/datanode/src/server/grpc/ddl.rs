@@ -91,6 +91,7 @@ impl Instance {
             table_name: expr.table_name,
             desc: expr.desc,
             schema,
+            region_numbers: vec![0],
             primary_key_indices,
             create_if_not_exists: expr.create_if_not_exists,
             table_options: expr.table_options,
