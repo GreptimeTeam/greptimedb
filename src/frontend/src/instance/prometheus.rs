@@ -48,15 +48,18 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
     Ok(ResponseType::from_i32(*response_type).unwrap())
 }
 
-fn object_result_to_query_result(table_name: &str, object_result: ObjectResult) -> QueryResult {
+fn object_result_to_query_result(
+    table_name: &str,
+    object_result: ObjectResult,
+) -> ServerResult<QueryResult> {
     let select_result = match object_result {
         ObjectResult::Select(result) => result,
         _ => unreachable!(),
     };
 
-    QueryResult {
-        timeseries: prometheus::select_result_to_timeseries(table_name, select_result),
-    }
+    Ok(QueryResult {
+        timeseries: prometheus::select_result_to_timeseries(table_name, select_result)?,
+    })
 }
 
 async fn handle_remote_queries(
@@ -105,6 +108,7 @@ impl PrometheusProtocolHandler for Instance {
     async fn read(&self, request: ReadRequest) -> ServerResult<HttpResponse> {
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
+        // TODO(dennis): use read_hints to speedup query if possible
         let results = handle_remote_queries(&self.db, &request.queries).await?;
 
         match response_type {
@@ -114,12 +118,13 @@ impl PrometheusProtocolHandler for Instance {
                     .map(|(table_name, object_result)| {
                         object_result_to_query_result(&table_name, object_result)
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<ServerResult<Vec<_>>>()?;
 
                 let response = ReadResponse {
                     results: query_results,
                 };
 
+                // TODO(dennis): may consume too much memory, adds flow control
                 Ok(HttpResponse::Bytes(BytesResponse {
                     content_type: "application/x-protobuf".to_string(),
                     content_encoding: "snappy".to_string(),
@@ -135,5 +140,143 @@ impl PrometheusProtocolHandler for Instance {
 
     async fn inject_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
         todo!();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::prometheus::remote::{
+        label_matcher::Type as MatcherType, Label, LabelMatcher, Sample,
+    };
+
+    use super::*;
+    use crate::tests;
+
+    #[tokio::test]
+    async fn test_prometheus_remote_write_and_read() {
+        let instance = tests::create_frontend_instance().await;
+
+        let write_request = WriteRequest {
+            timeseries: prometheus::mock_timeseries(),
+            ..Default::default()
+        };
+
+        assert!(instance.write(write_request).await.is_ok());
+
+        let read_request = ReadRequest {
+            queries: vec![
+                Query {
+                    start_timestamp_ms: 1000,
+                    end_timestamp_ms: 2000,
+                    matchers: vec![LabelMatcher {
+                        name: prometheus::METRIC_NAME_LABEL.to_string(),
+                        value: "metric1".to_string(),
+                        r#type: 0,
+                    }],
+                    ..Default::default()
+                },
+                Query {
+                    start_timestamp_ms: 1000,
+                    end_timestamp_ms: 3000,
+                    matchers: vec![
+                        LabelMatcher {
+                            name: prometheus::METRIC_NAME_LABEL.to_string(),
+                            value: "metric3".to_string(),
+                            r#type: 0,
+                        },
+                        LabelMatcher {
+                            name: "app".to_string(),
+                            value: "biz".to_string(),
+                            r#type: MatcherType::Eq as i32,
+                        },
+                    ],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let response = instance.read(read_request).await.unwrap();
+
+        match response {
+            HttpResponse::Bytes(resp) => {
+                assert_eq!(resp.content_type, "application/x-protobuf");
+                assert_eq!(resp.content_encoding, "snappy");
+                let read_response = ReadResponse::decode(&resp.bytes[..]).unwrap();
+                let query_results = read_response.results;
+                assert_eq!(2, query_results.len());
+
+                assert_eq!(1, query_results[0].timeseries.len());
+                let timeseries = &query_results[0].timeseries[0];
+
+                assert_eq!(
+                    vec![
+                        Label {
+                            name: prometheus::METRIC_NAME_LABEL.to_string(),
+                            value: "metric1".to_string(),
+                        },
+                        Label {
+                            name: "job".to_string(),
+                            value: "spark".to_string(),
+                        },
+                    ],
+                    timeseries.labels
+                );
+
+                assert_eq!(
+                    timeseries.samples,
+                    vec![
+                        Sample {
+                            value: 1.0,
+                            timestamp: 1000,
+                        },
+                        Sample {
+                            value: 2.0,
+                            timestamp: 2000,
+                        }
+                    ]
+                );
+
+                assert_eq!(1, query_results[1].timeseries.len());
+                let timeseries = &query_results[1].timeseries[0];
+
+                assert_eq!(
+                    vec![
+                        Label {
+                            name: prometheus::METRIC_NAME_LABEL.to_string(),
+                            value: "metric3".to_string(),
+                        },
+                        Label {
+                            name: "idc".to_string(),
+                            value: "z002".to_string(),
+                        },
+                        Label {
+                            name: "app".to_string(),
+                            value: "biz".to_string(),
+                        },
+                    ],
+                    timeseries.labels
+                );
+
+                assert_eq!(
+                    timeseries.samples,
+                    vec![
+                        Sample {
+                            value: 5.0,
+                            timestamp: 1000,
+                        },
+                        Sample {
+                            value: 6.0,
+                            timestamp: 2000,
+                        },
+                        Sample {
+                            value: 7.0,
+                            timestamp: 3000,
+                        }
+                    ]
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 }

@@ -135,8 +135,11 @@ pub enum Error {
     #[snafu(display("Failed to decode prometheus remote request, source: {}", source))]
     DecompressPromRemoteRequest { source: snap::Error },
 
-    #[snafu(display("Valid prometheus remote request, msg: {}", msg))]
-    InvalidPromRemoteRequst { msg: String, backtrace: Backtrace },
+    #[snafu(display("Invalid prometheus remote request, msg: {}", msg))]
+    InvalidPromRemoteRequest { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Invalid prometheus remote read query result, msg: {}", msg))]
+    InvalidPromRemoteReadQueryResult { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -152,6 +155,7 @@ impl ErrorExt for Error {
             | CollectRecordbatch { .. }
             | StartHttp { .. }
             | StartGrpc { .. }
+            | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
@@ -168,7 +172,7 @@ impl ErrorExt for Error {
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
-            | InvalidPromRemoteRequst { .. }
+            | InvalidPromRemoteRequest { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } => source.status_code(),
@@ -204,6 +208,9 @@ impl IntoResponse for Error {
             | Error::InfluxdbLinesWrite { .. }
             | Error::InvalidOpentsdbLine { .. }
             | Error::InvalidOpentsdbJsonRequest { .. }
+            | Error::DecodePromRemoteRequest { .. }
+            | Error::DecompressPromRemoteRequest { .. }
+            | Error::InvalidPromRemoteRequest { .. }
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
             _ => (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
