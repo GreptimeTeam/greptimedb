@@ -43,7 +43,7 @@ impl Instance {
     pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
-        let meta_client = new_metasrv_client(&opts.meta_client_opts).await?;
+        let meta_client = new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?;
 
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
@@ -65,7 +65,7 @@ impl Instance {
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
         let heartbeat_task = HeartbeatTask::new(
-            1, /*node id not set*/
+            opts.node_id, /*node id not set*/
             opts.rpc_addr.clone(),
             meta_client.clone(),
         );
@@ -158,9 +158,9 @@ async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStor
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.
-async fn new_metasrv_client(meta_config: &MetaClientOpts) -> Result<MetaClient> {
+async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Result<MetaClient> {
     let cluster_id = 0; // TODO(hl): read from config
-    let member_id = 1; // TODO(hl): read from config
+    let member_id = node_id;
 
     let config = ChannelConfig::new()
         .timeout(Duration::from_millis(meta_config.timeout_millis))
