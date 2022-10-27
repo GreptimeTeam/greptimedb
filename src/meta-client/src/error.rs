@@ -51,6 +51,13 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Illegal state from server, code: {}, error: {}", code, err_msg))]
+    IllegalServerState {
+        code: i32,
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 #[allow(dead_code)]
@@ -75,7 +82,8 @@ impl ErrorExt for Error {
             | Error::NotStarted { .. }
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
-            | Error::CreateChannel { .. } => StatusCode::Internal,
+            | Error::CreateChannel { .. }
+            | Error::IllegalServerState { .. } => StatusCode::Internal,
             Error::RouteInfoCorrupted { .. } => StatusCode::Unexpected,
         }
     }
@@ -196,5 +204,19 @@ mod tests {
 
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Unexpected);
+    }
+
+    #[test]
+    fn test_illegal_server_state_error() {
+        let e = throw_none_option()
+            .context(IllegalServerStateSnafu {
+                code: 1,
+                err_msg: "",
+            })
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Internal);
     }
 }
