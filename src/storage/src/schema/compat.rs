@@ -35,7 +35,16 @@ fn is_source_column_readable(
     source_column: &ColumnMetadata,
     dest_column: &ColumnMetadata,
 ) -> Result<bool> {
-    debug_assert_eq!(source_column.name(), dest_column.name());
+    ensure!(
+        source_column.name() == dest_column.name(),
+        error::CompatReadSnafu {
+            reason: format!(
+                "try to use column in {} for column {}",
+                source_column.name(),
+                dest_column.name()
+            ),
+        }
+    );
 
     if source_column.id() != dest_column.id() {
         return Ok(false);
@@ -300,9 +309,12 @@ impl ReadResolver {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::data_type::ConcreteDataType;
     use store_api::storage::consts;
+    use store_api::storage::ColumnDescriptorBuilder;
 
     use super::*;
+    use crate::error::Error;
     use crate::metadata::RegionMetadata;
     use crate::schema::tests;
     use crate::schema::{ProjectedSchema, RegionSchema};
@@ -556,5 +568,87 @@ mod tests {
 
         let new_batch = call_arrow_chunk_to_batch(&resolver, &batch);
         check_batch_with_null_padding(&batch, &new_batch, &[2]);
+    }
+
+    #[inline]
+    fn new_column_desc_builder() -> ColumnDescriptorBuilder {
+        ColumnDescriptorBuilder::new(10, "test", ConcreteDataType::int32_datatype())
+    }
+
+    #[test]
+    fn test_is_source_column_readable() {
+        let desc = new_column_desc_builder().build().unwrap();
+        let source = ColumnMetadata { cf_id: 1, desc };
+
+        // Same column is always readable, also tests read nullable column
+        // as a nullable column.
+        assert!(is_source_column_readable(&source, &source).unwrap());
+
+        // Different id.
+        let desc = new_column_desc_builder()
+            .id(source.desc.id + 1)
+            .build()
+            .unwrap();
+        let dest = ColumnMetadata { cf_id: 1, desc };
+        assert!(!is_source_column_readable(&source, &dest).unwrap());
+    }
+
+    #[test]
+    fn test_nullable_column_read_by_not_null() {
+        let desc = new_column_desc_builder().build().unwrap();
+        assert!(desc.is_nullable());
+        let source = ColumnMetadata { cf_id: 1, desc };
+
+        let desc = new_column_desc_builder()
+            .is_nullable(false)
+            .build()
+            .unwrap();
+        let dest = ColumnMetadata { cf_id: 1, desc };
+
+        let err = is_source_column_readable(&source, &dest).unwrap_err();
+        assert!(
+            matches!(err, Error::CompatRead { .. }),
+            "{:?} is not CompatRead",
+            err
+        );
+    }
+
+    #[test]
+    fn test_read_not_null_column() {
+        let desc = new_column_desc_builder()
+            .is_nullable(false)
+            .build()
+            .unwrap();
+        let source = ColumnMetadata { cf_id: 1, desc };
+
+        let desc = new_column_desc_builder()
+            .is_nullable(false)
+            .build()
+            .unwrap();
+        let not_null_dest = ColumnMetadata { cf_id: 1, desc };
+        assert!(is_source_column_readable(&source, &not_null_dest).unwrap());
+
+        let desc = new_column_desc_builder().build().unwrap();
+        let null_dest = ColumnMetadata { cf_id: 1, desc };
+        assert!(is_source_column_readable(&source, &null_dest).unwrap());
+    }
+
+    #[test]
+    fn test_read_column_with_different_name() {
+        let desc = new_column_desc_builder().build().unwrap();
+        let source = ColumnMetadata { cf_id: 1, desc };
+
+        let desc = new_column_desc_builder()
+            .name(format!("{}_other", source.desc.name))
+            .build()
+            .unwrap();
+        let dest = ColumnMetadata { cf_id: 1, desc };
+
+        let err = is_source_column_readable(&source, &dest).unwrap_err();
+        assert!(
+            matches!(err, Error::CompatRead { .. }),
+            "{:?} is not CompatRead",
+            err
+        );
     }
 }
