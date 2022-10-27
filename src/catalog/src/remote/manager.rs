@@ -34,7 +34,7 @@ use crate::{
 
 /// Catalog manager based on metasrv.
 pub struct RemoteCatalogManager {
-    node_id: String,
+    node_id: u64,
     backend: KvBackendRef,
     catalogs: Arc<ArcSwap<HashMap<String, CatalogProviderRef>>>,
     next_table_id: Arc<AtomicU32>,
@@ -44,7 +44,7 @@ pub struct RemoteCatalogManager {
 }
 
 impl RemoteCatalogManager {
-    pub fn new(engine: TableEngineRef, node_id: String, backend: KvBackendRef) -> Self {
+    pub fn new(engine: TableEngineRef, node_id: u64, backend: KvBackendRef) -> Self {
         Self {
             engine,
             node_id,
@@ -59,14 +59,14 @@ impl RemoteCatalogManager {
     fn build_catalog_key(&self, catalog_name: impl AsRef<str>) -> CatalogKey {
         CatalogKey {
             catalog_name: catalog_name.as_ref().to_string(),
-            node_id: self.node_id.clone(),
+            node_id: self.node_id,
         }
     }
 
     fn new_catalog_provider(&self, catalog_name: &str) -> CatalogProviderRef {
         Arc::new(RemoteCatalogProvider {
             catalog_name: catalog_name.to_string(),
-            node_id: self.node_id.clone(),
+            node_id: self.node_id,
             backend: self.backend.clone(),
             schemas: Default::default(),
             mutex: Default::default(),
@@ -78,7 +78,7 @@ impl RemoteCatalogManager {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
             tables: Default::default(),
-            node_id: self.node_id.clone(),
+            node_id: self.node_id,
             backend: self.backend.clone(),
             mutex: Default::default(),
         }) as _
@@ -225,7 +225,7 @@ impl RemoteCatalogManager {
         let schema_key = SchemaKey {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            node_id: self.node_id.clone(),
+            node_id: self.node_id,
         }
         .to_string();
         self.backend
@@ -240,7 +240,7 @@ impl RemoteCatalogManager {
 
         let catalog_key = CatalogKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            node_id: self.node_id.clone(),
+            node_id: self.node_id,
         }
         .to_string();
         self.backend
@@ -433,14 +433,14 @@ impl CatalogList for RemoteCatalogManager {
 
 pub struct RemoteCatalogProvider {
     catalog_name: String,
-    node_id: String,
+    node_id: u64,
     backend: KvBackendRef,
     schemas: Arc<ArcSwap<HashMap<String, SchemaProviderRef>>>,
     mutex: Arc<Mutex<()>>,
 }
 
 impl RemoteCatalogProvider {
-    pub fn new(catalog_name: String, node_id: String, backend: KvBackendRef) -> Self {
+    pub fn new(catalog_name: String, node_id: u64, backend: KvBackendRef) -> Self {
         Self {
             catalog_name,
             node_id,
@@ -454,7 +454,7 @@ impl RemoteCatalogProvider {
         SchemaKey {
             catalog_name: self.catalog_name.clone(),
             schema_name: schema_name.as_ref().to_string(),
-            node_id: self.node_id.clone(),
+            node_id: self.node_id,
         }
     }
 }
@@ -509,7 +509,7 @@ impl CatalogProvider for RemoteCatalogProvider {
 pub struct RemoteSchemaProvider {
     catalog_name: String,
     schema_name: String,
-    node_id: String,
+    node_id: u64,
     backend: KvBackendRef,
     tables: Arc<ArcSwap<HashMap<String, TableRef>>>,
     mutex: Arc<Mutex<()>>,
@@ -519,7 +519,7 @@ impl RemoteSchemaProvider {
     pub fn new(
         catalog_name: String,
         schema_name: String,
-        node_id: String,
+        node_id: u64,
         backend: KvBackendRef,
     ) -> Self {
         Self {
@@ -542,7 +542,7 @@ impl RemoteSchemaProvider {
             schema_name: self.schema_name.clone(),
             table_name: table_name.as_ref().to_string(),
             version: table_version,
-            node_id: self.node_id.clone(),
+            node_id: self.node_id,
         }
     }
 }
@@ -566,7 +566,7 @@ impl SchemaProvider for RemoteSchemaProvider {
         let table_value = TableValue {
             meta: table_info.meta.clone(),
             id: table_info.ident.table_id,
-            node_id: self.node_id.clone(),
+            node_id: self.node_id,
         };
         let backend = self.backend.clone();
         let mutex = self.mutex.clone();

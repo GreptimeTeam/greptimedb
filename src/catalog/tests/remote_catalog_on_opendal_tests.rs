@@ -28,7 +28,7 @@ mod tests {
     }
 
     async fn prepare_components(
-        node_id: String,
+        node_id: u64,
     ) -> (KvBackendRef, TableEngineRef, RemoteCatalogManager, TempDir) {
         let dir = tempdir::TempDir::new("opendal_test").unwrap();
         let backend = create_opendal_backend(dir.path().to_str().unwrap()).await;
@@ -42,7 +42,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_backend() {
-        let node_id = "localhost".to_string();
+        let node_id = 42;
         let (_, _, catalog_manager, _dir) = prepare_components(node_id).await;
         assert_eq!(
             vec![DEFAULT_CATALOG_NAME.to_owned()],
@@ -66,7 +66,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_to_default_schema() {
         common_telemetry::init_default_ut_logging();
-        let node_id = "localhost".to_string();
+        let node_id = 42;
         let (_, table_engine, catalog_manager, _dir) = prepare_components(node_id).await;
         let default_schema = catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
@@ -114,12 +114,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_catalog_and_schema() {
-        let node_id = "localhost";
-        let (backend, _, catalog_manager, _dir) = prepare_components(node_id.to_string()).await;
+        let node_id = 42;
+        let (backend, _, catalog_manager, _dir) = prepare_components(node_id).await;
         let catalog_name = "some_catalog";
         let new_catalog = Arc::new(RemoteCatalogProvider::new(
             catalog_name.to_string(),
-            node_id.to_string(),
+            node_id,
             backend.clone(),
         ));
         assert!(catalog_manager
@@ -142,7 +142,7 @@ mod tests {
         let new_schema = Arc::new(RemoteSchemaProvider::new(
             catalog_name.to_string(),
             schema_name.to_string(),
-            node_id.to_string(),
+            node_id,
             backend.clone(),
         ));
         assert!(new_catalog
@@ -153,13 +153,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_table_to_new_schema() {
-        let node_id = "localhost";
-        let (backend, table_engine, catalog_manager, _dir) =
-            prepare_components(node_id.to_string()).await;
+        let node_id = 42;
+        let (backend, table_engine, catalog_manager, _dir) = prepare_components(node_id).await;
         let catalog_name = "some_catalog";
         let new_catalog = Arc::new(RemoteCatalogProvider::new(
             catalog_name.to_string(),
-            node_id.to_string(),
+            node_id,
             backend.clone(),
         ));
         catalog_manager
@@ -169,7 +168,7 @@ mod tests {
         let new_schema = Arc::new(RemoteSchemaProvider::new(
             catalog_name.to_string(),
             schema_name.to_string(),
-            node_id.to_string(),
+            node_id,
             backend.clone(),
         ));
         new_catalog

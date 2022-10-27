@@ -22,6 +22,9 @@ pub enum Error {
         backtrace: Backtrace,
         source: serde_json::error::Error,
     },
+
+    #[snafu(display("Failed to parse node id: {}", key))]
+    ParseNodeId { key: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -30,6 +33,7 @@ impl ErrorExt for Error {
             Error::InvalidCatalog { .. }
             | Error::DeserializeCatalogEntryValue { .. }
             | Error::SerializeCatalogEntryValue { .. } => StatusCode::Unexpected,
+            Error::ParseNodeId { .. } => StatusCode::InvalidArguments,
         }
     }
 

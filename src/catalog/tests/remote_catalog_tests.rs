@@ -24,12 +24,12 @@ mod tests {
     #[tokio::test]
     async fn test_backend() {
         common_telemetry::init_default_ut_logging();
-        let node_id = "localhost".to_string();
+        let node_id = 42;
         let backend = MockKvBackend::default();
 
         let default_catalog_key = CatalogKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            node_id: node_id.clone(),
+            node_id,
         }
         .to_string();
 
@@ -44,7 +44,7 @@ mod tests {
         let schema_key = SchemaKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            node_id: node_id.clone(),
+            node_id,
         }
         .to_string();
         backend
@@ -64,9 +64,7 @@ mod tests {
         );
     }
 
-    async fn prepare_components(
-        node_id: String,
-    ) -> (KvBackendRef, TableEngineRef, CatalogManagerRef) {
+    async fn prepare_components(node_id: u64) -> (KvBackendRef, TableEngineRef, CatalogManagerRef) {
         let backend = Arc::new(MockKvBackend::default()) as KvBackendRef;
         let table_engine = Arc::new(MockTableEngine::default());
         let catalog_manager =
@@ -78,7 +76,7 @@ mod tests {
     #[tokio::test]
     async fn test_remote_catalog_default() {
         common_telemetry::init_default_ut_logging();
-        let node_id = "test_node_id".to_string();
+        let node_id = 42;
         let (_, _, catalog_manager) = prepare_components(node_id).await;
         assert_eq!(
             vec![DEFAULT_CATALOG_NAME.to_string()],
@@ -98,7 +96,7 @@ mod tests {
     #[tokio::test]
     async fn test_remote_catalog_register_nonexistent() {
         common_telemetry::init_default_ut_logging();
-        let node_id = "test_node_id".to_string();
+        let node_id = 42;
         let (_, table_engine, catalog_manager) = prepare_components(node_id).await;
         // register a new table with an nonexistent catalog
         let catalog_name = "nonexistent_catalog".to_string();
@@ -141,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_table() {
-        let node_id = "test_node_id".to_string();
+        let node_id = 42;
         let (_, table_engine, catalog_manager) = prepare_components(node_id).await;
         let default_catalog = catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
@@ -195,14 +193,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_catalog_schema_table() {
-        let node_id = "test_node_id".to_string();
-        let (backend, table_engine, catalog_manager) = prepare_components(node_id.clone()).await;
+        let node_id = 42;
+        let (backend, table_engine, catalog_manager) = prepare_components(node_id).await;
 
         let catalog_name = "test_catalog".to_string();
         let schema_name = "nonexistent_schema".to_string();
         let catalog = Arc::new(RemoteCatalogProvider::new(
             catalog_name.clone(),
-            node_id.clone(),
+            node_id,
             backend.clone(),
         ));
 
@@ -258,7 +256,7 @@ mod tests {
         let schema = Arc::new(RemoteSchemaProvider::new(
             catalog_name.clone(),
             schema_name.clone(),
-            node_id.clone(),
+            node_id,
             backend.clone(),
         ));
 
