@@ -9,20 +9,18 @@ use table::metadata::{TableId, TableMeta, TableVersion};
 
 use crate::consts::{CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_KEY_PREFIX};
 use crate::error::{
-    DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu, SerializeCatalogEntryValueSnafu,
+    DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu, ParseNodeIdSnafu,
+    SerializeCatalogEntryValueSnafu,
 };
 
 lazy_static! {
-    static ref CATALOG_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)$",
-        CATALOG_KEY_PREFIX
-    ))
-    .unwrap();
+    static ref CATALOG_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{}-([a-zA-Z_]+)-([0-9]+)$", CATALOG_KEY_PREFIX)).unwrap();
 }
 
 lazy_static! {
     static ref SCHEMA_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)$",
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)$",
         SCHEMA_KEY_PREFIX
     ))
     .unwrap();
@@ -30,7 +28,7 @@ lazy_static! {
 
 lazy_static! {
     static ref TABLE_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)-([a-zA-Z_]+)$",
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)-([0-9]+)$",
         TABLE_KEY_PREFIX
     ))
     .unwrap();
@@ -58,7 +56,7 @@ pub struct TableKey {
     pub schema_name: String,
     pub table_name: String,
     pub version: TableVersion,
-    pub node_id: String,
+    pub node_id: u64,
 }
 
 impl Display for TableKey {
@@ -73,7 +71,7 @@ impl Display for TableKey {
         f.write_str("-")?;
         f.serialize_u64(self.version)?;
         f.write_str("-")?;
-        f.write_str(&self.node_id)
+        f.serialize_u64(self.node_id)
     }
 }
 
@@ -87,12 +85,15 @@ impl TableKey {
 
         let version =
             u64::from_str(&captures[4]).map_err(|_| InvalidCatalogSnafu { key }.build())?;
+        let node_id_str = captures[5].to_string();
+        let node_id = u64::from_str(&node_id_str)
+            .map_err(|_| ParseNodeIdSnafu { key: node_id_str }.build())?;
         Ok(Self {
             catalog_name: captures[1].to_string(),
             schema_name: captures[2].to_string(),
             table_name: captures[3].to_string(),
             version,
-            node_id: captures[5].to_string(),
+            node_id,
         })
     }
 }
@@ -100,7 +101,7 @@ impl TableKey {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableValue {
     pub id: TableId,
-    pub node_id: String,
+    pub node_id: u64,
     pub meta: TableMeta,
 }
 
@@ -119,7 +120,7 @@ impl TableValue {
 
 pub struct CatalogKey {
     pub catalog_name: String,
-    pub node_id: String,
+    pub node_id: u64,
 }
 
 impl Display for CatalogKey {
@@ -128,7 +129,7 @@ impl Display for CatalogKey {
         f.write_str("-")?;
         f.write_str(&self.catalog_name)?;
         f.write_str("-")?;
-        f.write_str(&self.node_id)
+        f.serialize_u64(self.node_id)
     }
 }
 
@@ -139,9 +140,14 @@ impl CatalogKey {
             .captures(key)
             .context(InvalidCatalogSnafu { key })?;
         ensure!(captures.len() == 3, InvalidCatalogSnafu { key });
+
+        let node_id_str = captures[2].to_string();
+        let node_id = u64::from_str(&node_id_str)
+            .map_err(|_| ParseNodeIdSnafu { key: node_id_str }.build())?;
+
         Ok(Self {
             catalog_name: captures[1].to_string(),
-            node_id: captures[2].to_string(),
+            node_id,
         })
     }
 }
@@ -160,7 +166,7 @@ impl CatalogValue {
 pub struct SchemaKey {
     pub catalog_name: String,
     pub schema_name: String,
-    pub node_id: String,
+    pub node_id: u64,
 }
 
 impl Display for SchemaKey {
@@ -171,7 +177,7 @@ impl Display for SchemaKey {
         f.write_str("-")?;
         f.write_str(&self.schema_name)?;
         f.write_str("-")?;
-        f.write_str(&self.node_id)
+        f.serialize_u64(self.node_id)
     }
 }
 
@@ -183,10 +189,14 @@ impl SchemaKey {
             .context(InvalidCatalogSnafu { key })?;
         ensure!(captures.len() == 4, InvalidCatalogSnafu { key });
 
+        let node_id_str = captures[3].to_string();
+        let node_id = u64::from_str(&node_id_str)
+            .map_err(|_| ParseNodeIdSnafu { key: node_id_str }.build())?;
+
         Ok(Self {
             catalog_name: captures[1].to_string(),
             schema_name: captures[2].to_string(),
-            node_id: captures[3].to_string(),
+            node_id,
         })
     }
 }
@@ -213,31 +223,31 @@ mod tests {
 
     #[test]
     fn test_parse_catalog_key() {
-        let key = "__c-C-N";
+        let key = "__c-C-2";
         let catalog_key = CatalogKey::parse(key).unwrap();
         assert_eq!("C", catalog_key.catalog_name);
-        assert_eq!("N", catalog_key.node_id);
+        assert_eq!(2, catalog_key.node_id);
         assert_eq!(key, catalog_key.to_string());
     }
 
     #[test]
     fn test_parse_schema_key() {
-        let key = "__s-C-S-N";
+        let key = "__s-C-S-3";
         let schema_key = SchemaKey::parse(key).unwrap();
         assert_eq!("C", schema_key.catalog_name);
         assert_eq!("S", schema_key.schema_name);
-        assert_eq!("N", schema_key.node_id);
+        assert_eq!(3, schema_key.node_id);
         assert_eq!(key, schema_key.to_string());
     }
 
     #[test]
     fn test_parse_table_key() {
-        let key = "__t-C-S-T-42-N";
+        let key = "__t-C-S-T-42-1";
         let entry = TableKey::parse(key).unwrap();
         assert_eq!("C", entry.catalog_name);
         assert_eq!("S", entry.schema_name);
         assert_eq!("T", entry.table_name);
-        assert_eq!("N", entry.node_id);
+        assert_eq!(1, entry.node_id);
         assert_eq!(42, entry.version);
         assert_eq!(key, &entry.to_string());
     }
@@ -273,7 +283,7 @@ mod tests {
 
         let value = TableValue {
             id: 42,
-            node_id: "localhost".to_string(),
+            node_id: 32,
             meta,
         };
         let serialized = serde_json::to_string(&value).unwrap();
