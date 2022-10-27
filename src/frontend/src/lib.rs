@@ -7,8 +7,10 @@ pub mod instance;
 pub(crate) mod mock;
 pub mod mysql;
 pub mod opentsdb;
+mod partition;
 pub mod postgres;
 mod server;
+mod spliter;
 mod table;
 #[cfg(test)]
 mod tests;

@@ -109,6 +109,24 @@ pub enum Error {
         region: Region,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to find partition column: {}", column_name))]
+    FindPartitionColumn {
+        column_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to find region, reason: {}", reason))]
+    FindRegion {
+        reason: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invaild InsertRequest, reason: {}", reason))]
+    InvalidInsertRequest {
+        reason: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -119,6 +137,9 @@ impl ErrorExt for Error {
             Error::ConnectDatanode { .. }
             | Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
+            | Error::FindRegion { .. }
+            | Error::InvalidInsertRequest { .. }
+            | Error::FindPartitionColumn { .. }
             | Error::FindRegions { .. } => StatusCode::InvalidArguments,
 
             Error::RuntimeResource { source, .. } => source.status_code(),

@@ -20,6 +20,9 @@ use sql::statements::create_table::{CreateTable, Partitions as SqlPartitions};
 use sql::statements::sql_value_to_value;
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::error::Error;
+use crate::partition::PartitionRule;
+
 pub struct PartitionColumn {
     column_name: String,
     // Does not store the last "MAXVALUE" bound because it can make our binary search in finding regions easier
@@ -69,10 +72,33 @@ impl PartitionColumn {
             },
         }
     }
+
+    fn find_region(&self, value: &Value) -> Region {
+        match self.partition_points.binary_search(value) {
+            Ok(i) => self.regions[i + 1].clone(),
+            Err(i) => self.regions[i].clone(),
+        }
+    }
 }
 
 pub struct RangePartitionRule {
     partition_column: PartitionColumn,
+}
+
+impl PartitionRule for RangePartitionRule {
+    type Error = Error;
+
+    fn partition_columns(&self) -> Vec<crate::spliter::ColumnName> {
+        vec![self.partition_column.column_name.clone()]
+    }
+
+    fn find_region(
+        &self,
+        values: &crate::spliter::ValueList,
+    ) -> std::result::Result<crate::spliter::RegionId, Self::Error> {
+        debug_assert!(values.len() == 1, "Length of `region_keys` must be one");
+        Ok(self.partition_column.find_region(&values[0]).id())
+    }
 }
 
 impl RangePartitionRule {
@@ -285,6 +311,42 @@ pub(crate) struct TableScanPlan {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_find_region() {
+        // PARTITION BY RANGE (a) (
+        //   PARTITION r1 VALUES LESS THAN ('hz'),
+        //   PARTITION r2 VALUES LESS THAN ('sh'),
+        //   PARTITION r3 VALUES LESS THAN ('sz'),
+        //   PARTITION r4 VALUES LESS THAN (MAXVALUE),
+        // )
+        let rule = RangePartitionRule::new(
+            "a",
+            vec!["hz".into(), "sh".into(), "sz".into()],
+            vec![
+                Region::new(1),
+                Region::new(2),
+                Region::new(3),
+                Region::new(4),
+            ],
+        );
+
+        let value: Value = "h".into();
+        let region_id = rule.find_region(&vec![value]).unwrap();
+        assert_eq!(1, region_id);
+
+        let value: Value = "sa".into();
+        let region_id = rule.find_region(&vec![value]).unwrap();
+        assert_eq!(2, region_id);
+
+        let value: Value = "sj".into();
+        let region_id = rule.find_region(&vec![value]).unwrap();
+        assert_eq!(3, region_id);
+
+        let value: Value = "t".into();
+        let region_id = rule.find_region(&vec![value]).unwrap();
+        assert_eq!(4, region_id);
+    }
 
     #[test]
     fn test_find_regions() {
