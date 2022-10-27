@@ -96,6 +96,7 @@ impl SystemCatalogTable {
                 table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
                 desc: Some("System catalog table".to_string()),
                 schema: schema.clone(),
+                region_numbers: vec![0],
                 primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX, TIMESTAMP_INDEX],
                 create_if_not_exists: true,
                 table_options: HashMap::new(),

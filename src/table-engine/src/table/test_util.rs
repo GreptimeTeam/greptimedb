@@ -103,6 +103,7 @@ pub async fn setup_test_engine_and_table() -> (
                 create_if_not_exists: true,
                 primary_key_indices: Vec::default(),
                 table_options: HashMap::new(),
+                region_numbers: vec![0],
             },
         )
         .await
@@ -135,6 +136,7 @@ pub async fn setup_mock_engine_and_table(
                 create_if_not_exists: true,
                 primary_key_indices: Vec::default(),
                 table_options: HashMap::new(),
+                region_numbers: vec![0],
             },
         )
         .await
