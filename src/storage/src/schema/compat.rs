@@ -31,7 +31,7 @@ pub trait CompatWrite {
 /// - `Ok(true)` if `source_column` is compatible to read using `dest_column` as schema.
 /// - `Ok(false)` if they are considered different columns.
 /// - `Err` if there is incompatible issue that could not be resolved.
-fn is_source_column_readable(
+fn is_source_column_compatible(
     source_column: &ColumnMetadata,
     dest_column: &ColumnMetadata,
 ) -> Result<bool> {
@@ -149,7 +149,7 @@ impl ReadAdapter {
             {
                 let dest_column = &schema_to_read.columns()[dest_idx];
                 // Check whether we could read this column.
-                if is_source_column_readable(source_column, dest_column)? {
+                if is_source_column_compatible(source_column, dest_column)? {
                     // Mark that this column could be read from source data, since some
                     // columns in source schema would be skipped, we should not use
                     // the source column's index directly.
@@ -576,13 +576,13 @@ mod tests {
     }
 
     #[test]
-    fn test_is_source_column_readable() {
+    fn test_is_source_column_compatible() {
         let desc = new_column_desc_builder().build().unwrap();
         let source = ColumnMetadata { cf_id: 1, desc };
 
-        // Same column is always readable, also tests read nullable column
+        // Same column is always compatible, also tests read nullable column
         // as a nullable column.
-        assert!(is_source_column_readable(&source, &source).unwrap());
+        assert!(is_source_column_compatible(&source, &source).unwrap());
 
         // Different id.
         let desc = new_column_desc_builder()
@@ -590,7 +590,7 @@ mod tests {
             .build()
             .unwrap();
         let dest = ColumnMetadata { cf_id: 1, desc };
-        assert!(!is_source_column_readable(&source, &dest).unwrap());
+        assert!(!is_source_column_compatible(&source, &dest).unwrap());
     }
 
     #[test]
@@ -605,7 +605,7 @@ mod tests {
             .unwrap();
         let dest = ColumnMetadata { cf_id: 1, desc };
 
-        let err = is_source_column_readable(&source, &dest).unwrap_err();
+        let err = is_source_column_compatible(&source, &dest).unwrap_err();
         assert!(
             matches!(err, Error::CompatRead { .. }),
             "{:?} is not CompatRead",
@@ -626,11 +626,11 @@ mod tests {
             .build()
             .unwrap();
         let not_null_dest = ColumnMetadata { cf_id: 1, desc };
-        assert!(is_source_column_readable(&source, &not_null_dest).unwrap());
+        assert!(is_source_column_compatible(&source, &not_null_dest).unwrap());
 
         let desc = new_column_desc_builder().build().unwrap();
         let null_dest = ColumnMetadata { cf_id: 1, desc };
-        assert!(is_source_column_readable(&source, &null_dest).unwrap());
+        assert!(is_source_column_compatible(&source, &null_dest).unwrap());
     }
 
     #[test]
@@ -644,7 +644,7 @@ mod tests {
             .unwrap();
         let dest = ColumnMetadata { cf_id: 1, desc };
 
-        let err = is_source_column_readable(&source, &dest).unwrap_err();
+        let err = is_source_column_compatible(&source, &dest).unwrap_err();
         assert!(
             matches!(err, Error::CompatRead { .. }),
             "{:?} is not CompatRead",
