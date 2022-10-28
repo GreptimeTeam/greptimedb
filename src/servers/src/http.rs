@@ -4,6 +4,7 @@ pub mod opentsdb;
 pub mod prometheus;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use aide::axum::routing as apirouting;
@@ -269,7 +270,7 @@ impl HttpServer {
             .api_route("/run-script", apirouting::post(handler::run_script))
             .route("/private/api.json", apirouting::get(serve_api))
             .finish_api(&mut api)
-            .layer(Extension(api));
+            .layer(Extension(Arc::new(api)));
 
         let mut router = Router::new().nest(&format!("/{}", HTTP_API_VERSION), sql_router);
 
