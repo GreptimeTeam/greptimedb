@@ -9,13 +9,11 @@ use axum_test_helper::TestClient;
 use common_query::Output;
 use prost::Message;
 use servers::error::Result;
-use servers::http::BytesResponse;
-use servers::http::HttpResponse;
 use servers::http::HttpServer;
 use servers::prometheus;
 use servers::prometheus::snappy_compress;
 use servers::prometheus::Metrics;
-use servers::query_handler::{PrometheusProtocolHandler, SqlQueryHandler};
+use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse, SqlQueryHandler};
 use tokio::sync::mpsc;
 
 struct DummyInstance {
@@ -29,7 +27,7 @@ impl PrometheusProtocolHandler for DummyInstance {
 
         Ok(())
     }
-    async fn read(&self, request: ReadRequest) -> Result<HttpResponse> {
+    async fn read(&self, request: ReadRequest) -> Result<PrometheusResponse> {
         let _ = self.tx.send(request.encode_to_vec()).await;
 
         let response = ReadResponse {
@@ -38,11 +36,11 @@ impl PrometheusProtocolHandler for DummyInstance {
             }],
         };
 
-        Ok(HttpResponse::Bytes(BytesResponse {
+        Ok(PrometheusResponse {
             content_type: "application/x-protobuf".to_string(),
             content_encoding: "snappy".to_string(),
-            bytes: response.encode_to_vec(),
-        }))
+            body: response.encode_to_vec(),
+        })
     }
 
     async fn ingest_metrics(&self, _metrics: Metrics) -> Result<()> {

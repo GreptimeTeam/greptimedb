@@ -48,13 +48,6 @@ pub struct ColumnSchema {
     data_type: String,
 }
 
-#[derive(Serialize, Debug)]
-pub struct BytesResponse {
-    pub content_type: String,
-    pub content_encoding: String,
-    pub bytes: Vec<u8>,
-}
-
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Schema {
     column_schemas: Vec<ColumnSchema>,
