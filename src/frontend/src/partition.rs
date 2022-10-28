@@ -1,11 +1,10 @@
 use std::fmt::Debug;
+
 use datatypes::prelude::Value;
 use snafu::ensure;
 
 use crate::error::{self, Result};
 use crate::spliter::{ColumnName, RegionId, ValueList};
-
-type ValueList = Vec<Value>;
 
 pub trait PartitionRule {
     type Error: Debug;
@@ -38,7 +37,9 @@ pub trait PartitionRule {
 ///
 /// Please refer to MySQL's [document](https://dev.mysql.com/doc/refman/8.0/en/partitioning-columns-range.html)
 /// for more details.
-struct PartitionRule {
+// FIXME(LFC): no allow
+#[allow(unused)]
+struct RangePartitionRule {
     column_list: Vec<String>,
     // Does not store the last "MAXVALUE" bound because it can make our binary search in finding regions easier
     // (besides, it's hard to represent "MAXVALUE" in our `Value`).
@@ -47,7 +48,9 @@ struct PartitionRule {
     regions: Vec<u64>,
 }
 
-impl PartitionRule {
+// FIXME(LFC): no allow
+#[allow(unused)]
+impl RangePartitionRule {
     /// Creates a new partition rule. `value_lists` must be strictly increased (because we are
     /// using binary search to get a determined result on it).
     ///
@@ -107,7 +110,7 @@ mod tests {
         //   PARTITION r2 VALUES LESS THAN ('sh'),
         //   PARTITION r3 VALUES LESS THAN (MAXVALUE),
         // )
-        let rule = PartitionRule::new(
+        let rule = RangePartitionRule::new(
             vec!["a".to_string()],
             vec![vec!["hz".into()], vec!["sh".into()]],
             vec![1, 2, 3],
@@ -133,7 +136,7 @@ mod tests {
         //   PARTITION r3 VALUES LESS THAN ('sh', 50),
         //   PARTITION r4 VALUES LESS THAN (MAXVALUE, MAXVALUE),
         // )
-        let rule = PartitionRule::new(
+        let rule = RangePartitionRule::new(
             vec!["a".to_string(), "b".to_string()],
             vec![
                 vec!["hz".into(), 10_i32.into()],
