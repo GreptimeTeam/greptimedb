@@ -9,13 +9,19 @@ use serde::{Deserialize, Serialize};
 use crate::http::JsonResponse;
 use crate::query_handler::SqlQueryHandlerRef;
 
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SqlQuery {
+    pub database: Option<String>,
+    pub sql: Option<String>,
+}
+
 /// Handler to execute sql
 #[axum_macros::debug_handler]
 pub async fn sql(
     State(sql_handler): State<SqlQueryHandlerRef>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(params): Query<SqlQuery>,
 ) -> Json<JsonResponse> {
-    if let Some(sql) = params.get("sql") {
+    if let Some(ref sql) = params.sql {
         Json(JsonResponse::from_output(sql_handler.do_query(sql).await).await)
     } else {
         Json(JsonResponse::with_error(Some(
@@ -25,8 +31,7 @@ pub async fn sql(
 }
 
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
-    op.id("sql")
-        .description("Execute SQL query provided by `sql` parameter")
+    op.description("Execute SQL query provided by `sql` parameter")
         .response::<200, Json<JsonResponse>>()
 }
 
@@ -40,7 +45,7 @@ pub async fn metrics(Query(_params): Query<HashMap<String, String>>) -> String {
     }
 }
 
-#[derive(Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ScriptExecution {
     pub name: String,
     pub script: String,
@@ -69,13 +74,18 @@ pub async fn scripts(
     Json(body)
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RunScriptQuery {
+    name: Option<String>,
+}
+
 /// Handler to execute script
 #[axum_macros::debug_handler]
 pub async fn run_script(
     State(query_handler): State<SqlQueryHandlerRef>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(params): Query<RunScriptQuery>,
 ) -> Json<JsonResponse> {
-    let name = params.get("name");
+    let name = params.name.as_ref();
 
     if name.is_none() || name.unwrap().is_empty() {
         return Json(JsonResponse::with_error(Some("Invalid name".to_string())));

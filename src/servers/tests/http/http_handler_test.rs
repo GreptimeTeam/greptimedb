@@ -13,7 +13,11 @@ use crate::create_testing_sql_query_handler;
 #[tokio::test]
 async fn test_sql_not_provided() {
     let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let Json(json) = http_handler::sql(State(query_handler), Query(HashMap::default())).await;
+    let Json(json) = http_handler::sql(
+        State(query_handler),
+        Query(http_handler::SqlQuery::default()),
+    )
+    .await;
     assert!(!json.success());
     assert_eq!(
         Some(&"sql parameter is required.".to_string()),
@@ -46,8 +50,7 @@ async fn test_metrics() {
 
     counter!("test_metrics", 1);
 
-    let query = create_query();
-    let text = http_handler::metrics(query).await;
+    let text = http_handler::metrics(Query(HashMap::default())).await;
     assert!(text.contains("test_metrics counter"));
 }
 
@@ -76,9 +79,9 @@ def test(n):
     })
 }
 
-fn create_query() -> Query<HashMap<String, String>> {
-    Query(HashMap::from([(
-        "sql".to_string(),
-        "select sum(uint32s) from numbers limit 20".to_string(),
-    )]))
+fn create_query() -> Query<http_handler::SqlQuery> {
+    Query(http_handler::SqlQuery {
+        sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
+        database: None,
+    })
 }
