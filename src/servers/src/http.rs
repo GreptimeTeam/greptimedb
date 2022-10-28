@@ -102,7 +102,7 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
                     .collect(),
             };
 
-            let mut rows = Vec::new();
+            let mut rows = Vec::with_capacity(recordbatches.iter().map(|r| r.rows()).sum::<usize>());
 
             for recordbatch in recordbatches {
                 for row in recordbatch.rows() {
