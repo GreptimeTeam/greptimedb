@@ -11,6 +11,7 @@ use aide::axum::routing as apirouting;
 use aide::axum::{ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi};
 use async_trait::async_trait;
+use axum::response::Html;
 use axum::Extension;
 use axum::{error_handling::HandleErrorLayer, response::Json, routing, BoxError, Router};
 use common_query::Output;
@@ -204,8 +205,12 @@ async fn shutdown_signal() {
         .expect("failed to install CTRL+C signal handler");
 }
 
-async fn serve_api(Extension(api): Extension<OpenApi>) -> impl IntoApiResponse {
+async fn serve_api(Extension(api): Extension<Arc<OpenApi>>) -> impl IntoApiResponse {
     Json(api)
+}
+
+async fn serve_docs() -> Html<String> {
+    Html(include_str!("http/redoc.html").to_owned())
 }
 
 impl HttpServer {
@@ -269,6 +274,7 @@ impl HttpServer {
             .api_route("/scripts", apirouting::post(handler::scripts))
             .api_route("/run-script", apirouting::post(handler::run_script))
             .route("/private/api.json", apirouting::get(serve_api))
+            .route("/private/docs", apirouting::get(serve_docs))
             .finish_api(&mut api)
             .layer(Extension(Arc::new(api)));
 
