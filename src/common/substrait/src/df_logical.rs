@@ -347,6 +347,7 @@ mod test {
         CatalogList, CatalogProvider, RegisterTableRequest,
     };
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use datafusion::logical_plan::DFSchema;
     use datatypes::schema::Schema;
     use table::{requests::CreateTableRequest, test_util::EmptyTable, test_util::MockTableEngine};
 
