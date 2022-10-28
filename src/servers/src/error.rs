@@ -130,10 +130,16 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to decode prometheus remote request, source: {}", source))]
-    DecodePromRemoteRequest { source: prost::DecodeError },
+    DecodePromRemoteRequest {
+        backtrace: Backtrace,
+        source: prost::DecodeError,
+    },
 
-    #[snafu(display("Failed to decode prometheus remote request, source: {}", source))]
-    DecompressPromRemoteRequest { source: snap::Error },
+    #[snafu(display("Failed to decompress prometheus remote request, source: {}", source))]
+    DecompressPromRemoteRequest {
+        backtrace: Backtrace,
+        source: snap::Error,
+    },
 
     #[snafu(display("Invalid prometheus remote request, msg: {}", msg))]
     InvalidPromRemoteRequest { msg: String, backtrace: Backtrace },

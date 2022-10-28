@@ -46,12 +46,13 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
             msg: "missing '__name__' label in timeseries",
         })?;
 
-    let mut conditions = format!(
-        "{}>={} and {}<={}",
-        TIMESTAMP_COLUMN_NAME, start_timestamp_ms, TIMESTAMP_COLUMN_NAME, end_timestamp_ms,
-    );
+    let mut conditions: Vec<String> = Vec::with_capacity(label_matches.len());
 
-    let mut label_conditions: Vec<String> = Vec::with_capacity(label_matches.len());
+    conditions.push(format!(
+        "{}>={} AND {}<={}",
+        TIMESTAMP_COLUMN_NAME, start_timestamp_ms, TIMESTAMP_COLUMN_NAME, end_timestamp_ms,
+    ));
+
     for m in label_matches {
         let name = &m.name;
 
@@ -67,26 +68,23 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
 
         match m_type {
             MatcherType::Eq => {
-                label_conditions.push(format!("{}='{}'", name, value));
+                conditions.push(format!("{}='{}'", name, value));
             }
             MatcherType::Neq => {
-                label_conditions.push(format!("{}!='{}'", name, value));
+                conditions.push(format!("{}!='{}'", name, value));
             }
             // Case senstive regexp match
             MatcherType::Re => {
-                label_conditions.push(format!("{}~'{}'", name, value));
+                conditions.push(format!("{}~'{}'", name, value));
             }
             // Case senstive regexp not match
             MatcherType::Nre => {
-                label_conditions.push(format!("{}!~'{}'", name, value));
+                conditions.push(format!("{}!~'{}'", name, value));
             }
         }
     }
 
-    if !label_conditions.is_empty() {
-        conditions.push_str(" and ");
-        conditions.push_str(&label_conditions.join(" and "));
-    }
+    let conditions = conditions.join(" AND ");
 
     Ok((
         table_name.to_string(),
@@ -111,10 +109,14 @@ struct TimeSeriesId {
 /// Because Label in protobuf doesn't impl `Eq`, so we have to do it by ourselves.
 impl PartialEq for TimeSeriesId {
     fn eq(&self, other: &Self) -> bool {
+        if self.labels.len() != other.labels.len() {
+            return false;
+        }
+
         self.labels
             .iter()
             .zip(other.labels.iter())
-            .all(|(l, r)| l.value == r.value)
+            .all(|(l, r)| l.name == r.name && l.value == r.value)
     }
 }
 impl Eq for TimeSeriesId {}
@@ -128,11 +130,21 @@ impl Hash for TimeSeriesId {
     }
 }
 
-/// Sort timeseries
+/// For Sorting timeseries
 impl Ord for TimeSeriesId {
     fn cmp(&self, other: &Self) -> Ordering {
+        let ordering = self.labels.len().cmp(&other.labels.len());
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+
         for (l, r) in self.labels.iter().zip(other.labels.iter()) {
-            // The names are always equals, so we just compare values
+            let ordering = l.name.cmp(&r.name);
+
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+
             let ordering = l.value.cmp(&r.value);
 
             if ordering != Ordering::Equal {
@@ -155,8 +167,8 @@ fn collect_timeseries_ids(
     table_name: &str,
     row_count: usize,
     columns: &[Column],
-) -> HashMap<usize, TimeSeriesId> {
-    let mut timeseries_ids = HashMap::with_capacity(row_count);
+) -> Vec<TimeSeriesId> {
+    let mut timeseries_ids = Vec::with_capacity(row_count);
 
     for row in 0..row_count {
         let mut labels = vec![new_label(
@@ -173,20 +185,17 @@ fn collect_timeseries_ids(
                 continue;
             }
 
-            // TODO(dennis): if the value is missing, return an empty string is correct?
+            // A label with an empty label value is considered equivalent to a label that does not exist.
             if !null_mask.is_empty() && null_mask[row] == 0 {
-                labels.push(new_label(column_name.to_string(), "".to_string()));
-            } else {
-                labels.push(new_label(
-                    column_name.to_string(),
-                    values
-                        .as_ref()
-                        .map(|vs| vs.string_values[row].to_string())
-                        .unwrap_or_else(|| "".to_string()),
-                ));
+                continue;
+            }
+
+            let column_value = values.as_ref().map(|vs| vs.string_values[row].to_string());
+            if let Some(value) = column_value {
+                labels.push(new_label(column_name.to_string(), value));
             }
         }
-        timeseries_ids.insert(row, TimeSeriesId { labels });
+        timeseries_ids.push(TimeSeriesId { labels });
     }
     timeseries_ids
 }
@@ -215,10 +224,7 @@ pub fn select_result_to_timeseries(
     // Then, group timeseries by it's id.
     let mut timeseries_map: BTreeMap<&TimeSeriesId, TimeSeries> = BTreeMap::default();
 
-    for row in 0..row_count {
-        // It's safe to unwrap, it should be exists.
-        let timeseries_id = timeseries_ids.get(&row).unwrap();
-
+    for (row, timeseries_id) in timeseries_ids.iter().enumerate() {
         let timeseries = timeseries_map
             .entry(timeseries_id)
             .or_insert_with(|| TimeSeries {
@@ -327,7 +333,24 @@ fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
     })
 }
 
-/// Mock timeseries for test
+#[inline]
+pub fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
+    let mut decoder = Decoder::new();
+    decoder
+        .decompress_vec(buf)
+        .context(error::DecompressPromRemoteRequestSnafu)
+}
+
+#[inline]
+pub fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = Encoder::new();
+    encoder
+        .compress_vec(buf)
+        .context(error::DecompressPromRemoteRequestSnafu)
+}
+
+/// Mock timeseries for test, it is both used in servers and frontend crate
+/// So we present it here
 pub fn mock_timeseries() -> Vec<TimeSeries> {
     vec![
         TimeSeries {
@@ -423,7 +446,7 @@ mod tests {
         };
         let (table, sql) = query_to_sql(&q).unwrap();
         assert_eq!("test", table);
-        assert_eq!("select * from test where greptime_timestamp>=1000 and greptime_timestamp<=2000 order by greptime_timestamp", sql);
+        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 order by greptime_timestamp", sql);
 
         let q = Query {
             start_timestamp_ms: 1000,
@@ -449,7 +472,7 @@ mod tests {
         };
         let (table, sql) = query_to_sql(&q).unwrap();
         assert_eq!("test", table);
-        assert_eq!("select * from test where greptime_timestamp>=1000 and greptime_timestamp<=2000 and job~'*prom*' and instance!='localhost' order by greptime_timestamp", sql);
+        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 AND job~'*prom*' AND instance!='localhost' order by greptime_timestamp", sql);
     }
 
     #[test]
@@ -644,20 +667,4 @@ mod tests {
             }]
         );
     }
-}
-
-#[inline]
-pub fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
-    let mut decoder = Decoder::new();
-    decoder
-        .decompress_vec(buf)
-        .context(error::DecompressPromRemoteRequestSnafu)
-}
-
-#[inline]
-pub fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
-    let mut encoder = Encoder::new();
-    encoder
-        .compress_vec(buf)
-        .context(error::DecompressPromRemoteRequestSnafu)
 }

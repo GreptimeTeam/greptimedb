@@ -45,7 +45,7 @@ impl PrometheusProtocolHandler for DummyInstance {
         }))
     }
 
-    async fn inject_metrics(&self, _metrics: Metrics) -> Result<()> {
+    async fn ingest_metrics(&self, _metrics: Metrics) -> Result<()> {
         unimplemented!();
     }
 }

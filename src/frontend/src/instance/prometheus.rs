@@ -17,8 +17,9 @@ use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
 
-/// Only supports samples response right now
-fn supported_response_type(response_type: i32) -> bool {
+#[inline]
+fn is_supported(response_type: i32) -> bool {
+    // Only supports samples response right now
     response_type == SAMPLES_RESPONSE_TYPE
 }
 
@@ -34,7 +35,7 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
 
     let response_type = accepted_response_types
         .iter()
-        .find(|t| supported_response_type(**t))
+        .find(|t| is_supported(**t))
         .with_context(|| error::NotSupportedSnafu {
             feat: format!(
                 "server does not support any of the requested response types: {:?}",
@@ -62,11 +63,11 @@ fn object_result_to_query_result(
 
 async fn handle_remote_queries(
     db: &Database,
-    quires: &[Query],
+    queries: &[Query],
 ) -> ServerResult<Vec<(String, ObjectResult)>> {
-    let mut results = Vec::with_capacity(quires.len());
+    let mut results = Vec::with_capacity(queries.len());
 
-    for q in quires {
+    for q in queries {
         let (table_name, sql) = prometheus::query_to_sql(q)?;
 
         logging::debug!(
@@ -136,7 +137,7 @@ impl PrometheusProtocolHandler for Instance {
         }
     }
 
-    async fn inject_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
+    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
         todo!();
     }
 }

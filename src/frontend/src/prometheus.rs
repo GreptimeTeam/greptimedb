@@ -16,7 +16,7 @@ mod tests {
     use super::PrometheusOptions;
 
     #[test]
-    fn test_influxdb_options() {
+    fn test_prometheus_options() {
         let default = PrometheusOptions::default();
         assert!(default.enable);
     }

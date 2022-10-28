@@ -66,5 +66,5 @@ pub trait PrometheusProtocolHandler {
     /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest) -> Result<HttpResponse>;
     /// Handling push gateway requests
-    async fn inject_metrics(&self, metrics: Metrics) -> Result<()>;
+    async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }
