@@ -43,12 +43,12 @@ pub fn create_tmp_dir_and_datanode_opts() -> (DatanodeOptions, TestGuard) {
     )
 }
 
-pub async fn create_test_table(instance: &Instance) -> Result<()> {
+pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -> Result<()> {
     let column_schemas = vec![
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true),
+        ColumnSchema::new("ts", ts_type, true),
     ];
 
     let table_name = "demo";

@@ -1,11 +1,11 @@
-use arrow::array::UInt64Array;
+use arrow::array::{Int64Array, UInt64Array};
 use common_query::Output;
 use common_recordbatch::util;
 use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow_array::StringArray;
+use datatypes::prelude::ConcreteDataType;
 
-use crate::error;
 use crate::instance::Instance;
 use crate::tests::test_util;
 
@@ -17,7 +17,9 @@ async fn test_execute_insert() {
     let instance = Instance::new(&opts).await.unwrap();
     instance.start().await.unwrap();
 
-    test_util::create_test_table(&instance).await.unwrap();
+    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
+        .await
+        .unwrap();
 
     let output = instance
         .execute_sql(
@@ -29,6 +31,45 @@ async fn test_execute_insert() {
         .await
         .unwrap();
     assert!(matches!(output, Output::AffectedRows(2)));
+}
+
+#[tokio::test]
+async fn test_execute_insert_query_with_i64_timestamp() {
+    common_telemetry::init_default_ut_logging();
+
+    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let instance = Instance::new(&opts).await.unwrap();
+    instance.start().await.unwrap();
+
+    test_util::create_test_table(&instance, ConcreteDataType::int64_datatype())
+        .await
+        .unwrap();
+
+    let output = instance
+        .execute_sql(
+            r#"insert into demo(host, cpu, memory, ts) values
+                           ('host1', 66.6, 1024, 1655276557000),
+                           ('host2', 88.8,  333.3, 1655276558000)
+                           "#,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(2)));
+
+    let query_output = instance.execute_sql("select ts from demo").await.unwrap();
+
+    match query_output {
+        Output::Stream(s) => {
+            let batches = util::collect(s).await.unwrap();
+            let columns = batches[0].df_recordbatch.columns();
+            assert_eq!(1, columns.len());
+            assert_eq!(
+                &Int64Array::from_slice(&[1655276557000, 1655276558000]),
+                columns[0].as_any().downcast_ref::<Int64Array>().unwrap()
+            );
+        }
+        _ => unreachable!(),
+    }
 }
 
 #[tokio::test]
@@ -110,7 +151,9 @@ async fn test_execute_show_databases_tables() {
     }
 
     // creat a table
-    test_util::create_test_table(&instance).await.unwrap();
+    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
+        .await
+        .unwrap();
 
     let output = instance.execute_sql("show tables").await.unwrap();
     match output {
@@ -187,8 +230,14 @@ pub async fn test_create_table_illegal_timestamp_type() {
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#,
         )
-        .await;
-    assert!(matches!(output, Err(error::Error::CreateSchema { .. })));
+        .await
+        .unwrap();
+    match output {
+        Output::AffectedRows(rows) => {
+            assert_eq!(1, rows);
+        }
+        _ => unreachable!(),
+    }
 }
 
 #[tokio::test]
@@ -198,7 +247,9 @@ async fn test_alter_table() {
     let instance = Instance::new_mock().await.unwrap();
     instance.start().await.unwrap();
 
-    test_util::create_test_table(&instance).await.unwrap();
+    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
+        .await
+        .unwrap();
     // make sure table insertion is ok before altering table
     instance
         .execute_sql("insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000)")

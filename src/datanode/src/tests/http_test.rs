@@ -4,6 +4,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
+use datatypes::prelude::ConcreteDataType;
 use servers::http::handler::ScriptExecution;
 use servers::http::HttpServer;
 use servers::server::Server;
@@ -16,7 +17,9 @@ async fn make_test_app() -> (Router, TestGuard) {
     let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts();
     let instance = Arc::new(Instance::new(&opts).await.unwrap());
     instance.start().await.unwrap();
-    test_util::create_test_table(&instance).await.unwrap();
+    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
+        .await
+        .unwrap();
     let http_server = HttpServer::new(instance);
     (http_server.make_app(), guard)
 }
