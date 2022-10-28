@@ -126,7 +126,7 @@ impl PrometheusProtocolHandler for Instance {
                 Ok(HttpResponse::Bytes(BytesResponse {
                     content_type: "application/x-protobuf".to_string(),
                     content_encoding: "snappy".to_string(),
-                    bytes: response.encode_to_vec(),
+                    bytes: prometheus::snappy_compress(&response.encode_to_vec())?,
                 }))
             }
             ResponseType::StreamedXorChunks => error::NotSupportedSnafu {
@@ -200,7 +200,8 @@ mod tests {
             HttpResponse::Bytes(resp) => {
                 assert_eq!(resp.content_type, "application/x-protobuf");
                 assert_eq!(resp.content_encoding, "snappy");
-                let read_response = ReadResponse::decode(&resp.bytes[..]).unwrap();
+                let body = prometheus::snappy_decompress(&resp.bytes).unwrap();
+                let read_response = ReadResponse::decode(&body[..]).unwrap();
                 let query_results = read_response.results;
                 assert_eq!(2, query_results.len());
 

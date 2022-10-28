@@ -9,11 +9,11 @@ use axum_test_helper::TestClient;
 use common_query::Output;
 use prost::Message;
 use servers::error::Result;
-use servers::http::prometheus::{snappy_compress, snappy_decompress};
 use servers::http::BytesResponse;
 use servers::http::HttpResponse;
 use servers::http::HttpServer;
 use servers::prometheus;
+use servers::prometheus::snappy_compress;
 use servers::prometheus::Metrics;
 use servers::query_handler::{PrometheusProtocolHandler, SqlQueryHandler};
 use tokio::sync::mpsc;
@@ -121,7 +121,7 @@ async fn test_prometheus_remote_write_read() {
         Some("snappy"),
         headers.get("content-encoding").map(|x| x.to_str().unwrap())
     );
-    let response = snappy_decompress(&result.chunk().await.unwrap()[..]).unwrap();
+    let response = result.chunk().await.unwrap();
     let response = ReadResponse::decode(&response[..]).unwrap();
     assert_eq!(response.results.len(), 1);
     assert_eq!(

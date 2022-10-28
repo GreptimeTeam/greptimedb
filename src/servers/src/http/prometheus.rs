@@ -4,11 +4,11 @@ use axum::http::StatusCode;
 use hyper::Body;
 use prost::Message;
 use snafu::prelude::*;
-use snap::raw::{Decoder, Encoder};
 
 use crate::error::Result;
 use crate::error::{self};
 use crate::http::HttpResponse;
+use crate::prometheus::snappy_decompress;
 use crate::query_handler::PrometheusProtocolHandlerRef;
 
 #[axum_macros::debug_handler]
@@ -30,32 +30,7 @@ pub async fn remote_read(
 ) -> Result<HttpResponse> {
     let request = decode_remote_read_request(body).await?;
 
-    let response = match handler.read(request).await? {
-        HttpResponse::Bytes(mut response) => {
-            response.bytes = snappy_compress(&response.bytes)?;
-
-            HttpResponse::Bytes(response)
-        }
-        _ => unreachable!(),
-    };
-
-    Ok(response)
-}
-
-#[inline]
-pub fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
-    let mut decoder = Decoder::new();
-    decoder
-        .decompress_vec(buf)
-        .context(error::DecompressPromRemoteRequestSnafu)
-}
-
-#[inline]
-pub fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
-    let mut encoder = Encoder::new();
-    encoder
-        .compress_vec(buf)
-        .context(error::DecompressPromRemoteRequestSnafu)
+    handler.read(request).await
 }
 
 async fn decode_remote_write_request(body: Body) -> Result<WriteRequest> {
@@ -77,6 +52,3 @@ async fn decode_remote_read_request(body: Body) -> Result<ReadRequest> {
 
     ReadRequest::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)
 }
-
-#[cfg(test)]
-mod tests {}

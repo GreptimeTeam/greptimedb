@@ -12,7 +12,8 @@ use api::v1::{
     InsertExpr,
 };
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
+use snap::raw::{Decoder, Encoder};
 
 use crate::error::{self, Result};
 
@@ -643,4 +644,20 @@ mod tests {
             }]
         );
     }
+}
+
+#[inline]
+pub fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
+    let mut decoder = Decoder::new();
+    decoder
+        .decompress_vec(buf)
+        .context(error::DecompressPromRemoteRequestSnafu)
+}
+
+#[inline]
+pub fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = Encoder::new();
+    encoder
+        .compress_vec(buf)
+        .context(error::DecompressPromRemoteRequestSnafu)
 }
