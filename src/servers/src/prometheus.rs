@@ -170,13 +170,17 @@ fn collect_timeseries_ids(
 ) -> Vec<TimeSeriesId> {
     let mut timeseries_ids = Vec::with_capacity(row_count);
 
+    let mut columns_rows = vec![0; columns.len()];
+
     for row in 0..row_count {
-        let mut labels = vec![new_label(
+        let mut labels = Vec::with_capacity(columns.len() - 1);
+
+        labels.push(new_label(
             METRIC_NAME_LABEL.to_string(),
             table_name.to_string(),
-        )];
+        ));
 
-        for column in columns {
+        for (i, column) in columns.iter().enumerate() {
             let column_name = &column.column_name;
             let null_mask = &column.null_mask;
             let values = &column.values;
@@ -189,6 +193,9 @@ fn collect_timeseries_ids(
             if !null_mask.is_empty() && null_mask[row] == 0 {
                 continue;
             }
+
+            let row = columns_rows[i];
+            columns_rows[i] += 1;
 
             let column_value = values.as_ref().map(|vs| vs.string_values[row].to_string());
             if let Some(value) = column_value {
