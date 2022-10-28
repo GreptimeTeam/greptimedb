@@ -4,7 +4,8 @@ use bytes::{Buf, Bytes, BytesMut};
 use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use datafusion::datasource::TableProvider;
-use datafusion::logical_plan::{DFSchema, LogicalPlan, TableScan, ToDFSchema};
+use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
+use datafusion::physical_plan::project_schema;
 use prost::Message;
 use snafu::ensure;
 use snafu::{OptionExt, ResultExt};
@@ -181,23 +182,15 @@ impl DFLogicalSubstraitConvertor {
 
         // Calculate the projected schema
         let df_schema = stored_schema.to_dfschema().context(DFInternalSnafu)?;
-        let projected_fields = if let Some(projection) = &projection {
-            projection
-                .iter()
-                .map(|index| df_schema.fields().get(*index).cloned())
-                .collect::<Option<_>>()
-                .context(InvalidParametersSnafu {
-                    reason: format!(
-                        "projection {:?} out of bounds, schema {}",
-                        projection, df_schema
-                    ),
-                })?
-        } else {
-            vec![]
-        };
+        let projection_ref = projection.as_ref();
         let projected_schema = Arc::new(
-            DFSchema::new_with_metadata(projected_fields, Default::default())
-                .context(DFInternalSnafu)?,
+            Arc::try_unwrap(
+                project_schema(&Arc::new(df_schema.try_into().unwrap()), projection_ref)
+                    .context(DFInternalSnafu)?,
+            )
+            .unwrap()
+            .try_into()
+            .context(DFInternalSnafu)?,
         );
 
         // TODO(ruihang): Support filters and limit

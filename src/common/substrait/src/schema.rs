@@ -76,7 +76,7 @@ pub(crate) mod test {
             ConcreteDataType::string_datatype(),
             ConcreteDataType::date_datatype(),
             ConcreteDataType::timestamp_datatype(Default::default()),
-            // DateTime and List type are not supported now
+            // TODO(ruihang): DateTime and List type are not supported now
         ]
         .into_iter()
         .enumerate()

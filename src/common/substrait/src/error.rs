@@ -70,7 +70,7 @@ pub enum Error {
     #[snafu(display("Table quering not found: {}", name))]
     TableNotFound { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Cannot convert plan doesn't belong to GrepTimeDB"))]
+    #[snafu(display("Cannot convert plan doesn't belong to GreptimeDB"))]
     UnknownPlan { backtrace: Backtrace },
 
     #[snafu(display(

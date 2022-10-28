@@ -1,4 +1,4 @@
-//! Methods that perform convertion between Substrait's type ([Type](SType)) and GrepTime's type ([ConcreteDataType]).
+//! Methods that perform convertion between Substrait's type ([Type](SType)) and GreptimeDB's type ([ConcreteDataType]).
 
 use datatypes::prelude::ConcreteDataType;
 use substrait_proto::protobuf::r#type::{self as s_type, Kind, Nullability};
@@ -33,7 +33,7 @@ macro_rules! substrait_kind {
     }};
 }
 
-/// Convert Substrait [Type](SType) to GrepTime's [ConcreteDataType]. The bool in return
+/// Convert Substrait [Type](SType) to GreptimeDB's [ConcreteDataType]. The bool in return
 /// tuple is the nullability identifier.
 pub fn to_concrete_type(ty: &SType) -> Result<(ConcreteDataType, bool)> {
     /// In scope helper function.
@@ -93,7 +93,7 @@ macro_rules! build_substrait_kind {
     }};
 }
 
-/// Convert GrepTime's [ConcreteDataType] to Substrait [Type](SType).
+/// Convert GreptimeDB's [ConcreteDataType] to Substrait [Type](SType).
 pub fn from_concrete_type(ty: ConcreteDataType, nullability: Option<bool>) -> Result<SType> {
     let kind = match ty {
         ConcreteDataType::Null(_) => None,
