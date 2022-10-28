@@ -971,7 +971,7 @@ mod tests {
     #[test]
     pub fn test_align_timestamp_overflow() {
         assert_eq!(Some(i64::MIN), align_timestamp(i64::MIN, 1));
-        assert_eq!(None, align_timestamp(i64::MIN, 2));
+        assert_eq!(Some(-9223372036854775808), align_timestamp(i64::MIN, 2));
         assert_eq!(
             Some(((i64::MIN + 20) / 20 - 1) * 20),
             align_timestamp(i64::MIN + 20, 20)

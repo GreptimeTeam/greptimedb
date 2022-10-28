@@ -117,12 +117,6 @@ impl From<i64> for Timestamp {
     }
 }
 
-impl From<Timestamp> for i64 {
-    fn from(t: Timestamp) -> Self {
-        t.convert_to(TimeUnit::Millisecond)
-    }
-}
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeUnit {
     Second,

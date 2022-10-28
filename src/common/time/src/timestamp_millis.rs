@@ -75,15 +75,10 @@ pub trait BucketAligned {
 impl<T: Into<i64>> BucketAligned for T {
     fn align_by_bucket(self, bucket_duration: i64) -> Option<TimestampMillis> {
         assert!(bucket_duration > 0);
-        let val = self.into();
-        let ts = if val >= 0 {
-            val
-        } else {
-            // `bucket_duration > 0` implies `bucket_duration - 1` won't overflow.
-            val.checked_sub(bucket_duration - 1)?
-        };
-
-        Some(TimestampMillis(ts / bucket_duration * bucket_duration))
+        self.into()
+            .checked_div_euclid(bucket_duration)
+            .and_then(|val| val.checked_mul(bucket_duration))
+            .map(TimestampMillis)
     }
 }
 

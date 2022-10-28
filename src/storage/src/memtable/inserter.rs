@@ -153,14 +153,16 @@ impl Inserter {
                     .as_any()
                     .downcast_ref()
                     .context(error::BatchMissingTimestampSnafu)?;
-                compute_slice_indexes(timestamps, self.bucket_duration, &self.time_range_indexes)
+                let iter = timestamps.iter_data();
+                compute_slice_indices(iter, self.bucket_duration, &self.time_range_indexes)
             }
             ConcreteDataType::Timestamp(_) => {
                 let timestamps: &TimestampVector = timestamps
                     .as_any()
                     .downcast_ref()
                     .context(error::BatchMissingTimestampSnafu)?;
-                compute_slice_indexes(timestamps, self.bucket_duration, &self.time_range_indexes)
+                let iter = timestamps.iter_data().map(|v| v.map(|v| v.value()));
+                compute_slice_indices(iter, self.bucket_duration, &self.time_range_indexes)
             }
             _ => {
                 return IllegalTimestampColumnTypeSnafu {
@@ -235,8 +237,8 @@ struct SliceIndex {
 /// # Panics
 /// Panics if the duration is too large to be represented by i64, or `timestamps` are not all
 /// included by `time_range_indexes`.
-fn compute_slice_indexes<T: for<'a> ScalarVector<RefItem<'a>: Into<i64>>>(
-    timestamps: &T,
+fn compute_slice_indices<I: Iterator<Item = Option<i64>>>(
+    timestamps: I,
     duration: Duration,
     time_range_indexes: &RangeIndexMap,
 ) -> Vec<SliceIndex> {
@@ -252,7 +254,7 @@ fn compute_slice_indexes<T: for<'a> ScalarVector<RefItem<'a>: Into<i64>>>(
     let mut last_range_index = None;
 
     // Iterate all timestamps, split timestamps by its time range.
-    for (i, ts) in timestamps.iter_data().enumerate() {
+    for (i, ts) in timestamps.enumerate() {
         // Find index for time range of the timestamp.
 
         let current_range_index = ts
@@ -363,8 +365,8 @@ mod tests {
         let time_ranges = new_time_ranges(range_starts, duration);
         let time_range_indexes = new_range_index_map(&time_ranges);
 
-        let slice_indexes = compute_slice_indexes(
-            &ts_vec,
+        let slice_indexes = compute_slice_indices(
+            ts_vec.iter_data().map(|v| v.map(|v| v.value())),
             Duration::from_millis(duration as u64),
             &time_range_indexes,
         );
@@ -388,8 +390,8 @@ mod tests {
         let time_ranges = new_time_ranges(range_starts, duration);
         let time_range_indexes = new_range_index_map(&time_ranges);
 
-        let slice_indexes = compute_slice_indexes(
-            &ts_vec,
+        let slice_indexes = compute_slice_indices(
+            ts_vec.iter_data(),
             Duration::from_millis(duration as u64),
             &time_range_indexes,
         );
@@ -426,8 +428,8 @@ mod tests {
         let time_ranges = new_time_ranges(range_starts, duration);
         let time_range_indexes = new_range_index_map(&time_ranges);
 
-        let slice_indexes = compute_slice_indexes(
-            &ts_vec,
+        let slice_indexes = compute_slice_indices(
+            ts_vec.iter_data().map(|v| v.map(|v| v.value())),
             Duration::from_millis(duration as u64),
             &time_range_indexes,
         );
