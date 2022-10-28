@@ -11,6 +11,7 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: thehanimo/pr-title-checker@v1.3.4
         with:
