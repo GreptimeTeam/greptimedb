@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use aide::axum::routing as apirouting;
 use aide::axum::{ApiRouter, IntoApiResponse};
-use aide::openapi::{Info, OpenApi};
+use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
 use axum::response::Html;
 use axum::Extension;
@@ -72,7 +72,10 @@ impl HttpRecordsOutput {
     }
 
     pub fn num_cols(&self) -> usize {
-        self.schema.map(|x| x.column_schemas.len()).unwrap_or(0)
+        self.schema
+            .as_ref()
+            .map(|x| x.column_schemas.len())
+            .unwrap_or(0)
     }
 }
 
@@ -102,7 +105,8 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
                     .collect(),
             };
 
-            let mut rows = Vec::with_capacity(recordbatches.iter().map(|r| r.rows()).sum::<usize>());
+            let mut rows =
+                Vec::with_capacity(recordbatches.iter().map(|r| r.num_rows()).sum::<usize>());
 
             for recordbatch in recordbatches {
                 for row in recordbatch.rows() {
@@ -251,6 +255,11 @@ impl HttpServer {
                 version: HTTP_API_VERSION.to_string(),
                 ..Info::default()
             },
+            servers: vec![OpenAPIServer {
+                url: "http://localhost:4000/v1".to_string(),
+                ..OpenAPIServer::default()
+            }],
+
             ..OpenApi::default()
         };
 

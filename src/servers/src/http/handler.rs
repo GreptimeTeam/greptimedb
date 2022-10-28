@@ -31,8 +31,7 @@ pub async fn sql(
 }
 
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
-    op.description("Execute SQL query provided by `sql` parameter")
-        .response::<200, Json<JsonResponse>>()
+    op.response::<200, Json<JsonResponse>>()
 }
 
 /// Handler to export metrics
