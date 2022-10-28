@@ -72,11 +72,7 @@ impl HttpRecordsOutput {
     }
 
     pub fn num_cols(&self) -> usize {
-        if let Some(schema) = &self.schema {
-            schema.column_schemas.len()
-        } else {
-            0
-        }
+        self.schema.map(|x| x.column_schemas.len()).unwrap_or(0)
     }
 }
 
