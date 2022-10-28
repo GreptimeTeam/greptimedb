@@ -181,17 +181,10 @@ impl DFLogicalSubstraitConvertor {
         );
 
         // Calculate the projected schema
-        let df_schema = stored_schema.to_dfschema().context(DFInternalSnafu)?;
-        let projection_ref = projection.as_ref();
-        let projected_schema = Arc::new(
-            Arc::try_unwrap(
-                project_schema(&Arc::new(df_schema.try_into().unwrap()), projection_ref)
-                    .context(DFInternalSnafu)?,
-            )
-            .unwrap()
-            .try_into()
-            .context(DFInternalSnafu)?,
-        );
+        let projected_schema = project_schema(&stored_schema, projection.as_ref())
+            .context(DFInternalSnafu)?
+            .to_dfschema_ref()
+            .context(DFInternalSnafu)?;
 
         // TODO(ruihang): Support filters and limit
         Ok(LogicalPlan::TableScan(TableScan {
