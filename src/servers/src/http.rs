@@ -1,6 +1,7 @@
 pub mod handler;
 pub mod influxdb;
 pub mod opentsdb;
+pub mod prometheus;
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -8,6 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::{
     error_handling::HandleErrorLayer,
+    http::header,
     response::IntoResponse,
     response::{Json, Response},
     routing, BoxError, Router,
@@ -23,7 +25,9 @@ use tower_http::trace::TraceLayer;
 use self::influxdb::influxdb_write;
 use crate::error::{Result, StartHttpSnafu};
 use crate::query_handler::SqlQueryHandlerRef;
-use crate::query_handler::{InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef};
+use crate::query_handler::{
+    InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef, PrometheusProtocolHandlerRef,
+};
 use crate::server::Server;
 
 const HTTP_API_VERSION: &str = "v1";
@@ -32,6 +36,7 @@ pub struct HttpServer {
     sql_handler: SqlQueryHandlerRef,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
+    prom_handler: Option<PrometheusProtocolHandlerRef>,
 }
 
 #[derive(Serialize, Debug)]
@@ -41,9 +46,17 @@ pub enum JsonOutput {
 }
 
 #[derive(Serialize, Debug)]
+pub struct BytesResponse {
+    pub content_type: String,
+    pub content_encoding: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Serialize, Debug)]
 pub enum HttpResponse {
     Json(JsonResponse),
     Text(String),
+    Bytes(BytesResponse),
 }
 
 #[derive(Serialize, Debug)]
@@ -60,6 +73,14 @@ impl IntoResponse for HttpResponse {
         match self {
             HttpResponse::Json(json) => Json(json).into_response(),
             HttpResponse::Text(text) => text.into_response(),
+            HttpResponse::Bytes(resp) => (
+                [
+                    (header::CONTENT_TYPE, resp.content_type),
+                    (header::CONTENT_ENCODING, resp.content_encoding),
+                ],
+                resp.bytes,
+            )
+                .into_response(),
         }
     }
 }
@@ -125,6 +146,7 @@ impl HttpServer {
             sql_handler,
             opentsdb_handler: None,
             influxdb_handler: None,
+            prom_handler: None,
         }
     }
 
@@ -142,6 +164,14 @@ impl HttpServer {
             "Influxdb line protocol handler can be set only once!"
         );
         self.influxdb_handler.get_or_insert(handler);
+    }
+
+    pub fn set_prom_handler(&mut self, handler: PrometheusProtocolHandlerRef) {
+        debug_assert!(
+            self.prom_handler.is_none(),
+            "Prometheus protocol handler can be set only once!"
+        );
+        self.prom_handler.get_or_insert(handler);
     }
 
     pub fn make_app(&self) -> Router {
@@ -172,6 +202,14 @@ impl HttpServer {
                 Router::with_state(influxdb_handler).route("/write", routing::post(influxdb_write));
 
             router = router.nest(&format!("/{}/influxdb", HTTP_API_VERSION), influxdb_router);
+        }
+
+        if let Some(prom_handler) = self.prom_handler.clone() {
+            let prom_router = Router::with_state(prom_handler)
+                .route("/write", routing::post(prometheus::remote_write))
+                .route("/read", routing::post(prometheus::remote_read));
+
+            router = router.nest(&format!("/{}/prometheus", HTTP_API_VERSION), prom_router);
         }
 
         router

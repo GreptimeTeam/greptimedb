@@ -16,6 +16,8 @@ common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
+openmetrics-parser = "0.4"
+prost = "0.11"
 serde = "1.0"
 servers = { path = "../servers" }
 snafu = { version = "0.7", features = ["backtraces"] }

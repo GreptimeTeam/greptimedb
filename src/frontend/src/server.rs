@@ -15,6 +15,7 @@ use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
 use crate::influxdb::InfluxdbOptions;
 use crate::instance::InstanceRef;
+use crate::prometheus::PrometheusOptions;
 
 pub(crate) struct Services;
 
@@ -97,6 +98,13 @@ impl Services {
                 Some(InfluxdbOptions { enable: true })
             ) {
                 http_server.set_influxdb_handler(instance.clone());
+            }
+
+            if matches!(
+                opts.prometheus_options,
+                Some(PrometheusOptions { enable: true })
+            ) {
+                http_server.set_prom_handler(instance.clone());
             }
 
             Some((Box::new(http_server) as _, http_addr))

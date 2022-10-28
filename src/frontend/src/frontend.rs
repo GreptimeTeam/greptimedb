@@ -9,6 +9,7 @@ use crate::instance::Instance;
 use crate::mysql::MysqlOptions;
 use crate::opentsdb::OpentsdbOptions;
 use crate::postgres::PostgresOptions;
+use crate::prometheus::PrometheusOptions;
 use crate::server::Services;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -19,6 +20,7 @@ pub struct FrontendOptions {
     pub postgres_options: Option<PostgresOptions>,
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
+    pub prometheus_options: Option<PrometheusOptions>,
 }
 
 impl Default for FrontendOptions {
@@ -30,6 +32,7 @@ impl Default for FrontendOptions {
             postgres_options: Some(PostgresOptions::default()),
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
+            prometheus_options: Some(PrometheusOptions::default()),
         }
     }
 }

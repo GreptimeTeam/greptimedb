@@ -1,5 +1,6 @@
 mod influxdb;
 mod opentsdb;
+mod prometheus;
 
 use std::collections::HashMap;
 use std::sync::Arc;
