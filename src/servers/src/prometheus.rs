@@ -231,6 +231,11 @@ pub fn select_result_to_timeseries(
     // Then, group timeseries by it's id.
     let mut timeseries_map: BTreeMap<&TimeSeriesId, TimeSeries> = BTreeMap::default();
 
+    let mut value_column_row = 0;
+    let mut ts_column_row = 0;
+    let value_null_mask = &value_column.null_mask;
+    let ts_null_mask = &ts_column.null_mask;
+
     for (row, timeseries_id) in timeseries_ids.iter().enumerate() {
         let timeseries = timeseries_map
             .entry(timeseries_id)
@@ -239,16 +244,28 @@ pub fn select_result_to_timeseries(
                 ..Default::default()
             });
 
+        if !ts_null_mask.is_empty() && ts_null_mask[row] == 0 {
+            continue;
+        }
+        let ts_row = ts_column_row;
+        ts_column_row += 1;
+
+        if !value_null_mask.is_empty() && value_null_mask[row] == 0 {
+            continue;
+        }
+        let value_row = value_column_row;
+        value_column_row += 1;
+
         let sample = Sample {
             value: value_column
                 .values
                 .as_ref()
-                .map(|vs| vs.f64_values[row])
+                .map(|vs| vs.f64_values[value_row])
                 .unwrap_or(0.0f64),
             timestamp: ts_column
                 .values
                 .as_ref()
-                .map(|vs| vs.ts_millis_values[row])
+                .map(|vs| vs.ts_millis_values[ts_row])
                 .unwrap_or(0i64),
         };
 
