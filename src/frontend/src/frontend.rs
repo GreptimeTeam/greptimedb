@@ -19,6 +19,7 @@ pub struct FrontendOptions {
     pub postgres_options: Option<PostgresOptions>,
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
+    pub metasrv_addr: String,
 }
 
 impl Default for FrontendOptions {
@@ -30,6 +31,7 @@ impl Default for FrontendOptions {
             postgres_options: Some(PostgresOptions::default()),
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
+            metasrv_addr: "127.0.0.1:3002".to_string(),
         }
     }
 }
@@ -48,7 +50,7 @@ pub struct Frontend {
 
 impl Frontend {
     pub async fn new(opts: FrontendOptions) -> Self {
-        let instance = Instance::new().await;
+        let instance = Instance::new(&opts).await;
         Self {
             opts,
             instance: Some(instance),

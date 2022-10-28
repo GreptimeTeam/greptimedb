@@ -57,8 +57,8 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub(crate) async fn new() -> Self {
-        let meta_client = Self::prepare_meta_client().await;
+    pub(crate) async fn new(opts: &FrontendOptions) -> Self {
+        let meta_client = Self::prepare_meta_client(opts.metasrv_addr.clone()).await;
         let partition_rules = Arc::new(RwLock::new(HashMap::new()));
         let datanode_instances = Arc::new(RwLock::new(HashMap::new()));
         let catalog_list = Arc::new(FrontendCatalogList::new(
@@ -93,7 +93,7 @@ impl Instance {
         }
     }
 
-    pub async fn prepare_meta_client() -> MetaClient {
+    pub async fn prepare_meta_client(metasrv_addr: String) -> MetaClient {
         let config = common_grpc::channel_manager::ChannelConfig::new()
             .timeout(std::time::Duration::from_secs(3))
             .connect_timeout(std::time::Duration::from_secs(5))
@@ -107,7 +107,11 @@ impl Instance {
             .channel_manager(channel_manager)
             .build();
 
-        meta_client.start(&["127.0.0.1:3002"]).await.unwrap();
+        info!(
+            "Starting frontend meta-client with metasrv addr: {}",
+            metasrv_addr
+        );
+        meta_client.start(&[metasrv_addr]).await.unwrap();
         meta_client
     }
 
@@ -872,8 +876,9 @@ mod tests {
     }
 
     async fn new_frontend_instance() -> Instance {
-        let mut instance = Instance::new().await;
-        instance.start(&FrontendOptions::default()).await.unwrap();
+        let opts = FrontendOptions::default();
+        let mut instance = Instance::new(&opts).await;
+        instance.start(&opts).await.unwrap();
         instance
     }
 
