@@ -332,6 +332,46 @@ async fn handle_error(err: BoxError) -> Json<JsonResponse> {
 
 #[cfg(test)]
 mod test {
-    #[test]
-    fn test_recordbatches_convertion() {}
+    use std::sync::Arc;
+
+    use common_recordbatch::RecordBatches;
+    use datatypes::prelude::*;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{StringVector, UInt32Vector};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_recordbatches_convertion() {
+        let column_schemas = vec![
+            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
+            Arc::new(StringVector::from(vec![
+                None,
+                Some("hello"),
+                Some("greptime"),
+                None,
+            ])),
+        ];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch]).unwrap();
+
+        let json_resp = JsonResponse::from_output(Ok(Output::RecordBatches(recordbatches))).await;
+
+        let json_output = json_resp.output.unwrap();
+        if let JsonOutput::Records(r) = json_output {
+            assert_eq!(r.num_rows(), 4);
+            assert_eq!(r.num_cols(), 2);
+            assert_eq!(r.schema.column_schemas[0].name, "numbers");
+            assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
+            assert_eq!(r.rows[0][0], serde_json::Value::from(1));
+            assert_eq!(r.rows[0][1], serde_json::Value::Null);
+        } else {
+            panic!("invalid output type");
+        }
+    }
 }
