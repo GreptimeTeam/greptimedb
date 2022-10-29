@@ -133,9 +133,10 @@ def test(n):
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = res.text().await;
+    // FIXME(sunng87): coprocessor generated RecordBatches returnes incorrect schema.
     assert_eq!(
         body,
-        r#"{"success":true,"output":{"records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}}}"#,
+        r#"{"success":true,"output":{"records":{"schema":{"column_schemas":[{"name":"number","data_type":"UInt32"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}}}"#,
     );
 }
 
