@@ -1,4 +1,6 @@
 use clap::Parser;
+use common_telemetry::warn;
+use frontend::error as frontend_error;
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::influxdb::InfluxdbOptions;
 use frontend::mysql::MysqlOptions;
@@ -54,9 +56,34 @@ struct StartCommand {
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        let opts = self.try_into()?;
-        let mut frontend = Frontend::new(opts);
-        frontend.start().await.context(error::StartFrontendSnafu)
+        let opts: FrontendOptions = self.try_into()?;
+
+        // TODO(zyy17): Put retry args in options.
+        let max_retry_times = 10;
+        let retry_interval = std::time::Duration::from_secs(5);
+
+        let mut retry_times = 0;
+
+        loop {
+            let mut frontend = Frontend::new(opts.clone());
+            match frontend.start().await {
+                Ok(_) => return Ok(()),
+                Err(err) => match &err {
+                    frontend_error::Error::ConnectDatanode { addr, .. } => {
+                        retry_times += 1;
+                        if retry_times > max_retry_times {
+                            return Err(err).context(error::StartFrontendSnafu);
+                        }
+                        warn!(
+                            "connect datanode {} failed,  retry {} times",
+                            addr, retry_times
+                        );
+                        tokio::time::sleep(retry_interval).await;
+                    }
+                    _ => return Err(err).context(error::StartFrontendSnafu),
+                },
+            }
+        }
     }
 }
 
