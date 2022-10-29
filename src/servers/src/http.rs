@@ -18,7 +18,6 @@ use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
 use datatypes::data_type::DataType;
-use datatypes::schema::SchemaRef;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
@@ -56,7 +55,7 @@ pub struct Schema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct HttpRecordsOutput {
-    schema: Schema,
+    schema: Option<Schema>,
     rows: Vec<Vec<Value>>,
 }
 
@@ -66,42 +65,59 @@ impl HttpRecordsOutput {
     }
 
     pub fn num_cols(&self) -> usize {
-        self.schema.column_schemas.len()
+        self.schema
+            .as_ref()
+            .map(|x| x.column_schemas.len())
+            .unwrap_or(0)
     }
 }
 
-impl HttpRecordsOutput {
-    fn new(
-        schema: SchemaRef,
+impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
+    type Error = String;
+
+    fn try_from(
         recordbatches: Vec<RecordBatch>,
-    ) -> std::result::Result<HttpRecordsOutput, String> {
-        let schema = Schema {
-            column_schemas: schema
-                .column_schemas()
-                .iter()
-                .map(|cs| ColumnSchema {
-                    name: cs.name.clone(),
-                    data_type: cs.data_type.name().to_owned(),
-                })
-                .collect(),
-        };
+    ) -> std::result::Result<HttpRecordsOutput, Self::Error> {
+        if recordbatches.is_empty() {
+            Ok(HttpRecordsOutput {
+                schema: None,
+                rows: vec![],
+            })
+        } else {
+            // safety ensured by previous empty check
+            let first = &recordbatches[0];
+            let schema = Schema {
+                column_schemas: first
+                    .schema
+                    .column_schemas()
+                    .iter()
+                    .map(|cs| ColumnSchema {
+                        name: cs.name.clone(),
+                        data_type: cs.data_type.name().to_owned(),
+                    })
+                    .collect(),
+            };
 
-        let mut rows =
-            Vec::with_capacity(recordbatches.iter().map(|r| r.num_rows()).sum::<usize>());
+            let mut rows =
+                Vec::with_capacity(recordbatches.iter().map(|r| r.num_rows()).sum::<usize>());
 
-        for recordbatch in recordbatches {
-            for row in recordbatch.rows() {
-                let row = row.map_err(|e| e.to_string())?;
-                let value_row = row
-                    .into_iter()
-                    .map(|f| Value::try_from(f).map_err(|err| err.to_string()))
-                    .collect::<std::result::Result<Vec<Value>, _>>()?;
+            for recordbatch in recordbatches {
+                for row in recordbatch.rows() {
+                    let row = row.map_err(|e| e.to_string())?;
+                    let value_row = row
+                        .into_iter()
+                        .map(|f| Value::try_from(f).map_err(|err| err.to_string()))
+                        .collect::<std::result::Result<Vec<Value>, _>>()?;
 
-                rows.push(value_row);
+                    rows.push(value_row);
+                }
             }
-        }
 
-        Ok(HttpRecordsOutput { schema, rows })
+            Ok(HttpRecordsOutput {
+                schema: Some(schema),
+                rows,
+            })
+        }
     }
 }
 
@@ -144,18 +160,15 @@ impl JsonResponse {
             Ok(Output::AffectedRows(rows)) => {
                 Self::with_output(Some(JsonOutput::AffectedRows(rows)))
             }
-            Ok(Output::Stream(stream)) => {
-                let schema = stream.schema();
-                match util::collect(stream).await {
-                    Ok(rows) => match HttpRecordsOutput::new(schema, rows) {
-                        Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
-                        Err(err) => Self::with_error(Some(format!(": {}", err))),
-                    },
-                    Err(e) => Self::with_error(Some(format!("Recordbatch error: {}", e))),
-                }
-            }
+            Ok(Output::Stream(stream)) => match util::collect(stream).await {
+                Ok(rows) => match HttpRecordsOutput::try_from(rows) {
+                    Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
+                    Err(err) => Self::with_error(Some(format!(": {}", err))),
+                },
+                Err(e) => Self::with_error(Some(format!("Recordbatch error: {}", e))),
+            },
             Ok(Output::RecordBatches(recordbatches)) => {
-                match HttpRecordsOutput::new(recordbatches.schema(), recordbatches.take()) {
+                match HttpRecordsOutput::try_from(recordbatches.take()) {
                     Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
                     Err(err) => Self::with_error(Some(format!(": {}", err))),
                 }
@@ -366,8 +379,9 @@ mod test {
         if let JsonOutput::Records(r) = json_output {
             assert_eq!(r.num_rows(), 4);
             assert_eq!(r.num_cols(), 2);
-            assert_eq!(r.schema.column_schemas[0].name, "numbers");
-            assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
+            let schema = r.schema.unwrap();
+            assert_eq!(schema.column_schemas[0].name, "numbers");
+            assert_eq!(schema.column_schemas[0].data_type, "UInt32");
             assert_eq!(r.rows[0][0], serde_json::Value::from(1));
             assert_eq!(r.rows[0][1], serde_json::Value::Null);
         } else {
