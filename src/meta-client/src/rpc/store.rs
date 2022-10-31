@@ -4,6 +4,7 @@ use api::v1::meta::CompareAndPutRequest as PbCompareAndPutRequest;
 use api::v1::meta::CompareAndPutResponse as PbCompareAndPutResponse;
 use api::v1::meta::DeleteRangeRequest as PbDeleteRangeRequest;
 use api::v1::meta::DeleteRangeResponse as PbDeleteRangeResponse;
+use api::v1::meta::KeyValue as PbKeyValue;
 use api::v1::meta::PutRequest as PbPutRequest;
 use api::v1::meta::PutResponse as PbPutResponse;
 use api::v1::meta::RangeRequest as PbRangeRequest;
@@ -90,7 +91,7 @@ impl RangeRequest {
     #[inline]
     pub fn with_prefix(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
-        self.range_end = util::get_prefix(&self.key);
+        self.range_end = util::get_prefix_end_key(&self.key);
         self
     }
 
@@ -234,8 +235,7 @@ impl PutResponse {
 
 #[derive(Debug, Clone, Default)]
 pub struct BatchPutRequest {
-    pub keys: Vec<Vec<u8>>,
-    pub values: Vec<Vec<u8>>,
+    pub kvs: Vec<PbKeyValue>,
     /// If prev_kv is set, gets the previous key-value pairs before changing it.
     /// The previous key-value pairs will be returned in the batch put response.
     pub prev_kv: bool,
@@ -245,8 +245,7 @@ impl From<BatchPutRequest> for PbBatchPutRequest {
     fn from(req: BatchPutRequest) -> Self {
         Self {
             header: None,
-            keys: req.keys,
-            values: req.values,
+            kvs: req.kvs,
             prev_kv: req.prev_kv,
         }
     }
@@ -256,16 +255,17 @@ impl BatchPutRequest {
     #[inline]
     pub fn new() -> Self {
         Self {
-            keys: vec![],
-            values: vec![],
+            kvs: vec![],
             prev_kv: false,
         }
     }
 
     #[inline]
     pub fn add_kv(mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
-        self.keys.push(key.into());
-        self.values.push(value.into());
+        self.kvs.push(PbKeyValue {
+            key: key.into(),
+            value: value.into(),
+        });
         self
     }
 
@@ -473,7 +473,7 @@ impl DeleteRangeRequest {
     #[inline]
     pub fn with_prefix(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
-        self.range_end = util::get_prefix(&self.key);
+        self.range_end = util::get_prefix_end_key(&self.key);
         self
     }
 
@@ -648,22 +648,12 @@ mod tests {
 
         let into_req: PbBatchPutRequest = req.into();
         assert!(into_req.header.is_none());
-        assert_eq!(
-            vec![
-                b"test_key1".to_vec(),
-                b"test_key2".to_vec(),
-                b"test_key3".to_vec()
-            ],
-            into_req.keys
-        );
-        assert_eq!(
-            vec![
-                b"test_value1".to_vec(),
-                b"test_value2".to_vec(),
-                b"test_value3".to_vec()
-            ],
-            into_req.values
-        );
+        assert_eq!(b"test_key1".to_vec(), into_req.kvs.get(0).unwrap().key);
+        assert_eq!(b"test_key2".to_vec(), into_req.kvs.get(1).unwrap().key);
+        assert_eq!(b"test_key3".to_vec(), into_req.kvs.get(2).unwrap().key);
+        assert_eq!(b"test_value1".to_vec(), into_req.kvs.get(0).unwrap().value);
+        assert_eq!(b"test_value2".to_vec(), into_req.kvs.get(1).unwrap().value);
+        assert_eq!(b"test_value3".to_vec(), into_req.kvs.get(2).unwrap().value);
         assert!(into_req.prev_kv);
     }
 

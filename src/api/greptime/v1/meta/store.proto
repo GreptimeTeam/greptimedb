@@ -11,7 +11,7 @@ service Store {
   // Put puts the given key into the key-value store.
   rpc Put(PutRequest) returns (PutResponse);
 
-  // BatchPut atomic puts the given keys into the key-value store.
+  // BatchPut atomically puts the given keys into the key-value store.
   rpc BatchPut(BatchPutRequest) returns (BatchPutResponse);
 
   // CompareAndPut atomically puts the value to the given updated
@@ -74,11 +74,10 @@ message PutResponse {
 message BatchPutRequest {
   RequestHeader header = 1;
 
-  repeated bytes keys = 2;
-  repeated bytes values = 3;
+  repeated KeyValue kvs = 2;
   // If prev_kv is set, gets the previous key-value pairs before changing it.
   // The previous key-value pairs will be returned in the batch put response.
-  bool prev_kv = 4;
+  bool prev_kv = 3;
 }
 
 message BatchPutResponse {

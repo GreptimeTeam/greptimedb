@@ -11,7 +11,7 @@ pub struct MetaSrvOptions {
     pub bind_addr: String,
     pub server_addr: String,
     pub store_addr: String,
-    pub dn_lease_secs: i64,
+    pub datanode_lease_secs: i64,
 }
 
 impl Default for MetaSrvOptions {
@@ -20,7 +20,7 @@ impl Default for MetaSrvOptions {
             bind_addr: "0.0.0.0:3002".to_string(),
             server_addr: "0.0.0.0:3002".to_string(),
             store_addr: "0.0.0.0:2380".to_string(),
-            dn_lease_secs: 15,
+            datanode_lease_secs: 15,
         }
     }
 }

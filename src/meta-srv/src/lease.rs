@@ -18,7 +18,7 @@ where
     P: Fn(&LeaseKey, &LeaseValue) -> bool,
 {
     let key = get_lease_prefix(cluster_id);
-    let range_end = util::get_prefix(&key);
+    let range_end = util::get_prefix_end_key(&key);
     let req = RangeRequest {
         key,
         range_end,
@@ -57,7 +57,7 @@ mod tests {
     fn test_get_prefix() {
         let dn_key = get_lease_prefix(1);
         assert_eq!(b"__meta_dnlease-1".to_vec(), dn_key);
-        let range_end = util::get_prefix(&dn_key);
+        let range_end = util::get_prefix_end_key(&dn_key);
         assert_eq!(b"__meta_dnlease-2".to_vec(), range_end);
     }
 }

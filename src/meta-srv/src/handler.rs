@@ -71,10 +71,6 @@ pub struct HeartbeatHandlers {
 }
 
 impl HeartbeatHandlers {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
     pub async fn add_handler(&self, handler: impl HeartbeatHandler + 'static) {
         let mut handlers = self.handlers.write().await;
         handlers.push(Box::new(handler));

@@ -81,7 +81,7 @@ pub struct LeaseValue {
 impl FromStr for LeaseValue {
     type Err = error::Error;
 
-    fn from_str(value: &str) -> crate::Result<Self> {
+    fn from_str(value: &str) -> Result<Self> {
         serde_json::from_str(value).context(error::DeserializeFromJsonSnafu { input: value })
     }
 }

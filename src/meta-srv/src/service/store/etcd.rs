@@ -102,15 +102,13 @@ impl KvStore for EtcdStore {
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
         let BatchPut {
             cluster_id,
-            keys,
-            values,
+            kvs,
             options,
         } = req.try_into()?;
 
-        let put_ops = keys
+        let put_ops = kvs
             .into_iter()
-            .zip(values.into_iter())
-            .map(|kv| (TxnOp::put(kv.0, kv.1, options.clone())))
+            .map(|kv| (TxnOp::put(kv.key, kv.value, options.clone())))
             .collect::<Vec<_>>();
         let txn = Txn::new().and_then(put_ops);
 
@@ -296,8 +294,7 @@ impl TryFrom<PutRequest> for Put {
 
 struct BatchPut {
     cluster_id: u64,
-    keys: Vec<Vec<u8>>,
-    values: Vec<Vec<u8>>,
+    kvs: Vec<KeyValue>,
     options: Option<PutOptions>,
 }
 
@@ -307,17 +304,9 @@ impl TryFrom<BatchPutRequest> for BatchPut {
     fn try_from(req: BatchPutRequest) -> Result<Self> {
         let BatchPutRequest {
             header,
-            keys,
-            values,
+            kvs,
             prev_kv,
         } = req;
-
-        ensure!(
-            keys.len() == values.len(),
-            error::InvalidArgumentsSnafu {
-                err_msg: "keys and values must be the same count"
-            }
-        );
 
         let mut options = PutOptions::default();
         if prev_kv {
@@ -326,8 +315,7 @@ impl TryFrom<BatchPutRequest> for BatchPut {
 
         Ok(BatchPut {
             cluster_id: header.map_or(0, |h| h.cluster_id),
-            keys,
-            values,
+            kvs,
             options: Some(options),
         })
     }

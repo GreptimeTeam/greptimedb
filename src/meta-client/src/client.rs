@@ -236,7 +236,7 @@ impl MetaClient {
             .try_into()
     }
 
-    /// BatchPut atomic puts the given keys into the key-value store.
+    /// BatchPut atomically puts the given keys into the key-value store.
     pub async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
         self.store_client()
             .context(error::NotStartedSnafu {

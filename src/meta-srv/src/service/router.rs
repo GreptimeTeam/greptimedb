@@ -29,7 +29,7 @@ trait DnSelect {
 
 #[derive(Clone)]
 struct Context {
-    pub dn_lease_secs: i64,
+    pub datanode_lease_secs: i64,
     pub kv_store: KvStoreRef,
 }
 
@@ -38,7 +38,7 @@ impl router_server::Router for MetaSrv {
     async fn route(&self, req: Request<RouteRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
         let ctx = Context {
-            dn_lease_secs: self.options().dn_lease_secs,
+            datanode_lease_secs: self.options().datanode_lease_secs,
             kv_store: self.kv_store(),
         };
         let res = handle_route(req, ctx).await?;
@@ -49,7 +49,7 @@ impl router_server::Router for MetaSrv {
     async fn create(&self, req: Request<CreateRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
         let ctx = Context {
-            dn_lease_secs: self.options().dn_lease_secs,
+            datanode_lease_secs: self.options().datanode_lease_secs,
             kv_store: self.kv_store(),
         };
         let res = handle_create(req, ctx, DefaultDnSelect {}).await?;
@@ -66,7 +66,7 @@ impl DnSelect for DefaultDnSelect {
         // filter out the nodes out lease
         let now = time_util::current_time_millis();
         let lease_filter =
-            |_: &LeaseKey, v: &LeaseValue| now - v.timestamp_millis < ctx.dn_lease_secs;
+            |_: &LeaseKey, v: &LeaseValue| now - v.timestamp_millis < ctx.datanode_lease_secs;
         lease::find_datanodes(id, ctx.kv_store.clone(), lease_filter).await
     }
 }
@@ -185,7 +185,7 @@ mod tests {
             .value_list(vec![b"v11".to_vec(), b"v22".to_vec()]);
         let req = req.add_partition(p0).add_partition(p1);
         let ctx = Context {
-            dn_lease_secs: 10,
+            datanode_lease_secs: 10,
             kv_store,
         };
         let res = handle_create(req, ctx, MockDnSelect {}).await.unwrap();
