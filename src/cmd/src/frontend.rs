@@ -52,16 +52,18 @@ struct StartCommand {
     config_file: Option<String>,
     #[clap(short, long)]
     influxdb_enable: Option<bool>,
+    #[clap(long, default_value_t = 10)]
+    max_retry_times: u32,
+    #[clap(long, default_value_t = 5)]
+    retry_interval: u64, // seconds
 }
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
         let opts: FrontendOptions = self.try_into()?;
 
-        // TODO(zyy17): Put retry args in options.
-        let max_retry_times = 10;
-        let retry_interval = std::time::Duration::from_secs(5);
-
+        let max_retry_times = opts.max_retry_times;
+        let retry_interval = std::time::Duration::from_secs(opts.retry_interval);
         let mut retry_times = 0;
 
         let handle = tokio::spawn(async move {
@@ -128,6 +130,10 @@ impl TryFrom<StartCommand> for FrontendOptions {
         if let Some(enable) = cmd.influxdb_enable {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
+
+        opts.max_retry_times = cmd.max_retry_times;
+        opts.retry_interval = cmd.retry_interval;
+
         Ok(opts)
     }
 }
@@ -146,6 +152,8 @@ mod tests {
             opentsdb_addr: Some("127.0.0.1:4321".to_string()),
             influxdb_enable: Some(false),
             config_file: None,
+            max_retry_times: 10,
+            retry_interval: 5,
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();

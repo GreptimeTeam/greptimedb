@@ -21,6 +21,8 @@ pub struct FrontendOptions {
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
+    pub max_retry_times: u32,
+    pub retry_interval: u64,
 }
 
 impl Default for FrontendOptions {
@@ -33,6 +35,8 @@ impl Default for FrontendOptions {
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
+            max_retry_times: 10,
+            retry_interval: 5,
         }
     }
 }
