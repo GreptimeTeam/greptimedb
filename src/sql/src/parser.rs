@@ -5,7 +5,9 @@ use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
-use crate::error::{self, InvalidDatabaseNameSnafu, Result, SyntaxSnafu, TokenizerSnafu};
+use crate::error::{
+    self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu, TokenizerSnafu,
+};
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
 
@@ -102,10 +104,8 @@ impl<'a> ParserContext<'a> {
         } else if self.matches_keyword(Keyword::TABLES) {
             self.parser.next_token();
             self.parse_show_tables()
-        } else if self.matches_keyword(Keyword::CREATE) {
-            self.parser.next_token();
-            if self.matches_keyword(Keyword::TABLE) {
-                self.parser.next_token();
+        } else if self.consume_token("CREATE") {
+            if self.consume_token("TABLE") {
                 self.parse_show_create_table()
             } else {
                 self.unsupported(self.peek_token_as_string())
@@ -115,34 +115,28 @@ impl<'a> ParserContext<'a> {
         }
     }
 
-    /// Parser SHOW CREATE TABLE statement
+    /// Parse SHOW CREATE TABLE statement
     fn parse_show_create_table(&mut self) -> Result<Statement> {
-        let tablename: Option<String> = match self.parser.peek_token() {
-            Token::EOF | Token::SemiColon => {
-                return Ok(Statement::ShowCreateTable(ShowCreateTable {
-                    tablename: None,
-                }));
+        if let Token::EOF | Token::SemiColon = self.parser.peek_token() {
+            return InvalidTableNameSnafu { name: "None" }.fail();
+        }
+        let tablename =
+            self.parser
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a table name",
+                    actual: self.peek_token_as_string(),
+                })?;
+        ensure!(
+            !tablename.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: tablename.to_string(),
             }
-            _ => {
-                let tabname =
-                    self.parser
-                        .parse_object_name()
-                        .with_context(|_| error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "a table name",
-                            actual: self.peek_token_as_string(),
-                        })?;
-                ensure!(
-                    tabname.0.len() == 1,
-                    InvalidDatabaseNameSnafu {
-                        name: tabname.to_string(),
-                    }
-                );
-
-                Some(tabname.to_string())
-            }
-        };
-        Ok(Statement::ShowCreateTable(ShowCreateTable { tablename }))
+        );
+        Ok(Statement::ShowCreateTable(ShowCreateTable {
+            table_name: Some(tablename.to_string()),
+        }))
     }
 
     fn parse_show_tables(&mut self) -> Result<Statement> {
