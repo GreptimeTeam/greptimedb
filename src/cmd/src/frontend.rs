@@ -1,5 +1,4 @@
 use clap::Parser;
-use common_telemetry::tracing::level_enabled;
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::influxdb::InfluxdbOptions;
 use frontend::mysql::MysqlOptions;

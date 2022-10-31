@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use common_telemetry::debug;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::chunk::Chunk;
-use datatypes::arrow::datatypes::{DataType, Field, Schema};
+use datatypes::arrow::datatypes::{DataType, Schema};
 use datatypes::arrow::io::parquet::read::{
     infer_schema, read_columns_many_async, read_metadata_async, RowGroupDeserializer,
 };
@@ -27,6 +27,7 @@ use table::predicate::Predicate;
 use crate::error::{self, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
+use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchemaRef, StoreSchema};
 use crate::sst;
 
@@ -213,17 +214,18 @@ impl<'a> ParquetReader<'a> {
 
         let arrow_schema =
             infer_schema(&metadata).context(error::ReadParquetSnafu { file: &file_path })?;
+        let store_schema = Arc::new(
+            StoreSchema::try_from(arrow_schema)
+                .context(error::ConvertStoreSchemaSnafu { file: &file_path })?,
+        );
 
-        // Now the StoreSchema is only used to validate metadata of the parquet file, but this schema
-        // would be useful once we support altering schema, as this is the actual schema of the SST.
-        let store_schema = StoreSchema::try_from(arrow_schema)
-            .context(error::ConvertStoreSchemaSnafu { file: &file_path })?;
+        let adapter = ReadAdapter::new(store_schema.clone(), self.projected_schema.clone())?;
 
         let pruned_row_groups = self
             .predicate
             .prune_row_groups(store_schema.schema().clone(), &metadata.row_groups);
 
-        let projected_fields = self.projected_fields().to_vec();
+        let projected_fields = adapter.fields_to_read();
         let chunk_stream = try_stream!({
             for (idx, valid) in pruned_row_groups.iter().enumerate() {
                 if !valid {
@@ -250,27 +252,20 @@ impl<'a> ParquetReader<'a> {
             }
         });
 
-        ChunkStream::new(self.projected_schema.clone(), Box::pin(chunk_stream))
-    }
-
-    fn projected_fields(&self) -> &[Field] {
-        &self.projected_schema.schema_to_read().arrow_schema().fields
+        ChunkStream::new(adapter, Box::pin(chunk_stream))
     }
 }
 
 pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk<Arc<dyn Array>>>> + Send>>;
 
 pub struct ChunkStream {
-    projected_schema: ProjectedSchemaRef,
+    adapter: ReadAdapter,
     stream: SendableChunkStream,
 }
 
 impl ChunkStream {
-    pub fn new(projected_schema: ProjectedSchemaRef, stream: SendableChunkStream) -> Result<Self> {
-        Ok(Self {
-            projected_schema,
-            stream,
-        })
+    pub fn new(adapter: ReadAdapter, stream: SendableChunkStream) -> Result<Self> {
+        Ok(Self { adapter, stream })
     }
 }
 
@@ -280,12 +275,7 @@ impl BatchReader for ChunkStream {
         self.stream
             .try_next()
             .await?
-            .map(|chunk| {
-                self.projected_schema
-                    .schema_to_read()
-                    .arrow_chunk_to_batch(&chunk)
-                    .context(error::InvalidParquetSchemaSnafu)
-            })
+            .map(|chunk| self.adapter.arrow_chunk_to_batch(&chunk))
             .transpose()
     }
 }

@@ -8,7 +8,7 @@ use servers::grpc::GrpcServer;
 use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
 use servers::postgres::PostgresServer;
-use servers::query_handler::{SqlQueryHandler, SqlQueryHandlerRef};
+use servers::query_handler::SqlQueryHandlerRef;
 use servers::server::Server;
 use snafu::ResultExt;
 use tokio::try_join;

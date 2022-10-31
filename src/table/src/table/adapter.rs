@@ -6,7 +6,6 @@ use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlanAdapter, Ph
 use common_query::DfPhysicalPlan;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
-///  Datafusion table adpaters
 use datafusion::datasource::{
     datasource::TableProviderFilterPushDown as DfTableProviderFilterPushDown, TableProvider,
     TableType as DfTableType,

@@ -96,12 +96,6 @@ async fn test_shutdown_pg_server() -> Result<()> {
     for handle in join_handles.iter_mut() {
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        let error = result.unwrap_err().to_string();
-        assert!(
-            error.contains("Connection refused")
-                || error.contains("Connection reset by peer")
-                || error.contains("close")
-        );
     }
 
     Ok(())

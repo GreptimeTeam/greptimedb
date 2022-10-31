@@ -25,6 +25,8 @@ datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", bran
 datatypes = { path = "../datatypes" }
 itertools = "0.10"
 query = { path = "../query" }
+openmetrics-parser = "0.4"
+prost = "0.11"
 serde = "1.0"
 servers = { path = "../servers" }
 snafu = { version = "0.7", features = ["backtraces"] }

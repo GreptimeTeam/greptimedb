@@ -12,6 +12,7 @@ jobs:
     name: Check
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v2
       - uses: arduino/setup-protoc@v1
@@ -31,6 +32,7 @@ jobs:
     name: Test Suite
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v2
       - uses: arduino/setup-protoc@v1
@@ -56,6 +58,7 @@ jobs:
     name: Rustfmt
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v2
       - uses: arduino/setup-protoc@v1
@@ -76,6 +79,7 @@ jobs:
     name: Clippy
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v2
       - uses: arduino/setup-protoc@v1

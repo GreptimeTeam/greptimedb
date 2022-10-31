@@ -5,7 +5,7 @@ use std::sync::Arc;
 use common_error::prelude::*;
 use datatypes::arrow::bitmap::MutableBitmap;
 use datatypes::schema::{SchemaBuilder, SchemaRef};
-use datatypes::vectors::{BooleanVector, VectorRef};
+use datatypes::vectors::BooleanVector;
 use store_api::storage::{Chunk, ColumnId};
 
 use crate::error;
@@ -184,36 +184,6 @@ impl ProjectedSchema {
             .unwrap_or(true)
     }
 
-    /// Construct a new [Batch] from row key, value, sequence and op_type.
-    ///
-    /// # Panics
-    /// Panics if number of columns are not the same as this schema.
-    pub fn batch_from_parts(
-        &self,
-        row_key_columns: Vec<VectorRef>,
-        mut value_columns: Vec<VectorRef>,
-        sequences: VectorRef,
-        op_types: VectorRef,
-    ) -> Batch {
-        // sequence and op_type
-        let num_internal_columns = 2;
-
-        assert_eq!(
-            self.schema_to_read.num_columns(),
-            row_key_columns.len() + value_columns.len() + num_internal_columns
-        );
-
-        let mut columns = row_key_columns;
-        // Reserve space for value, sequence and op_type
-        columns.reserve(value_columns.len() + num_internal_columns);
-        columns.append(&mut value_columns);
-        // Internal columns are push in sequence, op_type order.
-        columns.push(sequences);
-        columns.push(op_types);
-
-        Batch::new(columns)
-    }
-
     fn build_schema_to_read(
         region_schema: &RegionSchema,
         projection: &Projection,
@@ -369,7 +339,7 @@ impl BatchOp for ProjectedSchema {
 mod tests {
     use datatypes::prelude::ScalarVector;
     use datatypes::type_id::LogicalTypeId;
-    use datatypes::vectors::TimestampVector;
+    use datatypes::vectors::{TimestampVector, VectorRef};
     use store_api::storage::OpType;
 
     use super::*;
@@ -474,17 +444,6 @@ mod tests {
         assert_eq!(2, chunk.columns.len());
         assert_eq!(&chunk.columns[0], batch.column(2));
         assert_eq!(&chunk.columns[1], batch.column(1));
-
-        // Test batch_from_parts
-        let keys = batch.columns()[0..2].to_vec();
-        let values = batch.columns()[2..3].to_vec();
-        let created = projected_schema.batch_from_parts(
-            keys,
-            values,
-            batch.column(3).clone(),
-            batch.column(4).clone(),
-        );
-        assert_eq!(batch, created);
     }
 
     #[test]

@@ -8,9 +8,10 @@ use std::{
 };
 
 use common_error::prelude::*;
-use common_time::{RangeMillis, TimestampMillis};
+use common_time::timestamp_millis::BucketAligned;
+use common_time::RangeMillis;
 use datatypes::schema::{ColumnSchema, SchemaRef};
-use datatypes::vectors::TimestampVector;
+use datatypes::vectors::{Int64Vector, TimestampVector};
 use datatypes::{
     arrow::error::ArrowError, data_type::ConcreteDataType, prelude::ScalarVector, prelude::Value,
     vectors::VectorRef,
@@ -216,11 +217,26 @@ impl WriteRequest for WriteBatch {
 
                         aligned_timestamps.insert(aligned);
                     } else {
-                        let ts_vector = column.as_any().downcast_ref::<TimestampVector>().unwrap(); // not expected to fail
-                        for ts in ts_vector.iter_data().flatten() {
-                            let aligned = align_timestamp(ts.value(), durations_millis)
-                                .context(TimestampOverflowSnafu { ts: ts.value() })?;
-                            aligned_timestamps.insert(aligned);
+                        match column.data_type() {
+                            ConcreteDataType::Timestamp(_) => {
+                                let ts_vector =
+                                    column.as_any().downcast_ref::<TimestampVector>().unwrap();
+                                for ts in ts_vector.iter_data().flatten() {
+                                    let aligned = align_timestamp(ts.value(), durations_millis)
+                                        .context(TimestampOverflowSnafu { ts: ts.value() })?;
+                                    aligned_timestamps.insert(aligned);
+                                }
+                            }
+                            ConcreteDataType::Int64(_) => {
+                                let ts_vector =
+                                    column.as_any().downcast_ref::<Int64Vector>().unwrap();
+                                for ts in ts_vector.iter_data().flatten() {
+                                    let aligned = align_timestamp(ts, durations_millis)
+                                        .context(TimestampOverflowSnafu { ts })?;
+                                    aligned_timestamps.insert(aligned);
+                                }
+                            }
+                            _ => unreachable!(),
                         }
                     }
                 }
@@ -250,7 +266,7 @@ impl WriteRequest for WriteBatch {
 /// So timestamp within `[i64::MIN, i64::MIN + duration)` or
 /// `[i64::MAX-(i64::MAX%duration), i64::MAX]` is not a valid input.
 fn align_timestamp(ts: i64, duration: i64) -> Option<i64> {
-    let aligned = TimestampMillis::new(ts).align_by_bucket(duration)?.as_i64();
+    let aligned = ts.align_by_bucket(duration)?.as_i64();
     // Also ensure end timestamp won't overflow.
     aligned.checked_add(duration)?;
     Some(aligned)
@@ -955,7 +971,7 @@ mod tests {
     #[test]
     pub fn test_align_timestamp_overflow() {
         assert_eq!(Some(i64::MIN), align_timestamp(i64::MIN, 1));
-        assert_eq!(None, align_timestamp(i64::MIN, 2));
+        assert_eq!(Some(-9223372036854775808), align_timestamp(i64::MIN, 2));
         assert_eq!(
             Some(((i64::MIN + 20) / 20 - 1) * 20),
             align_timestamp(i64::MIN + 20, 20)

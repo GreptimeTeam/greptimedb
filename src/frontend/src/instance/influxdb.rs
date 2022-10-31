@@ -1,9 +1,6 @@
-use api::v1::InsertExpr;
 use async_trait::async_trait;
-use common_error::prelude::BoxedError;
 use servers::influxdb::InfluxdbRequest;
-use servers::{error::ExecuteQuerySnafu, query_handler::InfluxdbLineProtocolHandler};
-use snafu::ResultExt;
+use servers::query_handler::InfluxdbLineProtocolHandler;
 
 use crate::instance::Instance;
 

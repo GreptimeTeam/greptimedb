@@ -5,9 +5,12 @@ use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use datafusion::datasource::TableProvider;
 use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
+use datafusion::physical_plan::project_schema;
 use prost::Message;
 use snafu::ensure;
 use snafu::{OptionExt, ResultExt};
+use substrait_proto::protobuf::expression::mask_expression::{StructItem, StructSelect};
+use substrait_proto::protobuf::expression::MaskExpression;
 use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
 use substrait_proto::protobuf::read_rel::{NamedTable, ReadType};
 use substrait_proto::protobuf::rel::RelType;
@@ -19,9 +22,10 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::error::Error;
 use crate::error::{
     DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, InternalSnafu,
-    InvalidParametersSnafu, MissingFieldSnafu, TableNotFoundSnafu, UnknownPlanSnafu,
-    UnsupportedExprSnafu, UnsupportedPlanSnafu,
+    InvalidParametersSnafu, MissingFieldSnafu, SchemaNotMatchSnafu, TableNotFoundSnafu,
+    UnknownPlanSnafu, UnsupportedExprSnafu, UnsupportedPlanSnafu,
 };
+use crate::schema::{from_schema, to_schema};
 use crate::SubstraitPlan;
 
 pub struct DFLogicalSubstraitConvertor {
@@ -148,6 +152,11 @@ impl DFLogicalSubstraitConvertor {
             }
         };
 
+        // Get projection indices
+        let projection = read_rel
+            .projection
+            .map(|mask_expr| self.convert_mask_expression(mask_expr));
+
         // Get table handle from catalog manager
         let table_ref = self
             .catalog_manager
@@ -158,22 +167,44 @@ impl DFLogicalSubstraitConvertor {
                 name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
             })?;
         let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
-        // Get schema direct from the table.
-        // TODO(ruihang): Maybe need to verify the schema with the one in Substrait?
-        let schema = adapter
-            .schema()
+
+        // Get schema directly from the table, and compare it with the schema retrived from substrait proto.
+        let stored_schema = adapter.schema();
+        let retrived_schema = to_schema(read_rel.base_schema.unwrap_or_default())?;
+        let retrived_arrow_schema = retrived_schema.arrow_schema();
+        ensure!(
+            stored_schema.fields == retrived_arrow_schema.fields,
+            SchemaNotMatchSnafu {
+                substrait_schema: retrived_arrow_schema.clone(),
+                storage_schema: stored_schema
+            }
+        );
+
+        // Calculate the projected schema
+        let projected_schema = project_schema(&stored_schema, projection.as_ref())
+            .context(DFInternalSnafu)?
             .to_dfschema_ref()
             .context(DFInternalSnafu)?;
 
-        // TODO(ruihang): Support projection, filters and limit
+        // TODO(ruihang): Support filters and limit
         Ok(LogicalPlan::TableScan(TableScan {
             table_name,
             source: adapter,
-            projection: None,
-            projected_schema: schema,
+            projection,
+            projected_schema,
             filters: vec![],
             limit: None,
         }))
+    }
+
+    fn convert_mask_expression(&self, mask_expression: MaskExpression) -> Vec<usize> {
+        mask_expression
+            .select
+            .unwrap_or_default()
+            .struct_items
+            .into_iter()
+            .map(|select| select.field as _)
+            .collect()
     }
 }
 
@@ -254,26 +285,50 @@ impl DFLogicalSubstraitConvertor {
             .context(UnknownPlanSnafu)?;
         let table_info = provider.table().table_info();
 
+        // assemble NamedTable and ReadType
         let catalog_name = table_info.catalog_name.clone();
         let schema_name = table_info.schema_name.clone();
         let table_name = table_info.name.clone();
-
         let named_table = NamedTable {
             names: vec![catalog_name, schema_name, table_name],
             advanced_extension: None,
         };
         let read_type = ReadType::NamedTable(named_table);
 
+        // assemble projection
+        let projection = table_scan
+            .projection
+            .map(|proj| self.convert_schema_projection(&proj));
+
+        // assemble base (unprojected) schema using Table's schema.
+        let base_schema = from_schema(&provider.table().schema())?;
+
         let read_rel = ReadRel {
             common: None,
-            base_schema: None,
+            base_schema: Some(base_schema),
             filter: None,
-            projection: None,
+            projection,
             advanced_extension: None,
             read_type: Some(read_type),
         };
 
         Ok(read_rel)
+    }
+
+    /// Convert a index-based schema projection to substrait's [MaskExpression].
+    fn convert_schema_projection(&self, projections: &[usize]) -> MaskExpression {
+        let struct_items = projections
+            .iter()
+            .map(|index| StructItem {
+                field: *index as i32,
+                child: None,
+            })
+            .collect();
+        MaskExpression {
+            select: Some(StructSelect { struct_items }),
+            // TODO(ruihang): this field is unspecified
+            maintain_singular_struct: true,
+        }
     }
 }
 
@@ -285,10 +340,12 @@ mod test {
         CatalogList, CatalogProvider, RegisterTableRequest,
     };
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use datafusion::logical_plan::DFSchema;
     use datatypes::schema::Schema;
     use table::{requests::CreateTableRequest, test_util::EmptyTable, test_util::MockTableEngine};
 
     use super::*;
+    use crate::schema::test::supported_types;
 
     const DEFAULT_TABLE_NAME: &str = "SubstraitTable";
 
@@ -319,7 +376,7 @@ mod test {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             desc: None,
-            schema: Arc::new(Schema::new(vec![])),
+            schema: Arc::new(Schema::new(supported_types())),
             region_numbers: vec![0],
             primary_key_indices: vec![],
             create_if_not_exists: true,
@@ -337,7 +394,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_bare_table_scan() {
+    async fn test_table_scan() {
         let catalog_manager = build_mock_catalog_manager().await;
         let table_ref = Arc::new(EmptyTable::new(build_create_table_request(
             DEFAULT_TABLE_NAME,
@@ -353,13 +410,20 @@ mod test {
             .await
             .unwrap();
         let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
-        let schema = adapter.schema().to_dfschema_ref().unwrap();
+        let projection = vec![1, 3, 5];
+        let df_schema = adapter.schema().to_dfschema().unwrap();
+        let projected_fields = projection
+            .iter()
+            .map(|index| df_schema.field(*index).clone())
+            .collect();
+        let projected_schema =
+            Arc::new(DFSchema::new_with_metadata(projected_fields, Default::default()).unwrap());
 
         let table_scan_plan = LogicalPlan::TableScan(TableScan {
             table_name: DEFAULT_TABLE_NAME.to_string(),
             source: adapter,
-            projection: None,
-            projected_schema: schema,
+            projection: Some(projection),
+            projected_schema,
             filters: vec![],
             limit: None,
         });

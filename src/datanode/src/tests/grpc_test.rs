@@ -12,7 +12,7 @@ use api::v1::{
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
 use servers::grpc::GrpcServer;
-use servers::query_handler::{GrpcQueryHandler, GrpcQueryHandlerRef};
+use servers::query_handler::GrpcQueryHandlerRef;
 use servers::server::Server;
 
 use crate::instance::Instance;

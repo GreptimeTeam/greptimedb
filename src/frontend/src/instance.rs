@@ -1,3 +1,7 @@
+mod influxdb;
+mod opentsdb;
+mod prometheus;
+
 use std::collections::HashMap;
 use std::iter;
 use std::sync::Arc;
@@ -8,7 +12,6 @@ use api::v1::{
     ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
-use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogList, CatalogListRef, CatalogProvider};
 use client::admin::{admin_result_to_output, Admin};
@@ -26,25 +29,19 @@ use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler
 use snafu::prelude::*;
 use sql::ast::{ColumnDef, TableConstraint};
 use sql::statements::column_def_to_schema;
-use sql::statements::create_table::Partitions as SqlPartitions;
 use sql::statements::create_table::{CreateTable, TIME_INDEX};
 use sql::statements::statement::Statement;
 use sql::statements::{
     sql_data_type_to_concrete_data_type, sql_value_to_value, table_idents_to_full_name,
 };
 use sql::{dialect::GenericDialect, parser::ParserContext};
-use sqlparser::ast::Value as SqlValue;
-use sqlparser::ast::{Ident, SqlOption};
 use tokio::sync::RwLock;
 
 use crate::catalog::FrontendCatalogList;
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
-use crate::mock::{Datanode, DatanodeInstance, RangePartitionRule, Region};
+use crate::mock::{DatanodeInstance, RangePartitionRule, Region};
 use crate::sql::insert_to_request;
-
-mod influxdb;
-mod opentsdb;
 
 pub(crate) type InstanceRef = Arc<Instance>;
 
@@ -115,7 +112,7 @@ impl Instance {
         meta_client
     }
 
-    pub(crate) async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
+    pub(crate) async fn start(&mut self, _opts: &FrontendOptions) -> Result<()> {
         // let addr = opts.datanode_grpc_addr();
         // self.admin
         //     .start(addr.clone())
@@ -125,6 +122,7 @@ impl Instance {
     }
 }
 
+use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
 #[cfg(test)]
 impl Instance {
     pub fn with_client(client: Client) -> Self {

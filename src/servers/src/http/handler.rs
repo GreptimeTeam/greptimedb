@@ -1,38 +1,53 @@
 use std::collections::HashMap;
 
+use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
+use common_error::prelude::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_telemetry::metric;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::http::{HttpResponse, JsonResponse};
+use crate::http::JsonResponse;
 use crate::query_handler::SqlQueryHandlerRef;
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SqlQuery {
+    pub database: Option<String>,
+    pub sql: Option<String>,
+}
 
 /// Handler to execute sql
 #[axum_macros::debug_handler]
 pub async fn sql(
     State(sql_handler): State<SqlQueryHandlerRef>,
-    Query(params): Query<HashMap<String, String>>,
-) -> HttpResponse {
-    if let Some(sql) = params.get("sql") {
-        HttpResponse::Json(JsonResponse::from_output(sql_handler.do_query(sql).await).await)
+    Query(params): Query<SqlQuery>,
+) -> Json<JsonResponse> {
+    if let Some(ref sql) = params.sql {
+        Json(JsonResponse::from_output(sql_handler.do_query(sql).await).await)
     } else {
-        HttpResponse::Json(JsonResponse::with_error(Some(
+        Json(JsonResponse::with_error(
             "sql parameter is required.".to_string(),
-        )))
+            StatusCode::InvalidArguments,
+        ))
     }
+}
+
+pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
+    op.response::<200, Json<JsonResponse>>()
 }
 
 /// Handler to export metrics
 #[axum_macros::debug_handler]
-pub async fn metrics(Query(_params): Query<HashMap<String, String>>) -> HttpResponse {
+pub async fn metrics(Query(_params): Query<HashMap<String, String>>) -> String {
     if let Some(handle) = metric::try_handle() {
-        HttpResponse::Text(handle.render())
+        handle.render()
     } else {
-        HttpResponse::Text("Prometheus handle not initialized.".to_string())
+        "Prometheus handle not initialized.".to_owned()
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ScriptExecution {
     pub name: String,
     pub script: String,
@@ -43,11 +58,12 @@ pub struct ScriptExecution {
 pub async fn scripts(
     State(query_handler): State<SqlQueryHandlerRef>,
     Json(payload): Json<ScriptExecution>,
-) -> HttpResponse {
+) -> Json<JsonResponse> {
     if payload.name.is_empty() || payload.script.is_empty() {
-        return HttpResponse::Json(JsonResponse::with_error(Some(
+        return Json(JsonResponse::with_error(
             "Invalid name or script".to_string(),
-        )));
+            StatusCode::InvalidArguments,
+        ));
     }
 
     let body = match query_handler
@@ -55,25 +71,33 @@ pub async fn scripts(
         .await
     {
         Ok(()) => JsonResponse::with_output(None),
-        Err(e) => JsonResponse::with_error(Some(format!("Insert script error: {}", e))),
+        Err(e) => JsonResponse::with_error(format!("Insert script error: {}", e), e.status_code()),
     };
 
-    HttpResponse::Json(body)
+    Json(body)
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RunScriptQuery {
+    name: Option<String>,
 }
 
 /// Handler to execute script
 #[axum_macros::debug_handler]
 pub async fn run_script(
     State(query_handler): State<SqlQueryHandlerRef>,
-    Query(params): Query<HashMap<String, String>>,
-) -> HttpResponse {
-    let name = params.get("name");
+    Query(params): Query<RunScriptQuery>,
+) -> Json<JsonResponse> {
+    let name = params.name.as_ref();
 
     if name.is_none() || name.unwrap().is_empty() {
-        return HttpResponse::Json(JsonResponse::with_error(Some("Invalid name".to_string())));
+        return Json(JsonResponse::with_error(
+            "Invalid name".to_string(),
+            StatusCode::InvalidArguments,
+        ));
     }
 
     let output = query_handler.execute_script(name.unwrap()).await;
 
-    HttpResponse::Json(JsonResponse::from_output(output).await)
+    Json(JsonResponse::from_output(output).await)
 }

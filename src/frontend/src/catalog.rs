@@ -4,10 +4,8 @@ use std::sync::Arc;
 
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
-    CatalogList, CatalogListRef, CatalogProvider, CatalogProviderRef, SchemaProvider,
-    SchemaProviderRef,
+    CatalogList, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
 };
-use client::Database;
 use common_catalog::{CatalogKey, SchemaKey, TableKey, TableValue};
 use futures::StreamExt;
 use table::TableRef;
@@ -44,8 +42,8 @@ impl CatalogList for FrontendCatalogList {
 
     fn register_catalog(
         &self,
-        name: String,
-        catalog: CatalogProviderRef,
+        _name: String,
+        _catalog: CatalogProviderRef,
     ) -> catalog::error::Result<Option<CatalogProviderRef>> {
         unimplemented!("Frontend catalog list does not support register catalog")
     }
@@ -128,8 +126,8 @@ impl CatalogProvider for FrontendCatalogProvider {
 
     fn register_schema(
         &self,
-        name: String,
-        schema: SchemaProviderRef,
+        _name: String,
+        _schema: SchemaProviderRef,
     ) -> catalog::error::Result<Option<SchemaProviderRef>> {
         unimplemented!("Frontend catalog provider does not support register schema")
     }
@@ -221,7 +219,6 @@ impl SchemaProvider for FrontendSchemaProvider {
                     if !k.starts_with(table_prefix.as_bytes()) {
                         continue;
                     }
-                    let key = TableKey::parse(String::from_utf8_lossy(&k)).unwrap();
                     let val = TableValue::parse(String::from_utf8_lossy(&v)).unwrap();
                     let node_id = val.node_id;
                     let region_ids = val.regions_ids;
@@ -258,13 +255,13 @@ impl SchemaProvider for FrontendSchemaProvider {
 
     fn register_table(
         &self,
-        name: String,
-        table: TableRef,
+        _name: String,
+        _table: TableRef,
     ) -> catalog::error::Result<Option<TableRef>> {
         unimplemented!("Frontend schema provider does not support register table")
     }
 
-    fn deregister_table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
+    fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {
         unimplemented!("Frontend schema provider does not support deregister table")
     }
 

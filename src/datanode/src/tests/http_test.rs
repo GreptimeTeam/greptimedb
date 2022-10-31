@@ -4,6 +4,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
+use datatypes::prelude::ConcreteDataType;
 use servers::http::handler::ScriptExecution;
 use servers::http::HttpServer;
 use servers::server::Server;
@@ -16,7 +17,9 @@ async fn make_test_app() -> (Router, TestGuard) {
     let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts();
     let instance = Arc::new(Instance::new(&opts).await.unwrap());
     instance.start().await.unwrap();
-    test_util::create_test_table(&instance).await.unwrap();
+    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
+        .await
+        .unwrap();
     let http_server = HttpServer::new(instance);
     (http_server.make_app(), guard)
 }
@@ -32,7 +35,7 @@ async fn test_sql_api() {
     let body = res.text().await;
     assert_eq!(
         body,
-        r#"{"success":false,"error":"sql parameter is required."}"#
+        r#"{"code":1004,"error":"sql parameter is required."}"#
     );
 
     let res = client
@@ -44,7 +47,7 @@ async fn test_sql_api() {
     let body = res.text().await;
     assert_eq!(
         body,
-        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"number","data_type":"UInt32","is_nullable":false,"metadata":{}}],"metadata":{"greptime:version":"0"}},"columns":[[0,1,2,3,4,5,6,7,8,9]]}]}}"#
+        r#"{"code":0,"output":{"records":{"schema":{"column_schemas":[{"name":"number","data_type":"UInt32"}]},"rows":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]]}}}"#
     );
 
     // test insert and select
@@ -64,7 +67,7 @@ async fn test_sql_api() {
     let body = res.text().await;
     assert_eq!(
         body,
-        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"host","data_type":"Utf8","is_nullable":false,"metadata":{}},{"name":"cpu","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"memory","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"ts","data_type":{"Timestamp":["Millisecond",null]},"is_nullable":true,"metadata":{}}],"metadata":{"greptime:timestamp_column":"ts","greptime:version":"0"}},"columns":[["host"],[66.6],[1024.0],[0]]}]}}"#
+        r#"{"code":0,"output":{"records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"Timestamp"}]},"rows":[["host",66.6,1024.0,0]]}}}"#
     );
 
     // select with projections
@@ -77,7 +80,7 @@ async fn test_sql_api() {
     let body = res.text().await;
     assert_eq!(
         body,
-        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"cpu","data_type":"Float64","is_nullable":true,"metadata":{}},{"name":"ts","data_type":{"Timestamp":["Millisecond",null]},"is_nullable":true,"metadata":{}}],"metadata":{"greptime:timestamp_column":"ts","greptime:version":"0"}},"columns":[[66.6],[0]]}]}}"#
+        r#"{"code":0,"output":{"records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"Timestamp"}]},"rows":[[66.6,0]]}}}"#
     );
 }
 
@@ -96,7 +99,7 @@ async fn test_metrics_api() {
     assert_eq!(res.status(), StatusCode::OK);
 
     // Call metrics api
-    let res = client.get("/metrics").send().await;
+    let res = client.get("/v1/metrics").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.text().await;
     assert!(body.contains("datanode_handle_sql_elapsed"));
@@ -123,7 +126,7 @@ def test(n):
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = res.text().await;
-    assert_eq!(body, r#"{"success":true}"#,);
+    assert_eq!(body, r#"{"code":0}"#,);
 
     // call script
     let res = client.post("/v1/run-script?name=test").send().await;
@@ -132,7 +135,7 @@ def test(n):
     let body = res.text().await;
     assert_eq!(
         body,
-        r#"{"success":true,"output":{"Rows":[{"schema":{"fields":[{"name":"n","data_type":"Float64","is_nullable":false,"metadata":{}}],"metadata":{}},"columns":[[1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0,10.0]]}]}}"#,
+        r#"{"code":0,"output":{"records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}}}"#,
     );
 }
 

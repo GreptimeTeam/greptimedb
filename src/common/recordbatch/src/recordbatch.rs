@@ -31,6 +31,10 @@ impl RecordBatch {
         })
     }
 
+    pub fn num_rows(&self) -> usize {
+        self.df_recordbatch.num_rows()
+    }
+
     /// Create an iterator to traverse the data by row
     pub fn rows(&self) -> RecordBatchRowIterator<'_> {
         RecordBatchRowIterator::new(self)

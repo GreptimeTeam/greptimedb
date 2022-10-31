@@ -1,12 +1,11 @@
 use async_trait::async_trait;
-use client::ObjectResult;
 use common_error::prelude::BoxedError;
 use servers::error as server_error;
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;
 use snafu::prelude::*;
 
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::instance::Instance;
 
 #[async_trait]
@@ -129,13 +128,13 @@ mod tests {
                 let pretty_print = arrow_print::write(&recordbatches);
                 let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
                 let expected = vec![
-                    "+---------------------+-------+-------+-------+-------+",
-                    "| timestamp           | value | tagk1 | tagk2 | tagk3 |",
-                    "+---------------------+-------+-------+-------+-------+",
-                    "| 1970-01-01 00:00:01 | 1     | tagv1 | tagv2 |       |",
-                    "| 1970-01-01 00:00:02 | 2     |       | tagv2 | tagv3 |",
-                    "| 1970-01-01 00:00:03 | 3     |       |       |       |",
-                    "+---------------------+-------+-------+-------+-------+",
+                    "+---------------------+----------------+-------+-------+-------+",
+                    "| greptime_timestamp  | greptime_value | tagk1 | tagk2 | tagk3 |",
+                    "+---------------------+----------------+-------+-------+-------+",
+                    "| 1970-01-01 00:00:01 | 1              | tagv1 | tagv2 |       |",
+                    "| 1970-01-01 00:00:02 | 2              |       | tagv2 | tagv3 |",
+                    "| 1970-01-01 00:00:03 | 3              |       |       |       |",
+                    "+---------------------+----------------+-------+-------+-------+",
                 ];
                 assert_eq!(pretty_print, expected);
             }

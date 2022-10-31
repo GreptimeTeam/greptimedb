@@ -10,6 +10,7 @@ fn main() {
                 "greptime/v1/meta/heartbeat.proto",
                 "greptime/v1/meta/route.proto",
                 "greptime/v1/meta/store.proto",
+                "prometheus/remote/remote.proto",
             ],
             &["."],
         )

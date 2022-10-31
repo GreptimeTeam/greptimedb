@@ -18,8 +18,6 @@ use datafusion_expr::Operator;
 use datatypes::prelude::Value;
 use datatypes::schema::SchemaRef;
 use query::plan::LogicalPlan;
-use sql::statements::create_table::{CreateTable, Partitions as SqlPartitions};
-use sql::statements::sql_value_to_value;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::Error;
@@ -180,7 +178,7 @@ impl Datanode {
 #[derive(Clone)]
 pub struct DatanodeInstance {
     catalog_list: CatalogListRef,
-    db: Database,
+    pub db: Database,
 }
 
 impl std::fmt::Debug for DatanodeInstance {

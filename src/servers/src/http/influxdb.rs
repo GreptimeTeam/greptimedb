@@ -6,7 +6,6 @@ use common_grpc::writer::Precision;
 
 use crate::error::Result;
 use crate::error::TimePrecisionSnafu;
-use crate::http::HttpResponse;
 use crate::influxdb::InfluxdbRequest;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 
@@ -15,14 +14,14 @@ pub async fn influxdb_write(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
     lines: String,
-) -> Result<(StatusCode, HttpResponse)> {
+) -> Result<(StatusCode, ())> {
     let precision = params
         .get("precision")
         .map(|val| parse_time_precision(val))
         .transpose()?;
     let request = InfluxdbRequest { precision, lines };
     handler.exec(&request).await?;
-    Ok((StatusCode::NO_CONTENT, HttpResponse::Text("".to_string())))
+    Ok((StatusCode::NO_CONTENT, ()))
 }
 
 fn parse_time_precision(value: &str) -> Result<Precision> {

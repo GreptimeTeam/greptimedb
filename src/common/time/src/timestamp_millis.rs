@@ -21,24 +21,6 @@ impl TimestampMillis {
         TimestampMillis(ms)
     }
 
-    /// Returns the timestamp aligned by `bucket_duration` in milliseconds or
-    /// `None` if overflow occurred.
-    ///
-    /// # Panics
-    /// Panics if `bucket_duration <= 0`.
-    pub fn align_by_bucket(self, bucket_duration: i64) -> Option<TimestampMillis> {
-        assert!(bucket_duration > 0);
-
-        let ts = if self.0 >= 0 {
-            self.0
-        } else {
-            // `bucket_duration > 0` implies `bucket_duration - 1` won't overflow.
-            self.0.checked_sub(bucket_duration - 1)?
-        };
-
-        Some(TimestampMillis(ts / bucket_duration * bucket_duration))
-    }
-
     /// Returns the timestamp value as i64.
     pub fn as_i64(&self) -> i64 {
         self.0
@@ -48,6 +30,12 @@ impl TimestampMillis {
 impl From<i64> for TimestampMillis {
     fn from(ms: i64) -> TimestampMillis {
         TimestampMillis::new(ms)
+    }
+}
+
+impl From<TimestampMillis> for i64 {
+    fn from(ts: TimestampMillis) -> Self {
+        ts.0
     }
 }
 
@@ -72,6 +60,25 @@ impl PartialOrd<i64> for TimestampMillis {
 impl PartialOrd<TimestampMillis> for i64 {
     fn partial_cmp(&self, other: &TimestampMillis) -> Option<Ordering> {
         Some(self.cmp(&other.0))
+    }
+}
+
+pub trait BucketAligned {
+    /// Returns the timestamp aligned by `bucket_duration` in milliseconds or
+    /// `None` if overflow occurred.
+    ///
+    /// # Panics
+    /// Panics if `bucket_duration <= 0`.
+    fn align_by_bucket(self, bucket_duration: i64) -> Option<TimestampMillis>;
+}
+
+impl<T: Into<i64>> BucketAligned for T {
+    fn align_by_bucket(self, bucket_duration: i64) -> Option<TimestampMillis> {
+        assert!(bucket_duration > 0);
+        self.into()
+            .checked_div_euclid(bucket_duration)
+            .and_then(|val| val.checked_mul(bucket_duration))
+            .map(TimestampMillis)
     }
 }
 

@@ -8,10 +8,11 @@ pub mod instance;
 pub(crate) mod mock;
 pub mod mysql;
 pub mod opentsdb;
-mod partition;
+pub mod partition;
 pub mod postgres;
+pub mod prometheus;
 mod server;
-mod spliter;
+pub mod spliter;
 mod sql;
 mod table;
 #[cfg(test)]
