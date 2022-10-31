@@ -64,26 +64,30 @@ impl StartCommand {
 
         let mut retry_times = 0;
 
-        loop {
-            let mut frontend = Frontend::new(opts.clone());
-            match frontend.start().await {
-                Ok(_) => return Ok(()),
-                Err(err) => match &err {
-                    frontend_error::Error::ConnectDatanode { addr, .. } => {
-                        retry_times += 1;
-                        if retry_times > max_retry_times {
-                            return Err(err).context(error::StartFrontendSnafu);
+        let handle = tokio::spawn(async move {
+            loop {
+                let mut frontend = Frontend::new(opts.clone());
+                match frontend.start().await {
+                    Ok(_) => return Ok(()),
+                    Err(err) => match &err {
+                        frontend_error::Error::ConnectDatanode { addr, .. } => {
+                            retry_times += 1;
+                            if retry_times > max_retry_times {
+                                return Err(err).context(error::StartFrontendSnafu);
+                            }
+                            warn!(
+                                "connect datanode {} failed,  retry {} times",
+                                addr, retry_times
+                            );
+                            tokio::time::sleep(retry_interval).await;
                         }
-                        warn!(
-                            "connect datanode {} failed,  retry {} times",
-                            addr, retry_times
-                        );
-                        tokio::time::sleep(retry_interval).await;
-                    }
-                    _ => return Err(err).context(error::StartFrontendSnafu),
-                },
+                        _ => return Err(err).context(error::StartFrontendSnafu),
+                    },
+                }
             }
-        }
+        });
+
+        handle.await.unwrap()
     }
 }
 
