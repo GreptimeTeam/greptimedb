@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use common_query::Output;
 
 use crate::error::Result;
-use crate::http::HttpResponse;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
 use crate::prometheus::Metrics;
@@ -59,12 +58,18 @@ pub trait OpentsdbProtocolHandler {
     async fn exec(&self, data_point: &DataPoint) -> Result<()>;
 }
 
+pub struct PrometheusResponse {
+    pub content_type: String,
+    pub content_encoding: String,
+    pub body: Vec<u8>,
+}
+
 #[async_trait]
 pub trait PrometheusProtocolHandler {
     /// Handling prometheus remote write requests
     async fn write(&self, request: WriteRequest) -> Result<()>;
     /// Handling prometheus remote read requests
-    async fn read(&self, request: ReadRequest) -> Result<HttpResponse>;
+    async fn read(&self, request: ReadRequest) -> Result<PrometheusResponse>;
     /// Handling push gateway requests
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }
