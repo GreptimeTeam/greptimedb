@@ -250,7 +250,7 @@ impl HttpServer {
                 ..Info::default()
             },
             servers: vec![OpenAPIServer {
-                url: "http://localhost:4000/v1".to_string(),
+                url: format!("/{}", HTTP_API_VERSION),
                 ..OpenAPIServer::default()
             }],
 
