@@ -35,7 +35,7 @@ async fn test_sql_api() {
     let body = res.text().await;
     assert_eq!(
         body,
-        r#"{"success":false,"error":"sql parameter is required."}"#
+        r#"{"success":false,"error":"sql parameter is required.","error_code":1004}"#
     );
 
     let res = client

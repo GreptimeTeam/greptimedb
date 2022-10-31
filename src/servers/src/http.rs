@@ -14,6 +14,8 @@ use async_trait::async_trait;
 use axum::response::Html;
 use axum::Extension;
 use axum::{error_handling::HandleErrorLayer, response::Json, routing, BoxError, Router};
+use common_error::prelude::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
@@ -135,14 +137,17 @@ pub struct JsonResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<JsonOutput>,
 }
 
 impl JsonResponse {
-    fn with_error(error: Option<String>) -> Self {
+    fn with_error(error: Option<String>, error_code: Option<u32>) -> Self {
         JsonResponse {
             success: false,
             error,
+            error_code,
             output: None,
         }
     }
@@ -151,6 +156,7 @@ impl JsonResponse {
         JsonResponse {
             success: true,
             error: None,
+            error_code: None,
             output,
         }
     }
@@ -164,17 +170,29 @@ impl JsonResponse {
             Ok(Output::Stream(stream)) => match util::collect(stream).await {
                 Ok(rows) => match HttpRecordsOutput::try_from(rows) {
                     Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
-                    Err(err) => Self::with_error(Some(format!(": {}", err))),
+                    Err(err) => Self::with_error(
+                        Some(format!(": {}", err)),
+                        Some(StatusCode::Internal as u32),
+                    ),
                 },
-                Err(e) => Self::with_error(Some(format!("Recordbatch error: {}", e))),
+                Err(e) => Self::with_error(
+                    Some(format!("Recordbatch error: {}", e)),
+                    Some(e.status_code() as u32),
+                ),
             },
             Ok(Output::RecordBatches(recordbatches)) => {
                 match HttpRecordsOutput::try_from(recordbatches.take()) {
                     Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
-                    Err(err) => Self::with_error(Some(format!(": {}", err))),
+                    Err(err) => Self::with_error(
+                        Some(format!(": {}", err)),
+                        Some(StatusCode::Internal as u32),
+                    ),
                 }
             }
-            Err(e) => Self::with_error(Some(format!("Query engine output error: {}", e))),
+            Err(e) => Self::with_error(
+                Some(format!("Query engine output error: {}", e)),
+                Some(e.status_code() as u32),
+            ),
         }
     }
 
@@ -340,6 +358,7 @@ async fn handle_error(err: BoxError) -> Json<JsonResponse> {
     Json(JsonResponse {
         success: false,
         error: Some(format!("Unhandled internal error: {}", err)),
+        error_code: None,
         output: None,
     })
 }

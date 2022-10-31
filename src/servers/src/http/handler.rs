@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
+use common_error::prelude::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_telemetry::metric;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -24,9 +26,10 @@ pub async fn sql(
     if let Some(ref sql) = params.sql {
         Json(JsonResponse::from_output(sql_handler.do_query(sql).await).await)
     } else {
-        Json(JsonResponse::with_error(Some(
-            "sql parameter is required.".to_string(),
-        )))
+        Json(JsonResponse::with_error(
+            Some("sql parameter is required.".to_string()),
+            Some(StatusCode::InvalidArguments as u32),
+        ))
     }
 }
 
@@ -57,9 +60,10 @@ pub async fn scripts(
     Json(payload): Json<ScriptExecution>,
 ) -> Json<JsonResponse> {
     if payload.name.is_empty() || payload.script.is_empty() {
-        return Json(JsonResponse::with_error(Some(
-            "Invalid name or script".to_string(),
-        )));
+        return Json(JsonResponse::with_error(
+            Some("Invalid name or script".to_string()),
+            Some(StatusCode::InvalidArguments as u32),
+        ));
     }
 
     let body = match query_handler
@@ -67,7 +71,10 @@ pub async fn scripts(
         .await
     {
         Ok(()) => JsonResponse::with_output(None),
-        Err(e) => JsonResponse::with_error(Some(format!("Insert script error: {}", e))),
+        Err(e) => JsonResponse::with_error(
+            Some(format!("Insert script error: {}", e)),
+            Some(e.status_code() as u32),
+        ),
     };
 
     Json(body)
@@ -87,7 +94,10 @@ pub async fn run_script(
     let name = params.name.as_ref();
 
     if name.is_none() || name.unwrap().is_empty() {
-        return Json(JsonResponse::with_error(Some("Invalid name".to_string())));
+        return Json(JsonResponse::with_error(
+            Some("Invalid name".to_string()),
+            Some(StatusCode::InvalidArguments as u32),
+        ));
     }
 
     let output = query_handler.execute_script(name.unwrap()).await;
