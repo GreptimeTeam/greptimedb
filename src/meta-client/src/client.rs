@@ -15,6 +15,10 @@ use self::heartbeat::HeartbeatSender;
 use self::heartbeat::HeartbeatStream;
 use crate::error;
 use crate::error::Result;
+use crate::rpc::BatchPutRequest;
+use crate::rpc::BatchPutResponse;
+use crate::rpc::CompareAndPutRequest;
+use crate::rpc::CompareAndPutResponse;
 use crate::rpc::CreateRequest;
 use crate::rpc::DeleteRangeRequest;
 use crate::rpc::DeleteRangeResponse;
@@ -228,6 +232,32 @@ impl MetaClient {
                 name: "store_client",
             })?
             .put(req.into())
+            .await?
+            .try_into()
+    }
+
+    /// BatchPut atomic puts the given keys into the key-value store.
+    pub async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        self.store_client()
+            .context(error::NotStartedSnafu {
+                name: "store_client",
+            })?
+            .batch_put(req.into())
+            .await?
+            .try_into()
+    }
+
+    /// CompareAndPut atomically puts the value to the given updated
+    /// value if the current value == the expected value.
+    pub async fn compare_and_put(
+        &self,
+        req: CompareAndPutRequest,
+    ) -> Result<CompareAndPutResponse> {
+        self.store_client()
+            .context(error::NotStartedSnafu {
+                name: "store_client",
+            })?
+            .compare_and_put(req.into())
             .await?
             .try_into()
     }

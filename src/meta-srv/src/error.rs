@@ -38,11 +38,11 @@ pub enum Error {
     #[snafu(display("Empty table name"))]
     EmptyTableName { backtrace: Backtrace },
 
-    #[snafu(display("Invalid datanode key: {}", key))]
-    InvalidDatanodeKey { key: String, backtrace: Backtrace },
+    #[snafu(display("Invalid datanode lease key: {}", key))]
+    InvalidLeaseKey { key: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to parse datanode key from utf8: {}", source))]
-    DatanodeKeyFromUtf8 {
+    #[snafu(display("Failed to parse datanode lease key from utf8: {}", source))]
+    LeaseKeyFromUtf8 {
         source: std::string::FromUtf8Error,
         backtrace: Backtrace,
     },
@@ -63,6 +63,18 @@ pub enum Error {
     ParseNum {
         err_msg: String,
         source: std::num::ParseIntError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid arguments: {}", err_msg))]
+    InvalidArguments {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid result with a txn response: {}", err_msg))]
+    InvalidTxnResult {
+        err_msg: String,
         backtrace: Backtrace,
     },
 }
@@ -93,11 +105,13 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }
-            | Error::InvalidDatanodeKey { .. }
-            | Error::ParseNum { .. } => StatusCode::InvalidArguments,
-            Error::DatanodeKeyFromUtf8 { .. }
+            | Error::InvalidLeaseKey { .. }
+            | Error::ParseNum { .. }
+            | Error::InvalidArguments { .. } => StatusCode::InvalidArguments,
+            Error::LeaseKeyFromUtf8 { .. }
             | Error::SerializeDatanodeValue { .. }
-            | Error::DeserializeDatanodeValue { .. } => StatusCode::Unexpected,
+            | Error::DeserializeDatanodeValue { .. }
+            | Error::InvalidTxnResult { .. } => StatusCode::Unexpected,
         }
     }
 }
@@ -216,9 +230,20 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_datanode_key_error() {
+    fn test_invalid_lease_key_error() {
         let e = throw_none_option()
-            .context(InvalidDatanodeKeySnafu { key: "test" })
+            .context(InvalidLeaseKeySnafu { key: "test" })
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_invalid_arguments_error() {
+        let e = throw_none_option()
+            .context(InvalidArgumentsSnafu { err_msg: "test" })
             .err()
             .unwrap();
 

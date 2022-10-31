@@ -2,6 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::store_client::StoreClient;
+use api::v1::meta::BatchPutRequest;
+use api::v1::meta::BatchPutResponse;
+use api::v1::meta::CompareAndPutRequest;
+use api::v1::meta::CompareAndPutResponse;
 use api::v1::meta::DeleteRangeRequest;
 use api::v1::meta::DeleteRangeResponse;
 use api::v1::meta::PutRequest;
@@ -61,6 +65,19 @@ impl Client {
         inner.put(req).await
     }
 
+    pub async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        let inner = self.inner.read().await;
+        inner.batch_put(req).await
+    }
+
+    pub async fn compare_and_put(
+        &self,
+        req: CompareAndPutRequest,
+    ) -> Result<CompareAndPutResponse> {
+        let inner = self.inner.read().await;
+        inner.compare_and_put(req).await
+    }
+
     pub async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let inner = self.inner.read().await;
         inner.delete_range(req).await
@@ -110,6 +127,31 @@ impl Inner {
         let mut client = self.random_client()?;
         req.header = RequestHeader::new(self.id);
         let res = client.put(req).await.context(error::TonicStatusSnafu)?;
+
+        Ok(res.into_inner())
+    }
+
+    async fn batch_put(&self, mut req: BatchPutRequest) -> Result<BatchPutResponse> {
+        let mut client = self.random_client()?;
+        req.header = RequestHeader::new(self.id);
+        let res = client
+            .batch_put(req)
+            .await
+            .context(error::TonicStatusSnafu)?;
+
+        Ok(res.into_inner())
+    }
+
+    async fn compare_and_put(
+        &self,
+        mut req: CompareAndPutRequest,
+    ) -> Result<CompareAndPutResponse> {
+        let mut client = self.random_client()?;
+        req.header = RequestHeader::new(self.id);
+        let res = client
+            .compare_and_put(req)
+            .await
+            .context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
     }

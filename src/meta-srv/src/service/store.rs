@@ -4,6 +4,10 @@ pub mod kv;
 pub(crate) mod noop;
 
 use api::v1::meta::store_server;
+use api::v1::meta::BatchPutRequest;
+use api::v1::meta::BatchPutResponse;
+use api::v1::meta::CompareAndPutRequest;
+use api::v1::meta::CompareAndPutResponse;
 use api::v1::meta::DeleteRangeRequest;
 use api::v1::meta::DeleteRangeResponse;
 use api::v1::meta::PutRequest;
@@ -28,6 +32,23 @@ impl store_server::Store for MetaSrv {
     async fn put(&self, req: Request<PutRequest>) -> GrpcResult<PutResponse> {
         let req = req.into_inner();
         let res = self.kv_store().put(req).await?;
+
+        Ok(Response::new(res))
+    }
+
+    async fn batch_put(&self, req: Request<BatchPutRequest>) -> GrpcResult<BatchPutResponse> {
+        let req = req.into_inner();
+        let res = self.kv_store().batch_put(req).await?;
+
+        Ok(Response::new(res))
+    }
+
+    async fn compare_and_put(
+        &self,
+        req: Request<CompareAndPutRequest>,
+    ) -> GrpcResult<CompareAndPutResponse> {
+        let req = req.into_inner();
+        let res = self.kv_store().compare_and_put(req).await?;
 
         Ok(Response::new(res))
     }

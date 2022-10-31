@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+use api::v1::meta::BatchPutRequest;
+use api::v1::meta::BatchPutResponse;
+use api::v1::meta::CompareAndPutRequest;
+use api::v1::meta::CompareAndPutResponse;
 use api::v1::meta::DeleteRangeRequest;
 use api::v1::meta::DeleteRangeResponse;
 use api::v1::meta::KeyValue;
@@ -7,11 +11,17 @@ use api::v1::meta::PutRequest;
 use api::v1::meta::PutResponse;
 use api::v1::meta::RangeRequest;
 use api::v1::meta::RangeResponse;
+use api::v1::meta::ResponseHeader;
 use common_error::prelude::*;
 use etcd_client::Client;
+use etcd_client::Compare;
+use etcd_client::CompareOp;
 use etcd_client::DeleteOptions;
 use etcd_client::GetOptions;
 use etcd_client::PutOptions;
+use etcd_client::Txn;
+use etcd_client::TxnOp;
+use etcd_client::TxnOpResponse;
 
 use super::kv::KvStore;
 use super::kv::KvStoreRef;
@@ -40,7 +50,11 @@ impl EtcdStore {
 #[async_trait::async_trait]
 impl KvStore for EtcdStore {
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
-        let Get { key, options } = req.try_into()?;
+        let Get {
+            cluster_id,
+            key,
+            options,
+        } = req.try_into()?;
 
         let res = self
             .client
@@ -56,14 +70,15 @@ impl KvStore for EtcdStore {
             .collect::<Vec<_>>();
 
         Ok(RangeResponse {
+            header: ResponseHeader::success(cluster_id),
             kvs,
             more: res.more(),
-            ..Default::default()
         })
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {
         let Put {
+            cluster_id,
             key,
             value,
             options,
@@ -79,13 +94,113 @@ impl KvStore for EtcdStore {
         let prev_kv = res.prev_key().map(|kv| KvPair::new(kv).into());
 
         Ok(PutResponse {
+            header: ResponseHeader::success(cluster_id),
             prev_kv,
-            ..Default::default()
+        })
+    }
+
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        let BatchPut {
+            cluster_id,
+            keys,
+            values,
+            options,
+        } = req.try_into()?;
+
+        let put_ops = keys
+            .into_iter()
+            .zip(values.into_iter())
+            .map(|kv| (TxnOp::put(kv.0, kv.1, options.clone())))
+            .collect::<Vec<_>>();
+        let txn = Txn::new().and_then(put_ops);
+
+        let txn_res = self
+            .client
+            .kv_client()
+            .txn(txn)
+            .await
+            .context(error::EtcdFailedSnafu)?;
+
+        let mut prev_kvs = vec![];
+        for op_res in txn_res.op_responses() {
+            match op_res {
+                TxnOpResponse::Put(put_res) => {
+                    if let Some(prev_kv) = put_res.prev_key() {
+                        prev_kvs.push(KvPair::new(prev_kv).into());
+                    }
+                }
+                _ => unreachable!(), // never get here
+            }
+        }
+
+        Ok(BatchPutResponse {
+            header: ResponseHeader::success(cluster_id),
+            prev_kvs,
+        })
+    }
+
+    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+        let CompareAndPut {
+            cluster_id,
+            key,
+            expect,
+            value,
+            options,
+        } = req.try_into()?;
+
+        let txn = Txn::new()
+            .when(vec![Compare::value(
+                key.clone(),
+                CompareOp::Equal,
+                expect.clone(),
+            )])
+            .and_then(vec![TxnOp::put(key.clone(), value, options)])
+            .or_else(vec![TxnOp::get(key.clone(), None)]);
+
+        let txn_res = self
+            .client
+            .kv_client()
+            .txn(txn)
+            .await
+            .context(error::EtcdFailedSnafu)?;
+        let success = txn_res.succeeded();
+        let prev_kv;
+        let op_res = txn_res
+            .op_responses()
+            .pop()
+            .context(error::InvalidTxnResultSnafu {
+                err_msg: "empty response",
+            })?;
+        if success {
+            prev_kv = Some(KeyValue { key, value: expect });
+        } else {
+            match op_res {
+                TxnOpResponse::Get(get_res) => {
+                    ensure!(
+                        get_res.count() == 1,
+                        error::InvalidTxnResultSnafu {
+                            err_msg: format!("expect 1 response, actual {}", get_res.count())
+                        }
+                    );
+                    prev_kv = Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])));
+                }
+                _ => unreachable!(), // never get here
+            }
+        }
+
+        Ok(CompareAndPutResponse {
+            header: ResponseHeader::success(cluster_id),
+            success,
+            prev_kv,
         })
     }
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
-        let Delete { key, options } = req.try_into()?;
+        let Delete {
+            cluster_id,
+            key,
+            options,
+        } = req.try_into()?;
 
         let res = self
             .client
@@ -101,14 +216,15 @@ impl KvStore for EtcdStore {
             .collect::<Vec<_>>();
 
         Ok(DeleteRangeResponse {
+            header: ResponseHeader::success(cluster_id),
             deleted: res.deleted(),
             prev_kvs,
-            ..Default::default()
         })
     }
 }
 
 struct Get {
+    cluster_id: u64,
     key: Vec<u8>,
     options: Option<GetOptions>,
 }
@@ -118,11 +234,11 @@ impl TryFrom<RangeRequest> for Get {
 
     fn try_from(req: RangeRequest) -> Result<Self> {
         let RangeRequest {
+            header,
             key,
             range_end,
             limit,
             keys_only,
-            ..
         } = req;
 
         ensure!(!key.is_empty(), error::EmptyKeySnafu);
@@ -139,6 +255,7 @@ impl TryFrom<RangeRequest> for Get {
         }
 
         Ok(Get {
+            cluster_id: header.map_or(0, |h| h.cluster_id),
             key,
             options: Some(options),
         })
@@ -146,6 +263,7 @@ impl TryFrom<RangeRequest> for Get {
 }
 
 struct Put {
+    cluster_id: u64,
     key: Vec<u8>,
     value: Vec<u8>,
     options: Option<PutOptions>,
@@ -156,10 +274,10 @@ impl TryFrom<PutRequest> for Put {
 
     fn try_from(req: PutRequest) -> Result<Self> {
         let PutRequest {
+            header,
             key,
             value,
             prev_kv,
-            ..
         } = req;
 
         let mut options = PutOptions::default();
@@ -168,6 +286,7 @@ impl TryFrom<PutRequest> for Put {
         }
 
         Ok(Put {
+            cluster_id: header.map_or(0, |h| h.cluster_id),
             key,
             value,
             options: Some(options),
@@ -175,7 +294,76 @@ impl TryFrom<PutRequest> for Put {
     }
 }
 
+struct BatchPut {
+    cluster_id: u64,
+    keys: Vec<Vec<u8>>,
+    values: Vec<Vec<u8>>,
+    options: Option<PutOptions>,
+}
+
+impl TryFrom<BatchPutRequest> for BatchPut {
+    type Error = error::Error;
+
+    fn try_from(req: BatchPutRequest) -> Result<Self> {
+        let BatchPutRequest {
+            header,
+            keys,
+            values,
+            prev_kv,
+        } = req;
+
+        ensure!(
+            keys.len() == values.len(),
+            error::InvalidArgumentsSnafu {
+                err_msg: "keys and values must be the same count"
+            }
+        );
+
+        let mut options = PutOptions::default();
+        if prev_kv {
+            options = options.with_prev_key();
+        }
+
+        Ok(BatchPut {
+            cluster_id: header.map_or(0, |h| h.cluster_id),
+            keys,
+            values,
+            options: Some(options),
+        })
+    }
+}
+
+struct CompareAndPut {
+    cluster_id: u64,
+    key: Vec<u8>,
+    expect: Vec<u8>,
+    value: Vec<u8>,
+    options: Option<PutOptions>,
+}
+
+impl TryFrom<CompareAndPutRequest> for CompareAndPut {
+    type Error = error::Error;
+
+    fn try_from(req: CompareAndPutRequest) -> Result<Self> {
+        let CompareAndPutRequest {
+            header,
+            key,
+            expect,
+            value,
+        } = req;
+
+        Ok(CompareAndPut {
+            cluster_id: header.map_or(0, |h| h.cluster_id),
+            key,
+            expect,
+            value,
+            options: Some(PutOptions::default().with_prev_key()),
+        })
+    }
+}
+
 struct Delete {
+    cluster_id: u64,
     key: Vec<u8>,
     options: Option<DeleteOptions>,
 }
@@ -185,10 +373,10 @@ impl TryFrom<DeleteRangeRequest> for Delete {
 
     fn try_from(req: DeleteRangeRequest) -> Result<Self> {
         let DeleteRangeRequest {
+            header,
             key,
             range_end,
             prev_kv,
-            ..
         } = req;
 
         ensure!(!key.is_empty(), error::EmptyKeySnafu);
@@ -202,6 +390,7 @@ impl TryFrom<DeleteRangeRequest> for Delete {
         }
 
         Ok(Delete {
+            cluster_id: header.map_or(0, |h| h.cluster_id),
             key,
             options: Some(options),
         })

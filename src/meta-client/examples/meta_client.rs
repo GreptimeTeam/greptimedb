@@ -5,6 +5,8 @@ use api::v1::meta::Peer;
 use common_grpc::channel_manager::ChannelConfig;
 use common_grpc::channel_manager::ChannelManager;
 use meta_client::client::MetaClientBuilder;
+use meta_client::rpc::BatchPutRequest;
+use meta_client::rpc::CompareAndPutRequest;
 use meta_client::rpc::CreateRequest;
 use meta_client::rpc::DeleteRangeRequest;
 use meta_client::rpc::Partition;
@@ -98,6 +100,31 @@ async fn run() {
     let range2 = RangeRequest::new().with_prefix(b"key1".to_vec());
     let res = meta_client.range(range2.clone()).await.unwrap();
     event!(Level::INFO, "get prefix result: {:#?}", res);
+
+    // batch put
+    let batch_put = BatchPutRequest::new()
+        .add_kv(b"batch_put1".to_vec(), b"batch_put_v1".to_vec())
+        .add_kv(b"batch_put2".to_vec(), b"batch_put_v2".to_vec())
+        .with_prev_kv();
+    let res = meta_client.batch_put(batch_put).await.unwrap();
+    event!(Level::INFO, "batch put result: {:#?}", res);
+
+    // cas
+    let cas = CompareAndPutRequest::new()
+        .with_key(b"batch_put1".to_vec())
+        .with_expect(b"batch_put_v-----".to_vec())
+        .with_value(b"batch_put_v111".to_vec());
+
+    let res = meta_client.compare_and_put(cas).await.unwrap();
+    event!(Level::INFO, "cas0 result: {:#?}", res);
+
+    let cas = CompareAndPutRequest::new()
+        .with_key(b"batch_put1".to_vec())
+        .with_expect(b"batch_put_v1".to_vec())
+        .with_value(b"batch_put_v111".to_vec());
+
+    let res = meta_client.compare_and_put(cas).await.unwrap();
+    event!(Level::INFO, "cas1 result: {:#?}", res);
 
     // delete
     let delete_range = DeleteRangeRequest::new().with_key(b"key1".to_vec());

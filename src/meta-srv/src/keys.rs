@@ -29,9 +29,9 @@ impl FromStr for LeaseKey {
     fn from_str(key: &str) -> Result<Self> {
         let caps = DATANODE_KEY_PATTERN
             .captures(key)
-            .context(error::InvalidDatanodeKeySnafu { key })?;
+            .context(error::InvalidLeaseKeySnafu { key })?;
 
-        ensure!(caps.len() == 3, error::InvalidDatanodeKeySnafu { key });
+        ensure!(caps.len() == 3, error::InvalidLeaseKeySnafu { key });
 
         let cluster_id = caps[1].to_string();
         let node_id = caps[2].to_string();
@@ -54,7 +54,7 @@ impl TryFrom<Vec<u8>> for LeaseKey {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self> {
         String::from_utf8(bytes)
-            .context(error::DatanodeKeyFromUtf8Snafu {})
+            .context(error::LeaseKeyFromUtf8Snafu {})
             .map(|x| x.parse())?
     }
 }
@@ -91,7 +91,7 @@ impl TryFrom<Vec<u8>> for LeaseValue {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self> {
         String::from_utf8(bytes)
-            .context(error::DatanodeKeyFromUtf8Snafu {})
+            .context(error::LeaseKeyFromUtf8Snafu {})
             .map(|x| x.parse())?
     }
 }
@@ -111,7 +111,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_datanode_key() {
+    fn test_datanode_lease_key() {
         let key = LeaseKey {
             cluster_id: 0,
             node_id: 1,
@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn test_datanode_value() {
+    fn test_datanode_lease_value() {
         let value = LeaseValue {
             timestamp_millis: 111,
             node_addr: "0.0.0.0:3002".to_string(),

@@ -1,3 +1,7 @@
+use api::v1::meta::BatchPutRequest as PbBatchPutRequest;
+use api::v1::meta::BatchPutResponse as PbBatchPutResponse;
+use api::v1::meta::CompareAndPutRequest as PbCompareAndPutRequest;
+use api::v1::meta::CompareAndPutResponse as PbCompareAndPutResponse;
 use api::v1::meta::DeleteRangeRequest as PbDeleteRangeRequest;
 use api::v1::meta::DeleteRangeResponse as PbDeleteRangeResponse;
 use api::v1::meta::PutRequest as PbPutRequest;
@@ -9,6 +13,7 @@ use super::util;
 use super::KeyValue;
 use super::ResponseHeader;
 use crate::error;
+use crate::error::Result;
 
 #[derive(Debug, Clone, Default)]
 pub struct RangeRequest {
@@ -111,7 +116,7 @@ pub struct RangeResponse(PbRangeResponse);
 impl TryFrom<PbRangeResponse> for RangeResponse {
     type Error = error::Error;
 
-    fn try_from(pb: PbRangeResponse) -> Result<Self, Self::Error> {
+    fn try_from(pb: PbRangeResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self::new(pb))
@@ -203,7 +208,7 @@ pub struct PutResponse(PbPutResponse);
 impl TryFrom<PbPutResponse> for PutResponse {
     type Error = error::Error;
 
-    fn try_from(pb: PbPutResponse) -> Result<Self, Self::Error> {
+    fn try_from(pb: PbPutResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self::new(pb))
@@ -219,6 +224,171 @@ impl PutResponse {
     #[inline]
     pub fn take_header(&mut self) -> Option<ResponseHeader> {
         self.0.header.take().map(ResponseHeader::new)
+    }
+
+    #[inline]
+    pub fn take_prev_kv(&mut self) -> Option<KeyValue> {
+        self.0.prev_kv.take().map(KeyValue::new)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BatchPutRequest {
+    pub keys: Vec<Vec<u8>>,
+    pub values: Vec<Vec<u8>>,
+    /// If prev_kv is set, gets the previous key-value pairs before changing it.
+    /// The previous key-value pairs will be returned in the batch put response.
+    pub prev_kv: bool,
+}
+
+impl From<BatchPutRequest> for PbBatchPutRequest {
+    fn from(req: BatchPutRequest) -> Self {
+        Self {
+            header: None,
+            keys: req.keys,
+            values: req.values,
+            prev_kv: req.prev_kv,
+        }
+    }
+}
+
+impl BatchPutRequest {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            keys: vec![],
+            values: vec![],
+            prev_kv: false,
+        }
+    }
+
+    #[inline]
+    pub fn add_kv(mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
+        self.keys.push(key.into());
+        self.values.push(value.into());
+        self
+    }
+
+    /// If prev_kv is set, gets the previous key-value pair before changing it.
+    /// The previous key-value pair will be returned in the put response.
+    #[inline]
+    pub fn with_prev_kv(mut self) -> Self {
+        self.prev_kv = true;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchPutResponse(PbBatchPutResponse);
+
+impl TryFrom<PbBatchPutResponse> for BatchPutResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbBatchPutResponse) -> Result<Self> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self::new(pb))
+    }
+}
+
+impl BatchPutResponse {
+    #[inline]
+    pub fn new(res: PbBatchPutResponse) -> Self {
+        Self(res)
+    }
+
+    #[inline]
+    pub fn take_header(&mut self) -> Option<ResponseHeader> {
+        self.0.header.take().map(ResponseHeader::new)
+    }
+
+    #[inline]
+    pub fn take_prev_kvs(&mut self) -> Vec<KeyValue> {
+        self.0.prev_kvs.drain(..).map(KeyValue::new).collect()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CompareAndPutRequest {
+    /// key is the key, in bytes, to put into the key-value store.
+    pub key: Vec<u8>,
+    pub expect: Vec<u8>,
+    /// value is the value, in bytes, to associate with the key in the
+    /// key-value store.
+    pub value: Vec<u8>,
+}
+
+impl From<CompareAndPutRequest> for PbCompareAndPutRequest {
+    fn from(req: CompareAndPutRequest) -> Self {
+        Self {
+            header: None,
+            key: req.key,
+            expect: req.expect,
+            value: req.value,
+        }
+    }
+}
+
+impl CompareAndPutRequest {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            key: vec![],
+            expect: vec![],
+            value: vec![],
+        }
+    }
+
+    /// key is the key, in bytes, to put into the key-value store.
+    #[inline]
+    pub fn with_key(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.key = key.into();
+        self
+    }
+
+    /// expect is the previous value, in bytes
+    #[inline]
+    pub fn with_expect(mut self, expect: impl Into<Vec<u8>>) -> Self {
+        self.expect = expect.into();
+        self
+    }
+
+    /// value is the value, in bytes, to associate with the key in the
+    /// key-value store.
+    #[inline]
+    pub fn with_value(mut self, value: impl Into<Vec<u8>>) -> Self {
+        self.value = value.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompareAndPutResponse(PbCompareAndPutResponse);
+
+impl TryFrom<PbCompareAndPutResponse> for CompareAndPutResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCompareAndPutResponse) -> Result<Self> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self::new(pb))
+    }
+}
+
+impl CompareAndPutResponse {
+    #[inline]
+    pub fn new(res: PbCompareAndPutResponse) -> Self {
+        Self(res)
+    }
+
+    #[inline]
+    pub fn take_header(&mut self) -> Option<ResponseHeader> {
+        self.0.header.take().map(ResponseHeader::new)
+    }
+
+    #[inline]
+    pub fn is_success(&self) -> bool {
+        self.0.success
     }
 
     #[inline]
@@ -322,7 +492,7 @@ pub struct DeleteRangeResponse(PbDeleteRangeResponse);
 impl TryFrom<PbDeleteRangeResponse> for DeleteRangeResponse {
     type Error = error::Error;
 
-    fn try_from(pb: PbDeleteRangeResponse) -> Result<Self, Self::Error> {
+    fn try_from(pb: PbDeleteRangeResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self::new(pb))
