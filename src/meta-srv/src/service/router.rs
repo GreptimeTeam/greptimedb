@@ -1,5 +1,6 @@
 use api::v1::meta::router_server;
 use api::v1::meta::CreateRequest;
+use api::v1::meta::Peer;
 use api::v1::meta::Region;
 use api::v1::meta::RegionRoute;
 use api::v1::meta::ResponseHeader;
@@ -20,6 +21,11 @@ use crate::keys::LeaseKey;
 use crate::keys::LeaseValue;
 use crate::lease;
 use crate::metasrv::MetaSrv;
+
+#[async_trait::async_trait]
+trait DnSelect {
+    async fn select(&self, id: u64, ctx: &Context) -> Result<Vec<Peer>>;
+}
 
 #[derive(Clone)]
 struct Context {
@@ -46,9 +52,22 @@ impl router_server::Router for MetaSrv {
             dn_lease_secs: self.options().dn_lease_secs,
             kv_store: self.kv_store(),
         };
-        let res = handle_create(req, ctx).await?;
+        let res = handle_create(req, ctx, DefaultDnSelect {}).await?;
 
         Ok(Response::new(res))
+    }
+}
+
+struct DefaultDnSelect;
+
+#[async_trait::async_trait]
+impl DnSelect for DefaultDnSelect {
+    async fn select(&self, id: u64, ctx: &Context) -> Result<Vec<Peer>> {
+        // filter out the nodes out lease
+        let now = time_util::current_time_millis();
+        let lease_filter =
+            |_: &LeaseKey, v: &LeaseValue| now - v.timestamp_millis < ctx.dn_lease_secs;
+        lease::find_datanodes(id, ctx.kv_store.clone(), lease_filter).await
     }
 }
 
@@ -56,7 +75,11 @@ async fn handle_route(_req: RouteRequest, _ctx: Context) -> Result<RouteResponse
     todo!()
 }
 
-async fn handle_create(req: CreateRequest, ctx: Context) -> Result<RouteResponse> {
+async fn handle_create(
+    req: CreateRequest,
+    ctx: Context,
+    selector: impl DnSelect,
+) -> Result<RouteResponse> {
     let CreateRequest {
         header,
         table_name,
@@ -65,10 +88,7 @@ async fn handle_create(req: CreateRequest, ctx: Context) -> Result<RouteResponse
     let table_name = table_name.context(error::EmptyTableNameSnafu)?;
     let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
 
-    // filter out the nodes out lease
-    let now = time_util::current_time_millis();
-    let lease_filter = |_: &LeaseKey, v: &LeaseValue| now - v.timestamp_millis < ctx.dn_lease_secs;
-    let peers = lease::find_datanodes(cluster_id, ctx.kv_store, lease_filter).await?;
+    let peers = selector.select(cluster_id, &ctx).await?;
 
     let table = Table {
         table_name: Some(table_name),
@@ -130,28 +150,60 @@ mod tests {
         let _res = meta_srv.route(req.into_request()).await.unwrap();
     }
 
+    struct MockDnSelect;
+
+    #[async_trait::async_trait]
+    impl DnSelect for MockDnSelect {
+        async fn select(&self, _: u64, _: &Context) -> Result<Vec<Peer>> {
+            Ok(vec![
+                Peer {
+                    id: 0,
+                    addr: "127.0.0.1:3000".to_string(),
+                },
+                Peer {
+                    id: 1,
+                    addr: "127.0.0.1:3001".to_string(),
+                },
+            ])
+        }
+    }
+
     #[tokio::test]
     async fn test_handle_create() {
         let kv_store = Arc::new(NoopKvStore {});
-        let _meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
-
         let table_name = TableName::new("test_catalog", "test_db", "table1");
         let req = CreateRequest {
             header: RequestHeader::new((1, 1)),
             table_name: Some(table_name),
             ..Default::default()
         };
-
         let p0 = Partition::new()
             .column_list(vec![b"col1".to_vec(), b"col2".to_vec()])
             .value_list(vec![b"v1".to_vec(), b"v2".to_vec()]);
-
         let p1 = Partition::new()
             .column_list(vec![b"col1".to_vec(), b"col2".to_vec()])
             .value_list(vec![b"v11".to_vec(), b"v22".to_vec()]);
+        let req = req.add_partition(p0).add_partition(p1);
+        let ctx = Context {
+            dn_lease_secs: 10,
+            kv_store,
+        };
+        let res = handle_create(req, ctx, MockDnSelect {}).await.unwrap();
 
-        let _req = req.add_partition(p0).add_partition(p1);
-
-        // TODO
+        assert_eq!(
+            vec![
+                Peer {
+                    id: 0,
+                    addr: "127.0.0.1:3000".to_string(),
+                },
+                Peer {
+                    id: 1,
+                    addr: "127.0.0.1:3001".to_string(),
+                },
+            ],
+            res.peers
+        );
+        assert_eq!(1, res.table_routes.len());
+        assert_eq!(2, res.table_routes.get(0).unwrap().region_routes.len());
     }
 }

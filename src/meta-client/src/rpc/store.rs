@@ -522,6 +522,10 @@ impl DeleteRangeResponse {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::meta::BatchPutRequest as PbBatchPutRequest;
+    use api::v1::meta::BatchPutResponse as PbBatchPutResponse;
+    use api::v1::meta::CompareAndPutRequest as PbCompareAndPutRequest;
+    use api::v1::meta::CompareAndPutResponse as PbCompareAndPutResponse;
     use api::v1::meta::DeleteRangeRequest as PbDeleteRangeRequest;
     use api::v1::meta::DeleteRangeResponse as PbDeleteRangeResponse;
     use api::v1::meta::KeyValue as PbKeyValue;
@@ -626,6 +630,92 @@ mod tests {
         };
 
         let mut res = PutResponse::new(pb_res);
+        assert!(res.take_header().is_none());
+        let mut kv = res.take_prev_kv().unwrap();
+        assert_eq!(b"k1".to_vec(), kv.key().to_vec());
+        assert_eq!(b"k1".to_vec(), kv.take_key());
+        assert_eq!(b"v1".to_vec(), kv.value().to_vec());
+        assert_eq!(b"v1".to_vec(), kv.take_value());
+    }
+
+    #[test]
+    fn test_batch_put_request_trans() {
+        let req = BatchPutRequest::new()
+            .add_kv(b"test_key1".to_vec(), b"test_value1".to_vec())
+            .add_kv(b"test_key2".to_vec(), b"test_value2".to_vec())
+            .add_kv(b"test_key3".to_vec(), b"test_value3".to_vec())
+            .with_prev_kv();
+
+        let into_req: PbBatchPutRequest = req.into();
+        assert!(into_req.header.is_none());
+        assert_eq!(
+            vec![
+                b"test_key1".to_vec(),
+                b"test_key2".to_vec(),
+                b"test_key3".to_vec()
+            ],
+            into_req.keys
+        );
+        assert_eq!(
+            vec![
+                b"test_value1".to_vec(),
+                b"test_value2".to_vec(),
+                b"test_value3".to_vec()
+            ],
+            into_req.values
+        );
+        assert!(into_req.prev_kv);
+    }
+
+    #[test]
+    fn test_batch_put_response_trans() {
+        let pb_res = PbBatchPutResponse {
+            header: None,
+            prev_kvs: vec![PbKeyValue {
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+            }],
+        };
+
+        let mut res = BatchPutResponse::new(pb_res);
+        assert!(res.take_header().is_none());
+        let kvs = res.take_prev_kvs();
+        assert_eq!(b"k1".to_vec(), kvs[0].key().to_vec());
+        assert_eq!(b"v1".to_vec(), kvs[0].value().to_vec());
+    }
+
+    #[test]
+    fn test_compare_and_put_request_trans() {
+        let (key, expect, value) = (
+            b"test_key1".to_vec(),
+            b"test_expect1".to_vec(),
+            b"test_value1".to_vec(),
+        );
+
+        let req = CompareAndPutRequest::new()
+            .with_key(key.clone())
+            .with_expect(expect.clone())
+            .with_value(value.clone());
+
+        let into_req: PbCompareAndPutRequest = req.into();
+        assert!(into_req.header.is_none());
+        assert_eq!(key, into_req.key);
+        assert_eq!(expect, into_req.expect);
+        assert_eq!(value, into_req.value);
+    }
+
+    #[test]
+    fn test_compare_and_put_response_trans() {
+        let pb_res = PbCompareAndPutResponse {
+            header: None,
+            success: true,
+            prev_kv: Some(PbKeyValue {
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+            }),
+        };
+
+        let mut res = CompareAndPutResponse::new(pb_res);
         assert!(res.take_header().is_none());
         let mut kv = res.take_prev_kv().unwrap();
         assert_eq!(b"k1".to_vec(), kv.key().to_vec());

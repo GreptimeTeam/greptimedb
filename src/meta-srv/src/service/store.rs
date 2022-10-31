@@ -97,6 +97,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_batch_put() {
+        let kv_store = Arc::new(NoopKvStore {});
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
+        let req = BatchPutRequest::default();
+        let res = meta_srv.batch_put(req.into_request()).await;
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_put() {
+        let kv_store = Arc::new(NoopKvStore {});
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
+        let req = CompareAndPutRequest::default();
+        let res = meta_srv.compare_and_put(req.into_request()).await;
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_delete_range() {
         let kv_store = Arc::new(NoopKvStore {});
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;

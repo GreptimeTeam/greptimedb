@@ -112,11 +112,11 @@ async fn run() {
     // cas
     let cas = CompareAndPutRequest::new()
         .with_key(b"batch_put1".to_vec())
-        .with_expect(b"batch_put_v-----".to_vec())
+        .with_expect(b"batch_put_v_fail".to_vec())
         .with_value(b"batch_put_v111".to_vec());
 
     let res = meta_client.compare_and_put(cas).await.unwrap();
-    event!(Level::INFO, "cas0 result: {:#?}", res);
+    event!(Level::INFO, "cas 0 result: {:#?}", res);
 
     let cas = CompareAndPutRequest::new()
         .with_key(b"batch_put1".to_vec())
@@ -124,7 +124,7 @@ async fn run() {
         .with_value(b"batch_put_v111".to_vec());
 
     let res = meta_client.compare_and_put(cas).await.unwrap();
-    event!(Level::INFO, "cas1 result: {:#?}", res);
+    event!(Level::INFO, "cas 1 result: {:#?}", res);
 
     // delete
     let delete_range = DeleteRangeRequest::new().with_key(b"key1".to_vec());

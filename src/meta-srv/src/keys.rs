@@ -82,7 +82,7 @@ impl FromStr for LeaseValue {
     type Err = error::Error;
 
     fn from_str(value: &str) -> crate::Result<Self> {
-        serde_json::from_str(value).context(error::DeserializeDatanodeValueSnafu)
+        serde_json::from_str(value).context(error::DeserializeFromJsonSnafu { input: value })
     }
 }
 
@@ -101,7 +101,9 @@ impl TryFrom<LeaseValue> for Vec<u8> {
 
     fn try_from(dn_value: LeaseValue) -> Result<Self> {
         Ok(serde_json::to_string(&dn_value)
-            .context(error::SerializeDatanodeValueSnafu)?
+            .context(error::SerializeToJsonSnafu {
+                input: format!("{:?}", dn_value),
+            })?
             .into_bytes())
     }
 }

@@ -104,12 +104,10 @@ mod tests {
         fn throw_tonic_error() -> StdResult<tonic::transport::Error> {
             tonic::transport::Endpoint::new("http//http").map(|_| ())
         }
-
         let e = throw_tonic_error()
             .context(ConnectFailedSnafu { url: "" })
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -120,7 +118,6 @@ mod tests {
             .context(IllegalGrpcClientStateSnafu { err_msg: "" })
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -130,12 +127,10 @@ mod tests {
         fn throw_tonic_status_error() -> StdResult<tonic::Status> {
             Err(tonic::Status::new(tonic::Code::Aborted, ""))
         }
-
         let e = throw_tonic_status_error()
             .context(TonicStatusSnafu)
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -143,7 +138,6 @@ mod tests {
     #[test]
     fn test_ask_leader_error() {
         let e = throw_none_option().context(AskLeaderSnafu).err().unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -151,7 +145,6 @@ mod tests {
     #[test]
     fn test_no_leader_error() {
         let e = throw_none_option().context(NoLeaderSnafu).err().unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -163,12 +156,20 @@ mod tests {
                 .map(|_| ())
                 .context(common_grpc::error::CreateChannelSnafu)
         }
-
         let e = throw_common_grpc_error()
             .context(CreateChannelSnafu)
             .err()
             .unwrap();
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Internal);
+    }
 
+    #[test]
+    fn test_not_started_error() {
+        let e = throw_none_option()
+            .context(NotStartedSnafu { name: "" })
+            .err()
+            .unwrap();
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -179,7 +180,6 @@ mod tests {
             .context(SendHeartbeatSnafu { err_msg: "" })
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }

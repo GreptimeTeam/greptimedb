@@ -348,49 +348,38 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_heartbeat_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-
         let mut meta_client = MetaClientBuilder::new(0, 0)
             .enable_router()
             .enable_store()
             .build();
-
         meta_client.start(urls).await.unwrap();
-
         let res = meta_client.ask_leader().await;
-
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 
     #[tokio::test]
     async fn test_not_start_router_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-
         let mut meta_client = MetaClientBuilder::new(0, 0)
             .enable_heartbeat()
             .enable_store()
             .build();
-
         meta_client.start(urls).await.unwrap();
-
         let req = CreateRequest::new(TableName::new("c", "s", "t"));
         let res = meta_client.create_route(req).await;
-
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 
     #[tokio::test]
     async fn test_not_start_store_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-
         let mut meta_client = MetaClientBuilder::new(0, 0)
             .enable_heartbeat()
             .enable_router()
             .build();
 
         meta_client.start(urls).await.unwrap();
-
         let res = meta_client.put(PutRequest::default()).await;
-
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 

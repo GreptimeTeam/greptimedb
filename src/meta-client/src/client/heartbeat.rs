@@ -235,14 +235,11 @@ mod test {
     #[tokio::test]
     async fn test_start_client() {
         let mut client = Client::new((0, 0), ChannelManager::default());
-
         assert!(!client.is_started().await);
-
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
             .unwrap();
-
         assert!(client.is_started().await);
     }
 
@@ -253,13 +250,9 @@ mod test {
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
             .unwrap();
-
         assert!(client.is_started().await);
-
         let res = client.start(&["127.0.0.1:1002"]).await;
-
         assert!(res.is_err());
-
         assert!(matches!(
             res.err(),
             Some(error::Error::IllegalGrpcClientState { .. })
@@ -273,48 +266,18 @@ mod test {
             .start(&["127.0.0.1:1000", "127.0.0.1:1000", "127.0.0.1:1000"])
             .await
             .unwrap();
-
         assert_eq!(1, client.inner.write().await.peers.len());
-    }
-
-    #[tokio::test]
-    async fn test_ask_leader_unavailable() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
-        client.start(&["unavailable_peer"]).await.unwrap();
-
-        let res = client.ask_leader().await;
-
-        assert!(res.is_err());
-
-        let err = res.err().unwrap();
-        assert!(matches!(err, error::Error::AskLeader { .. }));
-    }
-
-    #[tokio::test]
-    async fn test_heartbeat_unavailable() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
-        client.start(&["unavailable_peer"]).await.unwrap();
-        client.inner.write().await.leader = Some("unavailable".to_string());
-
-        let res = client.heartbeat().await;
-
-        assert!(res.is_err());
-
-        let err = res.err().unwrap();
-        assert!(matches!(err, error::Error::TonicStatus { .. }));
     }
 
     #[tokio::test]
     async fn test_heartbeat_stream() {
         let (sender, mut receiver) = mpsc::channel::<HeartbeatRequest>(100);
         let sender = HeartbeatSender::new((8, 8), sender);
-
         tokio::spawn(async move {
             for _ in 0..10 {
                 sender.send(HeartbeatRequest::default()).await.unwrap();
             }
         });
-
         while let Some(req) = receiver.recv().await {
             let header = req.header.unwrap();
             assert_eq!(8, header.cluster_id);
