@@ -43,7 +43,7 @@ pub struct ShowTables {
 /// SQL structure for `SHOW CREATE TABLE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowCreateTable {
-    pub tablename: Option<String>,
+    pub table_name: Option<String>,
 }
 
 #[cfg(test)]
@@ -103,14 +103,14 @@ mod tests {
 
     #[test]
     pub fn test_show_create_table() {
-        let sql = "SHOW CREATE TABLE test";
+        let sql1 = "SHOW CREATE TABLE test";
         let stmts: Vec<Statement> =
-            ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+            ParserContext::create_with_dialect(sql1, &GenericDialect {}).unwrap();
         assert_eq!(1, stmts.len());
         assert_matches!(&stmts[0], Statement::ShowCreateTable { .. });
         match &stmts[0] {
             Statement::ShowCreateTable(show) => {
-                let tablename = show.tablename.as_ref();
+                let tablename = show.table_name.as_ref();
                 assert_eq!(tablename.unwrap(), "test");
             }
             _ => {
