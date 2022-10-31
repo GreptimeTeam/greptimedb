@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "benchmarks",
     "src/api",
     "src/catalog",
     "src/client",
