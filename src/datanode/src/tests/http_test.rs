@@ -13,8 +13,8 @@ use test_util::TestGuard;
 use crate::instance::Instance;
 use crate::tests::test_util;
 
-async fn make_test_app() -> (Router, TestGuard) {
-    let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts();
+async fn make_test_app(name: &str) -> (Router, TestGuard) {
+    let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
     let instance = Arc::new(Instance::new(&opts).await.unwrap());
     instance.start().await.unwrap();
     test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
@@ -27,7 +27,7 @@ async fn make_test_app() -> (Router, TestGuard) {
 #[tokio::test]
 async fn test_sql_api() {
     common_telemetry::init_default_ut_logging();
-    let (app, _guard) = make_test_app().await;
+    let (app, _guard) = make_test_app("sql_api").await;
     let client = TestClient::new(app);
     let res = client.get("/v1/sql").send().await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -88,7 +88,7 @@ async fn test_sql_api() {
 async fn test_metrics_api() {
     common_telemetry::init_default_ut_logging();
     common_telemetry::init_default_metrics_recorder();
-    let (app, _guard) = make_test_app().await;
+    let (app, _guard) = make_test_app("metrics_api").await;
     let client = TestClient::new(app);
 
     // Send a sql
@@ -108,7 +108,7 @@ async fn test_metrics_api() {
 #[tokio::test]
 async fn test_scripts_api() {
     common_telemetry::init_default_ut_logging();
-    let (app, _guard) = make_test_app().await;
+    let (app, _guard) = make_test_app("scripts_api").await;
     let client = TestClient::new(app);
     let res = client
         .post("/v1/scripts")
@@ -140,7 +140,7 @@ def test(n):
 }
 
 async fn start_test_app(addr: &str) -> (SocketAddr, TestGuard) {
-    let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts("py_side_scripts_api");
     let instance = Arc::new(Instance::new(&opts).await.unwrap());
     instance.start().await.unwrap();
     let mut http_server = HttpServer::new(instance);
