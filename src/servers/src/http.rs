@@ -133,30 +133,26 @@ pub enum JsonOutput {
 
 #[derive(Serialize, Debug, JsonSchema)]
 pub struct JsonResponse {
-    success: bool,
+    code: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error_code: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<JsonOutput>,
 }
 
 impl JsonResponse {
-    fn with_error(error: Option<String>, error_code: Option<u32>) -> Self {
+    fn with_error(error: String, error_code: StatusCode) -> Self {
         JsonResponse {
-            success: false,
-            error,
-            error_code,
+            error: Some(error),
+            code: error_code as u32,
             output: None,
         }
     }
 
     fn with_output(output: Option<JsonOutput>) -> Self {
         JsonResponse {
-            success: true,
             error: None,
-            error_code: None,
+            code: StatusCode::Success as u32,
             output,
         }
     }
@@ -170,34 +166,24 @@ impl JsonResponse {
             Ok(Output::Stream(stream)) => match util::collect(stream).await {
                 Ok(rows) => match HttpRecordsOutput::try_from(rows) {
                     Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
-                    Err(err) => Self::with_error(
-                        Some(format!(": {}", err)),
-                        Some(StatusCode::Internal as u32),
-                    ),
+                    Err(err) => Self::with_error(err, StatusCode::Internal),
                 },
-                Err(e) => Self::with_error(
-                    Some(format!("Recordbatch error: {}", e)),
-                    Some(e.status_code() as u32),
-                ),
+                Err(e) => Self::with_error(format!("Recordbatch error: {}", e), e.status_code()),
             },
             Ok(Output::RecordBatches(recordbatches)) => {
                 match HttpRecordsOutput::try_from(recordbatches.take()) {
                     Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
-                    Err(err) => Self::with_error(
-                        Some(format!(": {}", err)),
-                        Some(StatusCode::Internal as u32),
-                    ),
+                    Err(err) => Self::with_error(err, StatusCode::Internal),
                 }
             }
-            Err(e) => Self::with_error(
-                Some(format!("Query engine output error: {}", e)),
-                Some(e.status_code() as u32),
-            ),
+            Err(e) => {
+                Self::with_error(format!("Query engine output error: {}", e), e.status_code())
+            }
         }
     }
 
     pub fn success(&self) -> bool {
-        self.success
+        self.code == (StatusCode::Success as u32)
     }
 
     pub fn error(&self) -> Option<&String> {
@@ -355,12 +341,10 @@ impl Server for HttpServer {
 
 /// handle error middleware
 async fn handle_error(err: BoxError) -> Json<JsonResponse> {
-    Json(JsonResponse {
-        success: false,
-        error: Some(format!("Unhandled internal error: {}", err)),
-        error_code: None,
-        output: None,
-    })
+    Json(JsonResponse::with_error(
+        format!("Unhandled internal error: {}", err),
+        StatusCode::Unexpected,
+    ))
 }
 
 #[cfg(test)]

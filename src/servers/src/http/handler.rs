@@ -27,8 +27,8 @@ pub async fn sql(
         Json(JsonResponse::from_output(sql_handler.do_query(sql).await).await)
     } else {
         Json(JsonResponse::with_error(
-            Some("sql parameter is required.".to_string()),
-            Some(StatusCode::InvalidArguments as u32),
+            "sql parameter is required.".to_string(),
+            StatusCode::InvalidArguments,
         ))
     }
 }
@@ -61,8 +61,8 @@ pub async fn scripts(
 ) -> Json<JsonResponse> {
     if payload.name.is_empty() || payload.script.is_empty() {
         return Json(JsonResponse::with_error(
-            Some("Invalid name or script".to_string()),
-            Some(StatusCode::InvalidArguments as u32),
+            "Invalid name or script".to_string(),
+            StatusCode::InvalidArguments,
         ));
     }
 
@@ -71,10 +71,7 @@ pub async fn scripts(
         .await
     {
         Ok(()) => JsonResponse::with_output(None),
-        Err(e) => JsonResponse::with_error(
-            Some(format!("Insert script error: {}", e)),
-            Some(e.status_code() as u32),
-        ),
+        Err(e) => JsonResponse::with_error(format!("Insert script error: {}", e), e.status_code()),
     };
 
     Json(body)
@@ -95,8 +92,8 @@ pub async fn run_script(
 
     if name.is_none() || name.unwrap().is_empty() {
         return Json(JsonResponse::with_error(
-            Some("Invalid name".to_string()),
-            Some(StatusCode::InvalidArguments as u32),
+            "Invalid name".to_string(),
+            StatusCode::InvalidArguments,
         ));
     }
 
