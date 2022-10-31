@@ -1,4 +1,8 @@
 //! Methods that perform convertion between Substrait's type ([Type](SType)) and GreptimeDB's type ([ConcreteDataType]).
+//!
+//! Substrait use [type variation](https://substrait.io/types/type_variations/) to express different "logical types".
+//! Current we only have variations on integer types. Variation 0 (system prefered) are the same with base types, which
+//! are signed integer (i.e. I8 -> [i8]), and Variation 1 stands for unsigned integer (i.e. I8 -> [u8]).
 
 use datatypes::prelude::ConcreteDataType;
 use substrait_proto::protobuf::r#type::{self as s_type, Kind, Nullability};
@@ -36,19 +40,11 @@ macro_rules! substrait_kind {
 /// Convert Substrait [Type](SType) to GreptimeDB's [ConcreteDataType]. The bool in return
 /// tuple is the nullability identifier.
 pub fn to_concrete_type(ty: &SType) -> Result<(ConcreteDataType, bool)> {
-    /// In scope helper function.
-    #[inline(never)]
-    fn fail_unsupported(desc: impl std::fmt::Debug) -> Result<(ConcreteDataType, bool)> {
-        UnsupportedSubstraitTypeSnafu {
-            ty: format!("{:?}", desc),
-        }
-        .fail()
-    }
-
     if ty.kind.is_none() {
         return Ok((ConcreteDataType::null_datatype(), true));
     }
-    match ty.kind.as_ref().unwrap() {
+    let kind = ty.kind.as_ref().unwrap();
+    match kind {
         Kind::Bool(desc) => substrait_kind!(desc, boolean_datatype),
         Kind::I8(desc) => substrait_kind!(desc, int8_datatype, uint8_datatype),
         Kind::I16(desc) => substrait_kind!(desc, int16_datatype, uint16_datatype),
@@ -63,19 +59,22 @@ pub fn to_concrete_type(ty: &SType) -> Result<(ConcreteDataType, bool)> {
             ConcreteDataType::timestamp_datatype(Default::default())
         ),
         Kind::Date(desc) => substrait_kind!(desc, date_datatype),
-        Kind::Time(desc) => fail_unsupported(desc),
-        Kind::IntervalYear(desc) => fail_unsupported(desc),
-        Kind::IntervalDay(desc) => fail_unsupported(desc),
-        Kind::TimestampTz(desc) => fail_unsupported(desc),
-        Kind::Uuid(desc) => fail_unsupported(desc),
-        Kind::FixedChar(desc) => fail_unsupported(desc),
-        Kind::Varchar(desc) => fail_unsupported(desc),
-        Kind::FixedBinary(desc) => fail_unsupported(desc),
-        Kind::Decimal(desc) => fail_unsupported(desc),
-        Kind::Struct(desc) => fail_unsupported(desc),
-        Kind::List(desc) => fail_unsupported(desc),
-        Kind::Map(desc) => fail_unsupported(desc),
-        Kind::UserDefinedTypeReference(desc) => fail_unsupported(desc),
+        Kind::Time(_)
+        | Kind::IntervalYear(_)
+        | Kind::IntervalDay(_)
+        | Kind::TimestampTz(_)
+        | Kind::Uuid(_)
+        | Kind::FixedChar(_)
+        | Kind::Varchar(_)
+        | Kind::FixedBinary(_)
+        | Kind::Decimal(_)
+        | Kind::Struct(_)
+        | Kind::List(_)
+        | Kind::Map(_)
+        | Kind::UserDefinedTypeReference(_) => UnsupportedSubstraitTypeSnafu {
+            ty: format!("{:?}", kind),
+        }
+        .fail(),
     }
 }
 
@@ -94,6 +93,8 @@ macro_rules! build_substrait_kind {
 }
 
 /// Convert GreptimeDB's [ConcreteDataType] to Substrait [Type](SType).
+///
+/// Refer to [mod level documentation](super::types) for more information about type variation.
 pub fn from_concrete_type(ty: ConcreteDataType, nullability: Option<bool>) -> Result<SType> {
     let kind = match ty {
         ConcreteDataType::Null(_) => None,
