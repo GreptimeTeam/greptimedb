@@ -75,6 +75,7 @@ impl HttpRecordsOutput {
 impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
     type Error = String;
 
+    // TODO(sunng87): use schema from recordstreams when #366 fixed
     fn try_from(
         recordbatches: Vec<RecordBatch>,
     ) -> std::result::Result<HttpRecordsOutput, Self::Error> {
