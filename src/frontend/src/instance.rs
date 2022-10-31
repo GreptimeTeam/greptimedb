@@ -40,7 +40,7 @@ use tokio::sync::RwLock;
 use crate::catalog::FrontendCatalogList;
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
-use crate::mock::{Datanode, RangePartitionRule, Region};
+use crate::mock::{Datanode, DatanodeInstance, RangePartitionRule, Region};
 use crate::sql::insert_to_request;
 
 mod influxdb;
@@ -53,7 +53,7 @@ pub struct Instance {
     catalog_list: CatalogListRef,
     partition_rule: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
     meta_client: MetaClient,
-    datanode_instances: Arc<RwLock<HashMap<u64, Database>>>,
+    datanode_instances: Arc<RwLock<HashMap<u64, DatanodeInstance>>>,
 }
 
 impl Instance {
@@ -243,7 +243,8 @@ impl SqlQueryHandler for Instance {
                             None => {
                                 let mut db = Database::new("greptime", Client::default());
                                 db.start(format!("http://{}", leader.addr)).await.unwrap();
-                                datanode_instances.insert(leader.id, db);
+                                let instance = DatanodeInstance::new(self.catalog_list.clone(), db);
+                                datanode_instances.insert(leader.id, instance);
                             }
                             Some(_) => {
                                 info!("datanode instance already exist for node id {}", leader.id);
