@@ -177,12 +177,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Parquet file schema is invalid, source: {}", source))]
-    InvalidParquetSchema {
-        #[snafu(backtrace)]
-        source: MetadataError,
-    },
-
     #[snafu(display("Region is under {} state, cannot proceed operation", state))]
     InvalidRegionState {
         state: &'static str,
@@ -308,6 +302,40 @@ pub enum Error {
         #[snafu(backtrace)]
         source: MetadataError,
     },
+
+    #[snafu(display("Incompatible schema to read, reason: {}", reason))]
+    CompatRead {
+        reason: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to read column {}, could not create default value, source: {}",
+        column,
+        source
+    ))]
+    CreateDefaultToRead {
+        column: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to read column {}, no proper default value for it", column))]
+    NoDefaultToRead {
+        column: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to convert arrow chunk to batch, name: {}, source: {}",
+        name,
+        source
+    ))]
+    ConvertChunk {
+        name: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -334,14 +362,16 @@ impl ErrorExt for Error {
             | Cancelled { .. }
             | DecodeMetaActionList { .. }
             | Readline { .. }
-            | InvalidParquetSchema { .. }
             | WalDataCorrupted { .. }
             | VersionNotFound { .. }
             | SequenceNotMonotonic { .. }
             | ConvertStoreSchema { .. }
             | InvalidRawRegion { .. }
             | FilterColumn { .. }
-            | AlterMetadata { .. } => StatusCode::Unexpected,
+            | AlterMetadata { .. }
+            | CompatRead { .. }
+            | CreateDefaultToRead { .. }
+            | NoDefaultToRead { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | WriteParquet { .. }
@@ -364,6 +394,7 @@ impl ErrorExt for Error {
             | ConvertColumnSchema { source, .. } => source.status_code(),
             PushBatch { source, .. } => source.status_code(),
             AddDefault { source, .. } => source.status_code(),
+            ConvertChunk { source, .. } => source.status_code(),
         }
     }
 
