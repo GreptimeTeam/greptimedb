@@ -22,11 +22,6 @@ use crate::keys::LeaseValue;
 use crate::lease;
 use crate::metasrv::MetaSrv;
 
-#[async_trait::async_trait]
-trait DnSelect {
-    async fn select(&self, id: u64, ctx: &Context) -> Result<Vec<Peer>>;
-}
-
 #[derive(Clone)]
 struct Context {
     pub datanode_lease_secs: i64,
@@ -52,22 +47,41 @@ impl router_server::Router for MetaSrv {
             datanode_lease_secs: self.options().datanode_lease_secs,
             kv_store: self.kv_store(),
         };
-        let res = handle_create(req, ctx, DefaultDnSelect {}).await?;
+        let res = handle_create(req, ctx, LeaseBasedSelector::default()).await?;
 
         Ok(Response::new(res))
     }
 }
 
-struct DefaultDnSelect;
+#[async_trait::async_trait]
+trait DatanodeSelector {
+    async fn select(&self, id: u64, ctx: &Context) -> Result<Vec<Peer>>;
+}
+
+#[derive(Default)]
+struct LeaseBasedSelector;
 
 #[async_trait::async_trait]
-impl DnSelect for DefaultDnSelect {
+impl DatanodeSelector for LeaseBasedSelector {
     async fn select(&self, id: u64, ctx: &Context) -> Result<Vec<Peer>> {
         // filter out the nodes out lease
-        let now = time_util::current_time_millis();
-        let lease_filter =
-            |_: &LeaseKey, v: &LeaseValue| now - v.timestamp_millis < ctx.datanode_lease_secs;
-        lease::find_datanodes(id, ctx.kv_store.clone(), lease_filter).await
+        let lease_filter = |_: &LeaseKey, v: &LeaseValue| {
+            time_util::current_time_millis() - v.timestamp_millis < ctx.datanode_lease_secs
+        };
+        let mut lease_kvs = lease::alive_datanodes(id, ctx.kv_store.clone(), lease_filter).await?;
+        // TODO(jiachun): At the moment we are just pushing the latest to the forefront,
+        // and it is better to use load-based strategies in the future.
+        lease_kvs.sort_by(|a, b| b.1.timestamp_millis.cmp(&a.1.timestamp_millis));
+
+        let peers = lease_kvs
+            .into_iter()
+            .map(|(k, v)| Peer {
+                id: k.node_id,
+                addr: v.node_addr,
+            })
+            .collect::<Vec<_>>();
+
+        Ok(peers)
     }
 }
 
@@ -78,7 +92,7 @@ async fn handle_route(_req: RouteRequest, _ctx: Context) -> Result<RouteResponse
 async fn handle_create(
     req: CreateRequest,
     ctx: Context,
-    selector: impl DnSelect,
+    selector: impl DatanodeSelector,
 ) -> Result<RouteResponse> {
     let CreateRequest {
         header,
@@ -150,10 +164,10 @@ mod tests {
         let _res = meta_srv.route(req.into_request()).await.unwrap();
     }
 
-    struct MockDnSelect;
+    struct MockSelector;
 
     #[async_trait::async_trait]
-    impl DnSelect for MockDnSelect {
+    impl DatanodeSelector for MockSelector {
         async fn select(&self, _: u64, _: &Context) -> Result<Vec<Peer>> {
             Ok(vec![
                 Peer {
@@ -188,7 +202,7 @@ mod tests {
             datanode_lease_secs: 10,
             kv_store,
         };
-        let res = handle_create(req, ctx, MockDnSelect {}).await.unwrap();
+        let res = handle_create(req, ctx, MockSelector {}).await.unwrap();
 
         assert_eq!(
             vec![
