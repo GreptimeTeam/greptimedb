@@ -20,14 +20,14 @@ use crate::table::DistTable;
 pub struct FrontendCatalogList {
     backend: KvBackendRef,
     range_rules: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
-    datanode_instances: Arc<RwLock<HashMap<u64, Database>>>,
+    datanode_instances: Arc<RwLock<HashMap<u64, DatanodeInstance>>>,
 }
 
 impl FrontendCatalogList {
     pub fn new(
         backend: KvBackendRef,
         range_rules: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
-        datanode_instances: Arc<RwLock<HashMap<u64, Database>>>,
+        datanode_instances: Arc<RwLock<HashMap<u64, DatanodeInstance>>>,
     ) -> Self {
         Self {
             backend,
@@ -93,7 +93,7 @@ pub struct FrontendCatalogProvider {
     catalog_name: String,
     backend: KvBackendRef,
     range_rules: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
-    datanode_instances: Arc<RwLock<HashMap<u64, Database>>>,
+    datanode_instances: Arc<RwLock<HashMap<u64, DatanodeInstance>>>,
 }
 
 impl CatalogProvider for FrontendCatalogProvider {
@@ -155,22 +155,7 @@ pub struct FrontendSchemaProvider {
     schema_name: String,
     backend: KvBackendRef,
     range_rules: Arc<RwLock<HashMap<String, RangePartitionRule>>>,
-    datanode_instances: Arc<RwLock<HashMap<u64, Database>>>,
-}
-
-impl FrontendSchemaProvider {
-    fn build_query_catalog(&self) -> CatalogListRef {
-        let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
-        let catalog = Arc::new(catalog::local::memory::MemoryCatalogProvider::new());
-        let schema = Arc::new(catalog::local::memory::MemorySchemaProvider::new());
-        catalog
-            .register_schema(self.schema_name.clone(), schema)
-            .unwrap();
-        catalog_list
-            .register_catalog(self.catalog_name.clone(), catalog)
-            .unwrap();
-        catalog_list
-    }
+    datanode_instances: Arc<RwLock<HashMap<u64, DatanodeInstance>>>,
 }
 
 impl SchemaProvider for FrontendSchemaProvider {
@@ -213,7 +198,6 @@ impl SchemaProvider for FrontendSchemaProvider {
 
         let catalog_name = self.catalog_name.clone();
         let schema_name = self.schema_name.clone();
-        let catalog_ref = self.build_query_catalog();
         let instances = self.datanode_instances.clone();
         let backend = self.backend.clone();
 
@@ -227,7 +211,7 @@ impl SchemaProvider for FrontendSchemaProvider {
                     Some(r) => r.clone(),
                 };
 
-                let mut datanode_instances = HashMap::new();
+                let mut instances_for_query = HashMap::new();
                 let mut iter = backend.range(table_prefix.as_bytes());
 
                 let mut region_to_datanode_map = HashMap::new();
@@ -241,7 +225,7 @@ impl SchemaProvider for FrontendSchemaProvider {
                     let val = TableValue::parse(String::from_utf8_lossy(&v)).unwrap();
                     let node_id = val.node_id;
                     let region_ids = val.regions_ids;
-                    let database = match instances.read().await.get(&node_id) {
+                    let instance = match instances.read().await.get(&node_id) {
                         None => {
                             return Ok(None);
                         }
@@ -253,8 +237,7 @@ impl SchemaProvider for FrontendSchemaProvider {
                             .insert(Region::new(region_id), Datanode::new(node_id));
                     }
                     schema_opt = Some(val.meta.schema.clone());
-                    let instance = DatanodeInstance::new(catalog_ref.clone(), database);
-                    datanode_instances.insert(Datanode::new(node_id), instance);
+                    instances_for_query.insert(Datanode::new(node_id), instance);
                 }
 
                 let table = Arc::new(DistTable {
@@ -262,18 +245,9 @@ impl SchemaProvider for FrontendSchemaProvider {
                     schema: schema_opt.unwrap(),
                     partition_rule: range_rules,
                     region_dist_map: region_to_datanode_map,
-                    datanode_instances: Arc::new(Mutex::new(datanode_instances)),
+                    datanode_instances: Arc::new(Mutex::new(instances_for_query)),
                 });
 
-                catalog_ref
-                    .catalog(&catalog_name)
-                    .unwrap()
-                    .unwrap()
-                    .schema(&schema_name)
-                    .unwrap()
-                    .unwrap()
-                    .register_table(table_name, table.clone())
-                    .unwrap();
                 Ok(Some(table as _))
             })
         })
