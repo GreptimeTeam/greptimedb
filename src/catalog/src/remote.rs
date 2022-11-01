@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
 
+pub use client::MetaKvBackend;
 use futures::Stream;
 use futures_util::StreamExt;
 pub use manager::{RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider};
@@ -9,10 +10,7 @@ pub use manager::{RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvi
 use crate::error::Error;
 
 mod client;
-
 mod manager;
-
-pub use client::MetaKvBackend;
 
 #[derive(Debug, Clone)]
 pub struct Kv(pub Vec<u8>, pub Vec<u8>);
