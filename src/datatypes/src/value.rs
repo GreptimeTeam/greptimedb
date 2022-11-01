@@ -353,7 +353,7 @@ impl GeometryValue {
         }
     }
 
-    pub fn to_wkb(&self) -> String {
+    pub fn to_wkt(&self) -> String {
         match self {
             GeometryValue::Point(p) => p.wkt_string(),
         }

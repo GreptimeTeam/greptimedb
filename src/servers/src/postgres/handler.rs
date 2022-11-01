@@ -6,6 +6,7 @@ use common_recordbatch::{util, RecordBatch};
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
+use datatypes::types::GeometryType;
 use pgwire::api::portal::Portal;
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{FieldInfo, Response, Tag, TextQueryResponseBuilder};
@@ -120,7 +121,7 @@ fn encode_value(value: &Value, builder: &mut TextQueryResponseBuilder) -> PgWire
                 &value
             ),
         }))),
-        Value::Geometry(_) => todo!(),
+        Value::Geometry(v) => builder.append_field(Some(v.to_wkt())),
     }
 }
 
@@ -143,7 +144,9 @@ fn type_translate(origin: &ConcreteDataType) -> Result<Type> {
             err_msg: format!("not implemented for column datatype {:?}", origin),
         }
         .fail(),
-        &ConcreteDataType::Geometry(_) => todo!(),
+        ConcreteDataType::Geometry(geom_type) => match geom_type {
+            GeometryType::Point => Ok(Type::POINT),
+        },
     }
 }
 
@@ -162,7 +165,7 @@ mod test {
     use std::sync::Arc;
 
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::value::ListValue;
+    use datatypes::value::{GeometryValue, ListValue};
     use pgwire::api::results::FieldInfo;
     use pgwire::api::Type;
 
@@ -191,6 +194,11 @@ mod test {
                 true,
             ),
             ColumnSchema::new("dates", ConcreteDataType::date_datatype(), true),
+            ColumnSchema::new(
+                "loc",
+                ConcreteDataType::geometry_datatype(GeometryType::Point),
+                true,
+            ),
         ];
         let pg_field_info = vec![
             FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN),
@@ -209,6 +217,7 @@ mod test {
             FieldInfo::new("strings".into(), None, None, Type::VARCHAR),
             FieldInfo::new("timestamps".into(), None, None, Type::TIMESTAMP),
             FieldInfo::new("dates".into(), None, None, Type::DATE),
+            FieldInfo::new("loc".into(), None, None, Type::POINT),
         ];
         let schema = Arc::new(Schema::new(column_schemas));
         let fs = schema_to_pg(schema).unwrap();
@@ -243,6 +252,7 @@ mod test {
             FieldInfo::new("dates".into(), None, None, Type::DATE),
             FieldInfo::new("datetimes".into(), None, None, Type::TIMESTAMP),
             FieldInfo::new("timestamps".into(), None, None, Type::TIMESTAMP),
+            FieldInfo::new("loc".into(), None, None, Type::POINT),
         ];
 
         let values = vec![
@@ -271,6 +281,7 @@ mod test {
             Value::Date(1001i32.into()),
             Value::DateTime(1000001i64.into()),
             Value::Timestamp(1000001i64.into()),
+            Value::Geometry(GeometryValue::new_point(1f64, 2f64)),
         ];
         let mut builder = TextQueryResponseBuilder::new(schema);
         for i in values {

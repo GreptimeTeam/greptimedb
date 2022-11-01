@@ -118,7 +118,7 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                         })
                     }
                     Value::Geometry(v) => {
-                        row_writer.write_col(v.to_wkb())?;
+                        row_writer.write_col(v.to_wkt())?;
                     }
                 }
             }
