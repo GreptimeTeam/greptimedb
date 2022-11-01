@@ -324,7 +324,7 @@ impl Server for HttpServer {
     async fn shutdown(&self) -> Result<()> {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
         if let Some(tx) = shutdown_tx.take() {
-            if let Err(_) = tx.send(()) {
+            if tx.send(()).is_err() {
                 info!("Receiver dropped, the HTTP server has already existed");
             }
         }
