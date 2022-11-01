@@ -11,8 +11,8 @@ use router::Client as RouterClient;
 use snafu::OptionExt;
 use store::Client as StoreClient;
 
-use self::heartbeat::HeartbeatSender;
-use self::heartbeat::HeartbeatStream;
+pub use self::heartbeat::HeartbeatSender;
+pub use self::heartbeat::HeartbeatStream;
 use crate::error;
 use crate::error::Result;
 use crate::rpc::BatchPutRequest;
