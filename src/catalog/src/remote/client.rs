@@ -36,11 +36,7 @@ impl KvBackend for MetaKvBackend {
             while more {
                 let mut resp = self
                     .client
-                    .range(
-                        RangeRequest::new()
-                            .with_key(start_key.clone())
-                            .with_range_end(vec![0]),
-                    )
+                    .range(RangeRequest::new().with_range(start_key.clone(), vec![0]))
                     .await
                     .context(MetaSrvSnafu)?;
 
@@ -67,9 +63,7 @@ impl KvBackend for MetaKvBackend {
     }
 
     async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
-        let req = DeleteRangeRequest::new()
-            .with_key(key.to_vec())
-            .with_range_end(end.to_vec());
+        let req = DeleteRangeRequest::new().with_range(key.to_vec(), end.to_vec());
         let resp = self.client.delete_range(req).await.context(MetaSrvSnafu)?;
         info!(
             "Delete range, key: {}, end: {}, deleted: {}",

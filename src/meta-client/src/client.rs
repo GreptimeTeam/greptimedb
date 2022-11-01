@@ -15,6 +15,10 @@ use self::heartbeat::HeartbeatSender;
 use self::heartbeat::HeartbeatStream;
 use crate::error;
 use crate::error::Result;
+use crate::rpc::BatchPutRequest;
+use crate::rpc::BatchPutResponse;
+use crate::rpc::CompareAndPutRequest;
+use crate::rpc::CompareAndPutResponse;
 use crate::rpc::CreateRequest;
 use crate::rpc::DeleteRangeRequest;
 use crate::rpc::DeleteRangeResponse;
@@ -232,6 +236,32 @@ impl MetaClient {
             .try_into()
     }
 
+    /// BatchPut atomically puts the given keys into the key-value store.
+    pub async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        self.store_client()
+            .context(error::NotStartedSnafu {
+                name: "store_client",
+            })?
+            .batch_put(req.into())
+            .await?
+            .try_into()
+    }
+
+    /// CompareAndPut atomically puts the value to the given updated
+    /// value if the current value == the expected value.
+    pub async fn compare_and_put(
+        &self,
+        req: CompareAndPutRequest,
+    ) -> Result<CompareAndPutResponse> {
+        self.store_client()
+            .context(error::NotStartedSnafu {
+                name: "store_client",
+            })?
+            .compare_and_put(req.into())
+            .await?
+            .try_into()
+    }
+
     /// DeleteRange deletes the given range from the key-value store.
     pub async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         self.store_client()
@@ -318,49 +348,38 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_heartbeat_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-
         let mut meta_client = MetaClientBuilder::new(0, 0)
             .enable_router()
             .enable_store()
             .build();
-
         meta_client.start(urls).await.unwrap();
-
         let res = meta_client.ask_leader().await;
-
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 
     #[tokio::test]
     async fn test_not_start_router_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-
         let mut meta_client = MetaClientBuilder::new(0, 0)
             .enable_heartbeat()
             .enable_store()
             .build();
-
         meta_client.start(urls).await.unwrap();
-
         let req = CreateRequest::new(TableName::new("c", "s", "t"));
         let res = meta_client.create_route(req).await;
-
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 
     #[tokio::test]
     async fn test_not_start_store_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-
         let mut meta_client = MetaClientBuilder::new(0, 0)
             .enable_heartbeat()
             .enable_router()
             .build();
 
         meta_client.start(urls).await.unwrap();
-
         let res = meta_client.put(PutRequest::default()).await;
-
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 

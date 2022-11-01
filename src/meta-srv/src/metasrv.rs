@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::handler::datanode_lease::DatanodeLeaseHandler;
 use crate::handler::response_header::ResponseHeaderHandler;
 use crate::handler::HeartbeatHandlers;
 use crate::service::store::kv::KvStoreRef;
@@ -10,6 +11,7 @@ pub struct MetaSrvOptions {
     pub bind_addr: String,
     pub server_addr: String,
     pub store_addr: String,
+    pub datanode_lease_secs: i64,
 }
 
 impl Default for MetaSrvOptions {
@@ -18,6 +20,7 @@ impl Default for MetaSrvOptions {
             bind_addr: "0.0.0.0:3002".to_string(),
             server_addr: "0.0.0.0:3002".to_string(),
             store_addr: "0.0.0.0:2380".to_string(),
+            datanode_lease_secs: 15,
         }
     }
 }
@@ -31,8 +34,10 @@ pub struct MetaSrv {
 
 impl MetaSrv {
     pub async fn new(options: MetaSrvOptions, kv_store: KvStoreRef) -> Self {
-        let heartbeat_handlers = HeartbeatHandlers::new(kv_store.clone());
+        let heartbeat_handlers = HeartbeatHandlers::default();
         heartbeat_handlers.add_handler(ResponseHeaderHandler).await;
+        heartbeat_handlers.add_handler(DatanodeLeaseHandler).await;
+
         Self {
             options,
             kv_store,
