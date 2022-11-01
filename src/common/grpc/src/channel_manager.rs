@@ -63,7 +63,7 @@ impl ChannelManager {
         let channel = Channel {
             channel: inner_channel.clone(),
             access: 1,
-            use_default_conector: true,
+            use_default_connector: true,
         };
         pool.put(addr, channel);
 
@@ -87,7 +87,7 @@ impl ChannelManager {
         let channel = Channel {
             channel: inner_channel.clone(),
             access: 1,
-            use_default_conector: false,
+            use_default_connector: false,
         };
         let mut pool = self.pool.lock().unwrap();
         pool.put(addr, channel);
@@ -298,7 +298,7 @@ impl ChannelConfig {
 pub struct Channel {
     channel: InnerChannel,
     access: usize,
-    use_default_conector: bool,
+    use_default_connector: bool,
 }
 
 impl Channel {
@@ -309,7 +309,7 @@ impl Channel {
 
     #[inline]
     pub fn use_default_connector(&self) -> bool {
-        self.use_default_conector
+        self.use_default_connector
     }
 }
 #[derive(Debug)]

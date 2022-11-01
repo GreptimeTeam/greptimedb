@@ -33,7 +33,6 @@ impl ResponseHeader {
     }
 }
 
-#[macro_export]
 macro_rules! gen_set_header {
     ($req: ty) => {
         impl $req {
