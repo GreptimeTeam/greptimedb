@@ -11,7 +11,7 @@ use crate::error::FindPartitionColumnSnafu;
 use crate::error::FindRegionSnafu;
 use crate::error::InvalidInsertRequestSnafu;
 use crate::error::Result;
-use crate::partitioning::{PartitionRule, RegionId};
+use crate::partitioning::PartitionRule;
 
 pub type DistInsertRequest = HashMap<RegionId, InsertRequest>;
 
