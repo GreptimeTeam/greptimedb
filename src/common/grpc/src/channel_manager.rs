@@ -6,6 +6,8 @@ use std::time::Duration;
 use snafu::ResultExt;
 use tonic::transport::Channel as InnerChannel;
 use tonic::transport::Endpoint;
+use tonic::transport::Uri;
+use tower::make::MakeConnection;
 
 use crate::error;
 use crate::error::Result;
@@ -55,6 +57,53 @@ impl ChannelManager {
             return Ok(ch.channel.clone());
         }
 
+        let endpoint = self.build_endpoint(addr)?;
+
+        let inner_channel = endpoint.connect_lazy();
+        let channel = Channel {
+            channel: inner_channel.clone(),
+            access: 1,
+            use_default_conector: true,
+        };
+        pool.put(addr, channel);
+
+        Ok(inner_channel)
+    }
+
+    pub fn reset_with_connector<C>(
+        &self,
+        addr: impl AsRef<str>,
+        connector: C,
+    ) -> Result<InnerChannel>
+    where
+        C: MakeConnection<Uri> + Send + 'static,
+        C::Connection: Unpin + Send + 'static,
+        C::Future: Send + 'static,
+        Box<dyn std::error::Error + Send + Sync>: From<C::Error> + Send + 'static,
+    {
+        let addr = addr.as_ref();
+        let endpoint = self.build_endpoint(addr)?;
+        let inner_channel = endpoint.connect_with_connector_lazy(connector);
+        let channel = Channel {
+            channel: inner_channel.clone(),
+            access: 1,
+            use_default_conector: false,
+        };
+        let mut pool = self.pool.lock().unwrap();
+        pool.put(addr, channel);
+
+        Ok(inner_channel)
+    }
+
+    pub fn retain_channel<F>(&self, f: F)
+    where
+        F: FnMut(&String, &mut Channel) -> bool,
+    {
+        let mut pool = self.pool.lock().unwrap();
+        pool.retain_channel(f);
+    }
+
+    fn build_endpoint(&self, addr: &str) -> Result<Endpoint> {
         let mut endpoint =
             Endpoint::new(format!("http://{}", addr)).context(error::CreateChannelSnafu)?;
 
@@ -92,14 +141,7 @@ impl ChannelManager {
             .tcp_keepalive(self.config.tcp_keepalive)
             .tcp_nodelay(self.config.tcp_nodelay);
 
-        let inner_channel = endpoint.connect_lazy();
-        let channel = Channel {
-            channel: inner_channel.clone(),
-            access: 1,
-        };
-        pool.put(addr, channel);
-
-        Ok(inner_channel)
+        Ok(endpoint)
     }
 }
 
@@ -253,6 +295,24 @@ impl ChannelConfig {
 }
 
 #[derive(Debug)]
+pub struct Channel {
+    channel: InnerChannel,
+    access: usize,
+    use_default_conector: bool,
+}
+
+impl Channel {
+    #[inline]
+    pub fn access(&self) -> usize {
+        self.access
+    }
+
+    #[inline]
+    pub fn use_default_connector(&self) -> bool {
+        self.use_default_conector
+    }
+}
+#[derive(Debug)]
 struct Pool {
     channels: HashMap<String, Channel>,
 }
@@ -277,12 +337,6 @@ impl Pool {
     }
 }
 
-#[derive(Debug)]
-struct Channel {
-    channel: InnerChannel,
-    access: usize,
-}
-
 async fn recycle_channel_in_loop(pool: Arc<Mutex<Pool>>, interval_secs: u64) {
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
 
@@ -302,6 +356,8 @@ async fn recycle_channel_in_loop(pool: Arc<Mutex<Pool>>, interval_secs: u64) {
 
 #[cfg(test)]
 mod tests {
+    use tower::service_fn;
+
     use super::*;
 
     #[should_panic]
@@ -326,19 +382,7 @@ mod tests {
             channels: HashMap::default(),
         };
         let pool = Arc::new(Mutex::new(pool));
-        let config = ChannelConfig::new()
-            .timeout(Duration::from_secs(1))
-            .connect_timeout(Duration::from_secs(1))
-            .concurrency_limit(1)
-            .rate_limit(1, Duration::from_secs(1))
-            .initial_stream_window_size(1)
-            .initial_connection_window_size(1)
-            .http2_keep_alive_interval(Duration::from_secs(1))
-            .http2_keep_alive_timeout(Duration::from_secs(1))
-            .http2_keep_alive_while_idle(true)
-            .http2_adaptive_window(true)
-            .tcp_keepalive(Duration::from_secs(1))
-            .tcp_nodelay(true);
+        let config = ChannelConfig::new();
         let mgr = ChannelManager { pool, config };
         let addr = "test_uri";
 
@@ -418,5 +462,69 @@ mod tests {
             },
             cfg
         );
+    }
+
+    #[test]
+    fn test_build_endpoint() {
+        let pool = Pool {
+            channels: HashMap::default(),
+        };
+        let pool = Arc::new(Mutex::new(pool));
+        let config = ChannelConfig::new()
+            .timeout(Duration::from_secs(3))
+            .connect_timeout(Duration::from_secs(5))
+            .concurrency_limit(6)
+            .rate_limit(5, Duration::from_secs(1))
+            .initial_stream_window_size(10)
+            .initial_connection_window_size(20)
+            .http2_keep_alive_interval(Duration::from_secs(1))
+            .http2_keep_alive_timeout(Duration::from_secs(3))
+            .http2_keep_alive_while_idle(true)
+            .http2_adaptive_window(true)
+            .tcp_keepalive(Duration::from_secs(2))
+            .tcp_nodelay(true);
+        let mgr = ChannelManager { pool, config };
+
+        let res = mgr.build_endpoint("test_addr");
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_channel_with_connector() {
+        let pool = Pool {
+            channels: HashMap::default(),
+        };
+        let pool = Arc::new(Mutex::new(pool));
+        let config = ChannelConfig::new();
+        let mgr = ChannelManager { pool, config };
+
+        let addr = "test_addr";
+        let res = mgr.get(addr);
+        assert!(res.is_ok());
+
+        mgr.retain_channel(|addr, channel| {
+            assert_eq!("test_addr", addr);
+            assert!(channel.use_default_connector());
+            true
+        });
+
+        let (client, _) = tokio::io::duplex(1024);
+        let mut client = Some(client);
+        let res = mgr.reset_with_connector(
+            addr,
+            service_fn(move |_| {
+                let client = client.take().unwrap();
+                async move { Ok::<_, std::io::Error>(client) }
+            }),
+        );
+
+        assert!(res.is_ok());
+
+        mgr.retain_channel(|addr, channel| {
+            assert_eq!("test_addr", addr);
+            assert!(!channel.use_default_connector());
+            true
+        });
     }
 }
