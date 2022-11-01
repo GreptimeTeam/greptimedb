@@ -51,6 +51,13 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Illegal state from server, code: {}, error: {}", code, err_msg))]
+    IllegalServerState {
+        code: i32,
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 #[allow(dead_code)]
@@ -75,7 +82,8 @@ impl ErrorExt for Error {
             | Error::NotStarted { .. }
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
-            | Error::CreateChannel { .. } => StatusCode::Internal,
+            | Error::CreateChannel { .. }
+            | Error::IllegalServerState { .. } => StatusCode::Internal,
             Error::RouteInfoCorrupted { .. } => StatusCode::Unexpected,
         }
     }
@@ -96,12 +104,10 @@ mod tests {
         fn throw_tonic_error() -> StdResult<tonic::transport::Error> {
             tonic::transport::Endpoint::new("http//http").map(|_| ())
         }
-
         let e = throw_tonic_error()
             .context(ConnectFailedSnafu { url: "" })
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -112,7 +118,6 @@ mod tests {
             .context(IllegalGrpcClientStateSnafu { err_msg: "" })
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -122,12 +127,10 @@ mod tests {
         fn throw_tonic_status_error() -> StdResult<tonic::Status> {
             Err(tonic::Status::new(tonic::Code::Aborted, ""))
         }
-
         let e = throw_tonic_status_error()
             .context(TonicStatusSnafu)
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -135,7 +138,6 @@ mod tests {
     #[test]
     fn test_ask_leader_error() {
         let e = throw_none_option().context(AskLeaderSnafu).err().unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -143,7 +145,6 @@ mod tests {
     #[test]
     fn test_no_leader_error() {
         let e = throw_none_option().context(NoLeaderSnafu).err().unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -155,12 +156,20 @@ mod tests {
                 .map(|_| ())
                 .context(common_grpc::error::CreateChannelSnafu)
         }
-
         let e = throw_common_grpc_error()
             .context(CreateChannelSnafu)
             .err()
             .unwrap();
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Internal);
+    }
 
+    #[test]
+    fn test_not_started_error() {
+        let e = throw_none_option()
+            .context(NotStartedSnafu { name: "" })
+            .err()
+            .unwrap();
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -171,7 +180,6 @@ mod tests {
             .context(SendHeartbeatSnafu { err_msg: "" })
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -196,5 +204,19 @@ mod tests {
 
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Unexpected);
+    }
+
+    #[test]
+    fn test_illegal_server_state_error() {
+        let e = throw_none_option()
+            .context(IllegalServerStateSnafu {
+                code: 1,
+                err_msg: "",
+            })
+            .err()
+            .unwrap();
+
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Internal);
     }
 }

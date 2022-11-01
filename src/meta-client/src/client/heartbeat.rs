@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
-use api::v1::meta::request_header;
 use api::v1::meta::AskLeaderRequest;
 use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::HeartbeatResponse;
+use api::v1::meta::RequestHeader;
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::debug;
 use common_telemetry::info;
@@ -40,7 +40,7 @@ impl HeartbeatSender {
 
     #[inline]
     pub async fn send(&self, mut req: HeartbeatRequest) -> Result<()> {
-        req.header = request_header(self.id);
+        req.header = RequestHeader::new(self.id);
         self.sender.send(req).await.map_err(|e| {
             error::SendHeartbeatSnafu {
                 err_msg: e.to_string(),
@@ -154,7 +154,7 @@ impl Inner {
             }
         );
 
-        let header = request_header(self.id);
+        let header = RequestHeader::new(self.id);
         let mut leader = None;
         for addr in &self.peers {
             let req = AskLeaderRequest {
@@ -182,9 +182,8 @@ impl Inner {
         let mut leader = self.make_client(leader)?;
 
         let (sender, receiver) = mpsc::channel::<HeartbeatRequest>(128);
-        let header = request_header(self.id);
         let handshake = HeartbeatRequest {
-            header,
+            header: RequestHeader::new(self.id),
             ..Default::default()
         };
         sender.send(handshake).await.map_err(|e| {
@@ -236,14 +235,11 @@ mod test {
     #[tokio::test]
     async fn test_start_client() {
         let mut client = Client::new((0, 0), ChannelManager::default());
-
         assert!(!client.is_started().await);
-
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
             .unwrap();
-
         assert!(client.is_started().await);
     }
 
@@ -254,13 +250,9 @@ mod test {
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
             .unwrap();
-
         assert!(client.is_started().await);
-
         let res = client.start(&["127.0.0.1:1002"]).await;
-
         assert!(res.is_err());
-
         assert!(matches!(
             res.err(),
             Some(error::Error::IllegalGrpcClientState { .. })
@@ -274,48 +266,18 @@ mod test {
             .start(&["127.0.0.1:1000", "127.0.0.1:1000", "127.0.0.1:1000"])
             .await
             .unwrap();
-
         assert_eq!(1, client.inner.write().await.peers.len());
-    }
-
-    #[tokio::test]
-    async fn test_ask_leader_unavailable() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
-        client.start(&["unavailable_peer"]).await.unwrap();
-
-        let res = client.ask_leader().await;
-
-        assert!(res.is_err());
-
-        let err = res.err().unwrap();
-        assert!(matches!(err, error::Error::AskLeader { .. }));
-    }
-
-    #[tokio::test]
-    async fn test_heartbeat_unavailable() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
-        client.start(&["unavailable_peer"]).await.unwrap();
-        client.inner.write().await.leader = Some("unavailable".to_string());
-
-        let res = client.heartbeat().await;
-
-        assert!(res.is_err());
-
-        let err = res.err().unwrap();
-        assert!(matches!(err, error::Error::TonicStatus { .. }));
     }
 
     #[tokio::test]
     async fn test_heartbeat_stream() {
         let (sender, mut receiver) = mpsc::channel::<HeartbeatRequest>(100);
         let sender = HeartbeatSender::new((8, 8), sender);
-
         tokio::spawn(async move {
             for _ in 0..10 {
                 sender.send(HeartbeatRequest::default()).await.unwrap();
             }
         });
-
         while let Some(req) = receiver.recv().await {
             let header = req.header.unwrap();
             assert_eq!(8, header.cluster_id);

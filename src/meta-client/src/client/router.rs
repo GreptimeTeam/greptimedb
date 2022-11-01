@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use api::v1::meta::request_header;
 use api::v1::meta::router_client::RouterClient;
 use api::v1::meta::CreateRequest;
+use api::v1::meta::RequestHeader;
 use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
 use common_grpc::channel_manager::ChannelManager;
@@ -92,7 +92,7 @@ impl Inner {
 
     async fn route(&self, mut req: RouteRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-        req.header = request_header(self.id);
+        req.header = RequestHeader::new(self.id);
         let res = client.route(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -100,7 +100,7 @@ impl Inner {
 
     async fn create(&self, mut req: CreateRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-        req.header = request_header(self.id);
+        req.header = RequestHeader::new(self.id);
         let res = client.create(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -139,14 +139,11 @@ mod test {
     #[tokio::test]
     async fn test_start_client() {
         let mut client = Client::new((0, 0), ChannelManager::default());
-
         assert!(!client.is_started().await);
-
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
             .unwrap();
-
         assert!(client.is_started().await);
     }
 
@@ -157,13 +154,9 @@ mod test {
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
             .unwrap();
-
         assert!(client.is_started().await);
-
         let res = client.start(&["127.0.0.1:1002"]).await;
-
         assert!(res.is_err());
-
         assert!(matches!(
             res.err(),
             Some(error::Error::IllegalGrpcClientState { .. })
@@ -179,43 +172,5 @@ mod test {
             .unwrap();
 
         assert_eq!(1, client.inner.write().await.peers.len());
-    }
-
-    #[tokio::test]
-    async fn test_create_unavailable() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
-        client.start(&["unavailable_peer"]).await.unwrap();
-
-        let req = CreateRequest {
-            header: request_header((0, 0)),
-            ..Default::default()
-        };
-        let res = client.create(req).await;
-
-        assert!(res.is_err());
-
-        let err = res.err().unwrap();
-        assert!(
-            matches!(err, error::Error::TonicStatus { source, .. } if source.code() == tonic::Code::Unavailable)
-        );
-    }
-
-    #[tokio::test]
-    async fn test_route_unavailable() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
-        client.start(&["unavailable_peer"]).await.unwrap();
-
-        let req = RouteRequest {
-            header: request_header((0, 0)),
-            ..Default::default()
-        };
-        let res = client.route(req).await;
-
-        assert!(res.is_err());
-
-        let err = res.err().unwrap();
-        assert!(
-            matches!(err, error::Error::TonicStatus { source, .. } if source.code() == tonic::Code::Unavailable)
-        );
     }
 }
