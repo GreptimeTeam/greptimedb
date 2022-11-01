@@ -12,7 +12,6 @@ use api::v1::{
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
 use servers::grpc::GrpcServer;
-use servers::query_handler::GrpcQueryHandlerRef;
 use servers::server::Server;
 
 use crate::instance::Instance;
@@ -29,8 +28,7 @@ async fn setup_grpc_server(port: usize) -> String {
 
     let addr_cloned = addr.clone();
     tokio::spawn(async move {
-        let mut grpc_server =
-            GrpcServer::new(instance.clone() as GrpcQueryHandlerRef, instance as _);
+        let mut grpc_server = GrpcServer::new(instance.clone(), instance);
         let addr = addr_cloned.parse::<SocketAddr>().unwrap();
         grpc_server.start(addr).await.unwrap()
     });

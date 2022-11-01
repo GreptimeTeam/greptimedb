@@ -155,7 +155,6 @@ impl SqlHandler {
             table_name,
             desc: None,
             schema,
-            region_numbers: vec![0],
             primary_key_indices: primary_keys,
             create_if_not_exists: stmt.if_not_exists,
             table_options: HashMap::new(),

@@ -59,7 +59,7 @@ mod tests {
             res.insert(String::from_utf8_lossy(&kv.0).to_string());
         }
         assert_eq!(
-            vec!["__c-greptime-localhost".to_string()],
+            vec!["__c-greptime-42".to_string()],
             res.into_iter().collect::<Vec<_>>()
         );
     }
@@ -114,7 +114,6 @@ mod tests {
                     table_name: table_name.clone(),
                     desc: None,
                     schema: table_schema.clone(),
-                    region_numbers: vec![0],
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
                     table_options: Default::default(),
@@ -174,7 +173,6 @@ mod tests {
                     table_name: table_name.clone(),
                     desc: None,
                     schema: table_schema.clone(),
-                    region_numbers: vec![0],
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
                     table_options: Default::default(),
@@ -227,7 +225,6 @@ mod tests {
                     table_name: "".to_string(),
                     desc: None,
                     schema: Arc::new(Schema::new(vec![])),
-                    region_numbers: vec![0],
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
                     table_options: Default::default(),

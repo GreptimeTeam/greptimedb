@@ -53,8 +53,6 @@ pub struct TableMeta {
     pub value_indices: Vec<usize>,
     #[builder(default, setter(into))]
     pub engine: String,
-    #[builder(default, setter(into))]
-    pub region_numbers: Vec<u32>,
     pub next_column_id: ColumnId,
     #[builder(default)]
     pub engine_options: HashMap<String, String>,
