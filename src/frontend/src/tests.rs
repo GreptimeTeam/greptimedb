@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use api::v1::greptime_client::GreptimeClient;
 use client::Client;
+use common_runtime::Builder as RuntimeBuilder;
 use datanode::instance::Instance as DatanodeInstance;
 use servers::grpc::GrpcServer;
 use tonic::transport::{Endpoint, Server};
@@ -22,10 +23,18 @@ pub(crate) async fn create_frontend_instance() -> Arc<Instance> {
 
     let (client, server) = tokio::io::duplex(1024);
 
+    let runtime = Arc::new(
+        RuntimeBuilder::default()
+            .worker_threads(2)
+            .thread_name("grpc-handlers")
+            .build()
+            .unwrap(),
+    );
+
     // create a mock datanode grpc service, see example here:
     // https://github.com/hyperium/tonic/blob/master/examples/src/mock/mock.rs
     let datanode_service =
-        GrpcServer::new(datanode_instance.clone(), datanode_instance).create_service();
+        GrpcServer::new(datanode_instance.clone(), datanode_instance, runtime).create_service();
     tokio::spawn(async move {
         Server::builder()
             .add_service(datanode_service)

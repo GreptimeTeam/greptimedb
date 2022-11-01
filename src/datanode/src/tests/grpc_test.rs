@@ -11,6 +11,7 @@ use api::v1::{
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
+use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::GrpcServer;
 use servers::server::Server;
 
@@ -27,8 +28,16 @@ async fn setup_grpc_server(port: usize) -> String {
     instance.start().await.unwrap();
 
     let addr_cloned = addr.clone();
+    let runtime = Arc::new(
+        RuntimeBuilder::default()
+            .worker_threads(2)
+            .thread_name("grpc-handlers")
+            .build()
+            .unwrap(),
+    );
+
     tokio::spawn(async move {
-        let mut grpc_server = GrpcServer::new(instance.clone(), instance);
+        let mut grpc_server = GrpcServer::new(instance.clone(), instance, runtime);
         let addr = addr_cloned.parse::<SocketAddr>().unwrap();
         grpc_server.start(addr).await.unwrap()
     });

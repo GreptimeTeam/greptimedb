@@ -21,15 +21,16 @@ pub(crate) struct Services;
 
 impl Services {
     pub(crate) async fn start(opts: &FrontendOptions, instance: InstanceRef) -> Result<()> {
-        let grpc_runtime = Arc::new(
-            RuntimeBuilder::default()
-                .worker_threads(8)
-                .thread_name("mysql-io-handlers")
-                .build()
-                .context(error::RuntimeResourceSnafu)?,
-        );
-        let grpc_server_and_addr = if let Some(grpc_addr) = &opts.grpc_addr {
-            let grpc_addr = parse_addr(grpc_addr)?;
+        let grpc_server_and_addr = if let Some(opts) = &opts.grpc_options {
+            let grpc_addr = parse_addr(&opts.addr)?;
+
+            let grpc_runtime = Arc::new(
+                RuntimeBuilder::default()
+                    .worker_threads(opts.runtime_size)
+                    .thread_name("grpc-handlers")
+                    .build()
+                    .context(error::RuntimeResourceSnafu)?,
+            );
 
             let grpc_server = GrpcServer::new(instance.clone(), instance.clone(), grpc_runtime);
 

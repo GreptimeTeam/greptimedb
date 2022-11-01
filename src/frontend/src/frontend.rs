@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
+use crate::grpc::GrpcOptions;
 use crate::influxdb::InfluxdbOptions;
 use crate::instance::Instance;
 use crate::mysql::MysqlOptions;
@@ -15,7 +16,7 @@ use crate::server::Services;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrontendOptions {
     pub http_addr: Option<String>,
-    pub grpc_addr: Option<String>,
+    pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
     pub postgres_options: Option<PostgresOptions>,
     pub opentsdb_options: Option<OpentsdbOptions>,
@@ -27,7 +28,7 @@ impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
             http_addr: Some("0.0.0.0:4000".to_string()),
-            grpc_addr: Some("0.0.0.0:4001".to_string()),
+            grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
             postgres_options: Some(PostgresOptions::default()),
             opentsdb_options: Some(OpentsdbOptions::default()),

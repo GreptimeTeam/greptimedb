@@ -1,5 +1,6 @@
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
@@ -74,7 +75,10 @@ impl TryFrom<StartCommand> for FrontendOptions {
             opts.http_addr = Some(addr);
         }
         if let Some(addr) = cmd.grpc_addr {
-            opts.grpc_addr = Some(addr);
+            opts.grpc_options = Some(GrpcOptions {
+                addr,
+                ..Default::default()
+            });
         }
         if let Some(addr) = cmd.mysql_addr {
             opts.mysql_options = Some(MysqlOptions {
@@ -130,7 +134,10 @@ mod tests {
         );
 
         let default_opts = FrontendOptions::default();
-        assert_eq!(opts.grpc_addr, default_opts.grpc_addr);
+        assert_eq!(
+            opts.grpc_options.unwrap().addr,
+            default_opts.grpc_options.unwrap().addr
+        );
         assert_eq!(
             opts.mysql_options.as_ref().unwrap().runtime_size,
             default_opts.mysql_options.as_ref().unwrap().runtime_size

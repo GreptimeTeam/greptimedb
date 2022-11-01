@@ -42,7 +42,7 @@ impl Services {
         );
         let grpc_runtime = Arc::new(
             RuntimeBuilder::default()
-                .worker_threads(10)
+                .worker_threads(opts.rpc_runtime_size as usize)
                 .thread_name("grpc-io-handlers")
                 .build()
                 .context(error::RuntimeResourceSnafu)?,
