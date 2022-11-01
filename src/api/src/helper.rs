@@ -1,12 +1,8 @@
-use common_base::BitVec;
-use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::value::Value;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::v1::column::Values;
-use crate::v1::Column;
 use crate::v1::ColumnDataType;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -143,70 +139,6 @@ impl Values {
                 ts_millis_values: Vec::with_capacity(capacity),
                 ..Default::default()
             },
-        }
-    }
-}
-
-impl Column {
-    // Vals must be the same type
-    pub fn push_vals(&mut self, origin_count: usize, vals: Vec<Value>) {
-        if self.values.is_none() {
-            self.values = Some(Values::default());
-        }
-        let mut null_mask = BitVec::from_slice(&self.null_mask);
-        null_mask.reserve_exact(origin_count + vals.len());
-        null_mask.extend(BitVec::repeat(false, vals.len()));
-
-        let values = self.values.as_mut().unwrap();
-        for (idx, val) in vals.into_iter().enumerate() {
-            match val {
-                Value::Null => null_mask.set(idx + origin_count, true),
-                Value::Boolean(val) => values.bool_values.push(val),
-                Value::UInt8(val) => values.u8_values.push(val.into()),
-                Value::UInt16(val) => values.u16_values.push(val.into()),
-                Value::UInt32(val) => values.u32_values.push(val),
-                Value::UInt64(val) => values.u64_values.push(val),
-                Value::Int8(val) => values.i8_values.push(val.into()),
-                Value::Int16(val) => values.i16_values.push(val.into()),
-                Value::Int32(val) => values.i32_values.push(val),
-                Value::Int64(val) => values.i64_values.push(val),
-                Value::Float32(val) => values.f32_values.push(*val),
-                Value::Float64(val) => values.f64_values.push(*val),
-                Value::String(val) => values.string_values.push(val.as_utf8().to_string()),
-                Value::Binary(val) => values.binary_values.push(val.to_vec()),
-                Value::Date(val) => values.date_values.push(val.val()),
-                Value::DateTime(val) => values.datetime_values.push(val.val()),
-                Value::Timestamp(val) => values
-                    .ts_millis_values
-                    .push(val.convert_to(TimeUnit::Millisecond)),
-                Value::List(_) => unreachable!(),
-            }
-        }
-        self.null_mask = null_mask.into_vec();
-    }
-}
-
-impl From<ConcreteDataType> for ColumnDataType {
-    fn from(t: ConcreteDataType) -> Self {
-        match t {
-            ConcreteDataType::Boolean(_) => ColumnDataType::Boolean,
-            ConcreteDataType::Int8(_) => ColumnDataType::Int8,
-            ConcreteDataType::Int16(_) => ColumnDataType::Int16,
-            ConcreteDataType::Int32(_) => ColumnDataType::Int32,
-            ConcreteDataType::Int64(_) => ColumnDataType::Int64,
-            ConcreteDataType::UInt8(_) => ColumnDataType::Uint8,
-            ConcreteDataType::UInt16(_) => ColumnDataType::Uint16,
-            ConcreteDataType::UInt32(_) => ColumnDataType::Uint32,
-            ConcreteDataType::UInt64(_) => ColumnDataType::Uint64,
-            ConcreteDataType::Float32(_) => ColumnDataType::Float32,
-            ConcreteDataType::Float64(_) => ColumnDataType::Float64,
-            ConcreteDataType::Binary(_) => ColumnDataType::Binary,
-            ConcreteDataType::String(_) => ColumnDataType::String,
-            ConcreteDataType::Date(_) => ColumnDataType::Date,
-            ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
-            ConcreteDataType::Timestamp(_) => ColumnDataType::Timestamp,
-            ConcreteDataType::List(_) => unreachable!(),
-            ConcreteDataType::Null(_) => unreachable!(),
         }
     }
 }
@@ -425,44 +357,5 @@ mod tests {
             result.unwrap_err().to_string(),
             "Failed to create column datatype from List(ListType { inner: Boolean(BooleanType) })"
         );
-    }
-
-    #[test]
-    fn test_column_put_vals() {
-        use crate::v1::column::SemanticType;
-        // Some(false), None, Some(true), Some(true)
-        let mut column = Column {
-            column_name: "test".to_string(),
-            semantic_type: SemanticType::Field as i32,
-            values: Some(Values {
-                bool_values: vec![false, true, true],
-                ..Default::default()
-            }),
-            null_mask: vec![2],
-            datatype: ColumnDataType::Boolean as i32,
-        };
-        let row_count = 4;
-        column.push_vals(row_count, vec![true.into(), Value::Null, false.into()]);
-        // Some(false), None, Some(true), Some(true), Some(true), None, Some(false)
-        let bool_values = column.values.unwrap().bool_values;
-        assert_eq!(vec![false, true, true, true, false], bool_values);
-        let null_mask = column.null_mask;
-        assert_eq!(34, null_mask[0]);
-    }
-
-    #[test]
-    fn test_convert_concrete_to_grpc_datatype() {
-        let concrete_type = ConcreteDataType::int8_datatype();
-        let grpc_type: ColumnDataType = concrete_type.into();
-        assert_eq!(grpc_type, ColumnDataType::Int8);
-        let concrete_type = ConcreteDataType::int16_datatype();
-        let grpc_type: ColumnDataType = concrete_type.into();
-        assert_eq!(grpc_type, ColumnDataType::Int16);
-        let concrete_type = ConcreteDataType::int32_datatype();
-        let grpc_type: ColumnDataType = concrete_type.into();
-        assert_eq!(grpc_type, ColumnDataType::Int32);
-        let concrete_type = ConcreteDataType::int64_datatype();
-        let grpc_type: ColumnDataType = concrete_type.into();
-        assert_eq!(grpc_type, ColumnDataType::Int64);
     }
 }
