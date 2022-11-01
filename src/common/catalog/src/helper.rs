@@ -280,6 +280,7 @@ mod tests {
             engine_options: Default::default(),
             value_indices: vec![2, 3],
             options: Default::default(),
+            region_numbers: vec![1],
         };
 
         let value = TableValue {

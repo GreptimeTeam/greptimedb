@@ -82,13 +82,41 @@ mod tests {
     #[tokio::test]
     async fn test_get() {
         let backend = MockKvBackend {};
-        let result = backend.get(0.to_string().as_bytes()).await;
-        assert_eq!(0.to_string().as_bytes(), result.unwrap().unwrap().0);
-        let result = backend.get(1.to_string().as_bytes()).await;
-        assert_eq!(1.to_string().as_bytes(), result.unwrap().unwrap().0);
-        let result = backend.get(2.to_string().as_bytes()).await;
-        assert_eq!(2.to_string().as_bytes(), result.unwrap().unwrap().0);
-        let result = backend.get(3.to_string().as_bytes()).await;
-        assert!(result.unwrap().is_none());
+
+        assert_eq!(
+            0.to_string().as_bytes(),
+            backend
+                .get(0.to_string().as_bytes())
+                .await
+                .unwrap()
+                .unwrap()
+                .0
+        );
+
+        assert_eq!(
+            1.to_string().as_bytes(),
+            backend
+                .get(1.to_string().as_bytes())
+                .await
+                .unwrap()
+                .unwrap()
+                .0
+        );
+
+        assert_eq!(
+            2.to_string().as_bytes(),
+            backend
+                .get(2.to_string().as_bytes())
+                .await
+                .unwrap()
+                .unwrap()
+                .0
+        );
+
+        assert!(backend
+            .get(3.to_string().as_bytes())
+            .await
+            .unwrap()
+            .is_none());
     }
 }

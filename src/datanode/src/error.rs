@@ -279,6 +279,12 @@ pub enum Error {
         table_name: String,
         source: catalog::error::Error,
     },
+
+    #[snafu(display("Failed to initialize meta client, source: {}", source))]
+    MetaClientInit {
+        #[snafu(backtrace)]
+        source: meta_client::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -346,6 +352,7 @@ impl ErrorExt for Error {
             | Error::CollectRecordBatches { source } => source.status_code(),
 
             Error::ArrowComputation { .. } => StatusCode::Unexpected,
+            Error::MetaClientInit { source, .. } => source.status_code(),
         }
     }
 

@@ -316,6 +316,7 @@ impl RemoteCatalogManager {
                     table_name: table_name.clone(),
                     desc: None,
                     schema: meta.schema.clone(),
+                    region_numbers: meta.region_numbers.clone(),
                     primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,
                     table_options: meta.options.clone(),
@@ -589,7 +590,13 @@ impl SchemaProvider for RemoteSchemaProvider {
             meta: table_info.meta.clone(),
             id: table_info.ident.table_id,
             node_id: self.node_id,
-            regions_ids: vec![],
+            regions_ids: table
+                .table_info()
+                .meta
+                .region_numbers
+                .iter()
+                .map(|v| *v as u64)
+                .collect(),
         };
         let backend = self.backend.clone();
         let mutex = self.mutex.clone();
