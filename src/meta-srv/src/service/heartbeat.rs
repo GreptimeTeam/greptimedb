@@ -150,7 +150,7 @@ mod tests {
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
         let req = AskLeaderRequest {
-            header: RequestHeader::new((1, 1)),
+            header: Some(RequestHeader::new((1, 1))),
         };
 
         let res = meta_srv.ask_leader(req.into_request()).await.unwrap();

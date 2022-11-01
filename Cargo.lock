@@ -983,6 +983,7 @@ dependencies = [
  "snafu",
  "tokio",
  "tonic",
+ "tower",
 ]
 
 [[package]]
