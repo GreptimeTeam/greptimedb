@@ -20,15 +20,19 @@ use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
 use datatypes::data_type::DataType;
+use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
+use snafu::ensure;
 use snafu::ResultExt;
+use tokio::sync::oneshot::{self, Sender};
+use tokio::sync::Mutex;
 use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 
 use self::influxdb::influxdb_write;
-use crate::error::{Result, StartHttpSnafu};
+use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::query_handler::{
     InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef, PrometheusProtocolHandlerRef,
@@ -42,6 +46,7 @@ pub struct HttpServer {
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
     prom_handler: Option<PrometheusProtocolHandlerRef>,
+    shutdown_tx: Mutex<Option<Sender<()>>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -195,14 +200,6 @@ impl JsonResponse {
     }
 }
 
-async fn shutdown_signal() {
-    // Wait for the CTRL+C signal
-    // It has an issue on chrome: https://github.com/sigp/lighthouse/issues/478
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install CTRL+C signal handler");
-}
-
 async fn serve_api(Extension(api): Extension<Arc<OpenApi>>) -> impl IntoApiResponse {
     Json(api)
 }
@@ -218,6 +215,7 @@ impl HttpServer {
             opentsdb_handler: None,
             influxdb_handler: None,
             prom_handler: None,
+            shutdown_tx: Mutex::new(None),
         }
     }
 
@@ -324,17 +322,36 @@ impl HttpServer {
 #[async_trait]
 impl Server for HttpServer {
     async fn shutdown(&self) -> Result<()> {
-        // TODO(LFC): shutdown http server, and remove `shutdown_signal` above
-        unimplemented!()
+        let mut shutdown_tx = self.shutdown_tx.lock().await;
+        if let Some(tx) = shutdown_tx.take() {
+            if let Err(_) = tx.send(()) {
+                info!("Receiver dropped, the HTTP server has already existed");
+            }
+        }
+        info!("Shutdown HTTP server");
+
+        Ok(())
     }
 
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
-        let app = self.make_app();
-        let server = axum::Server::bind(&listening).serve(app.into_make_service());
+        let (tx, rx) = oneshot::channel();
+        let server = {
+            let mut shutdown_tx = self.shutdown_tx.lock().await;
+            ensure!(shutdown_tx.is_none(), AlreadyStartedSnafu);
+
+            let app = self.make_app();
+            let server = axum::Server::bind(&listening).serve(app.into_make_service());
+
+            *shutdown_tx = Some(tx);
+
+            server
+        };
         let listening = server.local_addr();
         info!("HTTP server is bound to {}", listening);
-        let graceful = server.with_graceful_shutdown(shutdown_signal());
+
+        let graceful = server.with_graceful_shutdown(rx.map(drop));
         graceful.await.context(StartHttpSnafu)?;
+
         Ok(listening)
     }
 }
