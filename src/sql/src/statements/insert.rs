@@ -39,7 +39,7 @@ impl Insert {
                                 Expr::Identifier(ident) => {
                                     Value::SingleQuotedString(ident.value.clone())
                                 }
-                                _ => unreachable!("unknown value {}", expr),
+                                _ => unreachable!(),
                             })
                             .collect::<Vec<Value>>()
                     })

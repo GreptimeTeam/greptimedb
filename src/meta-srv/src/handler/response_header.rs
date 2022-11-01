@@ -2,10 +2,10 @@ use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::ResponseHeader;
 use api::v1::meta::PROTOCOL_VERSION;
 
-use super::Context;
 use super::HeartbeatAccumulator;
 use super::HeartbeatHandler;
 use crate::error::Result;
+use crate::service::store::kv::KvStoreRef;
 
 pub struct ResponseHeaderHandler;
 
@@ -14,8 +14,8 @@ impl HeartbeatHandler for ResponseHeaderHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        _ctx: &Context,
         acc: &mut HeartbeatAccumulator,
+        _store: KvStoreRef,
     ) -> Result<()> {
         let HeartbeatRequest { header, .. } = req;
         let res_header = ResponseHeader {
@@ -35,16 +35,11 @@ mod tests {
     use api::v1::meta::{request_header, HeartbeatResponse};
 
     use super::*;
-    use crate::{handler::Context, service::store::noop::NoopKvStore};
+    use crate::service::store::noop::NoopKvStore;
 
     #[tokio::test]
     async fn test_handle_heartbeat_resp_header() {
         let kv_store = Arc::new(NoopKvStore {});
-        let ctx = Context {
-            server_addr: "0.0.0.0:0000".to_string(),
-            kv_store,
-        };
-
         let req = HeartbeatRequest {
             header: request_header((1, 2)),
             ..Default::default()
@@ -52,7 +47,10 @@ mod tests {
         let mut acc = HeartbeatAccumulator::default();
 
         let response_handler = ResponseHeaderHandler {};
-        response_handler.handle(&req, &ctx, &mut acc).await.unwrap();
+        response_handler
+            .handle(&req, &mut acc, kv_store)
+            .await
+            .unwrap();
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {
             header,

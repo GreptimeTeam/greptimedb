@@ -23,7 +23,6 @@ use super::GrpcResult;
 use super::GrpcStream;
 use crate::error;
 use crate::error::Result;
-use crate::handler::Context;
 use crate::metasrv::MetaSrv;
 
 static PUSHER_ID: AtomicU64 = AtomicU64::new(0);
@@ -39,10 +38,6 @@ impl heartbeat_server::Heartbeat for MetaSrv {
         let mut in_stream = req.into_inner();
         let (tx, rx) = mpsc::channel(128);
         let handlers = self.heartbeat_handlers();
-        let ctx = Context {
-            server_addr: self.options().server_addr.clone(),
-            kv_store: self.kv_store(),
-        };
         common_runtime::spawn_bg(async move {
             let mut pusher_key = None;
             while let Some(msg) = in_stream.next().await {
@@ -61,14 +56,9 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                             }
                         }
 
-                        tx.send(
-                            handlers
-                                .handle(req, ctx.clone())
-                                .await
-                                .map_err(|e| e.into()),
-                        )
-                        .await
-                        .expect("working rx");
+                        tx.send(handlers.handle(req).await.map_err(|e| e.into()))
+                            .await
+                            .expect("working rx");
                     }
                     Err(err) => {
                         if let Some(io_err) = error::match_for_io_error(&err) {

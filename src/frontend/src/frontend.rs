@@ -20,7 +20,6 @@ pub struct FrontendOptions {
     pub postgres_options: Option<PostgresOptions>,
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
-    pub metasrv_addr: String,
     pub prometheus_options: Option<PrometheusOptions>,
 }
 
@@ -33,7 +32,6 @@ impl Default for FrontendOptions {
             postgres_options: Some(PostgresOptions::default()),
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
-            metasrv_addr: "127.0.0.1:3002".to_string(),
             prometheus_options: Some(PrometheusOptions::default()),
         }
     }
@@ -42,7 +40,7 @@ impl Default for FrontendOptions {
 impl FrontendOptions {
     // TODO(LFC) Get Datanode address from Meta.
     pub(crate) fn datanode_grpc_addr(&self) -> String {
-        "http://127.0.0.1:4100".to_string()
+        "http://127.0.0.1:3001".to_string()
     }
 }
 
@@ -52,8 +50,8 @@ pub struct Frontend {
 }
 
 impl Frontend {
-    pub async fn new(opts: FrontendOptions) -> Self {
-        let instance = Instance::new(&opts).await;
+    pub fn new(opts: FrontendOptions) -> Self {
+        let instance = Instance::new();
         Self {
             opts,
             instance: Some(instance),

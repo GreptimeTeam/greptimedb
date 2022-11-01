@@ -92,11 +92,7 @@ impl PrometheusProtocolHandler for Instance {
     async fn write(&self, request: WriteRequest) -> ServerResult<()> {
         let exprs = prometheus::write_request_to_insert_exprs(request)?;
 
-        // TODO(hl): Frontend should be able to route Prometheus requests to all datanodes.
-        let instances = self.datanode_instances.read().await;
-        let (_, instance) = instances.iter().next().unwrap();
-        instance
-            .db
+        self.db
             .batch_insert(exprs)
             .await
             .map_err(BoxedError::new)
@@ -111,10 +107,7 @@ impl PrometheusProtocolHandler for Instance {
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
-        // TODO(hl): Frontend should be able to route Prometheus requests to all datanodes.
-        let instances = self.datanode_instances.read().await;
-        let (_, instance) = instances.iter().next().unwrap();
-        let results = handle_remote_queries(&instance.db, &request.queries).await?;
+        let results = handle_remote_queries(&self.db, &request.queries).await?;
 
         match response_type {
             ResponseType::Samples => {

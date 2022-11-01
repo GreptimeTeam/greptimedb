@@ -46,8 +46,6 @@ struct StartCommand {
     postgres_addr: Option<String>,
     #[clap(long)]
     opentsdb_addr: Option<String>,
-    #[clap(long)]
-    metasrv_addr: Option<String>,
     #[clap(short, long)]
     config_file: Option<String>,
     #[clap(short, long)]
@@ -57,7 +55,7 @@ struct StartCommand {
 impl StartCommand {
     async fn run(self) -> Result<()> {
         let opts = self.try_into()?;
-        let mut frontend = Frontend::new(opts).await;
+        let mut frontend = Frontend::new(opts);
         frontend.start().await.context(error::StartFrontendSnafu)
     }
 }
@@ -99,9 +97,6 @@ impl TryFrom<StartCommand> for FrontendOptions {
         if let Some(enable) = cmd.influxdb_enable {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
-        if let Some(meta_srv) = cmd.metasrv_addr {
-            opts.metasrv_addr = meta_srv
-        }
         Ok(opts)
     }
 }
@@ -120,7 +115,6 @@ mod tests {
             opentsdb_addr: Some("127.0.0.1:4321".to_string()),
             influxdb_enable: Some(false),
             config_file: None,
-            metasrv_addr: Some("127.0.0.1:3003".to_string()),
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();
@@ -151,6 +145,5 @@ mod tests {
         );
 
         assert!(!opts.influxdb_options.unwrap().enable);
-        assert_eq!("127.0.0.1:3003", opts.metasrv_addr);
     }
 }
