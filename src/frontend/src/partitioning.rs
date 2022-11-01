@@ -4,8 +4,7 @@ use std::fmt::Debug;
 
 pub use datafusion_expr::Operator;
 use datatypes::prelude::Value;
-
-pub(crate) type RegionId = u64;
+use store_api::storage::RegionId;
 
 pub(crate) type ValueList = Vec<Value>;
 

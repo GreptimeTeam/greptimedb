@@ -1819,6 +1819,7 @@ dependencies = [
  "servers",
  "snafu",
  "sql",
+ "store-api",
  "table",
  "tempdir",
  "tokio",

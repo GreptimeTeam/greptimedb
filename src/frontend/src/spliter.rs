@@ -4,13 +4,14 @@ use datatypes::vectors::VectorBuilder;
 use datatypes::vectors::VectorRef;
 use snafu::ensure;
 use snafu::OptionExt;
+use store_api::storage::RegionId;
 use table::requests::InsertRequest;
 
 use crate::error::FindPartitionColumnSnafu;
 use crate::error::FindRegionSnafu;
 use crate::error::InvalidInsertRequestSnafu;
 use crate::error::Result;
-use crate::partitioning::{PartitionRule, RegionId, ValueList};
+use crate::partitioning::{PartitionRule, ValueList};
 
 pub type DistInsertRequest = HashMap<RegionId, InsertRequest>;
 
