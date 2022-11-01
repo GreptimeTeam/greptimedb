@@ -1,7 +1,6 @@
 pub mod etcd;
 pub mod kv;
-#[cfg(test)]
-pub(crate) mod noop;
+pub mod noop;
 
 use api::v1::meta::store_server;
 use api::v1::meta::BatchPutRequest;

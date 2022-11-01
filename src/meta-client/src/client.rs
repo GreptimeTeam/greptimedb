@@ -301,7 +301,11 @@ impl MetaClient {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::meta::HeartbeatRequest;
+    use api::v1::meta::Peer;
+
     use super::*;
+    use crate::mocks;
     use crate::rpc::TableName;
 
     #[tokio::test]
@@ -387,5 +391,88 @@ mod tests {
     #[test]
     fn test_enable_at_least_one_client() {
         let _ = MetaClientBuilder::new(0, 0).build();
+    }
+
+    #[tokio::test]
+    async fn test_ask_leader() {
+        let client = mocks::create_meta_client_with_noop_store().await;
+        let res = client.ask_leader().await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat() {
+        let client = mocks::create_meta_client_with_noop_store().await;
+        let (sender, mut receiver) = client.heartbeat().await.unwrap();
+        // send heartbeats
+        tokio::spawn(async move {
+            for _ in 0..5 {
+                let req = HeartbeatRequest {
+                    peer: Some(Peer {
+                        id: 1,
+                        addr: "meta_client_peer".to_string(),
+                    }),
+                    ..Default::default()
+                };
+                sender.send(req).await.unwrap();
+            }
+        });
+
+        tokio::spawn(async move {
+            while let Some(res) = receiver.message().await.unwrap() {
+                assert_eq!(1000, res.header.unwrap().cluster_id);
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn test_range() {
+        let client = mocks::create_meta_client_with_noop_store().await;
+        let req = RangeRequest::new().with_key(b"key".to_vec());
+        let res = client.range(req).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_put() {
+        let client = mocks::create_meta_client_with_noop_store().await;
+        let req = PutRequest::new()
+            .with_key(b"key".to_vec())
+            .with_value(b"value".to_vec())
+            .with_prev_kv();
+        let res = client.put(req).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_batch_put() {
+        let client = mocks::create_meta_client_with_noop_store().await;
+        let req = BatchPutRequest::new()
+            .add_kv(b"key".to_vec(), b"value".to_vec())
+            .add_kv(b"key2".to_vec(), b"value2".to_vec())
+            .with_prev_kv();
+        let res = client.batch_put(req).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_put() {
+        let client = mocks::create_meta_client_with_noop_store().await;
+        let req = CompareAndPutRequest::new()
+            .with_key(b"key".to_vec())
+            .with_expect(b"expect".to_vec())
+            .with_value(b"value".to_vec());
+        let res = client.compare_and_put(req).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delete() {
+        let client = mocks::create_meta_client_with_noop_store().await;
+        let req = DeleteRangeRequest::new()
+            .with_key(b"key".to_vec())
+            .with_prev_kv();
+        let res = client.delete_range(req).await;
+        assert!(res.is_ok());
     }
 }
