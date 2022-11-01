@@ -29,7 +29,7 @@ fn create_postgres_server(table: MemTable) -> Result<Box<dyn Server>> {
 pub async fn test_start_postgres_server() -> Result<()> {
     let table = MemTable::default_numbers_table();
 
-    let mut pg_server = create_postgres_server(table)?;
+    let pg_server = create_postgres_server(table)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let result = pg_server.start(listening).await;
     assert!(result.is_ok());
@@ -48,7 +48,7 @@ async fn test_shutdown_pg_server() -> Result<()> {
 
     let table = MemTable::default_numbers_table();
 
-    let mut postgres_server = create_postgres_server(table)?;
+    let postgres_server = create_postgres_server(table)?;
     let result = postgres_server.shutdown().await;
     assert!(result
         .unwrap_err()
@@ -107,7 +107,7 @@ async fn test_query_pg_concurrently() -> Result<()> {
 
     let table = MemTable::default_numbers_table();
 
-    let mut pg_server = create_postgres_server(table)?;
+    let pg_server = create_postgres_server(table)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = pg_server.start(listening).await.unwrap();
     let server_port = server_addr.port();

@@ -143,7 +143,7 @@ async fn start_test_app(addr: &str) -> (SocketAddr, TestGuard) {
     let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts("py_side_scripts_api");
     let instance = Arc::new(Instance::new(&opts).await.unwrap());
     instance.start().await.unwrap();
-    let mut http_server = HttpServer::new(instance);
+    let http_server = HttpServer::new(instance);
     (
         http_server.start(addr.parse().unwrap()).await.unwrap(),
         guard,

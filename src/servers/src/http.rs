@@ -323,12 +323,12 @@ impl HttpServer {
 
 #[async_trait]
 impl Server for HttpServer {
-    async fn shutdown(&mut self) -> Result<()> {
+    async fn shutdown(&self) -> Result<()> {
         // TODO(LFC): shutdown http server, and remove `shutdown_signal` above
         unimplemented!()
     }
 
-    async fn start(&mut self, listening: SocketAddr) -> Result<SocketAddr> {
+    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let app = self.make_app();
         let server = axum::Server::bind(&listening).serve(app.into_make_service());
         let listening = server.local_addr();

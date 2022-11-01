@@ -17,7 +17,7 @@ use servers::server::Server;
 use crate::instance::Instance;
 use crate::tests::test_util::{self, TestGuard};
 
-async fn setup_grpc_server(name: &str, port: usize) -> (String, TestGuard) {
+async fn setup_grpc_server(name: &str, port: usize) -> (String, TestGuard, Arc<GrpcServer>) {
     common_telemetry::init_default_ut_logging();
 
     let (mut opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
@@ -27,25 +27,30 @@ async fn setup_grpc_server(name: &str, port: usize) -> (String, TestGuard) {
     instance.start().await.unwrap();
 
     let addr_cloned = addr.clone();
+    let grpc_server = Arc::new(GrpcServer::new(instance.clone(), instance));
+
+    let grpc_server_clone = grpc_server.clone();
     tokio::spawn(async move {
-        let mut grpc_server = GrpcServer::new(instance.clone(), instance);
         let addr = addr_cloned.parse::<SocketAddr>().unwrap();
-        grpc_server.start(addr).await.unwrap()
+        grpc_server_clone.start(addr).await.unwrap()
     });
 
     // wait for GRPC server to start
     tokio::time::sleep(Duration::from_secs(1)).await;
-    (addr, guard)
+
+    (addr, guard, grpc_server)
 }
 
 #[tokio::test]
 async fn test_auto_create_table() {
-    let (addr, _guard) = setup_grpc_server("auto_create_table", 3991).await;
+    let (addr, _guard, grpc_server) = setup_grpc_server("auto_create_table", 3991).await;
 
     let grpc_client = Client::connect(format!("http://{}", addr)).await.unwrap();
     let db = Database::new("greptime", grpc_client);
 
     insert_and_assert(&db).await;
+
+    grpc_server.shutdown().await.unwrap();
 }
 
 fn expect_data() -> (Column, Column, Column, Column) {
@@ -104,7 +109,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
 
 #[tokio::test]
 async fn test_insert_and_select() {
-    let (addr, _guard) = setup_grpc_server("insert_and_select", 3990).await;
+    let (addr, _guard, grpc_server) = setup_grpc_server("insert_and_select", 3990).await;
 
     let grpc_client = Client::connect(format!("http://{}", addr)).await.unwrap();
 
@@ -143,6 +148,8 @@ async fn test_insert_and_select() {
 
     // insert
     insert_and_assert(&db).await;
+
+    grpc_server.shutdown().await.unwrap();
 }
 
 async fn insert_and_assert(db: &Database) {

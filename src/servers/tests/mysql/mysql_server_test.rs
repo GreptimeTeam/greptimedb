@@ -32,7 +32,7 @@ fn create_mysql_server(table: MemTable) -> Result<Box<dyn Server>> {
 async fn test_start_mysql_server() -> Result<()> {
     let table = MemTable::default_numbers_table();
 
-    let mut mysql_server = create_mysql_server(table)?;
+    let mysql_server = create_mysql_server(table)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let result = mysql_server.start(listening).await;
     assert!(result.is_ok());
@@ -51,7 +51,7 @@ async fn test_shutdown_mysql_server() -> Result<()> {
 
     let table = MemTable::default_numbers_table();
 
-    let mut mysql_server = create_mysql_server(table)?;
+    let mysql_server = create_mysql_server(table)?;
     let result = mysql_server.shutdown().await;
     assert!(result
         .unwrap_err()
@@ -110,7 +110,7 @@ async fn test_query_all_datatypes() -> Result<()> {
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let table = MemTable::new("all_datatypes", recordbatch);
 
-    let mut mysql_server = create_mysql_server(table)?;
+    let mysql_server = create_mysql_server(table)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = mysql_server.start(listening).await.unwrap();
 
@@ -141,7 +141,7 @@ async fn test_query_concurrently() -> Result<()> {
 
     let table = MemTable::default_numbers_table();
 
-    let mut mysql_server = create_mysql_server(table)?;
+    let mysql_server = create_mysql_server(table)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = mysql_server.start(listening).await.unwrap();
     let server_port = server_addr.port();
