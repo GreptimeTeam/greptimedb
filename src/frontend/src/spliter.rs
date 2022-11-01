@@ -1,21 +1,18 @@
 use std::collections::HashMap;
 
-use datatypes::value::Value;
 use datatypes::vectors::VectorBuilder;
 use datatypes::vectors::VectorRef;
 use snafu::ensure;
 use snafu::OptionExt;
+use store_api::storage::RegionId;
 use table::requests::InsertRequest;
 
 use crate::error::FindPartitionColumnSnafu;
 use crate::error::FindRegionSnafu;
 use crate::error::InvalidInsertRequestSnafu;
 use crate::error::Result;
-use crate::partition::PartitionRule;
+use crate::partitioning::{PartitionRule, ValueList};
 
-pub type RegionId = u64;
-pub type ColumnName = String;
-pub type ValueList = Vec<Value>;
 pub type DistInsertRequest = HashMap<RegionId, InsertRequest>;
 
 pub struct WriteSpliter<'a, P> {
@@ -170,8 +167,9 @@ mod tests {
 
     use super::{
         check_req, find_partitioning_values, partition_insert_request, partition_values,
-        ColumnName, PartitionRule, RegionId, WriteSpliter,
+        PartitionRule, RegionId, WriteSpliter,
     };
+    use crate::partitioning::PartitionExpr;
 
     #[test]
     fn test_insert_req_check() {
@@ -409,7 +407,7 @@ mod tests {
     impl PartitionRule for MockPartitionRule {
         type Error = String;
 
-        fn partition_columns(&self) -> Vec<ColumnName> {
+        fn partition_columns(&self) -> Vec<String> {
             vec!["id".to_string()]
         }
 
@@ -425,6 +423,10 @@ mod tests {
                 return Ok(1);
             }
             unreachable!()
+        }
+
+        fn find_regions(&self, _: &[PartitionExpr]) -> Result<Vec<RegionId>, Self::Error> {
+            unimplemented!()
         }
     }
 }
