@@ -4,6 +4,7 @@ pub mod handler;
 mod keys;
 pub mod lease;
 pub mod metasrv;
+pub mod selector;
 pub mod service;
 mod util;
 

@@ -38,7 +38,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
     ) -> GrpcResult<Self::HeartbeatStream> {
         let mut in_stream = req.into_inner();
         let (tx, rx) = mpsc::channel(128);
-        let handlers = self.heartbeat_handlers();
+        let handler_group = self.handler_group();
         let ctx = Context {
             server_addr: self.options().server_addr.clone(),
             kv_store: self.kv_store(),
@@ -56,13 +56,13 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                                     peer.id,
                                     PUSHER_ID.fetch_add(1, Ordering::Relaxed)
                                 );
-                                handlers.register(&key, tx.clone()).await;
+                                handler_group.register(&key, tx.clone()).await;
                                 pusher_key = Some(key);
                             }
                         }
 
                         tx.send(
-                            handlers
+                            handler_group
                                 .handle(req, ctx.clone())
                                 .await
                                 .map_err(|e| e.into()),
@@ -91,7 +91,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                 pusher_key.as_ref().unwrap_or(&"unknow".to_string())
             );
             if let Some(key) = pusher_key {
-                let _ = handlers.unregister(&key);
+                let _ = handler_group.unregister(&key);
             }
         });
 
@@ -147,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn test_ask_leader() {
         let kv_store = Arc::new(NoopKvStore {});
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None).await;
 
         let req = AskLeaderRequest {
             header: Some(RequestHeader::new((1, 1))),

@@ -7,6 +7,7 @@ use common_grpc::channel_manager::ChannelConfig;
 use common_grpc::channel_manager::ChannelManager;
 use meta_srv::metasrv::MetaSrv;
 use meta_srv::metasrv::MetaSrvOptions;
+use meta_srv::metasrv::SelectorRef;
 use meta_srv::service::store::kv::KvStoreRef;
 use meta_srv::service::store::noop::NoopKvStore;
 use tower::service_fn;
@@ -16,12 +17,16 @@ use crate::client::MetaClientBuilder;
 
 pub async fn create_meta_client_with_noop_store() -> MetaClient {
     let kv_store = Arc::new(NoopKvStore {});
-    create_meta_client(Default::default(), kv_store).await
+    create_meta_client(Default::default(), kv_store, None).await
 }
 
-pub async fn create_meta_client(opts: MetaSrvOptions, kv_store: KvStoreRef) -> MetaClient {
+pub async fn create_meta_client(
+    opts: MetaSrvOptions,
+    kv_store: KvStoreRef,
+    selector: Option<SelectorRef>,
+) -> MetaClient {
     let server_addr = opts.server_addr.clone();
-    let meta_srv = MetaSrv::new(opts, kv_store).await;
+    let meta_srv = MetaSrv::new(opts, kv_store, selector).await;
     let (client, server) = tokio::io::duplex(1024);
     tokio::spawn(async move {
         tonic::transport::Server::builder()
