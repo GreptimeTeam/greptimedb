@@ -76,7 +76,7 @@ impl RangeRequest {
     /// If both key and range_end are '\0', then the range request returns all
     /// keys.
     #[inline]
-    pub fn with_key_range(
+    pub fn with_range(
         mut self,
         key: impl Into<Vec<u8>>,
         range_end: impl Into<Vec<u8>>,
@@ -458,7 +458,7 @@ impl DeleteRangeRequest {
     /// If range_end is '\0', the range is all keys greater than or equal to the
     /// key argument.
     #[inline]
-    pub fn with_key_range(
+    pub fn with_range(
         mut self,
         key: impl Into<Vec<u8>>,
         range_end: impl Into<Vec<u8>>,
@@ -541,7 +541,7 @@ mod tests {
         let (key, range_end, limit) = (b"test_key1".to_vec(), b"test_range_end1".to_vec(), 1);
 
         let req = RangeRequest::new()
-            .with_key_range(key.clone(), range_end.clone())
+            .with_range(key.clone(), range_end.clone())
             .with_limit(limit)
             .with_keys_only();
 
@@ -719,7 +719,7 @@ mod tests {
         let (key, range_end) = (b"test_key1".to_vec(), b"test_range_end1".to_vec());
 
         let req = DeleteRangeRequest::new()
-            .with_key_range(key.clone(), range_end.clone())
+            .with_range(key.clone(), range_end.clone())
             .with_prev_kv();
 
         let into_req: PbDeleteRangeRequest = req.into();
