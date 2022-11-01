@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use api::v1::{AdminResponse, BatchRequest, BatchResponse, DatabaseResponse};
+use common_runtime::Runtime;
+use tokio::sync::oneshot;
 
 use crate::error::Result;
 use crate::query_handler::{GrpcAdminHandlerRef, GrpcQueryHandlerRef};
@@ -7,13 +11,19 @@ use crate::query_handler::{GrpcAdminHandlerRef, GrpcQueryHandlerRef};
 pub struct BatchHandler {
     query_handler: GrpcQueryHandlerRef,
     admin_handler: GrpcAdminHandlerRef,
+    runtime: Arc<Runtime>,
 }
 
 impl BatchHandler {
-    pub fn new(query_handler: GrpcQueryHandlerRef, admin_handler: GrpcAdminHandlerRef) -> Self {
+    pub fn new(
+        query_handler: GrpcQueryHandlerRef,
+        admin_handler: GrpcAdminHandlerRef,
+        runtime: Arc<Runtime>,
+    ) -> Self {
         Self {
             query_handler,
             admin_handler,
+            runtime,
         }
     }
 
@@ -32,7 +42,15 @@ impl BatchHandler {
 
         for db_req in batch_req.databases {
             for obj_expr in db_req.exprs {
-                let object_resp = self.query_handler.do_query(obj_expr).await?;
+                let (tx, rx) = oneshot::channel();
+                let query_handler = self.query_handler.clone();
+                let join_handle = self.runtime.spawn(async move {
+                    let res = query_handler.do_query(obj_expr).await;
+                    tx.send(res)
+                });
+                drop(join_handle);
+                let object_resp = rx.await.unwrap()?;
+
                 db_resp.results.push(object_resp);
             }
         }
