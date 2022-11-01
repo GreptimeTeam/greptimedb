@@ -76,11 +76,7 @@ impl RangeRequest {
     /// If both key and range_end are '\0', then the range request returns all
     /// keys.
     #[inline]
-    pub fn with_range(
-        mut self,
-        key: impl Into<Vec<u8>>,
-        range_end: impl Into<Vec<u8>>,
-    ) -> Self {
+    pub fn with_range(mut self, key: impl Into<Vec<u8>>, range_end: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self.range_end = range_end.into();
         self
@@ -458,11 +454,7 @@ impl DeleteRangeRequest {
     /// If range_end is '\0', the range is all keys greater than or equal to the
     /// key argument.
     #[inline]
-    pub fn with_range(
-        mut self,
-        key: impl Into<Vec<u8>>,
-        range_end: impl Into<Vec<u8>>,
-    ) -> Self {
+    pub fn with_range(mut self, key: impl Into<Vec<u8>>, range_end: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self.range_end = range_end.into();
         self

@@ -390,7 +390,7 @@ struct KvPair<'a>(&'a etcd_client::KeyValue);
 impl<'a> KvPair<'a> {
     /// Creates a `KvPair` from etcd KeyValue
     #[inline]
-    const fn new(kv: &'a etcd_client::KeyValue) -> Self {
+    fn new(kv: &'a etcd_client::KeyValue) -> Self {
         Self(kv)
     }
 }
@@ -438,6 +438,41 @@ mod tests {
         assert_eq!(b"test_key".to_vec(), put.key);
         assert_eq!(b"test_value".to_vec(), put.value);
         assert!(put.options.is_some());
+    }
+
+    #[test]
+    fn test_parse_batch_put() {
+        let req = BatchPutRequest {
+            kvs: vec![KeyValue {
+                key: b"test_key".to_vec(),
+                value: b"test_value".to_vec(),
+            }],
+            prev_kv: true,
+            ..Default::default()
+        };
+
+        let batch_put: BatchPut = req.try_into().unwrap();
+
+        assert_eq!(b"test_key".to_vec(), batch_put.kvs.get(0).unwrap().key);
+        assert_eq!(b"test_value".to_vec(), batch_put.kvs.get(0).unwrap().value);
+        assert!(batch_put.options.is_some());
+    }
+
+    #[test]
+    fn test_parse_compare_and_put() {
+        let req = CompareAndPutRequest {
+            key: b"test_key".to_vec(),
+            expect: b"test_expect".to_vec(),
+            value: b"test_value".to_vec(),
+            ..Default::default()
+        };
+
+        let compare_and_put: CompareAndPut = req.try_into().unwrap();
+
+        assert_eq!(b"test_key".to_vec(), compare_and_put.key);
+        assert_eq!(b"test_expect".to_vec(), compare_and_put.expect);
+        assert_eq!(b"test_value".to_vec(), compare_and_put.value);
+        assert!(compare_and_put.options.is_some());
     }
 
     #[test]
