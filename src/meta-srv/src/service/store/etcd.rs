@@ -69,8 +69,9 @@ impl KvStore for EtcdStore {
             .map(|kv| KvPair::new(kv).into())
             .collect::<Vec<_>>();
 
+        let header = Some(ResponseHeader::success(cluster_id));
         Ok(RangeResponse {
-            header: ResponseHeader::success(cluster_id),
+            header,
             kvs,
             more: res.more(),
         })
@@ -93,10 +94,8 @@ impl KvStore for EtcdStore {
 
         let prev_kv = res.prev_key().map(|kv| KvPair::new(kv).into());
 
-        Ok(PutResponse {
-            header: ResponseHeader::success(cluster_id),
-            prev_kv,
-        })
+        let header = Some(ResponseHeader::success(cluster_id));
+        Ok(PutResponse { header, prev_kv })
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
@@ -131,10 +130,8 @@ impl KvStore for EtcdStore {
             }
         }
 
-        Ok(BatchPutResponse {
-            header: ResponseHeader::success(cluster_id),
-            prev_kvs,
-        })
+        let header = Some(ResponseHeader::success(cluster_id));
+        Ok(BatchPutResponse { header, prev_kvs })
     }
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
@@ -186,8 +183,9 @@ impl KvStore for EtcdStore {
             }
         }
 
+        let header = Some(ResponseHeader::success(cluster_id));
         Ok(CompareAndPutResponse {
-            header: ResponseHeader::success(cluster_id),
+            header,
             success,
             prev_kv,
         })
@@ -213,8 +211,9 @@ impl KvStore for EtcdStore {
             .map(|kv| KvPair::new(kv).into())
             .collect::<Vec<_>>();
 
+        let header = Some(ResponseHeader::success(cluster_id));
         Ok(DeleteRangeResponse {
-            header: ResponseHeader::success(cluster_id),
+            header,
             deleted: res.deleted(),
             prev_kvs,
         })

@@ -12,7 +12,6 @@ use api::v1::meta::PutRequest;
 use api::v1::meta::PutResponse;
 use api::v1::meta::RangeRequest;
 use api::v1::meta::RangeResponse;
-use api::v1::meta::RequestHeader;
 use common_grpc::channel_manager::ChannelManager;
 use snafu::ensure;
 use snafu::OptionExt;
@@ -117,7 +116,7 @@ impl Inner {
 
     async fn range(&self, mut req: RangeRequest) -> Result<RangeResponse> {
         let mut client = self.random_client()?;
-        req.header = RequestHeader::new(self.id);
+        req.set_header(self.id);
         let res = client.range(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -125,7 +124,7 @@ impl Inner {
 
     async fn put(&self, mut req: PutRequest) -> Result<PutResponse> {
         let mut client = self.random_client()?;
-        req.header = RequestHeader::new(self.id);
+        req.set_header(self.id);
         let res = client.put(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -133,7 +132,7 @@ impl Inner {
 
     async fn batch_put(&self, mut req: BatchPutRequest) -> Result<BatchPutResponse> {
         let mut client = self.random_client()?;
-        req.header = RequestHeader::new(self.id);
+        req.set_header(self.id);
         let res = client
             .batch_put(req)
             .await
@@ -147,7 +146,7 @@ impl Inner {
         mut req: CompareAndPutRequest,
     ) -> Result<CompareAndPutResponse> {
         let mut client = self.random_client()?;
-        req.header = RequestHeader::new(self.id);
+        req.set_header(self.id);
         let res = client
             .compare_and_put(req)
             .await
@@ -158,7 +157,7 @@ impl Inner {
 
     async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let mut client = self.random_client()?;
-        req.header = RequestHeader::new(self.id);
+        req.set_header(self.id);
         let res = client
             .delete_range(req)
             .await

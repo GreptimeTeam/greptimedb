@@ -127,8 +127,9 @@ async fn handle_create(
         region_routes,
     };
 
+    let header = Some(ResponseHeader::success(cluster_id));
     Ok(RouteResponse {
-        header: ResponseHeader::success(cluster_id),
+        header,
         peers,
         table_routes: vec![table_route],
     })
@@ -153,13 +154,25 @@ mod tests {
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
 
         let req = RouteRequest {
-            header: RequestHeader::new((1, 1)),
-            ..Default::default()
+            header: Some(RequestHeader::new((1, 1))),
+            table_names: vec![
+                TableName {
+                    catalog_name: "catalog1".to_string(),
+                    schema_name: "schema1".to_string(),
+                    table_name: "table1".to_string(),
+                },
+                TableName {
+                    catalog_name: "catalog1".to_string(),
+                    schema_name: "schema1".to_string(),
+                    table_name: "table2".to_string(),
+                },
+                TableName {
+                    catalog_name: "catalog1".to_string(),
+                    schema_name: "schema1".to_string(),
+                    table_name: "table3".to_string(),
+                },
+            ],
         };
-        let req = req
-            .add_table(TableName::new("catalog1", "schema1", "table1"))
-            .add_table(TableName::new("catalog1", "schema1", "table2"))
-            .add_table(TableName::new("catalog1", "schema1", "table3"));
 
         let _res = meta_srv.route(req.into_request()).await.unwrap();
     }
@@ -185,19 +198,24 @@ mod tests {
     #[tokio::test]
     async fn test_handle_create() {
         let kv_store = Arc::new(NoopKvStore {});
-        let table_name = TableName::new("test_catalog", "test_db", "table1");
-        let req = CreateRequest {
-            header: RequestHeader::new((1, 1)),
-            table_name: Some(table_name),
-            ..Default::default()
+        let table_name = TableName {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_db".to_string(),
+            table_name: "table1".to_string(),
         };
-        let p0 = Partition::new()
-            .column_list(vec![b"col1".to_vec(), b"col2".to_vec()])
-            .value_list(vec![b"v1".to_vec(), b"v2".to_vec()]);
-        let p1 = Partition::new()
-            .column_list(vec![b"col1".to_vec(), b"col2".to_vec()])
-            .value_list(vec![b"v11".to_vec(), b"v22".to_vec()]);
-        let req = req.add_partition(p0).add_partition(p1);
+        let p0 = Partition {
+            column_list: vec![b"col1".to_vec(), b"col2".to_vec()],
+            value_list: vec![b"v1".to_vec(), b"v2".to_vec()],
+        };
+        let p1 = Partition {
+            column_list: vec![b"col1".to_vec(), b"col2".to_vec()],
+            value_list: vec![b"v11".to_vec(), b"v22".to_vec()],
+        };
+        let req = CreateRequest {
+            header: Some(RequestHeader::new((1, 1))),
+            table_name: Some(table_name),
+            partitions: vec![p0, p1],
+        };
         let ctx = Context {
             datanode_lease_secs: 10,
             kv_store,
