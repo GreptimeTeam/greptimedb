@@ -2698,6 +2698,7 @@ name = "meta-client"
 version = "0.1.0"
 dependencies = [
  "api",
+ "async-trait",
  "common-error",
  "common-grpc",
  "common-telemetry",

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 api = { path = "../api" }
+async-trait = "0.1"
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-telemetry = { path = "../common/telemetry" }

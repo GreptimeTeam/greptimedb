@@ -20,6 +20,11 @@ pub async fn create_meta_client_with_noop_store() -> MetaClient {
     create_meta_client(Default::default(), kv_store, None).await
 }
 
+pub async fn create_meta_client_with_selector(selector: SelectorRef) -> MetaClient {
+    let kv_store = Arc::new(NoopKvStore {});
+    create_meta_client(Default::default(), kv_store, Some(selector)).await
+}
+
 pub async fn create_meta_client(
     opts: MetaSrvOptions,
     kv_store: KvStoreRef,

@@ -301,11 +301,18 @@ impl MetaClient {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::meta::HeartbeatRequest;
     use api::v1::meta::Peer;
+    use meta_srv::metasrv::Context;
+    use meta_srv::selector::Namespace;
+    use meta_srv::selector::Selector;
+    use meta_srv::Result as MetaResult;
 
     use super::*;
     use crate::mocks;
+    use crate::rpc::Partition;
     use crate::rpc::TableName;
 
     #[tokio::test]
@@ -423,6 +430,69 @@ mod tests {
                 assert_eq!(1000, res.header.unwrap().cluster_id);
             }
         });
+    }
+
+    struct MockSelector;
+
+    #[async_trait::async_trait]
+    impl Selector for MockSelector {
+        type Context = Context;
+        type Output = Vec<Peer>;
+
+        async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> MetaResult<Self::Output> {
+            Ok(vec![
+                Peer {
+                    id: 0,
+                    addr: "peer0".to_string(),
+                },
+                Peer {
+                    id: 1,
+                    addr: "peer1".to_string(),
+                },
+                Peer {
+                    id: 2,
+                    addr: "peer2".to_string(),
+                },
+            ])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_route() {
+        let selector = Arc::new(MockSelector {});
+        let client = mocks::create_meta_client_with_selector(selector).await;
+        let p1 = Partition {
+            column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
+            value_list: vec![b"k1".to_vec(), b"k2".to_vec()],
+        };
+        let p2 = Partition {
+            column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
+            value_list: vec![b"Max1".to_vec(), b"Max2".to_vec()],
+        };
+        let table_name = TableName::new("test_catalog", "test_schema", "test_table");
+        let req = CreateRequest::new(table_name)
+            .add_partition(p1)
+            .add_partition(p2);
+
+        let res = client.create_route(req).await.unwrap();
+
+        let table_routes = res.table_routes;
+        assert_eq!(1, table_routes.len());
+        let table_route = table_routes.get(0).unwrap();
+        let table = &table_route.table;
+        let table_name = &table.table_name;
+        assert_eq!("test_catalog", table_name.catalog_name);
+        assert_eq!("test_schema", table_name.schema_name);
+        assert_eq!("test_table", table_name.table_name);
+
+        let region_routes = &table_route.region_routes;
+        assert_eq!(2, region_routes.len());
+        let r0 = region_routes.get(0).unwrap();
+        let r1 = region_routes.get(1).unwrap();
+        assert_eq!(0, r0.region.as_ref().unwrap().id);
+        assert_eq!(1, r1.region.as_ref().unwrap().id);
+        assert_eq!("peer0", r0.leader_peer.as_ref().unwrap().addr);
+        assert_eq!("peer1", r1.leader_peer.as_ref().unwrap().addr);
     }
 
     #[tokio::test]
