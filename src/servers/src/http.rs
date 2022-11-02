@@ -337,7 +337,10 @@ impl Server for HttpServer {
         let (tx, rx) = oneshot::channel();
         let server = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
-            ensure!(shutdown_tx.is_none(), AlreadyStartedSnafu);
+            ensure!(
+                shutdown_tx.is_none(),
+                AlreadyStartedSnafu { server: "HTTP" }
+            );
 
             let app = self.make_app();
             let server = axum::Server::bind(&listening).serve(app.into_make_service());

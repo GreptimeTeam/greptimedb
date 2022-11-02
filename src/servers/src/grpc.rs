@@ -76,7 +76,10 @@ impl Server for GrpcServer {
         let (tx, rx) = oneshot::channel();
         let (listener, addr) = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
-            ensure!(shutdown_tx.is_none(), AlreadyStartedSnafu);
+            ensure!(
+                shutdown_tx.is_none(),
+                AlreadyStartedSnafu { server: "gRPC" }
+            );
 
             let listener = TcpListener::bind(addr)
                 .await
