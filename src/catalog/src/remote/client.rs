@@ -8,7 +8,6 @@ use snafu::ResultExt;
 
 use crate::error::{Error, MetaSrvSnafu};
 use crate::remote::{Kv, KvBackend, ValueIter};
-
 #[derive(Debug)]
 pub struct MetaKvBackend {
     pub client: MetaClient,
@@ -30,22 +29,41 @@ impl KvBackend for MetaKvBackend {
             while more {
                 let mut resp = self
                     .client
-                    .range(RangeRequest::new().with_range(start_key.clone(), vec![0]))
+                    .range(RangeRequest::new().with_prefix(start_key.clone()))
                     .await
                     .context(MetaSrvSnafu)?;
 
                 more = resp.more();
                 let kvs = resp.take_kvs();
-                start_key = kvs
+                // advance range start key
+                start_key = match kvs
                     .last()
-                    .map(|kv| kv.key().to_vec())
-                    .unwrap_or(start_key)
-                    .clone();
+                    .map(|kv| meta_client::util::get_prefix_end_key(kv.key()))
+                {
+                    Some(key) => key,
+                    None => {
+                        // kvs is empty means end of range, regardless of resp.more()
+                        return;
+                    }
+                };
+
                 for mut kv in kvs.into_iter() {
                     yield Ok(Kv(kv.take_key(), kv.take_value()))
                 }
             }
         }))
+    }
+
+    async fn get(&self, key: &[u8]) -> Result<Option<Kv>, Error> {
+        let mut response = self
+            .client
+            .range(RangeRequest::new().with_key(key))
+            .await
+            .context(MetaSrvSnafu)?;
+        Ok(response
+            .take_kvs()
+            .get_mut(0)
+            .map(|kv| Kv(kv.take_key(), kv.take_value())))
     }
 
     async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
