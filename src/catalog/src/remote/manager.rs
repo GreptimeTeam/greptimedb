@@ -99,10 +99,9 @@ impl RemoteCatalogManager {
                 }
                 let key = CatalogKey::parse(&String::from_utf8_lossy(&k))
                     .context(InvalidCatalogValueSnafu)?;
-                if key.node_id != self.node_id {
-                    continue;
+                if key.node_id == self.node_id {
+                    yield Ok(key)
                 }
-                yield Ok(key)
             }
         }))
     }
@@ -408,9 +407,7 @@ impl CatalogList for RemoteCatalogManager {
                     .await?;
                 let prev_catalogs = catalogs.load();
                 let mut new_catalogs = HashMap::with_capacity(prev_catalogs.len() + 1);
-                for (k, v) in prev_catalogs.iter() {
-                    new_catalogs.insert(k.clone(), v.clone());
-                }
+                new_catalogs.clone_from(&prev_catalogs);
                 let prev = new_catalogs.insert(name, catalog);
                 catalogs.store(Arc::new(new_catalogs));
                 Ok(prev)
@@ -583,13 +580,9 @@ impl SchemaProvider for RemoteSchemaProvider {
                 backend
                     .set(
                         table_key.as_bytes(),
-                        &table_value
-                            .as_bytes()
-                            .context(InvalidCatalogValueSnafu)
-                            .unwrap(),
+                        &table_value.as_bytes().context(InvalidCatalogValueSnafu)?,
                     )
-                    .await
-                    .unwrap();
+                    .await?;
                 debug!(
                     "Successfully set catalog table entry, key: {}, table value: {:?}",
                     table_key, table_value
@@ -600,12 +593,12 @@ impl SchemaProvider for RemoteSchemaProvider {
                 new_tables.clone_from(&prev_tables);
                 let prev = new_tables.insert(name, table);
                 tables.store(Arc::new(new_tables));
-                prev
+                Ok(prev)
             })
         })
         .join()
         .unwrap();
-        Ok(prev)
+        prev
     }
 
     fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
@@ -624,7 +617,7 @@ impl SchemaProvider for RemoteSchemaProvider {
         let prev = std::thread::spawn(move || {
             common_runtime::block_on_read(async move {
                 let _guard = mutex.lock().await;
-                backend.delete(table_key.as_bytes()).await.unwrap();
+                backend.delete(table_key.as_bytes()).await?;
                 debug!(
                     "Successfully deleted catalog table entry, key: {}",
                     table_key
@@ -635,12 +628,12 @@ impl SchemaProvider for RemoteSchemaProvider {
                 new_tables.clone_from(&prev_tables);
                 let prev = new_tables.remove(&table_name);
                 tables.store(Arc::new(new_tables));
-                prev
+                Ok(prev)
             })
         })
         .join()
         .unwrap();
-        Ok(prev)
+        prev
     }
 
     /// Checks if table exists in schema provider based on locally opened table map.
