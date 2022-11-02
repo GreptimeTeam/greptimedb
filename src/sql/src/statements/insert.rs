@@ -1,4 +1,4 @@
-use sqlparser::ast::{SetExpr, Statement, Values};
+use sqlparser::ast::{SetExpr, Statement, UnaryOperator, Values};
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value};
@@ -39,6 +39,15 @@ impl Insert {
                                 Expr::Identifier(ident) => {
                                     Value::SingleQuotedString(ident.value.clone())
                                 }
+                                Expr::UnaryOp {
+                                    op: UnaryOperator::Minus,
+                                    expr,
+                                } if matches!(**expr, Expr::Value(_)) => match &**expr {
+                                    Expr::Value(Value::Number(s, b)) => {
+                                        Value::Number(format!("-{}", s), *b)
+                                    }
+                                    _ => unreachable!(),
+                                },
                                 _ => unreachable!(),
                             })
                             .collect::<Vec<Value>>()
@@ -80,5 +89,22 @@ mod tests {
         let insert = stmts.pop().unwrap();
         let r: Result<Statement, ParserError> = insert.try_into();
         r.unwrap();
+    }
+
+    #[test]
+    fn test_insert_negative_value() {
+        use crate::statements::statement::Statement;
+
+        let sql = "INSERT INTO my_table VALUES(-1)";
+        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+            .unwrap()
+            .remove(0);
+        match stmt {
+            Statement::Insert(insert) => {
+                let values = insert.values();
+                assert_eq!(values, vec![vec![Value::Number("-1".to_string(), false)]]);
+            }
+            _ => unreachable!(),
+        }
     }
 }
