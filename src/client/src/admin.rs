@@ -22,10 +22,6 @@ impl Admin {
         }
     }
 
-    pub async fn start(&mut self, url: impl Into<String>) -> Result<()> {
-        self.client.start(url).await
-    }
-
     pub async fn create(&self, expr: CreateExpr) -> Result<AdminResult> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,

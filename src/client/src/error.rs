@@ -85,6 +85,15 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Failed to create gRPC channel, source: {}", source))]
+    CreateChannel {
+        #[snafu(backtrace)]
+        source: common_grpc::error::Error,
+    },
+
+    #[snafu(display("Not found client"))]
+    NotFoundClient { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -102,11 +111,13 @@ impl ErrorExt for Error {
             | Error::MutateFailure { .. }
             | Error::InvalidColumnProto { .. }
             | Error::ColumnDataType { .. }
+            | Error::NotFoundClient { .. }
             | Error::MissingField { .. } => StatusCode::Internal,
             Error::ConvertSchema { source } | Error::CreateVector { source } => {
                 source.status_code()
             }
             Error::CreateRecordBatches { source } => source.status_code(),
+            Error::CreateChannel { source } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
         }
     }

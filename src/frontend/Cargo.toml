@@ -10,6 +10,7 @@ async-trait = "0.1"
 client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
+common-grpc = { path = "../common/grpc" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }

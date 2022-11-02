@@ -42,7 +42,7 @@ async fn setup_grpc_server(port: usize) -> String {
 async fn test_auto_create_table() {
     let addr = setup_grpc_server(3991).await;
 
-    let grpc_client = Client::connect(format!("http://{}", addr)).await.unwrap();
+    let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new("greptime", grpc_client);
 
     insert_and_assert(&db).await;
@@ -106,7 +106,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
 async fn test_insert_and_select() {
     let addr = setup_grpc_server(3990).await;
 
-    let grpc_client = Client::connect(format!("http://{}", addr)).await.unwrap();
+    let grpc_client = Client::with_urls(vec![addr]);
 
     let db = Database::new("greptime", grpc_client.clone());
     let admin = Admin::new("greptime", grpc_client);
