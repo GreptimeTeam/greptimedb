@@ -74,7 +74,7 @@ pub trait BucketAligned {
 
 impl<T: Into<i64>> BucketAligned for T {
     fn align_by_bucket(self, bucket_duration: i64) -> Option<TimestampMillis> {
-        assert!(bucket_duration > 0);
+        assert!(bucket_duration > 0, "{}", bucket_duration);
         self.into()
             .checked_div_euclid(bucket_duration)
             .and_then(|val| val.checked_mul(bucket_duration))

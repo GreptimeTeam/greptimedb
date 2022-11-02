@@ -6,5 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+arrow = "10"
+clap = { version = "4.0", features = ["derive"] }
 client = { path = "../src/client" }
+itertools = "0.10.5"
 parquet = { version = "*" }
+tokio = { version = "1.21", features = ["full"] }

@@ -28,3 +28,6 @@ logs/
 
 # cpython's generated python byte code
 **/__pycache__/
+
+# Benchmark dataset
+benchmarks/data

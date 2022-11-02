@@ -33,3 +33,6 @@ members = [
     "src/table",
     "src/table-engine",
 ]
+
+[profile.release]
+debug = true
