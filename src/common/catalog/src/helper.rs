@@ -5,7 +5,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
-use table::metadata::{TableId, TableMeta, TableVersion};
+use table::metadata::{RawTableMeta, TableId, TableVersion};
 
 use crate::consts::{CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_KEY_PREFIX};
 use crate::error::{
@@ -101,7 +101,7 @@ impl TableKey {
 pub struct TableValue {
     pub id: TableId,
     pub node_id: String,
-    pub meta: TableMeta,
+    pub meta: RawTableMeta,
 }
 
 impl TableValue {
@@ -204,10 +204,8 @@ impl SchemaValue {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::schema::{ColumnSchema, RawSchema, Schema};
 
     use super::*;
 
@@ -254,14 +252,14 @@ mod tests {
 
     #[test]
     fn test_serialize_schema() {
-        let schema_ref = Arc::new(Schema::new(vec![ColumnSchema::new(
+        let schema = Schema::new(vec![ColumnSchema::new(
             "name",
             ConcreteDataType::string_datatype(),
             true,
-        )]));
+        )]);
 
-        let meta = TableMeta {
-            schema: schema_ref,
+        let meta = RawTableMeta {
+            schema: RawSchema::from(&schema),
             engine: "mito".to_string(),
             created_on: chrono::DateTime::default(),
             primary_key_indices: vec![0, 1],

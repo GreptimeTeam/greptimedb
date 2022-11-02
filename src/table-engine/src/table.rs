@@ -28,7 +28,7 @@ use table::metadata::{FilterPushDownType, TableInfoRef, TableMetaBuilder};
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
 use table::table::scan::SimpleTableScan;
 use table::{
-    metadata::{TableInfo, TableType},
+    metadata::{RawTableInfo, TableInfo, TableType},
     table::Table,
 };
 use tokio::sync::Mutex;
@@ -288,7 +288,7 @@ impl<R: Region> Table for MitoTable<R> {
         self.manifest
             .update(TableMetaActionList::with_action(TableMetaAction::Change(
                 Box::new(TableChange {
-                    table_info: new_info.clone(),
+                    table_info: RawTableInfo::from(new_info.clone()),
                 }),
             )))
             .await
@@ -455,7 +455,7 @@ impl<R: Region> MitoTable<R> {
         let _manifest_version = manifest
             .update(TableMetaActionList::with_action(TableMetaAction::Change(
                 Box::new(TableChange {
-                    table_info: table_info.clone(),
+                    table_info: RawTableInfo::from(table_info.clone()),
                 }),
             )))
             .await
@@ -515,10 +515,12 @@ impl<R: Region> MitoTable<R> {
             for action in action_list.actions {
                 match action {
                     TableMetaAction::Change(c) => {
-                        table_info = Some(c.table_info);
+                        table_info = Some(
+                            TableInfo::try_from(c.table_info).context(error::ConvertRawSnafu)?,
+                        );
                     }
                     TableMetaAction::Protocol(_) => {}
-                    _ => unimplemented!(),
+                    TableMetaAction::Remove(_) => unimplemented!("Drop table is unimplemented"),
                 }
             }
         }

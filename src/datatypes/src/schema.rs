@@ -1,4 +1,5 @@
 mod constraint;
+mod raw;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, DeserializeSnafu, Error, Result, SerializeSnafu};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
+pub use crate::schema::raw::RawSchema;
 use crate::vectors::VectorRef;
 
 /// Key used to store column name of the timestamp column in metadata.
@@ -104,7 +106,7 @@ impl ColumnSchema {
 }
 
 /// A common schema, should be immutable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Schema {
     column_schemas: Vec<ColumnSchema>,
     name_to_index: HashMap<String, usize>,
@@ -125,19 +127,20 @@ impl Schema {
     pub const INITIAL_VERSION: u32 = 0;
 
     /// Create a schema from a vector of [ColumnSchema].
+    ///
     /// # Panics
     /// Panics when ColumnSchema's `default_constrait` can't be serialized into json.
     pub fn new(column_schemas: Vec<ColumnSchema>) -> Schema {
-        // Builder won't fail
+        // Builder won't fail in this case
         SchemaBuilder::try_from(column_schemas)
             .unwrap()
             .build()
             .unwrap()
     }
 
+    /// Try to Create a schema from a vector of [ColumnSchema].
     pub fn try_new(column_schemas: Vec<ColumnSchema>) -> Result<Schema> {
-        // Builder won't fail
-        Ok(SchemaBuilder::try_from(column_schemas)?.build().unwrap())
+        SchemaBuilder::try_from(column_schemas)?.build()
     }
 
     #[inline]
@@ -236,6 +239,7 @@ impl SchemaBuilder {
         })
     }
 
+    // TODO(yingwen): Consider change to take Option as input.
     /// Set timestamp index.
     ///
     /// The validation of timestamp column is done in `build()`.

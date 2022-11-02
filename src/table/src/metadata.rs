@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use datatypes::schema::SchemaRef;
+pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
+use datatypes::schema::{RawSchema, Schema, SchemaRef};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use store_api::storage::ColumnId;
@@ -38,13 +39,14 @@ pub enum TableType {
     Temporary,
 }
 
+/// Identifier of the table.
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Default)]
 pub struct TableIdent {
     pub table_id: TableId,
     pub version: TableVersion,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Builder, PartialEq)]
+#[derive(Clone, Debug, Builder, PartialEq)]
 #[builder(pattern = "mutable")]
 pub struct TableMeta {
     pub schema: SchemaRef,
@@ -54,8 +56,10 @@ pub struct TableMeta {
     #[builder(default, setter(into))]
     pub engine: String,
     pub next_column_id: ColumnId,
+    /// Options for table engine.
     #[builder(default)]
     pub engine_options: HashMap<String, String>,
+    /// Table options.
     #[builder(default)]
     pub options: HashMap<String, String>,
     #[builder(default = "Utc::now()")]
@@ -92,13 +96,14 @@ impl TableMeta {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Builder)]
+#[derive(Clone, Debug, PartialEq, Builder)]
 #[builder(pattern = "owned")]
 pub struct TableInfo {
     #[builder(default, setter(into))]
     pub ident: TableIdent,
     #[builder(setter(into))]
     pub name: String,
+    /// Comment of the table.
     #[builder(default, setter(into))]
     pub desc: Option<String>,
     #[builder(default, setter(into))]
@@ -146,5 +151,92 @@ impl TableIdent {
 impl From<TableId> for TableIdent {
     fn from(table_id: TableId) -> Self {
         Self::new(table_id)
+    }
+}
+
+/// Struct used to serialize and deserialize [`TableMeta`].
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct RawTableMeta {
+    pub schema: RawSchema,
+    pub primary_key_indices: Vec<usize>,
+    pub value_indices: Vec<usize>,
+    pub engine: String,
+    pub next_column_id: ColumnId,
+    pub engine_options: HashMap<String, String>,
+    pub options: HashMap<String, String>,
+    pub created_on: DateTime<Utc>,
+}
+
+impl From<TableMeta> for RawTableMeta {
+    fn from(meta: TableMeta) -> RawTableMeta {
+        RawTableMeta {
+            schema: RawSchema::from(&*meta.schema),
+            primary_key_indices: meta.primary_key_indices,
+            value_indices: meta.value_indices,
+            engine: meta.engine,
+            next_column_id: meta.next_column_id,
+            engine_options: meta.engine_options,
+            options: meta.options,
+            created_on: meta.created_on,
+        }
+    }
+}
+
+impl TryFrom<RawTableMeta> for TableMeta {
+    type Error = ConvertError;
+
+    fn try_from(raw: RawTableMeta) -> ConvertResult<TableMeta> {
+        Ok(TableMeta {
+            schema: Arc::new(Schema::try_from(raw.schema)?),
+            primary_key_indices: raw.primary_key_indices,
+            value_indices: raw.value_indices,
+            engine: raw.engine,
+            next_column_id: raw.next_column_id,
+            engine_options: raw.engine_options,
+            options: raw.options,
+            created_on: raw.created_on,
+        })
+    }
+}
+
+/// Struct used to serialize and deserialize [`TableInfo`].
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct RawTableInfo {
+    pub ident: TableIdent,
+    pub name: String,
+    pub desc: Option<String>,
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub meta: RawTableMeta,
+    pub table_type: TableType,
+}
+
+impl From<TableInfo> for RawTableInfo {
+    fn from(info: TableInfo) -> RawTableInfo {
+        RawTableInfo {
+            ident: info.ident,
+            name: info.name,
+            desc: info.desc,
+            catalog_name: info.catalog_name,
+            schema_name: info.schema_name,
+            meta: RawTableMeta::from(info.meta),
+            table_type: info.table_type,
+        }
+    }
+}
+
+impl TryFrom<RawTableInfo> for TableInfo {
+    type Error = ConvertError;
+
+    fn try_from(raw: RawTableInfo) -> ConvertResult<TableInfo> {
+        Ok(TableInfo {
+            ident: raw.ident,
+            name: raw.name,
+            desc: raw.desc,
+            catalog_name: raw.catalog_name,
+            schema_name: raw.schema_name,
+            meta: TableMeta::try_from(raw.meta)?,
+            table_type: raw.table_type,
+        })
     }
 }
