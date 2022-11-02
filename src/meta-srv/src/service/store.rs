@@ -1,5 +1,6 @@
 pub mod etcd;
 pub mod kv;
+pub mod memory;
 pub mod noop;
 
 use api::v1::meta::store_server;

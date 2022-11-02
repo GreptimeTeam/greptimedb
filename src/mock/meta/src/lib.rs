@@ -12,15 +12,17 @@ use meta_srv::service::store::kv::KvStoreRef;
 use meta_srv::service::store::noop::NoopKvStore;
 use tower::service_fn;
 
-use crate::client::MetaClient;
-use crate::client::MetaClientBuilder;
+pub struct MockInfo {
+    pub server_addr: String,
+    pub channel_manager: ChannelManager,
+}
 
-pub async fn create_meta_client_with_noop_store() -> MetaClient {
+pub async fn create_meta_client_with_noop_store() -> MockInfo {
     let kv_store = Arc::new(NoopKvStore {});
     create_meta_client(Default::default(), kv_store, None).await
 }
 
-pub async fn create_meta_client_with_selector(selector: SelectorRef) -> MetaClient {
+pub async fn create_meta_client_with_selector(selector: SelectorRef) -> MockInfo {
     let kv_store = Arc::new(NoopKvStore {});
     create_meta_client(Default::default(), kv_store, Some(selector)).await
 }
@@ -29,7 +31,7 @@ pub async fn create_meta_client(
     opts: MetaSrvOptions,
     kv_store: KvStoreRef,
     selector: Option<SelectorRef>,
-) -> MetaClient {
+) -> MockInfo {
     let server_addr = opts.server_addr.clone();
     let meta_srv = MetaSrv::new(opts, kv_store, selector).await;
     let (client, server) = tokio::io::duplex(1024);
@@ -42,7 +44,6 @@ pub async fn create_meta_client(
             .await
     });
 
-    let id = (1000u64, 2000u64);
     let config = ChannelConfig::new();
     let channel_manager = ChannelManager::with_config(config);
 
@@ -68,15 +69,8 @@ pub async fn create_meta_client(
     );
     assert!(res.is_ok());
 
-    let mut meta_client = MetaClientBuilder::new(id.0, id.1)
-        .enable_heartbeat()
-        .enable_router()
-        .enable_store()
-        .channel_manager(channel_manager)
-        .build();
-    meta_client.start(&[&server_addr]).await.unwrap();
-    // required only when the heartbeat_client is enabled
-    meta_client.ask_leader().await.unwrap();
-
-    meta_client
+    MockInfo {
+        server_addr,
+        channel_manager,
+    }
 }

@@ -5,7 +5,7 @@ use crate::error::Result;
 pub type Namespace = u64;
 
 #[async_trait::async_trait]
-pub trait Selector: Send + Sync + 'static {
+pub trait Selector: Send + Sync {
     type Context;
     type Output;
 

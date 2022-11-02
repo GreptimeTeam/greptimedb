@@ -2705,6 +2705,7 @@ dependencies = [
  "etcd-client",
  "futures",
  "meta-srv",
+ "mock-meta",
  "rand 0.8.5",
  "snafu",
  "tokio",
@@ -2838,6 +2839,19 @@ dependencies = [
  "log",
  "wasi 0.11.0+wasi-snapshot-preview1",
  "windows-sys",
+]
+
+[[package]]
+name = "mock-meta"
+version = "0.1.0"
+dependencies = [
+ "api",
+ "common-grpc",
+ "futures",
+ "meta-srv",
+ "tokio",
+ "tonic",
+ "tower",
 ]
 
 [[package]]

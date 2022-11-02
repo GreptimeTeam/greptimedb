@@ -52,10 +52,7 @@ impl MetaSrv {
         kv_store: KvStoreRef,
         selector: Option<SelectorRef>,
     ) -> Self {
-        let selector = match selector {
-            Some(selector) => selector,
-            None => Arc::new(LeaseBasedSelector {}),
-        };
+        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector {}));
         let handler_group = HeartbeatHandlerGroup::default();
         handler_group.add_handler(ResponseHeaderHandler).await;
         handler_group.add_handler(DatanodeLeaseHandler).await;

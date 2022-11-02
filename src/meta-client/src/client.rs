@@ -311,7 +311,7 @@ mod tests {
     use meta_srv::Result as MetaResult;
 
     use super::*;
-    use crate::mocks;
+    use crate::mock;
     use crate::rpc::Partition;
     use crate::rpc::TableName;
 
@@ -402,14 +402,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_ask_leader() {
-        let client = mocks::create_meta_client_with_noop_store().await;
+        let client = mock::create_metaclient_with_noop_store().await;
         let res = client.ask_leader().await;
         assert!(res.is_ok());
     }
 
     #[tokio::test]
     async fn test_heartbeat() {
-        let client = mocks::create_meta_client_with_noop_store().await;
+        let client = mock::create_metaclient_with_noop_store().await;
         let (sender, mut receiver) = client.heartbeat().await.unwrap();
         // send heartbeats
         tokio::spawn(async move {
@@ -460,7 +460,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_route() {
         let selector = Arc::new(MockSelector {});
-        let client = mocks::create_meta_client_with_selector(selector).await;
+        let client = mock::create_metaclient_with_selector(selector).await;
         let p1 = Partition {
             column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
             value_list: vec![b"k1".to_vec(), b"k2".to_vec()],
@@ -497,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_range() {
-        let client = mocks::create_meta_client_with_noop_store().await;
+        let client = mock::create_metaclient_with_noop_store().await;
         let req = RangeRequest::new().with_key(b"key".to_vec());
         let res = client.range(req).await;
         assert!(res.is_ok());
@@ -505,7 +505,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_put() {
-        let client = mocks::create_meta_client_with_noop_store().await;
+        let client = mock::create_metaclient_with_noop_store().await;
         let req = PutRequest::new()
             .with_key(b"key".to_vec())
             .with_value(b"value".to_vec())
@@ -516,7 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_put() {
-        let client = mocks::create_meta_client_with_noop_store().await;
+        let client = mock::create_metaclient_with_noop_store().await;
         let req = BatchPutRequest::new()
             .add_kv(b"key".to_vec(), b"value".to_vec())
             .add_kv(b"key2".to_vec(), b"value2".to_vec())
@@ -527,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compare_and_put() {
-        let client = mocks::create_meta_client_with_noop_store().await;
+        let client = mock::create_metaclient_with_noop_store().await;
         let req = CompareAndPutRequest::new()
             .with_key(b"key".to_vec())
             .with_expect(b"expect".to_vec())
@@ -538,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete() {
-        let client = mocks::create_meta_client_with_noop_store().await;
+        let client = mock::create_metaclient_with_noop_store().await;
         let req = DeleteRangeRequest::new()
             .with_key(b"key".to_vec())
             .with_prev_kv();

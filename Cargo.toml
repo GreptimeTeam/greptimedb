@@ -22,6 +22,7 @@ members = [
     "src/log-store",
     "src/meta-client",
     "src/meta-srv",
+    "src/mock/meta",
     "src/object-store",
     "src/query",
     "src/script",

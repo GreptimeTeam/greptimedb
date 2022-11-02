@@ -19,6 +19,7 @@ tonic = "0.8"
 [dev-dependencies]
 futures = "0.3"
 meta-srv = { path = "../meta-srv" }
+mock-meta = { path = "../mock/meta" }
 tower = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
