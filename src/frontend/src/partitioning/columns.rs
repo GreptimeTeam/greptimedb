@@ -42,7 +42,7 @@ struct RangeColumnsPartitionRule {
     // this is how we do it if provided with concrete values (see `find_region` method).
     //
     // However, when we need to find regions by range, for example, a filter of "x < 100" defined
-    // in SQL, currently I not quite sure how that could be implemented. Especially facing the complex
+    // in SQL, currently I'm not quite sure how that could be implemented. Especially facing the complex
     // filter expression like "a < 1 AND (b > 2 OR c != 3)".
     //
     // So I decided to use the first partitioning column temporarily in finding regions by range,
