@@ -163,7 +163,7 @@ impl RemoteCatalogManager {
     /// Fetch catalogs/schemas/tables from remote catalog manager along with max table id allocated.
     async fn initiate_catalogs(&self) -> Result<(HashMap<String, CatalogProviderRef>, TableId)> {
         let mut res = HashMap::new();
-        let mut max_table_id = MIN_USER_TABLE_ID;
+        let max_table_id = MIN_USER_TABLE_ID;
 
         // initiate default catalog and schema
         let default_catalog = self.initiate_default_catalog().await?;
@@ -176,45 +176,70 @@ impl RemoteCatalogManager {
             info!("Fetch catalog from metasrv: {}", catalog_name);
             let catalog = res
                 .entry(catalog_name.clone())
-                .or_insert_with(|| self.new_catalog_provider(&catalog_name));
+                .or_insert_with(|| self.new_catalog_provider(&catalog_name))
+                .clone();
 
-            let mut schemas = self.iter_remote_schemas(&catalog_name).await;
-            while let Some(r) = schemas.next().await {
-                let SchemaKey {
-                    catalog_name,
-                    schema_name,
-                    ..
-                } = r?;
-                info!("Found schema: {}.{}", catalog_name, schema_name);
-                let schema = match catalog.schema(&schema_name)? {
-                    None => {
-                        let schema = self.new_schema_provider(&catalog_name, &schema_name);
-                        catalog.register_schema(schema_name.clone(), schema.clone())?;
-                        info!("Registered schema: {}", &schema_name);
-                        schema
-                    }
-                    Some(schema) => schema,
-                };
-
-                info!(
-                    "Fetch schema from metasrv: {}.{}",
-                    &catalog_name, &schema_name
-                );
-                let mut tables = self.iter_remote_tables(&catalog_name, &schema_name).await;
-                while let Some(r) = tables.next().await {
-                    let (table_key, table_value) = r?;
-                    let table_ref = self.open_or_create_table(&table_key, &table_value).await?;
-                    schema.register_table(table_key.table_name.to_string(), table_ref)?;
-                    info!("Registered table {}", &table_key.table_name);
-                    if table_value.id > max_table_id {
-                        info!("Max table id: {} -> {}", max_table_id, table_value.id);
-                        max_table_id = table_value.id;
-                    }
-                }
-            }
+            self.initiate_schemas(catalog_name, catalog, max_table_id)
+                .await?;
         }
 
         Ok((res, max_table_id))
+    }
+
+    async fn initiate_schemas(
+        &self,
+        catalog_name: String,
+        catalog: CatalogProviderRef,
+        max_table_id: TableId,
+    ) -> Result<()> {
+        let mut schemas = self.iter_remote_schemas(&catalog_name).await;
+        while let Some(r) = schemas.next().await {
+            let SchemaKey {
+                catalog_name,
+                schema_name,
+                ..
+            } = r?;
+            info!("Found schema: {}.{}", catalog_name, schema_name);
+            let schema = match catalog.schema(&schema_name)? {
+                None => {
+                    let schema = self.new_schema_provider(&catalog_name, &schema_name);
+                    catalog.register_schema(schema_name.clone(), schema.clone())?;
+                    info!("Registered schema: {}", &schema_name);
+                    schema
+                }
+                Some(schema) => schema,
+            };
+
+            info!(
+                "Fetch schema from metasrv: {}.{}",
+                &catalog_name, &schema_name
+            );
+            self.initiate_tables(&catalog_name, &schema_name, schema, max_table_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Initiates all tables inside a catalog by fetching data from metasrv.
+    async fn initiate_tables<'a>(
+        &'a self,
+        catalog_name: &'a str,
+        schema_name: &'a str,
+        schema: SchemaProviderRef,
+        mut max_table_id: TableId,
+    ) -> Result<()> {
+        let mut tables = self.iter_remote_tables(catalog_name, schema_name).await;
+        while let Some(r) = tables.next().await {
+            let (table_key, table_value) = r?;
+            let table_ref = self.open_or_create_table(&table_key, &table_value).await?;
+            schema.register_table(table_key.table_name.to_string(), table_ref)?;
+            info!("Registered table {}", &table_key.table_name);
+            if table_value.id > max_table_id {
+                info!("Max table id: {} -> {}", max_table_id, table_value.id);
+                max_table_id = table_value.id;
+            }
+        }
+        Ok(())
     }
 
     async fn initiate_default_catalog(&self) -> Result<CatalogProviderRef> {
