@@ -6,6 +6,7 @@ use frontend::influxdb::InfluxdbOptions;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
+use humantime;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -52,10 +53,10 @@ struct StartCommand {
     config_file: Option<String>,
     #[clap(short, long)]
     influxdb_enable: Option<bool>,
-    #[clap(long, default_value_t = 10)]
-    max_retry_times: u32,
-    #[clap(long, default_value_t = 5)]
-    retry_interval: u64, // seconds
+    #[clap(long, default_value_t = u32::MAX)]
+    max_retry_times: u32, // The frontend will try to connect datanode forever if failed.
+    #[clap(long, default_value = "5s")]
+    retry_interval: humantime::Duration,
 }
 
 impl StartCommand {
@@ -63,7 +64,7 @@ impl StartCommand {
         let opts: FrontendOptions = self.try_into()?;
 
         let max_retry_times = opts.max_retry_times;
-        let retry_interval = std::time::Duration::from_secs(opts.retry_interval);
+        let retry_interval = opts.retry_interval;
         let mut retry_times = 0;
 
         let handle = tokio::spawn(async move {
@@ -89,7 +90,7 @@ impl StartCommand {
             }
         });
 
-        handle.await.unwrap()
+        handle.await.context(error::JoinTaskSnafu)?
     }
 }
 
@@ -132,7 +133,7 @@ impl TryFrom<StartCommand> for FrontendOptions {
         }
 
         opts.max_retry_times = cmd.max_retry_times;
-        opts.retry_interval = cmd.retry_interval;
+        opts.retry_interval = humantime::Duration::into(cmd.retry_interval);
 
         Ok(opts)
     }
@@ -153,7 +154,7 @@ mod tests {
             influxdb_enable: Some(false),
             config_file: None,
             max_retry_times: 10,
-            retry_interval: 5,
+            retry_interval: "5s".parse::<humantime::Duration>().unwrap(),
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();

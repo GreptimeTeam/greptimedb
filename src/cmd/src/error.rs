@@ -1,6 +1,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_runtime;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -35,6 +36,12 @@ pub enum Error {
         source: toml::de::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to join task, source: {}", source))]
+    JoinTask {
+        source: common_runtime::JoinError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -46,6 +53,7 @@ impl ErrorExt for Error {
             Error::StartFrontend { source } => source.status_code(),
             Error::StartMetaServer { source } => source.status_code(),
             Error::ReadConfig { .. } | Error::ParseConfig { .. } => StatusCode::InvalidArguments,
+            Error::JoinTask { .. } => StatusCode::Unexpected,
         }
     }
 

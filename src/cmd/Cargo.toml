@@ -11,6 +11,7 @@ path = "src/bin/greptime.rs"
 clap = { version = "3.1", features = ["derive"] }
 common-error = { path = "../common/error" }
 common-telemetry = { path = "../common/telemetry", features = ["deadlock_detection"] }
+common-runtime = { path = "../common/runtime" }
 datanode = { path = "../datanode" }
 frontend = { path = "../frontend" }
 futures = "0.3"
@@ -18,6 +19,7 @@ meta-srv = { path = "../meta-srv" }
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.18", features = ["full"] }
 toml = "0.5"
+humantime = "2.1"
 
 [dev-dependencies]
 serde = "1.0"

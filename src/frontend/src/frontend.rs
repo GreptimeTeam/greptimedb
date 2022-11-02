@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
@@ -22,7 +23,7 @@ pub struct FrontendOptions {
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
     pub max_retry_times: u32,
-    pub retry_interval: u64,
+    pub retry_interval: Duration,
 }
 
 impl Default for FrontendOptions {
@@ -35,8 +36,10 @@ impl Default for FrontendOptions {
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
-            max_retry_times: 10,
-            retry_interval: 5,
+
+            // Note: We don't really use the default value here, the real default value is in the clap derive.
+            max_retry_times: u32::MAX,
+            retry_interval: Duration::from_secs(5),
         }
     }
 }
