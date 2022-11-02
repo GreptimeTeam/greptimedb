@@ -2,7 +2,7 @@ use datatypes::prelude::*;
 use snafu::OptionExt;
 
 use crate::error::{self, Error};
-use crate::partitioning::{Operator, PartitionExpr, PartitionRule, RegionId, ValueList};
+use crate::partitioning::{Operator, PartitionExpr, PartitionRule, RegionId};
 
 /// [RangePartitionRule] manages the distribution of partitions partitioning by some column's value
 /// range. It's generated from create table request, using MySQL's syntax:
@@ -26,6 +26,7 @@ use crate::partitioning::{Operator, PartitionExpr, PartitionRule, RegionId, Valu
 ///   - partition name must be unique
 ///   - range bounds(the "value"s) must be strictly increased
 ///   - the last partition range must be bounded by "MAXVALUE"
+///
 /// are all been done in the create table SQL parsing stage. So we can safely skip some checks on the
 /// input arguments.
 ///
@@ -66,7 +67,7 @@ impl PartitionRule for RangePartitionRule {
         vec![self.column_name().to_string()]
     }
 
-    fn find_region(&self, _values: &ValueList) -> Result<RegionId, Self::Error> {
+    fn find_region(&self, _values: &[Value]) -> Result<RegionId, Self::Error> {
         unimplemented!()
     }
 
@@ -100,7 +101,7 @@ impl PartitionRule for RangePartitionRule {
                     Operator::NotEq => &self.regions[..],
                     _ => unimplemented!(),
                 },
-                Err(i) => match *op {
+                Err(i) => match op {
                     Operator::Lt | Operator::LtEq => &self.regions[..=i],
                     Operator::Eq => &self.regions[i..=i],
                     Operator::Gt | Operator::GtEq => &self.regions[i..],

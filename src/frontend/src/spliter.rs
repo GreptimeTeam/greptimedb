@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use datatypes::value::Value;
 use datatypes::vectors::VectorBuilder;
 use datatypes::vectors::VectorRef;
 use snafu::ensure;
@@ -11,7 +12,7 @@ use crate::error::FindPartitionColumnSnafu;
 use crate::error::FindRegionSnafu;
 use crate::error::InvalidInsertRequestSnafu;
 use crate::error::Result;
-use crate::partitioning::{PartitionRule, ValueList};
+use crate::partitioning::PartitionRule;
 
 pub type DistInsertRequest = HashMap<RegionId, InsertRequest>;
 
@@ -105,7 +106,7 @@ fn find_partitioning_values(
         .collect()
 }
 
-fn partition_values(partition_columns: &[VectorRef], idx: usize) -> ValueList {
+fn partition_values(partition_columns: &[VectorRef], idx: usize) -> Vec<Value> {
     partition_columns
         .iter()
         .map(|column| column.get(idx))
@@ -411,7 +412,7 @@ mod tests {
             vec!["id".to_string()]
         }
 
-        fn find_region(&self, values: &super::ValueList) -> Result<RegionId, Self::Error> {
+        fn find_region(&self, values: &[Value]) -> Result<RegionId, Self::Error> {
             let val = values.get(0).unwrap().to_owned();
             let id_1: Value = 1_i16.into();
             let id_2: Value = 2_i16.into();
