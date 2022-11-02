@@ -126,13 +126,13 @@ impl TableInfoBuilder {
         }
     }
 
-    pub fn table_id(mut self, id: impl Into<TableId>) -> Self {
+    pub fn table_id(mut self, id: TableId) -> Self {
         let ident = self.ident.get_or_insert_with(TableIdent::default);
         ident.table_id = id.into();
         self
     }
 
-    pub fn table_version(mut self, version: impl Into<TableVersion>) -> Self {
+    pub fn table_version(mut self, version: TableVersion) -> Self {
         let ident = self.ident.get_or_insert_with(TableIdent::default);
         ident.version = version.into();
         self
@@ -238,5 +238,51 @@ impl TryFrom<RawTableInfo> for TableInfo {
             meta: TableMeta::try_from(raw.meta)?,
             table_type: raw.table_type,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
+
+    use super::*;
+
+    fn new_test_schema() -> Schema {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+        ];
+        SchemaBuilder::try_from(column_schemas.clone())
+            .unwrap()
+            .timestamp_index(1)
+            .version(123)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_raw_convert() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![1])
+            .value_indices(vec![0])
+            .engine("engine")
+            .next_column_id(2)
+            .build()
+            .unwrap();
+        let info = TableInfoBuilder::default()
+            .table_id(10)
+            .table_version(5)
+            .name("mytable")
+            .meta(meta)
+            .build()
+            .unwrap();
+
+        let raw = RawTableInfo::from(info.clone());
+        let info_new = TableInfo::try_from(raw).unwrap();
+
+        assert_eq!(info, info_new);
     }
 }

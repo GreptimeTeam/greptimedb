@@ -34,3 +34,28 @@ impl From<&Schema> for RawSchema {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_type::ConcreteDataType;
+
+    #[test]
+    fn test_raw_convert() {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+        ];
+        let schema = SchemaBuilder::try_from(column_schemas.clone())
+            .unwrap()
+            .timestamp_index(1)
+            .version(123)
+            .build()
+            .unwrap();
+
+        let raw = RawSchema::from(&schema);
+        let schema_new = Schema::try_from(raw).unwrap();
+
+        assert_eq!(schema, schema_new);
+    }
+}
