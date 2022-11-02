@@ -128,13 +128,13 @@ impl TableInfoBuilder {
 
     pub fn table_id(mut self, id: TableId) -> Self {
         let ident = self.ident.get_or_insert_with(TableIdent::default);
-        ident.table_id = id.into();
+        ident.table_id = id;
         self
     }
 
     pub fn table_version(mut self, version: TableVersion) -> Self {
         let ident = self.ident.get_or_insert_with(TableIdent::default);
-        ident.version = version.into();
+        ident.version = version;
         self
     }
 }
@@ -253,7 +253,7 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
         ];
-        SchemaBuilder::try_from(column_schemas.clone())
+        SchemaBuilder::try_from(column_schemas)
             .unwrap()
             .timestamp_index(1)
             .version(123)

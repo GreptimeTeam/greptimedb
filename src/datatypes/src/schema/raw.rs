@@ -46,7 +46,7 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
         ];
-        let schema = SchemaBuilder::try_from(column_schemas.clone())
+        let schema = SchemaBuilder::try_from(column_schemas)
             .unwrap()
             .timestamp_index(1)
             .version(123)
