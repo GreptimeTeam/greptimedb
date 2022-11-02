@@ -255,7 +255,7 @@ mod tests {
         ];
         SchemaBuilder::try_from(column_schemas)
             .unwrap()
-            .timestamp_index(1)
+            .timestamp_index(Some(1))
             .version(123)
             .build()
             .unwrap()

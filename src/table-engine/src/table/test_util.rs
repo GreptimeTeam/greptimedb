@@ -38,7 +38,7 @@ pub fn schema_for_test() -> Schema {
 
     SchemaBuilder::try_from(column_schemas)
         .unwrap()
-        .timestamp_index(3)
+        .timestamp_index(Some(3))
         .build()
         .expect("ts must be timestamp column")
 }

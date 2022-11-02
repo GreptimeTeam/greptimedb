@@ -153,7 +153,7 @@ pub fn build_create_table_request(
         let schema = Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
-                .timestamp_index(timestamp_index)
+                .timestamp_index(Some(timestamp_index))
                 .build()
                 .context(error::CreateSchemaSnafu)?,
         );
@@ -430,7 +430,7 @@ mod tests {
         let schema = Arc::new(
             SchemaBuilder::try_from(columns)
                 .unwrap()
-                .timestamp_index(1)
+                .timestamp_index(Some(1))
                 .build()
                 .unwrap(),
         );
@@ -537,7 +537,7 @@ mod tests {
             Arc::new(
                 SchemaBuilder::try_from(column_schemas)
                     .unwrap()
-                    .timestamp_index(3)
+                    .timestamp_index(Some(3))
                     .build()
                     .unwrap(),
             )

@@ -145,7 +145,7 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
     Ok(Arc::new(
         SchemaBuilder::try_from(column_schemas)
             .context(error::CreateSchemaSnafu)?
-            .timestamp_index(ts_index)
+            .timestamp_index(Some(ts_index))
             .build()
             .context(error::CreateSchemaSnafu)?,
     ))
@@ -314,7 +314,7 @@ mod tests {
         Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
-                .timestamp_index(1)
+                .timestamp_index(Some(1))
                 .build()
                 .unwrap(),
         )

@@ -19,7 +19,7 @@ impl TryFrom<RawSchema> for Schema {
     fn try_from(raw: RawSchema) -> Result<Schema> {
         let mut builder = SchemaBuilder::try_from(raw.column_schemas)?.version(raw.version);
         if let Some(idx) = raw.timestamp_index {
-            builder = builder.timestamp_index(idx);
+            builder = builder.timestamp_index(Some(idx));
         }
         builder.build()
     }
@@ -48,7 +48,7 @@ mod tests {
         ];
         let schema = SchemaBuilder::try_from(column_schemas)
             .unwrap()
-            .timestamp_index(1)
+            .timestamp_index(Some(1))
             .version(123)
             .build()
             .unwrap();

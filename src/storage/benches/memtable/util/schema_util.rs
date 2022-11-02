@@ -7,7 +7,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 pub type ColumnDef<'a> = (&'a str, LogicalTypeId, bool);
 
 pub fn new_schema(column_defs: &[ColumnDef], timestamp_index: Option<usize>) -> Schema {
-    let column_schemas = column_defs
+    let column_schemas: Vec<_> = column_defs
         .iter()
         .map(|column_def| {
             let datatype = column_def.1.data_type();
@@ -15,15 +15,11 @@ pub fn new_schema(column_defs: &[ColumnDef], timestamp_index: Option<usize>) -> 
         })
         .collect();
 
-    if let Some(index) = timestamp_index {
-        SchemaBuilder::try_from(column_schemas)
-            .unwrap()
-            .timestamp_index(index)
-            .build()
-            .unwrap()
-    } else {
-        Schema::new(column_schemas)
-    }
+    SchemaBuilder::try_from(column_schemas)
+        .unwrap()
+        .timestamp_index(timestamp_index)
+        .build()
+        .unwrap()
 }
 
 pub fn new_schema_ref(column_defs: &[ColumnDef], timestamp_index: Option<usize>) -> SchemaRef {

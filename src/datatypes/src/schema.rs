@@ -239,12 +239,11 @@ impl SchemaBuilder {
         })
     }
 
-    // TODO(yingwen): Consider change to take Option as input.
     /// Set timestamp index.
     ///
     /// The validation of timestamp column is done in `build()`.
-    pub fn timestamp_index(mut self, timestamp_index: usize) -> Self {
-        self.timestamp_index = Some(timestamp_index);
+    pub fn timestamp_index(mut self, timestamp_index: Option<usize>) -> Self {
+        self.timestamp_index = timestamp_index;
         self
     }
 
@@ -551,7 +550,10 @@ mod tests {
         assert_eq!(0, schema.num_columns());
         assert!(schema.is_empty());
 
-        assert!(SchemaBuilder::default().timestamp_index(0).build().is_err());
+        assert!(SchemaBuilder::default()
+            .timestamp_index(Some(0))
+            .build()
+            .is_err());
     }
 
     #[test]
@@ -604,7 +606,7 @@ mod tests {
         ];
         let schema = SchemaBuilder::try_from(column_schemas.clone())
             .unwrap()
-            .timestamp_index(1)
+            .timestamp_index(Some(1))
             .version(123)
             .build()
             .unwrap();
@@ -626,17 +628,17 @@ mod tests {
         ];
         assert!(SchemaBuilder::try_from(column_schemas.clone())
             .unwrap()
-            .timestamp_index(0)
+            .timestamp_index(Some(0))
             .build()
             .is_err());
         assert!(SchemaBuilder::try_from(column_schemas.clone())
             .unwrap()
-            .timestamp_index(1)
+            .timestamp_index(Some(1))
             .build()
             .is_err());
         assert!(SchemaBuilder::try_from(column_schemas)
             .unwrap()
-            .timestamp_index(1)
+            .timestamp_index(Some(1))
             .build()
             .is_err());
     }

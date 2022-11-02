@@ -23,13 +23,12 @@ pub fn new_schema_with_version(
         })
         .collect();
 
-    let mut builder = SchemaBuilder::try_from(column_schemas)
+    SchemaBuilder::try_from(column_schemas)
         .unwrap()
-        .version(version);
-    if let Some(index) = timestamp_index {
-        builder = builder.timestamp_index(index);
-    }
-    builder.build().unwrap()
+        .timestamp_index(timestamp_index)
+        .version(version)
+        .build()
+        .unwrap()
 }
 
 pub fn new_schema_ref(column_defs: &[ColumnDef], timestamp_index: Option<usize>) -> SchemaRef {

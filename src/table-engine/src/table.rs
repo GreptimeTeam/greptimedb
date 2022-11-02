@@ -339,11 +339,9 @@ fn build_table_schema_with_new_columns(
         .context(SchemaBuildSnafu {
             msg: "Failed to convert column schemas into table schema",
         })?
+        .timestamp_index(table_schema.timestamp_index())
         .version(table_schema.version() + 1);
 
-    if let Some(index) = table_schema.timestamp_index() {
-        builder = builder.timestamp_index(index);
-    }
     for (k, v) in table_schema.arrow_schema().metadata.iter() {
         builder = builder.add_metadata(k, v);
     }
