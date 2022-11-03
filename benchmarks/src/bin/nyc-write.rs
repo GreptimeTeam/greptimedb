@@ -1,4 +1,10 @@
+//! Use the taxi trip records from New York City dataset to bench. You can download the dataset from
+//! [here](https://www1.nyc.gov/site/tlc/about/tlc-trip-record-data.page).
+
+#![feature(once_cell)]
+
 use std::{
+    cell::LazyCell,
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
@@ -17,25 +23,44 @@ use client::{
         codec::InsertBatch, column::Values, insert_expr, Column, ColumnDataType, ColumnDef,
         CreateExpr, InsertExpr,
     },
-    Client, Database,
+    Client, Database, Select,
 };
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::{
     arrow::{ArrowReader, ParquetFileArrowReader},
-    file::serialized_reader::SerializedFileReader,
+    file::{reader::FileReader, serialized_reader::SerializedFileReader},
 };
+use tokio::task::JoinSet;
 
 const CATALOG_NAME: &str = "greptime";
 const SCHEMA_NAME: &str = "public";
 const TABLE_NAME: &str = "nyc_taxi";
 
+const PROGRESS_BAR: LazyCell<MultiProgress> = LazyCell::new(|| MultiProgress::new());
+const PROGRESS_BAR_STYLE: LazyCell<ProgressStyle> = LazyCell::new(|| {
+    ProgressStyle::with_template("[{elapsed_precise}] {bar:60.cyan/blue} {pos:>7}/{len:7} {msg}")
+        .unwrap()
+        .progress_chars("##-")
+});
+
 #[derive(Parser)]
 #[command(name = "NYC benchmark runner")]
 struct Args {
+    /// Path to the dataset
     #[arg(short, long)]
     path: String,
 
-    #[arg(short = 's', long = "batch-size")]
+    /// Batch size of insert request.
+    #[arg(short = 's', long = "batch-size", default_value_t = 4096)]
     batch_size: usize,
+
+    /// Number of client threads on write (parallel on file level)
+    #[arg(short = 't', long = "thread-num", default_value_t = 4)]
+    thread_num: usize,
+
+    /// Number of query iteration
+    #[arg(short = 'i', long = "iter-num", default_value_t = 3)]
+    iter_num: usize,
 }
 
 fn get_file_list<P: AsRef<Path>>(path: P) -> Vec<PathBuf> {
@@ -45,20 +70,22 @@ fn get_file_list<P: AsRef<Path>>(path: P) -> Vec<PathBuf> {
         .collect()
 }
 
-async fn write_data(batch_size: usize, db: &mut Database, path: PathBuf) -> u128 {
-    let file = std::fs::File::open(path).unwrap();
-    let mut record_batch_reader =
-        ParquetFileArrowReader::new(Arc::new(SerializedFileReader::new(file).unwrap()))
-            .get_record_reader(batch_size)
-            .unwrap();
+async fn write_data(batch_size: usize, db: &Database, path: PathBuf) -> u128 {
+    let file = std::fs::File::open(&path).unwrap();
+    let file_reader = Arc::new(SerializedFileReader::new(file).unwrap());
+    let row_num = file_reader.metadata().file_metadata().num_rows();
+    let mut record_batch_reader = ParquetFileArrowReader::new(file_reader)
+        .get_record_reader(batch_size)
+        .unwrap();
+    let progress_bar = PROGRESS_BAR.add(ProgressBar::new(row_num as _));
+    progress_bar.set_style(PROGRESS_BAR_STYLE.clone());
+    progress_bar.set_message(format!("{:?}", path));
 
     let mut total_rpc_elapsed_ms = 0;
 
-    let mut cnt = 0;
     while let Some(record_batch) = record_batch_reader.next() {
-        println!("{:?}, {}", Instant::now(), cnt);
         let record_batch = record_batch.unwrap();
-        cnt += record_batch.num_rows();
+        let row_count = record_batch.num_rows();
         let insert_batch = convert_record_batch(record_batch).into();
         let insert_expr = InsertExpr {
             table_name: TABLE_NAME.to_string(),
@@ -71,8 +98,13 @@ async fn write_data(batch_size: usize, db: &mut Database, path: PathBuf) -> u128
         db.insert(insert_expr).await.unwrap();
         let elapsed = now.elapsed();
         total_rpc_elapsed_ms += elapsed.as_millis();
+        progress_bar.inc(row_count as _);
     }
 
+    progress_bar.finish_with_message(format!(
+        "file {:?} done in {}ms",
+        path, total_rpc_elapsed_ms
+    ));
     total_rpc_elapsed_ms
 }
 
@@ -304,22 +336,63 @@ fn create_table_expr() -> CreateExpr {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn query_set() -> HashMap<String, String> {
+    let mut ret = HashMap::new();
+
+    ret.insert(
+        "count_all".to_string(),
+        format!("SELECT COUNT(*) FROM {};", TABLE_NAME),
+    );
+
+    ret.insert(
+        "fare_amt_by_passenger".to_string(),
+        format!("SELECT passenger_count, MIN(fare_amount), MAX(fare_amount), SUM(fare_amount) FROM {} GROUP BY passenger_count",TABLE_NAME)
+    );
+
+    ret
+}
+
+async fn do_query(num_iter: usize, db: &Database) {
+    for (query_name, query) in query_set() {
+        for i in 0..num_iter {
+            let now = Instant::now();
+            let _res = db.select(Select::Sql(query.clone())).await.unwrap();
+            let elapsed = now.elapsed();
+            println!(
+                "query {}, iteration {}: {}ms",
+                query_name,
+                i,
+                elapsed.as_millis()
+            );
+        }
+    }
+}
+
+fn main() {
     let args = Args::parse();
 
-    let file_list = get_file_list(args.path);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(args.thread_num)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let file_list = get_file_list(args.path);
+            let mut write_jobs = JoinSet::new();
 
-    let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
-    let admin = Admin::new("admin", client.clone());
-    let mut db = Database::new("greptime", client);
+            let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
+            let admin = Admin::new("admin", client.clone());
 
-    let create_table_result = admin.create(create_table_expr()).await;
-    println!("Create table result: {:?}", create_table_result);
+            let create_table_result = admin.create(create_table_expr()).await;
+            println!("Create table result: {:?}", create_table_result);
 
-    for path in file_list {
-        println!("going to write {:?}", path);
-        let elapsed_ms = write_data(args.batch_size, &mut db, path).await;
-        println!("Finished after {}ms", elapsed_ms);
-    }
+            for path in file_list {
+                let db = Database::new("greptime", client.clone());
+                write_jobs.spawn(async move { write_data(args.batch_size, &db, path).await });
+            }
+            while let Some(_) = write_jobs.join_next().await {}
+
+            let db = Database::new("greptime", client.clone());
+            do_query(args.iter_num, &db).await;
+        })
 }
