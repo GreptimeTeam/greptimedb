@@ -42,8 +42,8 @@ impl BatchHandler {
 
         let (tx, rx) = oneshot::channel();
         let query_handler = self.query_handler.clone();
-        let join_handle = self.runtime.spawn(async move {
-            // execute request in another runtime.
+        let _ = self.runtime.spawn(async move {
+            // execute request in another runtime to prevent the execution from being cancelled unexpected by tonic runtime.
             let mut result = vec![];
             for db_req in batch_req.databases {
                 for obj_expr in db_req.exprs {
@@ -55,7 +55,8 @@ impl BatchHandler {
             // Ignore send result. Usually an error indicates the rx is dropped (request timeouted).
             let _ = tx.send(result);
         });
-        drop(join_handle);
+        // Safety: An early-dropped tx usually indicates a serious problem (like panic). This unwrap
+        // is used to poison the upper layer.
         db_resp.results = rx.await.unwrap().into_iter().collect::<Result<_>>()?;
         batch_resp.databases.push(db_resp);
         Ok(batch_resp)
