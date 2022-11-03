@@ -18,7 +18,7 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
-    let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
+    let client = Client::with_urls(vec!["127.0.0.1:3001"]);
 
     let create_table_expr = CreateExpr {
         catalog_name: Some("greptime".to_string()),

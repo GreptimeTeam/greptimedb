@@ -28,7 +28,7 @@ impl Instance {
     async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> Result<()> {
         let expr = data_point.as_grpc_insert();
 
-        let result = self.db.insert(expr.clone()).await;
+        let result = self.database().insert(expr.clone()).await;
 
         let object_result = match result {
             Ok(result) => result,

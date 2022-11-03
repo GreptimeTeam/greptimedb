@@ -11,7 +11,7 @@ use crate::instance::Instance;
 impl InfluxdbLineProtocolHandler for Instance {
     async fn exec(&self, request: &InfluxdbRequest) -> servers::error::Result<()> {
         let exprs: Vec<InsertExpr> = request.try_into()?;
-        self.db
+        self.database()
             .batch_insert(exprs)
             .await
             .map_err(BoxedError::new)
