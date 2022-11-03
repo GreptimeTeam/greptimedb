@@ -1,12 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
-use datatypes::schema::{RawSchema, Schema, SchemaRef};
+use datatypes::schema::{RawSchema, Schema, SchemaBuilder, SchemaRef};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use snafu::{ensure, ResultExt};
 use store_api::storage::ColumnId;
+
+use crate::error::{self, Result};
+use crate::requests::{AddColumnRequest, AlterKind};
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -42,7 +46,10 @@ pub enum TableType {
 /// Identifier of the table.
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Default)]
 pub struct TableIdent {
+    /// Unique id of this table.
     pub table_id: TableId,
+    /// Version of the table, bumped when metadata (such as schema) of the table
+    /// being changed.
     pub version: TableVersion,
 }
 
@@ -69,7 +76,7 @@ pub struct TableMeta {
 }
 
 impl TableMetaBuilder {
-    fn default_value_indices(&self) -> Result<Vec<usize>, String> {
+    fn default_value_indices(&self) -> std::result::Result<Vec<usize>, String> {
         match (&self.primary_key_indices, &self.schema) {
             (Some(v), Some(schema)) => {
                 let column_schemas = schema.column_schemas();
@@ -96,13 +103,183 @@ impl TableMeta {
             .iter()
             .map(|idx| &columns_schemas[*idx].name)
     }
+
+    /// Returns the new [TableMetaBuilder] after applying given `alter_kind`.
+    pub fn alter(&self, table_name: &str, alter_kind: AlterKind) -> Result<TableMetaBuilder> {
+        match alter_kind {
+            AlterKind::AddColumns { columns } => self.add_columns_to_meta(table_name, columns),
+            AlterKind::RemoveColumns { names } => self.remove_columns_from_meta(table_name, &names),
+        }
+    }
+
+    fn new_meta_builder(&self) -> TableMetaBuilder {
+        let mut builder = TableMetaBuilder::default();
+        builder
+            .engine(&self.engine)
+            .engine_options(self.engine_options.clone())
+            .options(self.options.clone())
+            .created_on(self.created_on);
+
+        builder
+    }
+
+    fn add_columns_to_meta(
+        &self,
+        table_name: &str,
+        requests: Vec<AddColumnRequest>,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        // Check whether columns to add are already existing.
+        for request in &requests {
+            let column_name = &request.column_schema.name;
+            ensure!(
+                table_schema.column_schema_by_name(column_name).is_none(),
+                error::ColumnExistsSnafu {
+                    column_name,
+                    table_name,
+                }
+            );
+        }
+
+        // Collect names of columns to add for error message.
+        let mut column_names = Vec::with_capacity(requests.len());
+        let mut primary_key_indices = self.primary_key_indices.clone();
+        let mut columns = Vec::with_capacity(table_schema.num_columns() + requests.len());
+        columns.extend_from_slice(table_schema.column_schemas());
+        // Append new columns to the end of column list.
+        for request in requests {
+            column_names.push(request.column_schema.name.clone());
+            if request.is_key {
+                // If a key column is added, we also need to store its index in primary_key_indices.
+                primary_key_indices.push(columns.len());
+            }
+            columns.push(request.column_schema);
+        }
+
+        let mut builder = SchemaBuilder::try_from(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!(
+                    "Failed to convert column schemas into schema for table {}",
+                    table_name
+                ),
+            })?
+            .timestamp_index(table_schema.timestamp_index())
+            // Also bump the schema version.
+            .version(table_schema.version() + 1);
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!(
+                "Table {} cannot add new columns {:?}",
+                table_name, column_names
+            ),
+        })?;
+
+        // value_indices would be generated automatically.
+        meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(primary_key_indices);
+
+        Ok(meta_builder)
+    }
+
+    fn remove_columns_from_meta(
+        &self,
+        table_name: &str,
+        column_names: &[String],
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let column_names: HashSet<_> = column_names.iter().collect();
+        let mut meta_builder = self.new_meta_builder();
+
+        let mut timestamp_index = table_schema.timestamp_index();
+        // Check whether columns are existing and not in primary key index.
+        for column_name in &column_names {
+            if let Some(index) = table_schema.column_index_by_name(column_name) {
+                // This is a linear search, but since there won't be too much columns, the performance should
+                // be acceptable.
+                ensure!(
+                    !self.primary_key_indices.contains(&index),
+                    error::RemoveColumnInIndexSnafu {
+                        column_name: *column_name,
+                        table_name,
+                    }
+                );
+
+                if let Some(old_index) = timestamp_index {
+                    // Not allowed to remove column in timestamp index.
+                    ensure!(
+                        index != old_index,
+                        error::RemoveColumnInIndexSnafu {
+                            column_name: table_schema.column_name_by_index(old_index),
+                            table_name,
+                        }
+                    );
+
+                    if index < old_index {
+                        // Column before timestamp column would be removed, need to left shift the
+                        // index of the timestamp column.
+                        timestamp_index = Some(old_index - 1);
+                    }
+                }
+            } else {
+                return error::ColumnNotExistsSnafu {
+                    column_name: *column_name,
+                    table_name,
+                }
+                .fail()?;
+            }
+        }
+
+        // Collect columns after removal.
+        let columns = table_schema
+            .column_schemas()
+            .iter()
+            .filter(|column_schema| !column_names.contains(&column_schema.name))
+            .cloned()
+            .collect();
+
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!(
+                    "Failed to convert column schemas into schema for table {}",
+                    table_name
+                ),
+            })?
+            // Need to use the newly computed timestamp index.
+            .timestamp_index(timestamp_index)
+            // Also bump the schema version.
+            .version(table_schema.version() + 1);
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!(
+                "Table {} cannot add remove columns {:?}",
+                table_name, column_names
+            ),
+        })?;
+
+        // Since removing columns in primary index is not allowed, so we could reuse the old
+        // primary_key_indices
+        meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Builder)]
 #[builder(pattern = "owned")]
 pub struct TableInfo {
+    /// Id and version of the table.
     #[builder(default, setter(into))]
     pub ident: TableIdent,
+    /// Name of the table.
     #[builder(setter(into))]
     pub name: String,
     /// Comment of the table.

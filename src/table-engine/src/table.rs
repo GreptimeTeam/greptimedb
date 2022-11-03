@@ -12,7 +12,7 @@ use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream};
 use common_telemetry::logging;
-use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use datatypes::schema::ColumnSchema;
 use datatypes::vectors::VectorRef;
 use futures::task::{Context, Poll};
 use futures::Stream;
@@ -20,11 +20,12 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ChunkReader, ColumnDescriptorBuilder, PutOperation,
-    ReadContext, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, ChunkReader, ColumnDescriptorBuilder, ColumnId,
+    PutOperation, ReadContext, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot, WriteContext,
+    WriteRequest,
 };
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
-use table::metadata::{FilterPushDownType, TableInfoRef, TableMetaBuilder};
+use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
 use table::table::scan::SimpleTableScan;
 use table::{
@@ -35,8 +36,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{
     self, ColumnsNotExistSnafu, ProjectedColumnNotFoundSnafu, Result, ScanTableManifestSnafu,
-    SchemaBuildSnafu, TableInfoNotFoundSnafu, UnsupportedDefaultConstraintSnafu,
-    UpdateTableManifestSnafu,
+    TableInfoNotFoundSnafu, UnsupportedDefaultConstraintSnafu, UpdateTableManifestSnafu,
 };
 use crate::manifest::action::*;
 use crate::manifest::TableManifest;
@@ -186,17 +186,7 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(Arc::new(SimpleTableScan::new(stream)))
     }
 
-    // Alter table changes the schemas of the table. The altering happens as cloning a new schema,
-    // change the new one, and swap the old. Though we can change the schema in place, considering
-    // the complex interwinding of inner data representation of schema, I think it's safer to
-    // change it like this to avoid partial inconsistent during the altering. For example, schema's
-    // `name_to_index` field must changed with `column_schemas` synchronously. If we add or remove
-    // columns from `column_schemas` *and then* update the `name_to_index`, there's a slightly time
-    // window of an inconsistency of the two field, which might bring some hard to trace down
-    // concurrency related bugs or failures. (Of course we could introduce some guards like readwrite
-    // lock to protect the consistency of schema altering, but that would hurt the performance of
-    // schema reads, and the reads are the dominant operation of schema. At last, altering is
-    // performed far lesser frequent.)
+    /// Alter table changes the schemas of the table.
     async fn alter(&self, req: AlterTableRequest) -> TableResult<()> {
         let _lock = self.alter_lock.lock().await;
 
@@ -204,82 +194,20 @@ impl<R: Region> Table for MitoTable<R> {
         let table_name = &table_info.name;
         let table_meta = &table_info.meta;
 
-        let (alter_op, table_schema, new_columns_num) = match &req.alter_kind {
-            AlterKind::AddColumns {
-                columns: new_columns,
-            } => {
-                let columns = new_columns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, add_column)| {
-                        let new_column = &add_column.column_schema;
+        let (alter_op, next_column_id) = self.convert_alter_kind(&req.alter_kind)?;
 
-                        let desc = ColumnDescriptorBuilder::new(
-                            table_meta.next_column_id + i as u32,
-                            &new_column.name,
-                            new_column.data_type.clone(),
-                        )
-                        .is_nullable(new_column.is_nullable())
-                        .default_constraint(new_column.default_constraint().cloned())
-                        .build()
-                        .context(error::BuildColumnDescriptorSnafu {
-                            table_name,
-                            column_name: &new_column.name,
-                        })?;
-
-                        Ok(AddColumn {
-                            desc,
-                            is_key: add_column.is_key,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                let alter_op = AlterOperation::AddColumns { columns };
-
-                // TODO(yingwen): [alter] Better way to alter the schema struct. In fact the column order
-                // in table schema could differ from the region schema, so we could just push this column
-                // to the back of the schema (as last column).
-                let table_schema = build_table_schema_with_new_columns(
-                    table_name,
-                    &table_meta.schema,
-                    new_columns,
-                )?;
-
-                (alter_op, table_schema, new_columns.len() as u32)
-            }
-            // TODO(dennis): supports removing columns etc.
-            _ => unimplemented!(),
-        };
-
-        let new_meta = TableMetaBuilder::default()
-            .schema(table_schema.clone())
-            .engine(&table_meta.engine)
-            .next_column_id(table_meta.next_column_id + new_columns_num) // Bump next column id.
-            .primary_key_indices(table_meta.primary_key_indices.clone())
+        let new_meta = table_meta
+            .alter(table_name, req.alter_kind)?
+            // Update next_column_id for the table meta.
+            .next_column_id(next_column_id)
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
-
         let mut new_info = TableInfo::clone(&*table_info);
+        // Increase version of the table.
         new_info.ident.version = table_info.ident.version + 1;
         new_info.meta = new_meta;
 
-        // FIXME(yingwen): [alter] Alter the region, now this is a temporary implementation.
-        let region = self.region();
-        let region_meta = region.in_memory_metadata();
-        let alter_req = AlterRequest {
-            operation: alter_op,
-            version: region_meta.version(),
-        };
-
-        logging::debug!(
-            "start altering region {} of table {}, with request {:?}",
-            region.name(),
-            table_name,
-            alter_req,
-        );
-        region.alter(alter_req).await.map_err(TableError::new)?;
-
-        // then alter table info
+        // Persist the alteration to the manifest.
         logging::debug!(
             "start updating the manifest of table {} with new table info {:?}",
             table_name,
@@ -295,60 +223,33 @@ impl<R: Region> Table for MitoTable<R> {
             .context(UpdateTableManifestSnafu {
                 table_name: &self.table_info().name,
             })?;
+
+        // TODO(yingwen): Error handling. Maybe the region need to provide a method to
+        // validate the request first.
+        let region = self.region();
+        let region_meta = region.in_memory_metadata();
+        let alter_req = AlterRequest {
+            operation: alter_op,
+            version: region_meta.version(),
+        };
+        // Alter the region.
+        logging::debug!(
+            "start altering region {} of table {}, with request {:?}",
+            region.name(),
+            table_name,
+            alter_req,
+        );
+        region.alter(alter_req).await.map_err(TableError::new)?;
+
+        // Update in memory metadata of the table.
         self.set_table_info(new_info);
 
-        // TODO(LFC): Think of a way to properly handle the metadata integrity between region and table.
-        // Currently there are no "transactions" to alter the metadata of region and table together,
-        // they are altered in sequence. That means there might be cases where the metadata of region
-        // is altered while the table's is not. Then the metadata integrity between region and
-        // table cannot be hold.
         Ok(())
     }
 
     fn supports_filter_pushdown(&self, _filter: &Expr) -> table::error::Result<FilterPushDownType> {
         Ok(FilterPushDownType::Inexact)
     }
-}
-
-fn build_table_schema_with_new_columns(
-    table_name: &str,
-    table_schema: &SchemaRef,
-    new_columns: &[AddColumnRequest],
-) -> Result<SchemaRef> {
-    let mut columns = table_schema.column_schemas().to_vec();
-
-    for add_column in new_columns {
-        let new_column = &add_column.column_schema;
-        if table_schema
-            .column_schema_by_name(&new_column.name)
-            .is_some()
-        {
-            return error::ColumnExistsSnafu {
-                column_name: &new_column.name,
-                table_name,
-            }
-            .fail()?;
-        }
-        columns.push(new_column.clone());
-    }
-
-    // Right now we are not support adding the column
-    // before or after some column, so just clone a new schema like this.
-    // TODO(LFC): support adding column before or after some column
-    let mut builder = SchemaBuilder::try_from_columns(columns)
-        .context(SchemaBuildSnafu {
-            msg: "Failed to convert column schemas into table schema",
-        })?
-        .timestamp_index(table_schema.timestamp_index())
-        .version(table_schema.version() + 1);
-
-    for (k, v) in table_schema.arrow_schema().metadata.iter() {
-        builder = builder.add_metadata(k, v);
-    }
-    let new_schema = Arc::new(builder.build().with_context(|_| error::SchemaBuildSnafu {
-        msg: format!("cannot add new columns {:?}", new_columns),
-    })?);
-    Ok(new_schema)
 }
 
 struct ChunkStream {
@@ -449,7 +350,7 @@ impl<R: Region> MitoTable<R> {
     ) -> Result<MitoTable<R>> {
         let manifest = TableManifest::new(&table_manifest_dir(table_name), object_store);
 
-        // TODO(dennis): save  manifest version into catalog?
+        // TODO(dennis): save manifest version into catalog?
         let _manifest_version = manifest
             .update(TableMetaActionList::with_action(TableMetaAction::Change(
                 Box::new(TableChange {
@@ -561,59 +462,82 @@ impl<R: Region> MitoTable<R> {
         // TODO(dennis): use manifest version in catalog ?
         (manifest::MIN_VERSION, manifest::MAX_VERSION)
     }
+
+    /// Convert the [`AlterKind`] into [`AlterOperation`].
+    ///
+    /// Returns the `AlterOperation` and next column id for the table.
+    fn convert_alter_kind(&self, alter_kind: &AlterKind) -> Result<(AlterOperation, ColumnId)> {
+        match alter_kind {
+            AlterKind::AddColumns { columns } => self.convert_add_columns(columns),
+            AlterKind::RemoveColumns { names } => self.convert_remove_columns(names),
+        }
+    }
+
+    /// Convert add column `requests` to [`AlterOperation`].
+    ///
+    /// Returns the converted [`AlterOperation`] and next column id for the table.
+    fn convert_add_columns(
+        &self,
+        requests: &[AddColumnRequest],
+    ) -> Result<(AlterOperation, ColumnId)> {
+        let table_info = self.table_info();
+        let table_name = &table_info.name;
+        let table_meta = &table_info.meta;
+
+        let columns = requests
+            .iter()
+            .enumerate()
+            .map(|(i, request)| {
+                let new_column = &request.column_schema;
+
+                let desc = ColumnDescriptorBuilder::new(
+                    table_meta.next_column_id + i as ColumnId,
+                    &new_column.name,
+                    new_column.data_type.clone(),
+                )
+                .is_nullable(new_column.is_nullable())
+                .default_constraint(new_column.default_constraint().cloned())
+                .build()
+                .context(error::BuildColumnDescriptorSnafu {
+                    table_name,
+                    column_name: &new_column.name,
+                })?;
+
+                Ok(AddColumn {
+                    desc,
+                    is_key: request.is_key,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let next_column_id = table_meta.next_column_id + columns.len() as ColumnId;
+        let alter_op = AlterOperation::AddColumns { columns };
+
+        Ok((alter_op, next_column_id))
+    }
+
+    /// Convert `names` of columns to remove to [`AlterOperation`].
+    ///
+    /// Returns the converted [`AlterOperation`] and next column id for the table.
+    fn convert_remove_columns(&self, names: &[String]) -> Result<(AlterOperation, ColumnId)> {
+        let alter_op = AlterOperation::DropColumns {
+            names: names.to_vec(),
+        };
+
+        let table_info = self.table_info();
+
+        // Just reuse old `next_column_id`.
+        Ok((alter_op, table_info.meta.next_column_id))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use datatypes::prelude::ConcreteDataType;
-
     use super::*;
-    use crate::table::test_util;
 
     #[test]
     fn test_table_manifest_dir() {
         assert_eq!("demo/manifest/", table_manifest_dir("demo"));
         assert_eq!("numbers/manifest/", table_manifest_dir("numbers"));
-    }
-
-    #[test]
-    fn test_build_table_schema_with_new_column() {
-        let table_info = test_util::build_test_table_info();
-        let table_name = &table_info.name;
-        let table_meta = &table_info.meta;
-        let table_schema = &table_meta.schema;
-
-        let new_column = ColumnSchema::new("host", ConcreteDataType::string_datatype(), true);
-
-        let new_columns = vec![AddColumnRequest {
-            column_schema: new_column,
-            is_key: false,
-        }];
-        let result = build_table_schema_with_new_columns(table_name, table_schema, &new_columns);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Column host already exists in table demo"));
-
-        let new_column = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
-        let new_columns = vec![AddColumnRequest {
-            column_schema: new_column.clone(),
-            is_key: false,
-        }];
-        let new_schema =
-            build_table_schema_with_new_columns(table_name, table_schema, &new_columns).unwrap();
-
-        assert_eq!(new_schema.num_columns(), table_schema.num_columns() + 1);
-        assert_eq!(
-            new_schema.column_schemas().split_last().unwrap(),
-            (&new_column, table_schema.column_schemas())
-        );
-
-        assert_eq!(
-            new_schema.timestamp_column(),
-            table_schema.timestamp_column()
-        );
-        assert_eq!(new_schema.version(), table_schema.version() + 1);
     }
 }

@@ -51,6 +51,38 @@ pub enum InnerError {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Column {} already exists in table {}", column_name, table_name))]
+    ColumnExists {
+        column_name: String,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to build schema, msg: {}, source: {}", msg, source))]
+    SchemaBuild {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+        msg: String,
+    },
+
+    #[snafu(display("Column {} not exists in table {}", column_name, table_name))]
+    ColumnNotExists {
+        column_name: String,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Not allowed to remove column {} in index from table {}",
+        column_name,
+        table_name
+    ))]
+    RemoveColumnInIndex {
+        column_name: String,
+        table_name: String,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for InnerError {
@@ -60,8 +92,13 @@ impl ErrorExt for InnerError {
             | InnerError::PollStream { .. }
             | InnerError::SchemaConversion { .. }
             | InnerError::TableProjection { .. } => StatusCode::EngineExecuteQuery,
-            InnerError::MissingColumn { .. } => StatusCode::InvalidArguments,
+            InnerError::MissingColumn { .. } | InnerError::RemoveColumnInIndex { .. } => {
+                StatusCode::InvalidArguments
+            }
             InnerError::TablesRecordBatch { .. } => StatusCode::Unexpected,
+            InnerError::ColumnExists { .. } => StatusCode::TableColumnExists,
+            InnerError::SchemaBuild { source, .. } => source.status_code(),
+            InnerError::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
         }
     }
 

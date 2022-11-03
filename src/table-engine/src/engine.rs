@@ -859,21 +859,27 @@ mod tests {
             .as_any()
             .downcast_ref::<MitoTable<MockRegion>>()
             .unwrap();
-        let table_info = table.table_info();
-        let old_info = (*table_info).clone();
+        let old_info = table.table_info();
         let old_meta = &old_info.meta;
         let old_schema = &old_meta.schema;
 
-        let new_column = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
         let req = AlterTableRequest {
             catalog_name: None,
             schema_name: None,
             table_name: TABLE_NAME.to_string(),
             alter_kind: AlterKind::AddColumns {
-                columns: vec![AddColumnRequest {
-                    column_schema: new_column.clone(),
-                    is_key: false,
-                }],
+                columns: vec![
+                    AddColumnRequest {
+                        column_schema: new_tag.clone(),
+                        is_key: false,
+                    },
+                    AddColumnRequest {
+                        column_schema: new_field.clone(),
+                        is_key: true,
+                    },
+                ],
             },
         };
         let table = table_engine
@@ -889,13 +895,21 @@ mod tests {
         let new_meta = &new_info.meta;
         let new_schema = &new_meta.schema;
 
-        assert_eq!(new_schema.num_columns(), old_schema.num_columns() + 1);
+        assert_eq!(new_schema.num_columns(), old_schema.num_columns() + 2);
         assert_eq!(
-            new_schema.column_schemas().split_last().unwrap(),
-            (&new_column, old_schema.column_schemas())
+            &new_schema.column_schemas()[..old_schema.num_columns()],
+            old_schema.column_schemas()
+        );
+        assert_eq!(
+            &new_schema.column_schemas()[old_schema.num_columns()],
+            &new_tag
+        );
+        assert_eq!(
+            &new_schema.column_schemas()[old_schema.num_columns() + 1],
+            &new_field
         );
         assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
         assert_eq!(new_schema.version(), old_schema.version() + 1);
-        assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 1);
+        assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 2);
     }
 }
