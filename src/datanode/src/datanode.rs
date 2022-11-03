@@ -24,11 +24,11 @@ impl Default for ObjectStoreConfig {
 pub struct DatanodeOptions {
     pub http_addr: String,
     pub rpc_addr: String,
-    pub rpc_runtime_size: u32,
+    pub rpc_runtime_size: usize,
     pub mysql_addr: String,
-    pub mysql_runtime_size: u32,
+    pub mysql_runtime_size: usize,
     pub postgres_addr: String,
-    pub postgres_runtime_size: u32,
+    pub postgres_runtime_size: usize,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
 }

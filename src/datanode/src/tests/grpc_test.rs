@@ -36,8 +36,10 @@ async fn setup_grpc_server(name: &str, port: usize) -> (String, TestGuard, Arc<G
             .unwrap(),
     );
 
+    let grpc_server = Arc::new(GrpcServer::new(instance.clone(), instance, runtime));
+    let grpc_server_clone = grpc_server.clone();
+
     tokio::spawn(async move {
-        let mut grpc_server = GrpcServer::new(instance.clone(), instance, runtime);
         let addr = addr_cloned.parse::<SocketAddr>().unwrap();
         grpc_server_clone.start(addr).await.unwrap()
     });

@@ -40,20 +40,23 @@ impl BatchHandler {
         }
         batch_resp.admins.push(admin_resp);
 
-        for db_req in batch_req.databases {
-            for obj_expr in db_req.exprs {
-                let (tx, rx) = oneshot::channel();
-                let query_handler = self.query_handler.clone();
-                let join_handle = self.runtime.spawn(async move {
-                    let res = query_handler.do_query(obj_expr).await;
-                    tx.send(res)
-                });
-                drop(join_handle);
-                let object_resp = rx.await.unwrap()?;
+        let (tx, rx) = oneshot::channel();
+        let query_handler = self.query_handler.clone();
+        let join_handle = self.runtime.spawn(async move {
+            // execute request in another runtime.
+            let mut result = vec![];
+            for db_req in batch_req.databases {
+                for obj_expr in db_req.exprs {
+                    let object_resp = query_handler.do_query(obj_expr).await;
 
-                db_resp.results.push(object_resp);
+                    result.push(object_resp);
+                }
             }
-        }
+            // Ignore send result. Usually an error indicates the rx is dropped (request timeouted).
+            let _ = tx.send(result);
+        });
+        drop(join_handle);
+        db_resp.results = rx.await.unwrap().into_iter().collect::<Result<_>>()?;
         batch_resp.databases.push(db_resp);
         Ok(batch_resp)
     }
