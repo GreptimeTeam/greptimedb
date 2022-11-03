@@ -56,7 +56,7 @@ macro_rules! json_err {
     }};
 
     ($msg: expr, $code: expr) => {{
-        return Json(JsonResponse::with_error($msg, $code));
+        return Json(JsonResponse::with_error($msg.to_string(), $code));
     }};
 }
 
@@ -79,7 +79,7 @@ pub async fn scripts(
     let name = params.name.as_ref();
 
     if name.is_none() || name.unwrap().is_empty() {
-        json_err!("Invalid name".to_string(), StatusCode::InvalidArguments);
+        json_err!("Invalid name", StatusCode::InvalidArguments);
     }
     let bytes = unwrap_or_json_err!(hyper::body::to_bytes(body).await);
 
@@ -107,7 +107,7 @@ pub async fn run_script(
     let name = params.name.as_ref();
 
     if name.is_none() || name.unwrap().is_empty() {
-        json_err!("Invalid name".to_string(), StatusCode::InvalidArguments);
+        json_err!("Invalid name", StatusCode::InvalidArguments);
     }
 
     let output = query_handler.execute_script(name.unwrap()).await;
