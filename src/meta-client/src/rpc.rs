@@ -1,5 +1,6 @@
 mod router;
 mod store;
+mod util;
 
 use api::v1::meta::KeyValue as PbKeyValue;
 use api::v1::meta::Peer as PbPeer;
@@ -12,6 +13,10 @@ pub use router::RouteRequest;
 pub use router::RouteResponse;
 pub use router::Table;
 pub use router::TableRoute;
+pub use store::BatchPutRequest;
+pub use store::BatchPutResponse;
+pub use store::CompareAndPutRequest;
+pub use store::CompareAndPutResponse;
 pub use store::DeleteRangeRequest;
 pub use store::DeleteRangeResponse;
 pub use store::PutRequest;

@@ -139,7 +139,7 @@ fn parse_addr(addr: &str) -> Result<SocketAddr> {
 async fn start_server(
     server_and_addr: Option<(Box<dyn Server>, SocketAddr)>,
 ) -> servers::error::Result<Option<SocketAddr>> {
-    if let Some((mut server, addr)) = server_and_addr {
+    if let Some((server, addr)) = server_and_addr {
         server.start(addr).await.map(Some)
     } else {
         Ok(None)

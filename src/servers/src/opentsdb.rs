@@ -85,18 +85,22 @@ impl OpentsdbServer {
 
 #[async_trait]
 impl Server for OpentsdbServer {
-    async fn shutdown(&mut self) -> Result<()> {
+    async fn shutdown(&self) -> Result<()> {
+        if let Some(tx) = &self.notify_shutdown {
+            // Err of broadcast sender does not mean that future calls to send will fail, so
+            // its return value is ignored here.
+            let _ = tx.send(());
+        }
         self.base_server.shutdown().await?;
-        drop(self.notify_shutdown.take());
         Ok(())
     }
 
-    async fn start(&mut self, listening: SocketAddr) -> Result<SocketAddr> {
+    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let (stream, addr) = self.base_server.bind(listening).await?;
 
         let io_runtime = self.base_server.io_runtime();
         let join_handle = tokio::spawn(self.accept(io_runtime, stream));
-        self.base_server.start_with(join_handle)?;
+        self.base_server.start_with(join_handle).await?;
         Ok(addr)
     }
 }

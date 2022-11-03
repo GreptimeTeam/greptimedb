@@ -10,11 +10,13 @@ async-trait = "0.1"
 client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
+common-grpc = { path = "../common/grpc" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../datatypes" }
 openmetrics-parser = "0.4"
 prost = "0.11"
@@ -22,6 +24,7 @@ serde = "1.0"
 servers = { path = "../servers" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
+store-api = { path = "../store-api" }
 table = { path = "../table" }
 tokio = { version = "1.18", features = ["full"] }
 

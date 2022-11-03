@@ -5,17 +5,15 @@ use datatypes::vectors::VectorBuilder;
 use datatypes::vectors::VectorRef;
 use snafu::ensure;
 use snafu::OptionExt;
+use store_api::storage::RegionId;
 use table::requests::InsertRequest;
 
 use crate::error::FindPartitionColumnSnafu;
 use crate::error::FindRegionSnafu;
 use crate::error::InvalidInsertRequestSnafu;
 use crate::error::Result;
-use crate::partition::PartitionRule;
+use crate::partitioning::PartitionRule;
 
-pub type RegionId = u64;
-pub type ColumnName = String;
-pub type ValueList = Vec<Value>;
 pub type DistInsertRequest = HashMap<RegionId, InsertRequest>;
 
 pub struct WriteSpliter<'a, P> {
@@ -108,7 +106,7 @@ fn find_partitioning_values(
         .collect()
 }
 
-fn partition_values(partition_columns: &[VectorRef], idx: usize) -> ValueList {
+fn partition_values(partition_columns: &[VectorRef], idx: usize) -> Vec<Value> {
     partition_columns
         .iter()
         .map(|column| column.get(idx))
@@ -170,8 +168,9 @@ mod tests {
 
     use super::{
         check_req, find_partitioning_values, partition_insert_request, partition_values,
-        ColumnName, PartitionRule, RegionId, WriteSpliter,
+        PartitionRule, RegionId, WriteSpliter,
     };
+    use crate::partitioning::PartitionExpr;
 
     #[test]
     fn test_insert_req_check() {
@@ -409,11 +408,11 @@ mod tests {
     impl PartitionRule for MockPartitionRule {
         type Error = String;
 
-        fn partition_columns(&self) -> Vec<ColumnName> {
+        fn partition_columns(&self) -> Vec<String> {
             vec!["id".to_string()]
         }
 
-        fn find_region(&self, values: &super::ValueList) -> Result<RegionId, Self::Error> {
+        fn find_region(&self, values: &[Value]) -> Result<RegionId, Self::Error> {
             let val = values.get(0).unwrap().to_owned();
             let id_1: Value = 1_i16.into();
             let id_2: Value = 2_i16.into();
@@ -425,6 +424,10 @@ mod tests {
                 return Ok(1);
             }
             unreachable!()
+        }
+
+        fn find_regions(&self, _: &[PartitionExpr]) -> Result<Vec<RegionId>, Self::Error> {
+            unimplemented!()
         }
     }
 }

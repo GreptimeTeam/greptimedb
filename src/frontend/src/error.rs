@@ -100,6 +100,13 @@ pub enum Error {
         reason: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Expect {} region keys, actual {}", expect, actual))]
+    RegionKeysSize {
+        expect: usize,
+        actual: usize,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -112,7 +119,8 @@ impl ErrorExt for Error {
             | Error::InvalidSql { .. }
             | Error::FindRegion { .. }
             | Error::InvalidInsertRequest { .. }
-            | Error::FindPartitionColumn { .. } => StatusCode::InvalidArguments,
+            | Error::FindPartitionColumn { .. }
+            | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
             Error::RuntimeResource { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
             Error::ParseSql { source } => source.status_code(),
