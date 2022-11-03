@@ -1,9 +1,11 @@
 pub mod handler;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use api::v1::{greptime_server, BatchRequest, BatchResponse};
 use async_trait::async_trait;
+use common_runtime::Runtime;
 use common_telemetry::logging::info;
 use futures::FutureExt;
 use snafu::ensure;
@@ -23,20 +25,30 @@ pub struct GrpcServer {
     query_handler: GrpcQueryHandlerRef,
     admin_handler: GrpcAdminHandlerRef,
     shutdown_tx: Mutex<Option<Sender<()>>>,
+    runtime: Arc<Runtime>,
 }
 
 impl GrpcServer {
-    pub fn new(query_handler: GrpcQueryHandlerRef, admin_handler: GrpcAdminHandlerRef) -> Self {
+    pub fn new(
+        query_handler: GrpcQueryHandlerRef,
+        admin_handler: GrpcAdminHandlerRef,
+        runtime: Arc<Runtime>,
+    ) -> Self {
         Self {
             query_handler,
             admin_handler,
             shutdown_tx: Mutex::new(None),
+            runtime,
         }
     }
 
     pub fn create_service(&self) -> greptime_server::GreptimeServer<GrpcService> {
         let service = GrpcService {
-            handler: BatchHandler::new(self.query_handler.clone(), self.admin_handler.clone()),
+            handler: BatchHandler::new(
+                self.query_handler.clone(),
+                self.admin_handler.clone(),
+                self.runtime.clone(),
+            ),
         };
         greptime_server::GreptimeServer::new(service)
     }
