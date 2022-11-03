@@ -15,7 +15,7 @@ use api::v1::meta::PutResponse;
 use api::v1::meta::RangeRequest;
 use api::v1::meta::RangeResponse;
 use api::v1::meta::ResponseHeader;
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 use super::kv::KvStore;
 use crate::error::Result;
@@ -51,7 +51,7 @@ impl KvStore for MemStore {
             keys_only,
         } = req;
 
-        let memory = self.inner.read().await;
+        let memory = self.inner.read();
 
         let mut kvs = if range_end.is_empty() {
             memory.get_key_value(&key).map_or(vec![], |(k, v)| {
@@ -94,7 +94,7 @@ impl KvStore for MemStore {
             prev_kv,
         } = req;
 
-        let mut memory = self.inner.write().await;
+        let mut memory = self.inner.write();
         let prev_value = memory.insert(key.clone(), value);
         let prev_kv = if prev_kv {
             prev_value.map(|value| KeyValue { key, value })
@@ -114,7 +114,7 @@ impl KvStore for MemStore {
             prev_kv,
         } = req;
 
-        let mut memory = self.inner.write().await;
+        let mut memory = self.inner.write();
         let prev_kvs = if prev_kv {
             kvs.into_iter()
                 .map(|kv| (kv.key.clone(), memory.insert(kv.key, kv.value)))
@@ -144,7 +144,7 @@ impl KvStore for MemStore {
             value,
         } = req;
 
-        let mut memory = self.inner.write().await;
+        let mut memory = self.inner.write();
         let (success, prev_kv) = if expect.is_empty() {
             (
                 false,
@@ -188,7 +188,7 @@ impl KvStore for MemStore {
             prev_kv,
         } = req;
 
-        let mut memory = self.inner.write().await;
+        let mut memory = self.inner.write();
 
         let prev_kvs = if range_end.is_empty() {
             let prev_val = memory.remove(&key);
