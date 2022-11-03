@@ -330,7 +330,9 @@ pub(crate) mod greptime_builtin {
         };
         match res {
             Ok(v) => Ok(v.into()),
-            Err(err) => Err(vm.new_runtime_error(format!("Internal Error: {}", err))),
+            Err(err) => {
+                Err(vm.new_runtime_error(format!("Fail to evaluate the function,: {}", err)))
+            }
         }
     }
 
@@ -349,15 +351,21 @@ pub(crate) mod greptime_builtin {
         let acc = f(&types);
         let mut acc = match acc {
             Ok(acc) => acc,
-            Err(err) => return Err(vm.new_runtime_error(format!("Internal Error: {}", err))),
+            Err(err) => {
+                return Err(vm.new_runtime_error(format!("Failed to create accumulator: {}", err)))
+            }
         };
         match acc.update_batch(&v) {
             Ok(_) => (),
-            Err(err) => return Err(vm.new_runtime_error(format!("Internal Error: {}", err))),
+            Err(err) => {
+                return Err(vm.new_runtime_error(format!("Failed to update batch: {}", err)))
+            }
         };
         let res = match acc.evaluate() {
             Ok(r) => r,
-            Err(err) => return Err(vm.new_runtime_error(format!("Internal Error: {}", err))),
+            Err(err) => {
+                return Err(vm.new_runtime_error(format!("Failed to evaluate accumulator: {}", err)))
+            }
         };
         let res = val_to_pyobj(res, vm);
         Ok(res)
