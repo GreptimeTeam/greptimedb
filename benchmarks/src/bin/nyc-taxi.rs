@@ -4,7 +4,6 @@
 #![feature(once_cell)]
 
 use std::{
-    cell::LazyCell,
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
@@ -35,12 +34,6 @@ use tokio::task::JoinSet;
 const CATALOG_NAME: &str = "greptime";
 const SCHEMA_NAME: &str = "public";
 const TABLE_NAME: &str = "nyc_taxi";
-
-const PROGRESS_BAR_STYLE: LazyCell<ProgressStyle> = LazyCell::new(|| {
-    ProgressStyle::with_template("[{elapsed_precise}] {bar:60.cyan/blue} {pos:>7}/{len:7} {msg}")
-        .unwrap()
-        .progress_chars("##-")
-});
 
 #[derive(Parser)]
 #[command(name = "NYC benchmark runner")]
@@ -75,20 +68,26 @@ fn get_file_list<P: AsRef<Path>>(path: P) -> Vec<PathBuf> {
         .collect()
 }
 
-async fn write_data(batch_size: usize, db: &Database, path: PathBuf, mpb: MultiProgress) -> u128 {
+async fn write_data(
+    batch_size: usize,
+    db: &Database,
+    path: PathBuf,
+    mpb: MultiProgress,
+    pb_style: ProgressStyle,
+) -> u128 {
     let file = std::fs::File::open(&path).unwrap();
     let file_reader = Arc::new(SerializedFileReader::new(file).unwrap());
     let row_num = file_reader.metadata().file_metadata().num_rows();
-    let mut record_batch_reader = ParquetFileArrowReader::new(file_reader)
+    let record_batch_reader = ParquetFileArrowReader::new(file_reader)
         .get_record_reader(batch_size)
         .unwrap();
     let progress_bar = mpb.add(ProgressBar::new(row_num as _));
-    progress_bar.set_style(PROGRESS_BAR_STYLE.clone());
+    progress_bar.set_style(pb_style);
     progress_bar.set_message(format!("{:?}", path));
 
     let mut total_rpc_elapsed_ms = 0;
 
-    while let Some(record_batch) = record_batch_reader.next() {
+    for record_batch in record_batch_reader {
         let record_batch = record_batch.unwrap();
         let row_count = record_batch.num_rows();
         let insert_batch = convert_record_batch(record_batch).into();
@@ -366,6 +365,11 @@ async fn do_write(args: &Args, client: &Client) {
     let create_table_result = admin.create(create_table_expr()).await;
     println!("Create table result: {:?}", create_table_result);
 
+    let progress_bar_style = ProgressStyle::with_template(
+        "[{elapsed_precise}] {bar:60.cyan/blue} {pos:>7}/{len:7} {msg}",
+    )
+    .unwrap()
+    .progress_chars("##-");
     let multi_progress_bar = MultiProgress::new();
     let file_progress = multi_progress_bar.add(ProgressBar::new(file_list.len() as _));
     file_progress.inc(0);
@@ -375,15 +379,17 @@ async fn do_write(args: &Args, client: &Client) {
         if let Some(path) = file_list.pop() {
             let db = Database::new("greptime", client.clone());
             let mpb = multi_progress_bar.clone();
-            write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb).await });
+            let pb_style = progress_bar_style.clone();
+            write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb, pb_style).await });
         }
     }
-    while let Some(_) = write_jobs.join_next().await {
+    while write_jobs.join_next().await.is_some() {
         file_progress.inc(1);
         if let Some(path) = file_list.pop() {
             let db = Database::new("greptime", client.clone());
             let mpb = multi_progress_bar.clone();
-            write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb).await });
+            let pb_style = progress_bar_style.clone();
+            write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb, pb_style).await });
         }
     }
 }
