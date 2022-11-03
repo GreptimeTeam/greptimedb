@@ -17,11 +17,10 @@ impl TryFrom<RawSchema> for Schema {
     type Error = Error;
 
     fn try_from(raw: RawSchema) -> Result<Schema> {
-        let mut builder = SchemaBuilder::try_from(raw.column_schemas)?.version(raw.version);
-        if let Some(idx) = raw.timestamp_index {
-            builder = builder.timestamp_index(Some(idx));
-        }
-        builder.build()
+        SchemaBuilder::try_from(raw.column_schemas)?
+            .timestamp_index(raw.timestamp_index)
+            .version(raw.version)
+            .build()
     }
 }
 
