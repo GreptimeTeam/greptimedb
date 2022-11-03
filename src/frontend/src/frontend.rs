@@ -40,7 +40,7 @@ impl Default for FrontendOptions {
 impl FrontendOptions {
     // TODO(LFC) Get Datanode address from Meta.
     pub(crate) fn datanode_grpc_addr(&self) -> String {
-        "http://127.0.0.1:3001".to_string()
+        "127.0.0.1:3001".to_string()
     }
 }
 
