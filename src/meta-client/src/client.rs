@@ -396,7 +396,7 @@ mod tests {
 
     #[should_panic]
     #[test]
-    fn test_enable_at_least_one_client() {
+    fn test_failed_when_start_nothing() {
         let _ = MetaClientBuilder::new(0, 0).build();
     }
 
@@ -512,7 +512,6 @@ mod tests {
 
         gen_data(&client).await;
 
-        // get
         let req = RangeRequest::new().with_key(b"key-0".to_vec());
         let res = client.range(req).await;
         let mut kvs = res.unwrap().take_kvs();
@@ -580,41 +579,158 @@ mod tests {
         let client = mocks::mock_client_with_memstore().await;
         let req = PutRequest::new()
             .with_key(b"key".to_vec())
+            .with_value(b"value".to_vec());
+        let res = client.put(req).await;
+        assert!(res.unwrap().take_prev_kv().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_put_with_prev_kv() {
+        let client = mocks::mock_client_with_memstore().await;
+        let req = PutRequest::new()
+            .with_key(b"key".to_vec())
             .with_value(b"value".to_vec())
             .with_prev_kv();
         let res = client.put(req).await;
-        assert!(res.is_ok());
+        assert!(res.unwrap().take_prev_kv().is_none());
+
+        let req = PutRequest::new()
+            .with_key(b"key".to_vec())
+            .with_value(b"value1".to_vec())
+            .with_prev_kv();
+        let res = client.put(req).await;
+        let mut kv = res.unwrap().take_prev_kv().unwrap();
+        assert_eq!(b"key".to_vec(), kv.take_key());
+        assert_eq!(b"value".to_vec(), kv.take_value());
     }
 
     #[tokio::test]
     async fn test_batch_put() {
-        let client = mocks::mock_client_with_noopstore().await;
+        let client = mocks::mock_client_with_memstore().await;
         let req = BatchPutRequest::new()
             .add_kv(b"key".to_vec(), b"value".to_vec())
-            .add_kv(b"key2".to_vec(), b"value2".to_vec())
+            .add_kv(b"key2".to_vec(), b"value2".to_vec());
+        let res = client.batch_put(req).await;
+        assert_eq!(0, res.unwrap().take_prev_kvs().len());
+
+        let req = RangeRequest::new().with_range(b"key".to_vec(), b"key3".to_vec());
+        let res = client.range(req).await;
+        let kvs = res.unwrap().take_kvs();
+        assert_eq!(2, kvs.len());
+    }
+
+    #[tokio::test]
+    async fn test_batch_put_with_prev_kv() {
+        let client = mocks::mock_client_with_memstore().await;
+        let req = BatchPutRequest::new().add_kv(b"key".to_vec(), b"value".to_vec());
+        let res = client.batch_put(req).await;
+        assert_eq!(0, res.unwrap().take_prev_kvs().len());
+
+        let req = BatchPutRequest::new()
+            .add_kv(b"key".to_vec(), b"value-".to_vec())
+            .add_kv(b"key2".to_vec(), b"value2-".to_vec())
             .with_prev_kv();
         let res = client.batch_put(req).await;
-        assert!(res.is_ok());
+        let mut kvs = res.unwrap().take_prev_kvs();
+        assert_eq!(1, kvs.len());
+        let mut kv = kvs.pop().unwrap();
+        assert_eq!(b"key".to_vec(), kv.take_key());
+        assert_eq!(b"value".to_vec(), kv.take_value());
     }
 
     #[tokio::test]
     async fn test_compare_and_put() {
-        let client = mocks::mock_client_with_noopstore().await;
+        let client = mocks::mock_client_with_memstore().await;
         let req = CompareAndPutRequest::new()
             .with_key(b"key".to_vec())
             .with_expect(b"expect".to_vec())
             .with_value(b"value".to_vec());
         let res = client.compare_and_put(req).await;
+        assert!(!res.unwrap().is_success());
+
+        // empty expect key is not allowed
+        let req = CompareAndPutRequest::new()
+            .with_key(b"key".to_vec())
+            .with_value(b"value".to_vec());
+        let res = client.compare_and_put(req).await;
+        let mut res = res.unwrap();
+        assert!(!res.is_success());
+        let mut kv = res.take_prev_kv().unwrap();
+        assert_eq!(b"key".to_vec(), kv.take_key());
+        assert!(kv.take_value().is_empty());
+
+        let req = PutRequest::new()
+            .with_key(b"key".to_vec())
+            .with_value(b"value".to_vec());
+        let res = client.put(req).await;
         assert!(res.is_ok());
+
+        let req = CompareAndPutRequest::new()
+            .with_key(b"key".to_vec())
+            .with_expect(b"value".to_vec())
+            .with_value(b"value2".to_vec());
+        let res = client.compare_and_put(req).await;
+        let mut res = res.unwrap();
+        assert!(res.is_success());
+        assert_eq!(b"value".to_vec(), res.take_prev_kv().unwrap().take_value());
     }
 
     #[tokio::test]
-    async fn test_delete() {
-        let client = mocks::mock_client_with_noopstore().await;
+    async fn test_delete_with_key() {
+        let client = mocks::mock_client_with_memstore().await;
+
+        gen_data(&client).await;
+
         let req = DeleteRangeRequest::new()
-            .with_key(b"key".to_vec())
+            .with_key(b"key-0".to_vec())
             .with_prev_kv();
         let res = client.delete_range(req).await;
-        assert!(res.is_ok());
+        let mut res = res.unwrap();
+        assert_eq!(1, res.deleted());
+        let mut kvs = res.take_prev_kvs();
+        assert_eq!(1, kvs.len());
+        let mut kv = kvs.pop().unwrap();
+        assert_eq!(b"value-0".to_vec(), kv.take_value());
+    }
+
+    #[tokio::test]
+    async fn test_delete_with_prefix() {
+        let client = mocks::mock_client_with_memstore().await;
+
+        gen_data(&client).await;
+
+        let req = DeleteRangeRequest::new()
+            .with_prefix(b"key-".to_vec())
+            .with_prev_kv();
+        let res = client.delete_range(req).await;
+        let mut res = res.unwrap();
+        assert_eq!(10, res.deleted());
+        let kvs = res.take_prev_kvs();
+        assert_eq!(10, kvs.len());
+        for (i, mut kv) in kvs.into_iter().enumerate() {
+            assert_eq!(format!("{}-{}", "value", i).into_bytes(), kv.take_value());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_with_range() {
+        let client = mocks::mock_client_with_memstore().await;
+
+        gen_data(&client).await;
+
+        let req = DeleteRangeRequest::new()
+            .with_range(b"key-2".to_vec(), b"key-7".to_vec())
+            .with_prev_kv();
+        let res = client.delete_range(req).await;
+        let mut res = res.unwrap();
+        assert_eq!(5, res.deleted());
+        let kvs = res.take_prev_kvs();
+        assert_eq!(5, kvs.len());
+        for (i, mut kv) in kvs.into_iter().enumerate() {
+            assert_eq!(
+                format!("{}-{}", "value", i + 2).into_bytes(),
+                kv.take_value()
+            );
+        }
     }
 }

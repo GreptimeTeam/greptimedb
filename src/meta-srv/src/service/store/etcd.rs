@@ -170,13 +170,18 @@ impl KvStore for EtcdStore {
         } else {
             match op_res {
                 TxnOpResponse::Get(get_res) => {
-                    ensure!(
-                        get_res.count() == 1,
-                        error::InvalidTxnResultSnafu {
-                            err_msg: format!("expect 1 response, actual {}", get_res.count())
-                        }
-                    );
-                    Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])))
+                    if get_res.count() == 0 {
+                        // do not exists
+                        Some(KeyValue { key, value: vec![] })
+                    } else {
+                        ensure!(
+                            get_res.count() == 1,
+                            error::InvalidTxnResultSnafu {
+                                err_msg: format!("expect 1 response, actual {}", get_res.count())
+                            }
+                        );
+                        Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])))
+                    }
                 }
                 _ => unreachable!(), // never get here
             }

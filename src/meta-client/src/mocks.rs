@@ -16,7 +16,7 @@ pub async fn mock_client_with_memstore() -> MetaClient {
 }
 
 #[allow(dead_code)]
-pub async fn mock_client_with_etcdstore(addr: &str,) -> MetaClient {
+pub async fn mock_client_with_etcdstore(addr: &str) -> MetaClient {
     let mock_info = server_mock::mock_with_etcdstore(addr).await;
     mock_client_by(mock_info).await
 }

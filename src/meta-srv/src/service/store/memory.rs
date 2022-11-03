@@ -47,13 +47,13 @@ impl KvStore for MemStore {
             header,
             key,
             range_end,
+            limit,
             keys_only,
-            ..
         } = req;
 
         let memory = self.inner.read().await;
 
-        let kvs = if range_end.is_empty() {
+        let mut kvs = if range_end.is_empty() {
             memory.get_key_value(&key).map_or(vec![], |(k, v)| {
                 vec![KeyValue {
                     key: k.clone(),
@@ -74,13 +74,16 @@ impl KvStore for MemStore {
                 .collect::<Vec<_>>()
         };
 
+        let more = if limit > 0 {
+            kvs.truncate(limit as usize);
+            true
+        } else {
+            false
+        };
+
         let cluster_id = header.map_or(0, |h| h.cluster_id);
         let header = Some(ResponseHeader::success(cluster_id));
-        Ok(RangeResponse {
-            header,
-            kvs,
-            more: false,
-        })
+        Ok(RangeResponse { header, kvs, more })
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {
@@ -122,6 +125,9 @@ impl KvStore for MemStore {
                 })
                 .collect()
         } else {
+            for kv in kvs.into_iter() {
+                memory.insert(kv.key, kv.value);
+            }
             vec![]
         };
 
@@ -139,25 +145,26 @@ impl KvStore for MemStore {
         } = req;
 
         let mut memory = self.inner.write().await;
-        let prev_val = memory.get(&key);
-        let success = if expect.is_empty() {
-            prev_val.is_none()
+        let (success, prev_kv) = if expect.is_empty() {
+            (
+                false,
+                Some(KeyValue {
+                    key: key.clone(),
+                    value: vec![],
+                }),
+            )
         } else {
-            prev_val
+            let prev_val = memory.get(&key);
+            let success = prev_val
                 .map(|v| expect.cmp(v) == Ordering::Equal)
-                .unwrap_or(false)
-        };
-
-        let prev_kv = if success {
-            Some(KeyValue {
-                key: key.clone(),
-                value: expect,
-            })
-        } else {
-            Some(KeyValue {
-                key: key.clone(),
-                value: prev_val.map(Clone::clone).unwrap_or_else(Vec::new),
-            })
+                .unwrap_or(false);
+            (
+                success,
+                prev_val.map(|v| KeyValue {
+                    key: key.clone(),
+                    value: v.clone(),
+                }),
+            )
         };
 
         if success {
