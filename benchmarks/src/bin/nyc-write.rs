@@ -36,7 +36,6 @@ const CATALOG_NAME: &str = "greptime";
 const SCHEMA_NAME: &str = "public";
 const TABLE_NAME: &str = "nyc_taxi";
 
-const PROGRESS_BAR: LazyCell<MultiProgress> = LazyCell::new(|| MultiProgress::new());
 const PROGRESS_BAR_STYLE: LazyCell<ProgressStyle> = LazyCell::new(|| {
     ProgressStyle::with_template("[{elapsed_precise}] {bar:60.cyan/blue} {pos:>7}/{len:7} {msg}")
         .unwrap()
@@ -70,14 +69,14 @@ fn get_file_list<P: AsRef<Path>>(path: P) -> Vec<PathBuf> {
         .collect()
 }
 
-async fn write_data(batch_size: usize, db: &Database, path: PathBuf) -> u128 {
+async fn write_data(batch_size: usize, db: &Database, path: PathBuf, mpb: MultiProgress) -> u128 {
     let file = std::fs::File::open(&path).unwrap();
     let file_reader = Arc::new(SerializedFileReader::new(file).unwrap());
     let row_num = file_reader.metadata().file_metadata().num_rows();
     let mut record_batch_reader = ParquetFileArrowReader::new(file_reader)
         .get_record_reader(batch_size)
         .unwrap();
-    let progress_bar = PROGRESS_BAR.add(ProgressBar::new(row_num as _));
+    let progress_bar = mpb.add(ProgressBar::new(row_num as _));
     progress_bar.set_style(PROGRESS_BAR_STYLE.clone());
     progress_bar.set_message(format!("{:?}", path));
 
@@ -377,7 +376,7 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async {
-            let file_list = get_file_list(args.path);
+            let mut file_list = get_file_list(args.path);
             let mut write_jobs = JoinSet::new();
 
             let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
@@ -386,11 +385,27 @@ fn main() {
             let create_table_result = admin.create(create_table_expr()).await;
             println!("Create table result: {:?}", create_table_result);
 
-            for path in file_list {
-                let db = Database::new("greptime", client.clone());
-                write_jobs.spawn(async move { write_data(args.batch_size, &db, path).await });
+            let multi_progress_bar = MultiProgress::new();
+            let file_progress = multi_progress_bar.add(ProgressBar::new(file_list.len() as _));
+            file_progress.inc(0);
+
+            for _ in 0..args.thread_num {
+                if let Some(path) = file_list.pop() {
+                    let db = Database::new("greptime", client.clone());
+                    let mpb = multi_progress_bar.clone();
+                    write_jobs
+                        .spawn(async move { write_data(args.batch_size, &db, path, mpb).await });
+                }
             }
-            while let Some(_) = write_jobs.join_next().await {}
+            while let Some(_) = write_jobs.join_next().await {
+                file_progress.inc(1);
+                if let Some(path) = file_list.pop() {
+                    let db = Database::new("greptime", client.clone());
+                    let mpb = multi_progress_bar.clone();
+                    write_jobs
+                        .spawn(async move { write_data(args.batch_size, &db, path, mpb).await });
+                }
+            }
 
             let db = Database::new("greptime", client.clone());
             do_query(args.iter_num, &db).await;
