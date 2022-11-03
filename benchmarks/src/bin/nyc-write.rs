@@ -24,7 +24,9 @@ use parquet::{
     file::serialized_reader::SerializedFileReader,
 };
 
-const TABLE_NAME: &str = "nyc-bench";
+const CATALOG_NAME: &str = "greptime";
+const SCHEMA_NAME: &str = "public";
+const TABLE_NAME: &str = "nyc_taxi";
 
 #[derive(Parser)]
 #[command(name = "NYC benchmark runner")]
@@ -175,9 +177,9 @@ fn build_values(column: &ArrayRef) -> Values {
 
 fn create_table_expr() -> CreateExpr {
     CreateExpr {
-        catalog_name: Some("greptime".to_string()),
-        schema_name: Some("public".to_string()),
-        table_name: "nyc-bench".to_string(),
+        catalog_name: Some(CATALOG_NAME.to_string()),
+        schema_name: Some(SCHEMA_NAME.to_string()),
+        table_name: TABLE_NAME.to_string(),
         desc: None,
         column_defs: vec![
             ColumnDef {
