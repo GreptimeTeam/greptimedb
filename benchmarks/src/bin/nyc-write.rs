@@ -47,7 +47,7 @@ const PROGRESS_BAR_STYLE: LazyCell<ProgressStyle> = LazyCell::new(|| {
 struct Args {
     /// Path to the dataset
     #[arg(short, long)]
-    path: String,
+    path: Option<String>,
 
     /// Batch size of insert request.
     #[arg(short = 's', long = "batch-size", default_value_t = 4096)]
@@ -60,6 +60,12 @@ struct Args {
     /// Number of query iteration
     #[arg(short = 'i', long = "iter-num", default_value_t = 3)]
     iter_num: usize,
+
+    #[arg(long = "skip-write")]
+    skip_write: bool,
+
+    #[arg(long = "skip-read")]
+    skip_read: bool,
 }
 
 fn get_file_list<P: AsRef<Path>>(path: P) -> Vec<PathBuf> {
@@ -351,8 +357,40 @@ fn query_set() -> HashMap<String, String> {
     ret
 }
 
+async fn do_write(args: &Args, client: &Client) {
+    let admin = Admin::new("admin", client.clone());
+
+    let mut file_list = get_file_list(args.path.clone().expect("Specify data path in argument"));
+    let mut write_jobs = JoinSet::new();
+
+    let create_table_result = admin.create(create_table_expr()).await;
+    println!("Create table result: {:?}", create_table_result);
+
+    let multi_progress_bar = MultiProgress::new();
+    let file_progress = multi_progress_bar.add(ProgressBar::new(file_list.len() as _));
+    file_progress.inc(0);
+
+    let batch_size = args.batch_size;
+    for _ in 0..args.thread_num {
+        if let Some(path) = file_list.pop() {
+            let db = Database::new("greptime", client.clone());
+            let mpb = multi_progress_bar.clone();
+            write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb).await });
+        }
+    }
+    while let Some(_) = write_jobs.join_next().await {
+        file_progress.inc(1);
+        if let Some(path) = file_list.pop() {
+            let db = Database::new("greptime", client.clone());
+            let mpb = multi_progress_bar.clone();
+            write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb).await });
+        }
+    }
+}
+
 async fn do_query(num_iter: usize, db: &Database) {
     for (query_name, query) in query_set() {
+        println!("Running query: {}", query);
         for i in 0..num_iter {
             let now = Instant::now();
             let _res = db.select(Select::Sql(query.clone())).await.unwrap();
@@ -376,38 +414,15 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async {
-            let mut file_list = get_file_list(args.path);
-            let mut write_jobs = JoinSet::new();
-
             let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
-            let admin = Admin::new("admin", client.clone());
 
-            let create_table_result = admin.create(create_table_expr()).await;
-            println!("Create table result: {:?}", create_table_result);
-
-            let multi_progress_bar = MultiProgress::new();
-            let file_progress = multi_progress_bar.add(ProgressBar::new(file_list.len() as _));
-            file_progress.inc(0);
-
-            for _ in 0..args.thread_num {
-                if let Some(path) = file_list.pop() {
-                    let db = Database::new("greptime", client.clone());
-                    let mpb = multi_progress_bar.clone();
-                    write_jobs
-                        .spawn(async move { write_data(args.batch_size, &db, path, mpb).await });
-                }
-            }
-            while let Some(_) = write_jobs.join_next().await {
-                file_progress.inc(1);
-                if let Some(path) = file_list.pop() {
-                    let db = Database::new("greptime", client.clone());
-                    let mpb = multi_progress_bar.clone();
-                    write_jobs
-                        .spawn(async move { write_data(args.batch_size, &db, path, mpb).await });
-                }
+            if !args.skip_write {
+                do_write(&args, &client).await;
             }
 
-            let db = Database::new("greptime", client.clone());
-            do_query(args.iter_num, &db).await;
+            if !args.skip_read {
+                let db = Database::new("greptime", client.clone());
+                do_query(args.iter_num, &db).await;
+            }
         })
 }
