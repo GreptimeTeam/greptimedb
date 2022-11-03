@@ -3,8 +3,8 @@ mod opentsdb;
 mod prometheus;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
+// use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
     insert_expr, AdminExpr, AdminResult, ColumnDataType, ColumnDef as GrpcColumnDef, CreateExpr,
@@ -17,7 +17,10 @@ use common_error::prelude::BoxedError;
 use common_query::Output;
 use datatypes::schema::ColumnSchema;
 use servers::error as server_error;
-use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
+use servers::query_handler::{
+    GrpcAdminHandler, GrpcQueryHandler, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
+    PrometheusProtocolHandler, SqlQueryHandler,
+};
 use snafu::prelude::*;
 use sql::ast::{ColumnDef, TableConstraint};
 use sql::statements::create_table::{CreateTable, TIME_INDEX};
@@ -28,7 +31,22 @@ use sql::{dialect::GenericDialect, parser::ParserContext};
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
 
-pub(crate) type InstanceRef = Arc<Instance>;
+// pub(crate) type InstanceRef = Arc<Instance>;
+
+#[async_trait]
+pub trait FrontendInstance:
+    GrpcAdminHandler
+    + GrpcQueryHandler
+    + SqlQueryHandler
+    + OpentsdbProtocolHandler
+    + InfluxdbLineProtocolHandler
+    + PrometheusProtocolHandler
+    + Send
+    + Sync
+    + 'static
+{
+    async fn start(&mut self, opts: &FrontendOptions) -> Result<()>;
+}
 
 #[derive(Default)]
 pub struct Instance {
@@ -36,14 +54,8 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Default::default()
-    }
-
-    pub(crate) async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
-        let addr = opts.datanode_grpc_addr();
-        self.client.start(vec![addr]);
-        Ok(())
     }
 
     // TODO(fys): temporarily hard code
@@ -54,6 +66,15 @@ impl Instance {
     // TODO(fys): temporarily hard code
     pub fn admin(&self) -> Admin {
         Admin::new("greptime", self.client.clone())
+    }
+}
+
+#[async_trait]
+impl FrontendInstance for Instance {
+    async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
+        let addr = opts.datanode_grpc_addr();
+        self.client.start(vec![addr]);
+        Ok(())
     }
 }
 
