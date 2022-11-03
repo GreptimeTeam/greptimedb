@@ -5,6 +5,8 @@ pub mod handler;
 mod keys;
 pub mod lease;
 pub mod metasrv;
+#[cfg(feature = "mock")]
+pub mod mocks;
 pub mod selector;
 pub mod service;
 mod util;

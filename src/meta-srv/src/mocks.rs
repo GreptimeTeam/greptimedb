@@ -5,29 +5,42 @@ use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
 use common_grpc::channel_manager::ChannelConfig;
 use common_grpc::channel_manager::ChannelManager;
-use meta_srv::metasrv::MetaSrv;
-use meta_srv::metasrv::MetaSrvOptions;
-use meta_srv::metasrv::SelectorRef;
-use meta_srv::service::store::kv::KvStoreRef;
-use meta_srv::service::store::noop::NoopKvStore;
 use tower::service_fn;
+
+use crate::metasrv::MetaSrv;
+use crate::metasrv::MetaSrvOptions;
+use crate::metasrv::SelectorRef;
+use crate::service::store::etcd::EtcdStore;
+use crate::service::store::kv::KvStoreRef;
+use crate::service::store::memory::MemStore;
+use crate::service::store::noop::NoopKvStore;
 
 pub struct MockInfo {
     pub server_addr: String,
     pub channel_manager: ChannelManager,
 }
 
-pub async fn create_meta_client_with_noop_store() -> MockInfo {
+pub async fn mock_with_noopstore() -> MockInfo {
     let kv_store = Arc::new(NoopKvStore {});
-    create_meta_client(Default::default(), kv_store, None).await
+    mock(Default::default(), kv_store, None).await
 }
 
-pub async fn create_meta_client_with_selector(selector: SelectorRef) -> MockInfo {
-    let kv_store = Arc::new(NoopKvStore {});
-    create_meta_client(Default::default(), kv_store, Some(selector)).await
+pub async fn mock_with_memstore() -> MockInfo {
+    let kv_store = Arc::new(MemStore::default());
+    mock(Default::default(), kv_store, None).await
 }
 
-pub async fn create_meta_client(
+pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
+    let kv_store = EtcdStore::with_endpoints([addr]).await.unwrap();
+    mock(Default::default(), kv_store, None).await
+}
+
+pub async fn mock_with_selector(selector: SelectorRef) -> MockInfo {
+    let kv_store = Arc::new(NoopKvStore {});
+    mock(Default::default(), kv_store, Some(selector)).await
+}
+
+pub async fn mock(
     opts: MetaSrvOptions,
     kv_store: KvStoreRef,
     selector: Option<SelectorRef>,
