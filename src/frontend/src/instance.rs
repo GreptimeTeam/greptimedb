@@ -4,7 +4,6 @@ mod prometheus;
 
 use std::collections::HashMap;
 
-// use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
     insert_expr, AdminExpr, AdminResult, ColumnDataType, ColumnDef as GrpcColumnDef, CreateExpr,
@@ -30,8 +29,6 @@ use sql::{dialect::GenericDialect, parser::ParserContext};
 
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
-
-// pub(crate) type InstanceRef = Arc<Instance>;
 
 #[async_trait]
 pub trait FrontendInstance:
