@@ -420,7 +420,7 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async {
-            let client = Client::connect("http://127.0.0.1:3001").await.unwrap();
+            let client = Client::with_urls(vec!["http://127.0.0.1:3001"]);
 
             if !args.skip_write {
                 do_write(&args, &client).await;
