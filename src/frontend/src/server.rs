@@ -14,13 +14,16 @@ use tokio::try_join;
 use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
 use crate::influxdb::InfluxdbOptions;
-use crate::instance::InstanceRef;
+use crate::instance::FrontendInstance;
 use crate::prometheus::PrometheusOptions;
 
 pub(crate) struct Services;
 
 impl Services {
-    pub(crate) async fn start(opts: &FrontendOptions, instance: InstanceRef) -> Result<()> {
+    pub(crate) async fn start<T>(opts: &FrontendOptions, instance: Arc<T>) -> Result<()>
+    where
+        T: FrontendInstance,
+    {
         let grpc_server_and_addr = if let Some(opts) = &opts.grpc_options {
             let grpc_addr = parse_addr(&opts.addr)?;
 

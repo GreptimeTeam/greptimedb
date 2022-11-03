@@ -2,6 +2,7 @@ use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
+use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
@@ -56,7 +57,7 @@ struct StartCommand {
 impl StartCommand {
     async fn run(self) -> Result<()> {
         let opts = self.try_into()?;
-        let mut frontend = Frontend::new(opts);
+        let mut frontend = Frontend::new(opts, Instance::new());
         frontend.start().await.context(error::StartFrontendSnafu)
     }
 }

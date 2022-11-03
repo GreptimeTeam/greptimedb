@@ -6,7 +6,7 @@ use snafu::prelude::*;
 use crate::error::{self, Result};
 use crate::grpc::GrpcOptions;
 use crate::influxdb::InfluxdbOptions;
-use crate::instance::Instance;
+use crate::instance::FrontendInstance;
 use crate::mysql::MysqlOptions;
 use crate::opentsdb::OpentsdbOptions;
 use crate::postgres::PostgresOptions;
@@ -45,14 +45,19 @@ impl FrontendOptions {
     }
 }
 
-pub struct Frontend {
+pub struct Frontend<T>
+where
+    T: FrontendInstance,
+{
     opts: FrontendOptions,
-    instance: Option<Instance>,
+    instance: Option<T>,
 }
 
-impl Frontend {
-    pub fn new(opts: FrontendOptions) -> Self {
-        let instance = Instance::new();
+impl<T> Frontend<T>
+where
+    T: FrontendInstance,
+{
+    pub fn new(opts: FrontendOptions, instance: T) -> Self {
         Self {
             opts,
             instance: Some(instance),
