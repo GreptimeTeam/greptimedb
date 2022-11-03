@@ -2,6 +2,7 @@
 //! [here](https://www1.nyc.gov/site/tlc/about/tlc-trip-record-data.page).
 
 #![feature(once_cell)]
+#![allow(clippy::print_stdout)]
 
 use std::{
     collections::HashMap,
