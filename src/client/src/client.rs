@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::greptime_client::GreptimeClient;
@@ -11,7 +10,7 @@ use tonic::transport::Channel;
 
 use crate::error;
 use crate::load_balance::LoadBalance;
-use crate::load_balance::LB;
+use crate::load_balance::Loadbalancer;
 use crate::Result;
 
 #[derive(Clone, Debug, Default)]
@@ -23,7 +22,7 @@ pub struct Client {
 struct Inner {
     channel_manager: ChannelManager,
     peers: Arc<RwLock<Vec<String>>>,
-    load_balance: LB,
+    load_balance: Loadbalancer,
 }
 
 impl Inner {
@@ -36,9 +35,7 @@ impl Inner {
 
     fn set_peers(&self, peers: Vec<String>) {
         let mut guard = self.peers.write();
-        if guard.is_empty() {
-            *guard = peers;
-        }
+        *guard = peers;
     }
 
     fn get_peer(&self) -> Option<String> {
@@ -75,8 +72,6 @@ impl Client {
             .as_ref()
             .iter()
             .map(|peer| peer.as_ref().to_string())
-            .collect::<HashSet<_>>()
-            .drain()
             .collect();
         inner.set_peers(urls);
         Self {
@@ -93,8 +88,6 @@ impl Client {
             .as_ref()
             .iter()
             .map(|peer| peer.as_ref().to_string())
-            .collect::<HashSet<_>>()
-            .drain()
             .collect();
 
         self.inner.set_peers(urls);
@@ -132,18 +125,21 @@ impl Client {
         let peer = self
             .inner
             .get_peer()
-            .context(error::NotFoundClientSnafu {})?;
+            .context(error::IllegalGrpcClientStateSnafu {
+                err_msg: "No available peer found",
+            })?;
         let mut client = self.make_client(peer)?;
         let result = client.batch(req).await.context(error::TonicStatusSnafu)?;
         Ok(result.into_inner())
     }
 
     fn make_client(&self, addr: impl AsRef<str>) -> Result<GreptimeClient<Channel>> {
+        let addr = addr.as_ref();
         let channel = self
             .inner
             .channel_manager
             .get(addr)
-            .context(error::CreateChannelSnafu)?;
+            .context(error::CreateChannelSnafu { addr })?;
         Ok(GreptimeClient::new(channel))
     }
 }
@@ -153,7 +149,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::Inner;
-    use crate::load_balance::LB;
+    use crate::load_balance::Loadbalancer;
 
     fn mock_peers() -> Vec<String> {
         vec![
@@ -169,7 +165,7 @@ mod tests {
 
         assert!(matches!(
             inner.load_balance,
-            LB::Random(crate::load_balance::Random)
+            Loadbalancer::Random(crate::load_balance::Random)
         ));
         assert!(inner.get_peer().is_none());
 
