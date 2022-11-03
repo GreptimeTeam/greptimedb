@@ -17,6 +17,9 @@ datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = 
     "simd",
 ] }
 datatypes = { path = "../datatypes" }
+enum_dispatch = "0.3"
+parking_lot = "0.12"
+rand = "0.8"
 snafu = { version = "0.7", features = ["backtraces"] }
 tonic = "0.8"
 

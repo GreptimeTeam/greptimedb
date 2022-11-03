@@ -8,9 +8,8 @@ use common_error::prelude::BoxedError;
 use common_telemetry::logging;
 use prost::Message;
 use servers::error::{self, Result as ServerResult};
-use servers::http::{BytesResponse, HttpResponse};
 use servers::prometheus::{self, Metrics};
-use servers::query_handler::PrometheusProtocolHandler;
+use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use snafu::{OptionExt, ResultExt};
 
 use crate::instance::Instance;
@@ -93,7 +92,7 @@ impl PrometheusProtocolHandler for Instance {
     async fn write(&self, request: WriteRequest) -> ServerResult<()> {
         let exprs = prometheus::write_request_to_insert_exprs(request)?;
 
-        self.db
+        self.database()
             .batch_insert(exprs)
             .await
             .map_err(BoxedError::new)
@@ -104,11 +103,11 @@ impl PrometheusProtocolHandler for Instance {
         Ok(())
     }
 
-    async fn read(&self, request: ReadRequest) -> ServerResult<HttpResponse> {
+    async fn read(&self, request: ReadRequest) -> ServerResult<PrometheusResponse> {
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
-        let results = handle_remote_queries(&self.db, &request.queries).await?;
+        let results = handle_remote_queries(&self.database(), &request.queries).await?;
 
         match response_type {
             ResponseType::Samples => {
@@ -124,11 +123,11 @@ impl PrometheusProtocolHandler for Instance {
                 };
 
                 // TODO(dennis): may consume too much memory, adds flow control
-                Ok(HttpResponse::Bytes(BytesResponse {
+                Ok(PrometheusResponse {
                     content_type: "application/x-protobuf".to_string(),
                     content_encoding: "snappy".to_string(),
-                    bytes: prometheus::snappy_compress(&response.encode_to_vec())?,
-                }))
+                    body: prometheus::snappy_compress(&response.encode_to_vec())?,
+                })
             }
             ResponseType::StreamedXorChunks => error::NotSupportedSnafu {
                 feat: "streamed remote read",
@@ -195,88 +194,82 @@ mod tests {
             ..Default::default()
         };
 
-        let response = instance.read(read_request).await.unwrap();
+        let resp = instance.read(read_request).await.unwrap();
+        assert_eq!(resp.content_type, "application/x-protobuf");
+        assert_eq!(resp.content_encoding, "snappy");
+        let body = prometheus::snappy_decompress(&resp.body).unwrap();
+        let read_response = ReadResponse::decode(&body[..]).unwrap();
+        let query_results = read_response.results;
+        assert_eq!(2, query_results.len());
 
-        match response {
-            HttpResponse::Bytes(resp) => {
-                assert_eq!(resp.content_type, "application/x-protobuf");
-                assert_eq!(resp.content_encoding, "snappy");
-                let body = prometheus::snappy_decompress(&resp.bytes).unwrap();
-                let read_response = ReadResponse::decode(&body[..]).unwrap();
-                let query_results = read_response.results;
-                assert_eq!(2, query_results.len());
+        assert_eq!(1, query_results[0].timeseries.len());
+        let timeseries = &query_results[0].timeseries[0];
 
-                assert_eq!(1, query_results[0].timeseries.len());
-                let timeseries = &query_results[0].timeseries[0];
+        assert_eq!(
+            vec![
+                Label {
+                    name: prometheus::METRIC_NAME_LABEL.to_string(),
+                    value: "metric1".to_string(),
+                },
+                Label {
+                    name: "job".to_string(),
+                    value: "spark".to_string(),
+                },
+            ],
+            timeseries.labels
+        );
 
-                assert_eq!(
-                    vec![
-                        Label {
-                            name: prometheus::METRIC_NAME_LABEL.to_string(),
-                            value: "metric1".to_string(),
-                        },
-                        Label {
-                            name: "job".to_string(),
-                            value: "spark".to_string(),
-                        },
-                    ],
-                    timeseries.labels
-                );
+        assert_eq!(
+            timeseries.samples,
+            vec![
+                Sample {
+                    value: 1.0,
+                    timestamp: 1000,
+                },
+                Sample {
+                    value: 2.0,
+                    timestamp: 2000,
+                }
+            ]
+        );
 
-                assert_eq!(
-                    timeseries.samples,
-                    vec![
-                        Sample {
-                            value: 1.0,
-                            timestamp: 1000,
-                        },
-                        Sample {
-                            value: 2.0,
-                            timestamp: 2000,
-                        }
-                    ]
-                );
+        assert_eq!(1, query_results[1].timeseries.len());
+        let timeseries = &query_results[1].timeseries[0];
 
-                assert_eq!(1, query_results[1].timeseries.len());
-                let timeseries = &query_results[1].timeseries[0];
+        assert_eq!(
+            vec![
+                Label {
+                    name: prometheus::METRIC_NAME_LABEL.to_string(),
+                    value: "metric3".to_string(),
+                },
+                Label {
+                    name: "idc".to_string(),
+                    value: "z002".to_string(),
+                },
+                Label {
+                    name: "app".to_string(),
+                    value: "biz".to_string(),
+                },
+            ],
+            timeseries.labels
+        );
 
-                assert_eq!(
-                    vec![
-                        Label {
-                            name: prometheus::METRIC_NAME_LABEL.to_string(),
-                            value: "metric3".to_string(),
-                        },
-                        Label {
-                            name: "idc".to_string(),
-                            value: "z002".to_string(),
-                        },
-                        Label {
-                            name: "app".to_string(),
-                            value: "biz".to_string(),
-                        },
-                    ],
-                    timeseries.labels
-                );
-
-                assert_eq!(
-                    timeseries.samples,
-                    vec![
-                        Sample {
-                            value: 5.0,
-                            timestamp: 1000,
-                        },
-                        Sample {
-                            value: 6.0,
-                            timestamp: 2000,
-                        },
-                        Sample {
-                            value: 7.0,
-                            timestamp: 3000,
-                        }
-                    ]
-                );
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(
+            timeseries.samples,
+            vec![
+                Sample {
+                    value: 5.0,
+                    timestamp: 1000,
+                },
+                Sample {
+                    value: 6.0,
+                    timestamp: 2000,
+                },
+                Sample {
+                    value: 7.0,
+                    timestamp: 3000,
+                }
+            ]
+        );
     }
 }

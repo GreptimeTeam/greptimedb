@@ -1,3 +1,7 @@
+use api::v1::meta::BatchPutRequest;
+use api::v1::meta::BatchPutResponse;
+use api::v1::meta::CompareAndPutRequest;
+use api::v1::meta::CompareAndPutResponse;
 use api::v1::meta::DeleteRangeRequest;
 use api::v1::meta::DeleteRangeResponse;
 use api::v1::meta::PutRequest;
@@ -21,6 +25,14 @@ impl KvStore for NoopKvStore {
 
     async fn put(&self, _req: PutRequest) -> Result<PutResponse> {
         Ok(PutResponse::default())
+    }
+
+    async fn batch_put(&self, _req: BatchPutRequest) -> Result<BatchPutResponse> {
+        Ok(BatchPutResponse::default())
+    }
+
+    async fn compare_and_put(&self, _req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+        Ok(CompareAndPutResponse::default())
     }
 
     async fn delete_range(&self, _req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {

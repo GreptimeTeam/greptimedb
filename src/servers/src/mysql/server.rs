@@ -68,16 +68,16 @@ impl MysqlServer {
 
 #[async_trait]
 impl Server for MysqlServer {
-    async fn shutdown(&mut self) -> Result<()> {
+    async fn shutdown(&self) -> Result<()> {
         self.base_server.shutdown().await
     }
 
-    async fn start(&mut self, listening: SocketAddr) -> Result<SocketAddr> {
+    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let (stream, addr) = self.base_server.bind(listening).await?;
 
         let io_runtime = self.base_server.io_runtime();
         let join_handle = tokio::spawn(self.accept(io_runtime, stream));
-        self.base_server.start_with(join_handle)?;
+        self.base_server.start_with(join_handle).await?;
         Ok(addr)
     }
 }

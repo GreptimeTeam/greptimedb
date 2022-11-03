@@ -37,6 +37,48 @@ pub enum Error {
 
     #[snafu(display("Empty table name"))]
     EmptyTableName { backtrace: Backtrace },
+
+    #[snafu(display("Invalid datanode lease key: {}", key))]
+    InvalidLeaseKey { key: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to parse datanode lease key from utf8: {}", source))]
+    LeaseKeyFromUtf8 {
+        source: std::string::FromUtf8Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to serialize to json: {}", input))]
+    SerializeToJson {
+        input: String,
+        source: serde_json::error::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to deserialize from json: {}", input))]
+    DeserializeFromJson {
+        input: String,
+        source: serde_json::error::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to parse number: {}, source: {}", err_msg, source))]
+    ParseNum {
+        err_msg: String,
+        source: std::num::ParseIntError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid arguments: {}", err_msg))]
+    InvalidArguments {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid result with a txn response: {}", err_msg))]
+    InvalidTxnResult {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -62,8 +104,17 @@ impl ErrorExt for Error {
             | Error::EtcdFailed { .. }
             | Error::ConnectEtcd { .. }
             | Error::TcpBind { .. }
+            | Error::SerializeToJson { .. }
+            | Error::DeserializeFromJson { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
-            Error::EmptyKey { .. } | Error::EmptyTableName { .. } => StatusCode::InvalidArguments,
+            Error::EmptyKey { .. }
+            | Error::EmptyTableName { .. }
+            | Error::InvalidLeaseKey { .. }
+            | Error::ParseNum { .. }
+            | Error::InvalidArguments { .. } => StatusCode::InvalidArguments,
+            Error::LeaseKeyFromUtf8 { .. } | Error::InvalidTxnResult { .. } => {
+                StatusCode::Unexpected
+            }
         }
     }
 }
@@ -106,10 +157,13 @@ mod tests {
         Err(etcd_client::Error::InvalidArgs("".to_string()))
     }
 
+    fn throw_serde_json_error() -> StdResult<serde_json::error::Error> {
+        serde_json::from_str("invalid json")
+    }
+
     #[test]
     fn test_stream_node_error() {
         let e = throw_none_option().context(StreamNoneSnafu).err().unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -117,7 +171,6 @@ mod tests {
     #[test]
     fn test_empty_key_error() {
         let e = throw_none_option().context(EmptyKeySnafu).err().unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::InvalidArguments);
     }
@@ -128,7 +181,6 @@ mod tests {
             .context(EtcdFailedSnafu)
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -139,7 +191,6 @@ mod tests {
             .context(ConnectEtcdSnafu)
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -153,7 +204,6 @@ mod tests {
             .context(TcpBindSnafu { addr: "127.0.0.1" })
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -163,9 +213,7 @@ mod tests {
         fn throw_tonic_error() -> StdResult<tonic::transport::Error> {
             tonic::transport::Endpoint::new("http//http").map(|_| ())
         }
-
         let e = throw_tonic_error().context(StartGrpcSnafu).err().unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::Internal);
     }
@@ -176,8 +224,84 @@ mod tests {
             .context(EmptyTableNameSnafu)
             .err()
             .unwrap();
-
         assert!(e.backtrace_opt().is_some());
         assert_eq!(e.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_invalid_lease_key_error() {
+        let e = throw_none_option()
+            .context(InvalidLeaseKeySnafu { key: "test" })
+            .err()
+            .unwrap();
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_lease_key_fromutf8_test() {
+        fn throw_fromutf8_error() -> StdResult<std::string::FromUtf8Error> {
+            let sparkle_heart = vec![0, 159, 146, 150];
+            String::from_utf8(sparkle_heart).map(|_| ())
+        }
+        let e = throw_fromutf8_error()
+            .context(LeaseKeyFromUtf8Snafu)
+            .err()
+            .unwrap();
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Unexpected);
+    }
+
+    #[test]
+    fn test_serialize_to_json_error() {
+        let e = throw_serde_json_error()
+            .context(SerializeToJsonSnafu { input: "" })
+            .err()
+            .unwrap();
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Internal);
+    }
+
+    #[test]
+    fn test_deserialize_from_json_error() {
+        let e = throw_serde_json_error()
+            .context(DeserializeFromJsonSnafu { input: "" })
+            .err()
+            .unwrap();
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Internal);
+    }
+
+    #[test]
+    fn test_parse_num_error() {
+        fn throw_parse_int_error() -> StdResult<std::num::ParseIntError> {
+            "invalid num".parse::<i64>().map(|_| ())
+        }
+        let e = throw_parse_int_error()
+            .context(ParseNumSnafu { err_msg: "" })
+            .err()
+            .unwrap();
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_invalid_arguments_error() {
+        let e = throw_none_option()
+            .context(InvalidArgumentsSnafu { err_msg: "test" })
+            .err()
+            .unwrap();
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_invalid_txn_error() {
+        let e = throw_none_option()
+            .context(InvalidTxnResultSnafu { err_msg: "test" })
+            .err()
+            .unwrap();
+        assert!(e.backtrace_opt().is_some());
+        assert_eq!(e.status_code(), StatusCode::Unexpected);
     }
 }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+aide = { version = "0.6", features = ["axum"] }
 api = { path = "../api" }
 async-trait = "0.1"
 axum = "0.6.0-rc.2"
@@ -29,6 +30,7 @@ openmetrics-parser = "0.4"
 opensrv-mysql = "0.1"
 pgwire = { version = "0.4" }
 prost = "0.11"
+schemars = "0.8"
 serde = "1.0"
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }

@@ -2,6 +2,7 @@ pub mod admin;
 mod client;
 mod database;
 mod error;
+pub mod load_balance;
 
 pub use api;
 
