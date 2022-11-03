@@ -74,7 +74,7 @@ async fn run() {
         value_list: vec![b"Max1".to_vec(), b"Max2".to_vec()],
     };
 
-    let table_name = TableName::new("test_catlog", "test_schema", "test_table");
+    let table_name = TableName::new("test_catalog", "test_schema", "test_table");
 
     let create_req = CreateRequest::new(table_name)
         .add_partition(p1)

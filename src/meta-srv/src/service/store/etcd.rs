@@ -159,29 +159,33 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
         let success = txn_res.succeeded();
-        let prev_kv;
         let op_res = txn_res
             .op_responses()
             .pop()
             .context(error::InvalidTxnResultSnafu {
                 err_msg: "empty response",
             })?;
-        if success {
-            prev_kv = Some(KeyValue { key, value: expect });
+        let prev_kv = if success {
+            Some(KeyValue { key, value: expect })
         } else {
             match op_res {
                 TxnOpResponse::Get(get_res) => {
-                    ensure!(
-                        get_res.count() == 1,
-                        error::InvalidTxnResultSnafu {
-                            err_msg: format!("expect 1 response, actual {}", get_res.count())
-                        }
-                    );
-                    prev_kv = Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])));
+                    if get_res.count() == 0 {
+                        // do not exists
+                        Some(KeyValue { key, value: vec![] })
+                    } else {
+                        ensure!(
+                            get_res.count() == 1,
+                            error::InvalidTxnResultSnafu {
+                                err_msg: format!("expect 1 response, actual {}", get_res.count())
+                            }
+                        );
+                        Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])))
+                    }
                 }
                 _ => unreachable!(), // never get here
             }
-        }
+        };
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(CompareAndPutResponse {

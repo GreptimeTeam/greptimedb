@@ -1,3 +1,5 @@
 pub mod client;
-mod error;
+pub mod error;
+#[cfg(test)]
+mod mocks;
 pub mod rpc;

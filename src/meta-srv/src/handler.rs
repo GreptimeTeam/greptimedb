@@ -65,12 +65,12 @@ pub enum Instruction {}
 pub type Pusher = Sender<std::result::Result<HeartbeatResponse, tonic::Status>>;
 
 #[derive(Clone, Default)]
-pub struct HeartbeatHandlers {
+pub struct HeartbeatHandlerGroup {
     handlers: Arc<RwLock<Vec<Box<dyn HeartbeatHandler>>>>,
     pushers: Arc<RwLock<BTreeMap<String, Pusher>>>,
 }
 
-impl HeartbeatHandlers {
+impl HeartbeatHandlerGroup {
     pub async fn add_handler(&self, handler: impl HeartbeatHandler + 'static) {
         let mut handlers = self.handlers.write().await;
         handlers.push(Box::new(handler));

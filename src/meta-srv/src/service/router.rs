@@ -1,6 +1,5 @@
 use api::v1::meta::router_server;
 use api::v1::meta::CreateRequest;
-use api::v1::meta::Peer;
 use api::v1::meta::Region;
 use api::v1::meta::RegionRoute;
 use api::v1::meta::ResponseHeader;
@@ -8,91 +7,44 @@ use api::v1::meta::RouteRequest;
 use api::v1::meta::RouteResponse;
 use api::v1::meta::Table;
 use api::v1::meta::TableRoute;
-use common_time::util as time_util;
 use snafu::OptionExt;
 use tonic::Request;
 use tonic::Response;
 
-use super::store::kv::KvStoreRef;
 use super::GrpcResult;
 use crate::error;
 use crate::error::Result;
-use crate::keys::LeaseKey;
-use crate::keys::LeaseValue;
-use crate::lease;
+use crate::metasrv::Context;
 use crate::metasrv::MetaSrv;
-
-#[derive(Clone)]
-struct Context {
-    pub datanode_lease_secs: i64,
-    pub kv_store: KvStoreRef,
-}
+use crate::metasrv::SelectorRef;
 
 #[async_trait::async_trait]
 impl router_server::Router for MetaSrv {
     async fn route(&self, req: Request<RouteRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
-        let ctx = Context {
-            datanode_lease_secs: self.options().datanode_lease_secs,
-            kv_store: self.kv_store(),
-        };
-        let res = handle_route(req, ctx).await?;
+        let res = handle_route(req).await?;
 
         Ok(Response::new(res))
     }
 
     async fn create(&self, req: Request<CreateRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
-        let ctx = Context {
-            datanode_lease_secs: self.options().datanode_lease_secs,
-            kv_store: self.kv_store(),
-        };
-        let res = handle_create(req, ctx, LeaseBasedSelector::default()).await?;
+        let ctx = self.new_ctx();
+        let selector = self.selector();
+        let res = handle_create(req, ctx, selector).await?;
 
         Ok(Response::new(res))
     }
 }
 
-#[async_trait::async_trait]
-trait DatanodeSelector {
-    async fn select(&self, id: u64, ctx: &Context) -> Result<Vec<Peer>>;
-}
-
-#[derive(Default)]
-struct LeaseBasedSelector;
-
-#[async_trait::async_trait]
-impl DatanodeSelector for LeaseBasedSelector {
-    async fn select(&self, id: u64, ctx: &Context) -> Result<Vec<Peer>> {
-        // filter out the nodes out lease
-        let lease_filter = |_: &LeaseKey, v: &LeaseValue| {
-            time_util::current_time_millis() - v.timestamp_millis < ctx.datanode_lease_secs
-        };
-        let mut lease_kvs = lease::alive_datanodes(id, ctx.kv_store.clone(), lease_filter).await?;
-        // TODO(jiachun): At the moment we are just pushing the latest to the forefront,
-        // and it is better to use load-based strategies in the future.
-        lease_kvs.sort_by(|a, b| b.1.timestamp_millis.cmp(&a.1.timestamp_millis));
-
-        let peers = lease_kvs
-            .into_iter()
-            .map(|(k, v)| Peer {
-                id: k.node_id,
-                addr: v.node_addr,
-            })
-            .collect::<Vec<_>>();
-
-        Ok(peers)
-    }
-}
-
-async fn handle_route(_req: RouteRequest, _ctx: Context) -> Result<RouteResponse> {
+async fn handle_route(_req: RouteRequest) -> Result<RouteResponse> {
     todo!()
 }
 
 async fn handle_create(
     req: CreateRequest,
     ctx: Context,
-    selector: impl DatanodeSelector,
+    selector: SelectorRef,
 ) -> Result<RouteResponse> {
     let CreateRequest {
         header,
@@ -145,13 +97,14 @@ mod tests {
 
     use super::*;
     use crate::metasrv::MetaSrvOptions;
+    use crate::selector::{Namespace, Selector};
     use crate::service::store::noop::NoopKvStore;
 
     #[should_panic]
     #[tokio::test]
     async fn test_handle_route() {
         let kv_store = Arc::new(NoopKvStore {});
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store).await;
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None).await;
 
         let req = RouteRequest {
             header: Some(RequestHeader::new((1, 1))),
@@ -180,8 +133,11 @@ mod tests {
     struct MockSelector;
 
     #[async_trait::async_trait]
-    impl DatanodeSelector for MockSelector {
-        async fn select(&self, _: u64, _: &Context) -> Result<Vec<Peer>> {
+    impl Selector for MockSelector {
+        type Context = Context;
+        type Output = Vec<Peer>;
+
+        async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> Result<Self::Output> {
             Ok(vec![
                 Peer {
                     id: 0,
@@ -220,7 +176,8 @@ mod tests {
             datanode_lease_secs: 10,
             kv_store,
         };
-        let res = handle_create(req, ctx, MockSelector {}).await.unwrap();
+        let selector = Arc::new(MockSelector {});
+        let res = handle_create(req, ctx, selector).await.unwrap();
 
         assert_eq!(
             vec![
