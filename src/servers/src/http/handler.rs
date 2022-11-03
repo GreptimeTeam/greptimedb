@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use aide::transform::TransformOperation;
-use axum::extract::{Json, Query, State};
+use axum::extract::{Json, Query, RawBody, State};
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_telemetry::metric;
@@ -47,54 +47,67 @@ pub async fn metrics(Query(_params): Query<HashMap<String, String>>) -> String {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-pub struct ScriptExecution {
-    pub name: String,
-    pub script: String,
+macro_rules! json_err {
+    ($e: ident) => {{
+        return Json(JsonResponse::with_error(
+            format!("Invalid argument: {}", $e),
+            common_error::status_code::StatusCode::InvalidArguments,
+        ));
+    }};
+
+    ($msg: expr, $code: expr) => {{
+        return Json(JsonResponse::with_error($msg, $code));
+    }};
+}
+
+macro_rules! unwrap_or_json_err {
+    ($result: expr) => {
+        match $result {
+            Ok(result) => result,
+            Err(e) => json_err!(e),
+        }
+    };
 }
 
 /// Handler to insert and compile script
 #[axum_macros::debug_handler]
 pub async fn scripts(
     State(query_handler): State<SqlQueryHandlerRef>,
-    Json(payload): Json<ScriptExecution>,
+    Query(params): Query<ScriptQuery>,
+    RawBody(body): RawBody,
 ) -> Json<JsonResponse> {
-    if payload.name.is_empty() || payload.script.is_empty() {
-        return Json(JsonResponse::with_error(
-            "Invalid name or script".to_string(),
-            StatusCode::InvalidArguments,
-        ));
-    }
+    let name = params.name.as_ref();
 
-    let body = match query_handler
-        .insert_script(&payload.name, &payload.script)
-        .await
-    {
+    if name.is_none() || name.unwrap().is_empty() {
+        json_err!("Invalid name".to_string(), StatusCode::InvalidArguments);
+    }
+    let bytes = unwrap_or_json_err!(hyper::body::to_bytes(body).await);
+
+    let script = unwrap_or_json_err!(String::from_utf8(bytes.to_vec()));
+
+    let body = match query_handler.insert_script(name.unwrap(), &script).await {
         Ok(()) => JsonResponse::with_output(None),
-        Err(e) => JsonResponse::with_error(format!("Insert script error: {}", e), e.status_code()),
+        Err(e) => json_err!(format!("Insert script error: {}", e), e.status_code()),
     };
 
     Json(body)
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct RunScriptQuery {
-    name: Option<String>,
+pub struct ScriptQuery {
+    pub name: Option<String>,
 }
 
 /// Handler to execute script
 #[axum_macros::debug_handler]
 pub async fn run_script(
     State(query_handler): State<SqlQueryHandlerRef>,
-    Query(params): Query<RunScriptQuery>,
+    Query(params): Query<ScriptQuery>,
 ) -> Json<JsonResponse> {
     let name = params.name.as_ref();
 
     if name.is_none() || name.unwrap().is_empty() {
-        return Json(JsonResponse::with_error(
-            "Invalid name".to_string(),
-            StatusCode::InvalidArguments,
-        ));
+        json_err!("Invalid name".to_string(), StatusCode::InvalidArguments);
     }
 
     let output = query_handler.execute_script(name.unwrap()).await;
