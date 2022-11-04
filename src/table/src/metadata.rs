@@ -200,7 +200,7 @@ impl TableMeta {
         let column_names: HashSet<_> = column_names.iter().collect();
         let mut meta_builder = self.new_meta_builder();
 
-        let mut timestamp_index = table_schema.timestamp_index();
+        let timestamp_index = table_schema.timestamp_index();
         // Check whether columns are existing and not in primary key index.
         for column_name in &column_names {
             if let Some(index) = table_schema.column_index_by_name(column_name) {
@@ -214,21 +214,15 @@ impl TableMeta {
                     }
                 );
 
-                if let Some(old_index) = timestamp_index {
+                if let Some(ts_index) = timestamp_index {
                     // Not allowed to remove column in timestamp index.
                     ensure!(
-                        index != old_index,
+                        index != ts_index,
                         error::RemoveColumnInIndexSnafu {
-                            column_name: table_schema.column_name_by_index(old_index),
+                            column_name: table_schema.column_name_by_index(ts_index),
                             table_name,
                         }
                     );
-
-                    if index < old_index {
-                        // Column before timestamp column would be removed, need to left shift the
-                        // index of the timestamp column.
-                        timestamp_index = Some(old_index - 1);
-                    }
                 }
             } else {
                 return error::ColumnNotExistsSnafu {
@@ -240,12 +234,24 @@ impl TableMeta {
         }
 
         // Collect columns after removal.
-        let columns = table_schema
+        let columns: Vec<_> = table_schema
             .column_schemas()
             .iter()
             .filter(|column_schema| !column_names.contains(&column_schema.name))
             .cloned()
             .collect();
+        // Find the index of the timestamp column.
+        let timestamp_column = table_schema.timestamp_column();
+        let timestamp_index = columns.iter().enumerate().find_map(|(idx, column_schema)| {
+            let is_timestamp = timestamp_column
+                .map(|c| c.name == column_schema.name)
+                .unwrap_or(false);
+            if is_timestamp {
+                Some(idx)
+            } else {
+                None
+            }
+        });
 
         let mut builder = SchemaBuilder::try_from_columns(columns)
             .with_context(|_| error::SchemaBuildSnafu {
@@ -529,7 +535,7 @@ mod tests {
     fn test_remove_columns() {
         let schema = Arc::new(new_test_schema());
         let meta = TableMetaBuilder::default()
-            .schema(schema)
+            .schema(schema.clone())
             .primary_key_indices(vec![0])
             .engine("engine")
             .next_column_id(3)
@@ -552,6 +558,55 @@ mod tests {
         assert_eq!(&["col1", "ts", "my_tag"], &names[..]);
         assert_eq!(&[0, 2], &new_meta.primary_key_indices[..]);
         assert_eq!(&[1], &new_meta.value_indices[..]);
+        assert_eq!(
+            schema.timestamp_column(),
+            new_meta.schema.timestamp_column()
+        );
+    }
+
+    #[test]
+    fn test_remove_multiple_columns_before_timestamp() {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("col3", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+        ];
+        let schema = Arc::new(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .timestamp_index(Some(3))
+                .version(123)
+                .build()
+                .unwrap(),
+        );
+        let meta = TableMetaBuilder::default()
+            .schema(schema.clone())
+            .primary_key_indices(vec![1])
+            .engine("engine")
+            .next_column_id(4)
+            .build()
+            .unwrap();
+
+        // Remove columns in reverse order to test whether timestamp index is valid.
+        let alter_kind = AlterKind::RemoveColumns {
+            names: vec![String::from("col3"), String::from("col1")],
+        };
+        let new_meta = meta.alter("my_table", alter_kind).unwrap().build().unwrap();
+
+        let names: Vec<String> = new_meta
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| column_schema.name.clone())
+            .collect();
+        assert_eq!(&["col2", "ts"], &names[..]);
+        assert_eq!(&[0], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[1], &new_meta.value_indices[..]);
+        assert_eq!(
+            schema.timestamp_column(),
+            new_meta.schema.timestamp_column()
+        );
     }
 
     #[test]
