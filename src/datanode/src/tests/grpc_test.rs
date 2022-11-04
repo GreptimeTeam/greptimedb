@@ -24,7 +24,7 @@ async fn setup_grpc_server(name: &str, port: usize) -> (String, TestGuard, Arc<G
     let (mut opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
     let addr = format!("127.0.0.1:{}", port);
     opts.rpc_addr = addr.clone();
-    let instance = Arc::new(Instance::new(&opts).await.unwrap());
+    let instance = Arc::new(Instance::mock_meta_client(&opts).await.unwrap());
     instance.start().await.unwrap();
 
     let addr_cloned = addr.clone();
@@ -50,7 +50,7 @@ async fn setup_grpc_server(name: &str, port: usize) -> (String, TestGuard, Arc<G
     (addr, guard, grpc_server)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_auto_create_table() {
     let (addr, _guard, grpc_server) = setup_grpc_server("auto_create_table", 3991).await;
 
@@ -116,8 +116,9 @@ fn expect_data() -> (Column, Column, Column, Column) {
     )
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_insert_and_select() {
+    common_telemetry::init_default_ut_logging();
     let (addr, _guard, grpc_server) = setup_grpc_server("insert_and_select", 3990).await;
 
     let grpc_client = Client::with_urls(vec![addr]);
@@ -247,6 +248,6 @@ fn testing_create_expr() -> CreateExpr {
         time_index: "ts".to_string(),
         primary_keys: vec!["ts".to_string(), "host".to_string()],
         create_if_not_exists: true,
-        table_options: HashMap::new(),
+        table_options: HashMap::from([("region_id".to_string(), "0".to_string())]),
     }
 }

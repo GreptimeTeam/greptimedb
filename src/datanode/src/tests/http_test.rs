@@ -14,7 +14,7 @@ use crate::tests::test_util;
 
 async fn make_test_app(name: &str) -> (Router, TestGuard) {
     let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
-    let instance = Arc::new(Instance::new(&opts).await.unwrap());
+    let instance = Arc::new(Instance::mock_meta_client(&opts).await.unwrap());
     instance.start().await.unwrap();
     test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
         .await
@@ -23,7 +23,7 @@ async fn make_test_app(name: &str) -> (Router, TestGuard) {
     (http_server.make_app(), guard)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_sql_api() {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = make_test_app("sql_api").await;
@@ -83,7 +83,7 @@ async fn test_sql_api() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_metrics_api() {
     common_telemetry::init_default_ut_logging();
     common_telemetry::init_default_metrics_recorder();
@@ -104,7 +104,7 @@ async fn test_metrics_api() {
     assert!(body.contains("datanode_handle_sql_elapsed"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_scripts_api() {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = make_test_app("scripts_api").await;

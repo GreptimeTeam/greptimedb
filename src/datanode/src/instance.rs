@@ -24,18 +24,18 @@ use crate::sql::SqlHandler;
 mod grpc;
 mod sql;
 
-type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
+pub(crate) type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
 
 // An abstraction to read/write services.
 pub struct Instance {
-    query_engine: QueryEngineRef,
-    sql_handler: SqlHandler,
-    catalog_manager: CatalogManagerRef,
-    physical_planner: PhysicalPlanner,
-    script_executor: ScriptExecutor,
+    pub(crate) query_engine: QueryEngineRef,
+    pub(crate) sql_handler: SqlHandler,
+    pub(crate) catalog_manager: CatalogManagerRef,
+    pub(crate) physical_planner: PhysicalPlanner,
+    pub(crate) script_executor: ScriptExecutor,
     #[allow(unused)]
-    meta_client: MetaClient,
-    heartbeat_task: HeartbeatTask,
+    pub(crate) meta_client: MetaClient,
+    pub(crate) heartbeat_task: HeartbeatTask,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -102,49 +102,9 @@ impl Instance {
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
-
-    // This method is used in other crate's testing codes, so move it out of "cfg(test)".
-    // TODO(LFC): Delete it when callers no longer need it.
-    pub async fn new_mock() -> Result<Self> {
-        use table_engine::table::test_util::new_test_object_store;
-        use table_engine::table::test_util::MockEngine;
-        use table_engine::table::test_util::MockMitoEngine;
-
-        let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
-        let mock_engine = Arc::new(MockMitoEngine::new(
-            TableEngineConfig::default(),
-            MockEngine::default(),
-            object_store,
-        ));
-
-        let catalog_manager = Arc::new(
-            catalog::local::manager::LocalCatalogManager::try_new(mock_engine.clone())
-                .await
-                .unwrap(),
-        );
-
-        let factory = QueryEngineFactory::new(catalog_manager.clone());
-        let query_engine = factory.query_engine().clone();
-
-        let sql_handler = SqlHandler::new(mock_engine.clone(), catalog_manager.clone());
-        let physical_planner = PhysicalPlanner::new(query_engine.clone());
-        let script_executor = ScriptExecutor::new(catalog_manager.clone(), query_engine.clone())
-            .await
-            .unwrap();
-
-        Ok(Self {
-            query_engine,
-            sql_handler,
-            catalog_manager,
-            physical_planner,
-            script_executor,
-            meta_client: Default::default(),
-            heartbeat_task: Default::default(),
-        })
-    }
 }
 
-async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
+pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
     // TODO(dennis): supports other backend
     let data_dir = util::normalize_dir(match store_config {
         ObjectStoreConfig::File { data_dir } => data_dir,
@@ -192,7 +152,9 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Resul
     Ok(meta_client)
 }
 
-async fn create_local_file_log_store(opts: &DatanodeOptions) -> Result<LocalFileLogStore> {
+pub(crate) async fn create_local_file_log_store(
+    opts: &DatanodeOptions,
+) -> Result<LocalFileLogStore> {
     // create WAL directory
     fs::create_dir_all(path::Path::new(&opts.wal_dir))
         .context(error::CreateDirSnafu { dir: &opts.wal_dir })?;

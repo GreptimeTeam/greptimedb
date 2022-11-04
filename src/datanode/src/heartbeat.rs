@@ -14,18 +14,18 @@ pub struct HeartbeatTask {
     node_id: u64,
     server_addr: String,
     started: Arc<AtomicBool>,
-    metasrv_client: MetaClient,
+    meta_client: MetaClient,
     interval: u64,
 }
 
 impl HeartbeatTask {
     /// Create a new heartbeat task instance.
-    pub fn new(node_id: u64, server_addr: String, metasrv_client: MetaClient) -> Self {
+    pub fn new(node_id: u64, server_addr: String, meta_client: MetaClient) -> Self {
         Self {
             node_id,
             server_addr,
             started: Arc::new(AtomicBool::new(false)),
-            metasrv_client,
+            meta_client,
             interval: 5_000, // default interval is set to 5 secs
         }
     }
@@ -58,7 +58,7 @@ impl HeartbeatTask {
         let interval = self.interval;
         let node_id = self.node_id;
         let server_addr = self.server_addr.clone();
-        let meta_client = self.metasrv_client.clone();
+        let meta_client = self.meta_client.clone();
 
         let mut tx = Self::create_streams(&meta_client).await?;
         common_runtime::spawn_bg(async move {

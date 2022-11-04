@@ -12,21 +12,21 @@ use common_catalog::{
     SchemaKey, SchemaValue, TableKey, TableValue,
 };
 use common_telemetry::{debug, info};
-use datatypes::schema::Schema;
 use futures::Stream;
 use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableVersion};
 use table::requests::{CreateTableRequest, OpenTableRequest};
+use table::table::numbers::NumbersTable;
 use table::TableRef;
 use tokio::sync::Mutex;
 
-use crate::error::Result;
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu,
     SchemaNotFoundSnafu, TableExistsSnafu,
 };
+use crate::error::{InvalidTableSchemaSnafu, Result};
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
@@ -164,7 +164,7 @@ impl RemoteCatalogManager {
     /// Fetch catalogs/schemas/tables from remote catalog manager along with max table id allocated.
     async fn initiate_catalogs(&self) -> Result<(HashMap<String, CatalogProviderRef>, TableId)> {
         let mut res = HashMap::new();
-        let max_table_id = MIN_USER_TABLE_ID;
+        let max_table_id = MIN_USER_TABLE_ID - 1;
 
         // initiate default catalog and schema
         let default_catalog = self.initiate_default_catalog().await?;
@@ -246,7 +246,7 @@ impl RemoteCatalogManager {
     async fn initiate_default_catalog(&self) -> Result<CatalogProviderRef> {
         let default_catalog = self.new_catalog_provider(DEFAULT_CATALOG_NAME);
         let default_schema = self.new_schema_provider(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)?;
+        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema.clone())?;
         let schema_key = SchemaKey {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
@@ -310,13 +310,21 @@ impl RemoteCatalogManager {
             })? {
             Some(table) => Ok(table),
             None => {
+                let schema = meta
+                    .schema
+                    .clone()
+                    .try_into()
+                    .context(InvalidTableSchemaSnafu {
+                        table_info: format!("{}.{}.{}", catalog_name, schema_name, table_name,),
+                        schema: meta.schema.clone(),
+                    })?;
                 let req = CreateTableRequest {
                     id: *id,
                     catalog_name: catalog_name.clone(),
                     schema_name: schema_name.clone(),
                     table_name: table_name.clone(),
                     desc: None,
-                    schema: Arc::new(Schema::new(meta.schema.column_schemas.clone())),
+                    schema: Arc::new(schema),
                     region_numbers: meta.region_numbers.clone(),
                     primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,
@@ -353,6 +361,15 @@ impl CatalogManager for RemoteCatalogManager {
         let mut system_table_requests = self.system_table_requests.lock().await;
         handle_system_table_request(self, self.engine.clone(), &mut system_table_requests).await?;
         info!("All system table opened");
+
+        self.catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .unwrap()
+            .schema(DEFAULT_SCHEMA_NAME)
+            .unwrap()
+            .unwrap()
+            .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+            .unwrap();
         Ok(())
     }
 
@@ -513,6 +530,7 @@ impl CatalogProvider for RemoteCatalogProvider {
                             .context(InvalidCatalogValueSnafu)?,
                     )
                     .await?;
+
                 let prev_schemas = schemas.load();
                 let mut new_schemas = HashMap::with_capacity(prev_schemas.len() + 1);
                 new_schemas.clone_from(&prev_schemas);

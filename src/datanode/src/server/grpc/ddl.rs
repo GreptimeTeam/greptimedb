@@ -188,10 +188,11 @@ mod tests {
     use super::*;
     use crate::tests::test_util;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_create_expr_to_request() {
+        common_telemetry::init_default_ut_logging();
         let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("create_expr_to_request");
-        let instance = Instance::new(&opts).await.unwrap();
+        let instance = Instance::mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
 
         let expr = testing_create_expr();
@@ -300,6 +301,9 @@ mod tests {
                 default_constraint: None,
             },
         ];
+        let table_options = [("region_id".to_string(), "0".to_string())]
+            .into_iter()
+            .collect::<HashMap<_, _>>();
         CreateExpr {
             catalog_name: None,
             schema_name: None,
@@ -309,7 +313,7 @@ mod tests {
             time_index: "ts".to_string(),
             primary_keys: vec!["ts".to_string(), "host".to_string()],
             create_if_not_exists: true,
-            table_options: HashMap::new(),
+            table_options,
         }
     }
 

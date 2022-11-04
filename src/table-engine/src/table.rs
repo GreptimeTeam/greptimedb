@@ -484,10 +484,10 @@ impl<R: Region> MitoTable<R> {
     ) -> Result<MitoTable<R>> {
         let manifest = TableManifest::new(&table_manifest_dir(table_name), object_store);
 
-        let table_info = Self::recover_table_info(table_name, &manifest)
+        let mut table_info = Self::recover_table_info(table_name, &manifest)
             .await?
             .context(TableInfoNotFoundSnafu { table_name })?;
-
+        table_info.meta.region_numbers = vec![(region.id() & 0xFFFFFFFF) as u32];
         Ok(MitoTable::new(table_info, region, manifest))
     }
 
