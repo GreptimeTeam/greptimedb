@@ -32,6 +32,7 @@ use parquet::{
 };
 use tokio::task::JoinSet;
 
+const DATABASE_NAME: &str = "greptime";
 const CATALOG_NAME: &str = "greptime";
 const SCHEMA_NAME: &str = "public";
 const TABLE_NAME: &str = "nyc_taxi";
@@ -60,6 +61,9 @@ struct Args {
 
     #[arg(long = "skip-read")]
     skip_read: bool,
+
+    #[arg(short, long, default_value_t = String::from("127.0.0.1:3001"))]
+    endpoint: String,
 }
 
 fn get_file_list<P: AsRef<Path>>(path: P) -> Vec<PathBuf> {
@@ -378,7 +382,7 @@ async fn do_write(args: &Args, client: &Client) {
     let batch_size = args.batch_size;
     for _ in 0..args.thread_num {
         if let Some(path) = file_list.pop() {
-            let db = Database::new("greptime", client.clone());
+            let db = Database::new(DATABASE_NAME, client.clone());
             let mpb = multi_progress_bar.clone();
             let pb_style = progress_bar_style.clone();
             write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb, pb_style).await });
@@ -387,7 +391,7 @@ async fn do_write(args: &Args, client: &Client) {
     while write_jobs.join_next().await.is_some() {
         file_progress.inc(1);
         if let Some(path) = file_list.pop() {
-            let db = Database::new("greptime", client.clone());
+            let db = Database::new(DATABASE_NAME, client.clone());
             let mpb = multi_progress_bar.clone();
             let pb_style = progress_bar_style.clone();
             write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb, pb_style).await });
@@ -421,14 +425,14 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async {
-            let client = Client::with_urls(vec!["http://127.0.0.1:3001"]);
+            let client = Client::with_urls(vec![&args.endpoint]);
 
             if !args.skip_write {
                 do_write(&args, &client).await;
             }
 
             if !args.skip_read {
-                let db = Database::new("greptime", client.clone());
+                let db = Database::new(DATABASE_NAME, client.clone());
                 do_query(args.iter_num, &db).await;
             }
         })
