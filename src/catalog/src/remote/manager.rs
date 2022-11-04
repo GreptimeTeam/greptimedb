@@ -591,13 +591,7 @@ impl SchemaProvider for RemoteSchemaProvider {
             meta: table_info.meta.clone().into(),
             id: table_info.ident.table_id,
             node_id: self.node_id,
-            regions_ids: table
-                .table_info()
-                .meta
-                .region_numbers
-                .iter()
-                .map(|v| *v as u64)
-                .collect(),
+            regions_ids: table.table_info().meta.region_numbers.clone(),
         };
         let backend = self.backend.clone();
         let mutex = self.mutex.clone();

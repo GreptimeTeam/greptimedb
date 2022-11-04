@@ -102,7 +102,7 @@ impl TableKey {
 pub struct TableValue {
     pub id: TableId,
     pub node_id: u64,
-    pub regions_ids: Vec<u64>,
+    pub regions_ids: Vec<u32>,
     pub meta: RawTableMeta,
 }
 
