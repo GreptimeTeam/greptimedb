@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,7 +58,7 @@ impl ChannelManager {
 
         let channel = Channel {
             channel: inner_channel.clone(),
-            access: 1,
+            access: AtomicUsize::new(1),
             use_default_connector: true,
         };
         self.pool.put(addr, channel);
@@ -79,7 +81,7 @@ impl ChannelManager {
         let inner_channel = endpoint.connect_with_connector_lazy(connector);
         let channel = Channel {
             channel: inner_channel.clone(),
-            access: 1,
+            access: AtomicUsize::new(1),
             use_default_connector: false,
         };
         self.pool.put(addr, channel);
@@ -288,14 +290,14 @@ impl ChannelConfig {
 #[derive(Debug)]
 pub struct Channel {
     channel: InnerChannel,
-    access: usize,
+    access: AtomicUsize,
     use_default_connector: bool,
 }
 
 impl Channel {
     #[inline]
     pub fn access(&self) -> usize {
-        self.access
+        self.access.load(Ordering::SeqCst)
     }
 
     #[inline]
@@ -311,9 +313,9 @@ struct Pool {
 
 impl Pool {
     fn get(&self, addr: &str) -> Option<InnerChannel> {
-        let guard = self.channels.get_mut(addr);
-        guard.map(|mut ch| {
-            ch.access += 1;
+        let guard = self.channels.get(addr);
+        guard.map(|ch| {
+            ch.access.fetch_add(1, Ordering::SeqCst);
             ch.channel.clone()
         })
     }
@@ -341,14 +343,7 @@ async fn recycle_channel_in_loop(pool: Arc<Pool>, interval_secs: u64) {
 
     loop {
         interval.tick().await;
-        pool.retain_channel(|_, c| {
-            if c.access == 0 {
-                false
-            } else {
-                c.access = 0;
-                true
-            }
-        })
+        pool.retain_channel(|_, c| c.access.swap(0, Ordering::SeqCst) != 0)
     }
 }
 
@@ -385,14 +380,8 @@ mod tests {
 
         assert_eq!(10, mgr.pool.get_access(addr).unwrap());
 
-        mgr.pool.retain_channel(|_, c| {
-            if c.access == 0 {
-                false
-            } else {
-                c.access = 0;
-                true
-            }
-        });
+        mgr.pool
+            .retain_channel(|_, c| c.access.swap(0, Ordering::SeqCst) != 0);
 
         assert_eq!(0, mgr.pool.get_access(addr).unwrap());
     }
