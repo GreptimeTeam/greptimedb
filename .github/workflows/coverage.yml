@@ -18,7 +18,17 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v2
+      - name: Cache LLVM and Clang
+        id: cache-llvm
+        uses: actions/cache@v2
+        with:
+          path: ./llvm
+          key: llvm
       - uses: arduino/setup-protoc@v1
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
+          cached: ${{ steps.cache-llvm.outputs.cache-hit }}
       - name: Install toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -30,13 +40,14 @@ jobs:
       - name: Cleanup disk
         uses: curoky/cleanup-disk-action@v2.0
         with:
-          retain: 'rust'
+          retain: 'rust,llvm'
       - name: Execute tests
         uses: actions-rs/cargo@v1
         with:
           command: test
           args: --workspace
         env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           RUSTFLAGS: "-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Cpanic=unwind -Zpanic_abort_tests"
