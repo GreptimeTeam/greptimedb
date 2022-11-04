@@ -22,31 +22,16 @@ impl KvBackend for MetaKvBackend {
     where
         'a: 'b,
     {
-        let mut start_key = key.to_vec();
-
+        let key = key.to_vec();
         Box::pin(stream!({
-            let mut more = true;
-            while more {
-                let mut resp = self
-                    .client
-                    .range(RangeRequest::new().with_prefix(start_key))
-                    .await
-                    .context(MetaSrvSnafu)?;
-
-                more = resp.more();
-                let kvs = resp.take_kvs();
-                // advance range start key
-                start_key = match kvs.last().map(|kv| next_range_start(kv.key())) {
-                    Some(key) => key,
-                    None => {
-                        // kvs is empty means end of range, regardless of resp.more()
-                        return;
-                    }
-                };
-
-                for mut kv in kvs.into_iter() {
-                    yield Ok(Kv(kv.take_key(), kv.take_value()))
-                }
+            let mut resp = self
+                .client
+                .range(RangeRequest::new().with_prefix(key))
+                .await
+                .context(MetaSrvSnafu)?;
+            let kvs = resp.take_kvs();
+            for mut kv in kvs.into_iter() {
+                yield Ok(Kv(kv.take_key(), kv.take_value()))
             }
         }))
     }
@@ -82,57 +67,5 @@ impl KvBackend for MetaKvBackend {
         );
 
         Ok(())
-    }
-}
-
-/// Create next range start key from last key in current range response.
-/// For example, for keys: `["1", "11", "123", "1234", "13", "2"]`, if current range response contains
-/// `["1", "11"]`, then next range start will be `11\0`, and expected to return `["123", "1234", "13"]`
-/// but not `2`.
-fn next_range_start(last: &[u8]) -> Vec<u8> {
-    let mut res = Vec::with_capacity(last.len() + 1);
-    res.extend(last);
-    res.push(0);
-    res
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::remote::client::next_range_start;
-
-    fn filter<'a>(keys: &'a [&str], prefix: &'a [u8], range_start: &'a [u8]) -> Vec<&'a str> {
-        let mut res = vec![];
-        for key in keys {
-            if key.as_bytes() >= range_start && key.as_bytes().starts_with(prefix) {
-                res.push(*key)
-            }
-        }
-        res
-    }
-
-    #[test]
-    fn test_next_prefix() {
-        let mut keys = vec!["1", "11", "123", "1234", "13", "2"];
-        keys.sort();
-
-        assert_eq!(
-            vec!["11", "123", "1234", "13"],
-            filter(&keys, b"1", next_range_start(b"1").as_slice())
-        );
-
-        assert_eq!(
-            vec!["123", "1234", "13"],
-            filter(&keys, b"1", next_range_start(b"11").as_slice())
-        );
-
-        assert_eq!(
-            vec!["1234", "13"],
-            filter(&keys, b"1", next_range_start(b"123").as_slice())
-        );
-
-        assert_eq!(
-            vec!["123", "1234", "13"],
-            filter(&keys, b"1", next_range_start(b"12").as_slice())
-        );
     }
 }
