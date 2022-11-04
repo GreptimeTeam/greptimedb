@@ -70,7 +70,7 @@ def test(n):
     let invalid_query = create_invalid_script_query();
     let Json(json) = http_handler::scripts(State(query_handler.clone()), invalid_query, body).await;
     assert!(!json.success(), "{:?}", json);
-    assert_eq!(json.error().unwrap(), "Invalid name");
+    assert_eq!(json.error().unwrap(), "Invalid argument: invalid name");
 
     let body = RawBody(Body::from(script));
     let exec = create_script_query();
