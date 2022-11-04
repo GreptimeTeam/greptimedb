@@ -4,9 +4,12 @@ mod recordbatch;
 pub mod util;
 
 use std::pin::Pin;
+use std::sync::Arc;
 
+use datafusion::arrow_print;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
-use datatypes::schema::SchemaRef;
+use datatypes::prelude::VectorRef;
+use datatypes::schema::{Schema, SchemaRef};
 use error::Result;
 use futures::task::{Context, Poll};
 use futures::Stream;
@@ -54,6 +57,38 @@ pub struct RecordBatches {
 }
 
 impl RecordBatches {
+    pub fn try_from_columns<I: IntoIterator<Item = VectorRef>>(
+        schema: SchemaRef,
+        columns: I,
+    ) -> Result<Self> {
+        let batches = vec![RecordBatch::new(schema.clone(), columns)?];
+        Ok(Self { schema, batches })
+    }
+
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            schema: Arc::new(Schema::new(vec![])),
+            batches: vec![],
+        }
+    }
+
+    pub fn iter(&self) -> RecordBatchesIter {
+        RecordBatchesIter {
+            batches: &self.batches,
+            i: 0,
+        }
+    }
+
+    pub fn pretty_print(&self) -> String {
+        arrow_print::write(
+            &self
+                .iter()
+                .map(|x| x.df_recordbatch.clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+
     pub fn try_new(schema: SchemaRef, batches: Vec<RecordBatch>) -> Result<Self> {
         for batch in batches.iter() {
             ensure!(
@@ -85,6 +120,25 @@ impl RecordBatches {
             },
             index: 0,
         })
+    }
+}
+
+pub struct RecordBatchesIter<'a> {
+    batches: &'a Vec<RecordBatch>,
+    i: usize,
+}
+
+impl<'a> Iterator for RecordBatchesIter<'a> {
+    type Item = &'a RecordBatch;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let i = self.i;
+        if i < self.batches.len() {
+            self.i = i + 1;
+            Some(&self.batches[i])
+        } else {
+            None
+        }
     }
 }
 
