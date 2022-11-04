@@ -78,16 +78,14 @@ impl TryFrom<Schema> for schema::SchemaRef {
             .map(schema::ColumnSchema::try_from)
             .collect::<Result<Vec<_>>>()?;
 
-        let schema: schema::SchemaRef = match schema.timestamp_index {
-            Some(index) => Arc::new(
-                schema::SchemaBuilder::try_from(column_schemas)
-                    .context(ConvertSchemaSnafu)?
-                    .timestamp_index(index.value as usize)
-                    .build()
-                    .context(ConvertSchemaSnafu)?,
-            ),
-            None => Arc::new(schema::Schema::try_new(column_schemas).context(ConvertSchemaSnafu)?),
-        };
+        let timestamp_index = schema.timestamp_index.map(|index| index.value as usize);
+        let schema = Arc::new(
+            schema::SchemaBuilder::try_from(column_schemas)
+                .context(ConvertSchemaSnafu)?
+                .timestamp_index(timestamp_index)
+                .build()
+                .context(ConvertSchemaSnafu)?,
+        );
 
         Ok(schema)
     }

@@ -12,6 +12,7 @@ use common_catalog::{
     SchemaKey, SchemaValue, TableKey, TableValue,
 };
 use common_telemetry::{debug, info};
+use datatypes::schema::Schema;
 use futures::Stream;
 use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -315,7 +316,7 @@ impl RemoteCatalogManager {
                     schema_name: schema_name.clone(),
                     table_name: table_name.clone(),
                     desc: None,
-                    schema: meta.schema.clone(),
+                    schema: Arc::new(Schema::new(meta.schema.column_schemas.clone())),
                     region_numbers: meta.region_numbers.clone(),
                     primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,
@@ -587,7 +588,7 @@ impl SchemaProvider for RemoteSchemaProvider {
         let table_info = table.table_info();
         let table_version = table_info.ident.version;
         let table_value = TableValue {
-            meta: table_info.meta.clone(),
+            meta: table_info.meta.clone().into(),
             id: table_info.ident.table_id,
             node_id: self.node_id,
             regions_ids: table

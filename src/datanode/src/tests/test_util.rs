@@ -24,9 +24,9 @@ pub struct TestGuard {
     _data_tmp_dir: TempDir,
 }
 
-pub fn create_tmp_dir_and_datanode_opts() -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new("/tmp/greptimedb_test_wal").unwrap();
-    let data_tmp_dir = TempDir::new("/tmp/greptimedb_test_data").unwrap();
+pub fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
+    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{}", name)).unwrap();
+    let data_tmp_dir = TempDir::new(&format!("gt_data_{}", name)).unwrap();
     let opts = DatanodeOptions {
         wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
         storage: ObjectStoreConfig::File {
@@ -65,7 +65,7 @@ pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -
                 schema: Arc::new(
                     SchemaBuilder::try_from(column_schemas)
                         .unwrap()
-                        .timestamp_index(3)
+                        .timestamp_index(Some(3))
                         .build()
                         .expect("ts is expected to be timestamp column"),
                 ),

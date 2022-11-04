@@ -40,7 +40,7 @@ impl HeartbeatSender {
 
     #[inline]
     pub async fn send(&self, mut req: HeartbeatRequest) -> Result<()> {
-        req.header = RequestHeader::new(self.id);
+        req.set_header(self.id);
         self.sender.send(req).await.map_err(|e| {
             error::SendHeartbeatSnafu {
                 err_msg: e.to_string(),
@@ -158,7 +158,7 @@ impl Inner {
         let mut leader = None;
         for addr in &self.peers {
             let req = AskLeaderRequest {
-                header: header.clone(),
+                header: Some(header.clone()),
             };
             let mut client = self.make_client(addr)?;
             match client.ask_leader(req).await {
@@ -183,7 +183,7 @@ impl Inner {
 
         let (sender, receiver) = mpsc::channel::<HeartbeatRequest>(128);
         let handshake = HeartbeatRequest {
-            header: RequestHeader::new(self.id),
+            header: Some(RequestHeader::new(self.id)),
             ..Default::default()
         };
         sender.send(handshake).await.map_err(|e| {

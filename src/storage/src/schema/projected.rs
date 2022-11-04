@@ -235,14 +235,12 @@ impl ProjectedSchema {
             })
             .collect();
 
-        let mut builder = SchemaBuilder::try_from(column_schemas)
+        let schema = SchemaBuilder::try_from(column_schemas)
             .context(metadata::ConvertSchemaSnafu)?
-            .version(region_schema.version());
-        if let Some(timestamp_index) = timestamp_index {
-            builder = builder.timestamp_index(timestamp_index);
-        }
-
-        let schema = builder.build().context(metadata::InvalidSchemaSnafu)?;
+            .timestamp_index(timestamp_index)
+            .version(region_schema.version())
+            .build()
+            .context(metadata::InvalidSchemaSnafu)?;
 
         Ok(Arc::new(schema))
     }

@@ -52,7 +52,7 @@ fn create_opentsdb_server(tx: mpsc::Sender<i32>) -> Result<Box<dyn Server>> {
 #[tokio::test]
 async fn test_start_opentsdb_server() -> Result<()> {
     let (tx, _) = mpsc::channel(100);
-    let mut server = create_opentsdb_server(tx)?;
+    let server = create_opentsdb_server(tx)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let result = server.start(listening).await;
     assert!(result.is_ok());
@@ -68,7 +68,7 @@ async fn test_start_opentsdb_server() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_shutdown_opentsdb_server_concurrently() -> Result<()> {
     let (tx, _) = mpsc::channel(100);
-    let mut server = create_opentsdb_server(tx)?;
+    let server = create_opentsdb_server(tx)?;
     let result = server.shutdown().await;
     assert!(result
         .unwrap_err()
@@ -133,7 +133,7 @@ async fn test_shutdown_opentsdb_server_concurrently() -> Result<()> {
 #[tokio::test]
 async fn test_opentsdb_connection_shutdown() -> Result<()> {
     let (tx, _) = mpsc::channel(100);
-    let mut server = create_opentsdb_server(tx)?;
+    let server = create_opentsdb_server(tx)?;
     let result = server.shutdown().await;
     assert!(result
         .unwrap_err()
@@ -178,7 +178,7 @@ async fn test_opentsdb_connection_shutdown() -> Result<()> {
 #[tokio::test]
 async fn test_opentsdb_connect_after_shutdown() -> Result<()> {
     let (tx, _) = mpsc::channel(100);
-    let mut server = create_opentsdb_server(tx)?;
+    let server = create_opentsdb_server(tx)?;
     let result = server.shutdown().await;
     assert!(result
         .unwrap_err()
@@ -198,7 +198,7 @@ async fn test_opentsdb_connect_after_shutdown() -> Result<()> {
 #[tokio::test]
 async fn test_query() -> Result<()> {
     let (tx, mut rx) = mpsc::channel(10);
-    let mut server = create_opentsdb_server(tx)?;
+    let server = create_opentsdb_server(tx)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let addr = server.start(listening).await?;
 
@@ -225,7 +225,7 @@ async fn test_query_concurrently() -> Result<()> {
     let expect_executed_queries_per_worker = 1000;
     let (tx, mut rx) = mpsc::channel(threads * expect_executed_queries_per_worker);
 
-    let mut server = create_opentsdb_server(tx)?;
+    let server = create_opentsdb_server(tx)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let addr = server.start(listening).await?;
 

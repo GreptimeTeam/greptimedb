@@ -1,6 +1,18 @@
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - develop
+      - main
+    paths-ignore:
+      - 'docs/**'
+      - 'config/**'
+      - '.github/**'
+      - '**.md'
+      - '**.yml'
+      - '.dockerignore'
+      - 'docker/**'
 
 name: Continuous integration for developing
 

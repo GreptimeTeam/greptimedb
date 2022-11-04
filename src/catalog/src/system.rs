@@ -172,7 +172,7 @@ fn build_system_catalog_schema() -> Schema {
     // The schema of this table must be valid.
     SchemaBuilder::try_from(cols)
         .unwrap()
-        .timestamp_index(2)
+        .timestamp_index(Some(2))
         .build()
         .unwrap()
 }

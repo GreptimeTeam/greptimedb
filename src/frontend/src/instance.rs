@@ -3,7 +3,6 @@ mod opentsdb;
 mod prometheus;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
@@ -17,7 +16,10 @@ use common_error::prelude::BoxedError;
 use common_query::Output;
 use datatypes::schema::ColumnSchema;
 use servers::error as server_error;
-use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
+use servers::query_handler::{
+    GrpcAdminHandler, GrpcQueryHandler, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
+    PrometheusProtocolHandler, SqlQueryHandler,
+};
 use snafu::prelude::*;
 use sql::ast::{ColumnDef, TableConstraint};
 use sql::statements::create_table::{CreateTable, TIME_INDEX};
@@ -28,31 +30,47 @@ use sql::{dialect::GenericDialect, parser::ParserContext};
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
 
-pub(crate) type InstanceRef = Arc<Instance>;
+#[async_trait]
+pub trait FrontendInstance:
+    GrpcAdminHandler
+    + GrpcQueryHandler
+    + SqlQueryHandler
+    + OpentsdbProtocolHandler
+    + InfluxdbLineProtocolHandler
+    + PrometheusProtocolHandler
+    + Send
+    + Sync
+    + 'static
+{
+    async fn start(&mut self, opts: &FrontendOptions) -> Result<()>;
+}
 
+#[derive(Default)]
 pub struct Instance {
-    db: Database,
-    admin: Admin,
+    client: Client,
 }
 
 impl Instance {
-    pub(crate) fn new() -> Self {
-        let client = Client::default();
-        let db = Database::new("greptime", client.clone());
-        let admin = Admin::new("greptime", client);
-        Self { db, admin }
+    pub fn new() -> Self {
+        Default::default()
     }
 
-    pub(crate) async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
+    // TODO(fys): temporarily hard code
+    pub fn database(&self) -> Database {
+        Database::new("greptime", self.client.clone())
+    }
+
+    // TODO(fys): temporarily hard code
+    pub fn admin(&self) -> Admin {
+        Admin::new("greptime", self.client.clone())
+    }
+}
+
+#[async_trait]
+impl FrontendInstance for Instance {
+    async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
         let addr = opts.datanode_grpc_addr();
-        self.db
-            .start(addr.clone())
-            .await
-            .context(error::ConnectDatanodeSnafu { addr: addr.clone() })?;
-        self.admin
-            .start(addr.clone())
-            .await
-            .context(error::ConnectDatanodeSnafu { addr })?;
+        self.client.start(vec![addr]);
         Ok(())
     }
 }
@@ -60,10 +78,7 @@ impl Instance {
 #[cfg(test)]
 impl Instance {
     pub fn with_client(client: Client) -> Self {
-        Self {
-            db: Database::new("greptime", client.clone()),
-            admin: Admin::new("greptime", client),
-        }
+        Self { client }
     }
 }
 
@@ -85,7 +100,7 @@ impl SqlQueryHandler for Instance {
 
         match stmt {
             Statement::Query(_) => self
-                .db
+                .database()
                 .select(Select::Sql(query.to_string()))
                 .await
                 .and_then(|object_result| object_result.try_into()),
@@ -96,7 +111,7 @@ impl SqlQueryHandler for Instance {
                     expr: Some(insert_expr::Expr::Sql(query.to_string())),
                     options: HashMap::default(),
                 };
-                self.db
+                self.database()
                     .insert(expr)
                     .await
                     .and_then(|object_result| object_result.try_into())
@@ -105,7 +120,7 @@ impl SqlQueryHandler for Instance {
                 let expr = create_to_expr(create)
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu { query })?;
-                self.admin
+                self.admin()
                     .create(expr)
                     .await
                     .and_then(admin_result_to_output)
@@ -235,7 +250,7 @@ fn columns_to_expr(column_defs: &[ColumnDef]) -> Result<Vec<GrpcColumnDef>> {
 #[async_trait]
 impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> server_error::Result<GrpcObjectResult> {
-        self.db
+        self.database()
             .object(query.clone())
             .await
             .map_err(BoxedError::new)
@@ -248,7 +263,7 @@ impl GrpcQueryHandler for Instance {
 #[async_trait]
 impl GrpcAdminHandler for Instance {
     async fn exec_admin_request(&self, expr: AdminExpr) -> server_error::Result<AdminResult> {
-        self.admin
+        self.admin()
             .do_request(expr.clone())
             .await
             .map_err(BoxedError::new)

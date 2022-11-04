@@ -143,7 +143,7 @@ impl SqlHandler {
         let schema = Arc::new(
             SchemaBuilder::try_from(columns_schemas)
                 .context(CreateSchemaSnafu)?
-                .timestamp_index(ts_index)
+                .timestamp_index(Some(ts_index))
                 .build()
                 .context(CreateSchemaSnafu)?,
         );

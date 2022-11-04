@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
-use std::ops::RangeInclusive;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -72,7 +71,7 @@ impl KvBackend for MockKvBackend {
     async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
         let start = key.to_vec();
         let end = end.to_vec();
-        let range = RangeInclusive::new(start, end);
+        let range = start..end;
 
         let mut map = self.map.write().await;
         map.retain(|k, _| !range.contains(k));

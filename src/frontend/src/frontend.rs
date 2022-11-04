@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
+use crate::grpc::GrpcOptions;
 use crate::influxdb::InfluxdbOptions;
-use crate::instance::Instance;
+use crate::instance::FrontendInstance;
 use crate::mysql::MysqlOptions;
 use crate::opentsdb::OpentsdbOptions;
 use crate::postgres::PostgresOptions;
@@ -15,7 +16,7 @@ use crate::server::Services;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrontendOptions {
     pub http_addr: Option<String>,
-    pub grpc_addr: Option<String>,
+    pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
     pub postgres_options: Option<PostgresOptions>,
     pub opentsdb_options: Option<OpentsdbOptions>,
@@ -27,7 +28,7 @@ impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
             http_addr: Some("0.0.0.0:4000".to_string()),
-            grpc_addr: Some("0.0.0.0:4001".to_string()),
+            grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
             postgres_options: Some(PostgresOptions::default()),
             opentsdb_options: Some(OpentsdbOptions::default()),
@@ -40,18 +41,23 @@ impl Default for FrontendOptions {
 impl FrontendOptions {
     // TODO(LFC) Get Datanode address from Meta.
     pub(crate) fn datanode_grpc_addr(&self) -> String {
-        "http://127.0.0.1:3001".to_string()
+        "127.0.0.1:3001".to_string()
     }
 }
 
-pub struct Frontend {
+pub struct Frontend<T>
+where
+    T: FrontendInstance,
+{
     opts: FrontendOptions,
-    instance: Option<Instance>,
+    instance: Option<T>,
 }
 
-impl Frontend {
-    pub fn new(opts: FrontendOptions) -> Self {
-        let instance = Instance::new();
+impl<T> Frontend<T>
+where
+    T: FrontendInstance,
+{
+    pub fn new(opts: FrontendOptions, instance: T) -> Self {
         Self {
             opts,
             instance: Some(instance),

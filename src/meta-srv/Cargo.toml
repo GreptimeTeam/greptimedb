@@ -3,11 +3,15 @@ name = "meta-srv"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+mock = []
+
 [dependencies]
 api = { path = "../api" }
 async-trait = "0.1"
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
+common-grpc = { path = "../common/grpc" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
@@ -16,6 +20,7 @@ futures = "0.3"
 h2 = "0.3"
 http-body = "0.4"
 lazy_static = "1.4"
+parking_lot = "0.12"
 regex = "1.6"
 serde = "1.0"
 serde_json = "1.0"
@@ -23,6 +28,7 @@ snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"
+tower = "0.4"
 url = "2.3"
 
 [dev-dependencies]

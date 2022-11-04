@@ -12,7 +12,7 @@ mod tests {
     use storage::manifest::MetaActionIteratorImpl;
     use store_api::manifest::action::ProtocolAction;
     use store_api::manifest::{Manifest, MetaActionIterator};
-    use table::metadata::TableInfo;
+    use table::metadata::{RawTableInfo, TableInfo};
 
     use super::*;
     use crate::manifest::action::{TableChange, TableMetaAction, TableRemove};
@@ -32,7 +32,7 @@ mod tests {
                     matches!(&action_list.actions[0], TableMetaAction::Protocol(p) if *p == *protocol)
                 );
                 assert!(
-                    matches!(&action_list.actions[1], TableMetaAction::Change(c) if c.table_info == *table_info)
+                    matches!(&action_list.actions[1], TableMetaAction::Change(c) if TableInfo::try_from(c.table_info.clone()).unwrap() == *table_info)
                 );
             }
             _ => unreachable!(),
@@ -52,7 +52,7 @@ mod tests {
         let table_info = test_util::build_test_table_info();
         let action_list =
             TableMetaActionList::new(vec![TableMetaAction::Change(Box::new(TableChange {
-                table_info: table_info.clone(),
+                table_info: RawTableInfo::from(table_info.clone()),
             }))]);
 
         assert_eq!(0, manifest.update(action_list).await.unwrap());

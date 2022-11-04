@@ -466,7 +466,7 @@ mod tests {
         let schema = Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
-                .timestamp_index(2)
+                .timestamp_index(Some(2))
                 .build()
                 .expect("ts must be timestamp column"),
         );

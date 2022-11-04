@@ -218,7 +218,7 @@ fn build_scripts_schema() -> Schema {
     // Schema is always valid here
     SchemaBuilder::try_from(cols)
         .unwrap()
-        .timestamp_index(3)
+        .timestamp_index(Some(3))
         .build()
         .unwrap()
 }

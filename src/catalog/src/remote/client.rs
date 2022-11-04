@@ -22,34 +22,16 @@ impl KvBackend for MetaKvBackend {
     where
         'a: 'b,
     {
-        let mut start_key = key.to_vec();
-
+        let key = key.to_vec();
         Box::pin(stream!({
-            let mut more = true;
-            while more {
-                let mut resp = self
-                    .client
-                    .range(RangeRequest::new().with_prefix(start_key.clone()))
-                    .await
-                    .context(MetaSrvSnafu)?;
-
-                more = resp.more();
-                let kvs = resp.take_kvs();
-                // advance range start key
-                start_key = match kvs
-                    .last()
-                    .map(|kv| meta_client::util::get_prefix_end_key(kv.key()))
-                {
-                    Some(key) => key,
-                    None => {
-                        // kvs is empty means end of range, regardless of resp.more()
-                        return;
-                    }
-                };
-
-                for mut kv in kvs.into_iter() {
-                    yield Ok(Kv(kv.take_key(), kv.take_value()))
-                }
+            let mut resp = self
+                .client
+                .range(RangeRequest::new().with_prefix(key))
+                .await
+                .context(MetaSrvSnafu)?;
+            let kvs = resp.take_kvs();
+            for mut kv in kvs.into_iter() {
+                yield Ok(Kv(kv.take_key(), kv.take_value()))
             }
         }))
     }

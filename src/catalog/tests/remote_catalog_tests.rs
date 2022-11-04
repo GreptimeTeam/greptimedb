@@ -59,7 +59,7 @@ mod tests {
             res.insert(String::from_utf8_lossy(&kv.0).to_string());
         }
         assert_eq!(
-            vec!["__c-greptime-localhost".to_string()],
+            vec!["__c-greptime-42".to_string()],
             res.into_iter().collect::<Vec<_>>()
         );
     }

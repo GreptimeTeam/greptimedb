@@ -40,9 +40,16 @@ impl Services {
                 .build()
                 .context(error::RuntimeResourceSnafu)?,
         );
+        let grpc_runtime = Arc::new(
+            RuntimeBuilder::default()
+                .worker_threads(opts.rpc_runtime_size as usize)
+                .thread_name("grpc-io-handlers")
+                .build()
+                .context(error::RuntimeResourceSnafu)?,
+        );
         Ok(Self {
             http_server: HttpServer::new(instance.clone()),
-            grpc_server: GrpcServer::new(instance.clone(), instance.clone()),
+            grpc_server: GrpcServer::new(instance.clone(), instance.clone(), grpc_runtime),
             mysql_server: MysqlServer::create_server(instance.clone(), mysql_io_runtime),
             postgres_server: Box::new(PostgresServer::new(instance, postgres_io_runtime)),
         })

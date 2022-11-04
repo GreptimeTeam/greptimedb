@@ -46,7 +46,7 @@ mod tests {
         };
 
         let req = HeartbeatRequest {
-            header: RequestHeader::new((1, 2)),
+            header: Some(RequestHeader::new((1, 2))),
             ..Default::default()
         };
         let mut acc = HeartbeatAccumulator::default();

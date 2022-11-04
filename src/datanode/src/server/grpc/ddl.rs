@@ -154,7 +154,7 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
     Ok(Arc::new(
         SchemaBuilder::try_from(column_schemas)
             .context(error::CreateSchemaSnafu)?
-            .timestamp_index(ts_index)
+            .timestamp_index(Some(ts_index))
             .build()
             .context(error::CreateSchemaSnafu)?,
     ))
@@ -190,7 +190,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_expr_to_request() {
-        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("create_expr_to_request");
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
 
@@ -323,7 +323,7 @@ mod tests {
         Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
-                .timestamp_index(1)
+                .timestamp_index(Some(1))
                 .build()
                 .unwrap(),
         )
