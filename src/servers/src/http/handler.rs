@@ -48,7 +48,7 @@ pub async fn metrics(Query(_params): Query<HashMap<String, String>>) -> String {
 }
 
 macro_rules! json_err {
-    ($e: ident) => {{
+    ($e: expr) => {{
         return Json(JsonResponse::with_error(
             format!("Invalid argument: {}", $e),
             common_error::status_code::StatusCode::InvalidArguments,
@@ -79,7 +79,7 @@ pub async fn scripts(
     let name = params.name.as_ref();
 
     if name.is_none() || name.unwrap().is_empty() {
-        json_err!("Invalid name", StatusCode::InvalidArguments);
+        json_err!("Invalid name");
     }
     let bytes = unwrap_or_json_err!(hyper::body::to_bytes(body).await);
 
@@ -107,7 +107,7 @@ pub async fn run_script(
     let name = params.name.as_ref();
 
     if name.is_none() || name.unwrap().is_empty() {
-        json_err!("Invalid name", StatusCode::InvalidArguments);
+        json_err!("Invalid name");
     }
 
     let output = query_handler.execute_script(name.unwrap()).await;
