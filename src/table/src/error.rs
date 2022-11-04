@@ -74,7 +74,7 @@ pub enum InnerError {
     },
 
     #[snafu(display(
-        "Not allowed to remove column {} in index from table {}",
+        "Not allowed to remove index column {} from table {}",
         column_name,
         table_name
     ))]

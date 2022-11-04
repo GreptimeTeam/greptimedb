@@ -57,6 +57,8 @@ pub struct TableIdent {
 #[builder(pattern = "mutable")]
 pub struct TableMeta {
     pub schema: SchemaRef,
+    /// The indices of columns in primary key. Note that the index of timestamp column
+    /// is not included in these indices.
     pub primary_key_indices: Vec<usize>,
     #[builder(default = "self.default_value_indices()?")]
     pub value_indices: Vec<usize>,
@@ -105,10 +107,12 @@ impl TableMeta {
     }
 
     /// Returns the new [TableMetaBuilder] after applying given `alter_kind`.
+    ///
+    /// The returned builder would derive the next column id of this meta.
     pub fn alter(&self, table_name: &str, alter_kind: AlterKind) -> Result<TableMetaBuilder> {
         match alter_kind {
-            AlterKind::AddColumns { columns } => self.add_columns_to_meta(table_name, columns),
-            AlterKind::RemoveColumns { names } => self.remove_columns_from_meta(table_name, &names),
+            AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
+            AlterKind::RemoveColumns { names } => self.remove_columns(table_name, &names),
         }
     }
 
@@ -118,12 +122,13 @@ impl TableMeta {
             .engine(&self.engine)
             .engine_options(self.engine_options.clone())
             .options(self.options.clone())
-            .created_on(self.created_on);
+            .created_on(self.created_on)
+            .next_column_id(self.next_column_id);
 
         builder
     }
 
-    fn add_columns_to_meta(
+    fn add_columns(
         &self,
         table_name: &str,
         requests: Vec<AddColumnRequest>,
@@ -186,7 +191,7 @@ impl TableMeta {
         Ok(meta_builder)
     }
 
-    fn remove_columns_from_meta(
+    fn remove_columns(
         &self,
         table_name: &str,
         column_names: &[String],
@@ -263,11 +268,18 @@ impl TableMeta {
             ),
         })?;
 
-        // Since removing columns in primary index is not allowed, so we could reuse the old
-        // primary_key_indices
+        // Rebuild the indices of primary key columns.
+        let primary_key_indices = self
+            .primary_key_indices
+            .iter()
+            .map(|idx| table_schema.column_name_by_index(*idx))
+            // This unwrap is safe since we don't allow removing a primary key column.
+            .map(|name| new_schema.column_index_by_name(name).unwrap())
+            .collect();
+
         meta_builder
             .schema(Arc::new(new_schema))
-            .primary_key_indices(self.primary_key_indices.clone());
+            .primary_key_indices(primary_key_indices);
 
         Ok(meta_builder)
     }
@@ -425,6 +437,7 @@ impl TryFrom<RawTableInfo> for TableInfo {
 
 #[cfg(test)]
 mod tests {
+    use common_error::prelude::*;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
 
@@ -434,6 +447,7 @@ mod tests {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
         ];
         SchemaBuilder::try_from(column_schemas)
             .unwrap()
@@ -448,10 +462,9 @@ mod tests {
         let schema = Arc::new(new_test_schema());
         let meta = TableMetaBuilder::default()
             .schema(schema)
-            .primary_key_indices(vec![1])
-            .value_indices(vec![0])
+            .primary_key_indices(vec![0])
             .engine("engine")
-            .next_column_id(2)
+            .next_column_id(3)
             .build()
             .unwrap();
         let info = TableInfoBuilder::default()
@@ -466,5 +479,147 @@ mod tests {
         let info_new = TableInfo::try_from(raw).unwrap();
 
         assert_eq!(info, info_new);
+    }
+
+    fn add_columns_to_meta(meta: &TableMeta) -> TableMeta {
+        let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![
+                AddColumnRequest {
+                    column_schema: new_tag.clone(),
+                    is_key: true,
+                },
+                AddColumnRequest {
+                    column_schema: new_field.clone(),
+                    is_key: false,
+                },
+            ],
+        };
+
+        let builder = meta.alter("my_table", alter_kind).unwrap();
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_add_columns() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let new_meta = add_columns_to_meta(&meta);
+
+        let names: Vec<String> = new_meta
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| column_schema.name.clone())
+            .collect();
+        assert_eq!(&["col1", "ts", "col2", "my_tag", "my_field"], &names[..]);
+        assert_eq!(&[0, 3], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[1, 2, 4], &new_meta.value_indices[..]);
+    }
+
+    #[test]
+    fn test_remove_columns() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        // Add more columns so we have enough candidate columns to remove.
+        let meta = add_columns_to_meta(&meta);
+
+        let alter_kind = AlterKind::RemoveColumns {
+            names: vec![String::from("col2"), String::from("my_field")],
+        };
+        let new_meta = meta.alter("my_table", alter_kind).unwrap().build().unwrap();
+
+        let names: Vec<String> = new_meta
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| column_schema.name.clone())
+            .collect();
+        assert_eq!(&["col1", "ts", "my_tag"], &names[..]);
+        assert_eq!(&[0, 2], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[1], &new_meta.value_indices[..]);
+    }
+
+    #[test]
+    fn test_add_existing_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![AddColumnRequest {
+                column_schema: ColumnSchema::new("col1", ConcreteDataType::string_datatype(), true),
+                is_key: false,
+            }],
+        };
+
+        let err = meta.alter("my_table", alter_kind).err().unwrap();
+        assert_eq!(StatusCode::TableColumnExists, err.status_code());
+    }
+
+    #[test]
+    fn test_remove_unknown_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::RemoveColumns {
+            names: vec![String::from("unknown")],
+        };
+
+        let err = meta.alter("my_table", alter_kind).err().unwrap();
+        assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
+    }
+
+    #[test]
+    fn test_remove_key_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        // Remove column in primary key.
+        let alter_kind = AlterKind::RemoveColumns {
+            names: vec![String::from("col1")],
+        };
+
+        let err = meta.alter("my_table", alter_kind).err().unwrap();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+
+        // Remove timestamp column.
+        let alter_kind = AlterKind::RemoveColumns {
+            names: vec![String::from("ts")],
+        };
+
+        let err = meta.alter("my_table", alter_kind).err().unwrap();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 }
