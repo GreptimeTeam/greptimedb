@@ -94,7 +94,7 @@ impl StoreSchema {
 
         let schema = SchemaBuilder::try_from(column_schemas)
             .context(metadata::ConvertSchemaSnafu)?
-            .timestamp_index(timestamp_key_index)
+            .timestamp_index(Some(timestamp_key_index))
             .version(version)
             .add_metadata(ROW_KEY_END_KEY, row_key_end.to_string())
             .add_metadata(USER_COLUMN_END_KEY, user_column_end.to_string())
@@ -252,7 +252,7 @@ mod tests {
         let expect_schema = SchemaBuilder::try_from(column_schemas)
             .unwrap()
             .version(123)
-            .timestamp_index(1)
+            .timestamp_index(Some(1))
             .build()
             .unwrap();
         // Only compare column schemas since SchemaRef in StoreSchema also contains other metadata that only used

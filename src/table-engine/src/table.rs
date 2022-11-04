@@ -28,7 +28,7 @@ use table::metadata::{FilterPushDownType, TableInfoRef, TableMetaBuilder};
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
 use table::table::scan::SimpleTableScan;
 use table::{
-    metadata::{TableInfo, TableType},
+    metadata::{RawTableInfo, TableInfo, TableType},
     table::Table,
 };
 use tokio::sync::Mutex;
@@ -288,7 +288,7 @@ impl<R: Region> Table for MitoTable<R> {
         self.manifest
             .update(TableMetaActionList::with_action(TableMetaAction::Change(
                 Box::new(TableChange {
-                    table_info: new_info.clone(),
+                    table_info: RawTableInfo::from(new_info.clone()),
                 }),
             )))
             .await
@@ -339,11 +339,9 @@ fn build_table_schema_with_new_columns(
         .context(SchemaBuildSnafu {
             msg: "Failed to convert column schemas into table schema",
         })?
+        .timestamp_index(table_schema.timestamp_index())
         .version(table_schema.version() + 1);
 
-    if let Some(index) = table_schema.timestamp_index() {
-        builder = builder.timestamp_index(index);
-    }
     for (k, v) in table_schema.arrow_schema().metadata.iter() {
         builder = builder.add_metadata(k, v);
     }
@@ -455,7 +453,7 @@ impl<R: Region> MitoTable<R> {
         let _manifest_version = manifest
             .update(TableMetaActionList::with_action(TableMetaAction::Change(
                 Box::new(TableChange {
-                    table_info: table_info.clone(),
+                    table_info: RawTableInfo::from(table_info.clone()),
                 }),
             )))
             .await
@@ -515,10 +513,12 @@ impl<R: Region> MitoTable<R> {
             for action in action_list.actions {
                 match action {
                     TableMetaAction::Change(c) => {
-                        table_info = Some(c.table_info);
+                        table_info = Some(
+                            TableInfo::try_from(c.table_info).context(error::ConvertRawSnafu)?,
+                        );
                     }
                     TableMetaAction::Protocol(_) => {}
-                    _ => unimplemented!(),
+                    TableMetaAction::Remove(_) => unimplemented!("Drop table is unimplemented"),
                 }
             }
         }
