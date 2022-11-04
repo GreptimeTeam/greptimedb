@@ -444,11 +444,6 @@ impl<R: Region> MitoTable<R> {
         &self.region
     }
 
-    #[inline]
-    pub fn table_info(&self) -> TableInfoRef {
-        Arc::clone(&self.table_info.load())
-    }
-
     pub fn set_table_info(&self, table_info: TableInfo) {
         self.table_info.swap(Arc::new(table_info));
     }

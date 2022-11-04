@@ -19,6 +19,7 @@ use table::Result as TableResult;
 use table::{
     metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion},
     table::TableRef,
+    Table,
 };
 use tokio::sync::Mutex;
 
@@ -740,10 +741,6 @@ mod tests {
         let (_engine, table_engine, table, _object_store, _dir) =
             test_util::setup_mock_engine_and_table().await;
 
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
         let table_info = table.table_info();
 
         let request = CreateTableRequest {
@@ -760,14 +757,7 @@ mod tests {
         };
 
         let created_table = table_engine.create_table(&ctx, request).await.unwrap();
-        assert_eq!(
-            table_info,
-            created_table
-                .as_any()
-                .downcast_ref::<MitoTable<MockRegion>>()
-                .unwrap()
-                .table_info()
-        );
+        assert_eq!(table_info, created_table.table_info());
 
         // test create_if_not_exists=false
         let request = CreateTableRequest {
@@ -826,10 +816,6 @@ mod tests {
             .unwrap();
         assert_eq!(table.schema(), reopened.schema());
 
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
         let reopened = reopened
             .as_any()
             .downcast_ref::<MitoTable<MockRegion>>()
@@ -855,10 +841,6 @@ mod tests {
         let (_engine, table_engine, table, _object_store, _dir) =
             test_util::setup_mock_engine_and_table().await;
 
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
         let old_info = table.table_info();
         let old_meta = &old_info.meta;
         let old_schema = &old_meta.schema;
@@ -887,10 +869,6 @@ mod tests {
             .await
             .unwrap();
 
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
         let new_info = table.table_info();
         let new_meta = &new_info.meta;
         let new_schema = &new_meta.schema;
