@@ -34,7 +34,7 @@ impl SqlHandler {
         stmt: Insert,
     ) -> Result<SqlRequest> {
         let columns = stmt.columns();
-        let values = stmt.values();
+        let values = stmt.values().context(ParseSqlValueSnafu)?;
         //TODO(dennis): table name may be in the form of `catalog.schema.table`,
         //   but we don't process it right now.
         let table_name = stmt.table_name();
