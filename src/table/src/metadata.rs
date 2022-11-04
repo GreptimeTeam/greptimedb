@@ -487,11 +487,11 @@ mod tests {
         let alter_kind = AlterKind::AddColumns {
             columns: vec![
                 AddColumnRequest {
-                    column_schema: new_tag.clone(),
+                    column_schema: new_tag,
                     is_key: true,
                 },
                 AddColumnRequest {
-                    column_schema: new_field.clone(),
+                    column_schema: new_field,
                     is_key: false,
                 },
             ],
