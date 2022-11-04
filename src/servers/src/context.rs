@@ -35,9 +35,9 @@ pub struct UserInfo {
 }
 
 pub enum Channel {
-    gRPC,
+    GRPC,
     HTTP,
-    MySQL,
+    MYSQL,
 }
 
 pub enum AuthMethod {
