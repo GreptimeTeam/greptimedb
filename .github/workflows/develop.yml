@@ -58,6 +58,10 @@ jobs:
           override: true
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.0.0
+      - name: Cleanup disk
+        uses: curoky/cleanup-disk-action@v2.0
+        with:
+          retain: 'rust,llvm'
       - uses: actions-rs/cargo@v1
         with:
           command: test
