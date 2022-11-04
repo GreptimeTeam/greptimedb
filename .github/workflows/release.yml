@@ -155,6 +155,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Login to Dockerhub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
 
@@ -168,4 +174,6 @@ jobs:
           file: ./docker/ci/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/greptimeteam/greptimedb:${{ github.ref_name }}
+          tags: |
+            ghcr.io/greptimeteam/greptimedb:${{ github.ref_name }}
+            greptime/greptimedb:${{ github.ref_name }}
