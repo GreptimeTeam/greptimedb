@@ -133,7 +133,7 @@ mod tests {
             Arc::new(
                 SchemaBuilder::try_from(column_schemas)
                     .unwrap()
-                    .timestamp_index(3)
+                    .timestamp_index(Some(3))
                     .build()
                     .unwrap(),
             )

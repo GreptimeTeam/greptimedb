@@ -11,11 +11,11 @@ use storage::manifest::helper;
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion, VersionHeader};
 use store_api::manifest::ManifestVersion;
 use store_api::manifest::MetaAction;
-use table::metadata::{TableIdent, TableInfo};
+use table::metadata::{RawTableInfo, TableIdent};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TableChange {
-    pub table_info: TableInfo,
+    pub table_info: RawTableInfo,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -137,7 +137,7 @@ mod tests {
         let mut protocol = ProtocolAction::new();
         protocol.min_reader_version = 1;
 
-        let table_info = test_util::build_test_table_info();
+        let table_info = RawTableInfo::from(test_util::build_test_table_info());
 
         let mut action_list = TableMetaActionList::new(vec![
             TableMetaAction::Protocol(protocol.clone()),

@@ -178,6 +178,15 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display(
+        "Failed to convert metadata from deserialized data, source: {}",
+        source
+    ))]
+    ConvertRaw {
+        #[snafu(backtrace)]
+        source: table::metadata::ConvertError,
+    },
 }
 
 impl From<Error> for table::error::Error {
@@ -215,7 +224,7 @@ impl ErrorExt for Error {
 
             ColumnsNotExist { .. } => StatusCode::TableColumnNotFound,
 
-            TableInfoNotFound { .. } => StatusCode::Unexpected,
+            TableInfoNotFound { .. } | ConvertRaw { .. } => StatusCode::Unexpected,
 
             ScanTableManifest { .. } | UpdateTableManifest { .. } => StatusCode::StorageUnavailable,
         }

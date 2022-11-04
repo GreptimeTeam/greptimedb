@@ -109,7 +109,7 @@ mod tests {
 
         SchemaBuilder::try_from(column_schemas)
             .unwrap()
-            .timestamp_index(1)
+            .timestamp_index(Some(1))
     }
 
     fn new_test_schema(v0_constraint: Option<Option<ColumnDefaultConstraint>>) -> SchemaRef {
