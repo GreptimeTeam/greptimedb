@@ -29,7 +29,7 @@ pub struct HeartbeatSender {
 
 impl HeartbeatSender {
     #[inline]
-    const fn new(id: Id, sender: mpsc::Sender<HeartbeatRequest>) -> Self {
+    fn new(id: Id, sender: mpsc::Sender<HeartbeatRequest>) -> Self {
         Self { id, sender }
     }
 
@@ -58,7 +58,7 @@ pub struct HeartbeatStream {
 
 impl HeartbeatStream {
     #[inline]
-    const fn new(id: Id, stream: Streaming<HeartbeatResponse>) -> Self {
+    fn new(id: Id, stream: Streaming<HeartbeatResponse>) -> Self {
         Self { id, stream }
     }
 
