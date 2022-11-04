@@ -326,7 +326,7 @@ pub(crate) mod greptime_builtin {
         let func: Option<FunctionRef> = FUNCTION_REGISTRY.get_function(name);
         let res = match func {
             Some(f) => f.eval(Default::default(), &v),
-            None => return Err(vm.new_type_error(format!("Can't found function {}", name))),
+            None => return Err(vm.new_type_error(format!("Can't find function {}", name))),
         };
         match res {
             Ok(v) => Ok(v.into()),
@@ -345,7 +345,7 @@ pub(crate) mod greptime_builtin {
         let func = FUNCTION_REGISTRY.get_aggr_function(name);
         let f = match func {
             Some(f) => f.create().creator(),
-            None => return Err(vm.new_type_error(format!("Can't found function {}", name))),
+            None => return Err(vm.new_type_error(format!("Can't find function {}", name))),
         };
         let types: Vec<_> = v.iter().map(|v| v.data_type()).collect();
         let acc = f(&types);
