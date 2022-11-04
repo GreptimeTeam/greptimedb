@@ -69,8 +69,9 @@ impl KvStore for EtcdStore {
             .map(|kv| KvPair::new(kv).into())
             .collect::<Vec<_>>();
 
+        let header = Some(ResponseHeader::success(cluster_id));
         Ok(RangeResponse {
-            header: ResponseHeader::success(cluster_id),
+            header,
             kvs,
             more: res.more(),
         })
@@ -93,10 +94,8 @@ impl KvStore for EtcdStore {
 
         let prev_kv = res.prev_key().map(|kv| KvPair::new(kv).into());
 
-        Ok(PutResponse {
-            header: ResponseHeader::success(cluster_id),
-            prev_kv,
-        })
+        let header = Some(ResponseHeader::success(cluster_id));
+        Ok(PutResponse { header, prev_kv })
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
@@ -131,10 +130,8 @@ impl KvStore for EtcdStore {
             }
         }
 
-        Ok(BatchPutResponse {
-            header: ResponseHeader::success(cluster_id),
-            prev_kvs,
-        })
+        let header = Some(ResponseHeader::success(cluster_id));
+        Ok(BatchPutResponse { header, prev_kvs })
     }
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
@@ -162,32 +159,37 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
         let success = txn_res.succeeded();
-        let prev_kv;
         let op_res = txn_res
             .op_responses()
             .pop()
             .context(error::InvalidTxnResultSnafu {
                 err_msg: "empty response",
             })?;
-        if success {
-            prev_kv = Some(KeyValue { key, value: expect });
+        let prev_kv = if success {
+            Some(KeyValue { key, value: expect })
         } else {
             match op_res {
                 TxnOpResponse::Get(get_res) => {
-                    ensure!(
-                        get_res.count() == 1,
-                        error::InvalidTxnResultSnafu {
-                            err_msg: format!("expect 1 response, actual {}", get_res.count())
-                        }
-                    );
-                    prev_kv = Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])));
+                    if get_res.count() == 0 {
+                        // do not exists
+                        Some(KeyValue { key, value: vec![] })
+                    } else {
+                        ensure!(
+                            get_res.count() == 1,
+                            error::InvalidTxnResultSnafu {
+                                err_msg: format!("expect 1 response, actual {}", get_res.count())
+                            }
+                        );
+                        Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])))
+                    }
                 }
                 _ => unreachable!(), // never get here
             }
-        }
+        };
 
+        let header = Some(ResponseHeader::success(cluster_id));
         Ok(CompareAndPutResponse {
-            header: ResponseHeader::success(cluster_id),
+            header,
             success,
             prev_kv,
         })
@@ -213,8 +215,9 @@ impl KvStore for EtcdStore {
             .map(|kv| KvPair::new(kv).into())
             .collect::<Vec<_>>();
 
+        let header = Some(ResponseHeader::success(cluster_id));
         Ok(DeleteRangeResponse {
-            header: ResponseHeader::success(cluster_id),
+            header,
             deleted: res.deleted(),
             prev_kvs,
         })

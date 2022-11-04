@@ -13,7 +13,7 @@ use crate::tests::test_util;
 async fn test_execute_insert() {
     common_telemetry::init_default_ut_logging();
 
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_insert");
     let instance = Instance::new(&opts).await.unwrap();
     instance.start().await.unwrap();
 
@@ -37,7 +37,7 @@ async fn test_execute_insert() {
 async fn test_execute_insert_query_with_i64_timestamp() {
     common_telemetry::init_default_ut_logging();
 
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("insert_query_i64_timestamp");
     let instance = Instance::new(&opts).await.unwrap();
     instance.start().await.unwrap();
 
@@ -74,7 +74,7 @@ async fn test_execute_insert_query_with_i64_timestamp() {
 
 #[tokio::test]
 async fn test_execute_query() {
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_query");
     let instance = Instance::new(&opts).await.unwrap();
     instance.start().await.unwrap();
 
@@ -100,7 +100,8 @@ async fn test_execute_query() {
 
 #[tokio::test]
 async fn test_execute_show_databases_tables() {
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let (opts, _guard) =
+        test_util::create_tmp_dir_and_datanode_opts("execute_show_databases_tables");
     let instance = Instance::new(&opts).await.unwrap();
     instance.start().await.unwrap();
 
@@ -191,7 +192,7 @@ async fn test_execute_show_databases_tables() {
 pub async fn test_execute_create() {
     common_telemetry::init_default_ut_logging();
 
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_create");
     let instance = Instance::new(&opts).await.unwrap();
     instance.start().await.unwrap();
 
@@ -215,7 +216,8 @@ pub async fn test_execute_create() {
 pub async fn test_create_table_illegal_timestamp_type() {
     common_telemetry::init_default_ut_logging();
 
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+    let (opts, _guard) =
+        test_util::create_tmp_dir_and_datanode_opts("create_table_illegal_timestamp_type");
     let instance = Instance::new(&opts).await.unwrap();
     instance.start().await.unwrap();
 

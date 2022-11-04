@@ -22,7 +22,7 @@ pub async fn bootstrap_meta_srv(opts: MetaSrvOptions) -> crate::Result<()> {
         })?;
     let listener = TcpListenerStream::new(listener);
 
-    let meta_srv = MetaSrv::new(opts, kv_store).await;
+    let meta_srv = MetaSrv::new(opts, kv_store, None).await;
 
     tonic::transport::Server::builder()
         .accept_http1(true) // for admin services

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 api = { path = "../api" }
+async-trait = "0.1"
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-telemetry = { path = "../common/telemetry" }
@@ -16,5 +17,8 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"
 
 [dev-dependencies]
+futures = "0.3"
+meta-srv = { path = "../meta-srv", features = ["mock"] }
+tower = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

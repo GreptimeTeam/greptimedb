@@ -181,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_expr_to_request() {
-        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts();
+        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("create_expr_to_request");
         let instance = Instance::new(&opts).await.unwrap();
         instance.start().await.unwrap();
 

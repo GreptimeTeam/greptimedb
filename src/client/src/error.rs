@@ -85,6 +85,17 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display(
+        "Failed to create gRPC channel, peer address: {}, source: {}",
+        addr,
+        source
+    ))]
+    CreateChannel {
+        addr: String,
+        #[snafu(backtrace)]
+        source: common_grpc::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -107,6 +118,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::CreateRecordBatches { source } => source.status_code(),
+            Error::CreateChannel { source, .. } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
         }
     }

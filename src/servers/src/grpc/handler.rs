@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use api::v1::{AdminResponse, BatchRequest, BatchResponse, DatabaseResponse};
+use common_runtime::Runtime;
+use tokio::sync::oneshot;
 
 use crate::error::Result;
 use crate::query_handler::{GrpcAdminHandlerRef, GrpcQueryHandlerRef};
@@ -7,13 +11,19 @@ use crate::query_handler::{GrpcAdminHandlerRef, GrpcQueryHandlerRef};
 pub struct BatchHandler {
     query_handler: GrpcQueryHandlerRef,
     admin_handler: GrpcAdminHandlerRef,
+    runtime: Arc<Runtime>,
 }
 
 impl BatchHandler {
-    pub fn new(query_handler: GrpcQueryHandlerRef, admin_handler: GrpcAdminHandlerRef) -> Self {
+    pub fn new(
+        query_handler: GrpcQueryHandlerRef,
+        admin_handler: GrpcAdminHandlerRef,
+        runtime: Arc<Runtime>,
+    ) -> Self {
         Self {
             query_handler,
             admin_handler,
+            runtime,
         }
     }
 
@@ -30,12 +40,24 @@ impl BatchHandler {
         }
         batch_resp.admins.push(admin_resp);
 
-        for db_req in batch_req.databases {
-            for obj_expr in db_req.exprs {
-                let object_resp = self.query_handler.do_query(obj_expr).await?;
-                db_resp.results.push(object_resp);
+        let (tx, rx) = oneshot::channel();
+        let query_handler = self.query_handler.clone();
+        let _ = self.runtime.spawn(async move {
+            // execute request in another runtime to prevent the execution from being cancelled unexpected by tonic runtime.
+            let mut result = vec![];
+            for db_req in batch_req.databases {
+                for obj_expr in db_req.exprs {
+                    let object_resp = query_handler.do_query(obj_expr).await;
+
+                    result.push(object_resp);
+                }
             }
-        }
+            // Ignore send result. Usually an error indicates the rx is dropped (request timeouted).
+            let _ = tx.send(result);
+        });
+        // Safety: An early-dropped tx usually indicates a serious problem (like panic). This unwrap
+        // is used to poison the upper layer.
+        db_resp.results = rx.await.unwrap().into_iter().collect::<Result<_>>()?;
         batch_resp.databases.push(db_resp);
         Ok(batch_resp)
     }

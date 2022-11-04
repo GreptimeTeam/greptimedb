@@ -35,10 +35,10 @@ impl FromStr for LeaseKey {
 
         let cluster_id = caps[1].to_string();
         let node_id = caps[2].to_string();
-        let cluster_id = cluster_id.parse::<u64>().context(error::ParseNumSnafu {
+        let cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
             err_msg: format!("invalid cluster_id: {}", cluster_id),
         })?;
-        let node_id = node_id.parse::<u64>().context(error::ParseNumSnafu {
+        let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
             err_msg: format!("invalid node_id: {}", node_id),
         })?;
 

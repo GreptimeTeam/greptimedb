@@ -42,6 +42,12 @@ pub enum Error {
     #[snafu(display("Failed to start gRPC server, source: {}", source))]
     StartGrpc { source: tonic::transport::Error },
 
+    #[snafu(display("{} server is already started", server))]
+    AlreadyStarted {
+        server: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to bind address {}, source: {}", addr, source))]
     TcpBind {
         addr: SocketAddr,
@@ -161,6 +167,7 @@ impl ErrorExt for Error {
             | CollectRecordbatch { .. }
             | StartHttp { .. }
             | StartGrpc { .. }
+            | AlreadyStarted { .. }
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. } => StatusCode::Internal,
 
