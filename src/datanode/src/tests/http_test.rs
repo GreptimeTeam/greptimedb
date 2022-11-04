@@ -5,7 +5,6 @@ use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
 use datatypes::prelude::ConcreteDataType;
-use servers::http::handler::ScriptExecution;
 use servers::http::HttpServer;
 use servers::server::Server;
 use test_util::TestGuard;
@@ -111,16 +110,14 @@ async fn test_scripts_api() {
     let (app, _guard) = make_test_app("scripts_api").await;
     let client = TestClient::new(app);
     let res = client
-        .post("/v1/scripts")
-        .json(&ScriptExecution {
-            name: "test".to_string(),
-            script: r#"
+        .post("/v1/scripts?name=test")
+        .body(
+            r#"
 @copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
 def test(n):
     return n + 1;
-"#
-            .to_string(),
-        })
+"#,
+        )
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
