@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "benchmarks",
     "src/api",
     "src/catalog",
     "src/client",
@@ -32,3 +33,6 @@ members = [
     "src/table",
     "src/table-engine",
 ]
+
+[profile.release]
+debug = true

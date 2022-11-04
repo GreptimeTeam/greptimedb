@@ -2,6 +2,7 @@
 name = "cmd"
 version = "0.1.0"
 edition = "2021"
+default-run = "greptime"
 
 [[bin]]
 name = "greptime"
@@ -10,7 +11,9 @@ path = "src/bin/greptime.rs"
 [dependencies]
 clap = { version = "3.1", features = ["derive"] }
 common-error = { path = "../common/error" }
-common-telemetry = { path = "../common/telemetry", features = ["deadlock_detection"] }
+common-telemetry = { path = "../common/telemetry", features = [
+    "deadlock_detection",
+] }
 datanode = { path = "../datanode" }
 frontend = { path = "../frontend" }
 futures = "0.3"
