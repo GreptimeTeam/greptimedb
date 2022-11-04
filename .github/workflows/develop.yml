@@ -47,10 +47,17 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v2
+      - name: Cache LLVM and Clang
+        id: cache-llvm
+        uses: actions/cache@v2
+        with:
+          path: ./llvm
+          key: llvm
       - uses: arduino/setup-protoc@v1
       - uses: KyleMayes/install-llvm-action@v1
         with:
           version: "14.0"
+          cached: ${{ steps.cache-llvm.outputs.cache-hit }}
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
