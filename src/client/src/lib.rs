@@ -4,6 +4,8 @@ mod database;
 mod error;
 pub mod load_balance;
 
+pub use api;
+
 pub use self::{
     client::Client,
     database::{Database, ObjectResult, Select},
