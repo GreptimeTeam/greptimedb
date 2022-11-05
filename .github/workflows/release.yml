@@ -33,9 +33,11 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Cache cargo assets
+        id: cache
         uses: actions/cache@v3
         with:
           path: |
+            ./llvm
             ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
@@ -50,6 +52,11 @@ jobs:
           unzip protoc-21.9-linux-x86_64.zip -d protoc
           sudo cp protoc/bin/protoc /usr/local/bin/
           sudo cp -r protoc/include/google /usr/local/include/
+
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
+          cached: ${{ steps.cache.outputs.cache-hit }}
 
       - name: Install Protoc for macos
         if: contains(matrix.arch, 'darwin')
@@ -78,6 +85,8 @@ jobs:
         with:
           command: build
           args: ${{ matrix.opts }} --release --locked --target ${{ matrix.arch }}
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
       - name: Calculate checksum and rename binary
         shell: bash
