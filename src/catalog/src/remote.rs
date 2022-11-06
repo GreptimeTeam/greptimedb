@@ -6,6 +6,7 @@ pub use client::MetaKvBackend;
 use futures::Stream;
 use futures_util::StreamExt;
 pub use manager::{RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider};
+use opendal::Accessor;
 
 use crate::error::Error;
 
@@ -45,6 +46,34 @@ pub trait KvBackend: Send + Sync {
 }
 
 pub type KvBackendRef = Arc<dyn KvBackend>;
+
+pub struct OpendalBackend {
+    accessor: Arc<dyn Accessor>,
+}
+
+impl OpendalBackend {
+    pub fn new(accessor: Arc<dyn Accessor>) -> Self {
+        OpendalBackend { accessor }
+    }
+}
+
+#[async_trait::async_trait]
+impl KvBackend for OpendalBackend {
+    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
+    where
+        'a: 'b,
+    {
+        self.accessor.range(key)
+    }
+
+    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
+        self.accessor.set(key, val).await
+    }
+
+    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
+        self.accessor.delete_range(key, end).await
+    }
+}
 
 #[cfg(test)]
 mod tests {
