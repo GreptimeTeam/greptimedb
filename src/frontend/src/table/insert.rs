@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use api::v1::codec::InsertBatch;
+use api::v1::codec;
 use api::v1::insert_expr;
 use api::v1::insert_expr::Expr;
 use api::v1::Column;
@@ -39,7 +39,7 @@ impl DistTable {
 
             let join = tokio::spawn(async move {
                 instance
-                    .grpc_insert(to_insert_expr(insert))
+                    .grpc_insert(to_insert_expr(region_id, insert))
                     .await
                     .context(error::RequestDatanodeSnafu)
             });
@@ -65,7 +65,7 @@ impl DistTable {
     }
 }
 
-fn to_insert_expr(insert: InsertRequest) -> InsertExpr {
+fn to_insert_expr(region_id: RegionId, insert: InsertRequest) -> InsertExpr {
     let mut row_count = 0;
 
     let columns: Vec<_> = insert
@@ -87,13 +87,17 @@ fn to_insert_expr(insert: InsertRequest) -> InsertExpr {
         })
         .collect();
 
-    let insert_batch = InsertBatch {
+    let insert_batch = codec::InsertBatch {
         columns,
         row_count: row_count as u32,
     };
 
-    // TODO(fys): need push "region_id" and "partition rule info" to options
-    let options = HashMap::new();
+    let mut options = HashMap::with_capacity(1);
+    options.insert(
+        // TODO(fys): Temporarily hard code here
+        "region_id".to_string(),
+        codec::RegionId { id: region_id }.into(),
+    );
 
     InsertExpr {
         table_name: insert.table_name,
@@ -106,9 +110,13 @@ fn to_insert_expr(insert: InsertRequest) -> InsertExpr {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, ops::Deref};
 
-    use api::v1::{codec::InsertBatch, insert_expr::Expr, ColumnDataType, InsertExpr};
+    use api::v1::{
+        codec::{self, InsertBatch},
+        insert_expr::Expr,
+        ColumnDataType, InsertExpr,
+    };
     use datatypes::{prelude::ConcreteDataType, types::StringType, vectors::VectorBuilder};
     use table::requests::InsertRequest;
 
@@ -118,7 +126,7 @@ mod tests {
     fn test_to_insert_expr() {
         let insert_request = mock_insert_request();
 
-        let insert_expr = to_insert_expr(insert_request);
+        let insert_expr = to_insert_expr(12, insert_request);
 
         verify_insert_expr(insert_expr);
     }
@@ -147,7 +155,6 @@ mod tests {
     fn verify_insert_expr(insert_expr: InsertExpr) {
         let table_name = insert_expr.table_name;
         assert_eq!("demo", table_name);
-        assert!(insert_expr.options.is_empty());
 
         let expr = insert_expr.expr.as_ref().unwrap();
         let vals = match expr {
@@ -174,5 +181,9 @@ mod tests {
                 );
             }
         }
+
+        let bytes = insert_expr.options.get("region_id").unwrap();
+        let region_id: codec::RegionId = bytes.deref().try_into().unwrap();
+        assert_eq!(12, region_id.id);
     }
 }

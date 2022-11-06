@@ -47,7 +47,7 @@ impl Table for DistTable {
     fn table_info(&self) -> TableInfoRef {
         unimplemented!()
     }
-    
+
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
         let spliter = WriteSpliter::with_patition_rule(self.partition_rule.clone());
         let inserts = spliter.split(request).map_err(TableError::new)?;
