@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, Peer};
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
 
@@ -54,7 +54,13 @@ impl HeartbeatTask {
     /// Start heartbeat task, spawn background task.
     pub async fn start(&self) -> Result<()> {
         let started = self.started.clone();
-        started.store(true, Ordering::Release);
+        if started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("Heartbeat task started multiple times");
+            return Ok(());
+        }
         let interval = self.interval;
         let node_id = self.node_id;
         let server_addr = self.server_addr.clone();
