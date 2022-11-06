@@ -98,7 +98,7 @@ async fn test_metrics_api() {
     assert_eq!(res.status(), StatusCode::OK);
 
     // Call metrics api
-    let res = client.get("/v1/metrics").send().await;
+    let res = client.get("/metrics").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.text().await;
     assert!(body.contains("datanode_handle_sql_elapsed"));
