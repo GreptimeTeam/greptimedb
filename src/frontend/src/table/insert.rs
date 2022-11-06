@@ -51,8 +51,7 @@ impl DistTable {
         let mut failure = 0;
 
         for join in joins {
-            // TODO(fys): remove unwrap()
-            let object_result = join.await.unwrap()?;
+            let object_result = join.await.context(error::JoinTaskSnafu)??;
             let result = match object_result {
                 client::ObjectResult::Select(_) => unreachable!(),
                 client::ObjectResult::Mutate(result) => result,
