@@ -8,23 +8,21 @@ use snafu::OptionExt;
 use store_api::storage::RegionId;
 use table::requests::InsertRequest;
 
+use crate::error::Error;
 use crate::error::FindPartitionColumnSnafu;
 use crate::error::FindRegionSnafu;
 use crate::error::InvalidInsertRequestSnafu;
 use crate::error::Result;
-use crate::partitioning::PartitionRule;
+use crate::partitioning::PartitionRuleRef;
 
 pub type DistInsertRequest = HashMap<RegionId, InsertRequest>;
 
-pub struct WriteSpliter<'a, P> {
-    partition_rule: &'a P,
+pub struct WriteSpliter {
+    partition_rule: PartitionRuleRef<Error>,
 }
 
-impl<'a, P> WriteSpliter<'a, P>
-where
-    P: PartitionRule,
-{
-    pub fn with_patition_rule(rule: &'a P) -> Self {
+impl WriteSpliter {
+    pub fn with_patition_rule(rule: PartitionRuleRef<Error>) -> Self {
         Self {
             partition_rule: rule,
         }
@@ -156,7 +154,7 @@ fn partition_insert_request(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, result::Result};
+    use std::{collections::HashMap, result::Result, sync::Arc};
 
     use datatypes::{
         data_type::ConcreteDataType,
@@ -167,10 +165,13 @@ mod tests {
     use table::requests::InsertRequest;
 
     use super::{
-        check_req, find_partitioning_values, partition_insert_request, partition_values,
-        PartitionRule, RegionId, WriteSpliter,
+        check_req, find_partitioning_values, partition_insert_request, partition_values, RegionId,
+        WriteSpliter,
     };
-    use crate::partitioning::PartitionExpr;
+    use crate::{
+        error::Error,
+        partitioning::{PartitionExpr, PartitionRule, PartitionRuleRef},
+    };
 
     #[test]
     fn test_insert_req_check() {
@@ -186,7 +187,8 @@ mod tests {
     #[test]
     fn test_writer_spliter() {
         let insert = mock_insert_request();
-        let spliter = WriteSpliter::with_patition_rule(&MockPartitionRule);
+        let rule = Arc::new(MockPartitionRule) as PartitionRuleRef<Error>;
+        let spliter = WriteSpliter::with_patition_rule(rule);
         let ret = spliter.split(insert).unwrap();
 
         assert_eq!(2, ret.len());
@@ -406,7 +408,7 @@ mod tests {
     //     PARTITION r1 VALUES IN(2, 3),
     // );
     impl PartitionRule for MockPartitionRule {
-        type Error = String;
+        type Error = Error;
 
         fn partition_columns(&self) -> Vec<String> {
             vec!["id".to_string()]

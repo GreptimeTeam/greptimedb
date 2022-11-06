@@ -18,8 +18,6 @@ use crate::error;
 use crate::error::Result;
 
 impl DistTable {
-    // TODO(fys): remove #[allow(dead_code)]
-    #[allow(dead_code)]
     pub async fn dist_insert(
         &self,
         inserts: HashMap<RegionId, InsertRequest>,
