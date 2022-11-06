@@ -19,13 +19,20 @@ pub type ValueIter<'a, E> = Pin<Box<dyn Stream<Item = Result<Kv, E>> + Send + 'a
 
 #[async_trait::async_trait]
 pub trait KvBackend: Send + Sync {
-    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, crate::error::Error>
+    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
     where
         'a: 'b;
 
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), crate::error::Error>;
+    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error>;
 
-    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), crate::error::Error>;
+    async fn compare_and_set(
+        &self,
+        key: &[u8],
+        expect: &[u8],
+        val: &[u8],
+    ) -> Result<Result<(), Option<Vec<u8>>>, Error>;
+
+    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error>;
 
     async fn delete(&self, key: &[u8]) -> Result<(), Error> {
         self.delete_range(key, &[]).await
@@ -71,6 +78,15 @@ mod tests {
         }
 
         async fn set(&self, _key: &[u8], _val: &[u8]) -> Result<(), Error> {
+            unimplemented!()
+        }
+
+        async fn compare_and_set(
+            &self,
+            _key: &[u8],
+            _expect: &[u8],
+            _val: &[u8],
+        ) -> Result<Result<(), Option<Vec<u8>>>, Error> {
             unimplemented!()
         }
 

@@ -149,6 +149,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: meta_client::error::Error,
     },
+
+    #[snafu(display("Failed to bump table id"))]
+    BumpTableId { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -185,6 +188,7 @@ impl ErrorExt for Error {
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableSchema { source, .. } => source.status_code(),
+            Error::BumpTableId { .. } => StatusCode::StorageUnavailable,
         }
     }
 

@@ -1,17 +1,19 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_stream::stream;
+use backoff::exponential::ExponentialBackoffBuilder;
+use backoff::ExponentialBackoff;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_catalog::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
     SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
 };
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use futures::Stream;
 use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -23,8 +25,8 @@ use table::TableRef;
 use tokio::sync::Mutex;
 
 use crate::error::{
-    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu,
-    SchemaNotFoundSnafu, TableExistsSnafu,
+    BumpTableIdSnafu, CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu,
+    OpenTableSnafu, SchemaNotFoundSnafu, TableExistsSnafu,
 };
 use crate::error::{InvalidTableSchemaSnafu, Result};
 use crate::remote::{Kv, KvBackendRef};
@@ -38,7 +40,6 @@ pub struct RemoteCatalogManager {
     node_id: u64,
     backend: KvBackendRef,
     catalogs: Arc<ArcSwap<HashMap<String, CatalogProviderRef>>>,
-    next_table_id: Arc<AtomicU32>,
     engine: TableEngineRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
     mutex: Arc<Mutex<()>>,
@@ -51,7 +52,6 @@ impl RemoteCatalogManager {
             node_id,
             backend,
             catalogs: Default::default(),
-            next_table_id: Default::default(),
             system_table_requests: Default::default(),
             mutex: Default::default(),
         }
@@ -360,8 +360,6 @@ impl CatalogManager for RemoteCatalogManager {
             catalogs.keys().cloned().collect::<Vec<_>>()
         );
         self.catalogs.store(Arc::new(catalogs));
-        self.next_table_id
-            .store(max_table_id + 1, Ordering::Relaxed);
         info!("Max table id allocated: {}", max_table_id);
 
         let mut system_table_requests = self.system_table_requests.lock().await;
@@ -379,8 +377,67 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    fn next_table_id(&self) -> TableId {
-        self.next_table_id.fetch_add(1, Ordering::Relaxed)
+    /// Bump table id in a CAS manner with backoff.
+    async fn next_table_id(&self) -> Result<TableId> {
+        let key = common_catalog::consts::TABLE_ID_KEY_PREFIX.as_bytes();
+
+        // let backend = self.backend.clone();
+
+        let op = || async {
+            let prev = match self.backend.get(key).await? {
+                None => MIN_USER_TABLE_ID,
+                Some(e) => String::from_utf8_lossy(&e.1).parse().unwrap(),
+            };
+
+            match self
+                .backend
+                .compare_and_set(
+                    key,
+                    prev.to_string().as_bytes(),
+                    (prev + 1).to_string().as_bytes(),
+                )
+                .await
+            {
+                Ok(cas_res) => match cas_res {
+                    Ok(_) => Ok(prev),
+                    Err(e) => {
+                        info!("Table id {:?} already occupied", e);
+                        Err(backoff::Error::transient(
+                            BumpTableIdSnafu {
+                                msg: "Table id occupied",
+                            }
+                            .build(),
+                        ))
+                    }
+                },
+                Err(e) => {
+                    error!(e;"Failed to CAS table id");
+                    Err(backoff::Error::permanent(
+                        BumpTableIdSnafu {
+                            msg: format!("Failed to perform CAS operation: {:?}", e),
+                        }
+                        .build(),
+                    ))
+                }
+            }
+        };
+
+        let retry_policy: ExponentialBackoff = ExponentialBackoffBuilder::new()
+            .with_initial_interval(Duration::from_millis(4))
+            .with_multiplier(2.0)
+            .with_max_interval(Duration::from_millis(1000))
+            .with_max_elapsed_time(Some(Duration::from_millis(3000)))
+            .build();
+
+        backoff::future::retry(retry_policy, op).await.map_err(|e| {
+            BumpTableIdSnafu {
+                msg: format!(
+                    "Bump table id exceeds max fail times, last error msg: {:?}",
+                    e
+                ),
+            }
+            .build()
+        })
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {

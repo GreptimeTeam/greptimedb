@@ -67,32 +67,27 @@ pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
 #[async_trait::async_trait]
 pub trait CatalogManager: CatalogList {
     /// Starts a catalog manager.
-    async fn start(&self) -> error::Result<()>;
+    async fn start(&self) -> Result<()>;
 
     /// Returns next available table id.
-    fn next_table_id(&self) -> TableId;
+    async fn next_table_id(&self) -> Result<TableId>;
 
     /// Registers a table given given catalog/schema to catalog manager,
     /// returns table registered.
-    async fn register_table(&self, request: RegisterTableRequest) -> error::Result<usize>;
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize>;
 
     /// Register a system table, should be called before starting the manager.
     async fn register_system_table(&self, request: RegisterSystemTableRequest)
         -> error::Result<()>;
 
     /// Returns the table by catalog, schema and table name.
-    fn table(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table_name: &str,
-    ) -> error::Result<Option<TableRef>>;
+    fn table(&self, catalog: &str, schema: &str, table_name: &str) -> Result<Option<TableRef>>;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;
 
 /// Hook called after system table opening.
-pub type OpenSystemTableHook = Arc<dyn Fn(TableRef) -> error::Result<()> + Send + Sync>;
+pub type OpenSystemTableHook = Arc<dyn Fn(TableRef) -> Result<()> + Send + Sync>;
 
 /// Register system table request:
 /// - When system table is already created and registered, the hook will be called
