@@ -1,5 +1,5 @@
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use std::str::FromStr;
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -7,29 +7,38 @@ use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::{RawTableMeta, TableId, TableVersion};
 
-use crate::consts::{CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_KEY_PREFIX};
+use crate::consts::{
+    CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_GLOBAL_KEY_PREFIX, TABLE_REGIONAL_KEY_PREFIX,
+};
 use crate::error::{
-    DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu, ParseNodeIdSnafu,
-    SerializeCatalogEntryValueSnafu,
+    DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu, SerializeCatalogEntryValueSnafu,
 };
 
 lazy_static! {
     static ref CATALOG_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{}-([a-zA-Z_]+)-([0-9]+)$", CATALOG_KEY_PREFIX)).unwrap();
+        Regex::new(&format!("^{}-([a-zA-Z_]+)$", CATALOG_KEY_PREFIX)).unwrap();
 }
 
 lazy_static! {
     static ref SCHEMA_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)$",
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)$",
         SCHEMA_KEY_PREFIX
     ))
     .unwrap();
 }
 
 lazy_static! {
-    static ref TABLE_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)-([0-9]+)$",
-        TABLE_KEY_PREFIX
+    static ref TABLE_GLOBAL_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)$",
+        TABLE_GLOBAL_KEY_PREFIX
+    ))
+    .unwrap();
+}
+
+lazy_static! {
+    static ref TABLE_REGIONAL_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)$",
+        TABLE_REGIONAL_KEY_PREFIX
     ))
     .unwrap();
 }
@@ -42,26 +51,90 @@ pub fn build_schema_prefix(catalog_name: impl AsRef<str>) -> String {
     format!("{}-{}-", SCHEMA_KEY_PREFIX, catalog_name.as_ref())
 }
 
-pub fn build_table_prefix(catalog_name: impl AsRef<str>, schema_name: impl AsRef<str>) -> String {
+pub fn build_table_global_prefix(
+    catalog_name: impl AsRef<str>,
+    schema_name: impl AsRef<str>,
+) -> String {
     format!(
         "{}-{}-{}-",
-        TABLE_KEY_PREFIX,
+        TABLE_GLOBAL_KEY_PREFIX,
         catalog_name.as_ref(),
         schema_name.as_ref()
     )
 }
 
-pub struct TableKey {
+pub fn build_table_regional_prefix(
+    catalog_name: impl AsRef<str>,
+    schema_name: impl AsRef<str>,
+) -> String {
+    format!(
+        "{}-{}-{}-",
+        TABLE_REGIONAL_KEY_PREFIX,
+        catalog_name.as_ref(),
+        schema_name.as_ref()
+    )
+}
+
+/// Table global info has only one key across all datanodes so it does not have `node_id` field.
+pub struct TableGlobalKey {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
-    pub version: TableVersion,
+}
+
+impl Display for TableGlobalKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(TABLE_GLOBAL_KEY_PREFIX)?;
+        f.write_str("-")?;
+        f.write_str(&self.catalog_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.schema_name)?;
+        f.write_str("-")?;
+        f.write_str(&self.table_name)
+    }
+}
+
+impl TableGlobalKey {
+    pub fn parse<S: AsRef<str>>(s: S) -> Result<Self, Error> {
+        let key = s.as_ref();
+        let captures = TABLE_GLOBAL_KEY_PATTERN
+            .captures(key)
+            .context(InvalidCatalogSnafu { key })?;
+        ensure!(captures.len() == 4, InvalidCatalogSnafu { key });
+
+        Ok(Self {
+            catalog_name: captures[1].to_string(),
+            schema_name: captures[2].to_string(),
+            table_name: captures[3].to_string(),
+        })
+    }
+}
+
+/// Table global info contains necessary info for a datanode to create table regions, including
+/// table id, table meta(schema...), region id allocation across datanodes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TableGlobalValue {
+    /// Table id is the same across all datanodes.
+    pub id: TableId,
+    /// Id of datanode that created the global table info kv. only for debugging.
+    pub node_id: u64,
+    /// Allocation of region ids across all datanodes.
+    pub regions_id_map: HashMap<u64, Vec<u32>>,
+    /// Node id -> region ids
+    pub meta: RawTableMeta,
+}
+
+/// Table regional info that varies between datanode, so it contains a `node_id` field.
+pub struct TableRegionalKey {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
     pub node_id: u64,
 }
 
-impl Display for TableKey {
+impl Display for TableRegionalKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(TABLE_KEY_PREFIX)?;
+        f.write_str(TABLE_REGIONAL_KEY_PREFIX)?;
         f.write_str("-")?;
         f.write_str(&self.catalog_name)?;
         f.write_str("-")?;
@@ -69,68 +142,47 @@ impl Display for TableKey {
         f.write_str("-")?;
         f.write_str(&self.table_name)?;
         f.write_str("-")?;
-        f.serialize_u64(self.version)?;
-        f.write_str("-")?;
         f.serialize_u64(self.node_id)
     }
 }
 
-impl TableKey {
+impl TableRegionalKey {
     pub fn parse<S: AsRef<str>>(s: S) -> Result<Self, Error> {
         let key = s.as_ref();
-        let captures = TABLE_KEY_PATTERN
+        let captures = TABLE_REGIONAL_KEY_PATTERN
             .captures(key)
             .context(InvalidCatalogSnafu { key })?;
-        ensure!(captures.len() == 6, InvalidCatalogSnafu { key });
-
-        let version =
-            u64::from_str(&captures[4]).map_err(|_| InvalidCatalogSnafu { key }.build())?;
-        let node_id_str = captures[5].to_string();
-        let node_id = u64::from_str(&node_id_str)
-            .map_err(|_| ParseNodeIdSnafu { key: node_id_str }.build())?;
+        ensure!(captures.len() == 5, InvalidCatalogSnafu { key });
+        let node_id = captures[4]
+            .to_string()
+            .parse()
+            .map_err(|_| InvalidCatalogSnafu { key }.build())?;
         Ok(Self {
             catalog_name: captures[1].to_string(),
             schema_name: captures[2].to_string(),
             table_name: captures[3].to_string(),
-            version,
             node_id,
         })
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TableValue {
-    pub id: TableId,
-    pub node_id: u64,
+/// Regional table info of specific datanode, including table version on that datanode and
+/// region ids allocated by metasrv.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TableRegionalValue {
+    pub version: TableVersion,
     pub regions_ids: Vec<u32>,
-    pub meta: RawTableMeta,
-}
-
-impl TableValue {
-    pub fn parse(s: impl AsRef<str>) -> Result<Self, Error> {
-        serde_json::from_str(s.as_ref())
-            .context(DeserializeCatalogEntryValueSnafu { raw: s.as_ref() })
-    }
-
-    pub fn as_bytes(&self) -> Result<Vec<u8>, Error> {
-        Ok(serde_json::to_string(self)
-            .context(SerializeCatalogEntryValueSnafu)?
-            .into_bytes())
-    }
 }
 
 pub struct CatalogKey {
     pub catalog_name: String,
-    pub node_id: u64,
 }
 
 impl Display for CatalogKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(CATALOG_KEY_PREFIX)?;
         f.write_str("-")?;
-        f.write_str(&self.catalog_name)?;
-        f.write_str("-")?;
-        f.serialize_u64(self.node_id)
+        f.write_str(&self.catalog_name)
     }
 }
 
@@ -140,15 +192,9 @@ impl CatalogKey {
         let captures = CATALOG_KEY_PATTERN
             .captures(key)
             .context(InvalidCatalogSnafu { key })?;
-        ensure!(captures.len() == 3, InvalidCatalogSnafu { key });
-
-        let node_id_str = captures[2].to_string();
-        let node_id = u64::from_str(&node_id_str)
-            .map_err(|_| ParseNodeIdSnafu { key: node_id_str }.build())?;
-
+        ensure!(captures.len() == 2, InvalidCatalogSnafu { key });
         Ok(Self {
             catalog_name: captures[1].to_string(),
-            node_id,
         })
     }
 }
@@ -156,18 +202,9 @@ impl CatalogKey {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CatalogValue;
 
-impl CatalogValue {
-    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
-        Ok(serde_json::to_string(self)
-            .context(SerializeCatalogEntryValueSnafu)?
-            .into_bytes())
-    }
-}
-
 pub struct SchemaKey {
     pub catalog_name: String,
     pub schema_name: String,
-    pub node_id: u64,
 }
 
 impl Display for SchemaKey {
@@ -176,9 +213,7 @@ impl Display for SchemaKey {
         f.write_str("-")?;
         f.write_str(&self.catalog_name)?;
         f.write_str("-")?;
-        f.write_str(&self.schema_name)?;
-        f.write_str("-")?;
-        f.serialize_u64(self.node_id)
+        f.write_str(&self.schema_name)
     }
 }
 
@@ -188,16 +223,10 @@ impl SchemaKey {
         let captures = SCHEMA_KEY_PATTERN
             .captures(key)
             .context(InvalidCatalogSnafu { key })?;
-        ensure!(captures.len() == 4, InvalidCatalogSnafu { key });
-
-        let node_id_str = captures[3].to_string();
-        let node_id = u64::from_str(&node_id_str)
-            .map_err(|_| ParseNodeIdSnafu { key: node_id_str }.build())?;
-
+        ensure!(captures.len() == 3, InvalidCatalogSnafu { key });
         Ok(Self {
             catalog_name: captures[1].to_string(),
             schema_name: captures[2].to_string(),
-            node_id,
         })
     }
 }
@@ -205,13 +234,31 @@ impl SchemaKey {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SchemaValue;
 
-impl SchemaValue {
-    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
-        Ok(serde_json::to_string(self)
-            .context(SerializeCatalogEntryValueSnafu)?
-            .into_bytes())
-    }
+macro_rules! define_catalog_value {
+    ( $($val_ty: ty), *) => {
+            $(
+                impl $val_ty {
+                    pub fn parse(s: impl AsRef<str>) -> Result<Self, Error> {
+                        serde_json::from_str(s.as_ref())
+                            .context(DeserializeCatalogEntryValueSnafu { raw: s.as_ref() })
+                    }
+
+                    pub fn as_bytes(&self) -> Result<Vec<u8>, Error> {
+                        Ok(serde_json::to_string(self)
+                            .context(SerializeCatalogEntryValueSnafu)?
+                            .into_bytes())
+                    }
+                }
+            )*
+        }
 }
+
+define_catalog_value!(
+    TableRegionalValue,
+    TableGlobalValue,
+    CatalogValue,
+    SchemaValue
+);
 
 #[cfg(test)]
 mod tests {
@@ -222,32 +269,28 @@ mod tests {
 
     #[test]
     fn test_parse_catalog_key() {
-        let key = "__c-C-2";
+        let key = "__c-C";
         let catalog_key = CatalogKey::parse(key).unwrap();
         assert_eq!("C", catalog_key.catalog_name);
-        assert_eq!(2, catalog_key.node_id);
         assert_eq!(key, catalog_key.to_string());
     }
 
     #[test]
     fn test_parse_schema_key() {
-        let key = "__s-C-S-3";
+        let key = "__s-C-S";
         let schema_key = SchemaKey::parse(key).unwrap();
         assert_eq!("C", schema_key.catalog_name);
         assert_eq!("S", schema_key.schema_name);
-        assert_eq!(3, schema_key.node_id);
         assert_eq!(key, schema_key.to_string());
     }
 
     #[test]
     fn test_parse_table_key() {
-        let key = "__t-C-S-T-42-1";
-        let entry = TableKey::parse(key).unwrap();
+        let key = "__tg-C-S-T";
+        let entry = TableGlobalKey::parse(key).unwrap();
         assert_eq!("C", entry.catalog_name);
         assert_eq!("S", entry.schema_name);
         assert_eq!("T", entry.table_name);
-        assert_eq!(1, entry.node_id);
-        assert_eq!(42, entry.version);
         assert_eq!(key, &entry.to_string());
     }
 
@@ -256,8 +299,8 @@ mod tests {
         assert_eq!("__c-", build_catalog_prefix());
         assert_eq!("__s-CATALOG-", build_schema_prefix("CATALOG"));
         assert_eq!(
-            "__t-CATALOG-SCHEMA-",
-            build_table_prefix("CATALOG", "SCHEMA")
+            "__tg-CATALOG-SCHEMA-",
+            build_table_global_prefix("CATALOG", "SCHEMA")
         );
     }
 
@@ -281,14 +324,14 @@ mod tests {
             region_numbers: vec![1],
         };
 
-        let value = TableValue {
+        let value = TableGlobalValue {
             id: 42,
-            node_id: 32,
-            regions_ids: vec![1, 2, 3],
+            node_id: 0,
+            regions_id_map: HashMap::from([(0, vec![1, 2, 3])]),
             meta,
         };
         let serialized = serde_json::to_string(&value).unwrap();
-        let deserialized = TableValue::parse(&serialized).unwrap();
+        let deserialized = TableGlobalValue::parse(&serialized).unwrap();
         assert_eq!(value, deserialized);
     }
 }
