@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use snafu::ResultExt;
 use tonic::transport::Channel as InnerChannel;
@@ -53,16 +54,21 @@ impl ChannelManager {
             return Ok(inner_ch);
         }
 
-        let endpoint = self.build_endpoint(addr)?;
-        let inner_channel = endpoint.connect_lazy();
+        let entry = match self.pool.channels.entry(addr.to_string()) {
+            Entry::Occupied(entry) => entry.into_ref(),
+            Entry::Vacant(entry) => {
+                let endpoint = self.build_endpoint(addr)?;
+                let inner_channel = endpoint.connect_lazy();
 
-        let channel = Channel {
-            channel: inner_channel.clone(),
-            access: AtomicUsize::new(1),
-            use_default_connector: true,
+                let channel = Channel {
+                    channel: inner_channel,
+                    access: AtomicUsize::new(1),
+                    use_default_connector: true,
+                };
+                entry.insert(channel)
+            }
         };
-        self.pool.put(addr, channel);
-        Ok(inner_channel)
+        Ok(entry.channel.clone())
     }
 
     pub fn reset_with_connector<C>(
@@ -297,7 +303,7 @@ pub struct Channel {
 impl Channel {
     #[inline]
     pub fn access(&self) -> usize {
-        self.access.load(Ordering::SeqCst)
+        self.access.load(Ordering::Acquire)
     }
 
     #[inline]
@@ -313,17 +319,17 @@ struct Pool {
 
 impl Pool {
     fn get(&self, addr: &str) -> Option<InnerChannel> {
-        let guard = self.channels.get(addr);
-        guard.map(|ch| {
-            ch.access.fetch_add(1, Ordering::SeqCst);
+        let channel = self.channels.get(addr);
+        channel.map(|ch| {
+            ch.access.fetch_add(1, Ordering::AcqRel);
             ch.channel.clone()
         })
     }
 
     #[cfg(test)]
     fn get_access(&self, addr: &str) -> Option<usize> {
-        let guard = self.channels.get(addr);
-        guard.map(|ch| ch.access())
+        let channel = self.channels.get(addr);
+        channel.map(|ch| ch.access())
     }
 
     fn put(&self, addr: &str, channel: Channel) {
@@ -343,7 +349,7 @@ async fn recycle_channel_in_loop(pool: Arc<Pool>, interval_secs: u64) {
 
     loop {
         interval.tick().await;
-        pool.retain_channel(|_, c| c.access.swap(0, Ordering::SeqCst) != 0)
+        pool.retain_channel(|_, c| c.access.swap(0, Ordering::AcqRel) != 0)
     }
 }
 
@@ -381,7 +387,7 @@ mod tests {
         assert_eq!(10, mgr.pool.get_access(addr).unwrap());
 
         mgr.pool
-            .retain_channel(|_, c| c.access.swap(0, Ordering::SeqCst) != 0);
+            .retain_channel(|_, c| c.access.swap(0, Ordering::AcqRel) != 0);
 
         assert_eq!(0, mgr.pool.get_access(addr).unwrap());
     }
