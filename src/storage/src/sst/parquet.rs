@@ -16,8 +16,8 @@ use datatypes::arrow::io::parquet::read::{
 use datatypes::arrow::io::parquet::write::{
     Compression, Encoding, FileSink, Version, WriteOptions,
 };
-use futures::io::Cursor;
-use futures::{AsyncReadExt, AsyncWriteExt};
+use futures::io::BufReader;
+use futures::AsyncWriteExt;
 use futures_util::sink::SinkExt;
 use futures_util::{try_join, Stream, TryStreamExt};
 use object_store::{ObjectStore, SeekableReader};
@@ -206,18 +206,12 @@ impl<'a> ParquetReader<'a> {
         };
 
         let file_path = self.file_path.to_string();
-        let mut reader = reader_factory()
+        let reader = reader_factory()
             .await
             .context(error::ReadParquetIoSnafu { file: &file_path })?;
-        // Pre-read all file content in memory to accelerate parquet meta reading (which will perform lots of
-        // random seek and small IO).
-        let mut buf = vec![];
-        reader
-            .read_to_end(&mut buf)
-            .await
-            .context(error::ReadObjectSnafu { path: &file_path })?;
-        let mut buf = Cursor::new(buf);
-        let metadata = read_metadata_async(&mut buf)
+        // Use BufReader to alleviate consumption bring by random seek and small IO.
+        let mut buf_reader = BufReader::new(reader);
+        let metadata = read_metadata_async(&mut buf_reader)
             .await
             .context(error::ReadParquetSnafu { file: &file_path })?;
 
