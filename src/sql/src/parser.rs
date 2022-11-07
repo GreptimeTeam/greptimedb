@@ -132,7 +132,7 @@ impl<'a> ParserContext<'a> {
             }
         );
         Ok(Statement::ShowCreateTable(ShowCreateTable {
-            table_name: Some(table_name.to_string()),
+            table_name: table_name.to_string(),
         }))
     }
 
