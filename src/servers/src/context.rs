@@ -28,28 +28,12 @@ impl Context {
     }
 }
 
-#[test]
-fn main() {
-    let mut ctx = Context::default();
-    ctx.add_predicate(Arc::new(|ctx: &Context| {
-        ctx.quota.total > ctx.quota.consumed
-    }));
-    ctx.quota.total = 10;
-    ctx.quota.consumed = 5;
-
-    let predicates = ctx.predicates.clone();
-    let mut re = true;
-    for predicate in predicates {
-        re &= predicate(&ctx);
-    }
-    assert!(re);
-}
-
 #[derive(Default, Serialize, Deserialize)]
 pub struct ExecInfo {
     pub catalog: Option<String>,
     pub schema: Option<String>,
-    pub extra_opts: Option<HashMap<String, String>>,
+    // should opts to be thread safe?
+    pub extra_opts: HashMap<String, String>,
     pub trace_id: Option<String>,
 }
 
@@ -108,5 +92,51 @@ pub enum AuthHashMethod {
 pub struct Quota {
     pub total: u64,
     pub consumed: u64,
-    pub predict: u64,
+    pub estimated: u64,
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use crate::context::{ClientInfo, Context, ExecInfo, Quota, UserInfo};
+
+    #[test]
+    fn test_predicate() {
+        let mut ctx = Context::default();
+        ctx.add_predicate(Arc::new(|ctx: &Context| {
+            ctx.quota.total > ctx.quota.consumed
+        }));
+        ctx.quota.total = 10;
+        ctx.quota.consumed = 5;
+
+        let predicates = ctx.predicates.clone();
+        let mut re = true;
+        for predicate in predicates {
+            re &= predicate(&ctx);
+        }
+        assert!(re);
+    }
+
+    #[test]
+    fn test_build() {
+        let ctx = Context {
+            exec_info: ExecInfo {
+                catalog: Some(String::from("greptime")),
+                schema: Some(String::from("public")),
+                extra_opts: HashMap::new(),
+                trace_id: None,
+            },
+            client_info: ClientInfo::new(Some(String::from("127.0.0.1:4001"))),
+            user_info: UserInfo::with_http_token(String::from("HELLO")),
+            quota: Quota {
+                total: 10,
+                consumed: 5,
+                estimated: 2,
+            },
+            predicates: vec![],
+        };
+        println!("{}", serde_json::to_string(&ctx).unwrap());
+    }
 }
