@@ -17,6 +17,8 @@ use script::{
     engine::{CompileContext, EvalContext, Script, ScriptEngine},
     python::{PyEngine, PyScript},
 };
+use servers::context::Context;
+
 mod opentsdb;
 mod postgres;
 
@@ -38,12 +40,12 @@ impl DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, query: &str) -> Result<Output> {
+    async fn do_query(&self, query: &str, _ctx: &Context) -> Result<Output> {
         let plan = self.query_engine.sql_to_plan(query).unwrap();
         Ok(self.query_engine.execute(&plan).await.unwrap())
     }
 
-    async fn insert_script(&self, name: &str, script: &str) -> Result<()> {
+    async fn insert_script(&self, name: &str, script: &str, _ctx: &Context) -> Result<()> {
         let script = self
             .py_engine
             .compile(script, CompileContext::default())
@@ -57,7 +59,7 @@ impl SqlQueryHandler for DummyInstance {
         Ok(())
     }
 
-    async fn execute_script(&self, name: &str) -> Result<Output> {
+    async fn execute_script(&self, name: &str, _ctx: &Context) -> Result<Output> {
         let py_script = self.scripts.read().unwrap().get(name).unwrap().clone();
 
         Ok(py_script.execute(EvalContext::default()).await.unwrap())

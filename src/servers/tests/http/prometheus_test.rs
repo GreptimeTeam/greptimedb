@@ -8,6 +8,7 @@ use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
 use prost::Message;
+use servers::context::Context;
 use servers::error::Result;
 use servers::http::HttpServer;
 use servers::prometheus;
@@ -22,12 +23,12 @@ struct DummyInstance {
 
 #[async_trait]
 impl PrometheusProtocolHandler for DummyInstance {
-    async fn write(&self, request: WriteRequest) -> Result<()> {
+    async fn write(&self, request: WriteRequest, _ctx: &Context) -> Result<()> {
         let _ = self.tx.send(request.encode_to_vec()).await;
 
         Ok(())
     }
-    async fn read(&self, request: ReadRequest) -> Result<PrometheusResponse> {
+    async fn read(&self, request: ReadRequest, _ctx: &Context) -> Result<PrometheusResponse> {
         let _ = self.tx.send(request.encode_to_vec()).await;
 
         let response = ReadResponse {
@@ -43,22 +44,22 @@ impl PrometheusProtocolHandler for DummyInstance {
         })
     }
 
-    async fn ingest_metrics(&self, _metrics: Metrics) -> Result<()> {
+    async fn ingest_metrics(&self, _metrics: Metrics, _ctx: &Context) -> Result<()> {
         unimplemented!();
     }
 }
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, _query: &str) -> Result<Output> {
+    async fn do_query(&self, _query: &str, _ctx: &Context) -> Result<Output> {
         unimplemented!()
     }
 
-    async fn insert_script(&self, _name: &str, _script: &str) -> Result<()> {
+    async fn insert_script(&self, _name: &str, _script: &str, _ctx: &Context) -> Result<()> {
         unimplemented!()
     }
 
-    async fn execute_script(&self, _name: &str) -> Result<Output> {
+    async fn execute_script(&self, _name: &str, _ctx: &Context) -> Result<Output> {
         unimplemented!()
     }
 }

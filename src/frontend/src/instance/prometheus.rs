@@ -90,7 +90,7 @@ async fn handle_remote_queries(
 
 #[async_trait]
 impl PrometheusProtocolHandler for Instance {
-    async fn write(&self, request: WriteRequest, ctx: &Context) -> ServerResult<()> {
+    async fn write(&self, request: WriteRequest, _ctx: &Context) -> ServerResult<()> {
         let exprs = prometheus::write_request_to_insert_exprs(request)?;
 
         self.database()
@@ -104,7 +104,7 @@ impl PrometheusProtocolHandler for Instance {
         Ok(())
     }
 
-    async fn read(&self, request: ReadRequest, ctx: &Context) -> ServerResult<PrometheusResponse> {
+    async fn read(&self, request: ReadRequest, _ctx: &Context) -> ServerResult<PrometheusResponse> {
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
@@ -137,7 +137,7 @@ impl PrometheusProtocolHandler for Instance {
         }
     }
 
-    async fn ingest_metrics(&self, _metrics: Metrics, ctx: &Context) -> ServerResult<()> {
+    async fn ingest_metrics(&self, _metrics: Metrics, _ctx: &Context) -> ServerResult<()> {
         todo!();
     }
 }

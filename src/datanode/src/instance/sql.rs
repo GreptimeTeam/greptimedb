@@ -84,7 +84,7 @@ impl Instance {
 
 #[async_trait]
 impl SqlQueryHandler for Instance {
-    async fn do_query(&self, query: &str, ctx: &Context) -> servers::error::Result<Output> {
+    async fn do_query(&self, query: &str, _ctx: &Context) -> servers::error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
         self.execute_sql(query)
             .await
@@ -99,12 +99,12 @@ impl SqlQueryHandler for Instance {
         &self,
         name: &str,
         script: &str,
-        ctx: &Context,
+        _ctx: &Context,
     ) -> servers::error::Result<()> {
         self.script_executor.insert_script(name, script).await
     }
 
-    async fn execute_script(&self, name: &str, ctx: &Context) -> servers::error::Result<Output> {
+    async fn execute_script(&self, name: &str, _ctx: &Context) -> servers::error::Result<Output> {
         self.script_executor.execute_script(name).await
     }
 }

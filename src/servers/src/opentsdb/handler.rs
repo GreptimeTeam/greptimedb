@@ -108,7 +108,7 @@ mod tests {
 
     #[async_trait]
     impl OpentsdbProtocolHandler for DummyQueryHandler {
-        async fn exec(&self, data_point: &DataPoint, ctx: &Context) -> Result<()> {
+        async fn exec(&self, data_point: &DataPoint, _ctx: &Context) -> Result<()> {
             let metric = data_point.metric();
             if metric == "should_failed" {
                 return error::InternalSnafu {

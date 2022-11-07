@@ -85,7 +85,7 @@ impl Instance {
 
 #[async_trait]
 impl SqlQueryHandler for Instance {
-    async fn do_query(&self, query: &str, ctx: &Context) -> server_error::Result<Output> {
+    async fn do_query(&self, query: &str, _ctx: &Context) -> server_error::Result<Output> {
         let mut stmt = ParserContext::create_with_dialect(query, &GenericDialect {})
             .map_err(BoxedError::new)
             .context(server_error::ExecuteQuerySnafu { query })?;
@@ -138,7 +138,7 @@ impl SqlQueryHandler for Instance {
         &self,
         _name: &str,
         _script: &str,
-        ctx: &Context,
+        _ctx: &Context,
     ) -> server_error::Result<()> {
         server_error::NotSupportedSnafu {
             feat: "Script execution in Frontend",
@@ -146,7 +146,7 @@ impl SqlQueryHandler for Instance {
         .fail()
     }
 
-    async fn execute_script(&self, _script: &str, ctx: &Context) -> server_error::Result<Output> {
+    async fn execute_script(&self, _script: &str, _ctx: &Context) -> server_error::Result<Output> {
         server_error::NotSupportedSnafu {
             feat: "Script execution in Frontend",
         }
@@ -261,7 +261,7 @@ impl GrpcQueryHandler for Instance {
     async fn do_query(
         &self,
         query: ObjectExpr,
-        ctx: &Context,
+        _ctx: &Context,
     ) -> server_error::Result<GrpcObjectResult> {
         self.database()
             .object(query.clone())
@@ -278,7 +278,7 @@ impl GrpcAdminHandler for Instance {
     async fn exec_admin_request(
         &self,
         expr: AdminExpr,
-        ctx: &Context,
+        _ctx: &Context,
     ) -> server_error::Result<AdminResult> {
         self.admin()
             .do_request(expr.clone())
@@ -318,7 +318,9 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(ts, host)
                         ) engine=mito with(regions=1);"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql, &Context::new())
+            .await
+            .unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
             _ => unreachable!(),
@@ -329,14 +331,18 @@ mod tests {
                                 ('frontend.host2', null, null, 2000),
                                 ('frontend.host3', 3.3, 300, 3000)
                                 "#;
-        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql, &Context::new())
+            .await
+            .unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 3),
             _ => unreachable!(),
         }
 
         let sql = "select * from demo";
-        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql, &Context::new())
+            .await
+            .unwrap();
         match output {
             Output::RecordBatches(recordbatches) => {
                 let pretty_print = recordbatches.pretty_print();
@@ -356,7 +362,9 @@ mod tests {
         };
 
         let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
-        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql, &Context::new())
+            .await
+            .unwrap();
         match output {
             Output::RecordBatches(recordbatches) => {
                 let pretty_print = recordbatches.pretty_print();
@@ -441,7 +449,7 @@ mod tests {
             header: Some(ExprHeader::default()),
             expr: Some(admin_expr::Expr::Create(create_expr)),
         };
-        let result = GrpcAdminHandler::exec_admin_request(&*instance, admin_expr)
+        let result = GrpcAdminHandler::exec_admin_request(&*instance, admin_expr, &Context::new())
             .await
             .unwrap();
         assert_matches!(
@@ -472,7 +480,7 @@ mod tests {
             header: Some(ExprHeader::default()),
             expr: Some(object_expr::Expr::Insert(insert_expr)),
         };
-        let result = GrpcQueryHandler::do_query(&*instance, object_expr)
+        let result = GrpcQueryHandler::do_query(&*instance, object_expr, &Context::new())
             .await
             .unwrap();
         assert_matches!(
@@ -490,7 +498,7 @@ mod tests {
                 expr: Some(select_expr::Expr::Sql("select * from demo".to_string())),
             })),
         };
-        let result = GrpcQueryHandler::do_query(&*instance, object_expr)
+        let result = GrpcQueryHandler::do_query(&*instance, object_expr, &Context::new())
             .await
             .unwrap();
         match result.result {

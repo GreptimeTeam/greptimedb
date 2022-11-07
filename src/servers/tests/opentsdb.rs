@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use common_runtime::Builder as RuntimeBuilder;
 use rand::rngs::StdRng;
 use rand::Rng;
+use servers::context::Context;
 use servers::error::{self as server_error, Error, Result};
 use servers::opentsdb::codec::DataPoint;
 use servers::opentsdb::connection::Connection;
@@ -23,7 +24,7 @@ struct DummyOpentsdbInstance {
 
 #[async_trait]
 impl OpentsdbProtocolHandler for DummyOpentsdbInstance {
-    async fn exec(&self, data_point: &DataPoint) -> Result<()> {
+    async fn exec(&self, data_point: &DataPoint, _ctx: &Context) -> Result<()> {
         let metric = data_point.metric();
         if metric == "should_failed" {
             return server_error::InternalSnafu {

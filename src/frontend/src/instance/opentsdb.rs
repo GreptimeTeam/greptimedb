@@ -12,7 +12,7 @@ use crate::instance::Instance;
 
 #[async_trait]
 impl OpentsdbProtocolHandler for Instance {
-    async fn exec(&self, data_point: &DataPoint, ctx: &Context) -> server_error::Result<()> {
+    async fn exec(&self, data_point: &DataPoint, _ctx: &Context) -> server_error::Result<()> {
         // TODO(LFC): Insert metrics in batch, then make OpentsdbLineProtocolHandler::exec received multiple data points, when
         // metric table and tags can be created upon insertion.
         self.insert_opentsdb_metric(data_point)

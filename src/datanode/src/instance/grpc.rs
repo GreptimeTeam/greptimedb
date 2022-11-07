@@ -195,7 +195,7 @@ impl GrpcQueryHandler for Instance {
     async fn do_query(
         &self,
         query: ObjectExpr,
-        ctx: &Context,
+        _ctx: &Context,
     ) -> servers::error::Result<ObjectResult> {
         let object_resp = match query.expr {
             Some(object_expr::Expr::Insert(insert_expr)) => {
@@ -232,7 +232,7 @@ impl GrpcAdminHandler for Instance {
     async fn exec_admin_request(
         &self,
         expr: AdminExpr,
-        ctx: &Context,
+        _ctx: &Context,
     ) -> servers::error::Result<AdminResult> {
         let admin_resp = match expr.expr {
             Some(admin_expr::Expr::Create(create_expr)) => self.handle_create(create_expr).await,
