@@ -65,14 +65,14 @@ impl UserInfo {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Channel {
     GRPC,
     HTTP,
     MYSQL,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthMethod {
     None,
     Password {
@@ -82,7 +82,7 @@ pub enum AuthMethod {
     Token(String),
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthHashMethod {
     DoubleSha1,
     Sha256,
