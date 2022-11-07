@@ -73,11 +73,8 @@ impl RecordBatches {
         }
     }
 
-    pub fn iter(&self) -> RecordBatchesIter {
-        RecordBatchesIter {
-            batches: &self.batches,
-            i: 0,
-        }
+    pub fn iter(&self) -> impl Iterator<Item = &RecordBatch> {
+        self.batches.iter()
     }
 
     pub fn pretty_print(&self) -> String {
@@ -123,25 +120,6 @@ impl RecordBatches {
     }
 }
 
-pub struct RecordBatchesIter<'a> {
-    batches: &'a Vec<RecordBatch>,
-    i: usize,
-}
-
-impl<'a> Iterator for RecordBatchesIter<'a> {
-    type Item = &'a RecordBatch;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let i = self.i;
-        if i < self.batches.len() {
-            self.i = i + 1;
-            Some(&self.batches[i])
-        } else {
-            None
-        }
-    }
-}
-
 pub struct SimpleRecordBatchStream {
     inner: RecordBatches,
     index: usize,
@@ -178,7 +156,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_recordbatches() {
+    fn test_recordbatches_try_from_columns() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let result = RecordBatches::try_from_columns(
+            schema.clone(),
+            vec![Arc::new(StringVector::from(vec!["hello", "world"])) as _],
+        );
+        assert!(result.is_err());
+
+        let v: VectorRef = Arc::new(Int32Vector::from_slice(&[1, 2]));
+        let expected = vec![RecordBatch::new(schema.clone(), vec![v.clone()]).unwrap()];
+        let r = RecordBatches::try_from_columns(schema, vec![v]).unwrap();
+        assert_eq!(r.take(), expected);
+    }
+
+    #[test]
+    fn test_recordbatches_try_new() {
         let column_a = ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false);
         let column_b = ColumnSchema::new("b", ConcreteDataType::string_datatype(), false);
         let column_c = ColumnSchema::new("c", ConcreteDataType::boolean_datatype(), false);
@@ -204,6 +201,15 @@ mod tests {
         );
 
         let batches = RecordBatches::try_new(schema1.clone(), vec![batch1.clone()]).unwrap();
+        let expected = "\
++---+-------+
+| a | b     |
++---+-------+
+| 1 | hello |
+| 2 | world |
++---+-------+";
+        assert_eq!(batches.pretty_print(), expected);
+
         assert_eq!(schema1, batches.schema());
         assert_eq!(vec![batch1], batches.take());
     }

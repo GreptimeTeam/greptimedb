@@ -1,5 +1,5 @@
 //! Use regex to filter out some MySQL federated components' emitted statements.
-//! Inspired by Databend.
+//! Inspired by Databend's "[mysql_federated.rs](https://github.com/datafuselabs/databend/blob/ac706bf65845e6895141c96c0a10bad6fdc2d367/src/query/service/src/servers/mysql/mysql_federated.rs)".
 
 use std::collections::HashMap;
 use std::sync::Arc;
