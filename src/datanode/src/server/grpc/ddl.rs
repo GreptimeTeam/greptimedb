@@ -192,7 +192,7 @@ mod tests {
     async fn test_create_expr_to_request() {
         common_telemetry::init_default_ut_logging();
         let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("create_expr_to_request");
-        let instance = Instance::mock_meta_client(&opts).await.unwrap();
+        let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
 
         let expr = testing_create_expr();

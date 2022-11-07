@@ -14,7 +14,7 @@ use crate::tests::test_util;
 
 async fn make_test_app(name: &str) -> (Router, TestGuard) {
     let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
-    let instance = Arc::new(Instance::mock_meta_client(&opts).await.unwrap());
+    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
     instance.start().await.unwrap();
     test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
         .await
