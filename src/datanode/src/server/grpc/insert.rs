@@ -168,6 +168,7 @@ pub fn build_create_table_request(
             create_if_not_exists: true,
             primary_key_indices,
             table_options: HashMap::new(),
+            region_numbers: vec![0],
         });
     }
 

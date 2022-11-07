@@ -270,7 +270,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let table_id = request.id;
         // TODO(dennis): supports multi regions;
-        let region_number = 0;
+        assert_eq!(1, request.region_numbers.len());
+        let region_number = request.region_numbers[0];
         let region_id = region_id(table_id, region_number);
 
         let region_name = region_name(table_id, region_number);
@@ -311,6 +312,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .engine(MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(request.primary_key_indices.clone())
+            .region_numbers(vec![region_number])
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
 
@@ -495,6 +497,7 @@ mod tests {
                     create_if_not_exists: true,
                     primary_key_indices: Vec::default(),
                     table_options: HashMap::new(),
+                    region_numbers: vec![0],
                 },
             )
             .await
@@ -753,6 +756,7 @@ mod tests {
             desc: None,
             primary_key_indices: Vec::default(),
             table_options: HashMap::new(),
+            region_numbers: vec![0],
         };
 
         let created_table = table_engine.create_table(&ctx, request).await.unwrap();
@@ -776,6 +780,7 @@ mod tests {
             desc: None,
             primary_key_indices: Vec::default(),
             table_options: HashMap::new(),
+            region_numbers: vec![0],
         };
 
         let result = table_engine.create_table(&ctx, request).await;

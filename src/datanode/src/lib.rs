@@ -2,8 +2,10 @@
 
 pub mod datanode;
 pub mod error;
+mod heartbeat;
 pub mod instance;
 mod metric;
+mod mock;
 mod script;
 pub mod server;
 mod sql;

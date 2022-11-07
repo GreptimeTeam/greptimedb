@@ -377,6 +377,7 @@ mod test {
             table_name: table_name.to_string(),
             desc: None,
             schema: Arc::new(Schema::new(supported_types())),
+            region_numbers: vec![0],
             primary_key_indices: vec![],
             create_if_not_exists: true,
             table_options: Default::default(),

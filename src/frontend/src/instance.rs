@@ -161,7 +161,10 @@ fn create_to_expr(create: CreateTable) -> Result<CreateExpr> {
         primary_keys: find_primary_keys(&create.constraints)?,
         create_if_not_exists: create.if_not_exists,
         // TODO(LFC): Fill in other table options.
-        table_options: HashMap::from([("engine".to_string(), create.engine)]),
+        table_options: HashMap::from([
+            ("engine".to_string(), create.engine),
+            ("region_id".to_string(), "0".to_string()),
+        ]),
         ..Default::default()
     };
     Ok(expr)
@@ -550,12 +553,15 @@ mod tests {
                 default_constraint: None,
             },
         ];
+        let mut table_options = HashMap::with_capacity(1);
+        table_options.insert("region_id".to_string(), "0".to_string());
         CreateExpr {
             table_name: "demo".to_string(),
             column_defs,
             time_index: "ts".to_string(),
             primary_keys: vec!["ts".to_string(), "host".to_string()],
             create_if_not_exists: true,
+            table_options,
             ..Default::default()
         }
     }

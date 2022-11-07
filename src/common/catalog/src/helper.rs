@@ -102,7 +102,7 @@ impl TableKey {
 pub struct TableValue {
     pub id: TableId,
     pub node_id: u64,
-    pub regions_ids: Vec<u64>,
+    pub regions_ids: Vec<u32>,
     pub meta: RawTableMeta,
 }
 
@@ -278,6 +278,7 @@ mod tests {
             engine_options: Default::default(),
             value_indices: vec![2, 3],
             options: Default::default(),
+            region_numbers: vec![1],
         };
 
         let value = TableValue {

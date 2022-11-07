@@ -1628,6 +1628,8 @@ dependencies = [
  "futures",
  "hyper",
  "log-store",
+ "meta-client",
+ "meta-srv",
  "metrics",
  "object-store",
  "query",

@@ -8,12 +8,12 @@ use common_recordbatch::{RecordBatch, RecordBatchStream};
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::array::UInt32Array;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::task::{Context, Poll};
 use futures::Stream;
 
 use crate::error::Result;
-use crate::metadata::TableInfoRef;
+use crate::metadata::{TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
 use crate::table::scan::SimpleTableScan;
 use crate::table::{Expr, Table};
 
@@ -31,7 +31,12 @@ impl Default for NumbersTable {
             false,
         )];
         Self {
-            schema: Arc::new(Schema::new(column_schemas)),
+            schema: Arc::new(
+                SchemaBuilder::try_from_columns(column_schemas)
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ),
         }
     }
 }
@@ -47,7 +52,26 @@ impl Table for NumbersTable {
     }
 
     fn table_info(&self) -> TableInfoRef {
-        unimplemented!()
+        Arc::new(
+            TableInfoBuilder::default()
+                .table_id(1)
+                .name("numbers")
+                .catalog_name("greptime")
+                .schema_name("public")
+                .table_version(0)
+                .table_type(TableType::Base)
+                .meta(
+                    TableMetaBuilder::default()
+                        .schema(self.schema.clone())
+                        .region_numbers(vec![0])
+                        .primary_key_indices(vec![0])
+                        .next_column_id(1)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
     }
 
     async fn scan(

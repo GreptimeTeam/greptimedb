@@ -55,6 +55,8 @@ pub struct TableMeta {
     pub value_indices: Vec<usize>,
     #[builder(default, setter(into))]
     pub engine: String,
+    #[builder(default, setter(into))]
+    pub region_numbers: Vec<u32>,
     pub next_column_id: ColumnId,
     /// Options for table engine.
     #[builder(default)]
@@ -162,6 +164,7 @@ pub struct RawTableMeta {
     pub value_indices: Vec<usize>,
     pub engine: String,
     pub next_column_id: ColumnId,
+    pub region_numbers: Vec<u32>,
     pub engine_options: HashMap<String, String>,
     pub options: HashMap<String, String>,
     pub created_on: DateTime<Utc>,
@@ -175,6 +178,7 @@ impl From<TableMeta> for RawTableMeta {
             value_indices: meta.value_indices,
             engine: meta.engine,
             next_column_id: meta.next_column_id,
+            region_numbers: meta.region_numbers,
             engine_options: meta.engine_options,
             options: meta.options,
             created_on: meta.created_on,
@@ -191,6 +195,7 @@ impl TryFrom<RawTableMeta> for TableMeta {
             primary_key_indices: raw.primary_key_indices,
             value_indices: raw.value_indices,
             engine: raw.engine,
+            region_numbers: vec![],
             next_column_id: raw.next_column_id,
             engine_options: raw.engine_options,
             options: raw.options,
