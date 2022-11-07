@@ -2,14 +2,13 @@
 name = "benchmarks"
 version = "0.1.0"
 edition = "2021"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 arrow = "10"
 clap = { version = "4.0", features = ["derive"] }
 client = { path = "../src/client" }
-itertools = "0.10.5"
 indicatif = "0.17.1"
+itertools = "0.10.5"
 parquet = { version = "*" }
 tokio = { version = "1.21", features = ["full"] }
