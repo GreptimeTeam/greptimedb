@@ -117,10 +117,7 @@ impl<'a> ParserContext<'a> {
 
     /// Parse SHOW CREATE TABLE statement
     fn parse_show_create_table(&mut self) -> Result<Statement> {
-        if let Token::EOF | Token::SemiColon = self.parser.peek_token() {
-            return InvalidTableNameSnafu { name: "None" }.fail();
-        }
-        let tablename =
+        let table_name =
             self.parser
                 .parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
@@ -129,13 +126,13 @@ impl<'a> ParserContext<'a> {
                     actual: self.peek_token_as_string(),
                 })?;
         ensure!(
-            !tablename.0.is_empty(),
+            !table_name.0.is_empty(),
             InvalidTableNameSnafu {
-                name: tablename.to_string(),
+                name: table_name.to_string(),
             }
         );
         Ok(Statement::ShowCreateTable(ShowCreateTable {
-            table_name: Some(tablename.to_string()),
+            table_name: Some(table_name.to_string()),
         }))
     }
 
