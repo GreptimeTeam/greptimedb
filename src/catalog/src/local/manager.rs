@@ -183,7 +183,6 @@ impl LocalCatalogManager {
                     info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
-                    debug!("t: {:?}", t);
                     self.open_and_register_table(&t).await?;
                     info!("Registered table: {:?}", t);
                     max_table_id = max_table_id.max(t.table_id);
