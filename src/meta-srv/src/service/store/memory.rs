@@ -145,27 +145,16 @@ impl KvStore for MemStore {
         } = req;
 
         let mut memory = self.inner.write();
-        let (success, prev_kv) = if expect.is_empty() {
-            (
-                false,
-                Some(KeyValue {
-                    key: key.clone(),
-                    value: vec![],
-                }),
-            )
-        } else {
-            let prev_val = memory.get(&key);
-            let success = prev_val
-                .map(|v| expect.cmp(v) == Ordering::Equal)
-                .unwrap_or(false);
-            (
-                success,
-                prev_val.map(|v| KeyValue {
-                    key: key.clone(),
-                    value: v.clone(),
-                }),
-            )
-        };
+
+        let prev_val = memory.get(&key);
+
+        let success = prev_val
+            .map(|v| expect.cmp(v) == Ordering::Equal)
+            .unwrap_or(false | expect.is_empty());
+        let prev_kv = prev_val.map(|v| KeyValue {
+            key: key.clone(),
+            value: v.clone(),
+        });
 
         if success {
             memory.insert(key, value);

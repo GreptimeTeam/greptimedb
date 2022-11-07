@@ -143,14 +143,17 @@ impl KvStore for EtcdStore {
             options,
         } = req.try_into()?;
 
-        let txn = Txn::new()
-            .when(vec![Compare::value(
-                key.clone(),
-                CompareOp::Equal,
-                expect.clone(),
-            )])
-            .and_then(vec![TxnOp::put(key.clone(), value, options)])
-            .or_else(vec![TxnOp::get(key.clone(), None)]);
+        let put_op = vec![TxnOp::put(key.clone(), value, options)];
+        let get_op = vec![TxnOp::get(key.clone(), None)];
+        let mut txn = if expect.is_empty() {
+            // create if absent
+            // revision 0 means key was not exist
+            Txn::new().when(vec![Compare::create_revision(key, CompareOp::Equal, 0)])
+        } else {
+            // compare and put
+            Txn::new().when(vec![Compare::value(key, CompareOp::Equal, expect)])
+        };
+        txn = txn.and_then(put_op).or_else(get_op);
 
         let txn_res = self
             .client
@@ -158,6 +161,7 @@ impl KvStore for EtcdStore {
             .txn(txn)
             .await
             .context(error::EtcdFailedSnafu)?;
+
         let success = txn_res.succeeded();
         let op_res = txn_res
             .op_responses()
@@ -165,26 +169,26 @@ impl KvStore for EtcdStore {
             .context(error::InvalidTxnResultSnafu {
                 err_msg: "empty response",
             })?;
-        let prev_kv = if success {
-            Some(KeyValue { key, value: expect })
-        } else {
-            match op_res {
-                TxnOpResponse::Get(get_res) => {
-                    if get_res.count() == 0 {
-                        // do not exists
-                        Some(KeyValue { key, value: vec![] })
-                    } else {
-                        ensure!(
-                            get_res.count() == 1,
-                            error::InvalidTxnResultSnafu {
-                                err_msg: format!("expect 1 response, actual {}", get_res.count())
-                            }
-                        );
-                        Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])))
-                    }
-                }
-                _ => unreachable!(), // never get here
+
+        let prev_kv = match op_res {
+            TxnOpResponse::Put(put_res) => {
+                put_res.prev_key().map(|kv| KeyValue::from(KvPair::new(kv)))
             }
+            TxnOpResponse::Get(get_res) => {
+                if get_res.count() == 0 {
+                    // do not exists
+                    None
+                } else {
+                    ensure!(
+                        get_res.count() == 1,
+                        error::InvalidTxnResultSnafu {
+                            err_msg: format!("expect 1 response, actual {}", get_res.count())
+                        }
+                    );
+                    Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])))
+                }
+            }
+            _ => unreachable!(), // never get here
         };
 
         let header = Some(ResponseHeader::success(cluster_id));
