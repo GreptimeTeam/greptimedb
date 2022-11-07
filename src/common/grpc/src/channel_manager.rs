@@ -390,15 +390,24 @@ mod tests {
     async fn test_access_count() {
         let pool = Arc::new(Pool::default());
         let config = ChannelConfig::new();
-        let mgr = ChannelManager { pool, config };
+        let mgr = Arc::new(ChannelManager { pool, config });
         let addr = "test_uri";
 
-        for i in 0..10 {
-            let _ = mgr.get(addr);
-            assert_eq!(i + 1, mgr.pool.get_access(addr).unwrap());
+        let mut joins = Vec::with_capacity(10);
+        for _ in 0..10 {
+            let mgr_clone = mgr.clone();
+            let join = tokio::spawn(async move {
+                for _ in 0..100 {
+                    let _ = mgr_clone.get(addr);
+                }
+            });
+            joins.push(join);
+        }
+        for join in joins {
+            join.await.unwrap();
         }
 
-        assert_eq!(10, mgr.pool.get_access(addr).unwrap());
+        assert_eq!(1000, mgr.pool.get_access(addr).unwrap());
 
         mgr.pool
             .retain_channel(|_, c| c.access.swap(0, Ordering::Relaxed) != 0);
