@@ -50,12 +50,17 @@ impl ChannelManager {
 
     pub fn get(&self, addr: impl AsRef<str>) -> Result<InnerChannel> {
         let addr = addr.as_ref();
+        // It will acquire the read lock.
         if let Some(inner_ch) = self.pool.get(addr) {
             return Ok(inner_ch);
         }
 
-        let entry = match self.pool.channels.entry(addr.to_string()) {
-            Entry::Occupied(entry) => entry.into_ref(),
+        // It will acquire the write lock.
+        let entry = match self.pool.entry(addr.to_string()) {
+            Entry::Occupied(entry) => {
+                entry.get().increase_access();
+                entry.into_ref()
+            }
             Entry::Vacant(entry) => {
                 let endpoint = self.build_endpoint(addr)?;
                 let inner_channel = endpoint.connect_lazy();
@@ -303,12 +308,17 @@ pub struct Channel {
 impl Channel {
     #[inline]
     pub fn access(&self) -> usize {
-        self.access.load(Ordering::Acquire)
+        self.access.load(Ordering::Relaxed)
     }
 
     #[inline]
     pub fn use_default_connector(&self) -> bool {
         self.use_default_connector
+    }
+
+    #[inline]
+    pub fn increase_access(&self) {
+        self.access.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -321,9 +331,13 @@ impl Pool {
     fn get(&self, addr: &str) -> Option<InnerChannel> {
         let channel = self.channels.get(addr);
         channel.map(|ch| {
-            ch.access.fetch_add(1, Ordering::AcqRel);
+            ch.increase_access();
             ch.channel.clone()
         })
+    }
+
+    fn entry(&self, addr: String) -> Entry<String, Channel> {
+        self.channels.entry(addr)
     }
 
     #[cfg(test)]
@@ -349,7 +363,7 @@ async fn recycle_channel_in_loop(pool: Arc<Pool>, interval_secs: u64) {
 
     loop {
         interval.tick().await;
-        pool.retain_channel(|_, c| c.access.swap(0, Ordering::AcqRel) != 0)
+        pool.retain_channel(|_, c| c.access.swap(0, Ordering::Relaxed) != 0)
     }
 }
 
@@ -387,7 +401,7 @@ mod tests {
         assert_eq!(10, mgr.pool.get_access(addr).unwrap());
 
         mgr.pool
-            .retain_channel(|_, c| c.access.swap(0, Ordering::AcqRel) != 0);
+            .retain_channel(|_, c| c.access.swap(0, Ordering::Relaxed) != 0);
 
         assert_eq!(0, mgr.pool.get_access(addr).unwrap());
     }
