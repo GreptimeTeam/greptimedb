@@ -9,6 +9,7 @@ async-trait = "0.1"
 common-base = { path = "../base" }
 common-error = { path = "../error" }
 common-runtime = { path = "../runtime" }
+dashmap = "5.4"
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.0", features = ["full"] }
@@ -19,3 +20,11 @@ tower = "0.4"
 package = "arrow2"
 version = "0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+
+[dev-dependencies]
+criterion = "0.4"
+rand = "0.8"
+
+[[bench]]
+name = "bench_main"
+harness = false
