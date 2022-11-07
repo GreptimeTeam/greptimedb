@@ -65,14 +65,14 @@ impl UserInfo {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum Channel {
     GRPC,
     HTTP,
     MYSQL,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum AuthMethod {
     None,
     Password {
@@ -82,7 +82,7 @@ pub enum AuthMethod {
     Token(String),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum AuthHashMethod {
     DoubleSha1,
     Sha256,
@@ -100,6 +100,8 @@ mod test {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use crate::context::AuthMethod::Token;
+    use crate::context::Channel::HTTP;
     use crate::context::{ClientInfo, Context, ExecInfo, Quota, UserInfo};
 
     #[test]
@@ -137,6 +139,28 @@ mod test {
             },
             predicates: vec![],
         };
-        println!("{}", serde_json::to_string(&ctx).unwrap());
+
+        assert_eq!(ctx.exec_info.catalog.unwrap(), String::from("greptime"));
+        assert_eq!(ctx.exec_info.schema.unwrap(), String::from("public"));
+        assert_eq!(ctx.exec_info.extra_opts.capacity(), 0);
+        assert_eq!(ctx.exec_info.trace_id, None);
+
+        assert_eq!(
+            ctx.client_info.client_host.unwrap(),
+            String::from("127.0.0.1:4001")
+        );
+
+        assert_eq!(ctx.user_info.username, None);
+        assert_eq!(ctx.user_info.from_channel.unwrap(), HTTP);
+        assert_eq!(
+            ctx.user_info.auth_method.unwrap(),
+            Token(String::from("HELLO"))
+        );
+
+        assert!(ctx.quota.total > 0);
+        assert!(ctx.quota.consumed > 0);
+        assert!(ctx.quota.estimated > 0);
+
+        assert_eq!(ctx.predicates.capacity(), 0);
     }
 }
