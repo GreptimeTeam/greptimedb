@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-#[derive(Default)]
+use crate::context::AuthMethod::Token;
+use crate::context::Channel::HTTP;
+
+#[derive(Default, Debug)]
 pub struct Context {
     pub exec_info: ExecInfo,
     pub client_info: ClientInfo,
@@ -13,7 +16,7 @@ impl Context {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ExecInfo {
     pub catalog: Option<String>,
     pub schema: Option<String>,
@@ -21,25 +24,42 @@ pub struct ExecInfo {
     pub trace_id: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ClientInfo {
-    pub client_addr: Option<String>,
-    pub client_ip: Option<String>,
+    pub client_host: Option<String>,
 }
 
-#[derive(Default)]
+impl ClientInfo {
+    pub fn new(host: Option<String>) -> Self {
+        ClientInfo { client_host: host }
+    }
+}
+
+#[derive(Default, Debug)]
 pub struct UserInfo {
     pub username: Option<String>,
     pub from_channel: Option<Channel>,
     pub auth_method: Option<AuthMethod>,
 }
 
+impl UserInfo {
+    pub fn with_http_token(token: String) -> Self {
+        UserInfo {
+            username: None,
+            from_channel: Some(HTTP),
+            auth_method: Some(Token(token)),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum Channel {
     GRPC,
     HTTP,
     MYSQL,
 }
 
+#[derive(Debug)]
 pub enum AuthMethod {
     None,
     Password {
@@ -49,6 +69,7 @@ pub enum AuthMethod {
     Token(String),
 }
 
+#[derive(Debug)]
 pub enum AuthHashMethod {
     DoubleSha1,
     Sha256,
