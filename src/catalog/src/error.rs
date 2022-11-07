@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::num::ParseIntError;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::prelude::{Snafu, StatusCode};
@@ -152,6 +153,9 @@ pub enum Error {
 
     #[snafu(display("Failed to bump table id"))]
     BumpTableId { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to parse table id from metasrv: {}", source))]
+    ParseTableId { source: ParseIntError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -188,7 +192,9 @@ impl ErrorExt for Error {
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableSchema { source, .. } => source.status_code(),
-            Error::BumpTableId { .. } => StatusCode::StorageUnavailable,
+            Error::BumpTableId { .. } | Error::ParseTableId { .. } => {
+                StatusCode::StorageUnavailable
+            }
         }
     }
 

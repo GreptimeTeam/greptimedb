@@ -25,6 +25,13 @@ pub trait KvBackend: Send + Sync {
 
     async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error>;
 
+    /// Compare and set value of key. `expect` is the expected value, if backend's current value associated
+    /// with key is the same as `expect`, the value will be updated to `val`.
+    ///
+    /// - If the compare-and-set operation successfully updated value, this method will return an `Ok(Ok())`
+    /// - If associated value is not the same as `expect`, no value will be updated and an `Ok(Err(Vec<u8>))`
+    /// will be returned, the `Err(Vec<u8>)` indicates the current associated value of key.
+    /// - If any error happens during operation, an `Err(Error)` will be returned.
     async fn compare_and_set(
         &self,
         key: &[u8],
@@ -55,7 +62,13 @@ pub type KvBackendRef = Arc<dyn KvBackend>;
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use async_stream::stream;
+    use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+    use common_telemetry::tracing::info;
+    use common_telemetry::warn;
+    use meta_client::client::MetaClientBuilder;
 
     use super::*;
 
@@ -106,5 +119,92 @@ mod tests {
         assert_eq!(2.to_string().as_bytes(), result.unwrap().unwrap().0);
         let result = backend.get(3.to_string().as_bytes()).await;
         assert!(result.unwrap().is_none());
+    }
+
+    async fn cas(backend: Arc<MetaKvBackend>, key: &[u8]) {
+        loop {
+            let (prev, prev_bytes) = match backend.get(key).await.unwrap() {
+                None => (0, vec![]),
+                Some(kv) => (
+                    String::from_utf8_lossy(&kv.1).parse().unwrap(),
+                    kv.1.clone(),
+                ),
+            };
+
+            match backend
+                .compare_and_set(
+                    key,
+                    prev_bytes.as_slice(),
+                    (prev + 1).to_string().as_bytes(),
+                )
+                .await
+                .unwrap()
+            {
+                Ok(_) => {
+                    info!("CAS finished: {}", prev + 1);
+                    break;
+                }
+                Err(e) => {
+                    let cur = match e {
+                        None => "none".to_string(),
+                        Some(v) => String::from_utf8_lossy(&v).to_string(),
+                    };
+                    warn!("Failed to updated value: {}", cur)
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cas() {
+        common_telemetry::init_default_ut_logging();
+        let id = (1000u64, 2000u64);
+        let config = ChannelConfig::new()
+            .timeout(Duration::from_secs(3))
+            .connect_timeout(Duration::from_secs(5))
+            .tcp_nodelay(true);
+        let channel_manager = ChannelManager::with_config(config);
+        let mut meta_client = MetaClientBuilder::new(id.0, id.1)
+            .enable_heartbeat()
+            .enable_router()
+            .enable_store()
+            .channel_manager(channel_manager)
+            .build();
+        meta_client
+            .start(&["proxy.huanglei.rocks:22009"])
+            .await
+            .unwrap();
+        // required only when the heartbeat_client is enabled
+        meta_client.ask_leader().await.unwrap();
+
+        info!("ask leader...");
+        let backend = Arc::new(MetaKvBackend {
+            client: meta_client,
+        });
+
+        let key = "__test_cas".as_bytes();
+        let thread_num = 100;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        for _ in 0..thread_num {
+            let backend = backend.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                cas(backend.clone(), key).await;
+                tx.send(()).await.unwrap();
+            });
+        }
+
+        let mut finished = 0;
+        while let Some(_) = rx.recv().await {
+            finished += 1;
+            info!("Finished thread: {}", finished);
+            if finished == thread_num {
+                break;
+            }
+        }
+
+        let res = String::from_utf8_lossy(&backend.get(key).await.unwrap().unwrap().1).to_string();
+        backend.delete(key).await.unwrap();
+        assert_eq!(thread_num.to_string(), res);
     }
 }

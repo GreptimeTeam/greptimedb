@@ -26,7 +26,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{
     BumpTableIdSnafu, CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu,
-    OpenTableSnafu, SchemaNotFoundSnafu, TableExistsSnafu,
+    OpenTableSnafu, ParseTableIdSnafu, SchemaNotFoundSnafu, TableExistsSnafu,
 };
 use crate::error::{InvalidTableSchemaSnafu, Result};
 use crate::remote::{Kv, KvBackendRef};
@@ -380,22 +380,20 @@ impl CatalogManager for RemoteCatalogManager {
     /// Bump table id in a CAS manner with backoff.
     async fn next_table_id(&self) -> Result<TableId> {
         let key = common_catalog::consts::TABLE_ID_KEY_PREFIX.as_bytes();
-
-        // let backend = self.backend.clone();
-
         let op = || async {
-            let prev = match self.backend.get(key).await? {
-                None => MIN_USER_TABLE_ID,
-                Some(e) => String::from_utf8_lossy(&e.1).parse().unwrap(),
+            let (prev, prev_bytes) = match self.backend.get(key).await? {
+                None => (MIN_USER_TABLE_ID - 1, vec![]),
+                Some(kv) => (
+                    String::from_utf8_lossy(&kv.1)
+                        .parse()
+                        .context(ParseTableIdSnafu)?,
+                    kv.1.clone(),
+                ),
             };
 
             match self
                 .backend
-                .compare_and_set(
-                    key,
-                    prev.to_string().as_bytes(),
-                    (prev + 1).to_string().as_bytes(),
-                )
+                .compare_and_set(key, &prev_bytes, (prev + 1).to_string().as_bytes())
                 .await
             {
                 Ok(cas_res) => match cas_res {
