@@ -67,6 +67,19 @@ impl RangeColumnsPartitionRule {
         value_lists: Vec<Vec<PartitionBound>>,
         regions: Vec<RegionId>,
     ) -> Self {
+        // An example range columns partition rule to calculate the first column bounds and regions:
+        // SQL:
+        //   PARTITION p1 VALUES LESS THAN (10, 'c'),
+        //   PARTITION p2 VALUES LESS THAN (20, 'h'),
+        //   PARTITION p3 VALUES LESS THAN (20, 'm'),
+        //   PARTITION p4 VALUES LESS THAN (50, 'p'),
+        //   PARTITION p5 VALUES LESS THAN (MAXVALUE, 'x'),
+        //   PARTITION p6 VALUES LESS THAN (MAXVALUE, MAXVALUE),
+        // first column bounds:
+        //   [10, 20, 50, MAXVALUE]
+        // first column regions:
+        //   [[1], [2, 3], [4], [5, 6]]
+
         let first_column_bounds = value_lists
             .iter()
             .map(|x| &x[0])
@@ -136,16 +149,6 @@ impl PartitionRule for RangeColumnsPartitionRule {
                 // "unwrap" is safe because we have checked that "self.column_list" contains all columns in "exprs"
                 .unwrap();
 
-            // an example of bounds and regions:
-            // SQL:
-            //   PARTITION p1 VALUES LESS THAN (10, 'c'),
-            //   PARTITION p2 VALUES LESS THAN (20, 'h'),
-            //   PARTITION p3 VALUES LESS THAN (20, 'm'),
-            //   PARTITION p4 VALUES LESS THAN (50, 'p'),
-            //   PARTITION p5 VALUES LESS THAN (MAXVALUE, 'x'),
-            //   PARTITION p6 VALUES LESS THAN (MAXVALUE, MAXVALUE),
-            // bounds: [10, 20, 50, MAXVALUE]
-            // regions: [[1], [2, 3], [4], [5, 6]]
             let regions = &self.first_column_regions;
             match self
                 .first_column_bounds

@@ -304,8 +304,7 @@ impl HttpServer {
             router = router.nest(&format!("/{}/prometheus", HTTP_API_VERSION), prom_router);
         }
 
-        let metrics_router = Router::new().route("/", routing::get(handler::metrics));
-        router = router.nest(&format!("/{}/metrics", HTTP_API_VERSION), metrics_router);
+        router = router.route("/metrics", routing::get(handler::metrics));
 
         router
             // middlewares

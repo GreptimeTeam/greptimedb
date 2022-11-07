@@ -1,6 +1,11 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_query::logical_plan::Expr;
+use datafusion_common::ScalarValue;
+use store_api::storage::RegionId;
+
+use crate::mock::DatanodeId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -83,6 +88,17 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display(
+        "Failed to convert DataFusion's ScalarValue: {:?}, source: {}",
+        value,
+        source
+    ))]
+    ConvertScalarValue {
+        value: ScalarValue,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Failed to find partition column: {}", column_name))]
     FindPartitionColumn {
         column_name: String,
@@ -92,6 +108,24 @@ pub enum Error {
     #[snafu(display("Failed to find region, reason: {}", reason))]
     FindRegion {
         reason: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to find regions by filters: {:?}", filters))]
+    FindRegions {
+        filters: Vec<Expr>,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to find Datanode by region: {:?}", region))]
+    FindDatanode {
+        region: RegionId,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to get Datanode instance: {:?}", datanode))]
+    DatanodeInstance {
+        datanode: DatanodeId,
         backtrace: Backtrace,
     },
 
@@ -118,15 +152,26 @@ impl ErrorExt for Error {
             | Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::FindRegion { .. }
+            | Error::FindRegions { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. }
             | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
+
             Error::RuntimeResource { source, .. } => source.status_code(),
+
             Error::StartServer { source, .. } => source.status_code(),
+
             Error::ParseSql { source } => source.status_code(),
-            Error::ConvertColumnDefaultConstraint { source, .. } => source.status_code(),
+
+            Error::ConvertColumnDefaultConstraint { source, .. }
+            | Error::ConvertScalarValue { source, .. } => source.status_code(),
+
             Error::RequestDatanode { source } => source.status_code(),
-            Error::ColumnDataType { .. } => StatusCode::Internal,
+
+            Error::ColumnDataType { .. }
+            | Error::FindDatanode { .. }
+            | Error::DatanodeInstance { .. } => StatusCode::Internal,
+
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
                 StatusCode::Unexpected
             }
