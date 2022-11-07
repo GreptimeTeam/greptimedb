@@ -9,8 +9,8 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use bytes::{Bytes, BytesMut};
 use common_error::ext::BoxedError;
-use common_telemetry::debug;
 use common_telemetry::logging::{error, info};
+use common_telemetry::{debug, trace};
 use futures::Stream;
 use futures_util::StreamExt;
 use snafu::ResultExt;
@@ -380,7 +380,7 @@ impl LogFile {
                         }
                     }
                 }
-                debug!("Yield batch size: {}", batch.len());
+                trace!("Yield batch size: {}", batch.len());
                 yield Ok(batch);
             }
         });
