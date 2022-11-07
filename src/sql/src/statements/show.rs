@@ -118,4 +118,9 @@ mod tests {
             }
         }
     }
+    #[test]
+    pub fn test_show_create_missing_table_name() {
+        let sql = "SHOW CREATE TABLE";
+        ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap_err();
+    }
 }
