@@ -158,13 +158,6 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
         if let Some(hook) = req.open_hook {
             (hook)(table)?;
         }
-        info!(
-            "{:?},",
-            manager
-                .table(catalog_name, schema_name, table_name)
-                .unwrap()
-                .is_some()
-        );
     }
     Ok(())
 }

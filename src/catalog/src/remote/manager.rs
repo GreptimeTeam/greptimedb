@@ -382,7 +382,7 @@ impl CatalogManager for RemoteCatalogManager {
         let key = common_catalog::consts::TABLE_ID_KEY_PREFIX.as_bytes();
         let op = || async {
             let (prev, prev_bytes) = match self.backend.get(key).await? {
-                None => (MIN_USER_TABLE_ID - 1, vec![]),
+                None => (MIN_USER_TABLE_ID, vec![]),
                 Some(kv) => (
                     String::from_utf8_lossy(&kv.1)
                         .parse()

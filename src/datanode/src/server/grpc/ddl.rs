@@ -83,13 +83,6 @@ impl Instance {
             .schema_name
             .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
 
-        let region_id = expr
-            .table_options
-            .get(&"region_id".to_string())
-            .unwrap()
-            .parse::<u32>()
-            .unwrap();
-
         let table_id = self
             .catalog_manager()
             .next_table_id()
