@@ -152,6 +152,9 @@ pub enum Error {
 
     #[snafu(display("Invalid prometheus remote read query result, msg: {}", msg))]
     InvalidPromRemoteReadQueryResult { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to decode region id, source: {}", source))]
+    DecodeRegionId { source: api::DecodeError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -186,6 +189,7 @@ impl ErrorExt for Error {
             | DecodePromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
+            | DecodeRegionId { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } => source.status_code(),
