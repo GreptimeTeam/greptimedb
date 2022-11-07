@@ -118,6 +118,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     pub fn test_show_create_missing_table_name() {
         let sql = "SHOW CREATE TABLE";
