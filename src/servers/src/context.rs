@@ -42,7 +42,7 @@ fn main() {
     for predicate in predicates {
         re &= predicate(&ctx);
     }
-    assert_eq!(re, true);
+    assert!(re);
 }
 
 #[derive(Default, Serialize, Deserialize)]
