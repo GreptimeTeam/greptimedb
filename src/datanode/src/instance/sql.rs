@@ -77,7 +77,7 @@ impl Instance {
             Statement::ShowTables(stmt) => {
                 self.sql_handler.execute(SqlRequest::ShowTables(stmt)).await
             }
-            Statement::ShowCreateTable(_) => {
+            Statement::ShowCreateTable(stmt) => {
                 unimplemented!("SHOW CREATE TABLE is unimplemented yet");
             }
         }
