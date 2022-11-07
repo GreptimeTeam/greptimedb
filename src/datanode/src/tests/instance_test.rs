@@ -12,7 +12,7 @@ async fn test_execute_insert() {
     common_telemetry::init_default_ut_logging();
 
     let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_insert");
-    let instance = Instance::mock_meta_client(&opts).await.unwrap();
+    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
     test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
@@ -36,7 +36,7 @@ async fn test_execute_insert_query_with_i64_timestamp() {
     common_telemetry::init_default_ut_logging();
 
     let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("insert_query_i64_timestamp");
-    let instance = Instance::mock_meta_client(&opts).await.unwrap();
+    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
     test_util::create_test_table(&instance, ConcreteDataType::int64_datatype())
@@ -73,7 +73,7 @@ async fn test_execute_insert_query_with_i64_timestamp() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_execute_query() {
     let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_query");
-    let instance = Instance::mock_meta_client(&opts).await.unwrap();
+    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
     let output = instance
@@ -100,7 +100,7 @@ async fn test_execute_query() {
 async fn test_execute_show_databases_tables() {
     let (opts, _guard) =
         test_util::create_tmp_dir_and_datanode_opts("execute_show_databases_tables");
-    let instance = Instance::mock_meta_client(&opts).await.unwrap();
+    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
     let output = instance.execute_sql("show databases").await.unwrap();
@@ -191,7 +191,7 @@ pub async fn test_execute_create() {
     common_telemetry::init_default_ut_logging();
 
     let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_create");
-    let instance = Instance::mock_meta_client(&opts).await.unwrap();
+    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
     let output = instance
@@ -216,7 +216,7 @@ pub async fn test_create_table_illegal_timestamp_type() {
 
     let (opts, _guard) =
         test_util::create_tmp_dir_and_datanode_opts("create_table_illegal_timestamp_type");
-    let instance = Instance::mock_meta_client(&opts).await.unwrap();
+    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
     let output = instance

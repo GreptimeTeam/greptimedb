@@ -328,7 +328,7 @@ mod test {
     use super::*;
     use crate::partitioning::range::RangePartitionRule;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_dist_table_scan() {
         let table = Arc::new(new_dist_table().await);
 
@@ -475,7 +475,7 @@ mod test {
             ..Default::default()
         };
 
-        let instance = Arc::new(Instance::new(&opts).await.unwrap());
+        let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
         instance.start().await.unwrap();
 
         let catalog_manager = instance.catalog_manager().clone();
@@ -498,7 +498,7 @@ mod test {
         )
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_find_regions() {
         let table = new_dist_table().await;
 

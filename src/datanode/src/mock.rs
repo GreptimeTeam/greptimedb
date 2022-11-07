@@ -59,7 +59,7 @@ impl Instance {
         })
     }
 
-    pub async fn mock_meta_client(opts: &DatanodeOptions) -> Result<Self> {
+    pub async fn with_mock_meta_client(opts: &DatanodeOptions) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
         let meta_client = mock_meta_client().await;

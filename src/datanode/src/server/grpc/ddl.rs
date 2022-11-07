@@ -83,6 +83,13 @@ impl Instance {
             .schema_name
             .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
 
+        let region_id = expr
+            .table_options
+            .get(&"region_id".to_string())
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+
         let table_id = self
             .catalog_manager()
             .next_table_id()
@@ -196,7 +203,7 @@ mod tests {
     async fn test_create_expr_to_request() {
         common_telemetry::init_default_ut_logging();
         let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("create_expr_to_request");
-        let instance = Instance::mock_meta_client(&opts).await.unwrap();
+        let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
 
         let expr = testing_create_expr();

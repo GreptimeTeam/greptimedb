@@ -21,9 +21,9 @@ datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = 
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../datatypes" }
+itertools = "0.10"
 openmetrics-parser = "0.4"
 prost = "0.11"
-itertools = "0.10"
 query = { path = "../query" }
 serde = "1.0"
 servers = { path = "../servers" }
