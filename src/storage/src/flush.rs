@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use common_time::RangeMillis;
 use store_api::logstore::LogStore;
+use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
 use store_api::storage::SequenceNumber;
 use uuid::Uuid;
 
@@ -164,6 +165,8 @@ impl<S: LogStore> FlushJob<S> {
         let mut futures = Vec::with_capacity(self.memtables.len());
         let iter_ctx = IterContext {
             for_flush: true,
+            // TODO(ruihang): dynamic row group size based on content (#412)
+            batch_size: WRITE_ROW_GROUP_SIZE,
             ..Default::default()
         };
         for m in &self.memtables {
