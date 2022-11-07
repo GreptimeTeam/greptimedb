@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::context::AuthMethod::Token;
 use crate::context::Channel::HTTP;
 
+type CtxFnRef = Arc<dyn Fn(&Context) -> bool + Send + Sync>;
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct Context {
     pub exec_info: ExecInfo,
@@ -13,7 +15,7 @@ pub struct Context {
     pub user_info: UserInfo,
     pub quota: Quota,
     #[serde(skip)]
-    pub predicates: Vec<Arc<dyn Fn(&Context) -> bool + Send + Sync>>,
+    pub predicates: Vec<CtxFnRef>,
 }
 
 impl Context {
@@ -21,7 +23,7 @@ impl Context {
         Context::default()
     }
 
-    pub fn add_predicate(&mut self, predicate: Arc<dyn Fn(&Context) -> bool + Send + Sync>) {
+    pub fn add_predicate(&mut self, predicate: CtxFnRef) {
         self.predicates.push(predicate);
     }
 }
