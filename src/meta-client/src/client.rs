@@ -618,23 +618,26 @@ mod tests {
         let res = client.compare_and_put(req).await;
         assert!(!res.unwrap().is_success());
 
-        // empty expect key is not allowed
+        // create if absent
         let req = CompareAndPutRequest::new()
             .with_key(b"key".to_vec())
             .with_value(b"value".to_vec());
         let res = client.compare_and_put(req).await;
         let mut res = res.unwrap();
-        assert!(!res.is_success());
-        let mut kv = res.take_prev_kv().unwrap();
-        assert_eq!(b"key".to_vec(), kv.take_key());
-        assert!(kv.take_value().is_empty());
+        assert!(res.is_success());
+        assert!(res.take_prev_kv().is_none());
 
-        let req = PutRequest::new()
+        // compare and put fail
+        let req = CompareAndPutRequest::new()
             .with_key(b"key".to_vec())
-            .with_value(b"value".to_vec());
-        let res = client.put(req).await;
-        assert!(res.is_ok());
+            .with_expect(b"not_eq".to_vec())
+            .with_value(b"value2".to_vec());
+        let res = client.compare_and_put(req).await;
+        let mut res = res.unwrap();
+        assert!(!res.is_success());
+        assert_eq!(b"value".to_vec(), res.take_prev_kv().unwrap().take_value());
 
+        // compare and put success
         let req = CompareAndPutRequest::new()
             .with_key(b"key".to_vec())
             .with_expect(b"value".to_vec())
