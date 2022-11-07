@@ -20,7 +20,11 @@ async fn create_datanode_instance() -> Arc<DatanodeInstance> {
 
 pub(crate) async fn create_frontend_instance() -> Arc<Instance> {
     let datanode_instance = create_datanode_instance().await;
+    let client = create_datanode_client(datanode_instance).await;
+    Arc::new(Instance::with_client(client))
+}
 
+pub(crate) async fn create_datanode_client(datanode_instance: Arc<DatanodeInstance>) -> Client {
     let (client, server) = tokio::io::duplex(1024);
 
     let runtime = Arc::new(
@@ -67,6 +71,5 @@ pub(crate) async fn create_frontend_instance() -> Arc<Instance> {
             }),
         )
         .unwrap();
-    let client = Client::with_manager_and_urls(channel_manager, vec![addr]);
-    Arc::new(Instance::with_client(client))
+    Client::with_manager_and_urls(channel_manager, vec![addr])
 }

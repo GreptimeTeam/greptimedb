@@ -252,7 +252,7 @@ impl<S: LogStore> EngineInner<S> {
             Some(v) => v,
         };
         guard.update(RegionSlot::Ready(region.clone()));
-        info!("Storage engine open region {:?}", &region);
+        info!("Storage engine open region {}", region.id());
         Ok(Some(region))
     }
 
@@ -281,7 +281,7 @@ impl<S: LogStore> EngineInner<S> {
 
         guard.update(RegionSlot::Ready(region.clone()));
 
-        info!("Storage engine create region {:?}", &region);
+        info!("Storage engine create region {}", region.id());
 
         Ok(region)
     }

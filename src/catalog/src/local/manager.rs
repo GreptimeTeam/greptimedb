@@ -7,7 +7,7 @@ use common_catalog::consts::{
     SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_recordbatch::RecordBatch;
-use common_telemetry::{debug, info};
+use common_telemetry::info;
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::lock::Mutex;
@@ -183,7 +183,6 @@ impl LocalCatalogManager {
                     info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
-                    debug!("t: {:?}", t);
                     self.open_and_register_table(&t).await?;
                     info!("Registered table: {:?}", t);
                     max_table_id = max_table_id.max(t.table_id);

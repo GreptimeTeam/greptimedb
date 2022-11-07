@@ -229,6 +229,11 @@ impl<S: LogStore> RegionImpl<S> {
         Ok(Some(RegionImpl { inner }))
     }
 
+    /// Get ID of this region.
+    pub fn id(&self) -> RegionId {
+        self.inner.shared.id()
+    }
+
     async fn recover_from_manifest(
         manifest: &RegionManifest,
     ) -> Result<(Option<Version>, RecoveredMetadataMap)> {

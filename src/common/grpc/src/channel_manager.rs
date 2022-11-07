@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
 use snafu::ResultExt;
 use tonic::transport::Channel as InnerChannel;
 use tonic::transport::Endpoint;
@@ -17,7 +19,7 @@ const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 #[derive(Clone, Debug)]
 pub struct ChannelManager {
     config: ChannelConfig,
-    pool: Arc<Mutex<Pool>>,
+    pool: Arc<Pool>,
 }
 
 impl Default for ChannelManager {
@@ -32,17 +34,14 @@ impl ChannelManager {
     }
 
     pub fn with_config(config: ChannelConfig) -> Self {
-        let pool = Pool {
-            channels: HashMap::default(),
-        };
-        let pool = Arc::new(Mutex::new(pool));
+        let pool = Arc::new(Pool::default());
         let cloned_pool = pool.clone();
 
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_bg(async {
             recycle_channel_in_loop(cloned_pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
         });
 
-        Self { pool, config }
+        Self { config, pool }
     }
 
     pub fn config(&self) -> &ChannelConfig {
@@ -51,23 +50,30 @@ impl ChannelManager {
 
     pub fn get(&self, addr: impl AsRef<str>) -> Result<InnerChannel> {
         let addr = addr.as_ref();
-        let mut pool = self.pool.lock().unwrap();
-        if let Some(ch) = pool.get_mut(addr) {
-            ch.access += 1;
-            return Ok(ch.channel.clone());
+        // It will acquire the read lock.
+        if let Some(inner_ch) = self.pool.get(addr) {
+            return Ok(inner_ch);
         }
 
-        let endpoint = self.build_endpoint(addr)?;
+        // It will acquire the write lock.
+        let entry = match self.pool.entry(addr.to_string()) {
+            Entry::Occupied(entry) => {
+                entry.get().increase_access();
+                entry.into_ref()
+            }
+            Entry::Vacant(entry) => {
+                let endpoint = self.build_endpoint(addr)?;
+                let inner_channel = endpoint.connect_lazy();
 
-        let inner_channel = endpoint.connect_lazy();
-        let channel = Channel {
-            channel: inner_channel.clone(),
-            access: 1,
-            use_default_connector: true,
+                let channel = Channel {
+                    channel: inner_channel,
+                    access: AtomicUsize::new(1),
+                    use_default_connector: true,
+                };
+                entry.insert(channel)
+            }
         };
-        pool.put(addr, channel);
-
-        Ok(inner_channel)
+        Ok(entry.channel.clone())
     }
 
     pub fn reset_with_connector<C>(
@@ -86,11 +92,10 @@ impl ChannelManager {
         let inner_channel = endpoint.connect_with_connector_lazy(connector);
         let channel = Channel {
             channel: inner_channel.clone(),
-            access: 1,
+            access: AtomicUsize::new(1),
             use_default_connector: false,
         };
-        let mut pool = self.pool.lock().unwrap();
-        pool.put(addr, channel);
+        self.pool.put(addr, channel);
 
         Ok(inner_channel)
     }
@@ -99,8 +104,7 @@ impl ChannelManager {
     where
         F: FnMut(&String, &mut Channel) -> bool,
     {
-        let mut pool = self.pool.lock().unwrap();
-        pool.retain_channel(f);
+        self.pool.retain_channel(f);
     }
 
     fn build_endpoint(&self, addr: &str) -> Result<Endpoint> {
@@ -297,39 +301,56 @@ impl ChannelConfig {
 #[derive(Debug)]
 pub struct Channel {
     channel: InnerChannel,
-    access: usize,
+    access: AtomicUsize,
     use_default_connector: bool,
 }
 
 impl Channel {
     #[inline]
     pub fn access(&self) -> usize {
-        self.access
+        self.access.load(Ordering::Relaxed)
     }
 
     #[inline]
     pub fn use_default_connector(&self) -> bool {
         self.use_default_connector
     }
+
+    #[inline]
+    pub fn increase_access(&self) {
+        self.access.fetch_add(1, Ordering::Relaxed);
+    }
 }
-#[derive(Debug)]
+
+#[derive(Debug, Default)]
 struct Pool {
-    channels: HashMap<String, Channel>,
+    channels: DashMap<String, Channel>,
 }
 
 impl Pool {
-    #[inline]
-    fn get_mut(&mut self, addr: &str) -> Option<&mut Channel> {
-        self.channels.get_mut(addr)
+    fn get(&self, addr: &str) -> Option<InnerChannel> {
+        let channel = self.channels.get(addr);
+        channel.map(|ch| {
+            ch.increase_access();
+            ch.channel.clone()
+        })
     }
 
-    #[inline]
-    fn put(&mut self, addr: &str, channel: Channel) {
+    fn entry(&self, addr: String) -> Entry<String, Channel> {
+        self.channels.entry(addr)
+    }
+
+    #[cfg(test)]
+    fn get_access(&self, addr: &str) -> Option<usize> {
+        let channel = self.channels.get(addr);
+        channel.map(|ch| ch.access())
+    }
+
+    fn put(&self, addr: &str, channel: Channel) {
         self.channels.insert(addr.to_string(), channel);
     }
 
-    #[inline]
-    fn retain_channel<F>(&mut self, f: F)
+    fn retain_channel<F>(&self, f: F)
     where
         F: FnMut(&String, &mut Channel) -> bool,
     {
@@ -337,20 +358,12 @@ impl Pool {
     }
 }
 
-async fn recycle_channel_in_loop(pool: Arc<Mutex<Pool>>, interval_secs: u64) {
+async fn recycle_channel_in_loop(pool: Arc<Pool>, interval_secs: u64) {
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
 
     loop {
         interval.tick().await;
-        let mut pool = pool.lock().unwrap();
-        pool.retain_channel(|_, c| {
-            if c.access == 0 {
-                false
-            } else {
-                c.access = 0;
-                true
-            }
-        })
+        pool.retain_channel(|_, c| c.access.swap(0, Ordering::Relaxed) != 0)
     }
 }
 
@@ -363,10 +376,7 @@ mod tests {
     #[should_panic]
     #[test]
     fn test_invalid_addr() {
-        let pool = Pool {
-            channels: HashMap::default(),
-        };
-        let pool = Arc::new(Mutex::new(pool));
+        let pool = Arc::new(Pool::default());
         let mgr = ChannelManager {
             pool,
             ..Default::default()
@@ -378,36 +388,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_access_count() {
-        let pool = Pool {
-            channels: HashMap::default(),
-        };
-        let pool = Arc::new(Mutex::new(pool));
+        let pool = Arc::new(Pool::default());
         let config = ChannelConfig::new();
-        let mgr = ChannelManager { pool, config };
+        let mgr = Arc::new(ChannelManager { pool, config });
         let addr = "test_uri";
 
-        for i in 0..10 {
-            {
-                let _ = mgr.get(addr).unwrap();
-                let mut pool = mgr.pool.lock().unwrap();
-                assert_eq!(i + 1, pool.get_mut(addr).unwrap().access);
-            }
+        let mut joins = Vec::with_capacity(10);
+        for _ in 0..10 {
+            let mgr_clone = mgr.clone();
+            let join = tokio::spawn(async move {
+                for _ in 0..100 {
+                    let _ = mgr_clone.get(addr);
+                }
+            });
+            joins.push(join);
+        }
+        for join in joins {
+            join.await.unwrap();
         }
 
-        let mut pool = mgr.pool.lock().unwrap();
+        assert_eq!(1000, mgr.pool.get_access(addr).unwrap());
 
-        assert_eq!(10, pool.get_mut(addr).unwrap().access);
+        mgr.pool
+            .retain_channel(|_, c| c.access.swap(0, Ordering::Relaxed) != 0);
 
-        pool.retain_channel(|_, c| {
-            if c.access == 0 {
-                false
-            } else {
-                c.access = 0;
-                true
-            }
-        });
-
-        assert_eq!(0, pool.get_mut(addr).unwrap().access);
+        assert_eq!(0, mgr.pool.get_access(addr).unwrap());
     }
 
     #[test]
@@ -466,10 +471,7 @@ mod tests {
 
     #[test]
     fn test_build_endpoint() {
-        let pool = Pool {
-            channels: HashMap::default(),
-        };
-        let pool = Arc::new(Mutex::new(pool));
+        let pool = Arc::new(Pool::default());
         let config = ChannelConfig::new()
             .timeout(Duration::from_secs(3))
             .connect_timeout(Duration::from_secs(5))
@@ -493,9 +495,11 @@ mod tests {
     #[tokio::test]
     async fn test_channel_with_connector() {
         let pool = Pool {
-            channels: HashMap::default(),
+            channels: DashMap::default(),
         };
-        let pool = Arc::new(Mutex::new(pool));
+
+        let pool = Arc::new(pool);
+
         let config = ChannelConfig::new();
         let mgr = ChannelManager { pool, config };
 

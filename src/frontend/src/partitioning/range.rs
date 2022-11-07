@@ -41,7 +41,7 @@ use crate::partitioning::{Operator, PartitionExpr, PartitionRule, RegionId};
 ///
 // TODO(LFC): Further clarify "partition" and "region".
 // Could be creating an extra layer between partition and region.
-struct RangePartitionRule {
+pub(crate) struct RangePartitionRule {
     column_name: String,
     // Does not store the last "MAXVALUE" bound; because in this way our binary search in finding
     // partitions are easier (besides, it's hard to represent "MAXVALUE" in our `Value`).
@@ -51,6 +51,20 @@ struct RangePartitionRule {
 }
 
 impl RangePartitionRule {
+    // FIXME(LFC): no allow, for clippy temporarily
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        column_name: impl Into<String>,
+        bounds: Vec<Value>,
+        regions: Vec<RegionId>,
+    ) -> Self {
+        Self {
+            column_name: column_name.into(),
+            bounds,
+            regions,
+        }
+    }
+
     fn column_name(&self) -> &String {
         &self.column_name
     }
@@ -72,6 +86,9 @@ impl PartitionRule for RangePartitionRule {
     }
 
     fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionId>, Self::Error> {
+        if exprs.is_empty() {
+            return Ok(self.regions.clone());
+        }
         debug_assert_eq!(
             exprs.len(),
             1,
