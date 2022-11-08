@@ -1,5 +1,4 @@
 use api::v1::meta::RangeRequest;
-use api::v1::meta::RangeResponse;
 
 use crate::error::Result;
 use crate::keys::LeaseKey;
@@ -10,7 +9,7 @@ use crate::util;
 
 pub async fn alive_datanodes<P>(
     cluster_id: u64,
-    kv_store: KvStoreRef,
+    kv_store: &KvStoreRef,
     predicate: P,
 ) -> Result<Vec<(LeaseKey, LeaseValue)>>
 where
@@ -26,7 +25,7 @@ where
 
     let res = kv_store.range(req).await?;
 
-    let RangeResponse { kvs, .. } = res;
+    let kvs = res.kvs;
     let mut lease_kvs = vec![];
     for kv in kvs {
         let lease_key: LeaseKey = kv.key.try_into()?;

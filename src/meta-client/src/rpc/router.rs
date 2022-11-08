@@ -134,6 +134,7 @@ pub struct TableRoute {
 
 #[derive(Debug, Clone)]
 pub struct Table {
+    pub id: u64,
     pub table_name: TableName,
     pub table_schema: Vec<u8>,
 }
@@ -149,6 +150,7 @@ impl TryFrom<PbTable> for Table {
             })?
             .into();
         Ok(Self {
+            id: t.id,
             table_name,
             table_schema: t.table_schema,
         })
@@ -296,6 +298,7 @@ mod tests {
             ],
             table_routes: vec![PbTableRoute {
                 table: Some(PbTable {
+                    id: 1,
                     table_name: Some(PbTableName {
                         catalog_name: "c1".to_string(),
                         schema_name: "s1".to_string(),
@@ -324,6 +327,7 @@ mod tests {
         assert_eq!(1, table_routes.len());
         let table_route = table_routes.remove(0);
         let table = table_route.table;
+        assert_eq!(1, table.id);
         assert_eq!("c1", table.table_name.catalog_name);
         assert_eq!("s1", table.table_name.schema_name);
         assert_eq!("t1", table.table_name.table_name);

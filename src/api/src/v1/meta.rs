@@ -1,6 +1,46 @@
 tonic::include_proto!("greptime.v1.meta");
 
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::hash::Hasher;
+
 pub const PROTOCOL_VERSION: u64 = 1;
+
+#[derive(Default)]
+pub struct PeerDict {
+    peers: HashMap<Peer, usize>,
+    index: usize,
+}
+
+impl PeerDict {
+    pub fn insert(&mut self, peer: Peer) -> usize {
+        let index = self.peers.entry(peer).or_insert_with(|| {
+            let v = self.index;
+            self.index += 1;
+            v
+        });
+
+        *index
+    }
+
+    pub fn into_peers(self) -> Vec<Peer> {
+        let mut array = vec![Peer::default(); self.index];
+        for (p, i) in self.peers {
+            array[i] = p;
+        }
+        array
+    }
+}
+
+#[allow(clippy::derive_hash_xor_eq)]
+impl Hash for Peer {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.addr.hash(state);
+    }
+}
+
+impl Eq for Peer {}
 
 impl RequestHeader {
     #[inline]
@@ -33,6 +73,21 @@ impl ResponseHeader {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    NoActiveDatanodes = 1,
+}
+
+impl Error {
+    #[inline]
+    pub fn no_active_datanodes() -> Self {
+        Self {
+            code: ErrorCode::NoActiveDatanodes as i32,
+            err_msg: "No active datanodes".to_string(),
+        }
+    }
+}
+
 macro_rules! gen_set_header {
     ($req: ty) => {
         impl $req {
@@ -52,3 +107,59 @@ gen_set_header!(PutRequest);
 gen_set_header!(BatchPutRequest);
 gen_set_header!(CompareAndPutRequest);
 gen_set_header!(DeleteRangeRequest);
+
+#[cfg(test)]
+mod tests {
+    use std::vec;
+
+    use super::*;
+
+    #[test]
+    fn test_peer_dict() {
+        let mut dict = PeerDict::default();
+
+        dict.insert(Peer {
+            id: 1,
+            addr: "111".to_string(),
+        });
+        dict.insert(Peer {
+            id: 2,
+            addr: "222".to_string(),
+        });
+        dict.insert(Peer {
+            id: 1,
+            addr: "111".to_string(),
+        });
+        dict.insert(Peer {
+            id: 1,
+            addr: "111".to_string(),
+        });
+        dict.insert(Peer {
+            id: 1,
+            addr: "111".to_string(),
+        });
+        dict.insert(Peer {
+            id: 1,
+            addr: "111".to_string(),
+        });
+        dict.insert(Peer {
+            id: 2,
+            addr: "222".to_string(),
+        });
+
+        assert_eq!(2, dict.index);
+        assert_eq!(
+            vec![
+                Peer {
+                    id: 1,
+                    addr: "111".to_string(),
+                },
+                Peer {
+                    id: 2,
+                    addr: "222".to_string(),
+                }
+            ],
+            dict.into_peers()
+        );
+    }
+}

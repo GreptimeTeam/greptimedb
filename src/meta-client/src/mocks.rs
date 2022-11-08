@@ -26,6 +26,11 @@ pub async fn mock_client_with_selector(selector: SelectorRef) -> MetaClient {
     mock_client_by(mock_info).await
 }
 
+pub async fn mock_client_with_memorystore_and_selector(selector: SelectorRef) -> MetaClient {
+    let mock_info = server_mock::mock_with_memstore_and_selector(selector).await;
+    mock_client_by(mock_info).await
+}
+
 pub async fn mock_client_by(mock_info: MockInfo) -> MetaClient {
     let MockInfo {
         server_addr,

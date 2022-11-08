@@ -9,7 +9,11 @@ use crate::handler::response_header::ResponseHeaderHandler;
 use crate::handler::HeartbeatHandlerGroup;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::Selector;
+use crate::sequence::Sequence;
+use crate::sequence::SequenceRef;
 use crate::service::store::kv::KvStoreRef;
+
+pub const TABLE_ID_SEQ: &str = "table_id";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetaSrvOptions {
@@ -42,6 +46,7 @@ pub type SelectorRef = Arc<dyn Selector<Context = Context, Output = Vec<Peer>>>;
 pub struct MetaSrv {
     options: MetaSrvOptions,
     kv_store: KvStoreRef,
+    table_id_sequence: SequenceRef,
     selector: SelectorRef,
     handler_group: HeartbeatHandlerGroup,
 }
@@ -52,6 +57,7 @@ impl MetaSrv {
         kv_store: KvStoreRef,
         selector: Option<SelectorRef>,
     ) -> Self {
+        let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 10, kv_store.clone()));
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector {}));
         let handler_group = HeartbeatHandlerGroup::default();
         handler_group.add_handler(ResponseHeaderHandler).await;
@@ -60,6 +66,7 @@ impl MetaSrv {
         Self {
             options,
             kv_store,
+            table_id_sequence,
             selector,
             handler_group,
         }
@@ -73,6 +80,11 @@ impl MetaSrv {
     #[inline]
     pub fn kv_store(&self) -> KvStoreRef {
         self.kv_store.clone()
+    }
+
+    #[inline]
+    pub fn table_id_sequence(&self) -> SequenceRef {
+        self.table_id_sequence.clone()
     }
 
     #[inline]

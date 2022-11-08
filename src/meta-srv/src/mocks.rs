@@ -40,6 +40,11 @@ pub async fn mock_with_selector(selector: SelectorRef) -> MockInfo {
     mock(Default::default(), kv_store, Some(selector)).await
 }
 
+pub async fn mock_with_memstore_and_selector(selector: SelectorRef) -> MockInfo {
+    let kv_store = Arc::new(MemStore::default());
+    mock(Default::default(), kv_store, Some(selector)).await
+}
+
 pub async fn mock(
     opts: MetaSrvOptions,
     kv_store: KvStoreRef,
