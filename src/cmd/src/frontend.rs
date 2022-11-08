@@ -37,7 +37,7 @@ impl SubCommand {
 }
 
 #[derive(Debug, Parser)]
-struct StartCommand {
+pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
