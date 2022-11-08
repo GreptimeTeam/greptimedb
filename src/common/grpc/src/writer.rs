@@ -208,7 +208,7 @@ impl LinesWriter {
     }
 }
 
-fn to_ms_ts(p: Precision, ts: i64) -> i64 {
+pub fn to_ms_ts(p: Precision, ts: i64) -> i64 {
     match p {
         Precision::NANOSECOND => ts / 1_000_000,
         Precision::MICROSECOND => ts / 1000,

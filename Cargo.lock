@@ -2003,6 +2003,7 @@ dependencies = [
  "servers",
  "snafu",
  "sql",
+ "sqlparser",
  "store-api",
  "table",
  "tempdir",
