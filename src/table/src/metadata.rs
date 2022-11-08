@@ -116,7 +116,7 @@ impl TableMeta {
     ) -> Result<TableMetaBuilder> {
         match alter_kind {
             AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
-            AlterKind::RemoveColumns { names } => self.remove_columns(table_name, &names),
+            AlterKind::RemoveColumns { names } => self.remove_columns(table_name, names),
         }
     }
 
