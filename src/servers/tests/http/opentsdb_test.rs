@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
-use servers::context::Context;
 use servers::error::{self, Result};
 use servers::http::HttpServer;
 use servers::opentsdb::codec::DataPoint;
@@ -17,7 +16,7 @@ struct DummyInstance {
 
 #[async_trait]
 impl OpentsdbProtocolHandler for DummyInstance {
-    async fn exec(&self, data_point: &DataPoint, _ctx: &Context) -> Result<()> {
+    async fn exec(&self, data_point: &DataPoint) -> Result<()> {
         if data_point.metric() == "should_failed" {
             return error::InternalSnafu {
                 err_msg: "expected",
@@ -31,15 +30,15 @@ impl OpentsdbProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, _query: &str, _ctx: &Context) -> Result<Output> {
+    async fn do_query(&self, _query: &str) -> Result<Output> {
         unimplemented!()
     }
 
-    async fn insert_script(&self, _name: &str, _script: &str, _ctx: &Context) -> Result<()> {
+    async fn insert_script(&self, _name: &str, _script: &str) -> Result<()> {
         unimplemented!()
     }
 
-    async fn execute_script(&self, _name: &str, _ctx: &Context) -> Result<Output> {
+    async fn execute_script(&self, _name: &str) -> Result<Output> {
         unimplemented!()
     }
 }

@@ -7,7 +7,6 @@ use hyper::Body;
 use prost::Message;
 use snafu::prelude::*;
 
-use crate::context::Context;
 use crate::error::{self, Result};
 use crate::prometheus::snappy_decompress;
 use crate::query_handler::{PrometheusProtocolHandlerRef, PrometheusResponse};
@@ -19,7 +18,7 @@ pub async fn remote_write(
 ) -> Result<(StatusCode, ())> {
     let request = decode_remote_write_request(body).await?;
 
-    handler.write(request, &Context::new()).await?;
+    handler.write(request).await?;
 
     Ok((StatusCode::NO_CONTENT, ()))
 }
@@ -44,7 +43,7 @@ pub async fn remote_read(
 ) -> Result<PrometheusResponse> {
     let request = decode_remote_read_request(body).await?;
 
-    handler.read(request, &Context::new()).await
+    handler.read(request).await
 }
 
 async fn decode_remote_write_request(body: Body) -> Result<WriteRequest> {

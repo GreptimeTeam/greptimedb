@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use client::ObjectResult;
 use common_error::prelude::BoxedError;
-use servers::context::Context;
 use servers::error as server_error;
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;
@@ -12,7 +11,7 @@ use crate::instance::Instance;
 
 #[async_trait]
 impl OpentsdbProtocolHandler for Instance {
-    async fn exec(&self, data_point: &DataPoint, _ctx: &Context) -> server_error::Result<()> {
+    async fn exec(&self, data_point: &DataPoint) -> server_error::Result<()> {
         // TODO(LFC): Insert metrics in batch, then make OpentsdbLineProtocolHandler::exec received multiple data points, when
         // metric table and tags can be created upon insertion.
         self.insert_opentsdb_metric(data_point)
@@ -71,15 +70,11 @@ mod tests {
                     "put sys.if.bytes.out 1479496100 1.3E3 host=web01 interface=eth0",
                 )
                 .unwrap(),
-                &Context::new(),
             )
             .await
             .unwrap();
         instance
-            .exec(
-                &DataPoint::try_create("put sys.procs.running 1479496100 42 host=web01").unwrap(),
-                &Context::new(),
-            )
+            .exec(&DataPoint::try_create("put sys.procs.running 1479496100 42 host=web01").unwrap())
             .await
             .unwrap();
     }
@@ -120,7 +115,7 @@ mod tests {
         assert!(result.is_ok());
 
         let output = instance
-            .do_query("select * from my_metric_1", &Context::new())
+            .do_query("select * from my_metric_1")
             .await
             .unwrap();
         match output {

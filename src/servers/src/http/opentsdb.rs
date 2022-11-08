@@ -7,7 +7,6 @@ use hyper::Body;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::context::Context;
 use crate::error::{self, Error, Result};
 use crate::opentsdb::codec::DataPoint;
 use crate::query_handler::OpentsdbProtocolHandlerRef;
@@ -72,10 +71,7 @@ pub async fn put(
 
     let response = if !summary && !details {
         for data_point in data_points.into_iter() {
-            if let Err(e) = opentsdb_handler
-                .exec(&data_point.into(), &Context::new())
-                .await
-            {
+            if let Err(e) = opentsdb_handler.exec(&data_point.into()).await {
                 // Not debugging purpose, failed fast.
                 return error::InternalSnafu {
                     err_msg: e.to_string(),
@@ -96,9 +92,7 @@ pub async fn put(
         };
 
         for data_point in data_points.into_iter() {
-            let result = opentsdb_handler
-                .exec(&data_point.clone().into(), &Context::new())
-                .await;
+            let result = opentsdb_handler.exec(&data_point.clone().into()).await;
             match result {
                 Ok(()) => response.on_success(),
                 Err(e) => {

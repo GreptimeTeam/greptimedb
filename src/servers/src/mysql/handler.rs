@@ -7,7 +7,6 @@ use opensrv_mysql::ParamParser;
 use opensrv_mysql::QueryResultWriter;
 use opensrv_mysql::StatementMetaWriter;
 
-use crate::context::Context;
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
 use crate::query_handler::SqlQueryHandlerRef;
@@ -70,7 +69,7 @@ impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
         let output = if let Some(output) = crate::mysql::federated::check(query) {
             Ok(output)
         } else {
-            self.query_handler.do_query(query, &Context::new()).await
+            self.query_handler.do_query(query).await
         };
 
         let mut writer = MysqlResultWriter::new(writer);

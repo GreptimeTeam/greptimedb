@@ -12,7 +12,6 @@ use pgwire::api::results::{FieldInfo, Response, Tag, TextQueryResponseBuilder};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{PgWireError, PgWireResult};
 
-use crate::context::Context;
 use crate::error::{self, Error, Result};
 use crate::query_handler::SqlQueryHandlerRef;
 
@@ -34,7 +33,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
     {
         let output = self
             .query_handler
-            .do_query(query, &Context::new())
+            .do_query(query)
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 

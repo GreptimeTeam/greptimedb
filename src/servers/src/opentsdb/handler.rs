@@ -2,7 +2,6 @@
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::context::Context;
 use crate::error::Result;
 use crate::opentsdb::codec::DataPoint;
 use crate::opentsdb::connection::Connection;
@@ -75,7 +74,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Handler<S> {
 
             match DataPoint::try_create(&line) {
                 Ok(data_point) => {
-                    let result = self.query_handler.exec(&data_point, &Context::new()).await;
+                    let result = self.query_handler.exec(&data_point).await;
                     if let Err(e) = result {
                         self.connection.write_line(e.to_string()).await?;
                     }
@@ -108,7 +107,7 @@ mod tests {
 
     #[async_trait]
     impl OpentsdbProtocolHandler for DummyQueryHandler {
-        async fn exec(&self, data_point: &DataPoint, _ctx: &Context) -> Result<()> {
+        async fn exec(&self, data_point: &DataPoint) -> Result<()> {
             let metric = data_point.metric();
             if metric == "should_failed" {
                 return error::InternalSnafu {

@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
-use servers::context::Context;
 use servers::error::Result;
 use servers::http::HttpServer;
 use servers::influxdb::InfluxdbRequest;
@@ -18,7 +17,7 @@ struct DummyInstance {
 
 #[async_trait]
 impl InfluxdbLineProtocolHandler for DummyInstance {
-    async fn exec(&self, request: &InfluxdbRequest, _ctx: &Context) -> Result<()> {
+    async fn exec(&self, request: &InfluxdbRequest) -> Result<()> {
         let exprs: Vec<InsertExpr> = request.try_into()?;
 
         for expr in exprs {
@@ -31,15 +30,15 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, _query: &str, _ctx: &Context) -> Result<Output> {
+    async fn do_query(&self, _query: &str) -> Result<Output> {
         unimplemented!()
     }
 
-    async fn insert_script(&self, _name: &str, _script: &str, _ctx: &Context) -> Result<()> {
+    async fn insert_script(&self, _name: &str, _script: &str) -> Result<()> {
         unimplemented!()
     }
 
-    async fn execute_script(&self, _name: &str, _ctx: &Context) -> Result<Output> {
+    async fn execute_script(&self, _name: &str) -> Result<Output> {
         unimplemented!()
     }
 }

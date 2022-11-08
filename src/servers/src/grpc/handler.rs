@@ -4,7 +4,6 @@ use api::v1::{AdminResponse, BatchRequest, BatchResponse, DatabaseResponse};
 use common_runtime::Runtime;
 use tokio::sync::oneshot;
 
-use crate::context::Context;
 use crate::error::Result;
 use crate::query_handler::{GrpcAdminHandlerRef, GrpcQueryHandlerRef};
 
@@ -35,10 +34,7 @@ impl BatchHandler {
 
         for admin_req in batch_req.admins {
             for admin_expr in admin_req.exprs {
-                let admin_result = self
-                    .admin_handler
-                    .exec_admin_request(admin_expr, &Context::new())
-                    .await?;
+                let admin_result = self.admin_handler.exec_admin_request(admin_expr).await?;
                 admin_resp.results.push(admin_result);
             }
         }
@@ -51,7 +47,7 @@ impl BatchHandler {
             let mut result = vec![];
             for db_req in batch_req.databases {
                 for obj_expr in db_req.exprs {
-                    let object_resp = query_handler.do_query(obj_expr, &Context::new()).await;
+                    let object_resp = query_handler.do_query(obj_expr).await;
 
                     result.push(object_resp);
                 }

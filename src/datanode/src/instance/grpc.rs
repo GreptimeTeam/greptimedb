@@ -8,7 +8,6 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use query::plan::LogicalPlan;
-use servers::context::Context;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
 use snafu::prelude::*;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -192,11 +191,7 @@ impl Instance {
 
 #[async_trait]
 impl GrpcQueryHandler for Instance {
-    async fn do_query(
-        &self,
-        query: ObjectExpr,
-        _ctx: &Context,
-    ) -> servers::error::Result<ObjectResult> {
+    async fn do_query(&self, query: ObjectExpr) -> servers::error::Result<ObjectResult> {
         let object_resp = match query.expr {
             Some(object_expr::Expr::Insert(insert_expr)) => {
                 let table_name = &insert_expr.table_name;
@@ -229,11 +224,7 @@ impl GrpcQueryHandler for Instance {
 
 #[async_trait]
 impl GrpcAdminHandler for Instance {
-    async fn exec_admin_request(
-        &self,
-        expr: AdminExpr,
-        _ctx: &Context,
-    ) -> servers::error::Result<AdminResult> {
+    async fn exec_admin_request(&self, expr: AdminExpr) -> servers::error::Result<AdminResult> {
         let admin_resp = match expr.expr {
             Some(admin_expr::Expr::Create(create_expr)) => self.handle_create(create_expr).await,
             Some(admin_expr::Expr::Alter(alter_expr)) => self.handle_alter(alter_expr).await,
