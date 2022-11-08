@@ -8,3 +8,7 @@ message InsertBatch {
   repeated Column columns = 1;
   uint32 row_count = 2;
 }
+
+message RegionId {
+  uint64 id = 1;
+}

@@ -15,12 +15,16 @@ pub enum ObjectStoreConfig {
 impl Default for ObjectStoreConfig {
     fn default() -> Self {
         ObjectStoreConfig::File {
-            data_dir: format!(
-                "/tmp/greptimedb/data/{}",
-                common_time::util::current_time_millis()
-            ),
+            data_dir: "/tmp/greptimedb/data/".to_string(),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Standalone,
+    Distributed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,6 +40,7 @@ pub struct DatanodeOptions {
     pub meta_client_opts: MetaClientOpts,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
+    pub mode: Mode,
 }
 
 impl Default for DatanodeOptions {
@@ -50,11 +55,9 @@ impl Default for DatanodeOptions {
             postgres_addr: "0.0.0.0:5432".to_string(),
             postgres_runtime_size: 2,
             meta_client_opts: MetaClientOpts::default(),
-            wal_dir: format!(
-                "/tmp/greptimedb/wal/{}",
-                common_time::util::current_time_millis()
-            ),
+            wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
+            mode: Mode::Standalone,
         }
     }
 }

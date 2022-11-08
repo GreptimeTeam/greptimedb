@@ -35,6 +35,9 @@ pub enum Error {
         source: toml::de::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Missing config, msg: {}", msg))]
+    MissingConfig { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -45,7 +48,9 @@ impl ErrorExt for Error {
             Error::StartDatanode { source } => source.status_code(),
             Error::StartFrontend { source } => source.status_code(),
             Error::StartMetaServer { source } => source.status_code(),
-            Error::ReadConfig { .. } | Error::ParseConfig { .. } => StatusCode::InvalidArguments,
+            Error::ReadConfig { .. } | Error::ParseConfig { .. } | Error::MissingConfig { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 

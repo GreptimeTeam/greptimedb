@@ -48,6 +48,7 @@ where
             Statement::Query(qb) => self.query_to_plan(qb),
             Statement::ShowTables(_)
             | Statement::ShowDatabases(_)
+            | Statement::ShowCreateTable(_)
             | Statement::Create(_)
             | Statement::Alter(_)
             | Statement::Insert(_) => unreachable!(),

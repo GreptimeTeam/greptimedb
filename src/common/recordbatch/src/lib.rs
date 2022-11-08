@@ -4,9 +4,12 @@ mod recordbatch;
 pub mod util;
 
 use std::pin::Pin;
+use std::sync::Arc;
 
+use datafusion::arrow_print;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
-use datatypes::schema::SchemaRef;
+use datatypes::prelude::VectorRef;
+use datatypes::schema::{Schema, SchemaRef};
 use error::Result;
 use futures::task::{Context, Poll};
 use futures::Stream;
@@ -54,6 +57,35 @@ pub struct RecordBatches {
 }
 
 impl RecordBatches {
+    pub fn try_from_columns<I: IntoIterator<Item = VectorRef>>(
+        schema: SchemaRef,
+        columns: I,
+    ) -> Result<Self> {
+        let batches = vec![RecordBatch::new(schema.clone(), columns)?];
+        Ok(Self { schema, batches })
+    }
+
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            schema: Arc::new(Schema::new(vec![])),
+            batches: vec![],
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &RecordBatch> {
+        self.batches.iter()
+    }
+
+    pub fn pretty_print(&self) -> String {
+        arrow_print::write(
+            &self
+                .iter()
+                .map(|x| x.df_recordbatch.clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+
     pub fn try_new(schema: SchemaRef, batches: Vec<RecordBatch>) -> Result<Self> {
         for batch in batches.iter() {
             ensure!(
@@ -124,7 +156,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_recordbatches() {
+    fn test_recordbatches_try_from_columns() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let result = RecordBatches::try_from_columns(
+            schema.clone(),
+            vec![Arc::new(StringVector::from(vec!["hello", "world"])) as _],
+        );
+        assert!(result.is_err());
+
+        let v: VectorRef = Arc::new(Int32Vector::from_slice(&[1, 2]));
+        let expected = vec![RecordBatch::new(schema.clone(), vec![v.clone()]).unwrap()];
+        let r = RecordBatches::try_from_columns(schema, vec![v]).unwrap();
+        assert_eq!(r.take(), expected);
+    }
+
+    #[test]
+    fn test_recordbatches_try_new() {
         let column_a = ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false);
         let column_b = ColumnSchema::new("b", ConcreteDataType::string_datatype(), false);
         let column_c = ColumnSchema::new("c", ConcreteDataType::boolean_datatype(), false);
@@ -150,6 +201,15 @@ mod tests {
         );
 
         let batches = RecordBatches::try_new(schema1.clone(), vec![batch1.clone()]).unwrap();
+        let expected = "\
++---+-------+
+| a | b     |
++---+-------+
+| 1 | hello |
+| 2 | world |
++---+-------+";
+        assert_eq!(batches.pretty_print(), expected);
+
         assert_eq!(schema1, batches.schema());
         assert_eq!(vec![batch1], batches.take());
     }

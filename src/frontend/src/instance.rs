@@ -285,8 +285,6 @@ mod tests {
         admin_expr, admin_result, column, column::SemanticType, object_expr, object_result,
         select_expr, Column, ExprHeader, MutateResult, SelectExpr,
     };
-    use datafusion::arrow_print;
-    use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;
 
@@ -327,12 +325,7 @@ mod tests {
         let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
         match output {
             Output::RecordBatches(recordbatches) => {
-                let recordbatches = recordbatches
-                    .take()
-                    .into_iter()
-                    .map(|r| r.df_recordbatch)
-                    .collect::<Vec<DfRecordBatch>>();
-                let pretty_print = arrow_print::write(&recordbatches);
+                let pretty_print = recordbatches.pretty_print();
                 let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
                 let expected = vec![
                     "+----------------+---------------------+-----+--------+-----------+",
@@ -352,12 +345,7 @@ mod tests {
         let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
         match output {
             Output::RecordBatches(recordbatches) => {
-                let recordbatches = recordbatches
-                    .take()
-                    .into_iter()
-                    .map(|r| r.df_recordbatch)
-                    .collect::<Vec<DfRecordBatch>>();
-                let pretty_print = arrow_print::write(&recordbatches);
+                let pretty_print = recordbatches.pretty_print();
                 let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
                 let expected = vec![
                     "+----------------+---------------------+-----+--------+-----------+",

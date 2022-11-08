@@ -63,7 +63,14 @@ impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        let output = self.query_handler.do_query(query).await;
+        // TODO(LFC): Find a better way:
+        // `check` uses regex to filter out unsupported statements emitted by MySQL's federated
+        // components, this is quick and dirty, there must be a better way to do it.
+        let output = if let Some(output) = crate::mysql::federated::check(query) {
+            Ok(output)
+        } else {
+            self.query_handler.do_query(query).await
+        };
 
         let mut writer = MysqlResultWriter::new(writer);
         writer.write(output).await

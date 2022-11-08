@@ -79,6 +79,8 @@ pub const OP_TYPE_COLUMN_NAME: &str = "__op_type";
 
 pub const READ_BATCH_SIZE: usize = 256;
 
+pub const WRITE_ROW_GROUP_SIZE: usize = 4096;
+
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]

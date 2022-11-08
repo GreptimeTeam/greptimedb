@@ -141,6 +141,12 @@ pub enum Error {
         actual: usize,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to join task, source: {}", source))]
+    JoinTask {
+        source: common_runtime::JoinError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -176,6 +182,7 @@ impl ErrorExt for Error {
                 StatusCode::Unexpected
             }
             Error::ExecOpentsdbPut { .. } => StatusCode::Internal,
+            Error::JoinTask { .. } => StatusCode::Unexpected,
         }
     }
 

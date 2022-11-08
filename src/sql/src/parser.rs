@@ -5,8 +5,10 @@ use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
-use crate::error::{self, InvalidDatabaseNameSnafu, Result, SyntaxSnafu, TokenizerSnafu};
-use crate::statements::show::{ShowDatabases, ShowKind, ShowTables};
+use crate::error::{
+    self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu, TokenizerSnafu,
+};
+use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
@@ -102,9 +104,36 @@ impl<'a> ParserContext<'a> {
         } else if self.matches_keyword(Keyword::TABLES) {
             self.parser.next_token();
             self.parse_show_tables()
+        } else if self.consume_token("CREATE") {
+            if self.consume_token("TABLE") {
+                self.parse_show_create_table()
+            } else {
+                self.unsupported(self.peek_token_as_string())
+            }
         } else {
             self.unsupported(self.peek_token_as_string())
         }
+    }
+
+    /// Parse SHOW CREATE TABLE statement
+    fn parse_show_create_table(&mut self) -> Result<Statement> {
+        let table_name =
+            self.parser
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a table name",
+                    actual: self.peek_token_as_string(),
+                })?;
+        ensure!(
+            !table_name.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: table_name.to_string(),
+            }
+        );
+        Ok(Statement::ShowCreateTable(ShowCreateTable {
+            table_name: table_name.to_string(),
+        }))
     }
 
     fn parse_show_tables(&mut self) -> Result<Statement> {
