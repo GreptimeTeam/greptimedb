@@ -128,6 +128,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_convert_region_id() {
+        let region_id = RegionId { id: 12 };
+
+        let bytes: Vec<u8> = region_id.into();
+        let region_id: RegionId = bytes.deref().try_into().unwrap();
+
+        assert_eq!(12, region_id.id);
+    }
+
     fn mock_insert_batch() -> InsertBatch {
         let values = column::Values {
             i32_values: vec![2, 3, 4, 5, 6, 7, 8],

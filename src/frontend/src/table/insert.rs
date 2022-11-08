@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::codec;
 use api::v1::insert_expr;
 use api::v1::insert_expr::Expr;
 use api::v1::Column;
-use api::v1::ColumnDataType;
 use api::v1::InsertExpr;
 use api::v1::MutateResult;
 use client::ObjectResult;
+use snafu::ensure;
 use snafu::OptionExt;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -37,9 +38,10 @@ impl DistTable {
 
             let instance = instance.clone();
 
+            // TODO(fys): a separate runtime should be used here.
             let join = tokio::spawn(async move {
                 instance
-                    .grpc_insert(to_insert_expr(region_id, insert))
+                    .grpc_insert(to_insert_expr(region_id, insert)?)
                     .await
                     .context(error::RequestDatanodeSnafu)
             });
@@ -64,31 +66,43 @@ impl DistTable {
     }
 }
 
-fn to_insert_expr(region_id: RegionId, insert: InsertRequest) -> InsertExpr {
-    let mut row_count = 0;
+fn to_insert_expr(region_id: RegionId, insert: InsertRequest) -> Result<InsertExpr> {
+    let mut row_count = None;
 
-    let columns: Vec<_> = insert
+    let columns = insert
         .columns_values
         .into_iter()
         .map(|(column_name, vector)| {
-            row_count = vector.len();
-            let datatype: ColumnDataType = vector.data_type().into();
-            let mut column: Column = Column {
+            match row_count {
+                Some(rows) => ensure!(
+                    rows == vector.len(),
+                    error::InvalidInsertRquestSnafu {
+                        err_msg: "The row count of columns is not the same."
+                    }
+                ),
+
+                None => row_count = Some(vector.len()),
+            }
+
+            let datatype: ColumnDataTypeWrapper = vector
+                .data_type()
+                .try_into()
+                .context(error::ColumnDataTypeSnafu)?;
+
+            let mut column = Column {
                 column_name,
-                datatype: datatype as i32,
+                datatype: datatype.datatype() as i32,
                 ..Default::default()
             };
-            column.push_vals(
-                0,
-                (0..row_count).into_iter().map(|i| vector.get(i)).collect(),
-            );
-            column
+
+            column.push_vals(0, vector);
+            Ok(column)
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let insert_batch = codec::InsertBatch {
         columns,
-        row_count: row_count as u32,
+        row_count: row_count.map(|rows| rows as u32).unwrap_or(0),
     };
 
     let mut options = HashMap::with_capacity(1);
@@ -98,13 +112,13 @@ fn to_insert_expr(region_id: RegionId, insert: InsertRequest) -> InsertExpr {
         codec::RegionId { id: region_id }.into(),
     );
 
-    InsertExpr {
+    Ok(InsertExpr {
         table_name: insert.table_name,
         options,
         expr: Some(Expr::Values(insert_expr::Values {
             values: vec![insert_batch.into()],
         })),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -125,7 +139,7 @@ mod tests {
     fn test_to_insert_expr() {
         let insert_request = mock_insert_request();
 
-        let insert_expr = to_insert_expr(12, insert_request);
+        let insert_expr = to_insert_expr(12, insert_request).unwrap();
 
         verify_insert_expr(insert_expr);
     }

@@ -204,6 +204,7 @@ impl GrpcQueryHandler for Instance {
                         reason: "missing `expr` in `InsertExpr`",
                     })?;
 
+                // TODO(fys): _region_id is for later use.
                 let _region_id: Option<RegionId> = insert_expr
                     .options
                     .get("region_id")
