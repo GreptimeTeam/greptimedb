@@ -4,7 +4,7 @@ use catalog::{schema::SchemaProviderRef, CatalogManagerRef, CatalogProviderRef};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::{OptionExt, ResultExt};
-use sql::statements::show::{ShowDatabases, ShowTables};
+use sql::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::*;
 use table::TableRef;
@@ -26,6 +26,7 @@ pub enum SqlRequest {
     Alter(AlterTableRequest),
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
+    ShowCreateTable(ShowCreateTable),
 }
 
 // Handler to execute SQL except query
@@ -49,6 +50,7 @@ impl SqlHandler {
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::ShowDatabases(stmt) => self.show_databases(stmt).await,
             SqlRequest::ShowTables(stmt) => self.show_tables(stmt).await,
+            SqlRequest::ShowCreateTable(stmt) => self.show_create_table(stmt).await,
         }
     }
 

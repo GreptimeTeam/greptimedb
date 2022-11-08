@@ -5,10 +5,10 @@ use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::arrow::compute;
 use datatypes::arrow_array::StringArray;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
 use datatypes::vectors::{Helper, StringVector, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
+use sql::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 
 use crate::error::{
     ArrowComputationSnafu, CastVectorSnafu, CatalogSnafu, NewRecordBatchSnafu,
@@ -101,6 +101,88 @@ impl SqlHandler {
 
         let columns: Vec<VectorRef> = vec![tables_vector];
         let recordbatch = RecordBatch::new(schema.clone(), columns).context(NewRecordBatchSnafu)?;
+
+        Ok(Output::RecordBatches(
+            RecordBatches::try_new(schema, vec![recordbatch]).context(NewRecordBatchesSnafu)?,
+        ))
+    }
+
+    pub(crate) async fn show_create_table(&self, stmt: ShowCreateTable) -> Result<Output> {
+        let schema1 = self.get_default_schema()?;
+        let name = stmt.table_name.as_str();
+        ensure!(
+            schema1.table_exist(name).unwrap(),
+            UnsupportedExprSnafu {
+                name: name.to_string(),
+            }
+        );
+        let column_schemas = vec![
+            ColumnSchema::new("Table", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("Create Table", ConcreteDataType::string_datatype(), false),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let sql1 = name.to_string();
+        let tableref = schema1.table(name).unwrap().clone();
+        let table_info = tableref.as_ref().unwrap().table_info();
+        let table_schema = tableref.as_ref().unwrap().schema();
+        let mut sql2 = String::new();
+        for col in table_schema.column_schemas() {
+            sql2 += format!("{} {:?}", col.name, col.data_type).as_str();
+            if !col.is_nullable() {
+                sql2 += " NOT NULL";
+            }
+            if let Some(expr) = col.default_constraint() {
+                match expr {
+                    ColumnDefaultConstraint::Value(v) => {
+                        if v.is_null() {
+                            sql2 += " DEFAULT NULL";
+                        } else {
+                            sql2 += format!(" DEFAULT {:?}", v).as_str();
+                        }
+                    }
+                    ColumnDefaultConstraint::Function(f) => {
+                        sql2 += format!("DEFAULT {}()", f).as_str();
+                    }
+                }
+            }
+            sql2 += ", ";
+        }
+        let keys = table_info.meta.primary_key_indices.clone();
+        let mut res = String::new();
+        for iter in keys {
+            res += table_schema.column_name_by_index(iter);
+            res += ", ";
+        }
+        sql2 += format!("PRIMARY KEY({})", res).as_str();
+        sql2 += format!(
+            "TIMESTAMP KEY({})",
+            table_schema.timestamp_column().unwrap().name
+        )
+        .as_str();
+        let sql3 = table_info.meta.engine.clone();
+        let mut sql4 = "".to_string();
+        let opts = table_info.meta.options.clone();
+        if !opts.is_empty() {
+            let mut v: Vec<String> = opts
+                .into_iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            v.sort();
+            sql4 = format!(" WITH({})", v.join(", "));
+        }
+        let sqls = vec![format!(
+            "CREATE TABLE {} ({}) ENGINE={}{}",
+            sql1, sql2, sql3, sql4
+        )];
+        let tables = vec![table_info.name.clone()];
+        let recordbatch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(StringVector::from(tables)) as _,
+                Arc::new(StringVector::from(sqls)) as _,
+            ],
+        )
+        .context(NewRecordBatchSnafu)?;
 
         Ok(Output::RecordBatches(
             RecordBatches::try_new(schema, vec![recordbatch]).context(NewRecordBatchesSnafu)?,
