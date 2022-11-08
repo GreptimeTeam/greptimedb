@@ -83,6 +83,19 @@ pub enum InnerError {
         table_name: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Failed to build column descriptor for table: {}, column: {}, source: {}",
+        table_name,
+        column_name,
+        source,
+    ))]
+    BuildColumnDescriptor {
+        source: store_api::storage::ColumnDescriptorBuilderError,
+        table_name: String,
+        column_name: String,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for InnerError {
@@ -92,9 +105,9 @@ impl ErrorExt for InnerError {
             | InnerError::PollStream { .. }
             | InnerError::SchemaConversion { .. }
             | InnerError::TableProjection { .. } => StatusCode::EngineExecuteQuery,
-            InnerError::MissingColumn { .. } | InnerError::RemoveColumnInIndex { .. } => {
-                StatusCode::InvalidArguments
-            }
+            InnerError::MissingColumn { .. }
+            | InnerError::RemoveColumnInIndex { .. }
+            | InnerError::BuildColumnDescriptor { .. } => StatusCode::InvalidArguments,
             InnerError::TablesRecordBatch { .. } => StatusCode::Unexpected,
             InnerError::ColumnExists { .. } => StatusCode::TableColumnExists,
             InnerError::SchemaBuild { source, .. } => source.status_code(),

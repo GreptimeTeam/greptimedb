@@ -20,16 +20,15 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ChunkReader, ColumnDescriptorBuilder, ColumnId,
-    PutOperation, ReadContext, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot, WriteContext,
-    WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, ChunkReader, PutOperation, ReadContext, Region,
+    RegionMeta, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
 use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
 use table::table::scan::SimpleTableScan;
 use table::{
-    metadata::{RawTableInfo, TableInfo, TableType},
+    metadata::{RawTableInfo, TableInfo, TableMeta, TableType},
     table::Table,
 };
 use tokio::sync::Mutex;
@@ -193,15 +192,13 @@ impl<R: Region> Table for MitoTable<R> {
         let table_info = self.table_info();
         let table_name = &table_info.name;
         let table_meta = &table_info.meta;
-
-        let (alter_op, next_column_id) = self.convert_alter_kind(&req.alter_kind)?;
-
-        let new_meta = table_meta
-            .builder_with_alter_kind(table_name, req.alter_kind)?
-            // Update next_column_id for the table meta.
-            .next_column_id(next_column_id)
+        let mut new_meta = table_meta
+            .builder_with_alter_kind(table_name, &req.alter_kind)?
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
+
+        let alter_op = create_alter_operation(table_name, &req.alter_kind, &mut new_meta)?;
+
         let mut new_info = TableInfo::clone(&*table_info);
         // Increase version of the table.
         new_info.ident.version = table_info.ident.version + 1;
@@ -457,73 +454,43 @@ impl<R: Region> MitoTable<R> {
         // TODO(dennis): use manifest version in catalog ?
         (manifest::MIN_VERSION, manifest::MAX_VERSION)
     }
+}
 
-    /// Convert the [`AlterKind`] into [`AlterOperation`].
-    ///
-    /// Returns the `AlterOperation` and next column id for the table.
-    fn convert_alter_kind(&self, alter_kind: &AlterKind) -> Result<(AlterOperation, ColumnId)> {
-        match alter_kind {
-            AlterKind::AddColumns { columns } => self.convert_add_columns(columns),
-            AlterKind::RemoveColumns { names } => self.convert_remove_columns(names),
+/// Create [`AlterOperation`] according to given `alter_kind`.
+fn create_alter_operation(
+    table_name: &str,
+    alter_kind: &AlterKind,
+    table_meta: &mut TableMeta,
+) -> TableResult<AlterOperation> {
+    match alter_kind {
+        AlterKind::AddColumns { columns } => {
+            create_add_columns_operation(table_name, columns, table_meta)
         }
-    }
-
-    /// Convert add column `requests` to [`AlterOperation`].
-    ///
-    /// Returns the converted [`AlterOperation`] and next column id for the table.
-    fn convert_add_columns(
-        &self,
-        requests: &[AddColumnRequest],
-    ) -> Result<(AlterOperation, ColumnId)> {
-        let table_info = self.table_info();
-        let table_name = &table_info.name;
-        let table_meta = &table_info.meta;
-
-        let columns = requests
-            .iter()
-            .enumerate()
-            .map(|(i, request)| {
-                let new_column = &request.column_schema;
-
-                let desc = ColumnDescriptorBuilder::new(
-                    table_meta.next_column_id + i as ColumnId,
-                    &new_column.name,
-                    new_column.data_type.clone(),
-                )
-                .is_nullable(new_column.is_nullable())
-                .default_constraint(new_column.default_constraint().cloned())
-                .build()
-                .context(error::BuildColumnDescriptorSnafu {
-                    table_name,
-                    column_name: &new_column.name,
-                })?;
-
-                Ok(AddColumn {
-                    desc,
-                    is_key: request.is_key,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let next_column_id = table_meta.next_column_id + columns.len() as ColumnId;
-        let alter_op = AlterOperation::AddColumns { columns };
-
-        Ok((alter_op, next_column_id))
-    }
-
-    /// Convert `names` of columns to remove to [`AlterOperation`].
-    ///
-    /// Returns the converted [`AlterOperation`] and next column id for the table.
-    fn convert_remove_columns(&self, names: &[String]) -> Result<(AlterOperation, ColumnId)> {
-        let alter_op = AlterOperation::DropColumns {
+        AlterKind::RemoveColumns { names } => Ok(AlterOperation::DropColumns {
             names: names.to_vec(),
-        };
-
-        let table_info = self.table_info();
-
-        // Just reuse old `next_column_id`.
-        Ok((alter_op, table_info.meta.next_column_id))
+        }),
     }
+}
+
+fn create_add_columns_operation(
+    table_name: &str,
+    requests: &[AddColumnRequest],
+    table_meta: &mut TableMeta,
+) -> TableResult<AlterOperation> {
+    let columns = requests
+        .iter()
+        .map(|request| {
+            let new_column = &request.column_schema;
+            let desc = table_meta.alloc_new_column(table_name, new_column)?;
+
+            Ok(AddColumn {
+                desc,
+                is_key: request.is_key,
+            })
+        })
+        .collect::<TableResult<Vec<_>>>()?;
+
+    Ok(AlterOperation::AddColumns { columns })
 }
 
 #[cfg(test)]

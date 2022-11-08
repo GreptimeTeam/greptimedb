@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
-use datatypes::schema::{RawSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
 use crate::error::{self, Result};
 use crate::requests::{AddColumnRequest, AlterKind};
@@ -112,12 +112,39 @@ impl TableMeta {
     pub fn builder_with_alter_kind(
         &self,
         table_name: &str,
-        alter_kind: AlterKind,
+        alter_kind: &AlterKind,
     ) -> Result<TableMetaBuilder> {
         match alter_kind {
             AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
             AlterKind::RemoveColumns { names } => self.remove_columns(table_name, &names),
         }
+    }
+
+    /// Allocate a new column for the table.
+    ///
+    /// This method would bump the `next_column_id` of the meta.
+    pub fn alloc_new_column(
+        &mut self,
+        table_name: &str,
+        new_column: &ColumnSchema,
+    ) -> Result<ColumnDescriptor> {
+        let desc = ColumnDescriptorBuilder::new(
+            self.next_column_id as ColumnId,
+            &new_column.name,
+            new_column.data_type.clone(),
+        )
+        .is_nullable(new_column.is_nullable())
+        .default_constraint(new_column.default_constraint().cloned())
+        .build()
+        .context(error::BuildColumnDescriptorSnafu {
+            table_name,
+            column_name: &new_column.name,
+        })?;
+
+        // Bump next column id.
+        self.next_column_id += 1;
+
+        Ok(desc)
     }
 
     fn new_meta_builder(&self) -> TableMetaBuilder {
@@ -135,13 +162,13 @@ impl TableMeta {
     fn add_columns(
         &self,
         table_name: &str,
-        requests: Vec<AddColumnRequest>,
+        requests: &[AddColumnRequest],
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
 
         // Check whether columns to add are already existing.
-        for request in &requests {
+        for request in requests {
             let column_name = &request.column_schema.name;
             ensure!(
                 table_schema.column_schema_by_name(column_name).is_none(),
@@ -164,7 +191,7 @@ impl TableMeta {
                 // If a key column is added, we also need to store its index in primary_key_indices.
                 primary_key_indices.push(columns.len());
             }
-            columns.push(request.column_schema);
+            columns.push(request.column_schema.clone());
         }
 
         let mut builder = SchemaBuilder::try_from(columns)
@@ -508,7 +535,7 @@ mod tests {
         };
 
         let builder = meta
-            .builder_with_alter_kind("my_table", alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap();
         builder.build().unwrap()
     }
@@ -554,7 +581,7 @@ mod tests {
             names: vec![String::from("col2"), String::from("my_field")],
         };
         let new_meta = meta
-            .builder_with_alter_kind("my_table", alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap()
             .build()
             .unwrap();
@@ -603,7 +630,7 @@ mod tests {
             names: vec![String::from("col3"), String::from("col1")],
         };
         let new_meta = meta
-            .builder_with_alter_kind("my_table", alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap()
             .build()
             .unwrap();
@@ -642,7 +669,7 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .err()
             .unwrap();
         assert_eq!(StatusCode::TableColumnExists, err.status_code());
@@ -664,7 +691,7 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .err()
             .unwrap();
         assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
@@ -687,7 +714,7 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .err()
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
@@ -698,9 +725,28 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .err()
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_alloc_new_column() {
+        let schema = Arc::new(new_test_schema());
+        let mut meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        assert_eq!(3, meta.next_column_id);
+
+        let column_schema = ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true);
+        let desc = meta.alloc_new_column("test_table", &column_schema).unwrap();
+
+        assert_eq!(4, meta.next_column_id);
+        assert_eq!(column_schema.name, desc.name);
     }
 }
