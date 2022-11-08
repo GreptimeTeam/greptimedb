@@ -21,9 +21,9 @@ pub struct LineWriter {
 }
 
 impl LineWriter {
-    pub fn with_lines(table_name: String, lines: usize) -> Self {
+    pub fn with_lines(table_name: impl Into<String>, lines: usize) -> Self {
         Self {
-            table_name,
+            table_name: table_name.into(),
             expected_rows: lines,
             current_rows: 0,
             columns_builders: Default::default(),

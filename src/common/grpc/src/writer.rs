@@ -12,6 +12,7 @@ use crate::error::{Result, TypeMismatchSnafu};
 
 type ColumnName = String;
 
+// TODO(fys): will remove in the future.
 #[derive(Default)]
 pub struct LinesWriter {
     column_name_index: HashMap<ColumnName, usize>,
