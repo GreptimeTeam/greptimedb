@@ -14,4 +14,6 @@ pub const SCRIPTS_TABLE_ID: u32 = 1;
 
 pub(crate) const CATALOG_KEY_PREFIX: &str = "__c";
 pub(crate) const SCHEMA_KEY_PREFIX: &str = "__s";
-pub(crate) const TABLE_KEY_PREFIX: &str = "__t";
+pub(crate) const TABLE_GLOBAL_KEY_PREFIX: &str = "__tg";
+pub(crate) const TABLE_REGIONAL_KEY_PREFIX: &str = "__tr";
+pub const TABLE_ID_KEY_PREFIX: &str = "__tid";

@@ -272,8 +272,8 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     #[inline]
-    fn next_table_id(&self) -> TableId {
-        self.next_table_id.fetch_add(1, Ordering::Relaxed)
+    async fn next_table_id(&self) -> Result<TableId> {
+        Ok(self.next_table_id.fetch_add(1, Ordering::Relaxed))
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {

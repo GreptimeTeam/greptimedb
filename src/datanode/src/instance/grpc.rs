@@ -65,7 +65,11 @@ impl Instance {
         insert_batches: &[InsertBatch],
     ) -> Result<()> {
         // Create table automatically, build schema from data.
-        let table_id = self.catalog_manager.next_table_id();
+        let table_id = self
+            .catalog_manager
+            .next_table_id()
+            .await
+            .context(CatalogSnafu)?;
         let create_table_request = insert::build_create_table_request(
             catalog_name,
             schema_name,

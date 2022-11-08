@@ -19,13 +19,27 @@ pub type ValueIter<'a, E> = Pin<Box<dyn Stream<Item = Result<Kv, E>> + Send + 'a
 
 #[async_trait::async_trait]
 pub trait KvBackend: Send + Sync {
-    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, crate::error::Error>
+    fn range<'a, 'b>(&'a self, key: &[u8]) -> ValueIter<'b, Error>
     where
         'a: 'b;
 
-    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), crate::error::Error>;
+    async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error>;
 
-    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), crate::error::Error>;
+    /// Compare and set value of key. `expect` is the expected value, if backend's current value associated
+    /// with key is the same as `expect`, the value will be updated to `val`.
+    ///
+    /// - If the compare-and-set operation successfully updated value, this method will return an `Ok(Ok())`
+    /// - If associated value is not the same as `expect`, no value will be updated and an `Ok(Err(Vec<u8>))`
+    /// will be returned, the `Err(Vec<u8>)` indicates the current associated value of key.
+    /// - If any error happens during operation, an `Err(Error)` will be returned.
+    async fn compare_and_set(
+        &self,
+        key: &[u8],
+        expect: &[u8],
+        val: &[u8],
+    ) -> Result<Result<(), Option<Vec<u8>>>, Error>;
+
+    async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error>;
 
     async fn delete(&self, key: &[u8]) -> Result<(), Error> {
         self.delete_range(key, &[]).await
@@ -71,6 +85,15 @@ mod tests {
         }
 
         async fn set(&self, _key: &[u8], _val: &[u8]) -> Result<(), Error> {
+            unimplemented!()
+        }
+
+        async fn compare_and_set(
+            &self,
+            _key: &[u8],
+            _expect: &[u8],
+            _val: &[u8],
+        ) -> Result<Result<(), Option<Vec<u8>>>, Error> {
             unimplemented!()
         }
 
