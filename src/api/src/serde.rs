@@ -1,7 +1,7 @@
 pub use prost::DecodeError;
 use prost::Message;
 
-use crate::v1::codec::{InsertBatch, PhysicalPlanNode, SelectResult};
+use crate::v1::codec::{InsertBatch, PhysicalPlanNode, RegionId, SelectResult};
 
 macro_rules! impl_convert_with_bytes {
     ($data_type: ty) => {
@@ -24,6 +24,7 @@ macro_rules! impl_convert_with_bytes {
 impl_convert_with_bytes!(InsertBatch);
 impl_convert_with_bytes!(SelectResult);
 impl_convert_with_bytes!(PhysicalPlanNode);
+impl_convert_with_bytes!(RegionId);
 
 #[cfg(test)]
 mod tests {
@@ -125,6 +126,16 @@ mod tests {
             vec![2, 3, 4, 5, 6, 7, 8],
             column.values.as_ref().unwrap().i32_values
         );
+    }
+
+    #[test]
+    fn test_convert_region_id() {
+        let region_id = RegionId { id: 12 };
+
+        let bytes: Vec<u8> = region_id.into();
+        let region_id: RegionId = bytes.deref().try_into().unwrap();
+
+        assert_eq!(12, region_id.id);
     }
 
     fn mock_insert_batch() -> InsertBatch {

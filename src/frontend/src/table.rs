@@ -1,3 +1,5 @@
+mod insert;
+
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -15,12 +17,14 @@ use snafu::prelude::*;
 use store_api::storage::RegionId;
 use table::error::Error as TableError;
 use table::metadata::{FilterPushDownType, TableInfoRef};
+use table::requests::InsertRequest;
 use table::Table;
 use tokio::sync::RwLock;
 
 use crate::error::{self, Error, Result};
 use crate::mock::{DatanodeId, DatanodeInstance, TableScanPlan};
 use crate::partitioning::{Operator, PartitionExpr, PartitionRuleRef};
+use crate::spliter::WriteSpliter;
 
 struct DistTable {
     table_name: String,
@@ -42,6 +46,16 @@ impl Table for DistTable {
 
     fn table_info(&self) -> TableInfoRef {
         unimplemented!()
+    }
+
+    async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
+        let spliter = WriteSpliter::with_patition_rule(self.partition_rule.clone());
+        let inserts = spliter.split(request).map_err(TableError::new)?;
+        let result = match self.dist_insert(inserts).await.map_err(TableError::new)? {
+            client::ObjectResult::Select(_) => unreachable!(),
+            client::ObjectResult::Mutate(result) => result,
+        };
+        Ok(result.success as usize)
     }
 
     async fn scan(

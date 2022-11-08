@@ -3,7 +3,9 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
+use api::v1::InsertExpr;
 use catalog::CatalogManagerRef;
+use client::ObjectResult;
 use client::{Database, Select};
 use common_query::prelude::Expr;
 use common_query::Output;
@@ -43,6 +45,10 @@ impl DatanodeInstance {
             catalog_manager,
             db,
         }
+    }
+
+    pub(crate) async fn grpc_insert(&self, request: InsertExpr) -> client::Result<ObjectResult> {
+        self.db.insert(request).await
     }
 
     #[allow(clippy::print_stdout)]
