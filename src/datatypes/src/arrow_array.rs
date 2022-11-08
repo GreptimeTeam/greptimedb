@@ -1,6 +1,6 @@
 use arrow::array::{
-    self, Array, BinaryArray as ArrowBinaryArray, MutableBinaryArray as ArrowMutableBinaryArray,
-    MutableUtf8Array, PrimitiveArray, Utf8Array,
+    self, Array, BinaryArray as ArrowBinaryArray, ListArray,
+    MutableBinaryArray as ArrowMutableBinaryArray, MutableUtf8Array, PrimitiveArray, Utf8Array,
 };
 use arrow::datatypes::DataType as ArrowDataType;
 use common_time::timestamp::Timestamp;
@@ -8,7 +8,7 @@ use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result};
 use crate::prelude::ConcreteDataType;
-use crate::value::Value;
+use crate::value::{ListValue, Value};
 
 pub type BinaryArray = ArrowBinaryArray<i64>;
 pub type MutableBinaryArray = ArrowMutableBinaryArray<i64>;
@@ -69,7 +69,14 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
             };
             Value::Timestamp(Timestamp::new(value, unit))
         }
-        // TODO(sunng87): List
+        ArrowDataType::List(_) => {
+            let array = cast_array!(array, ListArray::<i32>).value(idx);
+            let inner_datatype = ConcreteDataType::try_from(array.data_type())?;
+            let values = (0..array.len())
+                .map(|i| arrow_array_get(&*array, i))
+                .collect::<Result<Vec<Value>>>()?;
+            Value::List(ListValue::new(Some(Box::new(values)), inner_datatype))
+        }
         _ => unimplemented!("Arrow array datatype: {:?}", array.data_type()),
     };
 
@@ -80,6 +87,7 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
 mod test {
     use arrow::array::Int64Array as ArrowI64Array;
     use arrow::array::*;
+    use arrow::array::{MutableListArray, MutablePrimitiveArray, TryExtend};
     use arrow::buffer::Buffer;
     use arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
     use common_time::timestamp::{TimeUnit, Timestamp};
@@ -164,5 +172,40 @@ mod test {
             Value::Timestamp(Timestamp::new(1, TimeUnit::Nanosecond)),
             arrow_array_get(&array4, 0).unwrap()
         );
+
+        // test list array
+        let data = vec![
+            Some(vec![Some(1i32), Some(2), Some(3)]),
+            None,
+            Some(vec![Some(4), None, Some(6)]),
+        ];
+
+        let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i32>>::new();
+        arrow_array.try_extend(data).unwrap();
+        let arrow_array: ListArray<i32> = arrow_array.into();
+
+        let v0 = arrow_array_get(&arrow_array, 0).unwrap();
+        match v0 {
+            Value::List(list) => {
+                assert!(matches!(list.datatype(), ConcreteDataType::Int32(_)));
+                let items = list.items().as_ref().unwrap();
+                assert_eq!(
+                    **items,
+                    vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)]
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        assert_eq!(Value::Null, arrow_array_get(&arrow_array, 1).unwrap());
+        let v2 = arrow_array_get(&arrow_array, 2).unwrap();
+        match v2 {
+            Value::List(list) => {
+                assert!(matches!(list.datatype(), ConcreteDataType::Int32(_)));
+                let items = list.items().as_ref().unwrap();
+                assert_eq!(**items, vec![Value::Int32(4), Value::Null, Value::Int32(6)]);
+            }
+            _ => unreachable!(),
+        }
     }
 }
