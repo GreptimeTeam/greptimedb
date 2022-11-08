@@ -40,6 +40,12 @@ pub struct ShowTables {
     pub database: Option<String>,
 }
 
+/// SQL structure for `SHOW CREATE TABLE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowCreateTable {
+    pub table_name: String,
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
@@ -93,5 +99,28 @@ mod tests {
                 unreachable!();
             }
         }
+    }
+
+    #[test]
+    pub fn test_show_create_table() {
+        let sql = "SHOW CREATE TABLE test";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowCreateTable { .. });
+        match &stmts[0] {
+            Statement::ShowCreateTable(show) => {
+                let table_name = show.table_name.as_str();
+                assert_eq!(table_name, "test");
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+    #[test]
+    pub fn test_show_create_missing_table_name() {
+        let sql = "SHOW CREATE TABLE";
+        ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap_err();
     }
 }
