@@ -70,12 +70,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Invalid insert request, error: {}", err_msg))]
-    InvalidInsertRquest {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Illegal Frontend state: {}", err_msg))]
     IllegalFrontendState {
         err_msg: String,
@@ -167,7 +161,6 @@ impl ErrorExt for Error {
             | Error::FindRegions { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. }
-            | Error::InvalidInsertRquest { .. }
             | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
 
             Error::RuntimeResource { source, .. } => source.status_code(),

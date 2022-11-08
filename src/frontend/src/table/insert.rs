@@ -76,8 +76,8 @@ fn to_insert_expr(region_id: RegionId, insert: InsertRequest) -> Result<InsertEx
             match row_count {
                 Some(rows) => ensure!(
                     rows == vector.len(),
-                    error::InvalidInsertRquestSnafu {
-                        err_msg: "The row count of columns is not the same."
+                    error::InvalidInsertRequestSnafu {
+                        reason: "The row count of columns is not the same."
                     }
                 ),
 
