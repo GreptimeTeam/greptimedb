@@ -1059,6 +1059,7 @@ dependencies = [
  "common-error",
  "common-function-macro",
  "common-query",
+ "common-time",
  "datafusion-common",
  "datatypes",
  "libc",
