@@ -23,6 +23,13 @@ impl Default for ObjectStoreConfig {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Standalone,
+    Distributed,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DatanodeOptions {
     pub node_id: u64,
@@ -36,6 +43,7 @@ pub struct DatanodeOptions {
     pub meta_client_opts: MetaClientOpts,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
+    pub mode: Mode,
 }
 
 impl Default for DatanodeOptions {
@@ -55,6 +63,7 @@ impl Default for DatanodeOptions {
                 common_time::util::current_time_millis()
             ),
             storage: ObjectStoreConfig::default(),
+            mode: Mode::Standalone,
         }
     }
 }

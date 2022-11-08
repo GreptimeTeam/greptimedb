@@ -14,8 +14,8 @@ use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
-use crate::datanode::{DatanodeOptions, MetaClientOpts, ObjectStoreConfig};
-use crate::error::{self, MetaClientInitSnafu, NewCatalogSnafu, Result};
+use crate::datanode::{DatanodeOptions, MetaClientOpts, Mode, ObjectStoreConfig};
+use crate::error::{self, CatalogSnafu, MetaClientInitSnafu, NewCatalogSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
 use crate::server::grpc::plan::PhysicalPlanner;
@@ -34,8 +34,8 @@ pub struct Instance {
     pub(crate) physical_planner: PhysicalPlanner,
     pub(crate) script_executor: ScriptExecutor,
     #[allow(unused)]
-    pub(crate) meta_client: MetaClient,
-    pub(crate) heartbeat_task: HeartbeatTask,
+    pub(crate) meta_client: Option<MetaClient>,
+    pub(crate) heartbeat_task: Option<HeartbeatTask>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -44,7 +44,13 @@ impl Instance {
     pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
-        let meta_client = new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?;
+
+        let meta_client = match opts.mode {
+            Mode::Standalone => None,
+            Mode::Distributed => {
+                Some(new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?)
+            }
+        };
 
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
@@ -57,24 +63,42 @@ impl Instance {
         ));
 
         // create remote catalog manager
-        let catalog_manager = Arc::new(catalog::remote::RemoteCatalogManager::new(
-            table_engine.clone(),
-            opts.node_id,
-            Arc::new(MetaKvBackend {
-                client: meta_client.clone(),
-            }),
-        ));
+        let (catalog_manager, factory) = match opts.mode {
+            Mode::Standalone => {
+                let catalog = Arc::new(
+                    catalog::local::LocalCatalogManager::try_new(table_engine.clone())
+                        .await
+                        .context(CatalogSnafu)?,
+                );
+                let factory = QueryEngineFactory::new(catalog.clone());
+                (catalog as CatalogManagerRef, factory)
+            }
 
-        let factory = QueryEngineFactory::new(catalog_manager.clone());
+            Mode::Distributed => {
+                let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
+                    table_engine.clone(),
+                    opts.node_id,
+                    Arc::new(MetaKvBackend {
+                        client: meta_client.as_ref().unwrap().clone(),
+                    }),
+                ));
+                let factory = QueryEngineFactory::new(catalog.clone());
+                (catalog as CatalogManagerRef, factory)
+            }
+        };
+
         let query_engine = factory.query_engine().clone();
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
-        let heartbeat_task = HeartbeatTask::new(
-            opts.node_id, /*node id not set*/
-            opts.rpc_addr.clone(),
-            meta_client.clone(),
-        );
+        let heartbeat_task = match opts.mode {
+            Mode::Standalone => None,
+            Mode::Distributed => Some(HeartbeatTask::new(
+                opts.node_id, /*node id not set*/
+                opts.rpc_addr.clone(),
+                meta_client.as_ref().unwrap().clone(),
+            )),
+        };
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
@@ -91,7 +115,9 @@ impl Instance {
             .start()
             .await
             .context(NewCatalogSnafu)?;
-        self.heartbeat_task.start().await?;
+        if let Some(task) = &self.heartbeat_task {
+            task.start().await?;
+        }
         Ok(())
     }
 
