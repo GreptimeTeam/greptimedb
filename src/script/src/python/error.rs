@@ -1,5 +1,6 @@
 use common_error::prelude::{ErrorCompat, ErrorExt, StatusCode};
 use console::{style, Style};
+use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::error::Error as DataTypeError;
 use query::error::Error as QueryError;
@@ -50,6 +51,12 @@ pub enum Error {
         source: ArrowError,
     },
 
+    #[snafu(display("DataFusion error: {}", source))]
+    DataFusion {
+        backtrace: Backtrace,
+        source: DataFusionError,
+    },
+
     /// errors in coprocessors' parse check for types and etc.
     #[snafu(display("Coprocessor error: {} {}.", reason,
                     if let Some(loc) = loc{
@@ -93,9 +100,10 @@ impl From<QueryError> for Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::Arrow { .. } | Error::PyRuntime { .. } | Error::Other { .. } => {
-                StatusCode::Internal
-            }
+            Error::DataFusion { .. }
+            | Error::Arrow { .. }
+            | Error::PyRuntime { .. }
+            | Error::Other { .. } => StatusCode::Internal,
 
             Error::RecordBatch { source } => source.status_code(),
             Error::DatabaseQuery { source } => source.status_code(),
