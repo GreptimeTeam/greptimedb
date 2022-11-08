@@ -6,6 +6,7 @@ pub mod math;
 pub mod numpy;
 #[cfg(test)]
 pub(crate) mod test;
+mod timestamp;
 pub mod udf;
 
 pub use aggregate::MedianAccumulatorCreator;

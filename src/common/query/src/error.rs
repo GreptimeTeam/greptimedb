@@ -4,6 +4,7 @@ use arrow::datatypes::DataType as ArrowDatatype;
 use common_error::prelude::*;
 use datafusion_common::DataFusionError;
 use datatypes::error::Error as DataTypeError;
+use datatypes::prelude::ConcreteDataType;
 use statrs::StatsError;
 
 common_error::define_opaque_error!(Error);
@@ -14,6 +15,13 @@ pub enum InnerError {
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Unsupported input datatypes {:?} in function {}", datatypes, function))]
+    UnsupportedInputDataType {
+        function: String,
+        datatypes: Vec<ConcreteDataType>,
         backtrace: Backtrace,
     },
 
@@ -115,6 +123,8 @@ impl ErrorExt for InnerError {
             InnerError::ExecuteRepeatedly { .. }
             | InnerError::GeneralDataFusion { .. }
             | InnerError::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
+
+            InnerError::UnsupportedInputDataType { .. } => StatusCode::InvalidArguments,
 
             InnerError::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
         }
