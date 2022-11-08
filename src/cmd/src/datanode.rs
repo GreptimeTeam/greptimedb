@@ -3,7 +3,7 @@ use common_telemetry::logging;
 use datanode::datanode::{Datanode, DatanodeOptions, Mode};
 use snafu::ResultExt;
 
-use crate::error::{Error, Result, StartDatanodeSnafu};
+use crate::error::{Error, MissingConfigSnafu, Result, StartDatanodeSnafu};
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -75,9 +75,6 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             DatanodeOptions::default()
         };
 
-        if let Some(node_id) = cmd.node_id {
-            opts.node_id = node_id;
-        }
         if let Some(addr) = cmd.http_addr {
             opts.http_addr = addr;
         }
@@ -90,13 +87,30 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_addr = addr;
         }
-        if let Some(addr) = cmd.metasrv_addr {
-            opts.meta_client_opts.metasrv_addr = addr;
-            if cmd.node_id.is_some() {
+
+        match (cmd.metasrv_addr, cmd.node_id) {
+            (Some(meta_addr), Some(node_id)) => {
                 // Running mode is only set to Distributed when
                 // both metasrv addr and node id are set in
                 // commandline options
+                opts.meta_client_opts.metasrv_addr = meta_addr;
+                opts.node_id = node_id;
                 opts.mode = Mode::Distributed;
+            }
+            (None, None) => {
+                opts.mode = Mode::Standalone;
+            }
+            (None, Some(_)) => {
+                return MissingConfigSnafu {
+                    msg: "Missing metasrv address option",
+                }
+                .fail();
+            }
+            (Some(_), None) => {
+                return MissingConfigSnafu {
+                    msg: "Missing node id option",
+                }
+                .fail();
             }
         }
         Ok(opts)
