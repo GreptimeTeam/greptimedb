@@ -170,6 +170,12 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
+        shell: bash
+        run: |
+          VERSION=${{ github.ref_name }}
+          echo "VERSION=${VERSION:1}" >> $GITHUB_ENV
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
 
@@ -184,5 +190,6 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/greptimeteam/greptimedb:${{ github.ref_name }}
-            greptime/greptimedb:${{ github.ref_name }}
+            greptime/greptimedb:latest
+            greptime/greptimedb:${{ env.VERSION }}
+            ghcr.io/greptimeteam/greptimedb:${{ env.VERSION }}
