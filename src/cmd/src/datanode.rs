@@ -1,6 +1,6 @@
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions};
+use datanode::datanode::{Datanode, DatanodeOptions, Mode};
 use snafu::ResultExt;
 
 use crate::error::{Error, Result, StartDatanodeSnafu};
@@ -92,6 +92,12 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         }
         if let Some(addr) = cmd.metasrv_addr {
             opts.meta_client_opts.metasrv_addr = addr;
+            if cmd.node_id.is_some() {
+                // Running mode is only set to Distributed when
+                // both metasrv addr and node id are set in
+                // commandline options
+                opts.mode = Mode::Distributed;
+            }
         }
         Ok(opts)
     }

@@ -4,17 +4,44 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use table::metadata::TableId;
 use table::TableRef;
 
 use crate::error::{Result, TableExistsSnafu};
 use crate::schema::SchemaProvider;
-use crate::{CatalogList, CatalogProvider, CatalogProviderRef, SchemaProviderRef};
+use crate::{
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSystemTableRequest,
+    RegisterTableRequest, SchemaProviderRef,
+};
 
 /// Simple in-memory list of catalogs
 #[derive(Default)]
 pub struct MemoryCatalogList {
     /// Collection of catalogs containing schemas and ultimately Tables
     pub catalogs: RwLock<HashMap<String, CatalogProviderRef>>,
+}
+
+#[async_trait::async_trait]
+impl CatalogManager for MemoryCatalogList {
+    async fn start(&self) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn next_table_id(&self) -> TableId {
+        unimplemented!()
+    }
+
+    async fn register_table(&self, _request: RegisterTableRequest) -> Result<usize> {
+        unimplemented!()
+    }
+
+    async fn register_system_table(&self, _request: RegisterSystemTableRequest) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn table(&self, _catalog: &str, _schema: &str, _table_name: &str) -> Result<Option<TableRef>> {
+        unimplemented!()
+    }
 }
 
 impl MemoryCatalogList {

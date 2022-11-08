@@ -23,7 +23,7 @@ impl Instance {
         use table_engine::table::test_util::MockEngine;
         use table_engine::table::test_util::MockMitoEngine;
 
-        let meta_client = mock_meta_client().await;
+        let meta_client = Some(mock_meta_client().await);
         let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
         let mock_engine = Arc::new(MockMitoEngine::new(
             TableEngineConfig::default(),
@@ -46,8 +46,11 @@ impl Instance {
             .await
             .unwrap();
 
-        let heartbeat_task =
-            HeartbeatTask::new(0, "127.0.0.1:3302".to_string(), meta_client.clone());
+        let heartbeat_task = Some(HeartbeatTask::new(
+            0,
+            "127.0.0.1:3302".to_string(),
+            meta_client.as_ref().unwrap().clone(),
+        ));
         Ok(Self {
             query_engine,
             sql_handler,
@@ -95,8 +98,8 @@ impl Instance {
             catalog_manager,
             physical_planner: PhysicalPlanner::new(query_engine),
             script_executor,
-            meta_client,
-            heartbeat_task,
+            meta_client: Some(meta_client),
+            heartbeat_task: Some(heartbeat_task),
         })
     }
 }
