@@ -109,7 +109,11 @@ impl TableMeta {
     /// Returns the new [TableMetaBuilder] after applying given `alter_kind`.
     ///
     /// The returned builder would derive the next column id of this meta.
-    pub fn alter(&self, table_name: &str, alter_kind: AlterKind) -> Result<TableMetaBuilder> {
+    pub fn builder_with_alter_kind(
+        &self,
+        table_name: &str,
+        alter_kind: AlterKind,
+    ) -> Result<TableMetaBuilder> {
         match alter_kind {
             AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
             AlterKind::RemoveColumns { names } => self.remove_columns(table_name, &names),
@@ -503,7 +507,9 @@ mod tests {
             ],
         };
 
-        let builder = meta.alter("my_table", alter_kind).unwrap();
+        let builder = meta
+            .builder_with_alter_kind("my_table", alter_kind)
+            .unwrap();
         builder.build().unwrap()
     }
 
@@ -547,7 +553,11 @@ mod tests {
         let alter_kind = AlterKind::RemoveColumns {
             names: vec![String::from("col2"), String::from("my_field")],
         };
-        let new_meta = meta.alter("my_table", alter_kind).unwrap().build().unwrap();
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
 
         let names: Vec<String> = new_meta
             .schema
@@ -592,7 +602,11 @@ mod tests {
         let alter_kind = AlterKind::RemoveColumns {
             names: vec![String::from("col3"), String::from("col1")],
         };
-        let new_meta = meta.alter("my_table", alter_kind).unwrap().build().unwrap();
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
 
         let names: Vec<String> = new_meta
             .schema
@@ -627,7 +641,10 @@ mod tests {
             }],
         };
 
-        let err = meta.alter("my_table", alter_kind).err().unwrap();
+        let err = meta
+            .builder_with_alter_kind("my_table", alter_kind)
+            .err()
+            .unwrap();
         assert_eq!(StatusCode::TableColumnExists, err.status_code());
     }
 
@@ -646,7 +663,10 @@ mod tests {
             names: vec![String::from("unknown")],
         };
 
-        let err = meta.alter("my_table", alter_kind).err().unwrap();
+        let err = meta
+            .builder_with_alter_kind("my_table", alter_kind)
+            .err()
+            .unwrap();
         assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
     }
 
@@ -666,7 +686,10 @@ mod tests {
             names: vec![String::from("col1")],
         };
 
-        let err = meta.alter("my_table", alter_kind).err().unwrap();
+        let err = meta
+            .builder_with_alter_kind("my_table", alter_kind)
+            .err()
+            .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
 
         // Remove timestamp column.
@@ -674,7 +697,10 @@ mod tests {
             names: vec![String::from("ts")],
         };
 
-        let err = meta.alter("my_table", alter_kind).err().unwrap();
+        let err = meta
+            .builder_with_alter_kind("my_table", alter_kind)
+            .err()
+            .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 }

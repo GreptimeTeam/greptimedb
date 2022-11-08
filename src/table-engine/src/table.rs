@@ -197,7 +197,7 @@ impl<R: Region> Table for MitoTable<R> {
         let (alter_op, next_column_id) = self.convert_alter_kind(&req.alter_kind)?;
 
         let new_meta = table_meta
-            .alter(table_name, req.alter_kind)?
+            .builder_with_alter_kind(table_name, req.alter_kind)?
             // Update next_column_id for the table meta.
             .next_column_id(next_column_id)
             .build()
