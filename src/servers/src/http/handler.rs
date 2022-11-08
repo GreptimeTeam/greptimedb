@@ -8,6 +8,7 @@ use common_telemetry::metric;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::context::Context;
 use crate::http::JsonResponse;
 use crate::query_handler::SqlQueryHandlerRef;
 
@@ -24,7 +25,7 @@ pub async fn sql(
     Query(params): Query<SqlQuery>,
 ) -> Json<JsonResponse> {
     if let Some(ref sql) = params.sql {
-        Json(JsonResponse::from_output(sql_handler.do_query(sql).await).await)
+        Json(JsonResponse::from_output(sql_handler.do_query(sql, &Context::new()).await).await)
     } else {
         Json(JsonResponse::with_error(
             "sql parameter is required.".to_string(),
@@ -85,7 +86,10 @@ pub async fn scripts(
 
     let script = unwrap_or_json_err!(String::from_utf8(bytes.to_vec()));
 
-    let body = match query_handler.insert_script(name.unwrap(), &script).await {
+    let body = match query_handler
+        .insert_script(name.unwrap(), &script, &Context::new())
+        .await
+    {
         Ok(()) => JsonResponse::with_output(None),
         Err(e) => json_err!(format!("Insert script error: {}", e), e.status_code()),
     };
@@ -110,7 +114,9 @@ pub async fn run_script(
         json_err!("invalid name");
     }
 
-    let output = query_handler.execute_script(name.unwrap()).await;
+    let output = query_handler
+        .execute_script(name.unwrap(), &Context::new())
+        .await;
 
     Json(JsonResponse::from_output(output).await)
 }

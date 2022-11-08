@@ -4,6 +4,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use common_grpc::writer::Precision;
 
+use crate::context::Context;
 use crate::error::Result;
 use crate::error::TimePrecisionSnafu;
 use crate::influxdb::InfluxdbRequest;
@@ -20,7 +21,7 @@ pub async fn influxdb_write(
         .map(|val| parse_time_precision(val))
         .transpose()?;
     let request = InfluxdbRequest { precision, lines };
-    handler.exec(&request).await?;
+    handler.exec(&request, &Context::new()).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 

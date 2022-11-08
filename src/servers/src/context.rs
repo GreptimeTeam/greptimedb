@@ -7,6 +7,12 @@ pub struct Context {
     pub user_info: UserInfo,
 }
 
+impl Context {
+    pub fn new() -> Self {
+        Context::default()
+    }
+}
+
 #[derive(Default)]
 pub struct ExecInfo {
     pub catalog: Option<String>,

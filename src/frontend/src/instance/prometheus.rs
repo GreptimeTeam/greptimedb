@@ -7,6 +7,7 @@ use client::{Database, Select};
 use common_error::prelude::BoxedError;
 use common_telemetry::logging;
 use prost::Message;
+use servers::context::Context;
 use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
@@ -89,7 +90,7 @@ async fn handle_remote_queries(
 
 #[async_trait]
 impl PrometheusProtocolHandler for Instance {
-    async fn write(&self, request: WriteRequest) -> ServerResult<()> {
+    async fn write(&self, request: WriteRequest, ctx: &Context) -> ServerResult<()> {
         let exprs = prometheus::write_request_to_insert_exprs(request)?;
 
         self.database()
@@ -103,7 +104,7 @@ impl PrometheusProtocolHandler for Instance {
         Ok(())
     }
 
-    async fn read(&self, request: ReadRequest) -> ServerResult<PrometheusResponse> {
+    async fn read(&self, request: ReadRequest, ctx: &Context) -> ServerResult<PrometheusResponse> {
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
@@ -136,7 +137,7 @@ impl PrometheusProtocolHandler for Instance {
         }
     }
 
-    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
+    async fn ingest_metrics(&self, _metrics: Metrics, ctx: &Context) -> ServerResult<()> {
         todo!();
     }
 }
@@ -159,7 +160,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(instance.write(write_request).await.is_ok());
+        assert!(instance.write(write_request, &Context::new()).await.is_ok());
 
         let read_request = ReadRequest {
             queries: vec![
@@ -194,7 +195,7 @@ mod tests {
             ..Default::default()
         };
 
-        let resp = instance.read(read_request).await.unwrap();
+        let resp = instance.read(read_request, &Context::new()).await.unwrap();
         assert_eq!(resp.content_type, "application/x-protobuf");
         assert_eq!(resp.content_encoding, "snappy");
         let body = prometheus::snappy_decompress(&resp.body).unwrap();

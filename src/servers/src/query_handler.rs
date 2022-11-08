@@ -5,6 +5,7 @@ use api::v1::{AdminExpr, AdminResult, ObjectExpr, ObjectResult};
 use async_trait::async_trait;
 use common_query::Output;
 
+use crate::context::Context;
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
@@ -29,33 +30,33 @@ pub type PrometheusProtocolHandlerRef = Arc<dyn PrometheusProtocolHandler + Send
 
 #[async_trait]
 pub trait SqlQueryHandler {
-    async fn do_query(&self, query: &str) -> Result<Output>;
-    async fn insert_script(&self, name: &str, script: &str) -> Result<()>;
-    async fn execute_script(&self, name: &str) -> Result<Output>;
+    async fn do_query(&self, query: &str, ctx: &Context) -> Result<Output>;
+    async fn insert_script(&self, name: &str, script: &str, ctx: &Context) -> Result<()>;
+    async fn execute_script(&self, name: &str, ctx: &Context) -> Result<Output>;
 }
 
 #[async_trait]
 pub trait GrpcQueryHandler {
-    async fn do_query(&self, query: ObjectExpr) -> Result<ObjectResult>;
+    async fn do_query(&self, query: ObjectExpr, ctx: &Context) -> Result<ObjectResult>;
 }
 
 #[async_trait]
 pub trait GrpcAdminHandler {
-    async fn exec_admin_request(&self, expr: AdminExpr) -> Result<AdminResult>;
+    async fn exec_admin_request(&self, expr: AdminExpr, ctx: &Context) -> Result<AdminResult>;
 }
 
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
     /// A successful request will not return a response.
     /// Only on error will the socket return a line of data.
-    async fn exec(&self, request: &InfluxdbRequest) -> Result<()>;
+    async fn exec(&self, request: &InfluxdbRequest, ctx: &Context) -> Result<()>;
 }
 
 #[async_trait]
 pub trait OpentsdbProtocolHandler {
     /// A successful request will not return a response.
     /// Only on error will the socket return a line of data.
-    async fn exec(&self, data_point: &DataPoint) -> Result<()>;
+    async fn exec(&self, data_point: &DataPoint, ctx: &Context) -> Result<()>;
 }
 
 pub struct PrometheusResponse {
@@ -67,9 +68,9 @@ pub struct PrometheusResponse {
 #[async_trait]
 pub trait PrometheusProtocolHandler {
     /// Handling prometheus remote write requests
-    async fn write(&self, request: WriteRequest) -> Result<()>;
+    async fn write(&self, request: WriteRequest, ctx: &Context) -> Result<()>;
     /// Handling prometheus remote read requests
-    async fn read(&self, request: ReadRequest) -> Result<PrometheusResponse>;
+    async fn read(&self, request: ReadRequest, ctx: &Context) -> Result<PrometheusResponse>;
     /// Handling push gateway requests
-    async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
+    async fn ingest_metrics(&self, metrics: Metrics, ctx: &Context) -> Result<()>;
 }
