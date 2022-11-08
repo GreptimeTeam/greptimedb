@@ -160,4 +160,58 @@ mod tests {
             }
         };
     }
+
+    #[test]
+    fn test_try_from_cmd() {
+        assert_eq!(
+            Mode::Standalone,
+            DatanodeOptions::try_from(StartCommand {
+                node_id: None,
+                http_addr: None,
+                rpc_addr: None,
+                mysql_addr: None,
+                postgres_addr: None,
+                metasrv_addr: None,
+                config_file: None
+            })
+            .unwrap()
+            .mode
+        );
+
+        assert_eq!(
+            Mode::Distributed,
+            DatanodeOptions::try_from(StartCommand {
+                node_id: Some(42),
+                http_addr: None,
+                rpc_addr: None,
+                mysql_addr: None,
+                postgres_addr: None,
+                metasrv_addr: Some("127.0.0.1:3002".to_string()),
+                config_file: None
+            })
+            .unwrap()
+            .mode
+        );
+
+        assert!(DatanodeOptions::try_from(StartCommand {
+            node_id: None,
+            http_addr: None,
+            rpc_addr: None,
+            mysql_addr: None,
+            postgres_addr: None,
+            metasrv_addr: Some("127.0.0.1:3002".to_string()),
+            config_file: None,
+        })
+        .is_err());
+        assert!(DatanodeOptions::try_from(StartCommand {
+            node_id: Some(42),
+            http_addr: None,
+            rpc_addr: None,
+            mysql_addr: None,
+            postgres_addr: None,
+            metasrv_addr: None,
+            config_file: None,
+        })
+        .is_err());
+    }
 }

@@ -23,7 +23,8 @@ impl Default for ObjectStoreConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum Mode {
     Standalone,
     Distributed,
