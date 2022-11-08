@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::num::ParseIntError;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::prelude::{Snafu, StatusCode};
@@ -154,8 +153,8 @@ pub enum Error {
     #[snafu(display("Failed to bump table id"))]
     BumpTableId { msg: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to parse table id from metasrv: {}", source))]
-    ParseTableId { source: ParseIntError },
+    #[snafu(display("Failed to parse table id from metasrv, data: {:?}", data))]
+    ParseTableId { data: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
