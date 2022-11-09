@@ -142,6 +142,36 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Failed to access catalog, source: {}", source))]
+    Catalog {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
+    #[snafu(display("Table not found: {}", table_name))]
+    TableNotFound {
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Column {} not found in table {}", column_name, table_name))]
+    ColumnNotFound {
+        column_name: String,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Columns and values number mismatch, columns: {}, values: {}",
+        columns,
+        values,
+    ))]
+    ColumnValuesNumberMismatch {
+        columns: usize,
+        values: usize,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to join task, source: {}", source))]
     JoinTask {
         source: common_runtime::JoinError,
@@ -161,6 +191,7 @@ impl ErrorExt for Error {
             | Error::FindRegions { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. }
+            | Error::ColumnValuesNumberMismatch { .. }
             | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
 
             Error::RuntimeResource { source, .. } => source.status_code(),
@@ -174,6 +205,8 @@ impl ErrorExt for Error {
 
             Error::RequestDatanode { source } => source.status_code(),
 
+            Error::Catalog { source } => source.status_code(),
+
             Error::ColumnDataType { .. }
             | Error::FindDatanode { .. }
             | Error::DatanodeInstance { .. } => StatusCode::Internal,
@@ -182,6 +215,10 @@ impl ErrorExt for Error {
                 StatusCode::Unexpected
             }
             Error::ExecOpentsdbPut { .. } => StatusCode::Internal,
+
+            Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
+
             Error::JoinTask { .. } => StatusCode::Unexpected,
         }
     }
