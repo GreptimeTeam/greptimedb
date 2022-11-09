@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use common_telemetry::logging;
-use common_time::RangeMillis;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -283,7 +282,7 @@ impl WriterInner {
         mut request: WriteBatch,
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<WriteResponse> {
-        let time_ranges = self.preprocess_write(&request, &writer_ctx).await?;
+        self.preprocess_write(&request, &writer_ctx).await?;
         let version_control = writer_ctx.version_control();
 
         let _lock = version_mutex.lock().await;
@@ -311,7 +310,7 @@ impl WriterInner {
             .await?;
 
         // Insert batch into memtable.
-        let mut inserter = Inserter::new(next_sequence, time_ranges, version.bucket_duration());
+        let mut inserter = Inserter::new(next_sequence);
         inserter.insert_memtable(&request, version.mutable_memtable())?;
 
         // Update committed_sequence to make current batch visible. The `&mut self` of WriterInner
@@ -378,9 +377,7 @@ impl WriterInner {
 
                 if let Some(request) = request {
                     num_requests += 1;
-                    // let time_ranges = self.prepare_memtables(&request, version_control)?;
-                    let time_ranges = vec![]; // todo
-                                              // Note that memtables of `Version` may be updated during replay.
+                    // Note that memtables of `Version` may be updated during replay.
                     let version = version_control.current();
 
                     if req_sequence > last_sequence {
@@ -405,8 +402,7 @@ impl WriterInner {
                     }
                     // TODO(yingwen): Trigger flush if the size of memtables reach the flush threshold to avoid
                     // out of memory during replay, but we need to do it carefully to avoid dead lock.
-                    let mut inserter =
-                        Inserter::new(last_sequence, time_ranges, version.bucket_duration());
+                    let mut inserter = Inserter::new(last_sequence);
                     inserter.insert_memtable(&request, version.mutable_memtable())?;
                 }
             }
@@ -435,7 +431,7 @@ impl WriterInner {
         &mut self,
         _request: &WriteBatch,
         writer_ctx: &WriterContext<'_, S>,
-    ) -> Result<Vec<RangeMillis>> {
+    ) -> Result<()> {
         let version_control = writer_ctx.version_control();
         // Check whether memtable is full or flush should be triggered. We need to do this first since
         // switching memtables will clear all mutable memtables.
@@ -455,11 +451,9 @@ impl WriterInner {
                 new_mutable,
             )
             .await?;
-            // self.add_new_memtables(version_control);
         }
 
-        // self.prepare_memtables(request, version_control)
-        todo!()
+        Ok(())
     }
 
     /// Create a new mutable memtable.

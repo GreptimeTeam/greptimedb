@@ -9,7 +9,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
@@ -20,9 +19,6 @@ use crate::schema::RegionSchemaRef;
 use crate::sst::LevelMetas;
 use crate::sst::{FileHandle, FileMeta};
 use crate::sync::CowCell;
-
-/// Default bucket duration: 2 Hours.
-const DEFAULT_BUCKET_DURATION: Duration = Duration::from_secs(3600 * 2);
 
 pub const INIT_COMMITTED_SEQUENCE: u64 = 0;
 
@@ -207,11 +203,6 @@ impl Version {
     #[inline]
     pub fn flushed_sequence(&self) -> SequenceNumber {
         self.flushed_sequence
-    }
-
-    /// Returns duration used to partition the memtables and ssts by time.
-    pub fn bucket_duration(&self) -> Duration {
-        DEFAULT_BUCKET_DURATION
     }
 
     pub fn apply_edit(&mut self, edit: VersionEdit) {

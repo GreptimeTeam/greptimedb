@@ -1,8 +1,3 @@
-use std::collections::HashMap;
-use std::time::Duration;
-
-use common_time::timestamp_millis::BucketAligned;
-use common_time::{RangeMillis, TimestampMillis};
 use datatypes::vectors::VectorRef;
 use snafu::OptionExt;
 use store_api::storage::{ColumnDescriptor, OpType, SequenceNumber};
@@ -12,35 +7,18 @@ use crate::error::{self, Result};
 use crate::memtable::KeyValues;
 use crate::write_batch::{Mutation, PutData, WriteBatch};
 
-type RangeIndexMap = HashMap<TimestampMillis, usize>;
-
 /// Wraps logic of inserting key/values in [WriteBatch] to [Memtable].
 pub struct Inserter {
     /// Sequence of the batch to be inserted.
     sequence: SequenceNumber,
-    /// Time ranges of all input data.
-    time_ranges: Vec<RangeMillis>,
-    /// Map time range's start time to its index in time ranges.
-    time_range_indexes: RangeIndexMap,
-    /// Bucket duration of memtables.
-    bucket_duration: Duration,
     /// Used to calculate the start index in batch for `KeyValues`.
     index_in_batch: usize,
 }
 
 impl Inserter {
-    pub fn new(
-        sequence: SequenceNumber,
-        time_ranges: Vec<RangeMillis>,
-        bucket_duration: Duration,
-    ) -> Inserter {
-        let time_range_indexes = new_range_index_map(&time_ranges);
-
+    pub fn new(sequence: SequenceNumber) -> Inserter {
         Inserter {
             sequence,
-            time_ranges,
-            time_range_indexes,
-            bucket_duration,
             index_in_batch: 0,
         }
     }
@@ -74,7 +52,7 @@ impl Inserter {
             match mutation {
                 Mutation::Put(put_data) => {
                     // self.put_memtables(batch.schema(), put_data, memtable, &mut kvs)?;
-                    self.put_one_memtable(put_data, memtable, &mut kvs)?;
+                    self.write_one_mutation(put_data, memtable, &mut kvs)?;
                 }
             }
         }
@@ -82,7 +60,7 @@ impl Inserter {
         Ok(())
     }
 
-    fn put_one_memtable(
+    fn write_one_mutation(
         &mut self,
         put_data: &PutData,
         memtable: &MemtableRef,
@@ -120,14 +98,6 @@ fn validate_input_and_memtable_schemas(batch: &WriteBatch, memtable: &MemtableRe
     }
 }
 
-fn new_range_index_map(time_ranges: &[RangeMillis]) -> RangeIndexMap {
-    time_ranges
-        .iter()
-        .enumerate()
-        .map(|(i, range)| (*range.start(), i))
-        .collect()
-}
-
 fn clone_put_data_column_to(
     put_data: &PutData,
     desc: &ColumnDescriptor,
@@ -149,92 +119,6 @@ struct SliceIndex {
     end: usize,
     /// Index in time ranges.
     range_index: usize,
-}
-
-/// Computes the indexes used to split timestamps into time ranges aligned by `duration`, stores
-/// the indexes in [`SliceIndex`].
-///
-/// # Panics
-/// Panics if the duration is too large to be represented by i64, or `timestamps` are not all
-/// included by `time_range_indexes`.
-fn compute_slice_indices<I: Iterator<Item = Option<i64>>>(
-    timestamps: I,
-    duration: Duration,
-    time_range_indexes: &RangeIndexMap,
-) -> Vec<SliceIndex> {
-    let duration_ms = duration
-        .as_millis()
-        .try_into()
-        .unwrap_or_else(|e| panic!("Duration {:?} too large, {}", duration, e));
-
-    let mut slice_indexes = Vec::with_capacity(time_range_indexes.len());
-    // Current start and end of a valid `SliceIndex`.
-    let (mut start, mut end) = (0, 0);
-    // Time range index of the valid but unpushed `SliceIndex`.
-    let mut last_range_index = None;
-
-    // Iterate all timestamps, split timestamps by its time range.
-    for (i, ts) in timestamps.enumerate() {
-        // Find index for time range of the timestamp.
-
-        let current_range_index = ts
-            .and_then(|v| v.align_by_bucket(duration_ms))
-            .and_then(|aligned| time_range_indexes.get(&aligned).copied());
-
-        match current_range_index {
-            Some(current_range_index) => {
-                end = i;
-
-                match last_range_index {
-                    Some(last_index) => {
-                        if last_index != current_range_index {
-                            // Found a new range, we need to push a SliceIndex for last range.
-                            slice_indexes.push(SliceIndex {
-                                start,
-                                end,
-                                range_index: last_index,
-                            });
-                            // Update last range index.
-                            last_range_index = Some(current_range_index);
-                            // Advance start.
-                            start = i;
-                        }
-                    }
-                    // No previous range index.
-                    None => last_range_index = Some(current_range_index),
-                }
-            }
-            None => {
-                // Row without timestamp or out of time range will be skipped. This usually should not happen.
-                if let Some(last_index) = last_range_index {
-                    // Need to store SliceIndex for last range.
-                    slice_indexes.push(SliceIndex {
-                        start,
-                        end: i,
-                        range_index: last_index,
-                    });
-                    // Clear last range index.
-                    last_range_index = None;
-                }
-
-                // Advances start and end, skips current row.
-                start = i + 1;
-                end = start;
-            }
-        }
-    }
-
-    // Process last slice index.
-    if let Some(last_index) = last_range_index {
-        slice_indexes.push(SliceIndex {
-            start,
-            // We need to use `end + 1` to include the last element.
-            end: end + 1,
-            range_index: last_index,
-        });
-    }
-
-    slice_indexes
 }
 
 #[cfg(test)]
