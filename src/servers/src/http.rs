@@ -1,3 +1,4 @@
+mod ctx_ware;
 pub mod handler;
 pub mod influxdb;
 pub mod opentsdb;
@@ -11,6 +12,7 @@ use aide::axum::routing as apirouting;
 use aide::axum::{ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
+use axum::middleware::{self};
 use axum::response::Html;
 use axum::Extension;
 use axum::{error_handling::HandleErrorLayer, response::Json, routing, BoxError, Router};
@@ -313,7 +315,9 @@ impl HttpServer {
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
                     // TODO(LFC): make timeout configurable
-                    .layer(TimeoutLayer::new(Duration::from_secs(30))),
+                    .layer(TimeoutLayer::new(Duration::from_secs(30)))
+                    // custom layer
+                    .layer(middleware::from_fn(ctx_ware::build_ctx)),
             )
     }
 }
