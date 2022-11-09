@@ -25,7 +25,7 @@ use crate::error::{
     SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu,
     TableNotFoundSnafu,
 };
-use crate::local::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
     decode_system_catalog, Entry, SystemCatalogTable, TableEntry, ENTRY_TYPE_INDEX, KEY_INDEX,
     VALUE_INDEX,
@@ -40,7 +40,7 @@ use crate::{
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
 pub struct LocalCatalogManager {
     system: Arc<SystemCatalog>,
-    catalogs: Arc<MemoryCatalogList>,
+    catalogs: Arc<MemoryCatalogManager>,
     engine: TableEngineRef,
     next_table_id: AtomicU32,
     init_lock: Mutex<bool>,

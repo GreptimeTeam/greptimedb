@@ -11,7 +11,7 @@ use client::ObjectResult;
 use snafu::ensure;
 use snafu::OptionExt;
 use snafu::ResultExt;
-use store_api::storage::RegionId;
+use store_api::storage::RegionNumber;
 use table::requests::InsertRequest;
 
 use super::DistTable;
@@ -21,7 +21,7 @@ use crate::error::Result;
 impl DistTable {
     pub async fn dist_insert(
         &self,
-        inserts: HashMap<RegionId, InsertRequest>,
+        inserts: HashMap<RegionNumber, InsertRequest>,
     ) -> Result<ObjectResult> {
         let mut joins = Vec::with_capacity(inserts.len());
 
@@ -66,7 +66,7 @@ impl DistTable {
     }
 }
 
-fn to_insert_expr(region_id: RegionId, insert: InsertRequest) -> Result<InsertExpr> {
+fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<InsertExpr> {
     let mut row_count = None;
 
     let columns = insert

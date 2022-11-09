@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
@@ -70,7 +70,7 @@ fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
 
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogList::default());
+    let catalog_list = Arc::new(MemoryCatalogManager::default());
     schema_provider.register_table(table_name, table).unwrap();
     catalog_provider
         .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)

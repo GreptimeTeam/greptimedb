@@ -10,5 +10,5 @@ message InsertBatch {
 }
 
 message RegionId {
-  uint64 id = 1;
+  uint32 id = 1;
 }

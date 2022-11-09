@@ -1,9 +1,10 @@
 use datafusion_expr::Operator;
 use datatypes::value::Value;
 use snafu::ensure;
+use store_api::storage::RegionNumber;
 
 use crate::error::{self, Error};
-use crate::partitioning::{PartitionBound, PartitionExpr, PartitionRule, RegionId};
+use crate::partitioning::{PartitionBound, PartitionExpr, PartitionRule};
 
 /// A [RangeColumnsPartitionRule] is very similar to [RangePartitionRule] except that it allows
 /// partitioning by multiple columns.
@@ -32,7 +33,7 @@ use crate::partitioning::{PartitionBound, PartitionExpr, PartitionRule, RegionId
 struct RangeColumnsPartitionRule {
     column_list: Vec<String>,
     value_lists: Vec<Vec<PartitionBound>>,
-    regions: Vec<RegionId>,
+    regions: Vec<RegionNumber>,
 
     // TODO(LFC): Implement finding regions by all partitioning columns, not by the first one only.
     // Singled out the first partitioning column's bounds for finding regions by range.
@@ -54,7 +55,7 @@ struct RangeColumnsPartitionRule {
     //
     // The following two fields are acted as caches, so we don't need to recalculate them every time.
     first_column_bounds: Vec<PartitionBound>,
-    first_column_regions: Vec<Vec<RegionId>>,
+    first_column_regions: Vec<Vec<RegionNumber>>,
 }
 
 impl RangeColumnsPartitionRule {
@@ -65,7 +66,7 @@ impl RangeColumnsPartitionRule {
     fn new(
         column_list: Vec<String>,
         value_lists: Vec<Vec<PartitionBound>>,
-        regions: Vec<RegionId>,
+        regions: Vec<RegionNumber>,
     ) -> Self {
         // An example range columns partition rule to calculate the first column bounds and regions:
         // SQL:
@@ -87,7 +88,7 @@ impl RangeColumnsPartitionRule {
 
         let mut distinct_bounds = Vec::<PartitionBound>::new();
         distinct_bounds.push(first_column_bounds[0].clone());
-        let mut first_column_regions = Vec::<Vec<RegionId>>::new();
+        let mut first_column_regions = Vec::<Vec<RegionNumber>>::new();
         first_column_regions.push(vec![regions[0]]);
 
         for i in 1..first_column_bounds.len() {
@@ -116,7 +117,7 @@ impl PartitionRule for RangeColumnsPartitionRule {
         self.column_list.clone()
     }
 
-    fn find_region(&self, values: &[Value]) -> Result<RegionId, Self::Error> {
+    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Self::Error> {
         ensure!(
             values.len() == self.column_list.len(),
             error::RegionKeysSizeSnafu {
@@ -137,7 +138,7 @@ impl PartitionRule for RangeColumnsPartitionRule {
         })
     }
 
-    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionId>, Self::Error> {
+    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Self::Error> {
         let regions = if exprs.iter().all(|x| self.column_list.contains(&x.column)) {
             let PartitionExpr {
                 column: _,
@@ -173,7 +174,7 @@ impl PartitionRule for RangeColumnsPartitionRule {
             .iter()
             .flatten()
             .cloned()
-            .collect::<Vec<RegionId>>()
+            .collect::<Vec<RegionNumber>>()
         } else {
             self.regions.clone()
         };
@@ -224,7 +225,7 @@ mod tests {
             vec![1, 2, 3, 4, 5, 6],
         );
 
-        let test = |op: Operator, value: &str, expected_regions: Vec<u64>| {
+        let test = |op: Operator, value: &str, expected_regions: Vec<RegionNumber>| {
             let exprs = vec![
                 // Intentionally fix column b's partition expr to "b < 1". If we support finding
                 // regions by both columns("a" and "b") in the future, some test cases should fail.
@@ -242,7 +243,7 @@ mod tests {
             let regions = rule.find_regions(&exprs).unwrap();
             assert_eq!(
                 regions,
-                expected_regions.into_iter().collect::<Vec<RegionId>>()
+                expected_regions.into_iter().collect::<Vec<RegionNumber>>()
             );
         };
 
