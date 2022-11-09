@@ -142,12 +142,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to access catalog, source: {}", source))]
-    Catalog {
-        #[snafu(backtrace)]
-        source: catalog::error::Error,
-    },
-
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
@@ -219,8 +213,6 @@ impl ErrorExt for Error {
             | Error::ConvertScalarValue { source, .. } => source.status_code(),
 
             Error::RequestDatanode { source } => source.status_code(),
-
-            Error::Catalog { source } => source.status_code(),
 
             Error::ColumnDataType { .. }
             | Error::FindDatanode { .. }
