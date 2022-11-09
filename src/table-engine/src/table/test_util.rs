@@ -50,7 +50,8 @@ pub fn build_test_table_info() -> TableInfo {
         .schema(Arc::new(schema_for_test()))
         .engine(MITO_ENGINE)
         .next_column_id(1)
-        .primary_key_indices(vec![0, 1])
+        // host is primary key column.
+        .primary_key_indices(vec![0])
         .build()
         .unwrap();
 
@@ -69,6 +70,21 @@ pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     let store_dir = dir.path().to_string_lossy();
     let accessor = Builder::default().root(&store_dir).build().unwrap();
     (dir, ObjectStore::new(accessor))
+}
+
+fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
+    CreateTableRequest {
+        id: 1,
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
+        table_name: TABLE_NAME.to_string(),
+        desc: Some("a test table".to_string()),
+        schema,
+        region_numbers: vec![0],
+        create_if_not_exists: true,
+        primary_key_indices: vec![0],
+        table_options: HashMap::new(),
+    }
 }
 
 pub async fn setup_test_engine_and_table() -> (
@@ -93,18 +109,7 @@ pub async fn setup_test_engine_and_table() -> (
     let table = table_engine
         .create_table(
             &EngineContext::default(),
-            CreateTableRequest {
-                id: 1,
-                catalog_name: "greptime".to_string(),
-                schema_name: "public".to_string(),
-                table_name: TABLE_NAME.to_string(),
-                desc: Some("a test table".to_string()),
-                schema: schema.clone(),
-                create_if_not_exists: true,
-                primary_key_indices: Vec::default(),
-                table_options: HashMap::new(),
-                region_numbers: vec![0],
-            },
+            new_create_request(schema.clone()),
         )
         .await
         .unwrap();
@@ -124,21 +129,7 @@ pub async fn setup_mock_engine_and_table(
 
     let schema = Arc::new(schema_for_test());
     let table = table_engine
-        .create_table(
-            &EngineContext::default(),
-            CreateTableRequest {
-                id: 1,
-                catalog_name: "greptime".to_string(),
-                schema_name: "public".to_string(),
-                table_name: TABLE_NAME.to_string(),
-                desc: None,
-                schema: schema.clone(),
-                create_if_not_exists: true,
-                primary_key_indices: Vec::default(),
-                table_options: HashMap::new(),
-                region_numbers: vec![0],
-            },
-        )
+        .create_table(&EngineContext::default(), new_create_request(schema))
         .await
         .unwrap();
 

@@ -19,6 +19,7 @@ use table::Result as TableResult;
 use table::{
     metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion},
     table::TableRef,
+    Table,
 };
 use tokio::sync::Mutex;
 
@@ -740,10 +741,6 @@ mod tests {
         let (_engine, table_engine, table, _object_store, _dir) =
             test_util::setup_mock_engine_and_table().await;
 
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
         let table_info = table.table_info();
 
         let request = CreateTableRequest {
@@ -760,14 +757,7 @@ mod tests {
         };
 
         let created_table = table_engine.create_table(&ctx, request).await.unwrap();
-        assert_eq!(
-            table_info,
-            created_table
-                .as_any()
-                .downcast_ref::<MitoTable<MockRegion>>()
-                .unwrap()
-                .table_info()
-        );
+        assert_eq!(table_info, created_table.table_info());
 
         // test create_if_not_exists=false
         let request = CreateTableRequest {
@@ -826,10 +816,6 @@ mod tests {
             .unwrap();
         assert_eq!(table.schema(), reopened.schema());
 
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
         let reopened = reopened
             .as_any()
             .downcast_ref::<MitoTable<MockRegion>>()
@@ -850,30 +836,92 @@ mod tests {
         assert_eq!(18446744069414584330, region_id(u32::MAX, 10));
     }
 
+    fn new_add_columns_req(new_tag: &ColumnSchema, new_field: &ColumnSchema) -> AlterTableRequest {
+        AlterTableRequest {
+            catalog_name: None,
+            schema_name: None,
+            table_name: TABLE_NAME.to_string(),
+            alter_kind: AlterKind::AddColumns {
+                columns: vec![
+                    AddColumnRequest {
+                        column_schema: new_tag.clone(),
+                        is_key: true,
+                    },
+                    AddColumnRequest {
+                        column_schema: new_field.clone(),
+                        is_key: false,
+                    },
+                ],
+            },
+        }
+    }
+
     #[tokio::test]
     async fn test_alter_table_add_column() {
         let (_engine, table_engine, table, _object_store, _dir) =
             test_util::setup_mock_engine_and_table().await;
 
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
-        let table_info = table.table_info();
-        let old_info = (*table_info).clone();
+        let old_info = table.table_info();
         let old_meta = &old_info.meta;
         let old_schema = &old_meta.schema;
 
-        let new_column = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
+        let req = new_add_columns_req(&new_tag, &new_field);
+        let table = table_engine
+            .alter_table(&EngineContext::default(), req)
+            .await
+            .unwrap();
+
+        let new_info = table.table_info();
+        let new_meta = &new_info.meta;
+        let new_schema = &new_meta.schema;
+
+        assert_eq!(&[0, 4], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[1, 2, 3, 5], &new_meta.value_indices[..]);
+        assert_eq!(new_schema.num_columns(), old_schema.num_columns() + 2);
+        assert_eq!(
+            &new_schema.column_schemas()[..old_schema.num_columns()],
+            old_schema.column_schemas()
+        );
+        assert_eq!(
+            &new_schema.column_schemas()[old_schema.num_columns()],
+            &new_tag
+        );
+        assert_eq!(
+            &new_schema.column_schemas()[old_schema.num_columns() + 1],
+            &new_field
+        );
+        assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
+        assert_eq!(new_schema.version(), old_schema.version() + 1);
+        assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 2);
+    }
+
+    #[tokio::test]
+    async fn test_alter_table_remove_column() {
+        let (_engine, table_engine, _table, _object_store, _dir) =
+            test_util::setup_mock_engine_and_table().await;
+
+        // Add two columns to the table first.
+        let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
+        let req = new_add_columns_req(&new_tag, &new_field);
+        let table = table_engine
+            .alter_table(&EngineContext::default(), req)
+            .await
+            .unwrap();
+
+        let old_info = table.table_info();
+        let old_meta = &old_info.meta;
+        let old_schema = &old_meta.schema;
+
+        // Then remove memory and my_field from the table.
         let req = AlterTableRequest {
             catalog_name: None,
             schema_name: None,
             table_name: TABLE_NAME.to_string(),
-            alter_kind: AlterKind::AddColumns {
-                columns: vec![AddColumnRequest {
-                    column_schema: new_column.clone(),
-                    is_key: false,
-                }],
+            alter_kind: AlterKind::RemoveColumns {
+                names: vec![String::from("memory"), String::from("my_field")],
             },
         };
         let table = table_engine
@@ -881,21 +929,20 @@ mod tests {
             .await
             .unwrap();
 
-        let table = table
-            .as_any()
-            .downcast_ref::<MitoTable<MockRegion>>()
-            .unwrap();
         let new_info = table.table_info();
         let new_meta = &new_info.meta;
         let new_schema = &new_meta.schema;
 
-        assert_eq!(new_schema.num_columns(), old_schema.num_columns() + 1);
-        assert_eq!(
-            new_schema.column_schemas().split_last().unwrap(),
-            (&new_column, old_schema.column_schemas())
-        );
+        assert_eq!(new_schema.num_columns(), old_schema.num_columns() - 2);
+        let remaining_names: Vec<String> = new_schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| column_schema.name.clone())
+            .collect();
+        assert_eq!(&["host", "cpu", "ts", "my_tag"], &remaining_names[..]);
+        assert_eq!(&[0, 3], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[1, 2], &new_meta.value_indices[..]);
         assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
         assert_eq!(new_schema.version(), old_schema.version() + 1);
-        assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 1);
     }
 }

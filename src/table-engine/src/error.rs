@@ -136,25 +136,11 @@ pub enum Error {
         table_name: String,
     },
 
-    #[snafu(display("Column {} already exists in table {}", column_name, table_name))]
-    ColumnExists {
-        backtrace: Backtrace,
-        column_name: String,
-        table_name: String,
-    },
-
     #[snafu(display("Columns {} not exist in table {}", column_names.join(","), table_name))]
     ColumnsNotExist {
         backtrace: Backtrace,
         column_names: Vec<String>,
         table_name: String,
-    },
-
-    #[snafu(display("Failed to build schema, msg: {}, source: {}", msg, source))]
-    SchemaBuild {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-        msg: String,
     },
 
     #[snafu(display("Failed to alter table {}, source: {}", table_name, source))]
@@ -206,8 +192,6 @@ impl ErrorExt for Error {
 
             AlterTable { source, .. } => source.status_code(),
 
-            SchemaBuild { source, .. } => source.status_code(),
-
             BuildRowKeyDescriptor { .. }
             | BuildColumnDescriptor { .. }
             | BuildColumnFamilyDescriptor { .. }
@@ -219,8 +203,6 @@ impl ErrorExt for Error {
             | MissingTimestampIndex { .. }
             | UnsupportedDefaultConstraint { .. }
             | TableNotFound { .. } => StatusCode::InvalidArguments,
-
-            ColumnExists { .. } => StatusCode::TableColumnExists,
 
             ColumnsNotExist { .. } => StatusCode::TableColumnNotFound,
 
