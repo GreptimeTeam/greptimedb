@@ -1,3 +1,6 @@
+use std::ops::Deref;
+
+use api::v1::codec::RegionId;
 use api::v1::{
     admin_expr, codec::InsertBatch, insert_expr, object_expr, select_expr, AdminExpr, AdminResult,
     ObjectExpr, ObjectResult, SelectExpr,
@@ -62,7 +65,11 @@ impl Instance {
         insert_batches: &[InsertBatch],
     ) -> Result<()> {
         // Create table automatically, build schema from data.
-        let table_id = self.catalog_manager.next_table_id();
+        let table_id = self
+            .catalog_manager
+            .next_table_id()
+            .await
+            .context(CatalogSnafu)?;
         let create_table_request = insert::build_create_table_request(
             catalog_name,
             schema_name,
@@ -200,6 +207,18 @@ impl GrpcQueryHandler for Instance {
                     .context(servers::error::InvalidQuerySnafu {
                         reason: "missing `expr` in `InsertExpr`",
                     })?;
+
+                // TODO(fys): _region_id is for later use.
+                let _region_id: Option<RegionId> = insert_expr
+                    .options
+                    .get("region_id")
+                    .map(|id| {
+                        id.deref()
+                            .try_into()
+                            .context(servers::error::DecodeRegionIdSnafu)
+                    })
+                    .transpose()?;
+
                 match expr {
                     insert_expr::Expr::Values(values) => {
                         self.handle_insert(table_name, values).await

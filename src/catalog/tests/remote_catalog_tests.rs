@@ -12,7 +12,7 @@ mod tests {
         KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider,
     };
     use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
     use common_catalog::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use datatypes::schema::Schema;
     use futures_util::StreamExt;
@@ -24,19 +24,17 @@ mod tests {
     #[tokio::test]
     async fn test_backend() {
         common_telemetry::init_default_ut_logging();
-        let node_id = 42;
         let backend = MockKvBackend::default();
 
         let default_catalog_key = CatalogKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            node_id,
         }
         .to_string();
 
         backend
             .set(
                 default_catalog_key.as_bytes(),
-                &CatalogValue {}.to_bytes().unwrap(),
+                &CatalogValue {}.as_bytes().unwrap(),
             )
             .await
             .unwrap();
@@ -44,11 +42,10 @@ mod tests {
         let schema_key = SchemaKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            node_id,
         }
         .to_string();
         backend
-            .set(schema_key.as_bytes(), &SchemaValue {}.to_bytes().unwrap())
+            .set(schema_key.as_bytes(), &SchemaValue {}.as_bytes().unwrap())
             .await
             .unwrap();
 
@@ -59,7 +56,7 @@ mod tests {
             res.insert(String::from_utf8_lossy(&kv.0).to_string());
         }
         assert_eq!(
-            vec!["__c-greptime-42".to_string()],
+            vec!["__c-greptime".to_string()],
             res.into_iter().collect::<Vec<_>>()
         );
     }
@@ -209,7 +206,6 @@ mod tests {
         let schema_name = "nonexistent_schema".to_string();
         let catalog = Arc::new(RemoteCatalogProvider::new(
             catalog_name.clone(),
-            node_id,
             backend.clone(),
         ));
 
@@ -280,5 +276,20 @@ mod tests {
             HashSet::from([schema_name.clone()]),
             new_catalog.schema_names().unwrap().into_iter().collect()
         )
+    }
+
+    #[tokio::test]
+    async fn test_next_table_id() {
+        let node_id = 42;
+        let (_, _, catalog_manager) = prepare_components(node_id).await;
+        assert_eq!(
+            MIN_USER_TABLE_ID,
+            catalog_manager.next_table_id().await.unwrap()
+        );
+
+        assert_eq!(
+            MIN_USER_TABLE_ID + 1,
+            catalog_manager.next_table_id().await.unwrap()
+        );
     }
 }

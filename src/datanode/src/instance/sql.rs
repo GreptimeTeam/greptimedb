@@ -10,7 +10,7 @@ use servers::query_handler::SqlQueryHandler;
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
 
-use crate::error::{ExecuteSqlSnafu, Result};
+use crate::error::{CatalogSnafu, ExecuteSqlSnafu, Result};
 use crate::instance::Instance;
 use crate::metric;
 use crate::sql::SqlRequest;
@@ -49,7 +49,11 @@ impl Instance {
             }
 
             Statement::Create(c) => {
-                let table_id = self.catalog_manager.next_table_id();
+                let table_id = self
+                    .catalog_manager
+                    .next_table_id()
+                    .await
+                    .context(CatalogSnafu)?;
                 let _engine_name = c.engine.clone();
                 // TODO(hl): Select table engine by engine_name
 
@@ -76,6 +80,9 @@ impl Instance {
             }
             Statement::ShowTables(stmt) => {
                 self.sql_handler.execute(SqlRequest::ShowTables(stmt)).await
+            }
+            Statement::ShowCreateTable(_stmt) => {
+                unimplemented!("SHOW CREATE TABLE is unimplemented yet");
             }
         }
     }

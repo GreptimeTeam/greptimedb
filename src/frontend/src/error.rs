@@ -163,6 +163,12 @@ pub enum Error {
         values
     ))]
     ColumnValuesNumberMismatch { columns: usize, values: usize },
+
+    #[snafu(display("Failed to join task, source: {}", source))]
+    JoinTask {
+        source: common_runtime::JoinError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -201,8 +207,11 @@ impl ErrorExt for Error {
                 StatusCode::Unexpected
             }
             Error::ExecOpentsdbPut { .. } => StatusCode::Internal,
+
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
+
+            Error::JoinTask { .. } => StatusCode::Unexpected,
         }
     }
 

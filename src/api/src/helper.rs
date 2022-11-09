@@ -1,8 +1,13 @@
+use common_base::BitVec;
+use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::value::Value;
+use datatypes::vectors::VectorRef;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::v1::column::Values;
+use crate::v1::Column;
 use crate::v1::ColumnDataType;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -143,8 +148,47 @@ impl Values {
     }
 }
 
+impl Column {
+    // The type of vals must be same.
+    pub fn push_vals(&mut self, origin_count: usize, vector: VectorRef) {
+        let values = self.values.get_or_insert_with(Values::default);
+        let mut null_mask = BitVec::from_slice(&self.null_mask);
+        let len = vector.len();
+        null_mask.reserve_exact(origin_count + len);
+        null_mask.extend(BitVec::repeat(false, len));
+
+        (0..len).into_iter().for_each(|idx| match vector.get(idx) {
+            Value::Null => null_mask.set(idx + origin_count, true),
+            Value::Boolean(val) => values.bool_values.push(val),
+            Value::UInt8(val) => values.u8_values.push(val.into()),
+            Value::UInt16(val) => values.u16_values.push(val.into()),
+            Value::UInt32(val) => values.u32_values.push(val),
+            Value::UInt64(val) => values.u64_values.push(val),
+            Value::Int8(val) => values.i8_values.push(val.into()),
+            Value::Int16(val) => values.i16_values.push(val.into()),
+            Value::Int32(val) => values.i32_values.push(val),
+            Value::Int64(val) => values.i64_values.push(val),
+            Value::Float32(val) => values.f32_values.push(*val),
+            Value::Float64(val) => values.f64_values.push(*val),
+            Value::String(val) => values.string_values.push(val.as_utf8().to_string()),
+            Value::Binary(val) => values.binary_values.push(val.to_vec()),
+            Value::Date(val) => values.date_values.push(val.val()),
+            Value::DateTime(val) => values.datetime_values.push(val.val()),
+            Value::Timestamp(val) => values
+                .ts_millis_values
+                .push(val.convert_to(TimeUnit::Millisecond)),
+            Value::List(_) => unreachable!(),
+        });
+        self.null_mask = null_mask.into_vec();
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use datatypes::vectors::BooleanVector;
+
     use super::*;
 
     #[test]
@@ -357,5 +401,30 @@ mod tests {
             result.unwrap_err().to_string(),
             "Failed to create column datatype from List(ListType { inner: Boolean(BooleanType) })"
         );
+    }
+
+    #[test]
+    fn test_column_put_vector() {
+        use crate::v1::column::SemanticType;
+        // Some(false), None, Some(true), Some(true)
+        let mut column = Column {
+            column_name: "test".to_string(),
+            semantic_type: SemanticType::Field as i32,
+            values: Some(Values {
+                bool_values: vec![false, true, true],
+                ..Default::default()
+            }),
+            null_mask: vec![2],
+            datatype: ColumnDataType::Boolean as i32,
+        };
+        let row_count = 4;
+
+        let vector = Arc::new(BooleanVector::from(vec![Some(true), None, Some(false)]));
+        column.push_vals(row_count, vector);
+        // Some(false), None, Some(true), Some(true), Some(true), None, Some(false)
+        let bool_values = column.values.unwrap().bool_values;
+        assert_eq!(vec![false, true, true, true, false], bool_values);
+        let null_mask = column.null_mask;
+        assert_eq!(34, null_mask[0]);
     }
 }

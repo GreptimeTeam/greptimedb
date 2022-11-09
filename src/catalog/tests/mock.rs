@@ -1,3 +1,4 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -66,6 +67,34 @@ impl KvBackend for MockKvBackend {
         let mut map = self.map.write().await;
         map.insert(key.to_vec(), val.to_vec());
         Ok(())
+    }
+
+    async fn compare_and_set(
+        &self,
+        key: &[u8],
+        expect: &[u8],
+        val: &[u8],
+    ) -> Result<Result<(), Option<Vec<u8>>>, Error> {
+        let mut map = self.map.write().await;
+        let existing = map.entry(key.to_vec());
+        match existing {
+            Entry::Vacant(e) => {
+                if expect.is_empty() {
+                    e.insert(val.to_vec());
+                    Ok(Ok(()))
+                } else {
+                    Ok(Err(None))
+                }
+            }
+            Entry::Occupied(mut existing) => {
+                if existing.get() == expect {
+                    existing.insert(val.to_vec());
+                    Ok(Ok(()))
+                } else {
+                    Ok(Err(Some(existing.get().clone())))
+                }
+            }
+        }
     }
 
     async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {

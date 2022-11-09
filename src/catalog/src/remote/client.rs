@@ -3,7 +3,7 @@ use std::fmt::Debug;
 use async_stream::stream;
 use common_telemetry::info;
 use meta_client::client::MetaClient;
-use meta_client::rpc::{DeleteRangeRequest, PutRequest, RangeRequest};
+use meta_client::rpc::{CompareAndPutRequest, DeleteRangeRequest, PutRequest, RangeRequest};
 use snafu::ResultExt;
 
 use crate::error::{Error, MetaSrvSnafu};
@@ -67,5 +67,27 @@ impl KvBackend for MetaKvBackend {
         );
 
         Ok(())
+    }
+
+    async fn compare_and_set(
+        &self,
+        key: &[u8],
+        expect: &[u8],
+        val: &[u8],
+    ) -> Result<Result<(), Option<Vec<u8>>>, Error> {
+        let request = CompareAndPutRequest::new()
+            .with_key(key.to_vec())
+            .with_expect(expect.to_vec())
+            .with_value(val.to_vec());
+        let mut response = self
+            .client
+            .compare_and_put(request)
+            .await
+            .context(MetaSrvSnafu)?;
+        if response.is_success() {
+            Ok(Ok(()))
+        } else {
+            Ok(Err(response.take_prev_kv().map(|v| v.value().to_vec())))
+        }
     }
 }
