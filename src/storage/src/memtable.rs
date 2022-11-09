@@ -14,7 +14,7 @@ use store_api::storage::{consts, OpType, SequenceNumber};
 use crate::error::Result;
 use crate::memtable::btree::BTreeMemtable;
 pub use crate::memtable::inserter::Inserter;
-pub use crate::memtable::version::{MemtableSet, MemtableVersion};
+pub use crate::memtable::version::MemtableVersion;
 use crate::read::Batch;
 use crate::schema::{ProjectedSchemaRef, RegionSchemaRef};
 

@@ -7,7 +7,7 @@ use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{self, Error, Result};
-use crate::memtable::{IterContext, MemtableRef, MemtableSet};
+use crate::memtable::{IterContext, MemtableRef};
 use crate::read::{BoxedBatchReader, DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions, Visitor};

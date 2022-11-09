@@ -1,10 +1,7 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use common_time::RangeMillis;
 
-use crate::flush::MemtableWithMeta;
 use crate::memtable::{MemtableId, MemtableRef};
 
 /// A version of all memtables.
@@ -64,20 +61,6 @@ impl MemtableVersion {
             + self.mutable.bytes_allocated()
     }
 
-    /// Creates a new `MemtableVersion` that contains memtables both in this and `other`.
-    ///
-    /// # Panics
-    /// Panics if there are memtables with same time ranges.
-    pub fn add_mutable(&self, other: MemtableSet) -> MemtableVersion {
-        // let mutable = self.mutable.extend(other);
-
-        // Self {
-        //     mutable,
-        //     immutables: self.immutables.clone(),
-        // }
-        todo!()
-    }
-
     /// Creates a new `MemtableVersion` that removes immutable memtables
     /// less than or equal to max_memtable_id.
     pub fn remove_immutables(&self, max_memtable_id: MemtableId) -> MemtableVersion {
@@ -121,112 +104,6 @@ impl Ord for RangeKey {
 impl PartialOrd for RangeKey {
     fn partial_cmp(&self, other: &RangeKey) -> Option<Ordering> {
         Some(self.cmp(other))
-    }
-}
-
-/// Collection of mutable memtables.
-///
-/// Memtables are partitioned by their time range. Caller should ensure
-/// there are no overlapped ranges and all ranges are aligned by same
-/// bucket duration.
-#[derive(Default, Clone, Debug)]
-pub struct MemtableSet {
-    memtables: BTreeMap<RangeKey, MemtableRef>,
-    max_memtable_id: MemtableId,
-}
-
-pub type MemtableSetRef = Arc<MemtableSet>;
-
-impl PartialEq for MemtableSet {
-    fn eq(&self, other: &MemtableSet) -> bool {
-        self.max_memtable_id == other.max_memtable_id
-            && self.memtables.len() == other.memtables.len()
-            && self
-                .memtables
-                .iter()
-                .zip(&other.memtables)
-                .all(|(a, b)| a.0 == b.0 && a.1.id() == b.1.id() && a.1.schema() == b.1.schema())
-    }
-}
-
-impl Eq for MemtableSet {}
-
-impl MemtableSet {
-    pub fn new() -> MemtableSet {
-        MemtableSet::default()
-    }
-
-    /// Get memtable by time range.
-    ///
-    /// The range must exactly equal to the range of the memtable, otherwise `None`
-    /// is returned.
-    pub fn get_by_range(&self, range: &RangeMillis) -> Option<&MemtableRef> {
-        let range_key = RangeKey(*range);
-        self.memtables.get(&range_key)
-    }
-
-    /// Insert a new memtable.
-    ///
-    /// # Panics
-    /// Panics if memtable with same range already exists.
-    #[deprecated]
-    pub fn insert(&mut self, range: RangeMillis, mem: MemtableRef) {
-        self.max_memtable_id = MemtableId::max(self.max_memtable_id, mem.id());
-        let old = self.memtables.insert(RangeKey(range), mem);
-        assert!(old.is_none());
-    }
-
-    pub fn add(&mut self, mem: MemtableRef) {
-        todo!()
-    }
-
-    /// Returns number of memtables in the set.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.memtables.len()
-    }
-
-    /// Returns true if there is no memtable in the set.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.memtables.is_empty()
-    }
-
-    pub fn bytes_allocated(&self) -> usize {
-        self.memtables.values().map(|m| m.bytes_allocated()).sum()
-    }
-
-    pub fn max_memtable_id(&self) -> MemtableId {
-        self.max_memtable_id
-    }
-
-    /// Creates a new `MemtableSet` that contains memtables both in `self` and
-    /// `other`, left `self` unchanged. `other` will be extended.
-    pub fn extend(&self, mut other: MemtableSet) -> MemtableSet {
-        // We use `other.memtables` to extend `self.memtables` since memtables
-        // in other should be empty in usual, so overwriting it is okay.
-        other
-            .memtables
-            .extend(self.memtables.iter().map(|(k, v)| (*k, v.clone())));
-
-        MemtableSet {
-            memtables: other.memtables,
-            max_memtable_id: MemtableId::max(self.max_memtable_id, other.max_memtable_id),
-        }
-    }
-
-    pub fn to_memtable_with_metas(&self) -> Vec<MemtableWithMeta> {
-        self.memtables
-            .iter()
-            .map(|(range_key, memtable)| MemtableWithMeta {
-                memtable: memtable.clone(),
-                bucket: range_key.0,
-            })
-            .collect()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&RangeMillis, &MemtableRef)> {
-        self.memtables.iter().map(|(k, v)| (&k.0, v))
     }
 }
 

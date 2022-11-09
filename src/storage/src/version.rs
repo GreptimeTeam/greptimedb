@@ -14,7 +14,7 @@ use std::time::Duration;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
-use crate::memtable::{MemtableId, MemtableRef, MemtableSet, MemtableVersion};
+use crate::memtable::{MemtableId, MemtableRef, MemtableVersion};
 use crate::metadata::RegionMetadataRef;
 use crate::schema::RegionSchemaRef;
 use crate::sst::LevelMetas;
@@ -77,20 +77,6 @@ impl VersionControl {
     pub fn set_committed_sequence(&self, value: SequenceNumber) {
         // Relaxed ordering is enough for this update as this method requires external synchoronization.
         self.committed_sequence.store(value, Ordering::Relaxed);
-    }
-
-    /// Add mutable memtables and commit.
-    ///
-    /// # Panics
-    /// See [MemtableVersion::add_mutable](MemtableVersion::add_mutable).
-    pub fn add_mutable(&self, memtables_to_add: MemtableSet) {
-        let mut version_to_update = self.version.lock();
-
-        let memtable_version = version_to_update.memtables();
-        let merged = memtable_version.add_mutable(memtables_to_add);
-        version_to_update.memtables = Arc::new(merged);
-
-        version_to_update.commit();
     }
 
     /// Freeze all mutable memtables.

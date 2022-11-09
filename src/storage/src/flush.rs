@@ -104,12 +104,6 @@ impl FlushStrategy for SizeBasedStrategy {
     }
 }
 
-#[derive(Debug)]
-pub struct MemtableWithMeta {
-    pub memtable: MemtableRef,
-    pub bucket: RangeMillis,
-}
-
 #[async_trait]
 pub trait FlushScheduler: Send + Sync + std::fmt::Debug {
     async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle>;
