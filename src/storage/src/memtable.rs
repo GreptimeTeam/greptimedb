@@ -4,8 +4,10 @@ mod inserter;
 pub mod tests;
 mod version;
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use common_time::RangeMillis;
 use datatypes::vectors::VectorRef;
 use store_api::storage::{consts, OpType, SequenceNumber};
 
@@ -38,6 +40,9 @@ pub trait Memtable: Send + Sync + std::fmt::Debug {
 
     /// Returns the estimated bytes allocated by this memtable from heap.
     fn bytes_allocated(&self) -> usize;
+
+    /// Returns the time span of data inside this memtable.
+    fn time_span(&self) -> RangeMillis;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -100,7 +105,7 @@ pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
 pub type BoxedBatchIterator = Box<dyn BatchIterator>;
 
 pub trait MemtableBuilder: Send + Sync + std::fmt::Debug {
-    fn build(&self, id: MemtableId, schema: RegionSchemaRef) -> MemtableRef;
+    fn build(&self, schema: RegionSchemaRef) -> MemtableRef;
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
@@ -140,11 +145,14 @@ impl KeyValues {
     }
 }
 
-#[derive(Debug)]
-pub struct DefaultMemtableBuilder;
+#[derive(Debug, Default)]
+pub struct DefaultMemtableBuilder {
+    memtable_id: AtomicU32,
+}
 
 impl MemtableBuilder for DefaultMemtableBuilder {
-    fn build(&self, id: MemtableId, schema: RegionSchemaRef) -> MemtableRef {
+    fn build(&self, schema: RegionSchemaRef) -> MemtableRef {
+        let id = self.memtable_id.fetch_add(1, Ordering::Relaxed);
         Arc::new(BTreeMemtable::new(id, schema))
     }
 }

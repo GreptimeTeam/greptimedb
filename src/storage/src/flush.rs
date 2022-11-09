@@ -141,7 +141,7 @@ pub struct FlushJob<S: LogStore> {
     /// used to remove immutable memtables in current version.
     pub max_memtable_id: MemtableId,
     /// Memtables to be flushed.
-    pub memtables: Vec<MemtableWithMeta>,
+    pub memtables: Vec<MemtableRef>,
     /// Last sequence of data to be flushed.
     pub flush_sequence: SequenceNumber,
     /// Shared data of region to be flushed.
@@ -172,7 +172,7 @@ impl<S: LogStore> FlushJob<S> {
         for m in &self.memtables {
             let file_name = Self::generate_sst_file_name();
             // TODO(hl): Check if random file name already exists in meta.
-            let iter = m.memtable.iter(&iter_ctx)?;
+            let iter = m.iter(&iter_ctx)?;
             futures.push(async move {
                 self.sst_layer
                     .write_sst(&file_name, iter, &WriteOptions::default())

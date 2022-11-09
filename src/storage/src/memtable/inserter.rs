@@ -3,15 +3,13 @@ use std::time::Duration;
 
 use common_time::timestamp_millis::BucketAligned;
 use common_time::{RangeMillis, TimestampMillis};
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::ScalarVector;
-use datatypes::schema::SchemaRef;
-use datatypes::vectors::{Int64Vector, TimestampVector, VectorRef};
+use datatypes::vectors::VectorRef;
 use snafu::OptionExt;
 use store_api::storage::{ColumnDescriptor, OpType, SequenceNumber};
 
-use crate::error::{self, IllegalTimestampColumnTypeSnafu, Result};
-use crate::memtable::{KeyValues, Memtable, MemtableSet};
+use super::MemtableRef;
+use crate::error::{self, Result};
+use crate::memtable::KeyValues;
 use crate::write_batch::{Mutation, PutData, WriteBatch};
 
 type RangeIndexMap = HashMap<TimestampMillis, usize>;
@@ -48,21 +46,18 @@ impl Inserter {
     }
 
     // TODO(yingwen): Can we take the WriteBatch?
-    /// Insert write batch into memtables if both `batch` and `memtables` are not empty.
+    /// Insert write batch into memtable.
     ///
-    /// Won't do schema validation, caller (mostly the [`RegionWriter`]) should ensure the
-    /// schemas of `memtables` are consistent with `batch`'s, and the time ranges of `memtables`
+    /// Won't do schema validation if not configured. Caller (mostly the [`RegionWriter`]) should ensure the
+    /// schemas of `memtable` are consistent with `batch`'s, and the time ranges of `memtable`
     /// are consistent with `self`'s time ranges.
-    ///
-    /// # Panics
-    /// Panics if there is time range in `self.time_ranges` but not in `memtables`.
-    pub fn insert_memtables(&mut self, batch: &WriteBatch, memtables: &MemtableSet) -> Result<()> {
-        if batch.is_empty() || memtables.is_empty() {
+    pub fn insert_memtable(&mut self, batch: &WriteBatch, memtable: &MemtableRef) -> Result<()> {
+        if batch.is_empty() {
             return Ok(());
         }
 
-        // Only validate schema in debug mod.
-        validate_input_and_memtable_schemas(batch, memtables);
+        // This function only makes effect in debug mod.
+        validate_input_and_memtable_schemas(batch, memtable);
 
         // Enough to hold all key or value columns.
         let total_column_num = batch.schema().num_columns();
@@ -78,7 +73,8 @@ impl Inserter {
         for mutation in batch {
             match mutation {
                 Mutation::Put(put_data) => {
-                    self.put_memtables(batch.schema(), put_data, memtables, &mut kvs)?;
+                    // self.put_memtables(batch.schema(), put_data, memtable, &mut kvs)?;
+                    self.put_one_memtable(put_data, memtable, &mut kvs)?;
                 }
             }
         }
@@ -86,27 +82,10 @@ impl Inserter {
         Ok(())
     }
 
-    fn put_memtables(
-        &mut self,
-        schema: &SchemaRef,
-        put_data: &PutData,
-        memtables: &MemtableSet,
-        kvs: &mut KeyValues,
-    ) -> Result<()> {
-        if memtables.len() == 1 {
-            // Fast path, only one memtable to put.
-            let (_range, memtable) = memtables.iter().next().unwrap();
-            return self.put_one_memtable(put_data, &**memtable, kvs);
-        }
-
-        // Split data by time range and put them into memtables.
-        self.put_multiple_memtables(schema, put_data, memtables, kvs)
-    }
-
     fn put_one_memtable(
         &mut self,
         put_data: &PutData,
-        memtable: &dyn Memtable,
+        memtable: &MemtableRef,
         kvs: &mut KeyValues,
     ) -> Result<()> {
         let schema = memtable.schema();
@@ -128,75 +107,16 @@ impl Inserter {
 
         Ok(())
     }
-
-    /// Put data to multiple memtables.
-    fn put_multiple_memtables(
-        &mut self,
-        schema: &SchemaRef,
-        put_data: &PutData,
-        memtables: &MemtableSet,
-        kvs: &mut KeyValues,
-    ) -> Result<()> {
-        let timestamp_schema = schema
-            .timestamp_column()
-            .context(error::BatchMissingTimestampSnafu)?;
-
-        let timestamps = put_data.column_by_name(&timestamp_schema.name).context(
-            error::BatchMissingColumnSnafu {
-                column: &timestamp_schema.name,
-            },
-        )?;
-
-        let slice_indexes = match timestamps.data_type() {
-            ConcreteDataType::Int64(_) => {
-                let timestamps: &Int64Vector = timestamps
-                    .as_any()
-                    .downcast_ref()
-                    .context(error::BatchMissingTimestampSnafu)?;
-                let iter = timestamps.iter_data();
-                compute_slice_indices(iter, self.bucket_duration, &self.time_range_indexes)
-            }
-            ConcreteDataType::Timestamp(_) => {
-                let timestamps: &TimestampVector = timestamps
-                    .as_any()
-                    .downcast_ref()
-                    .context(error::BatchMissingTimestampSnafu)?;
-                let iter = timestamps.iter_data().map(|v| v.map(|v| v.value()));
-                compute_slice_indices(iter, self.bucket_duration, &self.time_range_indexes)
-            }
-            _ => {
-                return IllegalTimestampColumnTypeSnafu {
-                    data_type: timestamps.data_type(),
-                }
-                .fail();
-            }
-        };
-
-        for slice_index in slice_indexes {
-            let sliced_data = put_data.slice(slice_index.start, slice_index.end);
-            let range = &self.time_ranges[slice_index.range_index];
-            // The caller should ensure memtable for given time range is exists.
-            let memtable = memtables
-                .get_by_range(range)
-                .expect("Memtable not found for range");
-
-            self.put_one_memtable(&sliced_data, &**memtable, kvs)?;
-        }
-
-        Ok(())
-    }
 }
 
-fn validate_input_and_memtable_schemas(batch: &WriteBatch, memtables: &MemtableSet) {
+fn validate_input_and_memtable_schemas(batch: &WriteBatch, memtable: &MemtableRef) {
     if cfg!(debug_assertions) {
         let batch_schema = batch.schema();
-        for (_, memtable) in memtables.iter() {
-            let memtable_schema = memtable.schema();
-            let user_schema = memtable_schema.user_schema();
-            debug_assert_eq!(batch_schema.version(), user_schema.version());
-            // Only validate column schemas.
-            debug_assert_eq!(batch_schema.column_schemas(), user_schema.column_schemas());
-        }
+        let memtable_schema = memtable.schema();
+        let user_schema = memtable_schema.user_schema();
+        debug_assert_eq!(batch_schema.version(), user_schema.version());
+        // Only validate column schemas.
+        debug_assert_eq!(batch_schema.column_schemas(), user_schema.column_schemas());
     }
 }
 

@@ -100,11 +100,8 @@ impl ChunkReaderBuilder {
         self
     }
 
-    pub fn pick_memtables(mut self, memtables: &MemtableSet) -> Self {
-        for (_range, mem) in memtables.iter() {
-            self.memtables.push(mem.clone());
-        }
-
+    pub fn pick_memtables(mut self, memtables: MemtableRef) -> Self {
+        self.memtables.push(memtables);
         self
     }
 

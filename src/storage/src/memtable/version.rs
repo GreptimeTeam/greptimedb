@@ -10,40 +10,44 @@ use crate::memtable::{MemtableId, MemtableRef};
 /// A version of all memtables.
 ///
 /// This structure is immutable now.
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct MemtableVersion {
-    mutable: MemtableSet,
+    mutable: MemtableRef,
     /// Immutable memtables.
-    immutables: Vec<MemtableSetRef>,
+    immutables: Vec<MemtableRef>,
 }
 
 impl MemtableVersion {
-    pub fn new() -> MemtableVersion {
-        MemtableVersion::default()
+    pub fn new(mutable: MemtableRef) -> MemtableVersion {
+        Self {
+            mutable,
+            immutables: vec![],
+        }
     }
 
     #[inline]
-    pub fn mutable_memtables(&self) -> &MemtableSet {
+    pub fn mutable_memtable(&self) -> &MemtableRef {
         &self.mutable
     }
 
     #[inline]
-    pub fn immutable_memtables(&self) -> &[MemtableSetRef] {
+    pub fn immutable_memtables(&self) -> &[MemtableRef] {
         &self.immutables
     }
 
     pub fn num_memtables(&self) -> usize {
-        self.mutable.len() + self.immutables.iter().map(|set| set.len()).sum::<usize>()
+        // the last `1` is for `mutable`
+        self.immutable_memtables().len() + 1
     }
 
     /// Clone current memtable version and freeze its mutable memtables, which moves
     /// all mutable memtables to immutable memtable list.
-    pub fn freeze_mutable(&self) -> MemtableVersion {
+    pub fn freeze_mutable(&self, new_mutable: MemtableRef) -> MemtableVersion {
         let mut immutables = self.immutables.clone();
-        immutables.push(Arc::new(self.mutable.clone()));
+        immutables.push(self.mutable.clone());
 
         MemtableVersion {
-            mutable: MemtableSet::new(),
+            mutable: new_mutable,
             immutables,
         }
     }
@@ -65,12 +69,13 @@ impl MemtableVersion {
     /// # Panics
     /// Panics if there are memtables with same time ranges.
     pub fn add_mutable(&self, other: MemtableSet) -> MemtableVersion {
-        let mutable = self.mutable.add(other);
+        // let mutable = self.mutable.extend(other);
 
-        Self {
-            mutable,
-            immutables: self.immutables.clone(),
-        }
+        // Self {
+        //     mutable,
+        //     immutables: self.immutables.clone(),
+        // }
+        todo!()
     }
 
     /// Creates a new `MemtableVersion` that removes immutable memtables
@@ -79,7 +84,7 @@ impl MemtableVersion {
         let immutables = self
             .immutables
             .iter()
-            .filter(|immem| immem.max_memtable_id() > max_memtable_id)
+            .filter(|immem| immem.id() > max_memtable_id)
             .cloned()
             .collect();
 
@@ -89,17 +94,12 @@ impl MemtableVersion {
         }
     }
 
-    pub fn memtables_to_flush(&self) -> (Option<MemtableId>, Vec<MemtableWithMeta>) {
-        let max_memtable_id = self
-            .immutables
-            .iter()
-            .map(|immem| immem.max_memtable_id())
-            .max();
-        let memtables = self
-            .immutables
-            .iter()
-            .flat_map(|immem| immem.to_memtable_with_metas())
-            .collect();
+    pub fn memtables_to_flush(&self) -> (Option<MemtableId>, Vec<MemtableRef>) {
+        let max_memtable_id = self.immutables.iter().map(|immem| immem.id()).max();
+        let memtables = self.immutables.clone();
+        // .iter()
+        // .flat_map(|immem| immem.to_memtable_with_metas())
+        // .collect();
 
         (max_memtable_id, memtables)
     }
@@ -169,10 +169,15 @@ impl MemtableSet {
     ///
     /// # Panics
     /// Panics if memtable with same range already exists.
+    #[deprecated]
     pub fn insert(&mut self, range: RangeMillis, mem: MemtableRef) {
         self.max_memtable_id = MemtableId::max(self.max_memtable_id, mem.id());
         let old = self.memtables.insert(RangeKey(range), mem);
         assert!(old.is_none());
+    }
+
+    pub fn add(&mut self, mem: MemtableRef) {
+        todo!()
     }
 
     /// Returns number of memtables in the set.
@@ -196,8 +201,8 @@ impl MemtableSet {
     }
 
     /// Creates a new `MemtableSet` that contains memtables both in `self` and
-    /// `other`, let `self` unchanged.
-    pub fn add(&self, mut other: MemtableSet) -> MemtableSet {
+    /// `other`, left `self` unchanged. `other` will be extended.
+    pub fn extend(&self, mut other: MemtableSet) -> MemtableSet {
         // We use `other.memtables` to extend `self.memtables` since memtables
         // in other should be empty in usual, so overwriting it is okay.
         other
@@ -327,9 +332,9 @@ mod tests {
         s1_memtables.extend(s2_memtables);
 
         let empty = create_test_memtableset(&[]);
-        assert_eq!(s1, s1.add(empty));
+        assert_eq!(s1, s1.extend(empty));
 
-        let s3 = s1.add(s2);
+        let s3 = s1.extend(s2);
         assert_ne!(s1, s3);
 
         assert_eq!(7, s3.memtables.len());
@@ -347,16 +352,16 @@ mod tests {
     fn test_memtableversion() {
         let s1 = create_test_memtableset(&[0, 1, 2]);
         let s2 = create_test_memtableset(&[3, 4, 5, 6]);
-        let s3 = s1.add(s2.clone());
+        let s3 = s1.extend(s2.clone());
 
         let v1 = MemtableVersion::new();
-        assert!(v1.mutable_memtables().is_empty());
+        assert!(v1.mutable_memtable().is_empty());
         assert_eq!(0, v1.num_memtables());
 
         // Add one mutable
         let v2 = v1.add_mutable(s1.clone());
         assert_ne!(v1, v2);
-        let mutables = v2.mutable_memtables();
+        let mutables = v2.mutable_memtable();
         assert_eq!(s1, *mutables);
         assert_eq!(3, v2.num_memtables());
 
@@ -364,7 +369,7 @@ mod tests {
         let v3 = v2.add_mutable(s2);
         assert_ne!(v1, v3);
         assert_ne!(v2, v3);
-        let mutables = v3.mutable_memtables();
+        let mutables = v3.mutable_memtable();
         assert_eq!(s3, *mutables);
         assert!(v3.memtables_to_flush().1.is_empty());
         assert_eq!(7, v3.num_memtables());
@@ -374,7 +379,7 @@ mod tests {
         assert_ne!(v1, v4);
         assert_ne!(v2, v4);
         assert_ne!(v3, v4);
-        assert!(v4.mutable_memtables().is_empty());
+        assert!(v4.mutable_memtable().is_empty());
         assert_eq!(v4.immutables.len(), 1);
         assert_eq!(v4.immutables[0], Arc::new(s3.clone()));
 
@@ -386,7 +391,7 @@ mod tests {
         // Add another mutable
         let s4 = create_test_memtableset(&[7, 8]);
         let v5 = v4.add_mutable(s4.clone());
-        let mutables = v5.mutable_memtables();
+        let mutables = v5.mutable_memtable();
         assert_eq!(s4, *mutables);
         assert_eq!(v4.immutables, v5.immutables);
 

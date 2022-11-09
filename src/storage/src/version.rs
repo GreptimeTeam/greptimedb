@@ -14,7 +14,7 @@ use std::time::Duration;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
-use crate::memtable::{MemtableId, MemtableSet, MemtableVersion};
+use crate::memtable::{MemtableId, MemtableRef, MemtableSet, MemtableVersion};
 use crate::metadata::RegionMetadataRef;
 use crate::schema::RegionSchemaRef;
 use crate::sst::LevelMetas;
@@ -94,11 +94,11 @@ impl VersionControl {
     }
 
     /// Freeze all mutable memtables.
-    pub fn freeze_mutable(&self) {
+    pub fn freeze_mutable(&self, new_memtable: MemtableRef) {
         let mut version_to_update = self.version.lock();
 
         let memtable_version = version_to_update.memtables();
-        let freezed = memtable_version.freeze_mutable();
+        let freezed = memtable_version.freeze_mutable(new_memtable);
         version_to_update.memtables = Arc::new(freezed);
 
         version_to_update.commit();
@@ -116,16 +116,15 @@ impl VersionControl {
         &self,
         metadata: RegionMetadataRef,
         manifest_version: ManifestVersion,
+        mutable_memtable: MemtableRef,
     ) {
         let mut version_to_update = self.version.lock();
 
         let memtable_version = version_to_update.memtables();
         // When applying metadata, mutable memtable set might be empty and there is no
         // need to freeze it.
-        if !memtable_version.mutable_memtables().is_empty() {
-            let freezed = memtable_version.freeze_mutable();
-            version_to_update.memtables = Arc::new(freezed);
-        }
+        let freezed = memtable_version.freeze_mutable(mutable_memtable);
+        version_to_update.memtables = Arc::new(freezed);
 
         version_to_update.apply_metadata(metadata, manifest_version);
         version_to_update.commit();
@@ -178,10 +177,11 @@ impl Version {
     pub fn with_manifest_version(
         metadata: RegionMetadataRef,
         manifest_version: ManifestVersion,
+        mutable_memtable: MemtableRef,
     ) -> Version {
         Version {
             metadata,
-            memtables: Arc::new(MemtableVersion::new()),
+            memtables: Arc::new(MemtableVersion::new(mutable_memtable)),
             ssts: Arc::new(LevelMetas::new()),
             flushed_sequence: 0,
             manifest_version,
@@ -204,8 +204,8 @@ impl Version {
     }
 
     #[inline]
-    pub fn mutable_memtables(&self) -> &MemtableSet {
-        self.memtables.mutable_memtables()
+    pub fn mutable_memtable(&self) -> &MemtableRef {
+        self.memtables.mutable_memtable()
     }
 
     #[inline]

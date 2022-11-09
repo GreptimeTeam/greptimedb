@@ -261,7 +261,7 @@ async fn test_recover_region_manifets() {
     for (i, file) in files.iter().enumerate() {
         assert_eq!(format!("f{}", i + 1), file.file_name());
     }
-    assert!(version.mutable_memtables().is_empty());
+    assert!(version.mutable_memtable().is_empty());
 
     // check manifest state
     assert_eq!(3, manifest.last_version());

@@ -78,6 +78,10 @@ impl Memtable for BTreeMemtable {
     fn bytes_allocated(&self) -> usize {
         self.estimated_bytes.load(AtomicOrdering::Relaxed)
     }
+
+    fn time_span(&self) -> common_time::RangeMillis {
+        todo!()
+    }
 }
 
 struct BTreeIterator {
