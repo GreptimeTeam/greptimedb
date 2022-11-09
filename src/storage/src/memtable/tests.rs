@@ -157,7 +157,7 @@ impl Default for MemtableTester {
 impl MemtableTester {
     fn new() -> MemtableTester {
         let schema = schema_for_test();
-        let builders = vec![Arc::new(DefaultMemtableBuilder {}) as _];
+        let builders = vec![Arc::new(DefaultMemtableBuilder::default()) as _];
 
         MemtableTester { schema, builders }
     }
@@ -165,7 +165,7 @@ impl MemtableTester {
     fn new_memtables(&self) -> Vec<MemtableRef> {
         self.builders
             .iter()
-            .map(|b| b.build(MEMTABLE_ID, self.schema.clone()))
+            .map(|b| b.build(self.schema.clone()))
             .collect()
     }
 

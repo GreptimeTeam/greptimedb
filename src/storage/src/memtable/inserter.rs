@@ -126,349 +126,16 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::timestamp::Timestamp;
-    use datatypes::prelude::ScalarVectorBuilder;
-    use datatypes::vectors::{
-        Int64Vector, Int64VectorBuilder, TimestampVector, TimestampVectorBuilder,
-    };
+    use datatypes::vectors::{Int64Vector, TimestampVector};
     use datatypes::{type_id::LogicalTypeId, value::Value};
     use store_api::storage::{PutOperation, WriteRequest};
 
     use super::*;
-    use crate::memtable::{DefaultMemtableBuilder, IterContext, MemtableBuilder, MemtableId};
+    use crate::memtable::{DefaultMemtableBuilder, IterContext, MemtableBuilder};
     use crate::metadata::RegionMetadata;
     use crate::schema::RegionSchemaRef;
     use crate::test_util::descriptor_util::RegionDescBuilder;
     use crate::test_util::write_batch_util;
-
-    fn new_time_ranges(starts: &[i64], duration: i64) -> Vec<RangeMillis> {
-        let mut ranges = Vec::with_capacity(starts.len());
-        for start in starts {
-            assert_eq!(*start, start / duration * duration);
-
-            ranges.push(RangeMillis::new(*start, start + duration).unwrap());
-        }
-
-        ranges
-    }
-
-    fn check_compute_slice_indexes(
-        timestamps: &[Option<i64>],
-        range_starts: &[i64],
-        duration: i64,
-        expect: &[SliceIndex],
-    ) {
-        assert!(duration > 0);
-
-        let mut builder = TimestampVectorBuilder::with_capacity(0);
-        for v in timestamps {
-            builder.push(v.map(common_time::timestamp::Timestamp::from_millis));
-        }
-
-        let ts_vec = builder.finish();
-
-        let time_ranges = new_time_ranges(range_starts, duration);
-        let time_range_indexes = new_range_index_map(&time_ranges);
-
-        let slice_indexes = compute_slice_indices(
-            ts_vec.iter_data().map(|v| v.map(|v| v.value())),
-            Duration::from_millis(duration as u64),
-            &time_range_indexes,
-        );
-
-        assert_eq!(expect, slice_indexes);
-    }
-
-    #[test]
-    fn test_check_compute_slice_indexes_i64() {
-        let timestamps = &[Some(99), Some(13), Some(18), Some(234)];
-        let range_starts = &[0, 200];
-        let duration = 100;
-
-        let mut builder = Int64VectorBuilder::with_capacity(timestamps.len());
-        for v in timestamps {
-            builder.push(*v);
-        }
-
-        let ts_vec = builder.finish();
-
-        let time_ranges = new_time_ranges(range_starts, duration);
-        let time_range_indexes = new_range_index_map(&time_ranges);
-
-        let slice_indexes = compute_slice_indices(
-            ts_vec.iter_data(),
-            Duration::from_millis(duration as u64),
-            &time_range_indexes,
-        );
-        assert_eq!(
-            vec![
-                SliceIndex {
-                    start: 0,
-                    end: 3,
-                    range_index: 0,
-                },
-                SliceIndex {
-                    start: 3,
-                    end: 4,
-                    range_index: 1,
-                },
-            ],
-            slice_indexes
-        );
-    }
-
-    #[test]
-    fn test_check_compute_slice_indexes_timestamp() {
-        let timestamps = &[Some(99), Some(13), Some(18), Some(234)];
-        let range_starts = &[0, 200];
-        let duration = 100;
-
-        let mut builder = TimestampVectorBuilder::with_capacity(timestamps.len());
-        for v in timestamps {
-            builder.push(v.map(Timestamp::from_millis));
-        }
-
-        let ts_vec = builder.finish();
-
-        let time_ranges = new_time_ranges(range_starts, duration);
-        let time_range_indexes = new_range_index_map(&time_ranges);
-
-        let slice_indexes = compute_slice_indices(
-            ts_vec.iter_data().map(|v| v.map(|v| v.value())),
-            Duration::from_millis(duration as u64),
-            &time_range_indexes,
-        );
-        assert_eq!(
-            vec![
-                SliceIndex {
-                    start: 0,
-                    end: 3,
-                    range_index: 0,
-                },
-                SliceIndex {
-                    start: 3,
-                    end: 4,
-                    range_index: 1,
-                },
-            ],
-            slice_indexes
-        );
-    }
-
-    #[test]
-    fn test_compute_slice_indexes_valid() {
-        // Test empty input.
-        check_compute_slice_indexes(&[], &[], 100, &[]);
-
-        // One valid input.
-        check_compute_slice_indexes(
-            &[Some(99)],
-            &[0],
-            100,
-            &[SliceIndex {
-                start: 0,
-                end: 1,
-                range_index: 0,
-            }],
-        );
-
-        // 2 ranges.
-        check_compute_slice_indexes(
-            &[Some(99), Some(234)],
-            &[0, 200],
-            100,
-            &[
-                SliceIndex {
-                    start: 0,
-                    end: 1,
-                    range_index: 0,
-                },
-                SliceIndex {
-                    start: 1,
-                    end: 2,
-                    range_index: 1,
-                },
-            ],
-        );
-
-        // Multiple elements in first range.
-        check_compute_slice_indexes(
-            &[Some(99), Some(13), Some(18), Some(234)],
-            &[0, 200],
-            100,
-            &[
-                SliceIndex {
-                    start: 0,
-                    end: 3,
-                    range_index: 0,
-                },
-                SliceIndex {
-                    start: 3,
-                    end: 4,
-                    range_index: 1,
-                },
-            ],
-        );
-
-        // Multiple elements in last range.
-        check_compute_slice_indexes(
-            &[Some(99), Some(234), Some(271)],
-            &[0, 200],
-            100,
-            &[
-                SliceIndex {
-                    start: 0,
-                    end: 1,
-                    range_index: 0,
-                },
-                SliceIndex {
-                    start: 1,
-                    end: 3,
-                    range_index: 1,
-                },
-            ],
-        );
-
-        // Mulitple ranges.
-        check_compute_slice_indexes(
-            &[Some(99), Some(13), Some(234), Some(456)],
-            &[0, 200, 400],
-            100,
-            &[
-                SliceIndex {
-                    start: 0,
-                    end: 2,
-                    range_index: 0,
-                },
-                SliceIndex {
-                    start: 2,
-                    end: 3,
-                    range_index: 1,
-                },
-                SliceIndex {
-                    start: 3,
-                    end: 4,
-                    range_index: 2,
-                },
-            ],
-        );
-
-        // Different slices with same range.
-        check_compute_slice_indexes(
-            &[Some(99), Some(234), Some(15)],
-            &[0, 200],
-            100,
-            &[
-                SliceIndex {
-                    start: 0,
-                    end: 1,
-                    range_index: 0,
-                },
-                SliceIndex {
-                    start: 1,
-                    end: 2,
-                    range_index: 1,
-                },
-                SliceIndex {
-                    start: 2,
-                    end: 3,
-                    range_index: 0,
-                },
-            ],
-        );
-    }
-
-    #[test]
-    fn test_compute_slice_indexes_null_timestamp() {
-        check_compute_slice_indexes(&[None], &[0], 100, &[]);
-
-        check_compute_slice_indexes(
-            &[None, None, Some(53)],
-            &[0],
-            100,
-            &[SliceIndex {
-                start: 2,
-                end: 3,
-                range_index: 0,
-            }],
-        );
-
-        check_compute_slice_indexes(
-            &[Some(53), None, None],
-            &[0],
-            100,
-            &[SliceIndex {
-                start: 0,
-                end: 1,
-                range_index: 0,
-            }],
-        );
-
-        check_compute_slice_indexes(
-            &[None, Some(53), None, Some(240), Some(13), None],
-            &[0, 200],
-            100,
-            &[
-                SliceIndex {
-                    start: 1,
-                    end: 2,
-                    range_index: 0,
-                },
-                SliceIndex {
-                    start: 3,
-                    end: 4,
-                    range_index: 1,
-                },
-                SliceIndex {
-                    start: 4,
-                    end: 5,
-                    range_index: 0,
-                },
-            ],
-        );
-    }
-
-    #[test]
-    fn test_compute_slice_indexes_no_range() {
-        check_compute_slice_indexes(
-            &[Some(99), Some(234), Some(15)],
-            &[0],
-            100,
-            &[
-                SliceIndex {
-                    start: 0,
-                    end: 1,
-                    range_index: 0,
-                },
-                SliceIndex {
-                    start: 2,
-                    end: 3,
-                    range_index: 0,
-                },
-            ],
-        );
-
-        check_compute_slice_indexes(
-            &[Some(99), Some(15), Some(234)],
-            &[0],
-            100,
-            &[SliceIndex {
-                start: 0,
-                end: 2,
-                range_index: 0,
-            }],
-        );
-
-        check_compute_slice_indexes(
-            &[Some(-1), Some(99), Some(15)],
-            &[0],
-            100,
-            &[SliceIndex {
-                start: 1,
-                end: 3,
-                range_index: 0,
-            }],
-        );
-    }
 
     fn new_test_write_batch() -> WriteBatch {
         write_batch_util::new_write_batch(
@@ -501,18 +168,8 @@ mod tests {
         batch.put(put_data).unwrap();
     }
 
-    fn new_memtable_set(time_ranges: &[RangeMillis], schema: &RegionSchemaRef) -> MemtableSet {
-        let mut set = MemtableSet::new();
-        for (id, range) in time_ranges.iter().enumerate() {
-            let mem = DefaultMemtableBuilder {}.build(id as MemtableId, schema.clone());
-            set.insert(*range, mem)
-        }
-
-        set
-    }
-
     fn check_memtable_content(
-        mem: &dyn Memtable,
+        mem: &MemtableRef,
         sequence: SequenceNumber,
         data: &[(i64, Option<i64>)],
     ) {
@@ -540,14 +197,9 @@ mod tests {
     fn test_inserter_put_one_memtable() {
         let sequence = 11111;
         let bucket_duration = 100;
-        let time_ranges = new_time_ranges(&[0], bucket_duration);
         let memtable_schema = new_region_schema();
-        let memtables = new_memtable_set(&time_ranges, &memtable_schema);
-        let mut inserter = Inserter::new(
-            sequence,
-            time_ranges,
-            Duration::from_millis(bucket_duration as u64),
-        );
+        let mutable_memtable = DefaultMemtableBuilder::default().build(memtable_schema);
+        let mut inserter = Inserter::new(sequence);
 
         let mut batch = new_test_write_batch();
         put_batch(&mut batch, &[(1, Some(1)), (2, None)]);
@@ -563,12 +215,9 @@ mod tests {
             ],
         );
 
-        inserter.insert_memtables(&batch, &memtables).unwrap();
-        let mem = memtables
-            .get_by_range(&RangeMillis::new(0, 100).unwrap())
-            .unwrap();
+        inserter.insert_memtable(&batch, &mutable_memtable).unwrap();
         check_memtable_content(
-            &**mem,
+            &mutable_memtable,
             sequence,
             &[(1, Some(1)), (2, Some(2)), (3, None), (4, Some(4))],
         );
@@ -578,14 +227,9 @@ mod tests {
     fn test_inserter_put_multiple() {
         let sequence = 11111;
         let bucket_duration = 100;
-        let time_ranges = new_time_ranges(&[0, 100, 200], bucket_duration);
         let memtable_schema = new_region_schema();
-        let memtables = new_memtable_set(&time_ranges, &memtable_schema);
-        let mut inserter = Inserter::new(
-            sequence,
-            time_ranges,
-            Duration::from_millis(bucket_duration as u64),
-        );
+        let mutable_memtable = DefaultMemtableBuilder::default().build(memtable_schema);
+        let mut inserter = Inserter::new(sequence);
 
         let mut batch = new_test_write_batch();
         put_batch(
@@ -609,24 +253,23 @@ mod tests {
             ],
         );
 
-        inserter.insert_memtables(&batch, &memtables).unwrap();
-        let mem = memtables
-            .get_by_range(&RangeMillis::new(0, 100).unwrap())
-            .unwrap();
-        check_memtable_content(&**mem, sequence, &[(1, None), (2, None), (3, Some(3))]);
-
-        let mem = memtables
-            .get_by_range(&RangeMillis::new(100, 200).unwrap())
-            .unwrap();
+        inserter.insert_memtable(&batch, &mutable_memtable).unwrap();
         check_memtable_content(
-            &**mem,
+            &mutable_memtable,
+            sequence,
+            &[(1, None), (2, None), (3, Some(3))],
+        );
+
+        check_memtable_content(
+            &mutable_memtable,
             sequence,
             &[(101, Some(101)), (102, None), (180, Some(180))],
         );
 
-        let mem = memtables
-            .get_by_range(&RangeMillis::new(200, 300).unwrap())
-            .unwrap();
-        check_memtable_content(&**mem, sequence, &[(201, Some(201)), (211, Some(211))]);
+        check_memtable_content(
+            &mutable_memtable,
+            sequence,
+            &[(201, Some(201)), (211, Some(211))],
+        );
     }
 }

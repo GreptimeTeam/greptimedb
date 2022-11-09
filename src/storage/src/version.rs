@@ -151,8 +151,8 @@ pub struct Version {
 impl Version {
     /// Create a new `Version` with given `metadata`.
     #[cfg(test)]
-    pub fn new(metadata: RegionMetadataRef) -> Version {
-        Version::with_manifest_version(metadata, 0)
+    pub fn new(metadata: RegionMetadataRef, memtable: MemtableRef) -> Version {
+        Version::with_manifest_version(metadata, 0, memtable)
     }
 
     /// Create a new `Version` with given `metadata` and initial `manifest_version`.
@@ -259,16 +259,17 @@ impl Version {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::RegionMetadata;
+    use crate::memtable::{DefaultMemtableBuilder, MemtableBuilder};
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     fn new_version_control() -> VersionControl {
         let desc = RegionDescBuilder::new("version-test")
             .enable_version_column(false)
             .build();
-        let metadata: RegionMetadata = desc.try_into().unwrap();
+        let metadata: RegionMetadataRef = Arc::new(desc.try_into().unwrap());
+        let memtable = DefaultMemtableBuilder::default().build(metadata.schema().clone());
 
-        let version = Version::new(Arc::new(metadata));
+        let version = Version::new(metadata, memtable);
         VersionControl::with_version(version)
     }
 

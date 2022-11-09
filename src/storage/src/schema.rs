@@ -13,10 +13,7 @@ mod tests {
 
     use datatypes::vectors::{Int64Vector, UInt64Vector, UInt8Vector, VectorRef};
 
-    use super::*;
-    use crate::metadata::RegionMetadata;
     use crate::read::Batch;
-    use crate::test_util::descriptor_util;
 
     pub const REGION_NAME: &str = "test";
 
@@ -41,15 +38,5 @@ mod tests {
         columns.push(Arc::new(op_types));
 
         Batch::new(columns)
-    }
-
-    pub(crate) fn new_region_schema(version: u32, num_value_columns: usize) -> RegionSchema {
-        let metadata: RegionMetadata =
-            descriptor_util::desc_with_value_columns(REGION_NAME, num_value_columns)
-                .try_into()
-                .unwrap();
-
-        let columns = metadata.columns;
-        RegionSchema::new(columns, version).unwrap()
     }
 }

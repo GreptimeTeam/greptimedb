@@ -343,13 +343,13 @@ mod tests {
     use super::*;
     use crate::metadata::Error;
     use crate::schema::tests;
-    use crate::test_util::{read_util, schema_util};
+    use crate::test_util::{self, read_util, schema_util};
 
     #[test]
     fn test_projection() {
         // Build a region schema with 2 value columns. So the final user schema is
         // (k0, timestamp, v0, v1)
-        let region_schema = tests::new_region_schema(0, 2);
+        let region_schema = test_util::schema_util::new_region_schema(0, 2);
 
         // Projection, but still keep column order.
         // After projection: (timestamp, v0)
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn test_projected_schema_with_projection() {
         // (k0, timestamp, v0, v1, v2)
-        let region_schema = Arc::new(tests::new_region_schema(123, 3));
+        let region_schema = Arc::new(test_util::schema_util::new_region_schema(123, 3));
 
         // After projection: (v1, timestamp)
         let projected_schema =
@@ -428,7 +428,7 @@ mod tests {
         // The schema to read should be same as region schema with (k0, timestamp, v0).
         // We can't use `new_schema_with_version()` because the StoreSchema also store other
         // metadata that `new_schema_with_version()` can't store.
-        let expect_schema = tests::new_region_schema(123, 1);
+        let expect_schema = test_util::schema_util::new_region_schema(123, 1);
         assert_eq!(
             expect_schema.store_schema(),
             projected_schema.schema_to_read()
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn test_projected_schema_no_projection() {
         // (k0, timestamp, v0)
-        let region_schema = Arc::new(tests::new_region_schema(123, 1));
+        let region_schema = Arc::new(test_util::schema_util::new_region_schema(123, 1));
 
         let projected_schema = ProjectedSchema::no_projection(region_schema.clone());
 
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn test_projected_schema_empty_projection() {
         // (k0, timestamp, v0)
-        let region_schema = Arc::new(tests::new_region_schema(123, 1));
+        let region_schema = Arc::new(test_util::schema_util::new_region_schema(123, 1));
 
         let err = ProjectedSchema::new(region_schema, Some(Vec::new()))
             .err()

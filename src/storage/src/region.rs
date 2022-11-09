@@ -163,11 +163,15 @@ impl<S: LogStore> RegionImpl<S> {
         _opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
-        let (version, mut recovered_metadata) =
-            match Self::recover_from_manifest(&store_config.manifest, &store_config).await? {
-                (None, _) => return Ok(None),
-                (Some(v), m) => (v, m),
-            };
+        let (version, mut recovered_metadata) = match Self::recover_from_manifest(
+            &store_config.manifest,
+            &store_config.memtable_builder,
+        )
+        .await?
+        {
+            (None, _) => return Ok(None),
+            (Some(v), m) => (v, m),
+        };
 
         logging::debug!(
             "Region recovered version from manifest, version: {:?}",
@@ -246,7 +250,7 @@ impl<S: LogStore> RegionImpl<S> {
 
     async fn recover_from_manifest(
         manifest: &RegionManifest,
-        store_config: &StoreConfig<S>,
+        memtable_builder: &MemtableBuilderRef,
     ) -> Result<(Option<Version>, RecoveredMetadataMap)> {
         let (start, end) = Self::manifest_scan_range();
         let mut iter = manifest.scan(start, end).await?;
@@ -269,9 +273,8 @@ impl<S: LogStore> RegionImpl<S> {
                             .context(error::InvalidRawRegionSnafu { region })?;
                         // Use current schema to build a memtable as placeholder. This will be replaced later
                         // in `freeze_mutable_and_apply_metadata()`.
-                        let placeholder_memtable = store_config
-                            .memtable_builder
-                            .build(region_metadata.schema().clone());
+                        let placeholder_memtable =
+                            memtable_builder.build(region_metadata.schema().clone());
                         version = Some(Version::with_manifest_version(
                             Arc::new(region_metadata),
                             last_manifest_version,

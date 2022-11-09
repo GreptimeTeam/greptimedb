@@ -222,6 +222,7 @@ mod tests {
     use super::*;
     use crate::read::Batch;
     use crate::schema::tests;
+    use crate::test_util;
 
     fn check_chunk_batch(chunk: &ArrowChunk<Arc<dyn Array>>, batch: &Batch) {
         assert_eq!(5, chunk.columns().len());
@@ -234,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_store_schema() {
-        let region_schema = Arc::new(tests::new_region_schema(123, 1));
+        let region_schema = Arc::new(test_util::schema_util::new_region_schema(123, 1));
 
         // Checks StoreSchema.
         let store_schema = region_schema.store_schema();
