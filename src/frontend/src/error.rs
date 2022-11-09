@@ -149,20 +149,28 @@ pub enum Error {
     },
 
     #[snafu(display("Table not found: {}", table_name))]
-    TableNotFound { table_name: String },
+    TableNotFound {
+        table_name: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Column {} not found in table {}", column_name, table_name))]
     ColumnNotFound {
         column_name: String,
         table_name: String,
+        backtrace: Backtrace,
     },
 
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
         columns,
-        values
+        values,
     ))]
-    ColumnValuesNumberMismatch { columns: usize, values: usize },
+    ColumnValuesNumberMismatch {
+        columns: usize,
+        values: usize,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Failed to join task, source: {}", source))]
     JoinTask {
