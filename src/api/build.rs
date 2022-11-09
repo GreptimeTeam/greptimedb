@@ -1,5 +1,9 @@
+use std::path::PathBuf;
+
 fn main() {
+    let default_out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     tonic_build::configure()
+        .file_descriptor_set_path(default_out_dir.join("greptime_fd.bin"))
         .compile(
             &[
                 "greptime/v1/insert.proto",

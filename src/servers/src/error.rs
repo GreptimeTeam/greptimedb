@@ -155,6 +155,12 @@ pub enum Error {
 
     #[snafu(display("Failed to decode region id, source: {}", source))]
     DecodeRegionId { source: api::DecodeError },
+
+    #[snafu(display("Failed to build gRPC reflection service, source: {}", source))]
+    GrpcReflectionService {
+        source: tonic_reflection::server::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -172,7 +178,8 @@ impl ErrorExt for Error {
             | StartGrpc { .. }
             | AlreadyStarted { .. }
             | InvalidPromRemoteReadQueryResult { .. }
-            | TcpBind { .. } => StatusCode::Internal,
+            | TcpBind { .. }
+            | GrpcReflectionService { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }

@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
-use crate::error::{AlreadyStartedSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
+use crate::error::{self, AlreadyStartedSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::grpc::handler::BatchHandler;
 use crate::query_handler::{GrpcAdminHandlerRef, GrpcQueryHandlerRef};
 use crate::server::Server;
@@ -104,9 +104,16 @@ impl Server for GrpcServer {
             (listener, addr)
         };
 
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(api::v1::GREPTIME_FD_SET)
+            .with_service_name("greptime.v1.Greptime")
+            .build()
+            .context(error::GrpcReflectionServiceSnafu)?;
+
         // Would block to serve requests.
         tonic::transport::Server::builder()
             .add_service(self.create_service())
+            .add_service(reflection_service)
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), rx.map(drop))
             .await
             .context(StartGrpcSnafu)?;
