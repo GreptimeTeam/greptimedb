@@ -24,12 +24,12 @@ use crate::table::DistTable;
 
 pub type DatanodeInstances = HashMap<DatanodeId, DatanodeInstance>;
 
-pub struct FrontendCatalogList {
+pub struct FrontendCatalogManager {
     backend: KvBackendRef,
     datanode_instances: Arc<RwLock<DatanodeInstances>>,
 }
 
-impl FrontendCatalogList {
+impl FrontendCatalogManager {
     #[allow(dead_code)]
     pub fn new(backend: KvBackendRef, datanode_instances: Arc<RwLock<DatanodeInstances>>) -> Self {
         Self {
@@ -39,7 +39,7 @@ impl FrontendCatalogList {
     }
 }
 
-impl CatalogList for FrontendCatalogList {
+impl CatalogList for FrontendCatalogManager {
     fn as_any(&self) -> &dyn Any {
         self
     }
