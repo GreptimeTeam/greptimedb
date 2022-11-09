@@ -5,6 +5,7 @@ on:
     branches:
       - "main"
       - "develop"
+  workflow_dispatch:
 
 name: Code coverage
 
