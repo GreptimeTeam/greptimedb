@@ -92,6 +92,7 @@ pub enum Error {
     #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
     Insert {
         table_name: String,
+        #[snafu(backtrace)]
         source: TableError,
     },
 
