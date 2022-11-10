@@ -35,7 +35,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.0.0
+        uses: Swatinem/rust-cache@v2.2.0
       - uses: actions-rs/cargo@v1
         with:
           command: check
@@ -65,7 +65,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.0.0
+        uses: Swatinem/rust-cache@v2.2.0
       - name: Cleanup disk
         uses: curoky/cleanup-disk-action@v2.0
         with:
@@ -96,7 +96,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.0.0
+        uses: Swatinem/rust-cache@v2.2.0
       - run: rustup component add rustfmt
       - uses: actions-rs/cargo@v1
         with:
@@ -117,7 +117,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           override: true
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.0.0
+        uses: Swatinem/rust-cache@v2.2.0
       - run: rustup component add clippy
       - uses: actions-rs/cargo@v1
         with:
