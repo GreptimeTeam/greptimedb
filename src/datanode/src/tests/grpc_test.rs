@@ -11,6 +11,7 @@ use api::v1::{
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::GrpcServer;
 use servers::server::Server;
@@ -177,6 +178,8 @@ async fn insert_and_assert(db: &Database) {
     }
     .into()];
     let expr = InsertExpr {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: "demo".to_string(),
         expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
         options: HashMap::default(),

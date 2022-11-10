@@ -10,7 +10,7 @@ use sql::statements::{self, insert::Insert};
 use table::requests::*;
 
 use crate::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu, ParseSqlSnafu,
     ParseSqlValueSnafu, Result, TableNotFoundSnafu,
 };
 use crate::sql::{SqlHandler, SqlRequest};
@@ -35,9 +35,7 @@ impl SqlHandler {
     ) -> Result<SqlRequest> {
         let columns = stmt.columns();
         let values = stmt.values().context(ParseSqlValueSnafu)?;
-        //TODO(dennis): table name may be in the form of `catalog.schema.table`,
-        //   but we don't process it right now.
-        let table_name = stmt.table_name();
+        let (catalog_name, schema_name, table_name) = stmt.table_name().context(ParseSqlSnafu)?;
 
         let table = schema_provider
             .table(&table_name)
@@ -101,6 +99,8 @@ impl SqlHandler {
         }
 
         Ok(SqlRequest::Insert(InsertRequest {
+            catalog_name,
+            schema_name,
             table_name,
             columns_values: columns_builders
                 .into_iter()

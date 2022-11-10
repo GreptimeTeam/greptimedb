@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use api::v1::codec::InsertBatch;
 use api::v1::{column, column::SemanticType, insert_expr, Column, ColumnDataType, InsertExpr};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::writer::Precision;
 use table::requests::InsertRequest;
 
@@ -177,6 +178,9 @@ impl DataPoint {
             row_count: 1,
         };
         InsertExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            // TODO(dennis): supports database in http API
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: self.metric.clone(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values {
                 values: vec![batch.into()],

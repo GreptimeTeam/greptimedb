@@ -105,8 +105,17 @@ impl SqlQueryHandler for Instance {
                 .await
                 .and_then(|object_result| object_result.try_into()),
             Statement::Insert(insert) => {
-                let table_name = insert.table_name();
+                let (catalog_name, schema_name, table_name) = insert
+                    .table_name()
+                    .context(error::ParseSqlSnafu)
+                    .map_err(BoxedError::new)
+                    .context(server_error::ExecuteInsertSnafu {
+                        msg: "Failed to get table name",
+                    })?;
+
                 let expr = InsertExpr {
+                    catalog_name,
+                    schema_name,
                     table_name,
                     expr: Some(insert_expr::Expr::Sql(query.to_string())),
                     options: HashMap::default(),
@@ -285,6 +294,7 @@ mod tests {
         admin_expr, admin_result, column, column::SemanticType, object_expr, object_result,
         select_expr, Column, ExprHeader, MutateResult, SelectExpr,
     };
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;
 
@@ -450,6 +460,8 @@ mod tests {
         }
         .into()];
         let insert_expr = InsertExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
             options: HashMap::default(),

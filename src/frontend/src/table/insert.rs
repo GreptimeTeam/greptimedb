@@ -113,6 +113,8 @@ fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<Inse
     );
 
     Ok(InsertExpr {
+        catalog_name: insert.catalog_name,
+        schema_name: insert.schema_name,
         table_name: insert.table_name,
         options,
         expr: Some(Expr::Values(insert_expr::Values {
@@ -130,6 +132,7 @@ mod tests {
         insert_expr::Expr,
         ColumnDataType, InsertExpr,
     };
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::{prelude::ConcreteDataType, types::StringType, vectors::VectorBuilder};
     use table::requests::InsertRequest;
 
@@ -160,6 +163,8 @@ mod tests {
         columns_values.insert("id".to_string(), builder.finish());
 
         InsertRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
         }

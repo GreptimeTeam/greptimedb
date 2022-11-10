@@ -6,7 +6,6 @@ use api::v1::{
     ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
@@ -95,13 +94,11 @@ impl Instance {
 
     pub async fn execute_grpc_insert(
         &self,
+        catalog_name: &str,
+        schema_name: &str,
         table_name: &str,
         values: insert_expr::Values,
     ) -> Result<Output> {
-        // maybe infer from insert batch?
-        let catalog_name = DEFAULT_CATALOG_NAME;
-        let schema_name = DEFAULT_SCHEMA_NAME;
-
         let schema_provider = self
             .catalog_manager
             .catalog(catalog_name)
@@ -141,9 +138,13 @@ impl Instance {
                 .context(TableNotFoundSnafu { table_name })?
         };
 
-        let insert =
-            common_insert::insertion_expr_to_request(table_name, insert_batches, table.clone())
-                .context(InsertDataSnafu)?;
+        let insert = insertion_expr_to_request(
+            catalog_name,
+            schema_name,
+            table_name,
+            insert_batches,
+            table.clone(),
+        ).context(InsertDataSnafu)?;
 
         let affected_rows = table
             .insert(insert)
@@ -153,8 +154,17 @@ impl Instance {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    async fn handle_insert(&self, table_name: &str, values: insert_expr::Values) -> ObjectResult {
-        match self.execute_grpc_insert(table_name, values).await {
+    async fn handle_insert(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        values: insert_expr::Values,
+    ) -> ObjectResult {
+        match self
+            .execute_grpc_insert(catalog_name, schema_name, table_name, values)
+            .await
+        {
             Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
                 .status_code(StatusCode::Success as u32)
                 .mutate_result(rows as u32, 0)
@@ -207,6 +217,8 @@ impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> servers::error::Result<ObjectResult> {
         let object_resp = match query.expr {
             Some(object_expr::Expr::Insert(insert_expr)) => {
+                let catalog_name = &insert_expr.catalog_name;
+                let schema_name = &insert_expr.schema_name;
                 let table_name = &insert_expr.table_name;
                 let expr = insert_expr
                     .expr
@@ -227,7 +239,8 @@ impl GrpcQueryHandler for Instance {
 
                 match expr {
                     insert_expr::Expr::Values(values) => {
-                        self.handle_insert(table_name, values).await
+                        self.handle_insert(catalog_name, schema_name, table_name, values)
+                            .await
                     }
                     insert_expr::Expr::Sql(sql) => {
                         let output = self.execute_sql(&sql).await;

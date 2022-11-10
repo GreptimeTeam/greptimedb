@@ -4,6 +4,7 @@ use api::v1::{
     insert_expr::{self, Expr},
     InsertExpr,
 };
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::writer::{LinesWriter, Precision};
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
@@ -150,6 +151,9 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
         Ok(writers
             .into_iter()
             .map(|(table_name, writer)| InsertExpr {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                // TODO(dennis): supports database in http API
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name,
                 expr: Some(Expr::Values(insert_expr::Values {
                     values: vec![writer.finish().into()],

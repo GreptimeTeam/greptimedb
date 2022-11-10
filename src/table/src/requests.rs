@@ -9,6 +9,8 @@ use crate::metadata::TableId;
 /// Insert request
 #[derive(Debug)]
 pub struct InsertRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
     pub table_name: String,
     pub columns_values: HashMap<String, VectorRef>,
 }

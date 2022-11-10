@@ -117,6 +117,8 @@ impl ScriptsTable {
 
         let _ = table
             .insert(InsertRequest {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name: SCRIPTS_TABLE_NAME.to_string(),
                 columns_values,
             })

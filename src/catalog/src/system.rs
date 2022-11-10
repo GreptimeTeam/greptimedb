@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{
     INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID,
     SYSTEM_CATALOG_TABLE_NAME,
@@ -219,6 +220,8 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
     );
 
     InsertRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
         columns_values,
     }
