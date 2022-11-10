@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
 use futures::StreamExt;
-use pgwire::api::auth::cleartext::{CleartextPasswordAuthStartupHandler, PasswordVerifier};
-use pgwire::api::auth::ServerParameterProvider;
+use pgwire::api::auth::{self, ServerParameterProvider, StartupHandler};
 use pgwire::api::ClientInfo;
 use pgwire::error::PgWireResult;
+use pgwire::messages::PgWireFrontendMessage;
 use pgwire::tokio::process_socket;
 use tokio;
 
@@ -19,28 +19,43 @@ use crate::postgres::handler::PostgresServerHandler;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 
-struct DummyPasswordVerifier;
+struct SimpleStartupHandler;
 
 #[async_trait]
-impl PasswordVerifier for DummyPasswordVerifier {
-    async fn verify_password(&self, _password: &str) -> PgWireResult<bool> {
-        Ok(true)
+impl StartupHandler for SimpleStartupHandler {
+    async fn on_startup<C>(
+        &self,
+        client: &mut C,
+        message: &pgwire::messages::PgWireFrontendMessage,
+    ) -> PgWireResult<()>
+    where
+        C: ClientInfo + futures::Sink<pgwire::messages::PgWireBackendMessage> + Unpin + Send,
+        C::Error: std::fmt::Debug,
+        pgwire::error::PgWireError:
+            From<<C as futures::Sink<pgwire::messages::PgWireBackendMessage>>::Error>,
+    {
+        if let PgWireFrontendMessage::Startup(ref startup) = message {
+            auth::save_startup_parameters_to_metadata(client, startup);
+            auth::finish_authentication(client, &GreptimeDBStartupParameters::new()).await;
+        }
+
+        Ok(())
     }
 }
 
-struct StartupParameters {
+struct GreptimeDBStartupParameters {
     version: &'static str,
 }
 
-impl StartupParameters {
-    fn new() -> StartupParameters {
-        StartupParameters {
+impl GreptimeDBStartupParameters {
+    fn new() -> GreptimeDBStartupParameters {
+        GreptimeDBStartupParameters {
             version: env!("CARGO_PKG_VERSION"),
         }
     }
 }
 
-impl ServerParameterProvider for StartupParameters {
+impl ServerParameterProvider for GreptimeDBStartupParameters {
     fn server_parameters<C>(&self, _client: &C) -> Option<HashMap<String, String>>
     where
         C: ClientInfo,
@@ -54,8 +69,7 @@ impl ServerParameterProvider for StartupParameters {
 
 pub struct PostgresServer {
     base_server: BaseTcpServer,
-    auth_handler:
-        Arc<CleartextPasswordAuthStartupHandler<DummyPasswordVerifier, StartupParameters>>,
+    auth_handler: Arc<SimpleStartupHandler>,
     query_handler: Arc<PostgresServerHandler>,
 }
 
@@ -63,10 +77,7 @@ impl PostgresServer {
     /// Creates a new Postgres server with provided query_handler and async runtime
     pub fn new(query_handler: SqlQueryHandlerRef, io_runtime: Arc<Runtime>) -> PostgresServer {
         let postgres_handler = Arc::new(PostgresServerHandler::new(query_handler));
-        let startup_handler = Arc::new(CleartextPasswordAuthStartupHandler::new(
-            DummyPasswordVerifier,
-            StartupParameters::new(),
-        ));
+        let startup_handler = Arc::new(SimpleStartupHandler);
         PostgresServer {
             base_server: BaseTcpServer::create_server("Postgres", io_runtime),
             auth_handler: startup_handler,
