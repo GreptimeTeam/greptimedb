@@ -13,6 +13,11 @@ pub struct InsertRequest {
     pub columns_values: HashMap<String, VectorRef>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateDatabaseRequest {
+    pub db_name: String,
+}
+
 /// Create table request
 #[derive(Debug, Clone)]
 pub struct CreateTableRequest {

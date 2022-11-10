@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use catalog::local::MemorySchemaProvider;
 use catalog::RegisterTableRequest;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_telemetry::tracing::info;
 use datatypes::schema::SchemaBuilder;
@@ -15,13 +17,31 @@ use table::metadata::TableId;
 use table::requests::*;
 
 use crate::error::{
-    self, ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu,
-    InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu, Result,
+    self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateSchemaSnafu,
+    CreateTableSnafu, InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu,
+    RegisterSchemaSnafu, Result,
 };
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn create(&self, req: CreateTableRequest) -> Result<Output> {
+    pub(crate) async fn create_database(&self, req: CreateDatabaseRequest) -> Result<Output> {
+        // TODO(dennis): catalog manager may provide a function to create new schema
+        let schema = Arc::new(MemorySchemaProvider::new());
+
+        self.catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .context(CatalogSnafu)?
+            .context(CatalogNotFoundSnafu {
+                name: DEFAULT_CATALOG_NAME,
+            })?
+            .register_schema(req.db_name.clone(), schema)
+            .context(RegisterSchemaSnafu)?;
+
+        info!("Successfully created database: {:?}", req.db_name);
+        Ok(Output::AffectedRows(1))
+    }
+
+    pub(crate) async fn create_table(&self, req: CreateTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
         // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
@@ -52,7 +72,7 @@ impl SqlHandler {
         Ok(Output::AffectedRows(1))
     }
 
-    /// Converts [CreateTable] to [SqlRequest::Create].
+    /// Converts [CreateTable] to [SqlRequest::CreateTable].
     pub(crate) fn create_to_request(
         &self,
         table_id: TableId,

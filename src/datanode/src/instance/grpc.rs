@@ -85,7 +85,7 @@ impl Instance {
 
         let _result = self
             .sql_handler()
-            .execute(SqlRequest::Create(create_table_request))
+            .execute(SqlRequest::CreateTable(create_table_request))
             .await?;
 
         info!("Success to create table: {} automatically", table_name);

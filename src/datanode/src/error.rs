@@ -177,6 +177,12 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Failed to register a new schema, source: {}", source))]
+    RegisterSchema {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
     #[snafu(display("Failed to decode as physical plan, source: {}", source))]
     IntoPhysicalPlan {
         #[snafu(backtrace)]
@@ -321,6 +327,7 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
+            | Error::RegisterSchema { .. }
             | Error::Conversion { .. }
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }

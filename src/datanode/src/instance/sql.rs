@@ -9,6 +9,7 @@ use common_telemetry::{
 use servers::query_handler::SqlQueryHandler;
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
+use table::requests::CreateDatabaseRequest;
 
 use crate::error::{CatalogSnafu, ExecuteSqlSnafu, Result};
 use crate::instance::Instance;
@@ -48,8 +49,16 @@ impl Instance {
                 self.sql_handler.execute(request).await
             }
 
-            Statement::CreateDatabase(_) => {
-                unimplemented!();
+            Statement::CreateDatabase(c) => {
+                let request = CreateDatabaseRequest {
+                    db_name: c.name.to_string(),
+                };
+
+                info!("Creating a new database: {}", request.db_name);
+
+                self.sql_handler
+                    .execute(SqlRequest::CreateDatabase(request))
+                    .await
             }
 
             Statement::CreateTable(c) => {
@@ -71,7 +80,9 @@ impl Instance {
                     catalog_name, schema_name, table_name, table_id
                 );
 
-                self.sql_handler.execute(SqlRequest::Create(request)).await
+                self.sql_handler
+                    .execute(SqlRequest::CreateTable(request))
+                    .await
             }
             Statement::Alter(alter_table) => {
                 let req = self.sql_handler.alter_to_request(alter_table)?;
