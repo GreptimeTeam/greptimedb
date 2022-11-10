@@ -24,15 +24,17 @@ use table::{
     Table,
 };
 
-use crate::error::{self, ColumnNotFoundSnafu, DecodeInsertSnafu, IllegalInsertDataSnafu, Result};
+use crate::error::{
+    ColumnDataTypeSnafu, ColumnNotFoundSnafu, CreateSchemaSnafu, DecodeInsertSnafu,
+    DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu, MissingTimestampColumnSnafu, Result,
+};
 
 const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
 const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
 
 #[inline]
 fn build_column_schema(column_name: &str, datatype: i32, nullable: bool) -> Result<ColumnSchema> {
-    let datatype_wrapper =
-        ColumnDataTypeWrapper::try_new(datatype).context(error::ColumnDataTypeSnafu)?;
+    let datatype_wrapper = ColumnDataTypeWrapper::try_new(datatype).context(ColumnDataTypeSnafu)?;
 
     Ok(ColumnSchema::new(
         column_name,
@@ -127,7 +129,7 @@ pub fn build_create_table_request(
                     TIMESTAMP_SEMANTIC_TYPE => {
                         ensure!(
                             timestamp_index == usize::MAX,
-                            error::DuplicatedTimestampColumnSnafu {
+                            DuplicatedTimestampColumnSnafu {
                                 exists: &columns[timestamp_index].column_name,
                                 duplicated: column_name,
                             }
@@ -145,17 +147,14 @@ pub fn build_create_table_request(
             }
         }
 
-        ensure!(
-            timestamp_index != usize::MAX,
-            error::MissingTimestampColumnSnafu
-        );
+        ensure!(timestamp_index != usize::MAX, MissingTimestampColumnSnafu);
 
         let schema = Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
                 .timestamp_index(Some(timestamp_index))
                 .build()
-                .context(error::CreateSchemaSnafu)?,
+                .context(CreateSchemaSnafu)?,
         );
 
         return Ok(CreateTableRequest {
@@ -172,7 +171,7 @@ pub fn build_create_table_request(
         });
     }
 
-    error::IllegalInsertDataSnafu.fail()
+    IllegalInsertDataSnafu.fail()
 }
 
 pub fn insertion_expr_to_request(
@@ -357,7 +356,8 @@ fn is_null(null_mask: &BitVec, idx: usize) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::{any::Any, sync::Arc};
+    use std::any::Any;
+    use std::sync::Arc;
 
     use api::v1::{
         codec::InsertBatch,

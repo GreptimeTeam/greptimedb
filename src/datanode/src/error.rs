@@ -1,6 +1,5 @@
 use std::any::Any;
 
-use api::serde::DecodeError;
 use common_error::prelude::*;
 use datatypes::arrow::error::ArrowError;
 use storage::error::Error as StorageError;
@@ -73,9 +72,6 @@ pub enum Error {
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, backtrace: Backtrace },
 
-    #[snafu(display("Missing timestamp column in request"))]
-    MissingTimestampColumn { backtrace: Backtrace },
-
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
         columns,
@@ -95,12 +91,6 @@ pub enum Error {
         #[snafu(backtrace)]
         source: TableError,
     },
-
-    #[snafu(display("Illegal insert data"))]
-    IllegalInsertData,
-
-    #[snafu(display("Failed to convert bytes to insert batch, source: {}", source))]
-    DecodeInsert { source: DecodeError },
 
     #[snafu(display("Failed to start server, source: {}", source))]
     StartServer {
@@ -258,17 +248,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Duplicated timestamp column in gRPC requests, exists {}, duplicated: {}",
-        exists,
-        duplicated
-    ))]
-    DuplicatedTimestampColumn {
-        exists: String,
-        duplicated: String,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to access catalog, source: {}", source))]
     Catalog {
         #[snafu(backtrace)]
@@ -286,6 +265,15 @@ pub enum Error {
         #[snafu(backtrace)]
         source: meta_client::error::Error,
     },
+
+    #[snafu(display("Failed to insert data, source: {}", source))]
+    InsertData {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
+    #[snafu(display("Insert batch is empty"))]
+    EmptyInsertBatch,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -317,18 +305,14 @@ impl ErrorExt for Error {
             | Error::ConvertSchema { source, .. } => source.status_code(),
 
             Error::ColumnValuesNumberMismatch { .. }
-            | Error::IllegalInsertData { .. }
-            | Error::DecodeInsert { .. }
             | Error::InvalidSql { .. }
             | Error::KeyColumnNotFound { .. }
             | Error::InvalidPrimaryKey { .. }
             | Error::MissingField { .. }
-            | Error::MissingTimestampColumn { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::ConstraintNotSupported { .. }
-            | Error::ParseTimestamp { .. }
-            | Error::DuplicatedTimestampColumn { .. } => StatusCode::InvalidArguments,
+            | Error::ParseTimestamp { .. } => StatusCode::InvalidArguments,
 
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }
@@ -354,6 +338,8 @@ impl ErrorExt for Error {
 
             Error::ArrowComputation { .. } => StatusCode::Unexpected,
             Error::MetaClientInit { source, .. } => source.status_code(),
+            Error::InsertData { source, .. } => source.status_code(),
+            Error::EmptyInsertBatch => StatusCode::InvalidArguments,
         }
     }
 

@@ -1122,6 +1122,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-insert"
+version = "0.1.0"
+dependencies = [
+ "api",
+ "async-trait",
+ "common-base",
+ "common-error",
+ "common-query",
+ "common-telemetry",
+ "common-time",
+ "datatypes",
+ "snafu",
+ "table",
+]
+
+[[package]]
 name = "common-query"
 version = "0.1.0"
 dependencies = [
@@ -1635,6 +1651,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
+ "common-insert",
  "common-query",
  "common-recordbatch",
  "common-runtime",
