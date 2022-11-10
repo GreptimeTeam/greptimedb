@@ -112,36 +112,36 @@ impl TryFrom<LeaseValue> for Vec<u8> {
     }
 }
 
-pub struct TableRouteKey {
+pub struct TableRouteKey<'a> {
     pub table_id: u64,
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
+    pub catalog_name: &'a str,
+    pub schema_name: &'a str,
+    pub table_name: &'a str,
 }
 
-impl TableRouteKey {
-    pub fn with_table_name(table_id: u64, t: &TableName) -> Self {
+impl<'a> TableRouteKey<'a> {
+    pub fn with_table_name(table_id: u64, t: &'a TableName) -> Self {
         Self {
             table_id,
-            catalog_name: t.catalog_name.clone(),
-            schema_name: t.schema_name.clone(),
-            table_name: t.table_name.clone(),
+            catalog_name: &t.catalog_name,
+            schema_name: &t.schema_name,
+            table_name: &t.table_name,
         }
     }
 
-    pub fn with_table_global_key(table_id: u64, t: &TableGlobalKey) -> Self {
+    pub fn with_table_global_key(table_id: u64, t: &'a TableGlobalKey) -> Self {
         Self {
             table_id,
-            catalog_name: t.catalog_name.clone(),
-            schema_name: t.schema_name.clone(),
-            table_name: t.table_name.clone(),
+            catalog_name: &t.catalog_name,
+            schema_name: &t.schema_name,
+            table_name: &t.table_name,
         }
     }
 
     pub fn prefix(&self) -> String {
         format!(
             "{}-{}-{}-{}",
-            TABLE_ROUTE_PREFIX, &self.catalog_name, &self.schema_name, &self.table_name
+            TABLE_ROUTE_PREFIX, self.catalog_name, self.schema_name, self.table_name
         )
     }
 

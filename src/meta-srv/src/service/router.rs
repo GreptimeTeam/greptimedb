@@ -62,7 +62,7 @@ async fn handle_route(req: RouteRequest, ctx: Context) -> Result<RouteResponse> 
         schema_name: t.schema_name,
         table_name: t.table_name,
     });
-    let tables = fetch_tables(ctx.kv_store, table_global_keys).await?;
+    let tables = fetch_tables(&ctx.kv_store, table_global_keys).await?;
 
     let mut peer_dict = PeerDict::default();
     let mut table_routes = vec![];
@@ -127,7 +127,9 @@ async fn handle_create(
         });
     }
     let id = table_id_sequence.next().await?;
-    let table_route_key = TableRouteKey::with_table_name(id, &table_name);
+    let table_route_key = TableRouteKey::with_table_name(id, &table_name)
+        .key()
+        .into_bytes();
 
     let table = Table {
         id,
@@ -170,11 +172,11 @@ async fn handle_create(
 
 async fn save_table_route_value(
     kv_store: &KvStoreRef,
-    key: TableRouteKey,
-    value: TableRouteValue,
+    key: impl Into<Vec<u8>>,
+    value: impl Into<Vec<u8>>,
 ) -> Result<()> {
-    let key = key.key().into_bytes();
-    let value: Vec<u8> = value.into();
+    let key = key.into();
+    let value = value.into();
     let put_req = PutRequest {
         key,
         value,
@@ -186,14 +188,14 @@ async fn save_table_route_value(
 }
 
 async fn fetch_tables(
-    kv_store: KvStoreRef,
+    kv_store: &KvStoreRef,
     keys: impl Iterator<Item = TableGlobalKey>,
 ) -> Result<Vec<(TableGlobalValue, TableRouteValue)>> {
     let mut tables = vec![];
     // Maybe we can optimize the for loop in the future, but in general,
     // there won't be many keys, in fact, there is usually just one.
     for tk in keys {
-        let tv = get_table_global_value(&kv_store, &tk).await?;
+        let tv = get_table_global_value(kv_store, &tk).await?;
         if tv.is_none() {
             warn!("Table global value is absent: {}", tk);
             continue;
@@ -202,7 +204,7 @@ async fn fetch_tables(
 
         let table_id = tv.id as u64;
         let tr_key = TableRouteKey::with_table_global_key(table_id, &tk);
-        let tr = get_table_route_value(&kv_store, tr_key).await?;
+        let tr = get_table_route_value(kv_store, &tr_key).await?;
 
         tables.push((tv, tr));
     }
@@ -212,12 +214,11 @@ async fn fetch_tables(
 
 async fn get_table_route_value(
     kv_store: &KvStoreRef,
-    key: TableRouteKey,
+    key: &TableRouteKey<'_>,
 ) -> Result<TableRouteValue> {
-    let tr_key = key.key();
-    let tr = get_from_store(kv_store, tr_key.as_bytes().to_vec())
+    let tr = get_from_store(kv_store, key.key().into_bytes())
         .await?
-        .context(error::TableRouteNotFoundSnafu { key: tr_key })?;
+        .context(error::TableRouteNotFoundSnafu { key: key.key() })?;
     let tr: TableRouteValue = tr
         .as_slice()
         .try_into()
