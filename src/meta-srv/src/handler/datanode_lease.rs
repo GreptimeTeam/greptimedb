@@ -31,7 +31,7 @@ impl HeartbeatHandler for DatanodeLeaseHandler {
                 node_addr: peer.addr.clone(),
             };
 
-            info!("Receive a heartbeat from datanode: {:?}, {:?}", key, value);
+            info!("Receive a heartbeat: {:?}, {:?}", key, value);
 
             let key = key.try_into()?;
             let value = value.try_into()?;
@@ -41,8 +41,7 @@ impl HeartbeatHandler for DatanodeLeaseHandler {
                 ..Default::default()
             };
 
-            let kv_store = ctx.kv_store();
-            let _ = kv_store.put(put).await?;
+            let _ = ctx.kv_store().put(put).await?;
         }
 
         Ok(())

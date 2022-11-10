@@ -27,19 +27,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.0.0
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: --workspace --all-targets
+        uses: Swatinem/rust-cache@v2
+      - name: Run cargo check
+        run: cargo check --workspace --all-targets
 
   test:
     name: Test Suite
@@ -47,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Cache LLVM and Clang
         id: cache-llvm
         uses: actions/cache@v3
@@ -59,21 +55,19 @@ jobs:
         with:
           version: "14.0"
           cached: ${{ steps.cache-llvm.outputs.cache-hit }}
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.0.0
+        uses: Swatinem/rust-cache@v2
       - name: Cleanup disk
         uses: curoky/cleanup-disk-action@v2.0
         with:
           retain: 'rust,llvm'
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --workspace
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      - name: Run tests
+        run: cargo nextest run
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1
@@ -88,20 +82,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
+          components: rustfmt
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.0.0
-      - run: rustup component add rustfmt
-      - uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+        uses: Swatinem/rust-cache@v2
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
@@ -109,17 +99,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
+          components: clippy
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.0.0
-      - run: rustup component add clippy
-      - uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr
+        uses: Swatinem/rust-cache@v2
+      - name: Run cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr
