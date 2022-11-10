@@ -63,13 +63,11 @@ jobs:
           sudo apt-get -y update
           sudo apt-get -y install libssl-dev pkg-config g++-aarch64-linux-gnu gcc-aarch64-linux-gnu
 
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
-          target: ${{ matrix.arch }}
+          targets: ${{ matrix.arch }}
 
       - name: Output package versions
         run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version

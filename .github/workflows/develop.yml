@@ -29,11 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - uses: arduino/setup-protoc@v1
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.2.0
       - uses: actions-rs/cargo@v1
@@ -59,11 +57,9 @@ jobs:
         with:
           version: "14.0"
           cached: ${{ steps.cache-llvm.outputs.cache-hit }}
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.2.0
       - name: Cleanup disk
@@ -90,11 +86,10 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - uses: arduino/setup-protoc@v1
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
+          components: rustfmt
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.2.0
       - run: rustup component add rustfmt
@@ -111,11 +106,10 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - uses: arduino/setup-protoc@v1
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
+          components: clippy
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.2.0
       - run: rustup component add clippy
