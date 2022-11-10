@@ -25,6 +25,7 @@ impl Sequence {
                 next: 0,
                 step,
                 range: None,
+                fouce_quit: 1024,
             }),
         }
     }
@@ -41,11 +42,12 @@ struct Inner {
     next: u64,
     step: u64,
     range: Option<Range<u64>>,
+    fouce_quit: usize,
 }
 
 impl Inner {
     pub async fn next(&mut self) -> Result<u64> {
-        loop {
+        for _ in 0..self.fouce_quit {
             match &self.range {
                 Some(range) => {
                     if range.contains(&self.next) {
@@ -61,12 +63,17 @@ impl Inner {
                 }
             }
         }
+
+        error::NextSequenceSnafu {
+            err_msg: format!("{}.next()", &self.name),
+        }
+        .fail()
     }
 
     pub async fn next_range(&self) -> Result<Range<u64>> {
         let key = self.name.as_bytes();
         let mut start = self.next;
-        loop {
+        for _ in 0..self.fouce_quit {
             let expect = if start == 0 {
                 vec![]
             } else {
@@ -105,6 +112,11 @@ impl Inner {
                 end: start + self.step,
             });
         }
+
+        error::NextSequenceSnafu {
+            err_msg: format!("{}.next_range()", &self.name),
+        }
+        .fail()
     }
 }
 
@@ -113,7 +125,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::service::store::memory::MemStore;
+    use crate::service::store::{kv::KvStore, memory::MemStore};
 
     #[tokio::test]
     async fn test_sequence() {
@@ -123,5 +135,54 @@ mod tests {
         for i in 0..100 {
             assert_eq!(i, seq.next().await.unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn test_sequence_fouce_quit() {
+        struct Noop;
+
+        #[async_trait::async_trait]
+        impl KvStore for Noop {
+            async fn range(
+                &self,
+                _: api::v1::meta::RangeRequest,
+            ) -> Result<api::v1::meta::RangeResponse> {
+                unreachable!()
+            }
+
+            async fn put(
+                &self,
+                _: api::v1::meta::PutRequest,
+            ) -> Result<api::v1::meta::PutResponse> {
+                unreachable!()
+            }
+
+            async fn batch_put(
+                &self,
+                _: api::v1::meta::BatchPutRequest,
+            ) -> Result<api::v1::meta::BatchPutResponse> {
+                unreachable!()
+            }
+
+            async fn compare_and_put(
+                &self,
+                _: CompareAndPutRequest,
+            ) -> Result<api::v1::meta::CompareAndPutResponse> {
+                Ok(api::v1::meta::CompareAndPutResponse::default())
+            }
+
+            async fn delete_range(
+                &self,
+                _: api::v1::meta::DeleteRangeRequest,
+            ) -> Result<api::v1::meta::DeleteRangeResponse> {
+                unreachable!()
+            }
+        }
+
+        let kv_store = Arc::new(Noop {});
+        let seq = Sequence::new("test_seq", 10, kv_store);
+
+        let next = seq.next().await;
+        assert!(next.is_err());
     }
 }

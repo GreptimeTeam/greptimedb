@@ -100,6 +100,12 @@ pub enum Error {
 
     #[snafu(display("Table route not found: {}", key))]
     TableRouteNotFound { key: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to get sequence: {}", err_msg))]
+    NextSequence {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -137,6 +143,7 @@ impl ErrorExt for Error {
             Error::LeaseKeyFromUtf8 { .. }
             | Error::UnexceptedSequenceValue { .. }
             | Error::TableRouteNotFound { .. }
+            | Error::NextSequence { .. }
             | Error::InvalidTxnResult { .. } => StatusCode::Unexpected,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
         }
