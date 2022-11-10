@@ -110,7 +110,6 @@ mod tests {
 
     use super::*;
     use crate::memtable::DefaultMemtableBuilder;
-    use crate::memtable::Memtable;
     use crate::memtable::MemtableBuilder;
     use crate::test_util;
 

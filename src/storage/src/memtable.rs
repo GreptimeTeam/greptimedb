@@ -38,11 +38,16 @@ pub trait Memtable: Send + Sync + std::fmt::Debug {
     /// Iterates the memtable.
     fn iter(&self, ctx: &IterContext) -> Result<BoxedBatchIterator>;
 
-    /// Returns the estimated bytes allocated by this memtable from heap.
+    /// Returns the estimated bytes allocated by this memtable from heap. Result
+    /// of this method may be larger than the estimated based on [`num_rows`] because
+    /// of the implementator's pre-alloc behavior.
     fn bytes_allocated(&self) -> usize;
 
     /// Returns the time span of data inside this memtable.
     fn time_span(&self) -> RangeMillis;
+
+    /// Return the number of rows contained in this memtable.
+    fn num_rows(&self) -> usize;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;

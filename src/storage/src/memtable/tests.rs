@@ -10,9 +10,6 @@ use crate::metadata::RegionMetadata;
 use crate::schema::{ProjectedSchema, RegionSchemaRef};
 use crate::test_util::descriptor_util::RegionDescBuilder;
 
-// For simplicity, all memtables in test share same memtable id.
-const MEMTABLE_ID: MemtableId = 1;
-
 // Schema for testing memtable:
 // - key: Int64(timestamp), UInt64(version),
 // - value: UInt64, UInt64

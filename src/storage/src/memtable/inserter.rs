@@ -196,7 +196,6 @@ mod tests {
     #[test]
     fn test_inserter_put_one_memtable() {
         let sequence = 11111;
-        let bucket_duration = 100;
         let memtable_schema = new_region_schema();
         let mutable_memtable = DefaultMemtableBuilder::default().build(memtable_schema);
         let mut inserter = Inserter::new(sequence);
@@ -208,68 +207,28 @@ mod tests {
             &mut batch,
             &[
                 (3, None),
-                // Duplicate entries in same put data.
-                (2, None),
+                (2, None), // Duplicate entries in same put data.
                 (2, Some(2)),
                 (4, Some(4)),
-            ],
-        );
-
-        inserter.insert_memtable(&batch, &mutable_memtable).unwrap();
-        check_memtable_content(
-            &mutable_memtable,
-            sequence,
-            &[(1, Some(1)), (2, Some(2)), (3, None), (4, Some(4))],
-        );
-    }
-
-    #[test]
-    fn test_inserter_put_multiple() {
-        let sequence = 11111;
-        let bucket_duration = 100;
-        let memtable_schema = new_region_schema();
-        let mutable_memtable = DefaultMemtableBuilder::default().build(memtable_schema);
-        let mut inserter = Inserter::new(sequence);
-
-        let mut batch = new_test_write_batch();
-        put_batch(
-            &mut batch,
-            &[
-                (1, Some(1)),
-                (2, None),
                 (201, Some(201)),
                 (102, None),
                 (101, Some(101)),
             ],
         );
-        put_batch(
-            &mut batch,
-            &[
-                (180, Some(1)),
-                (3, Some(3)),
-                (1, None),
-                (211, Some(211)),
-                (180, Some(180)),
-            ],
-        );
 
         inserter.insert_memtable(&batch, &mutable_memtable).unwrap();
         check_memtable_content(
             &mutable_memtable,
             sequence,
-            &[(1, None), (2, None), (3, Some(3))],
-        );
-
-        check_memtable_content(
-            &mutable_memtable,
-            sequence,
-            &[(101, Some(101)), (102, None), (180, Some(180))],
-        );
-
-        check_memtable_content(
-            &mutable_memtable,
-            sequence,
-            &[(201, Some(201)), (211, Some(211))],
+            &[
+                (1, Some(1)),
+                (2, Some(2)),
+                (3, None),
+                (4, Some(4)),
+                (101, Some(101)),
+                (102, None),
+                (201, Some(201)),
+            ],
         );
     }
 }

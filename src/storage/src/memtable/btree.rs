@@ -82,6 +82,10 @@ impl Memtable for BTreeMemtable {
     fn time_span(&self) -> common_time::RangeMillis {
         todo!()
     }
+
+    fn num_rows(&self) -> usize {
+        self.map.read().unwrap().len()
+    }
 }
 
 struct BTreeIterator {

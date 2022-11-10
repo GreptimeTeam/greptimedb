@@ -163,6 +163,11 @@ impl<S: LogStore> FlushJob<S> {
             ..Default::default()
         };
         for m in &self.memtables {
+            // skip empty memtable
+            if m.num_rows() == 0 {
+                continue;
+            }
+
             let file_name = Self::generate_sst_file_name();
             // TODO(hl): Check if random file name already exists in meta.
             let iter = m.iter(&iter_ctx)?;
