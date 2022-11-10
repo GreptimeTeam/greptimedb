@@ -74,11 +74,11 @@ async fn handle_route(req: RouteRequest, ctx: Context) -> Result<RouteResponse> 
         if let Some(ref mut table_route) = table_route {
             for rr in &mut table_route.region_routes {
                 if let Some(peer) = peers.get(rr.leader_peer_index as usize) {
-                    rr.leader_peer_index = peer_dict.insert(peer.clone()) as u64;
+                    rr.leader_peer_index = peer_dict.get_or_insert(peer.clone()) as u64;
                 }
                 for index in &mut rr.follower_peer_indexes {
                     if let Some(peer) = peers.get(*index as usize) {
-                        *index = peer_dict.insert(peer.clone()) as u64;
+                        *index = peer_dict.get_or_insert(peer.clone()) as u64;
                     }
                 }
             }
@@ -215,7 +215,7 @@ async fn get_table_route_value(
     key: TableRouteKey,
 ) -> Result<TableRouteValue> {
     let tr_key = key.key();
-    let tr = get_form_store(kv_store, tr_key.as_bytes().to_vec())
+    let tr = get_from_store(kv_store, tr_key.as_bytes().to_vec())
         .await?
         .context(error::TableRouteNotFoundSnafu { key: tr_key })?;
     let tr: TableRouteValue = tr
@@ -231,7 +231,7 @@ async fn get_table_global_value(
     key: &TableGlobalKey,
 ) -> Result<Option<TableGlobalValue>> {
     let tg_key = format!("{}", key).into_bytes();
-    let tv = get_form_store(kv_store, tg_key).await?;
+    let tv = get_from_store(kv_store, tg_key).await?;
     match tv {
         Some(tv) => {
             let tv = TableGlobalValue::parse(&String::from_utf8_lossy(&tv))
@@ -242,7 +242,7 @@ async fn get_table_global_value(
     }
 }
 
-async fn get_form_store(kv_store: &KvStoreRef, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+async fn get_from_store(kv_store: &KvStoreRef, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
     let req = RangeRequest {
         key,
         ..Default::default()

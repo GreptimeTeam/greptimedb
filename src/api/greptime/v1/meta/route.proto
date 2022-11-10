@@ -82,7 +82,7 @@ message Partition {
   repeated bytes value_list = 2;
 }
 
-// This message is only for save into store
+// This message is only for saving into store.
 message TableRouteValue {
   repeated Peer peers = 1; 
   TableRoute table_route = 2;

@@ -18,6 +18,7 @@ pub struct Sequence {
 impl Sequence {
     pub fn new(name: impl AsRef<str>, step: u64, generator: KvStoreRef) -> Self {
         let name = format!("{}-{}", keys::SEQ_PREFIX, name.as_ref());
+        let step = step.max(1);
         Self {
             inner: Mutex::new(Inner {
                 name,
@@ -25,7 +26,7 @@ impl Sequence {
                 next: 0,
                 step,
                 range: None,
-                fouce_quit: 1024,
+                force_quit: 1024,
             }),
         }
     }
@@ -39,15 +40,23 @@ impl Sequence {
 struct Inner {
     name: String,
     generator: KvStoreRef,
+    // The next available sequences(if it is in the range,
+    // otherwise it need to fetch from generator again).
     next: u64,
+    // Fetch several sequences at once: [start, start + step).
     step: u64,
+    // The range of available sequences for the local cache.
     range: Option<Range<u64>>,
-    fouce_quit: usize,
+    // Used to avoid dead loops.
+    force_quit: usize,
 }
 
 impl Inner {
+    /// 1. returns the `next` value directly if it is in the `range` (local cache)
+    /// 2. fetch(CAS) next `range` from the `generator`
+    /// 3. jump to step 1
     pub async fn next(&mut self) -> Result<u64> {
-        for _ in 0..self.fouce_quit {
+        for _ in 0..self.force_quit {
             match &self.range {
                 Some(range) => {
                     if range.contains(&self.next) {
@@ -58,8 +67,9 @@ impl Inner {
                     self.range = None;
                 }
                 None => {
-                    self.range = Some(self.next_range().await?);
-                    self.next = self.range.as_ref().unwrap().start;
+                    let range = self.next_range().await?;
+                    self.next = range.start;
+                    self.range = Some(range);
                 }
             }
         }
@@ -73,7 +83,7 @@ impl Inner {
     pub async fn next_range(&self) -> Result<Range<u64>> {
         let key = self.name.as_bytes();
         let mut start = self.next;
-        for _ in 0..self.fouce_quit {
+        for _ in 0..self.force_quit {
             let expect = if start == 0 {
                 vec![]
             } else {
@@ -92,15 +102,14 @@ impl Inner {
 
             if !res.success {
                 if let Some(kv) = res.prev_kv {
-                    let mid = std::mem::size_of::<u64>();
+                    let value = kv.value;
                     ensure!(
-                        kv.value.len() == mid,
+                        value.len() == std::mem::size_of::<u64>(),
                         error::UnexceptedSequenceValueSnafu {
-                            err_msg: format!("key={}, unexpected value={:?}", self.name, kv.value)
+                            err_msg: format!("key={}, unexpected value={:?}", self.name, value)
                         }
                     );
-                    let (int_bytes, _) = kv.value.split_at(mid);
-                    start = u64::from_le_bytes(int_bytes.try_into().unwrap());
+                    start = u64::from_le_bytes(value.try_into().unwrap());
                 } else {
                     start = 0;
                 }

@@ -13,7 +13,7 @@ pub struct PeerDict {
 }
 
 impl PeerDict {
-    pub fn insert(&mut self, peer: Peer) -> usize {
+    pub fn get_or_insert(&mut self, peer: Peer) -> usize {
         let index = self.peers.entry(peer).or_insert_with(|| {
             let v = self.index;
             self.index += 1;
@@ -118,31 +118,31 @@ mod tests {
     fn test_peer_dict() {
         let mut dict = PeerDict::default();
 
-        dict.insert(Peer {
+        dict.get_or_insert(Peer {
             id: 1,
             addr: "111".to_string(),
         });
-        dict.insert(Peer {
+        dict.get_or_insert(Peer {
             id: 2,
             addr: "222".to_string(),
         });
-        dict.insert(Peer {
+        dict.get_or_insert(Peer {
             id: 1,
             addr: "111".to_string(),
         });
-        dict.insert(Peer {
+        dict.get_or_insert(Peer {
             id: 1,
             addr: "111".to_string(),
         });
-        dict.insert(Peer {
+        dict.get_or_insert(Peer {
             id: 1,
             addr: "111".to_string(),
         });
-        dict.insert(Peer {
+        dict.get_or_insert(Peer {
             id: 1,
             addr: "111".to_string(),
         });
-        dict.insert(Peer {
+        dict.get_or_insert(Peer {
             id: 2,
             addr: "222".to_string(),
         });

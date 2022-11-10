@@ -86,7 +86,7 @@ pub enum Error {
         source: common_catalog::error::Error,
     },
 
-    #[snafu(display("Unexcepted sequecnce value: {}", err_msg))]
+    #[snafu(display("Unexcepted sequence value: {}", err_msg))]
     UnexceptedSequenceValue {
         err_msg: String,
         backtrace: Backtrace,
