@@ -6,11 +6,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
-use futures::StreamExt;
+use futures::{Sink, StreamExt};
 use pgwire::api::auth::{self, ServerParameterProvider, StartupHandler};
 use pgwire::api::ClientInfo;
-use pgwire::error::PgWireResult;
-use pgwire::messages::PgWireFrontendMessage;
+use pgwire::error::{PgWireError, PgWireResult};
+use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use pgwire::tokio::process_socket;
 use tokio;
 
@@ -26,13 +26,12 @@ impl StartupHandler for SimpleStartupHandler {
     async fn on_startup<C>(
         &self,
         client: &mut C,
-        message: &pgwire::messages::PgWireFrontendMessage,
+        message: &PgWireFrontendMessage,
     ) -> PgWireResult<()>
     where
-        C: ClientInfo + futures::Sink<pgwire::messages::PgWireBackendMessage> + Unpin + Send,
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
         C::Error: std::fmt::Debug,
-        pgwire::error::PgWireError:
-            From<<C as futures::Sink<pgwire::messages::PgWireBackendMessage>>::Error>,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         if let PgWireFrontendMessage::Startup(ref startup) = message {
             auth::save_startup_parameters_to_metadata(client, startup);
