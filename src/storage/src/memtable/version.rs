@@ -132,7 +132,7 @@ mod tests {
         assert_eq!(2, v2.num_memtables());
 
         // Add another one and check immutable memtables that need flush
-        let memtable_3 = memtable_builder.build(region_schema.clone());
+        let memtable_3 = memtable_builder.build(region_schema);
         let v3 = v2.freeze_mutable(memtable_3);
         let (max_table_id, immutables) = v3.memtables_to_flush();
         assert_eq!(1, max_table_id.unwrap());
