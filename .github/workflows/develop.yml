@@ -64,8 +64,10 @@ jobs:
         uses: curoky/cleanup-disk-action@v2
         with:
           retain: 'rust,llvm'
-      - name: Run cargo test
-        run: cargo test --workspace
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      - name: Run tests
+        run: cargo nextest run
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1

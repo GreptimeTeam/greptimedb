@@ -31,10 +31,12 @@ jobs:
         uses: curoky/cleanup-disk-action@v2
         with:
           retain: 'rust'
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Collect coverage data
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
         env:
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
