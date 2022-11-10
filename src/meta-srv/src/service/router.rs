@@ -160,7 +160,7 @@ async fn handle_create(
         peers: peers.clone(),
         table_route: Some(table_route.clone()),
     };
-    save_table_route_value(&ctx.kv_store, table_route_key, table_route_value).await?;
+    put_into_store(&ctx.kv_store, table_route_key, table_route_value).await?;
 
     let header = Some(ResponseHeader::success(cluster_id));
     Ok(RouteResponse {
@@ -168,23 +168,6 @@ async fn handle_create(
         peers,
         table_routes: vec![table_route],
     })
-}
-
-async fn save_table_route_value(
-    kv_store: &KvStoreRef,
-    key: impl Into<Vec<u8>>,
-    value: impl Into<Vec<u8>>,
-) -> Result<()> {
-    let key = key.into();
-    let value = value.into();
-    let put_req = PutRequest {
-        key,
-        value,
-        ..Default::default()
-    };
-    let _ = kv_store.put(put_req).await?;
-
-    Ok(())
 }
 
 async fn fetch_tables(
@@ -241,6 +224,23 @@ async fn get_table_global_value(
         }
         None => Ok(None),
     }
+}
+
+async fn put_into_store(
+    kv_store: &KvStoreRef,
+    key: impl Into<Vec<u8>>,
+    value: impl Into<Vec<u8>>,
+) -> Result<()> {
+    let key = key.into();
+    let value = value.into();
+    let put_req = PutRequest {
+        key,
+        value,
+        ..Default::default()
+    };
+    let _ = kv_store.put(put_req).await?;
+
+    Ok(())
 }
 
 async fn get_from_store(kv_store: &KvStoreRef, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
