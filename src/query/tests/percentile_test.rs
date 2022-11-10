@@ -1,6 +1,6 @@
 use std::sync::Arc;
 mod function;
-use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
@@ -114,7 +114,7 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
     // create engine
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogList::default());
+    let catalog_list = Arc::new(MemoryCatalogManager::default());
 
     let mut column_schemas = vec![];
     let mut columns = vec![];

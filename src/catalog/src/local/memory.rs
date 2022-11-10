@@ -1,23 +1,94 @@
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use common_catalog::consts::MIN_USER_TABLE_ID;
+use snafu::OptionExt;
+use table::metadata::TableId;
 use table::TableRef;
 
-use crate::error::{Result, TableExistsSnafu};
+use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::schema::SchemaProvider;
-use crate::{CatalogList, CatalogProvider, CatalogProviderRef, SchemaProviderRef};
+use crate::{
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSystemTableRequest,
+    RegisterTableRequest, SchemaProviderRef,
+};
 
 /// Simple in-memory list of catalogs
-#[derive(Default)]
-pub struct MemoryCatalogList {
+pub struct MemoryCatalogManager {
     /// Collection of catalogs containing schemas and ultimately Tables
     pub catalogs: RwLock<HashMap<String, CatalogProviderRef>>,
+    pub table_id: AtomicU32,
 }
 
-impl MemoryCatalogList {
+impl Default for MemoryCatalogManager {
+    fn default() -> Self {
+        let manager = Self {
+            table_id: AtomicU32::new(MIN_USER_TABLE_ID),
+            catalogs: Default::default(),
+        };
+        let default_catalog = Arc::new(MemoryCatalogProvider::new());
+        manager
+            .register_catalog("greptime".to_string(), default_catalog.clone())
+            .unwrap();
+        default_catalog
+            .register_schema("public".to_string(), Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        manager
+    }
+}
+
+#[async_trait::async_trait]
+impl CatalogManager for MemoryCatalogManager {
+    async fn start(&self) -> Result<()> {
+        self.table_id.store(MIN_USER_TABLE_ID, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn next_table_id(&self) -> Result<TableId> {
+        Ok(self.table_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+        let catalogs = self.catalogs.write().unwrap();
+        let catalog = catalogs
+            .get(&request.catalog)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?
+            .clone();
+        let schema = catalog
+            .schema(&request.schema)?
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", &request.catalog, &request.schema),
+            })?;
+        schema
+            .register_table(request.table_name, request.table)
+            .map(|v| if v.is_some() { 0 } else { 1 })
+    }
+
+    async fn register_system_table(&self, _request: RegisterSystemTableRequest) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn table(&self, catalog: &str, schema: &str, table_name: &str) -> Result<Option<TableRef>> {
+        let c = self.catalogs.read().unwrap();
+        let catalog = if let Some(c) = c.get(catalog) {
+            c.clone()
+        } else {
+            return Ok(None);
+        };
+        match catalog.schema(schema)? {
+            None => Ok(None),
+            Some(s) => s.table(table_name),
+        }
+    }
+}
+
+impl MemoryCatalogManager {
     /// Registers a catalog and return `None` if no catalog with the same name was already
     /// registered, or `Some` with the previously registered catalog.
     pub fn register_catalog_if_absent(
@@ -37,7 +108,7 @@ impl MemoryCatalogList {
     }
 }
 
-impl CatalogList for MemoryCatalogList {
+impl CatalogList for MemoryCatalogManager {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -162,8 +233,8 @@ impl SchemaProvider for MemorySchemaProvider {
 }
 
 /// Create a memory catalog list contains a numbers table for test
-pub fn new_memory_catalog_list() -> Result<Arc<MemoryCatalogList>> {
-    Ok(Arc::new(MemoryCatalogList::default()))
+pub fn new_memory_catalog_list() -> Result<Arc<MemoryCatalogManager>> {
+    Ok(Arc::new(MemoryCatalogManager::default()))
 }
 
 #[cfg(test)]
@@ -178,23 +249,11 @@ mod tests {
     #[test]
     fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_list().unwrap();
+        let default_catalog = catalog_list.catalog(DEFAULT_CATALOG_NAME).unwrap().unwrap();
 
-        assert!(catalog_list
-            .catalog(DEFAULT_CATALOG_NAME)
-            .unwrap()
-            .is_none());
-        let default_catalog = Arc::new(MemoryCatalogProvider::default());
-        catalog_list
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog.clone())
-            .unwrap();
-
-        assert!(default_catalog
+        let default_schema = default_catalog
             .schema(DEFAULT_SCHEMA_NAME)
             .unwrap()
-            .is_none());
-        let default_schema = Arc::new(MemorySchemaProvider::default());
-        default_catalog
-            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema.clone())
             .unwrap();
 
         default_schema
@@ -203,7 +262,6 @@ mod tests {
 
         let table = default_schema.table("numbers").unwrap();
         assert!(table.is_some());
-
         assert!(default_schema.table("not_exists").unwrap().is_none());
     }
 
@@ -229,7 +287,7 @@ mod tests {
 
     #[test]
     pub fn test_register_if_absent() {
-        let list = MemoryCatalogList::default();
+        let list = MemoryCatalogManager::default();
         assert!(list
             .register_catalog_if_absent(
                 "test_catalog".to_string(),
@@ -241,6 +299,8 @@ mod tests {
             Arc::new(MemoryCatalogProvider::new()),
         )
         .unwrap();
-        list.as_any().downcast_ref::<MemoryCatalogList>().unwrap();
+        list.as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .unwrap();
     }
 }

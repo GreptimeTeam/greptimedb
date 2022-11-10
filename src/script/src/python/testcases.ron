@@ -363,6 +363,39 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         )
     ),
     (
+        name: "constant_list",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["what"])
+def a(cpu: vector[f32], mem: vector[f64]):
+    return ["apple" ,"banana", "cherry"]
+"#,
+        predicate: ExecIsOk(
+            fields: [
+                (
+                    datatype: Some(Utf8),
+                    is_nullable: false,
+                ),
+            ],
+            columns: [
+                (
+                    ty: Utf8,
+                    len: 3
+                ),
+            ]
+        )
+    ),
+    (
+        name: "constant_list_different_type",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["what"])
+def a(cpu: vector[f32], mem: vector[f64]):
+    return ["apple" ,3, "cherry"]
+"#,
+        predicate: ExecIsErr(
+            reason: "All elements in a list should be same type to cast to Datafusion list!",
+        )
+    ),
+    (
         // expect 4 vector ,found 5
         name: "ret_nums_wrong",
         code: r#"

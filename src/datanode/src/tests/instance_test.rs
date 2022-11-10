@@ -1,6 +1,8 @@
 use arrow::array::{Int64Array, UInt64Array};
 use common_query::Output;
 use common_recordbatch::util;
+use datafusion::arrow_print;
+use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow_array::StringArray;
 use datatypes::prelude::ConcreteDataType;
 
@@ -240,12 +242,24 @@ pub async fn test_create_table_illegal_timestamp_type() {
     }
 }
 
+async fn check_output_stream(output: Output, expected: Vec<&str>) {
+    match output {
+        Output::Stream(stream) => {
+            let recordbatches = util::collect(stream).await.unwrap();
+            let recordbatch = recordbatches
+                .into_iter()
+                .map(|r| r.df_recordbatch)
+                .collect::<Vec<DfRecordBatch>>();
+            let pretty_print = arrow_print::write(&recordbatch);
+            let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
+            assert_eq!(pretty_print, expected);
+        }
+        _ => unreachable!(),
+    }
+}
+
 #[tokio::test]
 async fn test_alter_table() {
-    use datafusion::arrow_print;
-    use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-    // TODO(LFC) Use real Mito engine when we can alter its region schema,
-    //   and delete the `new_mock` method.
     let instance = Instance::new_mock().await.unwrap();
     instance.start().await.unwrap();
 
@@ -278,26 +292,69 @@ async fn test_alter_table() {
     assert!(matches!(output, Output::AffectedRows(1)));
 
     let output = instance.execute_sql("select * from demo").await.unwrap();
-    match output {
-        Output::Stream(stream) => {
-            let recordbatches = util::collect(stream).await.unwrap();
-            let recordbatch = recordbatches
-                .into_iter()
-                .map(|r| r.df_recordbatch)
-                .collect::<Vec<DfRecordBatch>>();
-            let pretty_print = arrow_print::write(&recordbatch);
-            let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
-            let expected = vec![
-                "+-------+-----+--------+---------------------+--------+",
-                "| host  | cpu | memory | ts                  | my_tag |",
-                "+-------+-----+--------+---------------------+--------+",
-                "| host1 | 1.1 | 100    | 1970-01-01 00:00:01 |        |",
-                "| host2 | 2.2 | 200    | 1970-01-01 00:00:02 | hello  |",
-                "| host3 | 3.3 | 300    | 1970-01-01 00:00:03 |        |",
-                "+-------+-----+--------+---------------------+--------+",
-            ];
-            assert_eq!(pretty_print, expected);
-        }
-        _ => unreachable!(),
-    }
+    let expected = vec![
+        "+-------+-----+--------+---------------------+--------+",
+        "| host  | cpu | memory | ts                  | my_tag |",
+        "+-------+-----+--------+---------------------+--------+",
+        "| host1 | 1.1 | 100    | 1970-01-01 00:00:01 |        |",
+        "| host2 | 2.2 | 200    | 1970-01-01 00:00:02 | hello  |",
+        "| host3 | 3.3 | 300    | 1970-01-01 00:00:03 |        |",
+        "+-------+-----+--------+---------------------+--------+",
+    ];
+    check_output_stream(output, expected).await;
+}
+
+async fn test_insert_with_default_value_for_type(type_name: &str) {
+    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_create");
+    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
+    instance.start().await.unwrap();
+
+    let create_sql = format!(
+        r#"create table test_table(
+        host string,
+        ts {} DEFAULT CURRENT_TIMESTAMP,
+        cpu double default 0,
+        TIME INDEX (ts),
+        PRIMARY KEY(host)
+    ) engine=mito with(regions=1);"#,
+        type_name
+    );
+    let output = instance.execute_sql(&create_sql).await.unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    // Insert with ts.
+    instance
+        .execute_sql("insert into test_table(host, cpu, ts) values ('host1', 1.1, 1000)")
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    // Insert without ts, so it should be filled by default value.
+    let output = instance
+        .execute_sql("insert into test_table(host, cpu) values ('host2', 2.2)")
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    let output = instance
+        .execute_sql("select host, cpu from test_table")
+        .await
+        .unwrap();
+    let expected = vec![
+        "+-------+-----+",
+        "| host  | cpu |",
+        "+-------+-----+",
+        "| host1 | 1.1 |",
+        "| host2 | 2.2 |",
+        "+-------+-----+",
+    ];
+    check_output_stream(output, expected).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_insert_with_default_value() {
+    common_telemetry::init_default_ut_logging();
+
+    test_insert_with_default_value_for_type("timestamp").await;
+    test_insert_with_default_value_for_type("bigint").await;
 }

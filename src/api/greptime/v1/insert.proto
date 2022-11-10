@@ -9,6 +9,6 @@ message InsertBatch {
   uint32 row_count = 2;
 }
 
-message RegionId {
-  uint64 id = 1;
+message RegionNumber {
+  uint32 id = 1;
 }

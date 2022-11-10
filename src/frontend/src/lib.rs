@@ -1,5 +1,6 @@
 #![feature(assert_matches)]
 
+mod catalog;
 pub mod error;
 pub mod frontend;
 pub mod grpc;
@@ -13,6 +14,7 @@ pub mod postgres;
 pub mod prometheus;
 mod server;
 pub mod spliter;
+mod sql;
 mod table;
 #[cfg(test)]
 mod tests;

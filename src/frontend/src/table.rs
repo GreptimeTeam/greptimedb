@@ -14,7 +14,7 @@ use datafusion::logical_plan::Expr as DfExpr;
 use datafusion::physical_plan::Partitioning;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use snafu::prelude::*;
-use store_api::storage::RegionId;
+use store_api::storage::RegionNumber;
 use table::error::Error as TableError;
 use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::requests::InsertRequest;
@@ -26,12 +26,12 @@ use crate::mock::{DatanodeId, DatanodeInstance, TableScanPlan};
 use crate::partitioning::{Operator, PartitionExpr, PartitionRuleRef};
 use crate::spliter::WriteSpliter;
 
-struct DistTable {
-    table_name: String,
-    schema: SchemaRef,
-    partition_rule: PartitionRuleRef<Error>,
-    region_dist_map: HashMap<RegionId, DatanodeId>,
-    datanode_instances: HashMap<DatanodeId, DatanodeInstance>,
+pub struct DistTable {
+    pub table_name: String,
+    pub schema: SchemaRef,
+    pub partition_rule: PartitionRuleRef<Error>,
+    pub region_dist_map: HashMap<RegionNumber, DatanodeId>,
+    pub datanode_instances: HashMap<DatanodeId, DatanodeInstance>,
 }
 
 #[async_trait]
@@ -104,7 +104,7 @@ impl Table for DistTable {
 
 impl DistTable {
     // TODO(LFC): Finding regions now seems less efficient, should be further looked into.
-    fn find_regions(&self, filters: &[Expr]) -> Result<Vec<RegionId>> {
+    fn find_regions(&self, filters: &[Expr]) -> Result<Vec<RegionNumber>> {
         let regions = if let Some((first, rest)) = filters.split_first() {
             let mut target = self.find_regions0(first)?;
             for filter in rest {
@@ -119,7 +119,7 @@ impl DistTable {
                     break;
                 }
             }
-            target.into_iter().collect::<Vec<RegionId>>()
+            target.into_iter().collect::<Vec<_>>()
         } else {
             self.partition_rule.find_regions(&[])?
         };
@@ -136,7 +136,7 @@ impl DistTable {
     //   - BETWEEN and IN (maybe more)
     //   - expr with arithmetic like "a + 1 < 10" (should have been optimized in logic plan?)
     //   - not comparison or neither "AND" nor "OR" operations, for example, "a LIKE x"
-    fn find_regions0(&self, filter: &Expr) -> Result<HashSet<RegionId>> {
+    fn find_regions0(&self, filter: &Expr) -> Result<HashSet<RegionNumber>> {
         let expr = filter.df_expr();
         match expr {
             DfExpr::BinaryExpr { left, op, right } if is_compare_op(op) => {
@@ -156,7 +156,7 @@ impl DistTable {
                         .partition_rule
                         .find_regions(&[PartitionExpr::new(column, op, value)])?
                         .into_iter()
-                        .collect::<HashSet<RegionId>>());
+                        .collect::<HashSet<RegionNumber>>());
                 }
             }
             DfExpr::BinaryExpr { left, op, right }
@@ -168,11 +168,11 @@ impl DistTable {
                     Operator::And => left_regions
                         .intersection(&right_regions)
                         .cloned()
-                        .collect::<HashSet<RegionId>>(),
+                        .collect::<HashSet<RegionNumber>>(),
                     Operator::Or => left_regions
                         .union(&right_regions)
                         .cloned()
-                        .collect::<HashSet<RegionId>>(),
+                        .collect::<HashSet<RegionNumber>>(),
                     _ => unreachable!(),
                 };
                 return Ok(regions);
@@ -185,10 +185,13 @@ impl DistTable {
             .partition_rule
             .find_regions(&[])?
             .into_iter()
-            .collect::<HashSet<RegionId>>())
+            .collect::<HashSet<RegionNumber>>())
     }
 
-    fn find_datanodes(&self, regions: Vec<RegionId>) -> Result<HashMap<DatanodeId, Vec<RegionId>>> {
+    fn find_datanodes(
+        &self,
+        regions: Vec<RegionNumber>,
+    ) -> Result<HashMap<DatanodeId, Vec<RegionNumber>>> {
         let mut datanodes = HashMap::new();
         for region in regions.iter() {
             let datanode = *self
@@ -344,6 +347,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dist_table_scan() {
+        common_telemetry::init_default_ut_logging();
         let table = Arc::new(new_dist_table().await);
 
         // should scan all regions
@@ -434,7 +438,7 @@ mod test {
         let partition_rule = RangePartitionRule::new(
             "a",
             vec![10_i32.into(), 20_i32.into(), 50_i32.into()],
-            vec![1_u64, 2, 3, 4],
+            vec![1_u32, 2, 3, 4],
         );
 
         let table1 = new_memtable(schema.clone(), (0..5).collect::<Vec<i32>>());
@@ -458,7 +462,7 @@ mod test {
             table_name: "dist_numbers".to_string(),
             schema,
             partition_rule: Arc::new(partition_rule),
-            region_dist_map: HashMap::from([(1_u64, 1), (2_u64, 2), (3_u64, 3), (4_u64, 4)]),
+            region_dist_map: HashMap::from([(1_u32, 1), (2_u32, 2), (3_u32, 3), (4_u32, 4)]),
             datanode_instances,
         }
     }
@@ -491,20 +495,21 @@ mod test {
 
         let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
         instance.start().await.unwrap();
-
         let catalog_manager = instance.catalog_manager().clone();
+        let client = crate::tests::create_datanode_client(instance).await;
+
+        let table_name = table.table_name().to_string();
         catalog_manager
             .register_table(RegisterTableRequest {
                 catalog: "greptime".to_string(),
                 schema: "public".to_string(),
-                table_name: table.table_name().to_string(),
+                table_name: table_name.clone(),
                 table_id: 1234,
                 table: Arc::new(table),
             })
             .await
             .unwrap();
 
-        let client = crate::tests::create_datanode_client(instance).await;
         DatanodeInstance::new(
             datanode_id,
             catalog_manager,
@@ -516,7 +521,7 @@ mod test {
     async fn test_find_regions() {
         let table = new_dist_table().await;
 
-        let test = |filters: Vec<Expr>, expect_regions: Vec<u64>| {
+        let test = |filters: Vec<Expr>, expect_regions: Vec<RegionNumber>| {
             let mut regions = table.find_regions(filters.as_slice()).unwrap();
             regions.sort();
 

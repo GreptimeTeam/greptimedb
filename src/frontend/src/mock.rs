@@ -21,7 +21,7 @@ use table::table::adapter::DfTableProviderAdapter;
 pub(crate) type DatanodeId = u64;
 
 #[derive(Clone)]
-pub(crate) struct DatanodeInstance {
+pub struct DatanodeInstance {
     pub(crate) datanode_id: DatanodeId,
     catalog_manager: CatalogManagerRef,
     db: Database,
@@ -37,12 +37,12 @@ impl DatanodeInstance {
     #[allow(dead_code)]
     pub(crate) fn new(
         datanode_id: DatanodeId,
-        catalog_manager: CatalogManagerRef,
+        catalog_list: CatalogManagerRef,
         db: Database,
     ) -> Self {
         Self {
             datanode_id,
-            catalog_manager,
+            catalog_manager: catalog_list,
             db,
         }
     }

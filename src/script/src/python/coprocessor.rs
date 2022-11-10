@@ -13,7 +13,7 @@ use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::schema::Schema;
 use datatypes::vectors::Helper;
-use datatypes::vectors::{BooleanVector, Vector, VectorRef};
+use datatypes::vectors::{BooleanVector, StringVector, Vector, VectorRef};
 use rustpython_bytecode::CodeObject;
 use rustpython_vm as vm;
 use rustpython_vm::{class::PyClassImpl, AsObject};
@@ -186,10 +186,11 @@ fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
             DataType::Int16 => try_into_vector::<i16>(arg)?,
             DataType::Int32 => try_into_vector::<i32>(arg)?,
             DataType::Int64 => try_into_vector::<i64>(arg)?,
+            DataType::Utf8 => {
+                Arc::new(StringVector::try_from_arrow_array(arg).context(TypeCastSnafu)?) as _
+            }
             DataType::Boolean => {
-                let v: VectorRef =
-                    Arc::new(BooleanVector::try_from_arrow_array(arg).context(TypeCastSnafu)?);
-                v
+                Arc::new(BooleanVector::try_from_arrow_array(arg).context(TypeCastSnafu)?) as _
             }
             _ => {
                 return ret_other_error_with(format!(
