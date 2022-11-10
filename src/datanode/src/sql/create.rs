@@ -143,7 +143,7 @@ impl SqlHandler {
             }
         );
 
-        ensure!(ts_index != usize::MAX, error::MissingTimestampColumnSnafu,);
+        ensure!(ts_index != usize::MAX, error::MissingTimestampColumnSnafu);
 
         if primary_keys.is_empty() {
             info!(
