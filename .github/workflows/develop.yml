@@ -34,10 +34,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.2.0
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: --workspace --all-targets
+      - name: Run cargo check
+        run: cargo check --workspace --all-targets
 
   test:
     name: Test Suite
@@ -66,10 +64,8 @@ jobs:
         uses: curoky/cleanup-disk-action@v2.0
         with:
           retain: 'rust,llvm'
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --workspace
+      - name: Run cargo test
+        run: cargo test --workspace
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1
@@ -92,11 +88,8 @@ jobs:
           components: rustfmt
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.2.0
-      - run: rustup component add rustfmt
-      - uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
@@ -112,8 +105,5 @@ jobs:
           components: clippy
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.2.0
-      - run: rustup component add clippy
-      - uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr
+      - name: Run cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr
