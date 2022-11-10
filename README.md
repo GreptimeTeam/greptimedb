@@ -1,8 +1,27 @@
-# GreptimeDB
+<br>
+<p align="center">
+    <img src="/docs/logo-text-padding.png" alt="GreptimeDB Logo">
+</p>
+</br>
 
-[![codecov](https://codecov.io/gh/GrepTimeTeam/greptimedb/branch/develop/graph/badge.svg?token=FITFDI3J3C)](https://codecov.io/gh/GrepTimeTeam/greptimedb)
+<h3 align="center">
+    The next-generation hybrid timeseries/analytics processing database in the cloud
+</h3>
 
-GreptimeDB: the next-generation hybrid timeseries/analytics processing database in the cloud.
+<p align="center">
+    <a href="https://codecov.io/gh/GrepTimeTeam/greptimedb"><img src="https://codecov.io/gh/GrepTimeTeam/greptimedb/branch/develop/graph/badge.svg?token=FITFDI3J3C"></img></a>
+    &nbsp;
+    <a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml"><img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="Continuous integration for developing"></img></a>
+    &nbsp;
+    <a href="https://github.com/greptimeTeam/greptimedb/blob/master/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
+</p>
+
+<p align="center">
+    <a href="https://twitter.com/greptime"><img src="https://img.shields.io/badge/twitter-follow_us-1d9bf0.svg"></a>
+    &nbsp;
+    <a href="https://www.linkedin.com/company/greptime/"><img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg"></a>
+</p>
+
 
 ## Getting Started
 
