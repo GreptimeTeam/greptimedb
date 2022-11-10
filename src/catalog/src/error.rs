@@ -48,13 +48,19 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid system catalog entry type: {:?}", entry_type))]
-    InvalidEntryType { entry_type: Option<u8> },
+    InvalidEntryType {
+        entry_type: Option<u8>,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Invalid system catalog key: {:?}", key))]
-    InvalidKey { key: Option<String> },
+    InvalidKey {
+        key: Option<String>,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Catalog value is not present"))]
-    EmptyValue,
+    EmptyValue { backtrace: Backtrace },
 
     #[snafu(display("Failed to deserialize value, source: {}", source))]
     ValueDeserialize {
@@ -63,10 +69,16 @@ pub enum Error {
     },
 
     #[snafu(display("Cannot find catalog by name: {}", catalog_name))]
-    CatalogNotFound { catalog_name: String },
+    CatalogNotFound {
+        catalog_name: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Cannot find schema, schema info: {}", schema_info))]
-    SchemaNotFound { schema_info: String },
+    SchemaNotFound {
+        schema_info: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Table {} already exists", table))]
     TableExists { table: String, backtrace: Backtrace },
@@ -85,7 +97,10 @@ pub enum Error {
     },
 
     #[snafu(display("Table not found while opening table, table info: {}", table_info))]
-    TableNotFound { table_info: String },
+    TableNotFound {
+        table_info: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Failed to read system catalog table records"))]
     ReadSystemCatalog {
@@ -190,7 +205,7 @@ impl ErrorExt for Error {
             | Error::CatalogStateInconsistent { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
-            | Error::EmptyValue
+            | Error::EmptyValue { .. }
             | Error::ValueDeserialize { .. }
             | Error::Io { .. } => StatusCode::StorageUnavailable,
 
@@ -255,7 +270,7 @@ mod tests {
 
         assert_eq!(
             StatusCode::Unexpected,
-            Error::InvalidKey { key: None }.status_code()
+            InvalidKeySnafu { key: None }.build().status_code()
         );
 
         assert_eq!(
@@ -296,7 +311,7 @@ mod tests {
         );
         assert_eq!(
             StatusCode::StorageUnavailable,
-            Error::EmptyValue.status_code()
+            EmptyValueSnafu {}.build().status_code()
         );
     }
 
