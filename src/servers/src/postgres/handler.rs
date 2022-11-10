@@ -3,7 +3,6 @@ use std::ops::Deref;
 use async_trait::async_trait;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
-use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
 use pgwire::api::portal::Portal;
@@ -111,9 +110,9 @@ fn encode_value(value: &Value, builder: &mut TextQueryResponseBuilder) -> PgWire
         Value::Float64(v) => builder.append_field(Some(v.0)),
         Value::String(v) => builder.append_field(Some(v.as_utf8())),
         Value::Binary(v) => builder.append_field(Some(hex::encode(v.deref()))),
-        Value::Date(v) => builder.append_field(Some(v.val())),
-        Value::DateTime(v) => builder.append_field(Some(v.val())),
-        Value::Timestamp(v) => builder.append_field(Some(v.convert_to(TimeUnit::Millisecond))),
+        Value::Date(v) => builder.append_field(Some(v.to_string())),
+        Value::DateTime(v) => builder.append_field(Some(v.to_string())),
+        Value::Timestamp(v) => builder.append_field(Some(v.to_iso8601_string())),
         Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
             err_msg: format!(
                 "cannot write value {:?} in postgres protocol: unimplemented",
