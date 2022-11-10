@@ -436,16 +436,7 @@ impl WriterInner {
             writer_ctx.flush_strategy,
         ) {
             let new_mutable = self.alloc_memtable(version_control);
-            self.trigger_flush(
-                writer_ctx.shared,
-                writer_ctx.flush_scheduler,
-                writer_ctx.sst_layer,
-                writer_ctx.writer,
-                writer_ctx.wal,
-                writer_ctx.manifest,
-                new_mutable,
-            )
-            .await?;
+            self.trigger_flush(writer_ctx, new_mutable).await?;
         }
 
         Ok(())
@@ -472,15 +463,10 @@ impl WriterInner {
 
     async fn trigger_flush<S: LogStore>(
         &mut self,
-        shared: &SharedDataRef,
-        flush_scheduler: &FlushSchedulerRef,
-        sst_layer: &AccessLayerRef,
-        writer: &RegionWriterRef,
-        wal: &Wal<S>,
-        manifest: &RegionManifest,
+        ctx: &WriterContext<'_, S>,
         new_mutable: MemtableRef,
     ) -> Result<()> {
-        let version_control = &shared.version_control;
+        let version_control = &ctx.shared.version_control;
         // Freeze all mutable memtables so we can flush them later.
         version_control.freeze_mutable(new_mutable);
 
@@ -489,12 +475,12 @@ impl WriterInner {
             // However the last flush job may fail, in which case, we just return error
             // and abort current write request. The flush handle is left empty, so the next
             // time we still have chance to trigger a new flush.
-            logging::info!("Write stall, region: {}", shared.name);
+            logging::info!("Write stall, region: {}", ctx.shared.name);
 
             // TODO(yingwen): We should release the write lock during waiting flush done, which
             // needs something like async condvar.
             flush_handle.join().await.map_err(|e| {
-                logging::error!(e; "Previous flush job failed, region: {}", shared.name);
+                logging::error!(e; "Previous flush job failed, region: {}", ctx.shared.name);
                 e
             })?;
         }
@@ -503,7 +489,7 @@ impl WriterInner {
         let (max_memtable_id, mem_to_flush) = current_version.memtables().memtables_to_flush();
 
         if max_memtable_id.is_none() {
-            logging::info!("No memtables to flush in region: {}", shared.name);
+            logging::info!("No memtables to flush in region: {}", ctx.shared.name);
             return Ok(());
         }
 
@@ -512,14 +498,17 @@ impl WriterInner {
             memtables: mem_to_flush,
             // In write thread, safe to use current commited sequence.
             flush_sequence: version_control.committed_sequence(),
-            shared: shared.clone(),
-            sst_layer: sst_layer.clone(),
-            writer: writer.clone(),
-            wal: wal.clone(),
-            manifest: manifest.clone(),
+            shared: ctx.shared.clone(),
+            sst_layer: ctx.sst_layer.clone(),
+            writer: ctx.writer.clone(),
+            wal: ctx.wal.clone(),
+            manifest: ctx.manifest.clone(),
         };
 
-        let flush_handle = flush_scheduler.schedule_flush(Box::new(flush_req)).await?;
+        let flush_handle = ctx
+            .flush_scheduler
+            .schedule_flush(Box::new(flush_req))
+            .await?;
         self.flush_handle = Some(flush_handle);
 
         Ok(())
