@@ -10,6 +10,62 @@ use crate::instance::Instance;
 use crate::tests::test_util;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_create_database_and_insert_query() {
+    common_telemetry::init_default_ut_logging();
+
+    let (opts, _guard) =
+        test_util::create_tmp_dir_and_datanode_opts("create_database_and_insert_query");
+    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
+    instance.start().await.unwrap();
+
+    let output = instance.execute_sql("create database test").await.unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    let output = instance
+        .execute_sql(
+            r#"create table greptime.test.demo(
+             host STRING,
+             cpu DOUBLE,
+             memory DOUBLE,
+             ts bigint,
+             TIME INDEX(ts)
+)"#,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    let output = instance
+        .execute_sql(
+            r#"insert into greptime.test.demo(host, cpu, memory, ts) values
+                           ('host1', 66.6, 1024, 1655276557000),
+                           ('host2', 88.8,  333.3, 1655276558000)
+                           "#,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(2)));
+
+    let query_output = instance
+        .execute_sql("select ts from greptime.test.demo")
+        .await
+        .unwrap();
+
+    match query_output {
+        Output::Stream(s) => {
+            let batches = util::collect(s).await.unwrap();
+            let columns = batches[0].df_recordbatch.columns();
+            assert_eq!(1, columns.len());
+            assert_eq!(
+                &Int64Array::from_slice(&[1655276557000, 1655276558000]),
+                columns[0].as_any().downcast_ref::<Int64Array>().unwrap()
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_execute_insert() {
     common_telemetry::init_default_ut_logging();
 

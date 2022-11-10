@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::{
@@ -11,7 +10,9 @@ use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use table::requests::CreateDatabaseRequest;
 
-use crate::error::{CatalogSnafu, ExecuteSqlSnafu, Result};
+use crate::error::{
+    CatalogNotFoundSnafu, CatalogSnafu, ExecuteSqlSnafu, Result, SchemaNotFoundSnafu,
+};
 use crate::instance::Instance;
 use crate::metric;
 use crate::sql::SqlRequest;
@@ -36,14 +37,16 @@ impl Instance {
                     .context(ExecuteSqlSnafu)
             }
             Statement::Insert(i) => {
+                let (catalog_name, schema_name, _table_name) = i.table_name().unwrap();
+
                 let schema_provider = self
                     .catalog_manager
-                    .catalog(DEFAULT_CATALOG_NAME)
-                    .expect("datafusion does not accept fallible catalog access")
-                    .unwrap()
-                    .schema(DEFAULT_SCHEMA_NAME)
-                    .expect("datafusion does not accept fallible catalog access")
-                    .unwrap();
+                    .catalog(&catalog_name)
+                    .context(CatalogSnafu)?
+                    .context(CatalogNotFoundSnafu { name: catalog_name })?
+                    .schema(&schema_name)
+                    .context(CatalogSnafu)?
+                    .context(SchemaNotFoundSnafu { name: schema_name })?;
 
                 let request = self.sql_handler.insert_to_request(schema_provider, *i)?;
                 self.sql_handler.execute(request).await
