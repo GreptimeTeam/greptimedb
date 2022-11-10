@@ -185,7 +185,7 @@ pub enum Error {
     },
 
     #[snafu(display("Cannot find datanode by id: {}", node_id))]
-    DatanodeNotAvailable { node_id: u64 },
+    DatanodeNotAvailable { node_id: u64, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

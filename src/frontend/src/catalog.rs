@@ -7,8 +7,7 @@ use catalog::error::{
 };
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
-    CatalogList, CatalogManagerRef, CatalogProvider, CatalogProviderRef, SchemaProvider,
-    SchemaProviderRef,
+    CatalogList, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
 };
 use common_catalog::{CatalogKey, SchemaKey, TableGlobalKey, TableGlobalValue};
 use common_error::ext::BoxedError;
@@ -152,21 +151,6 @@ pub struct FrontendSchemaProvider {
     datanode_instances: Arc<RwLock<DatanodeInstances>>,
 }
 
-impl FrontendSchemaProvider {
-    fn build_query_catalog(&self) -> CatalogManagerRef {
-        let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
-        let catalog = Arc::new(catalog::local::memory::MemoryCatalogProvider::new());
-        let schema = Arc::new(catalog::local::memory::MemorySchemaProvider::new());
-        catalog
-            .register_schema(self.schema_name.clone(), schema)
-            .unwrap();
-        catalog_list
-            .register_catalog(self.catalog_name.clone(), catalog)
-            .unwrap();
-        catalog_list
-    }
-}
-
 impl SchemaProvider for FrontendSchemaProvider {
     fn as_any(&self) -> &dyn Any {
         self
@@ -203,7 +187,6 @@ impl SchemaProvider for FrontendSchemaProvider {
             table_name: name.to_string(),
         };
 
-        let catalog_ref = self.build_query_catalog();
         let instances = self.datanode_instances.clone();
         let backend = self.backend.clone();
         let table_name = name.to_string();
@@ -261,16 +244,6 @@ impl SchemaProvider for FrontendSchemaProvider {
                     region_dist_map: region_to_datanode_map,
                     datanode_instances,
                 });
-
-                catalog_ref
-                    .catalog(&table_global_key.catalog_name)
-                    .unwrap()
-                    .unwrap()
-                    .schema(&table_global_key.schema_name)
-                    .unwrap()
-                    .unwrap()
-                    .register_table(table_name, table.clone())
-                    .unwrap();
                 Ok(Some(table as _))
             })
         })

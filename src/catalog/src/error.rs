@@ -160,6 +160,7 @@ pub enum Error {
     DeserializePartitionRule {
         data: String,
         source: serde_json::error::Error,
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Invalid table schema in catalog, source: {:?}", source))]

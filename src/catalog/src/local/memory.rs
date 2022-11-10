@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use common_catalog::consts::MIN_USER_TABLE_ID;
+use snafu::OptionExt;
 use table::metadata::TableId;
 use table::TableRef;
 
-use crate::error::Error::SchemaNotFound;
-use crate::error::{CatalogNotFoundSnafu, Result, TableExistsSnafu};
+use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::schema::SchemaProvider;
 use crate::{
     CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSystemTableRequest,
@@ -56,16 +56,15 @@ impl CatalogManager for MemoryCatalogManager {
         let catalogs = self.catalogs.write().unwrap();
         let catalog = catalogs
             .get(&request.catalog)
-            .ok_or_else(|| {
-                CatalogNotFoundSnafu {
-                    catalog_name: &request.catalog,
-                }
-                .build()
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
             })?
             .clone();
-        let schema = catalog.schema(&request.schema)?.ok_or(SchemaNotFound {
-            schema_info: format!("{}.{}", &request.catalog, &request.schema),
-        })?;
+        let schema = catalog
+            .schema(&request.schema)?
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", &request.catalog, &request.schema),
+            })?;
         schema
             .register_table(request.table_name, request.table)
             .map(|v| if v.is_some() { 0 } else { 1 })
