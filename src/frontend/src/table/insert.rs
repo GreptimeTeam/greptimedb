@@ -109,7 +109,7 @@ fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<Inse
     options.insert(
         // TODO(fys): Temporarily hard code here
         "region_id".to_string(),
-        codec::RegionId { id: region_id }.into(),
+        codec::RegionNumber { id: region_id }.into(),
     );
 
     Ok(InsertExpr {
@@ -196,7 +196,7 @@ mod tests {
         }
 
         let bytes = insert_expr.options.get("region_id").unwrap();
-        let region_id: codec::RegionId = bytes.deref().try_into().unwrap();
+        let region_id: codec::RegionNumber = bytes.deref().try_into().unwrap();
         assert_eq!(12, region_id.id);
     }
 }

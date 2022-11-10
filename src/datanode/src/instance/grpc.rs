@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use api::v1::codec::RegionId;
+use api::v1::codec::RegionNumber;
 use api::v1::{
     admin_expr, codec::InsertBatch, insert_expr, object_expr, select_expr, AdminExpr, AdminResult,
     ObjectExpr, ObjectResult, SelectExpr,
@@ -209,13 +209,13 @@ impl GrpcQueryHandler for Instance {
                     })?;
 
                 // TODO(fys): _region_id is for later use.
-                let _region_id: Option<RegionId> = insert_expr
+                let _region_id: Option<RegionNumber> = insert_expr
                     .options
                     .get("region_id")
                     .map(|id| {
                         id.deref()
                             .try_into()
-                            .context(servers::error::DecodeRegionIdSnafu)
+                            .context(servers::error::DecodeRegionNumberSnafu)
                     })
                     .transpose()?;
 
