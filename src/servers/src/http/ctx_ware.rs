@@ -9,19 +9,21 @@ use common_telemetry::error;
 use crate::context::{AuthMethod, Channel, CtxBuilder};
 
 pub async fn build_ctx<B>(mut req: Request<B>, next: Next<B>) -> Result<Response, StatusCode> {
-    let auth_option =
-        req.headers()
-            .get(http::header::AUTHORIZATION)
-            .map_or(AuthMethod::None, |header| {
-                header.to_str().map_or(AuthMethod::None, |header_str| {
-                    match header_str.split_once(' ') {
-                        Some((name, content)) if name == "Bearer" || name == "TOKEN" => {
-                            AuthMethod::Token(String::from(content))
-                        }
-                        _ => AuthMethod::None,
+    let auth_option = req
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .map(|header| {
+            header
+                .to_str()
+                .map(|header_str| match header_str.split_once(' ') {
+                    Some((name, content)) if name == "Bearer" || name == "TOKEN" => {
+                        AuthMethod::Token(String::from(content))
                     }
+                    _ => AuthMethod::None,
                 })
-            });
+                .unwrap_or(AuthMethod::None)
+        })
+        .or(Some(AuthMethod::None));
 
     match CtxBuilder::new()
         .client_addr(
@@ -31,7 +33,7 @@ pub async fn build_ctx<B>(mut req: Request<B>, next: Next<B>) -> Result<Response
                 .map(|h| h.to_string()),
         )
         .set_channel(Some(Channel::HTTP))
-        .set_auth_method(Some(auth_option))
+        .set_auth_method(auth_option)
         .build()
     {
         Ok(ctx) => {
