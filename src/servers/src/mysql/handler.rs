@@ -1,12 +1,19 @@
 use std::io;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_telemetry::{error, info};
 use opensrv_mysql::AsyncMysqlShim;
 use opensrv_mysql::ErrorKind;
 use opensrv_mysql::ParamParser;
 use opensrv_mysql::QueryResultWriter;
 use opensrv_mysql::StatementMetaWriter;
+use rand::RngCore;
+use tokio::sync::RwLock;
 
+use crate::context::AuthHashMethod::DoubleSha1;
+use crate::context::Channel::MYSQL;
+use crate::context::{AuthMethod, Context, CtxBuilder};
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
 use crate::query_handler::SqlQueryHandlerRef;
@@ -14,17 +21,80 @@ use crate::query_handler::SqlQueryHandlerRef;
 // An intermediate shim for executing MySQL queries.
 pub struct MysqlInstanceShim {
     query_handler: SqlQueryHandlerRef,
+    salt: [u8; 20],
+    client_addr: String,
+    ctx: Arc<RwLock<Context>>,
 }
 
 impl MysqlInstanceShim {
-    pub fn create(query_handler: SqlQueryHandlerRef) -> MysqlInstanceShim {
-        MysqlInstanceShim { query_handler }
+    pub fn create(query_handler: SqlQueryHandlerRef, client_addr: String) -> MysqlInstanceShim {
+        // init a random salt
+        let mut bs = vec![0u8; 20];
+        let mut rng = rand::thread_rng();
+        rng.fill_bytes(bs.as_mut());
+
+        let mut scramble: [u8; 20] = [0; 20];
+        for i in 0..20 {
+            scramble[i] = bs[i] & 0x7fu8;
+            if scramble[i] == b'\0' || scramble[i] == b'$' {
+                scramble[i] += 1;
+            }
+        }
+
+        MysqlInstanceShim {
+            query_handler,
+            salt: scramble,
+            client_addr,
+            ctx: Default::default(),
+        }
     }
 }
 
 #[async_trait]
 impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
     type Error = error::Error;
+
+    fn salt(&self) -> [u8; 20] {
+        self.salt
+    }
+
+    async fn authenticate(
+        &self,
+        _auth_plugin: &str,
+        _username: &[u8],
+        _salt: &[u8],
+        _auth_data: &[u8],
+    ) -> bool {
+        // if not specified then **root** will be used
+        let username = String::from_utf8_lossy(_username);
+        let client_addr = self.client_addr.clone();
+        let auth_method = match _auth_data.len() {
+            0 => AuthMethod::None,
+            _ => AuthMethod::Password {
+                hash_method: DoubleSha1,
+                hashed_value: _auth_data.to_vec(),
+                salt: _salt.to_vec(),
+            },
+        };
+
+        return match CtxBuilder::new()
+            .client_addr(Some(client_addr))
+            .set_channel(Some(MYSQL))
+            .set_username(Some(username.to_string()))
+            .set_auth_method(Some(auth_method))
+            .build()
+        {
+            Ok(ctx) => {
+                let mut a = self.ctx.write().await;
+                *a = ctx;
+                true
+            }
+            Err(e) => {
+                error!(e; "create ctx failed when authing mysql conn");
+                false
+            }
+        };
+    }
 
     async fn on_prepare<'a>(
         &'a mut self,

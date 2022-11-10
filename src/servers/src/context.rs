@@ -53,6 +53,11 @@ impl CtxBuilder {
         self
     }
 
+    pub fn set_username(&mut self, username: Option<String>) -> &mut Self {
+        self.username = username;
+        self
+    }
+
     pub fn build(&self) -> Result<Context> {
         Ok(Context {
             client_info: ClientInfo {
@@ -126,6 +131,7 @@ pub enum AuthMethod {
     Password {
         hash_method: AuthHashMethod,
         hashed_value: Vec<u8>,
+        salt: Vec<u8>,
     },
     Token(String),
 }

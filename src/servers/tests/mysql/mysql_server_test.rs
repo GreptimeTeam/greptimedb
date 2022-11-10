@@ -63,10 +63,10 @@ async fn test_shutdown_mysql_server() -> Result<()> {
     let server_port = server_addr.port();
 
     let mut join_handles = vec![];
-    for _ in 0..2 {
+    for index in 0..2 {
         join_handles.push(tokio::spawn(async move {
             for _ in 0..1000 {
-                match create_connection(server_port).await {
+                match create_connection(server_port, index == 1).await {
                     Ok(mut connection) => {
                         let result: u32 = connection
                             .query_first("SELECT uint32s FROM numbers LIMIT 1")
@@ -114,7 +114,7 @@ async fn test_query_all_datatypes() -> Result<()> {
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = mysql_server.start(listening).await.unwrap();
 
-    let mut connection = create_connection(server_addr.port()).await.unwrap();
+    let mut connection = create_connection(server_addr.port(), false).await.unwrap();
     let mut result = connection
         .query_iter("SELECT * FROM all_datatypes LIMIT 3")
         .await
@@ -149,11 +149,13 @@ async fn test_query_concurrently() -> Result<()> {
     let threads = 4;
     let expect_executed_queries_per_worker = 1000;
     let mut join_handles = vec![];
-    for _ in 0..threads {
+    for index in 0..threads {
         join_handles.push(tokio::spawn(async move {
             let mut rand: StdRng = rand::SeedableRng::from_entropy();
 
-            let mut connection = create_connection(server_port).await.unwrap();
+            let mut connection = create_connection(server_port, index % 2 == 0)
+                .await
+                .unwrap();
             for _ in 0..expect_executed_queries_per_worker {
                 let expected: u32 = rand.gen_range(0..100);
                 let result: u32 = connection
@@ -168,7 +170,9 @@ async fn test_query_concurrently() -> Result<()> {
 
                 let should_recreate_conn = expected == 1;
                 if should_recreate_conn {
-                    connection = create_connection(server_port).await.unwrap();
+                    connection = create_connection(server_port, index % 2 == 0)
+                        .await
+                        .unwrap();
                 }
             }
             expect_executed_queries_per_worker
@@ -182,11 +186,16 @@ async fn test_query_concurrently() -> Result<()> {
     Ok(())
 }
 
-async fn create_connection(port: u16) -> mysql_async::Result<mysql_async::Conn> {
-    let opts = mysql_async::OptsBuilder::default()
+async fn create_connection(port: u16, with_pwd: bool) -> mysql_async::Result<mysql_async::Conn> {
+    let mut opts = mysql_async::OptsBuilder::default()
         .ip_or_hostname("127.0.0.1")
         .tcp_port(port)
         .prefer_socket(false)
         .wait_timeout(Some(1000));
+
+    if with_pwd {
+        opts = opts.pass(Some("default_pwd".to_string()));
+    }
+
     mysql_async::Conn::new(opts).await
 }
