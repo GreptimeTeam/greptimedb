@@ -28,7 +28,7 @@ impl Default for MetaSrvOptions {
         Self {
             bind_addr: "0.0.0.0:3002".to_string(),
             server_addr: "0.0.0.0:3002".to_string(),
-            store_addr: "0.0.0.0:2380".to_string(),
+            store_addr: "0.0.0.0:2379".to_string(),
             datanode_lease_secs: 15,
         }
     }

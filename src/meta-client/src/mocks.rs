@@ -5,11 +5,6 @@ use meta_srv::mocks::MockInfo;
 use crate::client::MetaClient;
 use crate::client::MetaClientBuilder;
 
-pub async fn mock_client_with_noopstore() -> MetaClient {
-    let mock_info = server_mock::mock_with_noopstore().await;
-    mock_client_by(mock_info).await
-}
-
 pub async fn mock_client_with_memstore() -> MetaClient {
     let mock_info = server_mock::mock_with_memstore().await;
     mock_client_by(mock_info).await
@@ -18,11 +13,6 @@ pub async fn mock_client_with_memstore() -> MetaClient {
 #[allow(dead_code)]
 pub async fn mock_client_with_etcdstore(addr: &str) -> MetaClient {
     let mock_info = server_mock::mock_with_etcdstore(addr).await;
-    mock_client_by(mock_info).await
-}
-
-pub async fn mock_client_with_selector(selector: SelectorRef) -> MetaClient {
-    let mock_info = server_mock::mock_with_selector(selector).await;
     mock_client_by(mock_info).await
 }
 

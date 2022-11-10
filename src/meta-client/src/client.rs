@@ -372,14 +372,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_ask_leader() {
-        let client = mocks::mock_client_with_noopstore().await;
+        let client = mocks::mock_client_with_memstore().await;
         let res = client.ask_leader().await;
         assert!(res.is_ok());
     }
 
     #[tokio::test]
     async fn test_heartbeat() {
-        let client = mocks::mock_client_with_noopstore().await;
+        let client = mocks::mock_client_with_memstore().await;
         let (sender, mut receiver) = client.heartbeat().await.unwrap();
         // send heartbeats
         tokio::spawn(async move {
@@ -425,44 +425,6 @@ mod tests {
                 },
             ])
         }
-    }
-
-    #[tokio::test]
-    async fn test_create_route() {
-        let selector = Arc::new(MockSelector {});
-        let client = mocks::mock_client_with_selector(selector).await;
-        let p1 = Partition {
-            column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
-            value_list: vec![b"k1".to_vec(), b"k2".to_vec()],
-        };
-        let p2 = Partition {
-            column_list: vec![b"col_1".to_vec(), b"col_2".to_vec()],
-            value_list: vec![b"Max1".to_vec(), b"Max2".to_vec()],
-        };
-        let table_name = TableName::new("test_catalog", "test_schema", "test_table");
-        let req = CreateRequest::new(table_name)
-            .add_partition(p1)
-            .add_partition(p2);
-
-        let res = client.create_route(req).await.unwrap();
-
-        let table_routes = res.table_routes;
-        assert_eq!(1, table_routes.len());
-        let table_route = table_routes.get(0).unwrap();
-        let table = &table_route.table;
-        let table_name = &table.table_name;
-        assert_eq!("test_catalog", table_name.catalog_name);
-        assert_eq!("test_schema", table_name.schema_name);
-        assert_eq!("test_table", table_name.table_name);
-
-        let region_routes = &table_route.region_routes;
-        assert_eq!(2, region_routes.len());
-        let r0 = region_routes.get(0).unwrap();
-        let r1 = region_routes.get(1).unwrap();
-        assert_eq!(0, r0.region.as_ref().unwrap().id);
-        assert_eq!(1, r1.region.as_ref().unwrap().id);
-        assert_eq!("peer0", r0.leader_peer.as_ref().unwrap().addr);
-        assert_eq!("peer1", r1.leader_peer.as_ref().unwrap().addr);
     }
 
     #[tokio::test]

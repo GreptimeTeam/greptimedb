@@ -35,11 +35,12 @@ mod tests {
     use api::v1::meta::{HeartbeatResponse, RequestHeader};
 
     use super::*;
-    use crate::{handler::Context, service::store::noop::NoopKvStore};
+    use crate::handler::Context;
+    use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_handle_heartbeat_resp_header() {
-        let kv_store = Arc::new(NoopKvStore {});
+        let kv_store = Arc::new(MemStore::new());
         let ctx = Context {
             server_addr: "0.0.0.0:0000".to_string(),
             kv_store,
