@@ -13,8 +13,8 @@ use table::TableRef;
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::schema::SchemaProvider;
 use crate::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSystemTableRequest,
-    RegisterTableRequest, SchemaProviderRef,
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSchemaRequest,
+    RegisterSystemTableRequest, RegisterTableRequest, SchemaProviderRef,
 };
 
 /// Simple in-memory list of catalogs
@@ -68,6 +68,17 @@ impl CatalogManager for MemoryCatalogManager {
         schema
             .register_table(request.table_name, request.table)
             .map(|v| if v.is_some() { 0 } else { 1 })
+    }
+
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+        let catalogs = self.catalogs.write().unwrap();
+        let catalog = catalogs
+            .get(&request.catalog)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?;
+        catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
+        Ok(1)
     }
 
     async fn register_system_table(&self, _request: RegisterSystemTableRequest) -> Result<()> {

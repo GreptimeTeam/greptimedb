@@ -32,7 +32,8 @@ use crate::error::{InvalidTableSchemaSnafu, Result};
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
-    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider,
+    SchemaProviderRef,
 };
 
 /// Catalog manager based on metasrv.
@@ -453,6 +454,17 @@ impl CatalogManager for RemoteCatalogManager {
             .fail();
         }
         schema_provider.register_table(request.table_name, request.table)?;
+        Ok(1)
+    }
+
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+        let catalog_name = request.catalog;
+        let schema_name = request.schema;
+        let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
+            catalog_name: &catalog_name,
+        })?;
+        let schema_provider = self.new_schema_provider(&catalog_name, &schema_name);
+        catalog_provider.register_schema(schema_name, schema_provider)?;
         Ok(1)
     }
 

@@ -24,8 +24,8 @@ use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::SimpleTableScan;
 use table::{Table, TableRef};
 
-use crate::error::{Error, InsertTableRecordSnafu};
-use crate::system::{build_table_insert_request, SystemCatalogTable};
+use crate::error::{Error, InsertCatalogRecordSnafu};
+use crate::system::{build_schema_insert_request, build_table_insert_request, SystemCatalogTable};
 use crate::{
     format_full_table_name, CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef,
 };
@@ -254,7 +254,20 @@ impl SystemCatalog {
             .system
             .insert(request)
             .await
-            .context(InsertTableRecordSnafu)
+            .context(InsertCatalogRecordSnafu)
+    }
+
+    pub async fn register_schema(
+        &self,
+        catalog: String,
+        schema: String,
+    ) -> crate::error::Result<usize> {
+        let request = build_schema_insert_request(catalog, schema);
+        self.information_schema
+            .system
+            .insert(request)
+            .await
+            .context(InsertCatalogRecordSnafu)
     }
 }
 

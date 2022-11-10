@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::local::MemorySchemaProvider;
-use catalog::RegisterTableRequest;
+use catalog::{RegisterSchemaRequest, RegisterTableRequest};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_telemetry::tracing::info;
@@ -17,27 +16,25 @@ use table::metadata::TableId;
 use table::requests::*;
 
 use crate::error::{
-    self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateSchemaSnafu,
-    CreateTableSnafu, InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu,
-    RegisterSchemaSnafu, Result,
+    self, ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu,
+    InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu, RegisterSchemaSnafu,
+    Result,
 };
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
     pub(crate) async fn create_database(&self, req: CreateDatabaseRequest) -> Result<Output> {
-        // TODO(dennis): catalog manager may provide a function to create new schema
-        let schema = Arc::new(MemorySchemaProvider::new());
-
+        let schema = req.db_name;
+        let req = RegisterSchemaRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: schema.clone(),
+        };
         self.catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                name: DEFAULT_CATALOG_NAME,
-            })?
-            .register_schema(req.db_name.clone(), schema)
+            .register_schema(req)
+            .await
             .context(RegisterSchemaSnafu)?;
 
-        info!("Successfully created database: {:?}", req.db_name);
+        info!("Successfully created database: {:?}", schema);
         Ok(Output::AffectedRows(1))
     }
 

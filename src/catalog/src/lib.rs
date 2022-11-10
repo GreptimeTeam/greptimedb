@@ -76,6 +76,9 @@ pub trait CatalogManager: CatalogList {
     /// returns table registered.
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize>;
 
+    /// Register a schema with catalog name and schema name.
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize>;
+
     /// Register a system table, should be called before starting the manager.
     async fn register_system_table(&self, request: RegisterSystemTableRequest)
         -> error::Result<()>;
@@ -105,6 +108,12 @@ pub struct RegisterTableRequest {
     pub table_name: String,
     pub table_id: TableId,
     pub table: TableRef,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegisterSchemaRequest {
+    pub catalog: String,
+    pub schema: String,
 }
 
 /// Formats table fully-qualified name
