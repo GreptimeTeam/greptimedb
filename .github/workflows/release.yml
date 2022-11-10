@@ -64,22 +64,17 @@ jobs:
           sudo apt-get -y update
           sudo apt-get -y install libssl-dev pkg-config g++-aarch64-linux-gnu gcc-aarch64-linux-gnu
 
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
-          target: ${{ matrix.arch }}
+          targets: ${{ matrix.arch }}
 
       - name: Output package versions
         run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
 
       - name: Run cargo build
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: ${{ matrix.opts }} --release --locked --target ${{ matrix.arch }}
+        run: cargo build ${{ matrix.opts }} --release --locked --target ${{ matrix.arch }}
 
       - name: Calculate checksum and rename binary
         shell: bash
@@ -124,7 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Download amd64 binary
         uses: actions/download-artifact@v3

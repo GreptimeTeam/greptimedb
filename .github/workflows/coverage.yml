@@ -18,24 +18,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
       - name: Install toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
           components: llvm-tools-preview
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.0.0
+        uses: Swatinem/rust-cache@v2
       - name: Cleanup disk
         uses: curoky/cleanup-disk-action@v2.0
         with:
           retain: 'rust'
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Collect coverage data
-        run: cargo llvm-cov --lcov --output-path lcov.info
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
         env:
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
