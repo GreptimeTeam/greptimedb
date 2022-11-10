@@ -134,7 +134,7 @@ impl RegionWriter {
         // avoid other writers write to the region and switch the memtable safely.
         // Another potential benefit is that the write lock also protect against concurrent
         // alter request to the region.
-        let _inner = self.inner.lock().await;
+        let inner = self.inner.lock().await;
 
         let version_control = alter_ctx.version_control();
 
@@ -176,12 +176,7 @@ impl RegionWriter {
         let manifest_version = alter_ctx.manifest.update(action_list).await?;
 
         // Now we could switch memtables and apply the new metadata to the version.
-        let new_mutable = self
-            .inner
-            .lock()
-            .await
-            .memtable_builder
-            .build(new_metadata.schema().clone());
+        let new_mutable = inner.memtable_builder.build(new_metadata.schema().clone());
         version_control.freeze_mutable_and_apply_metadata(
             new_metadata,
             manifest_version,
