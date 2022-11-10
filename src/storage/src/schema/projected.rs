@@ -215,15 +215,10 @@ impl ProjectedSchema {
             .projected_columns
             .iter()
             .map(|col_idx| {
-                let column_schema = region_schema
+                region_schema
                     .column_metadata(*col_idx)
                     .desc
-                    .to_column_schema();
-                if *col_idx == region_schema.timestamp_key_index() {
-                    column_schema.with_time_index(true)
-                } else {
-                    column_schema
-                }
+                    .to_column_schema()
             })
             .collect();
 
