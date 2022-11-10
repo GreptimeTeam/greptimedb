@@ -15,6 +15,7 @@ members = [
     "src/common/recordbatch",
     "src/common/runtime",
     "src/common/substrait",
+    "src/common/insert",
     "src/common/telemetry",
     "src/common/time",
     "src/datanode",

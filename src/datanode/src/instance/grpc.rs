@@ -17,12 +17,11 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::AddColumnRequest;
 
 use crate::error::{
-    self, CatalogSnafu, DecodeLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, Result,
-    TableNotFoundSnafu, UnsupportedExprSnafu,
+    CatalogSnafu, DecodeLogicalPlanSnafu, EmptyInsertBatchSnafu, ExecuteSqlSnafu, InsertDataSnafu,
+    InsertSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
-use crate::server::grpc::insert::{self, insertion_expr_to_request};
 use crate::server::grpc::plan::PhysicalPlanner;
 use crate::server::grpc::select::to_object_result;
 use crate::sql::SqlRequest;
@@ -38,7 +37,7 @@ impl Instance {
             .map(|req| req.column_schema.name.clone())
             .collect::<Vec<_>>();
 
-        let alter_request = insert::build_alter_table_request(table_name, add_columns);
+        let alter_request = common_insert::build_alter_table_request(table_name, add_columns);
 
         debug!(
             "Adding new columns: {:?} to table: {}",
@@ -70,13 +69,14 @@ impl Instance {
             .next_table_id()
             .await
             .context(CatalogSnafu)?;
-        let create_table_request = insert::build_create_table_request(
+        let create_table_request = common_insert::build_create_table_request(
             catalog_name,
             schema_name,
             table_id,
             table_name,
             insert_batches,
-        )?;
+        )
+        .context(InsertDataSnafu)?;
 
         info!(
             "Try to create table: {} automatically with request: {:?}",
@@ -111,12 +111,16 @@ impl Instance {
             .expect("default schema must exist")
             .unwrap();
 
-        let insert_batches = insert::insert_batches(values.values)?;
-        ensure!(!insert_batches.is_empty(), error::IllegalInsertDataSnafu);
+        let insert_batches =
+            common_insert::insert_batches(values.values).context(InsertDataSnafu)?;
+
+        ensure!(!insert_batches.is_empty(), EmptyInsertBatchSnafu);
 
         let table = if let Some(table) = schema_provider.table(table_name).context(CatalogSnafu)? {
             let schema = table.schema();
-            if let Some(add_columns) = insert::find_new_columns(&schema, &insert_batches)? {
+            if let Some(add_columns) = common_insert::find_new_columns(&schema, &insert_batches)
+                .context(InsertDataSnafu)?
+            {
                 self.add_new_columns_to_table(table_name, add_columns)
                     .await?;
             }
@@ -137,7 +141,9 @@ impl Instance {
                 .context(TableNotFoundSnafu { table_name })?
         };
 
-        let insert = insertion_expr_to_request(table_name, insert_batches, table.clone())?;
+        let insert =
+            common_insert::insertion_expr_to_request(table_name, insert_batches, table.clone())
+                .context(InsertDataSnafu)?;
 
         let affected_rows = table
             .insert(insert)
