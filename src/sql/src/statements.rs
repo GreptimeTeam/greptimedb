@@ -1,5 +1,5 @@
 pub mod alter;
-pub mod create_table;
+pub mod create;
 pub mod insert;
 pub mod query;
 pub mod show;

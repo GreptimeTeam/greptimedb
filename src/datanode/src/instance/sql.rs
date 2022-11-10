@@ -48,7 +48,11 @@ impl Instance {
                 self.sql_handler.execute(request).await
             }
 
-            Statement::Create(c) => {
+            Statement::CreateDatabase(_) => {
+                unimplemented!();
+            }
+
+            Statement::CreateTable(c) => {
                 let table_id = self
                     .catalog_manager
                     .next_table_id()

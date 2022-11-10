@@ -19,7 +19,7 @@ pub enum Error {
     Unsupported { sql: String, keyword: String },
 
     #[snafu(display(
-        "Unexpected token while parsing SQL statement: {}, expected: {}, found: {}, source: {}",
+        "Unexpected token while parsing SQL statement: {}, expected: '{}', found: {}, source: {}",
         sql,
         expected,
         actual,

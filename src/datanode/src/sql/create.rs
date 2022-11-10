@@ -7,7 +7,7 @@ use common_telemetry::tracing::info;
 use datatypes::schema::SchemaBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::TableConstraint;
-use sql::statements::create_table::CreateTable;
+use sql::statements::create::CreateTable;
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use store_api::storage::consts::TIME_INDEX_NAME;
 use table::engine::EngineContext;
@@ -181,7 +181,7 @@ mod tests {
         let mut res = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
         assert_eq!(1, res.len());
         match res.pop().unwrap() {
-            Statement::Create(c) => c,
+            Statement::CreateTable(c) => c,
             _ => {
                 panic!("Unexpected statement!")
             }

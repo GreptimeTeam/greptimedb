@@ -22,7 +22,7 @@ use servers::query_handler::{
 };
 use snafu::prelude::*;
 use sql::ast::{ColumnDef, TableConstraint};
-use sql::statements::create_table::{CreateTable, TIME_INDEX};
+use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::statement::Statement;
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use sql::{dialect::GenericDialect, parser::ParserContext};
@@ -116,7 +116,7 @@ impl SqlQueryHandler for Instance {
                     .await
                     .and_then(|object_result| object_result.try_into())
             }
-            Statement::Create(create) => {
+            Statement::CreateTable(create) => {
                 let expr = create_to_expr(create)
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu { query })?;
