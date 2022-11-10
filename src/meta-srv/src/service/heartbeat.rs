@@ -142,11 +142,11 @@ mod tests {
 
     use super::*;
     use crate::metasrv::MetaSrvOptions;
-    use crate::service::store::noop::NoopKvStore;
+    use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_ask_leader() {
-        let kv_store = Arc::new(NoopKvStore {});
+        let kv_store = Arc::new(MemStore::new());
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None).await;
 
         let req = AskLeaderRequest {
