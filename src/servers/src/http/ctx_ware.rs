@@ -4,7 +4,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use common_telemetry::{error, info};
+use common_telemetry::error;
 
 use crate::context::{AuthMethod, Channel, CtxBuilder};
 
@@ -13,21 +13,14 @@ pub async fn build_ctx<B>(mut req: Request<B>, next: Next<B>) -> Result<Response
         req.headers()
             .get(http::header::AUTHORIZATION)
             .map_or(AuthMethod::None, |header| {
-                if header.as_bytes().starts_with(b"TOKEN ") {
-                    let bytes = &header.as_bytes()[b"TOKEN ".len()..];
-                    return match String::from_utf8(bytes.to_vec()) {
-                        Ok(token) => AuthMethod::Token(token),
-                        Err(_) => {
-                            info!(
-                                "parse auth token from http header error: {:?}",
-                                header.to_str()
-                            );
-                            AuthMethod::None
+                header.to_str().map_or(AuthMethod::None, |header_str| {
+                    match header_str.split_once(' ') {
+                        Some((name, content)) if name == "Bearer" || name == "TOKEN" => {
+                            AuthMethod::Token(String::from(content))
                         }
-                    };
-                }
-                // unrecognized case
-                AuthMethod::None
+                        _ => AuthMethod::None,
+                    }
+                })
             });
 
     match CtxBuilder::new()
