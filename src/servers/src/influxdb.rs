@@ -240,19 +240,19 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         let columns = &insert_req.columns_values;
 
         let host = columns.get("host").unwrap();
-        let expetcd: Vec<Value> = vec!["host1".into(), "host2".into()];
-        assert_vector(&expetcd, host);
+        let expected: Vec<Value> = vec!["host1".into(), "host2".into()];
+        assert_vector(&expected, host);
 
         let cpu = columns.get("cpu").unwrap();
-        let expetcd: Vec<Value> = vec![66.6.into(), Value::Null];
-        assert_vector(&expetcd, cpu);
+        let expected: Vec<Value> = vec![66.6.into(), Value::Null];
+        assert_vector(&expected, cpu);
 
         let memory = columns.get("memory").unwrap();
-        let expetcd: Vec<Value> = vec![1024.0.into(), 1027.0.into()];
-        assert_vector(&expetcd, memory);
+        let expected: Vec<Value> = vec![1024.0.into(), 1027.0.into()];
+        assert_vector(&expected, memory);
 
         let ts = columns.get("ts").unwrap();
-        let expetcd: Vec<Value> = vec![
+        let expected: Vec<Value> = vec![
             datatypes::prelude::Value::Timestamp(Timestamp::new(
                 1663840496100,
                 TimeUnit::Millisecond,
@@ -262,7 +262,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                 TimeUnit::Millisecond,
             )),
         ];
-        assert_vector(&expetcd, ts);
+        assert_vector(&expected, ts);
     }
 
     fn assert_table_2(insert_req: &InsertRequest) {
@@ -272,19 +272,19 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         let columns = &insert_req.columns_values;
 
         let host = columns.get("host").unwrap();
-        let expetcd: Vec<Value> = vec!["host3".into(), "host4".into()];
-        assert_vector(&expetcd, host);
+        let expected: Vec<Value> = vec!["host3".into(), "host4".into()];
+        assert_vector(&expected, host);
 
         let cpu = columns.get("cpu").unwrap();
-        let expetcd: Vec<Value> = vec![66.5.into(), 66.3.into()];
-        assert_vector(&expetcd, cpu);
+        let expected: Vec<Value> = vec![66.5.into(), 66.3.into()];
+        assert_vector(&expected, cpu);
 
         let memory = columns.get("memory").unwrap();
-        let expetcd: Vec<Value> = vec![Value::Null, 1029.0.into()];
-        assert_vector(&expetcd, memory);
+        let expected: Vec<Value> = vec![Value::Null, 1029.0.into()];
+        assert_vector(&expected, memory);
 
         let ts = columns.get("ts").unwrap();
-        let expetcd: Vec<Value> = vec![
+        let expected: Vec<Value> = vec![
             datatypes::prelude::Value::Timestamp(Timestamp::new(
                 1663840496100,
                 TimeUnit::Millisecond,
@@ -294,7 +294,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                 TimeUnit::Millisecond,
             )),
         ];
-        assert_vector(&expetcd, ts);
+        assert_vector(&expected, ts);
     }
 
     fn assert_vector(expected: &[Value], vector: &Arc<dyn Vector>) {
