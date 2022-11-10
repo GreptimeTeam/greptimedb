@@ -33,7 +33,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.2.0
+        uses: Swatinem/rust-cache@v2
       - name: Run cargo check
         run: cargo check --workspace --all-targets
 
@@ -59,9 +59,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.2.0
+        uses: Swatinem/rust-cache@v2
       - name: Cleanup disk
-        uses: curoky/cleanup-disk-action@v2.0
+        uses: curoky/cleanup-disk-action@v2
         with:
           retain: 'rust,llvm'
       - name: Run cargo test
@@ -87,7 +87,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.2.0
+        uses: Swatinem/rust-cache@v2
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
 
@@ -104,6 +104,6 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.2.0
+        uses: Swatinem/rust-cache@v2
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr
