@@ -17,8 +17,9 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::AddColumnRequest;
 
 use crate::error::{
-    CatalogSnafu, DecodeLogicalPlanSnafu, EmptyInsertBatchSnafu, ExecuteSqlSnafu, InsertDataSnafu,
-    InsertSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu,
+    CatalogNotFoundSnafu, CatalogSnafu, DecodeLogicalPlanSnafu, EmptyInsertBatchSnafu,
+    ExecuteSqlSnafu, InsertDataSnafu, InsertSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
+    UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
@@ -103,11 +104,11 @@ impl Instance {
         let schema_provider = self
             .catalog_manager
             .catalog(catalog_name)
-            .unwrap()
-            .expect("default catalog must exist")
+            .context(CatalogSnafu)?
+            .context(CatalogNotFoundSnafu { name: catalog_name })?
             .schema(schema_name)
-            .expect("default schema must exist")
-            .unwrap();
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu { name: schema_name })?;
 
         let insert_batches =
             common_insert::insert_batches(values.values).context(InsertDataSnafu)?;
