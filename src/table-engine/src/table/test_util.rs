@@ -48,12 +48,12 @@ pub fn schema_for_test() -> Schema {
             "ts",
             ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
             true,
-        ),
+        )
+        .with_time_index(true),
     ];
 
     SchemaBuilder::try_from(column_schemas)
         .unwrap()
-        .timestamp_index(Some(3))
         .build()
         .expect("ts must be timestamp column")
 }

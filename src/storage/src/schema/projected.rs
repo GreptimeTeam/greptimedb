@@ -200,7 +200,6 @@ impl ProjectedSchema {
         let store_schema = StoreSchema::new(
             columns,
             region_schema.version(),
-            region_schema.timestamp_key_index(),
             region_schema.row_key_end(),
             projection.num_user_columns,
         )?;
@@ -212,32 +211,24 @@ impl ProjectedSchema {
         region_schema: &RegionSchema,
         projection: &Projection,
     ) -> Result<SchemaRef> {
-        let timestamp_index =
-            projection
-                .projected_columns
-                .iter()
-                .enumerate()
-                .find_map(|(idx, col_idx)| {
-                    if *col_idx == region_schema.timestamp_key_index() {
-                        Some(idx)
-                    } else {
-                        None
-                    }
-                });
         let column_schemas: Vec<_> = projection
             .projected_columns
             .iter()
             .map(|col_idx| {
-                region_schema
+                let column_schema = region_schema
                     .column_metadata(*col_idx)
                     .desc
-                    .to_column_schema()
+                    .to_column_schema();
+                if *col_idx == region_schema.timestamp_key_index() {
+                    column_schema.with_time_index(true)
+                } else {
+                    column_schema
+                }
             })
             .collect();
 
         let schema = SchemaBuilder::try_from(column_schemas)
             .context(metadata::ConvertSchemaSnafu)?
-            .timestamp_index(timestamp_index)
             .version(region_schema.version())
             .build()
             .context(metadata::InvalidSchemaSnafu)?;

@@ -160,12 +160,13 @@ fn create_to_expr(create: CreateTable) -> Result<CreateExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name).context(error::ParseSqlSnafu)?;
 
+    let time_index = find_time_index(&create.constraints)?;
     let expr = CreateExpr {
         catalog_name: Some(catalog_name),
         schema_name: Some(schema_name),
         table_name,
-        column_defs: columns_to_expr(&create.columns)?,
-        time_index: find_time_index(&create.constraints)?,
+        column_defs: columns_to_expr(&create.columns, &time_index)?,
+        time_index,
         primary_keys: find_primary_keys(&create.constraints)?,
         create_if_not_exists: create.if_not_exists,
         // TODO(LFC): Fill in other table options.
@@ -222,10 +223,12 @@ fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
     Ok(time_index.first().unwrap().to_string())
 }
 
-fn columns_to_expr(column_defs: &[ColumnDef]) -> Result<Vec<GrpcColumnDef>> {
+fn columns_to_expr(column_defs: &[ColumnDef], time_index: &str) -> Result<Vec<GrpcColumnDef>> {
     let column_schemas = column_defs
         .iter()
-        .map(|c| column_def_to_schema(c).context(error::ParseSqlSnafu))
+        .map(|c| {
+            column_def_to_schema(c, c.name.to_string() == time_index).context(error::ParseSqlSnafu)
+        })
         .collect::<Result<Vec<ColumnSchema>>>()?;
 
     let column_datatypes = column_schemas
@@ -423,8 +426,7 @@ mod tests {
                 ts_millis_values: vec![1000, 2000, 3000, 4000],
                 ..Default::default()
             }),
-            // FIXME(dennis): looks like the read schema in table scan doesn't have timestamp index, we have to investigate it.
-            semantic_type: SemanticType::Field as i32,
+            semantic_type: SemanticType::Timestamp as i32,
             datatype: ColumnDataType::Timestamp as i32,
             ..Default::default()
         };

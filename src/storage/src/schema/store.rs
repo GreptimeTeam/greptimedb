@@ -74,7 +74,6 @@ impl StoreSchema {
         StoreSchema::new(
             columns.columns().to_vec(),
             version,
-            columns.timestamp_key_index(),
             columns.row_key_end(),
             columns.user_column_end(),
         )
@@ -83,7 +82,6 @@ impl StoreSchema {
     pub(crate) fn new(
         columns: Vec<ColumnMetadata>,
         version: u32,
-        timestamp_key_index: usize,
         row_key_end: usize,
         user_column_end: usize,
     ) -> Result<StoreSchema> {
@@ -94,7 +92,6 @@ impl StoreSchema {
 
         let schema = SchemaBuilder::try_from(column_schemas)
             .context(metadata::ConvertSchemaSnafu)?
-            .timestamp_index(Some(timestamp_key_index))
             .version(version)
             .add_metadata(ROW_KEY_END_KEY, row_key_end.to_string())
             .add_metadata(USER_COLUMN_END_KEY, user_column_end.to_string())
@@ -252,7 +249,6 @@ mod tests {
         let expect_schema = SchemaBuilder::try_from(column_schemas)
             .unwrap()
             .version(123)
-            .timestamp_index(Some(1))
             .build()
             .unwrap();
         // Only compare column schemas since SchemaRef in StoreSchema also contains other metadata that only used

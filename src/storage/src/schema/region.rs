@@ -134,7 +134,6 @@ fn build_user_schema(columns: &ColumnsMetadata, version: u32) -> Result<Schema> 
 
     SchemaBuilder::try_from(column_schemas)
         .context(metadata::ConvertSchemaSnafu)?
-        .timestamp_index(Some(columns.timestamp_key_index()))
         .version(version)
         .build()
         .context(metadata::InvalidSchemaSnafu)

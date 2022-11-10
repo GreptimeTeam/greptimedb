@@ -124,6 +124,7 @@ pub fn build_create_table_request(
         {
             if !new_columns.contains(column_name) {
                 let mut is_nullable = true;
+                let mut is_time_index = false;
                 match *semantic_type {
                     TAG_SEMANTIC_TYPE => primary_key_indices.push(column_schemas.len()),
                     TIMESTAMP_SEMANTIC_TYPE => {
@@ -135,13 +136,15 @@ pub fn build_create_table_request(
                             }
                         );
                         timestamp_index = column_schemas.len();
+                        is_time_index = true;
                         // Timestamp column must not be null.
                         is_nullable = false;
                     }
                     _ => {}
                 }
 
-                let column_schema = build_column_schema(column_name, *datatype, is_nullable)?;
+                let column_schema = build_column_schema(column_name, *datatype, is_nullable)?
+                    .with_time_index(is_time_index);
                 column_schemas.push(column_schema);
                 new_columns.insert(column_name.to_string());
             }
@@ -152,7 +155,6 @@ pub fn build_create_table_request(
         let schema = Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
-                .timestamp_index(Some(timestamp_index))
                 .build()
                 .context(CreateSchemaSnafu)?,
         );
@@ -428,17 +430,13 @@ mod tests {
     fn test_find_new_columns() {
         let mut columns = Vec::with_capacity(1);
         let cpu_column = build_column_schema("cpu", 10, true).unwrap();
-        let ts_column = build_column_schema("ts", 15, false).unwrap();
+        let ts_column = build_column_schema("ts", 15, false)
+            .unwrap()
+            .with_time_index(true);
         columns.push(cpu_column);
         columns.push(ts_column);
 
-        let schema = Arc::new(
-            SchemaBuilder::try_from(columns)
-                .unwrap()
-                .timestamp_index(Some(1))
-                .build()
-                .unwrap(),
-        );
+        let schema = Arc::new(SchemaBuilder::try_from(columns).unwrap().build().unwrap());
 
         assert!(find_new_columns(&schema, &[]).unwrap().is_none());
 
@@ -539,13 +537,13 @@ mod tests {
                 ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
                 ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
                 ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true),
+                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true)
+                    .with_time_index(true),
             ];
 
             Arc::new(
                 SchemaBuilder::try_from(column_schemas)
                     .unwrap()
-                    .timestamp_index(Some(3))
                     .build()
                     .unwrap(),
             )

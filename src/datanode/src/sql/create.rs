@@ -143,6 +143,8 @@ impl SqlHandler {
             }
         );
 
+        ensure!(ts_index != usize::MAX, error::MissingTimestampColumnSnafu,);
+
         if primary_keys.is_empty() {
             info!(
                 "Creating table: {:?}.{:?}.{} but primary key not set, use time index column: {}",
@@ -154,13 +156,15 @@ impl SqlHandler {
         let columns_schemas: Vec<_> = stmt
             .columns
             .iter()
-            .map(|column| column_def_to_schema(column).context(error::ParseSqlSnafu))
+            .enumerate()
+            .map(|(index, column)| {
+                column_def_to_schema(column, index == ts_index).context(error::ParseSqlSnafu)
+            })
             .collect::<Result<Vec<_>>>()?;
 
         let schema = Arc::new(
             SchemaBuilder::try_from(columns_schemas)
                 .context(CreateSchemaSnafu)?
-                .timestamp_index(Some(ts_index))
                 .build()
                 .context(CreateSchemaSnafu)?,
         );
@@ -239,7 +243,7 @@ mod tests {
                       PRIMARY KEY(host)) engine=mito with(regions=1);"#,
         );
         let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
-        assert_matches!(error, Error::CreateSchema { .. });
+        assert_matches!(error, Error::MissingTimestampColumn { .. });
     }
 
     /// If primary key is not specified, time index should be used as primary key.

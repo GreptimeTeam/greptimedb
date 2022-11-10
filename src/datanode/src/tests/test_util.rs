@@ -48,7 +48,7 @@ pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("ts", ts_type, true),
+        ColumnSchema::new("ts", ts_type, true).with_time_index(true),
     ];
 
     let table_name = "demo";
@@ -65,7 +65,6 @@ pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -
                 schema: Arc::new(
                     SchemaBuilder::try_from(column_schemas)
                         .unwrap()
-                        .timestamp_index(Some(3))
                         .build()
                         .expect("ts is expected to be timestamp column"),
                 ),
