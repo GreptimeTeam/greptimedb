@@ -113,6 +113,13 @@ pub struct LogFile {
     append_buffer_size: usize,
 }
 
+impl Drop for LogFile {
+    fn drop(&mut self) {
+        self.state.stopped.store(true, Ordering::Relaxed);
+        info!("Stopping log file {}", self.name);
+    }
+}
+
 impl LogFile {
     /// Opens a file in path with given log config.
     pub async fn open(path: impl Into<String>, config: &LogConfig) -> Result<Self> {
@@ -825,5 +832,25 @@ mod tests {
                 .map(|c| &c.data[0..c.write_offset])
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown() {
+        logging::init_default_ut_logging();
+        let config = LogConfig::default();
+        let dir = TempDir::new("greptimedb-store-test").unwrap();
+        let path_buf = dir.path().join("0010.log");
+        let path = path_buf.to_str().unwrap().to_string();
+        File::create(path.as_str()).unwrap();
+
+        let mut file = LogFile::open(path.clone(), &config)
+            .await
+            .unwrap_or_else(|_| panic!("Failed to open file: {}", path));
+
+        let state = file.state.clone();
+        file.start().await.unwrap();
+        drop(file);
+
+        assert!(state.stopped.load(Ordering::Relaxed));
     }
 }
