@@ -306,25 +306,25 @@ impl TryFrom<u8> for EntryType {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub enum Entry {
     Catalog(CatalogEntry),
     Schema(SchemaEntry),
     Table(TableEntry),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub struct CatalogEntry {
     pub catalog_name: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub struct SchemaEntry {
     pub catalog_name: String,
     pub schema_name: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub struct TableEntry {
     pub catalog_name: String,
     pub schema_name: String,
