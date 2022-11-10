@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 pub use datafusion_expr::Operator;
 use datatypes::prelude::Value;
-use store_api::storage::RegionId;
+use store_api::storage::RegionNumber;
 
 pub(crate) type PartitionRuleRef<E> = Arc<dyn PartitionRule<Error = E>>;
 
@@ -17,9 +17,9 @@ pub trait PartitionRule: Sync + Send {
 
     // TODO(LFC): Unify `find_region` and `find_regions` methods when distributed read and write features are both merged into develop.
     // Or find better names since one is mainly for writes and the other is for reads.
-    fn find_region(&self, values: &[Value]) -> Result<RegionId, Self::Error>;
+    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Self::Error>;
 
-    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionId>, Self::Error>;
+    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Self::Error>;
 }
 
 /// The right bound(exclusive) of partition range.

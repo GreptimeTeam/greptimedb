@@ -154,7 +154,7 @@ pub enum Error {
     InvalidPromRemoteReadQueryResult { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to decode region id, source: {}", source))]
-    DecodeRegionId { source: api::DecodeError },
+    DecodeRegionNumber { source: api::DecodeError },
 
     #[snafu(display("Failed to build gRPC reflection service, source: {}", source))]
     GrpcReflectionService {
@@ -196,7 +196,7 @@ impl ErrorExt for Error {
             | DecodePromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
-            | DecodeRegionId { .. }
+            | DecodeRegionNumber { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } => source.status_code(),

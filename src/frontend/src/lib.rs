@@ -1,5 +1,6 @@
 #![feature(assert_matches)]
 
+mod catalog;
 pub mod error;
 pub mod frontend;
 pub mod grpc;

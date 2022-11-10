@@ -10,6 +10,8 @@ pub type ColumnFamilyId = u32;
 /// Id of the region.
 pub type RegionId = u64;
 
+pub type RegionNumber = u32;
+
 /// A [ColumnDescriptor] contains information to create a column.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
 #[builder(pattern = "owned", build_fn(validate = "Self::validate"))]

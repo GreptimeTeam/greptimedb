@@ -155,6 +155,25 @@ pub enum Error {
 
     #[snafu(display("Failed to parse table id from metasrv, data: {:?}", data))]
     ParseTableId { data: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to deserialize partition rule from string: {:?}", data))]
+    DeserializePartitionRule {
+        data: String,
+        source: serde_json::error::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid table schema in catalog, source: {:?}", source))]
+    InvalidSchemaInCatalog {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Catalog internal error: {}", source))]
+    Internal {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -194,6 +213,9 @@ impl ErrorExt for Error {
             Error::BumpTableId { .. } | Error::ParseTableId { .. } => {
                 StatusCode::StorageUnavailable
             }
+            Error::DeserializePartitionRule { .. } => StatusCode::Unexpected,
+            Error::InvalidSchemaInCatalog { .. } => StatusCode::Unexpected,
+            Error::Internal { source, .. } => source.status_code(),
         }
     }
 

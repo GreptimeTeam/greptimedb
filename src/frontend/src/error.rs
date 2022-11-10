@@ -142,12 +142,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to access catalog, source: {}", source))]
-    Catalog {
-        #[snafu(backtrace)]
-        source: catalog::error::Error,
-    },
-
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
@@ -177,6 +171,21 @@ pub enum Error {
         source: common_runtime::JoinError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed access catalog: {}", source))]
+    Catalog {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
+    #[snafu(display("Failed to parse catalog entry: {}", source))]
+    ParseCatalogEntry {
+        #[snafu(backtrace)]
+        source: common_catalog::error::Error,
+    },
+
+    #[snafu(display("Cannot find datanode by id: {}", node_id))]
+    DatanodeNotAvailable { node_id: u64, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -205,8 +214,6 @@ impl ErrorExt for Error {
 
             Error::RequestDatanode { source } => source.status_code(),
 
-            Error::Catalog { source } => source.status_code(),
-
             Error::ColumnDataType { .. }
             | Error::FindDatanode { .. }
             | Error::DatanodeInstance { .. } => StatusCode::Internal,
@@ -220,6 +227,9 @@ impl ErrorExt for Error {
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
             Error::JoinTask { .. } => StatusCode::Unexpected,
+            Error::Catalog { source, .. } => source.status_code(),
+            Error::ParseCatalogEntry { source, .. } => source.status_code(),
+            Error::DatanodeNotAvailable { .. } => StatusCode::StorageUnavailable,
         }
     }
 
