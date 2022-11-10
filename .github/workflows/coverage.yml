@@ -35,7 +35,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Collect coverage data
-        run: cargo llvm-cov --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
         env:
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
