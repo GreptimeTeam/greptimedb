@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -6,7 +7,10 @@ use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
 use futures::StreamExt;
-use pgwire::api::auth::noop::NoopStartupHandler;
+use pgwire::api::auth::cleartext::{CleartextPasswordAuthStartupHandler, PasswordVerifier};
+use pgwire::api::auth::ServerParameterProvider;
+use pgwire::api::ClientInfo;
+use pgwire::error::PgWireResult;
 use pgwire::tokio::process_socket;
 use tokio;
 
@@ -15,9 +19,43 @@ use crate::postgres::handler::PostgresServerHandler;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 
+struct DummyPasswordVerifier;
+
+#[async_trait]
+impl PasswordVerifier for DummyPasswordVerifier {
+    async fn verify_password(&self, _password: &str) -> PgWireResult<bool> {
+        Ok(true)
+    }
+}
+
+struct StartupParameters {
+    version: &'static str,
+}
+
+impl StartupParameters {
+    fn new() -> StartupParameters {
+        StartupParameters {
+            version: env!("CARGO_PKG_VERSION"),
+        }
+    }
+}
+
+impl ServerParameterProvider for StartupParameters {
+    fn server_parameters<C>(&self, _client: &C) -> Option<HashMap<String, String>>
+    where
+        C: ClientInfo,
+    {
+        let mut params = HashMap::new();
+        params.insert("server_version".to_owned(), self.version.to_owned());
+
+        Some(params)
+    }
+}
+
 pub struct PostgresServer {
     base_server: BaseTcpServer,
-    auth_handler: Arc<NoopStartupHandler>,
+    auth_handler:
+        Arc<CleartextPasswordAuthStartupHandler<DummyPasswordVerifier, StartupParameters>>,
     query_handler: Arc<PostgresServerHandler>,
 }
 
@@ -25,7 +63,10 @@ impl PostgresServer {
     /// Creates a new Postgres server with provided query_handler and async runtime
     pub fn new(query_handler: SqlQueryHandlerRef, io_runtime: Arc<Runtime>) -> PostgresServer {
         let postgres_handler = Arc::new(PostgresServerHandler::new(query_handler));
-        let startup_handler = Arc::new(NoopStartupHandler);
+        let startup_handler = Arc::new(CleartextPasswordAuthStartupHandler::new(
+            DummyPasswordVerifier,
+            StartupParameters::new(),
+        ));
         PostgresServer {
             base_server: BaseTcpServer::create_server("Postgres", io_runtime),
             auth_handler: startup_handler,
