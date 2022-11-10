@@ -81,6 +81,19 @@ async fn test_sql_api() {
         body,
         r#"{"code":0,"output":{"records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"Timestamp"}]},"rows":[[66.6,0]]}}}"#
     );
+
+    // select with column alias
+    let res = client
+        .get("/v1/sql?sql=select cpu as c, ts as time from demo limit 10")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = res.text().await;
+    assert_eq!(
+        body,
+        r#"{"code":0,"output":{"records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"Timestamp"}]},"rows":[[66.6,0]]}}}"#
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

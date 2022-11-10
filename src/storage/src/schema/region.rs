@@ -112,11 +112,6 @@ impl RegionSchema {
         self.columns.column_metadata(idx)
     }
 
-    #[inline]
-    pub(crate) fn timestamp_key_index(&self) -> usize {
-        self.columns.timestamp_key_index()
-    }
-
     #[cfg(test)]
     pub(crate) fn columns(&self) -> &[ColumnMetadata] {
         self.columns.columns()
