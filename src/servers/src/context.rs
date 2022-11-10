@@ -4,7 +4,6 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
-use crate::context::Channel::HTTP;
 use crate::error::{InternalSnafu, Result};
 
 type CtxFnRef = Arc<dyn Fn(&Context) -> bool + Send + Sync>;
@@ -44,9 +43,13 @@ impl CtxBuilder {
         self
     }
 
-    pub fn auth_with_token(&mut self, token: String) -> &mut Self {
-        self.from_channel = Some(HTTP);
-        self.auth_method = Some(AuthMethod::Token(token));
+    pub fn set_channel(&mut self, channel: Option<Channel>) -> &mut Self {
+        self.from_channel = channel;
+        self
+    }
+
+    pub fn set_auth_method(&mut self, auth_method: Option<AuthMethod>) -> &mut Self {
+        self.auth_method = auth_method;
         self
     }
 
@@ -54,16 +57,16 @@ impl CtxBuilder {
         Ok(Context {
             client_info: ClientInfo {
                 client_host: self.client_addr.clone().context(InternalSnafu {
-                    err_msg: "client host empty while building ctx",
+                    err_msg: "unknown client addr while building ctx",
                 })?,
             },
             user_info: UserInfo {
                 username: self.username.clone(),
                 from_channel: self.from_channel.clone().context(InternalSnafu {
-                    err_msg: "from channel empty while building ctx",
+                    err_msg: "unknown channel while building ctx",
                 })?,
                 auth_method: self.auth_method.clone().context(InternalSnafu {
-                    err_msg: "auth method empty while building ctx",
+                    err_msg: "unknown auth method while building ctx",
                 })?,
             },
             ..Default::default()
@@ -176,7 +179,8 @@ mod test {
     fn test_build() {
         let ctx = CtxBuilder::new()
             .client_addr(Some("127.0.0.1:4001".to_string()))
-            .auth_with_token("HELLO".to_string())
+            .set_channel(Some(HTTP))
+            .set_auth_method(Some(Token("HELLO".to_string())))
             .build()
             .unwrap();
 
