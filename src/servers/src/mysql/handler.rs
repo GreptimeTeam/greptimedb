@@ -2,7 +2,7 @@ use std::io;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_telemetry::{error, info};
+use common_telemetry::error;
 use opensrv_mysql::AsyncMysqlShim;
 use opensrv_mysql::ErrorKind;
 use opensrv_mysql::ParamParser;
