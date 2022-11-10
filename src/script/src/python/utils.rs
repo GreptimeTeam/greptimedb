@@ -1,11 +1,16 @@
 use std::sync::Arc;
 
-use datafusion::arrow::array::{ArrayRef, BooleanArray, PrimitiveArray};
-use rustpython_vm::builtins::{PyBool, PyFloat, PyInt};
+use datafusion::arrow::array::{ArrayRef, BooleanArray, NullArray, PrimitiveArray, Utf8Array};
+use datafusion_common::ScalarValue;
+use datafusion_expr::ColumnarValue as DFColValue;
+use datatypes::arrow::datatypes::DataType;
+use rustpython_vm::builtins::{PyBool, PyFloat, PyInt, PyList, PyStr};
 use rustpython_vm::{builtins::PyBaseExceptionRef, PyObjectRef, PyPayload, PyRef, VirtualMachine};
 use snafu::OptionExt;
+use snafu::ResultExt;
 use snafu::{Backtrace, GenerateImplicitData};
 
+use crate::python::builtins::try_into_columnar_value;
 use crate::python::error;
 use crate::python::error::ret_other_error_with;
 use crate::python::PyVector;
@@ -39,6 +44,7 @@ pub fn py_vec_obj_to_array(
     vm: &VirtualMachine,
     col_len: usize,
 ) -> Result<ArrayRef, error::Error> {
+    // It's ugly, but we can't find a better way right now.
     if is_instance::<PyVector>(obj, vm) {
         let pyv = obj.payload::<PyVector>().with_context(|| {
             ret_other_error_with(format!("can't cast obj {:?} to PyVector", obj))
@@ -66,6 +72,30 @@ pub fn py_vec_obj_to_array(
 
         let ret = BooleanArray::from_iter(std::iter::repeat(Some(val)).take(col_len));
         Ok(Arc::new(ret) as _)
+    } else if is_instance::<PyStr>(obj, vm) {
+        let val = obj
+            .to_owned()
+            .try_into_value::<String>(vm)
+            .map_err(|e| format_py_error(e, vm))?;
+
+        let ret = Utf8Array::<i32>::from_iter(std::iter::repeat(Some(val)).take(col_len));
+        Ok(Arc::new(ret) as _)
+    } else if is_instance::<PyList>(obj, vm) {
+        let columnar_value =
+            try_into_columnar_value(obj.clone(), vm).map_err(|e| format_py_error(e, vm))?;
+
+        match columnar_value {
+            DFColValue::Scalar(ScalarValue::List(scalars, _datatype)) => match scalars {
+                Some(scalars) => {
+                    let array = ScalarValue::iter_to_array(scalars.into_iter())
+                        .context(error::DataFusionSnafu)?;
+
+                    Ok(array)
+                }
+                None => Ok(Arc::new(NullArray::new(DataType::Null, 0))),
+            },
+            _ => unreachable!(),
+        }
     } else {
         ret_other_error_with(format!("Expect a vector or a constant, found {:?}", obj)).fail()
     }
