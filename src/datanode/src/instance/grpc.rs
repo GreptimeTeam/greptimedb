@@ -7,6 +7,7 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use common_error::status_code::StatusCode;
+use common_insert::insertion_expr_to_request;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use query::plan::LogicalPlan;
@@ -144,7 +145,8 @@ impl Instance {
             table_name,
             insert_batches,
             table.clone(),
-        ).context(InsertDataSnafu)?;
+        )
+        .context(InsertDataSnafu)?;
 
         let affected_rows = table
             .insert(insert)
