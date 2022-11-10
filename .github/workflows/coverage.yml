@@ -28,7 +28,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Cleanup disk
-        uses: curoky/cleanup-disk-action@v2
+        uses: curoky/cleanup-disk-action@v2.0
         with:
           retain: 'rust'
       - name: Install latest nextest release
