@@ -59,8 +59,7 @@ impl MysqlServer {
         query_handler: SqlQueryHandlerRef,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
-        let shim =
-            MysqlInstanceShim::create(query_handler, stream.peer_addr().unwrap().to_string());
+        let shim = MysqlInstanceShim::create(query_handler, stream.peer_addr()?.to_string());
         // TODO(LFC): Relate "handler" with MySQL session; also deal with panics there.
         let _handler = io_runtime.spawn(AsyncMysqlIntermediary::run_on(shim, stream));
         Ok(())
