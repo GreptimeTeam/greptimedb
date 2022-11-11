@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use catalog::remote::MetaKvBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
+use meta_srv::mocks::MockInfo;
 use query::QueryEngineFactory;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
@@ -23,7 +24,8 @@ impl Instance {
         use table_engine::table::test_util::MockEngine;
         use table_engine::table::test_util::MockMitoEngine;
 
-        let meta_client = Some(mock_meta_client().await);
+        let mock_info = meta_srv::mocks::mock_with_memstore().await;
+        let meta_client = Some(Arc::new(mock_meta_client(mock_info, 0).await));
         let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
         let mock_engine = Arc::new(MockMitoEngine::new(
             TableEngineConfig::default(),
@@ -63,9 +65,14 @@ impl Instance {
     }
 
     pub async fn with_mock_meta_client(opts: &DatanodeOptions) -> Result<Self> {
+        let mock_info = meta_srv::mocks::mock_with_memstore().await;
+        Self::with_mock_meta_server(opts, mock_info).await
+    }
+
+    pub async fn with_mock_meta_server(opts: &DatanodeOptions, meta_srv: MockInfo) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
-        let meta_client = mock_meta_client().await;
+        let meta_client = Arc::new(mock_meta_client(meta_srv, opts.node_id).await);
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
@@ -104,15 +111,14 @@ impl Instance {
     }
 }
 
-async fn mock_meta_client() -> MetaClient {
-    let mock_info = meta_srv::mocks::mock_with_memstore().await;
-    let meta_srv::mocks::MockInfo {
+async fn mock_meta_client(mock_info: MockInfo, node_id: u64) -> MetaClient {
+    let MockInfo {
         server_addr,
         channel_manager,
     } = mock_info;
 
     let id = (1000u64, 2000u64);
-    let mut meta_client = MetaClientBuilder::new(id.0, id.1)
+    let mut meta_client = MetaClientBuilder::new(id.0, node_id)
         .enable_heartbeat()
         .enable_router()
         .enable_store()

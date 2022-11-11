@@ -151,6 +151,7 @@ impl TableEngine for MockTableEngine {
             table_id,
             catalog_name,
             schema_name,
+            vec![0],
         )) as Arc<_>;
 
         let mut tables = self.tables.write().await;

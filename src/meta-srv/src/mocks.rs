@@ -14,6 +14,7 @@ use crate::service::store::etcd::EtcdStore;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::store::memory::MemStore;
 
+#[derive(Clone)]
 pub struct MockInfo {
     pub server_addr: String,
     pub channel_manager: ChannelManager,

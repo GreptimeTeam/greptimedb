@@ -5,8 +5,6 @@ use common_query::logical_plan::Expr;
 use datafusion_common::ScalarValue;
 use store_api::storage::RegionId;
 
-use crate::mock::DatanodeId;
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -123,12 +121,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to get Datanode instance: {:?}", datanode))]
-    DatanodeInstance {
-        datanode: DatanodeId,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Invaild InsertRequest, reason: {}", reason))]
     InvalidInsertRequest {
         reason: String,
@@ -184,8 +176,23 @@ pub enum Error {
         source: common_catalog::error::Error,
     },
 
-    #[snafu(display("Cannot find datanode by id: {}", node_id))]
-    DatanodeNotAvailable { node_id: u64, backtrace: Backtrace },
+    #[snafu(display("Failed to request Meta, source: {}", source))]
+    RequestMeta {
+        #[snafu(backtrace)]
+        source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Failed to get cache, error: {}", err_msg))]
+    GetCache {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to find table routes for table {}", table_name))]
+    FindTableRoutes {
+        table_name: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -216,7 +223,8 @@ impl ErrorExt for Error {
 
             Error::ColumnDataType { .. }
             | Error::FindDatanode { .. }
-            | Error::DatanodeInstance { .. } => StatusCode::Internal,
+            | Error::GetCache { .. }
+            | Error::FindTableRoutes { .. } => StatusCode::Internal,
 
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
                 StatusCode::Unexpected
@@ -229,7 +237,8 @@ impl ErrorExt for Error {
             Error::JoinTask { .. } => StatusCode::Unexpected,
             Error::Catalog { source, .. } => source.status_code(),
             Error::ParseCatalogEntry { source, .. } => source.status_code(),
-            Error::DatanodeNotAvailable { .. } => StatusCode::StorageUnavailable,
+
+            Error::RequestMeta { source } => source.status_code(),
         }
     }
 

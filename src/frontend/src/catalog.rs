@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use catalog::error::{
@@ -10,30 +10,32 @@ use catalog::{
     CatalogList, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
 };
 use common_catalog::{CatalogKey, SchemaKey, TableGlobalKey, TableGlobalValue};
-use common_error::ext::BoxedError;
 use futures::StreamExt;
-use snafu::{OptionExt, ResultExt};
+use meta_client::rpc::TableName;
+use snafu::prelude::*;
 use table::TableRef;
-use tokio::sync::RwLock;
 
-use crate::error::DatanodeNotAvailableSnafu;
-use crate::mock::{DatanodeId, DatanodeInstance};
+use crate::datanode::DatanodeClients;
 use crate::partitioning::range::RangePartitionRule;
+use crate::table::route::TableRoutes;
 use crate::table::DistTable;
-
-pub type DatanodeInstances = HashMap<DatanodeId, DatanodeInstance>;
 
 pub struct FrontendCatalogManager {
     backend: KvBackendRef,
-    datanode_instances: Arc<RwLock<DatanodeInstances>>,
+    table_routes: Arc<TableRoutes>,
+    datanode_clients: Arc<DatanodeClients>,
 }
 
 impl FrontendCatalogManager {
-    #[allow(dead_code)]
-    pub fn new(backend: KvBackendRef, datanode_instances: Arc<RwLock<DatanodeInstances>>) -> Self {
+    pub(crate) fn new(
+        backend: KvBackendRef,
+        table_routes: Arc<TableRoutes>,
+        datanode_clients: Arc<DatanodeClients>,
+    ) -> Self {
         Self {
             backend,
-            datanode_instances,
+            table_routes,
+            datanode_clients,
         }
     }
 }
@@ -79,7 +81,8 @@ impl CatalogList for FrontendCatalogManager {
             Ok(Some(Arc::new(FrontendCatalogProvider {
                 catalog_name: name.to_string(),
                 backend: self.backend.clone(),
-                datanode_instances: self.datanode_instances.clone(),
+                table_routes: self.table_routes.clone(),
+                datanode_clients: self.datanode_clients.clone(),
             })))
         } else {
             Ok(None)
@@ -90,7 +93,8 @@ impl CatalogList for FrontendCatalogManager {
 pub struct FrontendCatalogProvider {
     catalog_name: String,
     backend: KvBackendRef,
-    datanode_instances: Arc<RwLock<DatanodeInstances>>,
+    table_routes: Arc<TableRoutes>,
+    datanode_clients: Arc<DatanodeClients>,
 }
 
 impl CatalogProvider for FrontendCatalogProvider {
@@ -136,7 +140,8 @@ impl CatalogProvider for FrontendCatalogProvider {
                 catalog_name: self.catalog_name.clone(),
                 schema_name: name.to_string(),
                 backend: self.backend.clone(),
-                datanode_instances: self.datanode_instances.clone(),
+                table_routes: self.table_routes.clone(),
+                datanode_clients: self.datanode_clients.clone(),
             })))
         } else {
             Ok(None)
@@ -148,7 +153,8 @@ pub struct FrontendSchemaProvider {
     catalog_name: String,
     schema_name: String,
     backend: KvBackendRef,
-    datanode_instances: Arc<RwLock<DatanodeInstances>>,
+    table_routes: Arc<TableRoutes>,
+    datanode_clients: Arc<DatanodeClients>,
 }
 
 impl SchemaProvider for FrontendSchemaProvider {
@@ -187,24 +193,20 @@ impl SchemaProvider for FrontendSchemaProvider {
             table_name: name.to_string(),
         };
 
-        let instances = self.datanode_instances.clone();
         let backend = self.backend.clone();
-        let table_name = name.to_string();
+        let table_routes = self.table_routes.clone();
+        let datanode_clients = self.datanode_clients.clone();
+        let table_name = TableName::new(&self.catalog_name, &self.schema_name, name);
         let result: Result<Option<TableRef>, catalog::error::Error> = std::thread::spawn(|| {
             common_runtime::block_on_read(async move {
-                let mut datanode_instances = HashMap::new();
                 let res = match backend.get(table_global_key.to_string().as_bytes()).await? {
                     None => {
                         return Ok(None);
                     }
                     Some(r) => r,
                 };
-
-                let mut region_to_datanode_map = HashMap::new();
-
                 let val = TableGlobalValue::parse(String::from_utf8_lossy(&res.1))
                     .context(InvalidCatalogValueSnafu)?;
-                let node_id: DatanodeId = val.node_id;
 
                 // TODO(hl): We need to deserialize string to PartitionRule trait object
                 let partition_rule: Arc<RangePartitionRule> =
@@ -214,26 +216,8 @@ impl SchemaProvider for FrontendSchemaProvider {
                         },
                     )?);
 
-                for (node_id, region_ids) in val.regions_id_map {
-                    for region_id in region_ids {
-                        region_to_datanode_map.insert(region_id, node_id);
-                    }
-                }
-
-                datanode_instances.insert(
-                    node_id,
-                    instances
-                        .read()
-                        .await
-                        .get(&node_id)
-                        .context(DatanodeNotAvailableSnafu { node_id })
-                        .map_err(BoxedError::new)
-                        .context(catalog::error::InternalSnafu)?
-                        .clone(),
-                );
-
                 let table = Arc::new(DistTable {
-                    table_name: table_name.clone(),
+                    table_name,
                     schema: Arc::new(
                         val.meta
                             .schema
@@ -241,8 +225,8 @@ impl SchemaProvider for FrontendSchemaProvider {
                             .context(InvalidSchemaInCatalogSnafu)?,
                     ),
                     partition_rule,
-                    region_dist_map: region_to_datanode_map,
-                    datanode_instances,
+                    table_routes,
+                    datanode_clients,
                 });
                 Ok(Some(table as _))
             })

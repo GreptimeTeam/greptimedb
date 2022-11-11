@@ -6,6 +6,7 @@ use api::v1::meta::Region as PbRegion;
 use api::v1::meta::RouteRequest as PbRouteRequest;
 use api::v1::meta::RouteResponse as PbRouteResponse;
 use api::v1::meta::Table as PbTable;
+use serde::{Deserialize, Serialize, Serializer};
 use snafu::OptionExt;
 
 use super::util;
@@ -96,25 +97,29 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
                     err_msg: "table required",
                 })?
                 .try_into()?;
-            let region_routes = table_route
-                .region_routes
-                .into_iter()
-                .map(|region_route| {
-                    let region = region_route.region.map(Into::into);
-                    let leader_peer = get_peer(region_route.leader_peer_index);
-                    let follower_peers = region_route
-                        .follower_peer_indexes
-                        .into_iter()
-                        .filter_map(get_peer)
-                        .collect::<Vec<_>>();
 
-                    RegionRoute {
-                        region,
-                        leader_peer,
-                        follower_peers,
-                    }
-                })
-                .collect::<Vec<_>>();
+            let mut region_routes = Vec::with_capacity(table_route.region_routes.len());
+            for region_route in table_route.region_routes.into_iter() {
+                let region = region_route
+                    .region
+                    .context(error::RouteInfoCorruptedSnafu {
+                        err_msg: "'region' not found",
+                    })?
+                    .into();
+
+                let leader_peer = get_peer(region_route.leader_peer_index);
+                let follower_peers = region_route
+                    .follower_peer_indexes
+                    .into_iter()
+                    .filter_map(get_peer)
+                    .collect::<Vec<_>>();
+
+                region_routes.push(RegionRoute {
+                    region,
+                    leader_peer,
+                    follower_peers,
+                });
+            }
 
             table_routes.push(TableRoute {
                 table,
@@ -126,13 +131,13 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TableRoute {
     pub table: Table,
     pub region_routes: Vec<RegionRoute>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Table {
     pub id: u64,
     pub table_name: TableName,
@@ -157,14 +162,14 @@ impl TryFrom<PbTable> for Table {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RegionRoute {
-    pub region: Option<Region>,
+    pub region: Region,
     pub leader_peer: Option<Peer>,
     pub follower_peers: Vec<Peer>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Region {
     pub id: u64,
     pub name: String,
@@ -183,10 +188,24 @@ impl From<PbRegion> for Region {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Partition {
+    #[serde(serialize_with = "as_utf8")]
     pub column_list: Vec<Vec<u8>>,
+    #[serde(serialize_with = "as_utf8")]
     pub value_list: Vec<Vec<u8>>,
+}
+
+fn as_utf8<S: Serializer>(val: &[Vec<u8>], serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(
+        val.iter()
+            .map(|v| {
+                String::from_utf8(v.clone()).unwrap_or_else(|_| "<unknown-not-UTF8>".to_string())
+            })
+            .collect::<Vec<String>>()
+            .join(",")
+            .as_str(),
+    )
 }
 
 impl From<Partition> for PbPartition {
@@ -335,7 +354,7 @@ mod tests {
         let mut region_routes = table_route.region_routes;
         assert_eq!(1, region_routes.len());
         let region_route = region_routes.remove(0);
-        let region = region_route.region.unwrap();
+        let region = region_route.region;
         assert_eq!(1, region.id);
         assert_eq!("region1", region.name);
         let partition = region.partition.unwrap();

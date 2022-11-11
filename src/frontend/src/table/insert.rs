@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::codec;
@@ -7,7 +8,7 @@ use api::v1::insert_expr::Expr;
 use api::v1::Column;
 use api::v1::InsertExpr;
 use api::v1::MutateResult;
-use client::ObjectResult;
+use client::{Database, ObjectResult};
 use snafu::ensure;
 use snafu::OptionExt;
 use snafu::ResultExt;
@@ -17,26 +18,32 @@ use table::requests::InsertRequest;
 use super::DistTable;
 use crate::error;
 use crate::error::Result;
+use crate::mock::DatanodeInstance;
 
 impl DistTable {
     pub async fn dist_insert(
         &self,
         inserts: HashMap<RegionNumber, InsertRequest>,
     ) -> Result<ObjectResult> {
-        let mut joins = Vec::with_capacity(inserts.len());
+        let route = self.table_routes.get_route(&self.table_name).await?;
 
+        let mut joins = Vec::with_capacity(inserts.len());
         for (region_id, insert) in inserts {
-            let db = self
-                .region_dist_map
-                .get(&region_id)
+            let datanode = route
+                .region_routes
+                .iter()
+                .find_map(|x| {
+                    if x.region.id == region_id as u64 {
+                        x.leader_peer.clone()
+                    } else {
+                        None
+                    }
+                })
                 .context(error::FindDatanodeSnafu { region: region_id })?;
 
-            let instance = self
-                .datanode_instances
-                .get(db)
-                .context(error::DatanodeInstanceSnafu { datanode: *db })?;
-
-            let instance = instance.clone();
+            let client = self.datanode_clients.get_client(&datanode).await;
+            let db = Database::new(&self.table_name.schema_name, client);
+            let instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 
             // TODO(fys): a separate runtime should be used here.
             let join = tokio::spawn(async move {

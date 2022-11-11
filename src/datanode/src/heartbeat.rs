@@ -14,7 +14,7 @@ pub struct HeartbeatTask {
     node_id: u64,
     server_addr: String,
     running: Arc<AtomicBool>,
-    meta_client: MetaClient,
+    meta_client: Arc<MetaClient>,
     interval: u64,
 }
 
@@ -26,7 +26,7 @@ impl Drop for HeartbeatTask {
 
 impl HeartbeatTask {
     /// Create a new heartbeat task instance.
-    pub fn new(node_id: u64, server_addr: String, meta_client: MetaClient) -> Self {
+    pub fn new(node_id: u64, server_addr: String, meta_client: Arc<MetaClient>) -> Self {
         Self {
             node_id,
             server_addr,

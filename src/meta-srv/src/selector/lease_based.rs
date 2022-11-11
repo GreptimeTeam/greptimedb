@@ -19,7 +19,7 @@ impl Selector for LeaseBasedSelector {
     async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output> {
         // filter out the nodes out lease
         let lease_filter = |_: &LeaseKey, v: &LeaseValue| {
-            time_util::current_time_millis() - v.timestamp_millis < ctx.datanode_lease_secs
+            time_util::current_time_millis() - v.timestamp_millis < ctx.datanode_lease_secs * 1000
         };
         let mut lease_kvs = lease::alive_datanodes(ns, &ctx.kv_store, lease_filter).await?;
         // TODO(jiachun): At the moment we are just pushing the latest to the forefront,

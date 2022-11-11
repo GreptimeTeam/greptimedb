@@ -3,6 +3,8 @@ mod opentsdb;
 mod prometheus;
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
@@ -10,11 +12,15 @@ use api::v1::{
     InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
+use catalog::remote::MetaKvBackend;
 use client::admin::{admin_result_to_output, Admin};
 use client::{Client, Database, Select};
 use common_error::prelude::BoxedError;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
+use datanode::datanode::{MetaClientOpts, Mode};
 use datatypes::schema::ColumnSchema;
+use meta_client::client::MetaClientBuilder;
 use servers::error as server_error;
 use servers::query_handler::{
     GrpcAdminHandler, GrpcQueryHandler, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
@@ -27,8 +33,11 @@ use sql::statements::statement::Statement;
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use sql::{dialect::GenericDialect, parser::ParserContext};
 
+use crate::catalog::FrontendCatalogManager;
+use crate::datanode::DatanodeClients;
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::FrontendOptions;
+use crate::table::route::TableRoutes;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -48,6 +57,7 @@ pub trait FrontendInstance:
 #[derive(Default)]
 pub struct Instance {
     client: Client,
+    catalog_manager: Option<FrontendCatalogManager>,
 }
 
 impl Instance {
@@ -71,6 +81,39 @@ impl FrontendInstance for Instance {
     async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
         let addr = opts.datanode_grpc_addr();
         self.client.start(vec![addr]);
+
+        let meta_client = match opts.mode {
+            Mode::Standalone => None,
+            Mode::Distributed => {
+                let meta_config = MetaClientOpts::default();
+                let channel_config = ChannelConfig::new()
+                    .timeout(Duration::from_millis(meta_config.timeout_millis))
+                    .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
+                    .tcp_nodelay(meta_config.tcp_nodelay);
+
+                let channel_manager = ChannelManager::with_config(channel_config);
+
+                let meta_client = MetaClientBuilder::new(0, 0)
+                    .enable_router()
+                    .enable_store()
+                    .channel_manager(channel_manager)
+                    .build();
+                Some(Arc::new(meta_client))
+            }
+        };
+
+        self.catalog_manager = if let Some(meta_client) = meta_client {
+            let meta_backend = Arc::new(MetaKvBackend {
+                client: meta_client.clone(),
+            });
+            let table_routes = Arc::new(TableRoutes::new(meta_client));
+            let datanode_clients = Arc::new(DatanodeClients::new());
+            let catalog_manager =
+                FrontendCatalogManager::new(meta_backend, table_routes, datanode_clients);
+            Some(catalog_manager)
+        } else {
+            None
+        };
         Ok(())
     }
 }
@@ -78,7 +121,10 @@ impl FrontendInstance for Instance {
 #[cfg(test)]
 impl Instance {
     pub fn with_client(client: Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            catalog_manager: None,
+        }
     }
 }
 

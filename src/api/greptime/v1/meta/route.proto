@@ -69,6 +69,7 @@ message Table {
 }
 
 message Region {
+  // TODO(LFC): Maybe use message RegionNumber?
   uint64 id = 1;
   string name = 2;
   Partition partition = 3;
