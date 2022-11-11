@@ -3,6 +3,9 @@ use arrow::bitmap::MutableBitmap;
 use crate::scalars::ScalarVector;
 use crate::vectors::{ConstantVector, NullVector, Vector};
 
+// To implement dedup correctly, we need to keep in mind that always marks an element as
+// selected when it is different from the previous one, and leaves the `selected` unchanged
+// in any other case.
 pub(crate) fn dedup_scalar<'a, T: ScalarVector>(
     vector: &'a T,
     selected: &'a mut MutableBitmap,
@@ -27,17 +30,20 @@ pub(crate) fn dedup_scalar<'a, T: ScalarVector>(
         }
     }
 
-    // Always retain the first element.
-    selected.set(0, true);
-
-    // Then check whether still keep the first element based last element in previous vector.
-    if let Some(pv) = &prev_vector {
-        if !pv.is_empty() {
-            let last = pv.get_data(pv.len() - 1);
-            if last == vector.get_data(0) {
-                selected.set(0, false);
+    // Marks first element as selcted if it is different from previous element, otherwise
+    // keep selected bitmap unchanged.
+    let is_first_not_duplicate = prev_vector
+        .map(|pv| {
+            if pv.is_empty() {
+                true
+            } else {
+                let last = pv.get_data(pv.len() - 1);
+                last != vector.get_data(0)
             }
-        }
+        })
+        .unwrap_or(true);
+    if is_first_not_duplicate {
+        selected.set(0, true);
     }
 }
 
@@ -50,10 +56,8 @@ pub(crate) fn dedup_null(
         return;
     }
 
-    let no_prev_element = prev_vector.map(|v| v.is_empty()).unwrap_or(true);
-    if no_prev_element {
-        // Retain first element if no previous element (we known that it must
-        // be null).
+    let is_first_not_duplicate = prev_vector.map(|pv| pv.is_empty()).unwrap_or(true);
+    if is_first_not_duplicate {
         selected.set(0, true);
     }
 }
@@ -67,13 +71,17 @@ pub(crate) fn dedup_constant(
         return;
     }
 
-    let equal_to_prev = if let Some(prev) = prev_vector {
-        !prev.is_empty() && vector.get_constant_ref() == prev.get_constant_ref()
-    } else {
-        false
-    };
+    let is_first_not_duplicate = prev_vector
+        .map(|pv| {
+            if pv.is_empty() {
+                true
+            } else {
+                vector.get_constant_ref() != pv.get_constant_ref()
+            }
+        })
+        .unwrap_or(true);
 
-    if !equal_to_prev {
+    if is_first_not_duplicate {
         selected.set(0, true);
     }
 }
@@ -86,10 +94,8 @@ mod tests {
     use crate::vectors::{Int32Vector, StringVector, VectorOp};
 
     fn check_bitmap(expect: &[bool], selected: &MutableBitmap) {
-        assert_eq!(expect.len(), selected.len());
-        for (exp, v) in expect.iter().zip(selected.iter()) {
-            assert_eq!(*exp, v);
-        }
+        let actual = selected.iter().collect::<Vec<_>>();
+        assert_eq!(expect, actual);
     }
 
     fn check_dedup_scalar(expect: &[bool], input: &[i32], prev: Option<&[i32]>) {
@@ -139,6 +145,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_dedup_scalar_multi_times_with_prev() {
+        let prev = Int32Vector::from_slice(&[1]);
+
+        let v1 = Int32Vector::from_slice(&[2, 3, 4]);
+        let mut selected = MutableBitmap::from_len_zeroed(v1.len());
+        v1.dedup(&mut selected, Some(&prev));
+
+        // Though element in v2 are the same as prev, but we should still keep them.
+        let v2 = Int32Vector::from_slice(&[1, 1, 1]);
+        v2.dedup(&mut selected, Some(&prev));
+
+        check_bitmap(&[true, true, true], &selected);
+    }
+
+    fn new_bitmap(bits: &[bool]) -> MutableBitmap {
+        let mut bitmap = MutableBitmap::from_len_zeroed(bits.len());
+        for (i, bit) in bits.iter().enumerate() {
+            if *bit {
+                bitmap.set(i, true);
+            }
+        }
+
+        bitmap
+    }
+
+    #[test]
+    fn test_dedup_scalar_with_prev() {
+        let prev = Int32Vector::from_slice(&[1]);
+
+        let mut selected = new_bitmap(&[true, false, true, false]);
+        let v = Int32Vector::from_slice(&[2, 3, 4, 5]);
+        v.dedup(&mut selected, Some(&prev));
+        // All elements are different.
+        check_bitmap(&[true, true, true, true], &selected);
+
+        let mut selected = new_bitmap(&[true, false, true, false]);
+        let v = Int32Vector::from_slice(&[1, 2, 3, 4]);
+        v.dedup(&mut selected, Some(&prev));
+        // Though first element is duplicate, but we keep the flag unchanged.
+        check_bitmap(&[true, true, true, true], &selected);
+
+        // Same case as above, but now `prev` is None.
+        let mut selected = new_bitmap(&[true, false, true, false]);
+        let v = Int32Vector::from_slice(&[1, 2, 3, 4]);
+        v.dedup(&mut selected, None);
+        check_bitmap(&[true, true, true, true], &selected);
+
+        // Same case as above, but now `prev` is empty.
+        let mut selected = new_bitmap(&[true, false, true, false]);
+        let v = Int32Vector::from_slice(&[1, 2, 3, 4]);
+        v.dedup(&mut selected, Some(&Int32Vector::from_slice(&[])));
+        check_bitmap(&[true, true, true, true], &selected);
+
+        let mut selected = new_bitmap(&[false, false, false, false]);
+        let v = Int32Vector::from_slice(&[2, 2, 4, 5]);
+        v.dedup(&mut selected, Some(&prev));
+        // only v[1] is duplicate.
+        check_bitmap(&[true, false, true, true], &selected);
+    }
+
     fn check_dedup_null(len: usize) {
         let input = NullVector::new(len);
         let mut selected = MutableBitmap::from_len_zeroed(input.len());
@@ -162,6 +229,32 @@ mod tests {
         for len in 0..5 {
             check_dedup_null(len);
         }
+    }
+
+    #[test]
+    fn test_dedup_null_with_prev() {
+        let prev = NullVector::new(1);
+
+        // Keep flags unchanged.
+        let mut selected = new_bitmap(&[true, false, true, false]);
+        let v = NullVector::new(4);
+        v.dedup(&mut selected, Some(&prev));
+        check_bitmap(&[true, false, true, false], &selected);
+
+        // Keep flags unchanged.
+        let mut selected = new_bitmap(&[false, false, true, false]);
+        v.dedup(&mut selected, Some(&prev));
+        check_bitmap(&[false, false, true, false], &selected);
+
+        // Prev is None, select first element.
+        let mut selected = new_bitmap(&[false, false, true, false]);
+        v.dedup(&mut selected, None);
+        check_bitmap(&[true, false, true, false], &selected);
+
+        // Prev is empty, select first element.
+        let mut selected = new_bitmap(&[false, false, true, false]);
+        v.dedup(&mut selected, Some(&NullVector::new(0)));
+        check_bitmap(&[true, false, true, false], &selected);
     }
 
     fn check_dedup_constant(len: usize) {
@@ -190,6 +283,44 @@ mod tests {
         for len in 0..5 {
             check_dedup_constant(len);
         }
+    }
+
+    #[test]
+    fn test_dedup_constant_with_prev() {
+        let prev = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[1])), 1);
+
+        // Keep flags unchanged.
+        let mut selected = new_bitmap(&[true, false, true, false]);
+        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[1])), 4);
+        v.dedup(&mut selected, Some(&prev));
+        check_bitmap(&[true, false, true, false], &selected);
+
+        // Keep flags unchanged.
+        let mut selected = new_bitmap(&[false, false, true, false]);
+        v.dedup(&mut selected, Some(&prev));
+        check_bitmap(&[false, false, true, false], &selected);
+
+        // Prev is None, select first element.
+        let mut selected = new_bitmap(&[false, false, true, false]);
+        v.dedup(&mut selected, None);
+        check_bitmap(&[true, false, true, false], &selected);
+
+        // Prev is empty, select first element.
+        let mut selected = new_bitmap(&[false, false, true, false]);
+        v.dedup(
+            &mut selected,
+            Some(&ConstantVector::new(
+                Arc::new(Int32Vector::from_slice(&[1])),
+                0,
+            )),
+        );
+        check_bitmap(&[true, false, true, false], &selected);
+
+        // Different constant vector.
+        let mut selected = new_bitmap(&[false, false, true, false]);
+        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[2])), 4);
+        v.dedup(&mut selected, Some(&prev));
+        check_bitmap(&[true, false, true, false], &selected);
     }
 
     #[test]

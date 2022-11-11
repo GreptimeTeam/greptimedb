@@ -23,8 +23,7 @@ pub trait VectorOp {
     /// of `self` is retained.
     ///
     /// The caller should ensure
-    /// 1. the `selected` bitmap is intialized by setting `[0, vector.len())`
-    /// bits to false.
+    /// 1. the length of `selected` bitmap is equal to `vector.len()`.
     /// 2. `vector` and `prev_vector` are sorted.
     ///
     /// If there are multiple duplicate elements, this function retains the **first** element.
