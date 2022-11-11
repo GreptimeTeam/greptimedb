@@ -51,36 +51,25 @@ pub trait FrontendInstance:
     + Sync
     + 'static
 {
-    async fn start(&mut self, opts: &FrontendOptions) -> Result<()>;
+    async fn start(&mut self) -> Result<()>;
 }
+
+pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 
 #[derive(Default)]
 pub struct Instance {
+    // TODO(hl): In standalone mode, there is only one client.
+    // But in distribute mode, frontend should fetch datanodes' addresses from metasrv.
     client: Client,
+    /// catalog manager is None in standalone mode, datanode will keep their own
     catalog_manager: Option<FrontendCatalogManager>,
 }
 
 impl Instance {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    // TODO(fys): temporarily hard code
-    pub fn database(&self) -> Database {
-        Database::new("greptime", self.client.clone())
-    }
-
-    // TODO(fys): temporarily hard code
-    pub fn admin(&self) -> Admin {
-        Admin::new("greptime", self.client.clone())
-    }
-}
-
-#[async_trait]
-impl FrontendInstance for Instance {
-    async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
+    pub async fn try_new(opts: &FrontendOptions) -> Result<Self> {
+        let mut instance = Instance::default();
         let addr = opts.datanode_grpc_addr();
-        self.client.start(vec![addr]);
+        instance.client.start(vec![addr]);
 
         let meta_client = match opts.mode {
             Mode::Standalone => None,
@@ -102,7 +91,7 @@ impl FrontendInstance for Instance {
             }
         };
 
-        self.catalog_manager = if let Some(meta_client) = meta_client {
+        instance.catalog_manager = if let Some(meta_client) = meta_client {
             let meta_backend = Arc::new(MetaKvBackend {
                 client: meta_client.clone(),
             });
@@ -114,6 +103,24 @@ impl FrontendInstance for Instance {
         } else {
             None
         };
+        Ok(instance)
+    }
+
+    // TODO(fys): temporarily hard code
+    pub fn database(&self) -> Database {
+        Database::new("greptime", self.client.clone())
+    }
+
+    // TODO(fys): temporarily hard code
+    pub fn admin(&self) -> Admin {
+        Admin::new("greptime", self.client.clone())
+    }
+}
+
+#[async_trait]
+impl FrontendInstance for Instance {
+    async fn start(&mut self) -> Result<()> {
+        // Frontend init should move to here
         Ok(())
     }
 }

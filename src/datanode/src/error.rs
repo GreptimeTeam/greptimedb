@@ -283,6 +283,18 @@ pub enum Error {
 
     #[snafu(display("Insert batch is empty"))]
     EmptyInsertBatch,
+
+    #[snafu(display("Failed to build frontend instance, source: {}", source))]
+    BuildFrontend {
+        #[snafu(backtrace)]
+        source: frontend::error::Error,
+    },
+
+    #[snafu(display("Failed to start frontend instance, source: {}", source))]
+    StartFrontend {
+        #[snafu(backtrace)]
+        source: frontend::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -351,6 +363,9 @@ impl ErrorExt for Error {
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::InsertData { source, .. } => source.status_code(),
             Error::EmptyInsertBatch => StatusCode::InvalidArguments,
+            Error::BuildFrontend { source, .. } | Error::StartFrontend { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

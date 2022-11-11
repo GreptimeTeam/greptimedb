@@ -56,8 +56,13 @@ pub struct StartCommand {
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        let opts = self.try_into()?;
-        let mut frontend = Frontend::new(opts, Instance::new());
+        let opts: FrontendOptions = self.try_into()?;
+        let mut frontend = Frontend::new(
+            opts.clone(),
+            Instance::try_new(&opts)
+                .await
+                .context(error::StartFrontendSnafu)?,
+        );
         frontend.start().await.context(error::StartFrontendSnafu)
     }
 }

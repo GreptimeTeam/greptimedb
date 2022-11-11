@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
+use common_telemetry::info;
 use servers::grpc::GrpcServer;
 use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
@@ -24,6 +25,7 @@ impl Services {
     where
         T: FrontendInstance,
     {
+        info!("Starting frontend servers");
         let grpc_server_and_addr = if let Some(opts) = &opts.grpc_options {
             let grpc_addr = parse_addr(&opts.addr)?;
 
@@ -143,7 +145,9 @@ async fn start_server(
     server_and_addr: Option<(Box<dyn Server>, SocketAddr)>,
 ) -> servers::error::Result<Option<SocketAddr>> {
     if let Some((server, addr)) = server_and_addr {
-        server.start(addr).await.map(Some)
+        let res = server.start(addr).await.map(Some)?;
+        info!("Starting server at {}", addr);
+        Ok(res)
     } else {
         Ok(None)
     }

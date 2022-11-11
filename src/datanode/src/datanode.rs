@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use common_telemetry::info;
 use frontend::frontend::Mode;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
@@ -59,7 +60,7 @@ impl Default for DatanodeOptions {
 
 /// Datanode service.
 pub struct Datanode {
-    opts: DatanodeOptions,
+    datanode_opts: DatanodeOptions,
     services: Services,
     instance: InstanceRef,
 }
@@ -67,16 +68,18 @@ pub struct Datanode {
 impl Datanode {
     pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
         let instance = Arc::new(Instance::new(&opts).await?);
-        let services = Services::try_new(instance.clone(), &opts)?;
+        let services = Services::try_new(instance.clone(), &opts).await?;
         Ok(Self {
-            opts,
+            datanode_opts: opts,
             services,
             instance,
         })
     }
 
     pub async fn start(&mut self) -> Result<()> {
+        info!("Starting datanode instance...");
         self.instance.start().await?;
-        self.services.start(&self.opts).await
+        self.services.start(&self.datanode_opts).await?;
+        Ok(())
     }
 }
