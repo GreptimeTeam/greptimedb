@@ -64,8 +64,10 @@ impl KvBackend for MockKvBackend {
     }
 
     async fn set(&self, key: &[u8], val: &[u8]) -> Result<(), Error> {
+        common_telemetry::info!("Mock KvBackend, put begin");
         let mut map = self.map.write().await;
         map.insert(key.to_vec(), val.to_vec());
+        common_telemetry::info!("Mock KvBackend, put end");
         Ok(())
     }
 

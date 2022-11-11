@@ -94,7 +94,15 @@ impl KvStore for MemStore {
             prev_kv,
         } = req;
 
+        common_telemetry::info!(
+            "memory kv store put acquire lock, key: {}",
+            String::from_utf8_lossy(&key)
+        );
         let mut memory = self.inner.write();
+        common_telemetry::info!(
+            "memory kv store put insert, key: {}",
+            String::from_utf8_lossy(&key)
+        );
         let prev_value = memory.insert(key.clone(), value);
         let prev_kv = if prev_kv {
             prev_value.map(|value| KeyValue { key, value })
@@ -104,6 +112,7 @@ impl KvStore for MemStore {
 
         let cluster_id = header.map_or(0, |h| h.cluster_id);
         let header = Some(ResponseHeader::success(cluster_id));
+        common_telemetry::info!("memory kv store put end");
         Ok(PutResponse { header, prev_kv })
     }
 
@@ -114,7 +123,9 @@ impl KvStore for MemStore {
             prev_kv,
         } = req;
 
+        common_telemetry::info!("memory kv store put batch acquire lock");
         let mut memory = self.inner.write();
+        common_telemetry::info!("memory kv store put batch insert");
         let prev_kvs = if prev_kv {
             kvs.into_iter()
                 .map(|kv| (kv.key.clone(), memory.insert(kv.key, kv.value)))
@@ -133,6 +144,7 @@ impl KvStore for MemStore {
 
         let cluster_id = header.map_or(0, |h| h.cluster_id);
         let header = Some(ResponseHeader::success(cluster_id));
+        common_telemetry::info!("memory kv store put batch end");
         Ok(BatchPutResponse { header, prev_kvs })
     }
 

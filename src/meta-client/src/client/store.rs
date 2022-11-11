@@ -60,8 +60,12 @@ impl Client {
     }
 
     pub async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+        common_telemetry::info!("meta StoreClient put acquire lock, req: {:?}", req);
         let inner = self.inner.read().await;
-        inner.put(req).await
+        common_telemetry::info!("meta StoreClient put begin, req: {:?}", req);
+        let ret = inner.put(req).await;
+        common_telemetry::info!("meta StoreClient put end");
+        ret
     }
 
     pub async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
@@ -125,7 +129,9 @@ impl Inner {
     async fn put(&self, mut req: PutRequest) -> Result<PutResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id);
+        common_telemetry::info!("StoreClient inner put begin, req: {:?}", req);
         let res = client.put(req).await.context(error::TonicStatusSnafu)?;
+        common_telemetry::info!("StoreClient inner put end");
 
         Ok(res.into_inner())
     }
@@ -178,10 +184,12 @@ impl Inner {
     }
 
     fn make_client(&self, addr: impl AsRef<str>) -> Result<StoreClient<Channel>> {
+        common_telemetry::info!("StoreClient inner make client by addr {}", addr.as_ref());
         let channel = self
             .channel_manager
             .get(addr)
             .context(error::CreateChannelSnafu)?;
+        common_telemetry::info!("StoreClient inner make client get channel");
 
         Ok(StoreClient::new(channel))
     }
