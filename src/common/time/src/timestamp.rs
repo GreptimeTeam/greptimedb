@@ -40,9 +40,15 @@ impl Timestamp {
     }
 
     pub fn to_iso8601_string(&self) -> String {
-        let secs = self.convert_to(TimeUnit::Second);
-        let nsecs = self.convert_to(TimeUnit::Nanosecond)
-            - secs * (TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor());
+        let nano_factor = TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor();
+
+        let mut secs = self.convert_to(TimeUnit::Second);
+        let mut nsecs = self.convert_to(TimeUnit::Nanosecond) % nano_factor;
+
+        if nsecs < 0 {
+            secs -= 1;
+            nsecs += nano_factor;
+        }
 
         let datetime = Utc.timestamp(secs, nsecs as u32);
         format!("{}", datetime.format("%Y-%m-%d %H:%M:%S%.f%z"))
@@ -284,5 +290,17 @@ mod tests {
         let ts_millis = 1668070237000;
         let ts = Timestamp::from_millis(ts_millis);
         assert_eq!("2022-11-10 08:50:37+0000", ts.to_iso8601_string());
+
+        let ts_millis = -1000;
+        let ts = Timestamp::from_millis(ts_millis);
+        assert_eq!("1969-12-31 23:59:59+0000", ts.to_iso8601_string());
+
+        let ts_millis = -1;
+        let ts = Timestamp::from_millis(ts_millis);
+        assert_eq!("1969-12-31 23:59:59.999+0000", ts.to_iso8601_string());
+
+        let ts_millis = -1001;
+        let ts = Timestamp::from_millis(ts_millis);
+        assert_eq!("1969-12-31 23:59:58.999+0000", ts.to_iso8601_string());
     }
 }

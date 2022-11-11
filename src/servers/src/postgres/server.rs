@@ -59,7 +59,7 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
     where
         C: ClientInfo,
     {
-        let mut params = HashMap::new();
+        let mut params = HashMap::with_capacity(1);
         params.insert("server_version".to_owned(), self.version.to_owned());
 
         Some(params)
