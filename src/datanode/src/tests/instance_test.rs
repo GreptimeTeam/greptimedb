@@ -112,7 +112,10 @@ async fn test_execute_insert_query_with_i64_timestamp() {
         .unwrap();
     assert!(matches!(output, Output::AffectedRows(2)));
 
-    let query_output = instance.execute_sql("select ts from demo").await.unwrap();
+    let query_output = instance
+        .execute_sql("select ts from demo order by ts")
+        .await
+        .unwrap();
 
     match query_output {
         Output::Stream(s) => {
@@ -128,7 +131,7 @@ async fn test_execute_insert_query_with_i64_timestamp() {
     }
 
     let query_output = instance
-        .execute_sql("select ts as time from demo")
+        .execute_sql("select ts as time from demo order by ts")
         .await
         .unwrap();
 
