@@ -40,7 +40,7 @@ pub trait Memtable: Send + Sync + std::fmt::Debug {
 
     /// Returns the estimated bytes allocated by this memtable from heap. Result
     /// of this method may be larger than the estimated based on [`num_rows`] because
-    /// of the implementator's pre-alloc behavior.
+    /// of the implementor's pre-alloc behavior.
     fn bytes_allocated(&self) -> usize;
 
     /// Returns the time span of data inside this memtable.

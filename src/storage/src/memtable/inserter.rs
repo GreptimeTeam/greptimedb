@@ -27,14 +27,13 @@ impl Inserter {
     /// Insert write batch into memtable.
     ///
     /// Won't do schema validation if not configured. Caller (mostly the [`RegionWriter`]) should ensure the
-    /// schemas of `memtable` are consistent with `batch`'s, and the time ranges of `memtable`
-    /// are consistent with `self`'s time ranges.
+    /// schemas of `memtable` are consistent with `batch`'s.
     pub fn insert_memtable(&mut self, batch: &WriteBatch, memtable: &MemtableRef) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
 
-        // This function only makes effect in debug mod.
+        // This function only makes effect in debug mode.
         validate_input_and_memtable_schemas(batch, memtable);
 
         // Enough to hold all key or value columns.
@@ -51,7 +50,6 @@ impl Inserter {
         for mutation in batch {
             match mutation {
                 Mutation::Put(put_data) => {
-                    // self.put_memtables(batch.schema(), put_data, memtable, &mut kvs)?;
                     self.write_one_mutation(put_data, memtable, &mut kvs)?;
                 }
             }
