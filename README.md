@@ -113,22 +113,22 @@ cargo run -- --log-dir=logs --log-level=debug frontend start -c ./config/fronten
 3. Insert data:
 
    ```SQL
-   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955);
-   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host2', 77.7, 2048, 1660897956);
-   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host2', 77.7, 2048, 1660897956000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
    ```
 
 4. Query data:
 
    ```SQL
    mysql> SELECT * FROM monitor;
-   +-------+------------+------+--------+
-   | host  | ts         | cpu  | memory |
-   +-------+------------+------+--------+
-   | host1 | 1660897955 | 66.6 |   1024 |
-   | host2 | 1660897956 | 77.7 |   2048 |
-   | host3 | 1660897957 | 88.8 |   4096 |
-   +-------+------------+------+--------+
+   +-------+---------------+------+--------+
+   | host  | ts            | cpu  | memory |
+   +-------+---------------+------+--------+
+   | host1 | 1660897955000 | 66.6 |   1024 |
+   | host2 | 1660897956000 | 77.7 |   2048 |
+   | host3 | 1660897957000 | 88.8 |   4096 |
+   +-------+---------------+------+--------+
    3 rows in set (0.01 sec)
    ```
    You can delete your data by removing `/tmp/greptimedb`.

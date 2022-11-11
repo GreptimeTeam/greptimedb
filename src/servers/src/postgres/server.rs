@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -5,8 +6,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
-use futures::StreamExt;
-use pgwire::api::auth::noop::NoopStartupHandler;
+use futures::{Sink, StreamExt};
+use pgwire::api::auth::{self, ServerParameterProvider, StartupHandler};
+use pgwire::api::ClientInfo;
+use pgwire::error::{PgWireError, PgWireResult};
+use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use pgwire::tokio::process_socket;
 use tokio;
 
@@ -15,9 +19,56 @@ use crate::postgres::handler::PostgresServerHandler;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 
+struct SimpleStartupHandler;
+
+#[async_trait]
+impl StartupHandler for SimpleStartupHandler {
+    async fn on_startup<C>(
+        &self,
+        client: &mut C,
+        message: &PgWireFrontendMessage,
+    ) -> PgWireResult<()>
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
+        C::Error: std::fmt::Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        if let PgWireFrontendMessage::Startup(ref startup) = message {
+            auth::save_startup_parameters_to_metadata(client, startup);
+            auth::finish_authentication(client, &GreptimeDBStartupParameters::new()).await;
+        }
+
+        Ok(())
+    }
+}
+
+struct GreptimeDBStartupParameters {
+    version: &'static str,
+}
+
+impl GreptimeDBStartupParameters {
+    fn new() -> GreptimeDBStartupParameters {
+        GreptimeDBStartupParameters {
+            version: env!("CARGO_PKG_VERSION"),
+        }
+    }
+}
+
+impl ServerParameterProvider for GreptimeDBStartupParameters {
+    fn server_parameters<C>(&self, _client: &C) -> Option<HashMap<String, String>>
+    where
+        C: ClientInfo,
+    {
+        let mut params = HashMap::with_capacity(1);
+        params.insert("server_version".to_owned(), self.version.to_owned());
+
+        Some(params)
+    }
+}
+
 pub struct PostgresServer {
     base_server: BaseTcpServer,
-    auth_handler: Arc<NoopStartupHandler>,
+    auth_handler: Arc<SimpleStartupHandler>,
     query_handler: Arc<PostgresServerHandler>,
 }
 
@@ -25,7 +76,7 @@ impl PostgresServer {
     /// Creates a new Postgres server with provided query_handler and async runtime
     pub fn new(query_handler: SqlQueryHandlerRef, io_runtime: Arc<Runtime>) -> PostgresServer {
         let postgres_handler = Arc::new(PostgresServerHandler::new(query_handler));
-        let startup_handler = Arc::new(NoopStartupHandler);
+        let startup_handler = Arc::new(SimpleStartupHandler);
         PostgresServer {
             base_server: BaseTcpServer::create_server("Postgres", io_runtime),
             auth_handler: startup_handler,
