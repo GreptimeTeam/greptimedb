@@ -5,6 +5,7 @@ use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
+use store_api::storage::SequenceNumber;
 use store_api::storage::{AlterRequest, WriteContext, WriteResponse};
 use tokio::sync::Mutex;
 
@@ -17,9 +18,10 @@ use crate::manifest::action::{
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::metadata::RegionMetadataRef;
 use crate::proto::wal::WalHeader;
-use crate::region::{RecoveredMetadataMap, RegionManifest, SharedDataRef};
+use crate::region::{RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef};
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
+use crate::version::VersionControl;
 use crate::version::{VersionControlRef, VersionEdit};
 use crate::wal::{Payload, Wal};
 use crate::write_batch::WriteBatch;
@@ -341,28 +343,14 @@ impl WriterInner {
                     // There might be multiple metadata changes to be applied, so a loop is necessary.
                     if req_sequence > sequence_before_alter {
                         // This is the first request that use the new metadata.
-                        // It's safe to unwrap here. It's checked above. Move out metadata to avoid cloning it.
-                        let (_, (manifest_version, metadata)) = next_apply_metadata.take().unwrap();
-                        let region_metadata: RegionMetadataRef = Arc::new(
-                            metadata.try_into().context(error::InvalidRawRegionSnafu {
-                                region: &writer_ctx.shared.name,
-                            })?,
-                        );
-                        let new_mutable = self
-                            .memtable_builder
-                            .build(region_metadata.schema().clone());
-                        version_control.freeze_mutable_and_apply_metadata(
-                            region_metadata,
-                            manifest_version,
-                            new_mutable,
-                        );
-                        num_recovered_metadata += 1;
-                        logging::debug!(
-                            "Applied metadata to region: {} when replaying WAL: sequence={} manifest={} ",
-                            writer_ctx.shared.name,
+                        self.apply_metadata(
+                            &writer_ctx,
                             sequence_before_alter,
-                            manifest_version
-                        );
+                            next_apply_metadata,
+                            version_control,
+                        )?;
+
+                        num_recovered_metadata += 1;
                         next_apply_metadata = recovered_metadata.pop_first();
                     } else {
                         // Keep the next_apply_metadata until req_sequence > sequence_before_alter
@@ -380,7 +368,7 @@ impl WriterInner {
                     } else {
                         logging::error!(
                             "Sequence should not decrease during replay, found {} <= {}, \
-                            region_id: {}, region_name: {}, flushed_sequence: {}, num_requests: {}",
+                             region_id: {}, region_name: {}, flushed_sequence: {}, num_requests: {}",
                             req_sequence,
                             last_sequence,
                             writer_ctx.shared.id,
@@ -402,6 +390,21 @@ impl WriterInner {
                 }
             }
 
+            // Apply metadata after last WAL entry
+            while let Some((sequence_before_alter, _)) = next_apply_metadata {
+                if sequence_before_alter > last_sequence {
+                    self.apply_metadata(
+                        &writer_ctx,
+                        sequence_before_alter,
+                        next_apply_metadata,
+                        version_control,
+                    )?;
+
+                    num_recovered_metadata += 1;
+                }
+                next_apply_metadata = recovered_metadata.pop_first();
+            }
+
             version_control.set_committed_sequence(last_sequence);
         }
 
@@ -413,6 +416,39 @@ impl WriterInner {
             last_sequence,
             num_requests,
             num_recovered_metadata,
+        );
+
+        Ok(())
+    }
+
+    fn apply_metadata<S: LogStore>(
+        &self,
+        writer_ctx: &WriterContext<'_, S>,
+        sequence: SequenceNumber,
+        mut metadata: Option<RecoverdMetadata>,
+        version_control: &VersionControl,
+    ) -> Result<()> {
+        // It's safe to unwrap here, it's checked outside.
+        // Move out metadata to avoid cloning it.
+
+        let (_, (manifest_version, metadata)) = metadata.take().unwrap();
+        let region_metadata: RegionMetadataRef =
+            Arc::new(metadata.try_into().context(error::InvalidRawRegionSnafu {
+                region: &writer_ctx.shared.name,
+            })?);
+        let new_mutable = self
+            .memtable_builder
+            .build(region_metadata.schema().clone());
+        version_control.freeze_mutable_and_apply_metadata(
+            region_metadata,
+            manifest_version,
+            new_mutable,
+        );
+        logging::debug!(
+            "Applied metadata to region: {} when replaying WAL: sequence={} manifest={} ",
+            writer_ctx.shared.name,
+            sequence,
+            manifest_version
         );
 
         Ok(())

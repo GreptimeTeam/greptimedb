@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common_time::Timestamp;
@@ -16,8 +17,10 @@ use tempdir::TempDir;
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::OpenOptions;
 use crate::region::RegionImpl;
+use crate::region::{RawRegionMetadata, RegionMetadata};
 use crate::test_util;
 use crate::test_util::config_util;
+use crate::test_util::descriptor_util::RegionDescBuilder;
 use crate::write_batch::PutData;
 
 const REGION_NAME: &str = "region-alter-0";
@@ -235,6 +238,7 @@ fn drop_column_req(names: &[&str]) -> AlterRequest {
 
 fn check_schema_names(schema: &SchemaRef, names: &[&str]) {
     assert_eq!(names.len(), schema.num_columns());
+
     for (idx, name) in names.iter().enumerate() {
         assert_eq!(*name, schema.column_name_by_index(idx));
         assert!(schema.column_schema_by_name(name).is_some());
@@ -390,4 +394,52 @@ async fn test_put_old_schema_after_alter() {
     ];
     let scanned = tester.full_scan().await;
     assert_eq!(expect, scanned);
+}
+
+#[tokio::test]
+async fn test_replay_metadata_after_open() {
+    let dir = TempDir::new("replay-metadata-after-open").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+    let mut tester = AlterTester::new(store_dir).await;
+
+    let data = vec![(1000, Some(100)), (1001, Some(101)), (1002, Some(102))];
+
+    tester.put_with_init_schema(&data).await;
+
+    tester.reopen().await;
+
+    let committed_sequence = tester.base().committed_sequence();
+    let manifest_version = tester.base().region.current_manifest_version();
+    let version = tester.version();
+
+    let mut recovered_metadata = BTreeMap::new();
+
+    let desc = RegionDescBuilder::new(REGION_NAME)
+        .push_key_column(("k1", LogicalTypeId::Int32, false))
+        .push_value_column(("v0", LogicalTypeId::Float32, true))
+        .build();
+    let metadata: &RegionMetadata = &desc.try_into().unwrap();
+    let mut raw_metadata: RawRegionMetadata = metadata.into();
+    raw_metadata.version = version + 1;
+    recovered_metadata.insert(committed_sequence, (manifest_version + 1, raw_metadata));
+    tester.base().replay_inner(recovered_metadata).await;
+    // The same with init schema, because metadata's sequence is equals to last commited sequence,
+    // So we don't apply it.
+    let schema = tester.schema();
+    check_schema_names(&schema, &["timestamp", "v0"]);
+
+    let mut recovered_metadata = BTreeMap::new();
+    let desc = RegionDescBuilder::new(REGION_NAME)
+        .push_key_column(("k1", LogicalTypeId::Int32, false))
+        .push_key_column(("k2", LogicalTypeId::Int32, false))
+        .push_value_column(("v0", LogicalTypeId::Float32, true))
+        .push_value_column(("v1", LogicalTypeId::Float32, true))
+        .build();
+    let metadata: &RegionMetadata = &desc.try_into().unwrap();
+    let mut raw_metadata: RawRegionMetadata = metadata.into();
+    raw_metadata.version = version + 2;
+    recovered_metadata.insert(committed_sequence + 1, (manifest_version + 2, raw_metadata));
+    tester.base().replay_inner(recovered_metadata).await;
+    let schema = tester.schema();
+    check_schema_names(&schema, &["k1", "k2", "timestamp", "v0", "v1"]);
 }
