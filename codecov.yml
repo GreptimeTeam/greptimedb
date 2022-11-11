@@ -1,10 +1,8 @@
 # codecov config
 coverage:
   status:
-    patch: off # disable patch status
     project:
       default:
-        enable: yes
         threshold: 1%
 ignore:
   - "**/error*.rs" # ignore all error.rs files
