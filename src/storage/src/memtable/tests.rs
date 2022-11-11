@@ -10,9 +10,6 @@ use crate::metadata::RegionMetadata;
 use crate::schema::{ProjectedSchema, RegionSchemaRef};
 use crate::test_util::descriptor_util::RegionDescBuilder;
 
-// For simplicity, all memtables in test share same memtable id.
-const MEMTABLE_ID: MemtableId = 1;
-
 // Schema for testing memtable:
 // - key: Int64(timestamp), UInt64(version),
 // - value: UInt64, UInt64
@@ -157,7 +154,7 @@ impl Default for MemtableTester {
 impl MemtableTester {
     fn new() -> MemtableTester {
         let schema = schema_for_test();
-        let builders = vec![Arc::new(DefaultMemtableBuilder {}) as _];
+        let builders = vec![Arc::new(DefaultMemtableBuilder::default()) as _];
 
         MemtableTester { schema, builders }
     }
@@ -165,7 +162,7 @@ impl MemtableTester {
     fn new_memtables(&self) -> Vec<MemtableRef> {
         self.builders
             .iter()
-            .map(|b| b.build(MEMTABLE_ID, self.schema.clone()))
+            .map(|b| b.build(self.schema.clone()))
             .collect()
     }
 

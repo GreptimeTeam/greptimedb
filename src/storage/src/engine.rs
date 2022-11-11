@@ -207,7 +207,7 @@ impl<S: LogStore> EngineInner<S> {
             object_store,
             log_store,
             regions: RwLock::new(Default::default()),
-            memtable_builder: Arc::new(DefaultMemtableBuilder {}),
+            memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
         }

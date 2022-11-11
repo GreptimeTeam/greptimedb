@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
-use common_time::RangeMillis;
 use store_api::logstore::LogStore;
 use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
 use store_api::storage::SequenceNumber;
@@ -104,12 +103,6 @@ impl FlushStrategy for SizeBasedStrategy {
     }
 }
 
-#[derive(Debug)]
-pub struct MemtableWithMeta {
-    pub memtable: MemtableRef,
-    pub bucket: RangeMillis,
-}
-
 #[async_trait]
 pub trait FlushScheduler: Send + Sync + std::fmt::Debug {
     async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle>;
@@ -141,7 +134,7 @@ pub struct FlushJob<S: LogStore> {
     /// used to remove immutable memtables in current version.
     pub max_memtable_id: MemtableId,
     /// Memtables to be flushed.
-    pub memtables: Vec<MemtableWithMeta>,
+    pub memtables: Vec<MemtableRef>,
     /// Last sequence of data to be flushed.
     pub flush_sequence: SequenceNumber,
     /// Shared data of region to be flushed.
@@ -170,9 +163,14 @@ impl<S: LogStore> FlushJob<S> {
             ..Default::default()
         };
         for m in &self.memtables {
+            // skip empty memtable
+            if m.num_rows() == 0 {
+                continue;
+            }
+
             let file_name = Self::generate_sst_file_name();
             // TODO(hl): Check if random file name already exists in meta.
-            let iter = m.memtable.iter(&iter_ctx)?;
+            let iter = m.iter(&iter_ctx)?;
             futures.push(async move {
                 self.sst_layer
                     .write_sst(&file_name, iter, &WriteOptions::default())

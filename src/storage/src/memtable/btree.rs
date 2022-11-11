@@ -78,6 +78,10 @@ impl Memtable for BTreeMemtable {
     fn bytes_allocated(&self) -> usize {
         self.estimated_bytes.load(AtomicOrdering::Relaxed)
     }
+
+    fn num_rows(&self) -> usize {
+        self.map.read().unwrap().len()
+    }
 }
 
 struct BTreeIterator {

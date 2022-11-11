@@ -36,7 +36,7 @@ impl Snapshot for SnapshotImpl {
         let visible_sequence = self.sequence_to_read(request.sequence);
         let memtable_version = self.version.memtables();
 
-        let mutables = memtable_version.mutable_memtables();
+        let mutables = memtable_version.mutable_memtable();
         let immutables = memtable_version.immutable_memtables();
 
         let mut builder =
@@ -46,10 +46,10 @@ impl Snapshot for SnapshotImpl {
                 .filters(request.filters)
                 .batch_size(ctx.batch_size)
                 .visible_sequence(visible_sequence)
-                .pick_memtables(mutables);
+                .pick_memtables(mutables.clone());
 
-        for mem_set in immutables {
-            builder = builder.pick_memtables(mem_set);
+        for memtable in immutables {
+            builder = builder.pick_memtables(memtable.clone());
         }
 
         let reader = builder.pick_ssts(self.version.ssts())?.build().await?;
