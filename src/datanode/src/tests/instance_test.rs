@@ -37,7 +37,7 @@ async fn test_create_database_and_insert_query() {
 
     let output = instance
         .execute_sql(
-            r#"insert into greptime.test.demo(host, cpu, memory, ts) values
+            r#"insert into test.demo(host, cpu, memory, ts) values
                            ('host1', 66.6, 1024, 1655276557000),
                            ('host2', 88.8,  333.3, 1655276558000)
                            "#,
@@ -47,7 +47,7 @@ async fn test_create_database_and_insert_query() {
     assert!(matches!(output, Output::AffectedRows(2)));
 
     let query_output = instance
-        .execute_sql("select ts from greptime.test.demo")
+        .execute_sql("select ts from test.demo order by ts")
         .await
         .unwrap();
 
