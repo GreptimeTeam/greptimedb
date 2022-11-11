@@ -57,7 +57,7 @@ message InsertExpr {
     string sql = 3;
   }
 
-  map<string, bytes> options = 6;
+  map<string, bytes> options = 4;
 }
 
 // TODO(jiachun)
