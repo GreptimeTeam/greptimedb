@@ -644,7 +644,7 @@ mod test {
 
     async fn register_datanode_table(instance: Arc<Instance>, table: MemTable) {
         let catalog_manager = instance.catalog_manager().clone();
-        catalog_manager
+        let _ = catalog_manager
             .register_table(RegisterTableRequest {
                 catalog: "greptime".to_string(),
                 schema: "public".to_string(),
@@ -652,8 +652,7 @@ mod test {
                 table_id: 1234,
                 table: Arc::new(table),
             })
-            .await
-            .unwrap();
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
