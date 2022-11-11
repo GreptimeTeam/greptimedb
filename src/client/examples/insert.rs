@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use api::v1::{codec::InsertBatch, *};
 use client::{Client, Database};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 fn main() {
     tracing::subscriber::set_global_default(tracing_subscriber::FmtSubscriber::builder().finish())
         .unwrap();
@@ -16,8 +15,6 @@ async fn run() {
     let db = Database::new("greptime", client);
 
     let expr = InsertExpr {
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: "demo".to_string(),
         expr: Some(insert_expr::Expr::Values(insert_expr::Values {
             values: insert_batches(),

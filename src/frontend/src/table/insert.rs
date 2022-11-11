@@ -113,8 +113,6 @@ fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<Inse
     );
 
     Ok(InsertExpr {
-        catalog_name: insert.catalog_name,
-        schema_name: insert.schema_name,
         table_name: insert.table_name,
         options,
         expr: Some(Expr::Values(insert_expr::Values {

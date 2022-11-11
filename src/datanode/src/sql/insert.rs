@@ -35,7 +35,8 @@ impl SqlHandler {
     ) -> Result<SqlRequest> {
         let columns = stmt.columns();
         let values = stmt.values().context(ParseSqlValueSnafu)?;
-        let (catalog_name, schema_name, table_name) = stmt.table_name().context(ParseSqlSnafu)?;
+        let (catalog_name, schema_name, table_name) =
+            stmt.full_table_name().context(ParseSqlSnafu)?;
 
         let table = schema_provider
             .table(&table_name)

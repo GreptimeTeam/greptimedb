@@ -11,7 +11,6 @@ use api::v1::{
     codec::SelectResult, column, column::SemanticType, insert_expr, Column, ColumnDataType,
     InsertExpr,
 };
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::writer::Precision::MILLISECOND;
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt};
@@ -400,9 +399,6 @@ fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
         row_count: row_count as u32,
     };
     Ok(InsertExpr {
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        // TODO(dennis): supports database in http API
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
         })?,

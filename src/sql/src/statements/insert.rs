@@ -12,7 +12,7 @@ pub struct Insert {
 }
 
 impl Insert {
-    pub fn table_name(&self) -> Result<(String, String, String)> {
+    pub fn full_table_name(&self) -> Result<(String, String, String)> {
         match &self.inner {
             Statement::Insert { table_name, .. } => table_idents_to_full_name(table_name),
             _ => unreachable!(),

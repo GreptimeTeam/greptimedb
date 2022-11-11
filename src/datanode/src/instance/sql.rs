@@ -11,7 +11,7 @@ use sql::statements::statement::Statement;
 use table::requests::CreateDatabaseRequest;
 
 use crate::error::{
-    CatalogNotFoundSnafu, CatalogSnafu, ExecuteSqlSnafu, Result, SchemaNotFoundSnafu,
+    CatalogNotFoundSnafu, CatalogSnafu, ExecuteSqlSnafu, ParseSqlSnafu, Result, SchemaNotFoundSnafu,
 };
 use crate::instance::Instance;
 use crate::metric;
@@ -37,7 +37,8 @@ impl Instance {
                     .context(ExecuteSqlSnafu)
             }
             Statement::Insert(i) => {
-                let (catalog_name, schema_name, _table_name) = i.table_name().unwrap();
+                let (catalog_name, schema_name, _table_name) =
+                    i.full_table_name().context(ParseSqlSnafu)?;
 
                 let schema_provider = self
                     .catalog_manager

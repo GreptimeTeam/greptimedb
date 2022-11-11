@@ -19,7 +19,7 @@ pub(crate) fn insert_to_request(
     let columns = stmt.columns();
     let values = stmt.values().context(error::ParseSqlSnafu)?;
     let (catalog_name, schema_name, table_name) =
-        stmt.table_name().context(error::ParseSqlSnafu)?;
+        stmt.full_table_name().context(error::ParseSqlSnafu)?;
 
     let table = schema_provider
         .table(&table_name)
