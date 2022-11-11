@@ -23,7 +23,7 @@ pub struct ColumnDescriptor {
     /// Is column nullable, default is true.
     #[builder(default = "true")]
     is_nullable: bool,
-    /// Is column nullable, default is true.
+    /// Is time index column, default is true.
     #[builder(default = "false")]
     is_time_index: bool,
     /// Default constraint of column, default is None, which means no default constraint
