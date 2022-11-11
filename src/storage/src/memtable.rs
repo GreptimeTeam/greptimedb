@@ -7,7 +7,6 @@ mod version;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use common_time::RangeMillis;
 use datatypes::vectors::VectorRef;
 use store_api::storage::{consts, OpType, SequenceNumber};
 
@@ -42,9 +41,6 @@ pub trait Memtable: Send + Sync + std::fmt::Debug {
     /// of this method may be larger than the estimated based on [`num_rows`] because
     /// of the implementor's pre-alloc behavior.
     fn bytes_allocated(&self) -> usize;
-
-    /// Returns the time span of data inside this memtable.
-    fn time_span(&self) -> RangeMillis;
 
     /// Return the number of rows contained in this memtable.
     fn num_rows(&self) -> usize;

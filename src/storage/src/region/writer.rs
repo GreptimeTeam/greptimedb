@@ -277,7 +277,7 @@ impl WriterInner {
         mut request: WriteBatch,
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<WriteResponse> {
-        self.preprocess_write(&request, &writer_ctx).await?;
+        self.preprocess_write(&writer_ctx).await?;
         let version_control = writer_ctx.version_control();
 
         let _lock = version_mutex.lock().await;
@@ -424,7 +424,6 @@ impl WriterInner {
     /// flush if necessary. Returns time ranges of the input write batch.
     async fn preprocess_write<S: LogStore>(
         &mut self,
-        _request: &WriteBatch,
         writer_ctx: &WriterContext<'_, S>,
     ) -> Result<()> {
         let version_control = writer_ctx.version_control();
@@ -435,15 +434,14 @@ impl WriterInner {
             version_control,
             writer_ctx.flush_strategy,
         ) {
-            let new_mutable = self.alloc_memtable(version_control);
-            self.trigger_flush(writer_ctx, new_mutable).await?;
+            self.trigger_flush(writer_ctx).await?;
         }
 
         Ok(())
     }
 
     /// Create a new mutable memtable.
-    fn alloc_memtable(&mut self, version_control: &VersionControlRef) -> MemtableRef {
+    fn alloc_memtable(&self, version_control: &VersionControlRef) -> MemtableRef {
         let memtable_schema = version_control.current().schema().clone();
         self.memtable_builder.build(memtable_schema)
     }
@@ -461,12 +459,9 @@ impl WriterInner {
         flush_strategy.should_flush(shared, mutable_bytes_allocated, total_bytes_allocated)
     }
 
-    async fn trigger_flush<S: LogStore>(
-        &mut self,
-        ctx: &WriterContext<'_, S>,
-        new_mutable: MemtableRef,
-    ) -> Result<()> {
+    async fn trigger_flush<S: LogStore>(&mut self, ctx: &WriterContext<'_, S>) -> Result<()> {
         let version_control = &ctx.shared.version_control;
+        let new_mutable = self.alloc_memtable(version_control);
         // Freeze all mutable memtables so we can flush them later.
         version_control.freeze_mutable(new_mutable);
 

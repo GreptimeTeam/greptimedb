@@ -111,12 +111,12 @@ mod tests {
     use super::*;
     use crate::memtable::DefaultMemtableBuilder;
     use crate::memtable::MemtableBuilder;
-    use crate::test_util;
+    use crate::test_util::schema_util;
 
     #[test]
     fn test_memtable_version() {
         let memtable_builder = DefaultMemtableBuilder::default();
-        let region_schema = Arc::new(test_util::schema_util::new_region_schema(1, 1));
+        let region_schema = Arc::new(schema_util::new_region_schema(1, 1));
 
         let memtable_1 = memtable_builder.build(region_schema.clone());
         let v1 = MemtableVersion::new(memtable_1);

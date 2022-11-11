@@ -79,10 +79,6 @@ impl Memtable for BTreeMemtable {
         self.estimated_bytes.load(AtomicOrdering::Relaxed)
     }
 
-    fn time_span(&self) -> common_time::RangeMillis {
-        todo!()
-    }
-
     fn num_rows(&self) -> usize {
         self.map.read().unwrap().len()
     }

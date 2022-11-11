@@ -48,8 +48,8 @@ impl Snapshot for SnapshotImpl {
                 .visible_sequence(visible_sequence)
                 .pick_memtables(mutables.clone());
 
-        for mem_set in immutables {
-            builder = builder.pick_memtables(mem_set.clone());
+        for memtable in immutables {
+            builder = builder.pick_memtables(memtable.clone());
         }
 
         let reader = builder.pick_ssts(self.version.ssts())?.build().await?;

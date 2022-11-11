@@ -271,14 +271,13 @@ impl<S: LogStore> RegionImpl<S> {
                             .metadata
                             .try_into()
                             .context(error::InvalidRawRegionSnafu { region })?;
-                        // Use current schema to build a memtable as placeholder. This will be replaced later
+                        // Use current schema to build a memtable. This might be replaced later
                         // in `freeze_mutable_and_apply_metadata()`.
-                        let placeholder_memtable =
-                            memtable_builder.build(region_metadata.schema().clone());
+                        let memtable = memtable_builder.build(region_metadata.schema().clone());
                         version = Some(Version::with_manifest_version(
                             Arc::new(region_metadata),
                             last_manifest_version,
-                            placeholder_memtable,
+                            memtable,
                         ));
                         for (manifest_version, action) in actions.drain(..) {
                             version = Self::replay_edit(manifest_version, action, version);

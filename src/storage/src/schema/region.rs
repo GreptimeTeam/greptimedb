@@ -145,11 +145,11 @@ mod tests {
     use datatypes::type_id::LogicalTypeId;
 
     use super::*;
-    use crate::test_util::{self, schema_util};
+    use crate::test_util::schema_util;
 
     #[test]
     fn test_region_schema() {
-        let region_schema = Arc::new(test_util::schema_util::new_region_schema(123, 1));
+        let region_schema = Arc::new(schema_util::new_region_schema(123, 1));
 
         let expect_schema = schema_util::new_schema_with_version(
             &[
