@@ -21,9 +21,12 @@ common-time = { path = "../common/time" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+datanode = { path = "../datanode" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 itertools = "0.10"
+meta-client = { path = "../meta-client" }
+moka = { version = "0.9", features = ["future"] }
 openmetrics-parser = "0.4"
 prost = "0.11"
 query = { path = "../query" }
@@ -36,7 +39,6 @@ sql = { path = "../sql" }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
 tokio = { version = "1.18", features = ["full"] }
-meta-client = {path = "../meta-client"}
 
 [dependencies.arrow]
 package = "arrow2"
@@ -44,8 +46,9 @@ version = "0.10"
 features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
 
 [dev-dependencies]
-datanode = { path = "../datanode" }
+chrono = "0.4"
 futures = "0.3"
+meta-srv = { path = "../meta-srv", features = ["mock"] }
 tempdir = "0.3"
 tonic = "0.8"
 tower = "0.4"

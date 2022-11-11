@@ -34,7 +34,7 @@ pub struct Instance {
     pub(crate) physical_planner: PhysicalPlanner,
     pub(crate) script_executor: ScriptExecutor,
     #[allow(unused)]
-    pub(crate) meta_client: Option<MetaClient>,
+    pub(crate) meta_client: Option<Arc<MetaClient>>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
 }
 
@@ -48,7 +48,8 @@ impl Instance {
         let meta_client = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => {
-                Some(new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?)
+                let meta_client = new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?;
+                Some(Arc::new(meta_client))
             }
         };
 

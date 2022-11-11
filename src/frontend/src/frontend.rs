@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use datanode::datanode::Mode;
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 
@@ -22,6 +23,7 @@ pub struct FrontendOptions {
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
+    pub mode: Mode,
 }
 
 impl Default for FrontendOptions {
@@ -34,6 +36,7 @@ impl Default for FrontendOptions {
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
+            mode: Mode::Standalone,
         }
     }
 }
