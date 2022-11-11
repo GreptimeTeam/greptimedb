@@ -685,9 +685,16 @@ impl SchemaProvider for RemoteSchemaProvider {
         let tables = self.tables.clone();
         let table_key = self.build_regional_table_key(&name).to_string();
 
+        info!("Register table name {}", name);
+        let name_clone = name.clone();
+
         let prev = std::thread::spawn(move || {
-            common_runtime::block_on_read(async move {
+            info!("manager block on read {} start", table_key);
+            let table_key_clone = table_key.clone();
+            let r = common_runtime::block_on_read(async move {
+                info!("manager acquire lock for key {}", table_key);
                 let _guard = mutex.lock().await;
+                info!("manager try to set key {}", table_key);
                 backend
                     .set(
                         table_key.as_bytes(),
@@ -705,10 +712,17 @@ impl SchemaProvider for RemoteSchemaProvider {
                 let prev = new_tables.insert(name, table);
                 tables.store(Arc::new(new_tables));
                 Ok(prev)
-            })
+            });
+
+            info!("manager block on read {} end", table_key_clone);
+
+            r
         })
         .join()
         .unwrap();
+
+        info!("Register table name {} done", name_clone);
+
         prev
     }
 

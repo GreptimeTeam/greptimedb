@@ -960,6 +960,7 @@ dependencies = [
  "common-grpc",
  "common-query",
  "common-recordbatch",
+ "common-telemetry",
  "common-time",
  "datafusion",
  "datanode",

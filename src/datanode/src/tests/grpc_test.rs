@@ -127,6 +127,7 @@ async fn test_insert_and_select() {
     let admin = Admin::new("greptime", grpc_client);
 
     // create
+    common_telemetry::info!("Create table start");
     let expr = testing_create_expr();
     let result = admin.create(expr).await.unwrap();
     assert_matches!(
@@ -136,6 +137,8 @@ async fn test_insert_and_select() {
             failure: 0
         }))
     );
+
+    common_telemetry::info!("Create table done");
 
     //alter
     let add_column = ColumnDef {
@@ -153,13 +156,20 @@ async fn test_insert_and_select() {
         schema_name: None,
         kind: Some(kind),
     };
+
+    common_telemetry::info!("Alter table start");
     let result = admin.alter(expr).await.unwrap();
+    common_telemetry::info!("Alter table end");
     assert_eq!(result.result, None);
 
     // insert
+    common_telemetry::info!("Insert and assert");
     insert_and_assert(&db).await;
 
+    common_telemetry::info!("Shutdown start");
     grpc_server.shutdown().await.unwrap();
+
+    common_telemetry::info!("Shutdown end");
 }
 
 async fn insert_and_assert(db: &Database) {

@@ -57,7 +57,11 @@ impl Admin {
             exprs,
         };
 
+        common_telemetry::info!("Client call admin start");
+
         let resp = self.client.admin(req).await?;
+
+        common_telemetry::info!("Client call admin end");
 
         let results = resp.results;
         ensure!(
