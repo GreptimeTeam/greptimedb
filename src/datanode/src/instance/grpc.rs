@@ -3,10 +3,11 @@ use std::ops::Deref;
 use api::v1::codec::RegionNumber;
 use api::v1::{
     admin_expr, codec::InsertBatch, insert_expr, object_expr, select_expr, AdminExpr, AdminResult,
-    ObjectExpr, ObjectResult, SelectExpr,
+    CreateDatabaseExpr, ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_insert::insertion_expr_to_request;
 use common_query::Output;
@@ -15,7 +16,7 @@ use query::plan::LogicalPlan;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
 use snafu::prelude::*;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
-use table::requests::AddColumnRequest;
+use table::requests::{AddColumnRequest, CreateDatabaseRequest};
 
 use crate::error::{
     CatalogNotFoundSnafu, CatalogSnafu, DecodeLogicalPlanSnafu, EmptyInsertBatchSnafu,
@@ -23,7 +24,7 @@ use crate::error::{
     UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
-use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
+use crate::server::grpc::handler::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use crate::server::grpc::plan::PhysicalPlanner;
 use crate::server::grpc::select::to_object_result;
 use crate::sql::SqlRequest;
@@ -203,6 +204,27 @@ impl Instance {
         }
     }
 
+    async fn execute_create_database(
+        &self,
+        create_database_expr: CreateDatabaseExpr,
+    ) -> AdminResult {
+        let req = CreateDatabaseRequest {
+            db_name: create_database_expr.database_name,
+        };
+        let result = self.sql_handler.create_database(req).await;
+        match result {
+            Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
+                .status_code(StatusCode::Success as u32)
+                .mutate_result(rows as u32, 0)
+                .build(),
+            Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => unreachable!(),
+            Err(err) => AdminResultBuilder::default()
+                .status_code(err.status_code() as u32)
+                .err_msg(err.to_string())
+                .build(),
+        }
+    }
+
     async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
         let logical_plan_converter = DFLogicalSubstraitConvertor::new(self.catalog_manager.clone());
         let logical_plan = logical_plan_converter
@@ -271,6 +293,9 @@ impl GrpcAdminHandler for Instance {
         let admin_resp = match expr.expr {
             Some(admin_expr::Expr::Create(create_expr)) => self.handle_create(create_expr).await,
             Some(admin_expr::Expr::Alter(alter_expr)) => self.handle_alter(alter_expr).await,
+            Some(admin_expr::Expr::CreateDatabase(create_database_expr)) => {
+                self.execute_create_database(create_database_expr).await
+            }
             other => {
                 return servers::error::NotSupportedSnafu {
                     feat: format!("{:?}", other),

@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    insert_expr, AdminExpr, AdminResult, ColumnDataType, ColumnDef as GrpcColumnDef, CreateExpr,
-    InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
+    insert_expr, AdminExpr, AdminResult, ColumnDataType, ColumnDef as GrpcColumnDef,
+    CreateDatabaseExpr, CreateExpr, InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
@@ -183,6 +183,22 @@ impl SqlQueryHandler for Instance {
                     .context(server_error::ExecuteQuerySnafu { query })?;
                 self.admin()
                     .create(expr)
+                    .await
+                    .and_then(admin_result_to_output)
+            }
+
+            Statement::ShowDatabases(_) | Statement::ShowTables(_) => self
+                .database()
+                .select(Select::Sql(query.to_string()))
+                .await
+                .and_then(|object_result| object_result.try_into()),
+
+            Statement::CreateDatabase(c) => {
+                let expr = CreateDatabaseExpr {
+                    database_name: c.name.to_string(),
+                };
+                self.admin()
+                    .create_database(expr)
                     .await
                     .and_then(admin_result_to_output)
             }

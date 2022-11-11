@@ -19,6 +19,7 @@ message AdminExpr {
   oneof expr {
     CreateExpr create = 2;
     AlterExpr alter = 3;
+    CreateDatabaseExpr create_database = 4;
   }
 }
 
@@ -52,4 +53,8 @@ message AlterExpr {
 
 message AddColumn {
   ColumnDef column_def = 1;
+}
+
+message CreateDatabaseExpr {
+  string database_name = 1;
 }
