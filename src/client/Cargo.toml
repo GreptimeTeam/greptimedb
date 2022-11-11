@@ -8,7 +8,6 @@ edition = "2021"
 api = { path = "../api" }
 async-stream = "0.3"
 common-base = { path = "../common/base" }
-common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-query = { path = "../common/query" }

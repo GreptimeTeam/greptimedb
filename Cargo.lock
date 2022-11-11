@@ -956,7 +956,6 @@ dependencies = [
  "api",
  "async-stream",
  "common-base",
- "common-catalog",
  "common-error",
  "common-grpc",
  "common-query",
