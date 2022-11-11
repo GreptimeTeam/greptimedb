@@ -619,8 +619,11 @@ mod test {
     }
 
     async fn create_datanode_instance(datanode_id: u64, meta_srv: MockInfo) -> Arc<Instance> {
-        let wal_tmp_dir = TempDir::new_in("/tmp", "gt_wal_dist_table_test").unwrap();
-        let data_tmp_dir = TempDir::new_in("/tmp", "gt_data_dist_table_test").unwrap();
+        let current = common_time::util::current_time_millis();
+        let wal_tmp_dir =
+            TempDir::new_in("/tmp", &format!("dist_table_test-wal-{}", current)).unwrap();
+        let data_tmp_dir =
+            TempDir::new_in("/tmp", &format!("dist_table_test-data-{}", current)).unwrap();
         let opts = DatanodeOptions {
             node_id: datanode_id,
             wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
