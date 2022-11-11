@@ -51,6 +51,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
+frontend = { path = "../frontend" }
 
 [dependencies.arrow]
 package = "arrow2"

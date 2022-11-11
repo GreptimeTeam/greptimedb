@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use datanode::datanode::Mode;
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 
@@ -79,4 +78,11 @@ where
         let instance = Arc::new(instance);
         Services::start(&self.opts, instance).await
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Standalone,
+    Distributed,
 }

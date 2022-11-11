@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use frontend::frontend::Mode;
+use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -18,13 +20,6 @@ impl Default for ObjectStoreConfig {
             data_dir: "/tmp/greptimedb/data/".to_string(),
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Standalone,
-    Distributed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,25 +78,5 @@ impl Datanode {
     pub async fn start(&mut self) -> Result<()> {
         self.instance.start().await?;
         self.services.start(&self.opts).await
-    }
-}
-
-// Options for meta client in datanode instance.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MetaClientOpts {
-    pub metasrv_addr: String,
-    pub timeout_millis: u64,
-    pub connect_timeout_millis: u64,
-    pub tcp_nodelay: bool,
-}
-
-impl Default for MetaClientOpts {
-    fn default() -> Self {
-        Self {
-            metasrv_addr: "127.0.0.1:3002".to_string(),
-            timeout_millis: 3_000u64,
-            connect_timeout_millis: 5_000u64,
-            tcp_nodelay: true,
-        }
     }
 }

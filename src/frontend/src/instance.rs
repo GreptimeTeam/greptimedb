@@ -18,9 +18,9 @@ use client::{Client, Database, Select};
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
-use datanode::datanode::{MetaClientOpts, Mode};
 use datatypes::schema::ColumnSchema;
 use meta_client::client::MetaClientBuilder;
+use meta_client::MetaClientOpts;
 use servers::error as server_error;
 use servers::query_handler::{
     GrpcAdminHandler, GrpcQueryHandler, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
@@ -36,7 +36,7 @@ use sql::{dialect::GenericDialect, parser::ParserContext};
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
-use crate::frontend::FrontendOptions;
+use crate::frontend::{FrontendOptions, Mode};
 use crate::table::route::TableRoutes;
 
 #[async_trait]
