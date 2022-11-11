@@ -18,7 +18,6 @@ impl TryFrom<RawSchema> for Schema {
 
     fn try_from(raw: RawSchema) -> Result<Schema> {
         SchemaBuilder::try_from(raw.column_schemas)?
-            .timestamp_index(raw.timestamp_index)
             .version(raw.version)
             .build()
     }
@@ -43,11 +42,11 @@ mod tests {
     fn test_raw_convert() {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
+                .with_time_index(true),
         ];
         let schema = SchemaBuilder::try_from(column_schemas)
             .unwrap()
-            .timestamp_index(Some(1))
             .version(123)
             .build()
             .unwrap();

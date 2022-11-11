@@ -201,7 +201,6 @@ impl TableMeta {
                     table_name
                 ),
             })?
-            .timestamp_index(table_schema.timestamp_index())
             // Also bump the schema version.
             .version(table_schema.version() + 1);
         for (k, v) in table_schema.metadata().iter() {
@@ -271,18 +270,6 @@ impl TableMeta {
             .filter(|column_schema| !column_names.contains(&column_schema.name))
             .cloned()
             .collect();
-        // Find the index of the timestamp column.
-        let timestamp_column = table_schema.timestamp_column();
-        let timestamp_index = columns.iter().enumerate().find_map(|(idx, column_schema)| {
-            let is_timestamp = timestamp_column
-                .map(|c| c.name == column_schema.name)
-                .unwrap_or(false);
-            if is_timestamp {
-                Some(idx)
-            } else {
-                None
-            }
-        });
 
         let mut builder = SchemaBuilder::try_from_columns(columns)
             .with_context(|_| error::SchemaBuildSnafu {
@@ -291,8 +278,6 @@ impl TableMeta {
                     table_name
                 ),
             })?
-            // Need to use the newly computed timestamp index.
-            .timestamp_index(timestamp_index)
             // Also bump the schema version.
             .version(table_schema.version() + 1);
         for (k, v) in table_schema.metadata().iter() {
@@ -483,12 +468,12 @@ mod tests {
     fn new_test_schema() -> Schema {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
+                .with_time_index(true),
             ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
         ];
         SchemaBuilder::try_from(column_schemas)
             .unwrap()
-            .timestamp_index(Some(1))
             .version(123)
             .build()
             .unwrap()
@@ -607,12 +592,12 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("col3", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
+                .with_time_index(true),
         ];
         let schema = Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
-                .timestamp_index(Some(3))
                 .version(123)
                 .build()
                 .unwrap(),

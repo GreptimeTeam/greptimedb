@@ -152,7 +152,8 @@ fn build_system_catalog_schema() -> Schema {
             "timestamp".to_string(),
             ConcreteDataType::timestamp_millis_datatype(),
             false,
-        ),
+        )
+        .with_time_index(true),
         ColumnSchema::new(
             "value".to_string(),
             ConcreteDataType::binary_datatype(),
@@ -171,11 +172,7 @@ fn build_system_catalog_schema() -> Schema {
     ];
 
     // The schema of this table must be valid.
-    SchemaBuilder::try_from(cols)
-        .unwrap()
-        .timestamp_index(Some(2))
-        .build()
-        .unwrap()
+    SchemaBuilder::try_from(cols).unwrap().build().unwrap()
 }
 
 pub fn build_table_insert_request(full_table_name: String, table_id: TableId) -> InsertRequest {

@@ -78,11 +78,9 @@ impl TryFrom<Schema> for schema::SchemaRef {
             .map(schema::ColumnSchema::try_from)
             .collect::<Result<Vec<_>>>()?;
 
-        let timestamp_index = schema.timestamp_index.map(|index| index.value as usize);
         let schema = Arc::new(
             schema::SchemaBuilder::try_from(column_schemas)
                 .context(ConvertSchemaSnafu)?
-                .timestamp_index(timestamp_index)
                 .build()
                 .context(ConvertSchemaSnafu)?,
         );
@@ -97,6 +95,7 @@ impl From<&schema::ColumnSchema> for ColumnSchema {
             name: cs.name.clone(),
             data_type: DataType::from(&cs.data_type).into(),
             is_nullable: cs.is_nullable(),
+            is_time_index: cs.is_time_index(),
         }
     }
 }
@@ -110,7 +109,8 @@ impl TryFrom<&ColumnSchema> for schema::ColumnSchema {
                 column_schema.name.clone(),
                 data_type.into(),
                 column_schema.is_nullable,
-            ))
+            )
+            .with_time_index(column_schema.is_time_index))
         } else {
             InvalidDataTypeSnafu {
                 data_type: column_schema.data_type,

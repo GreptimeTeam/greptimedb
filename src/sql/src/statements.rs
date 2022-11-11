@@ -220,7 +220,7 @@ fn parse_column_default_constraint(
 // TODO(yingwen): Make column nullable by default, and checks invalid case like
 // a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
-pub fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
+pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Result<ColumnSchema> {
     let is_nullable = column_def
         .options
         .iter()
@@ -232,6 +232,7 @@ pub fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         parse_column_default_constraint(&name, &data_type, &column_def.options)?;
 
     ColumnSchema::new(name, data_type, is_nullable)
+        .with_time_index(is_time_index)
         .with_default_constraint(default_constraint)
         .context(error::InvalidDefaultSnafu {
             column: &column_def.name.value,

@@ -204,7 +204,8 @@ fn build_scripts_schema() -> Schema {
             "timestamp".to_string(),
             ConcreteDataType::timestamp_millis_datatype(),
             false,
-        ),
+        )
+        .with_time_index(true),
         ColumnSchema::new(
             "gmt_created".to_string(),
             ConcreteDataType::timestamp_millis_datatype(),
@@ -218,9 +219,5 @@ fn build_scripts_schema() -> Schema {
     ];
 
     // Schema is always valid here
-    SchemaBuilder::try_from(cols)
-        .unwrap()
-        .timestamp_index(Some(3))
-        .build()
-        .unwrap()
+    SchemaBuilder::try_from(cols).unwrap().build().unwrap()
 }

@@ -112,7 +112,28 @@ async fn test_execute_insert_query_with_i64_timestamp() {
         .unwrap();
     assert!(matches!(output, Output::AffectedRows(2)));
 
-    let query_output = instance.execute_sql("select ts from demo").await.unwrap();
+    let query_output = instance
+        .execute_sql("select ts from demo order by ts")
+        .await
+        .unwrap();
+
+    match query_output {
+        Output::Stream(s) => {
+            let batches = util::collect(s).await.unwrap();
+            let columns = batches[0].df_recordbatch.columns();
+            assert_eq!(1, columns.len());
+            assert_eq!(
+                &Int64Array::from_slice(&[1655276557000, 1655276558000]),
+                columns[0].as_any().downcast_ref::<Int64Array>().unwrap()
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let query_output = instance
+        .execute_sql("select ts as time from demo order by ts")
+        .await
+        .unwrap();
 
     match query_output {
         Output::Stream(s) => {

@@ -142,23 +142,30 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
         .iter()
         .map(create_column_schema)
         .collect::<Result<Vec<ColumnSchema>>>()?;
-    let ts_index = column_schemas
-        .iter()
-        .enumerate()
-        .find_map(|(i, column)| {
-            if column.name == expr.time_index {
-                Some(i)
+
+    ensure!(
+        column_schemas
+            .iter()
+            .any(|column| column.name == expr.time_index),
+        error::KeyColumnNotFoundSnafu {
+            name: &expr.time_index,
+        }
+    );
+
+    let column_schemas = column_schemas
+        .into_iter()
+        .map(|column_schema| {
+            if column_schema.name == expr.time_index {
+                column_schema.with_time_index(true)
             } else {
-                None
+                column_schema
             }
         })
-        .context(error::KeyColumnNotFoundSnafu {
-            name: &expr.time_index,
-        })?;
+        .collect::<Vec<_>>();
+
     Ok(Arc::new(
         SchemaBuilder::try_from(column_schemas)
             .context(error::CreateSchemaSnafu)?
-            .timestamp_index(Some(ts_index))
             .build()
             .context(error::CreateSchemaSnafu)?,
     ))
@@ -324,14 +331,14 @@ mod tests {
     fn expected_table_schema() -> SchemaRef {
         let column_schemas = vec![
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
+                .with_time_index(true),
             ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ];
         Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
-                .timestamp_index(Some(1))
                 .build()
                 .unwrap(),
         )

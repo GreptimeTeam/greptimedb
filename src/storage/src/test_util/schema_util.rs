@@ -17,15 +17,20 @@ pub fn new_schema_with_version(
 ) -> Schema {
     let column_schemas: Vec<_> = column_defs
         .iter()
-        .map(|column_def| {
+        .enumerate()
+        .map(|(index, column_def)| {
             let datatype = column_def.1.data_type();
-            ColumnSchema::new(column_def.0, datatype, column_def.2)
+            if let Some(timestamp_index) = timestamp_index {
+                ColumnSchema::new(column_def.0, datatype, column_def.2)
+                    .with_time_index(index == timestamp_index)
+            } else {
+                ColumnSchema::new(column_def.0, datatype, column_def.2)
+            }
         })
         .collect();
 
     SchemaBuilder::try_from(column_schemas)
         .unwrap()
-        .timestamp_index(timestamp_index)
         .version(version)
         .build()
         .unwrap()

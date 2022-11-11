@@ -146,6 +146,7 @@ fn build_row_key_desc(
     )
     .default_constraint(ts_column_schema.default_constraint().cloned())
     .is_nullable(ts_column_schema.is_nullable())
+    .is_time_index(true)
     .build()
     .context(BuildColumnDescriptorSnafu {
         column_name: &ts_column_schema.name,
@@ -461,13 +462,13 @@ mod tests {
                 "ts",
                 ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
                 true,
-            ),
+            )
+            .with_time_index(true),
         ];
 
         let schema = Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
-                .timestamp_index(Some(2))
                 .build()
                 .expect("ts must be timestamp column"),
         );

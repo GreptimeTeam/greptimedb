@@ -112,11 +112,6 @@ impl RegionSchema {
         self.columns.column_metadata(idx)
     }
 
-    #[inline]
-    pub(crate) fn timestamp_key_index(&self) -> usize {
-        self.columns.timestamp_key_index()
-    }
-
     #[cfg(test)]
     pub(crate) fn columns(&self) -> &[ColumnMetadata] {
         self.columns.columns()
@@ -134,7 +129,6 @@ fn build_user_schema(columns: &ColumnsMetadata, version: u32) -> Result<Schema> 
 
     SchemaBuilder::try_from(column_schemas)
         .context(metadata::ConvertSchemaSnafu)?
-        .timestamp_index(Some(columns.timestamp_key_index()))
         .version(version)
         .build()
         .context(metadata::InvalidSchemaSnafu)

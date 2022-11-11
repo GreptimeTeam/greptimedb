@@ -72,6 +72,9 @@ pub enum Error {
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, backtrace: Backtrace },
 
+    #[snafu(display("Missing timestamp column in request"))]
+    MissingTimestampColumn { backtrace: Backtrace },
+
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
         columns,
@@ -315,6 +318,7 @@ impl ErrorExt for Error {
             | Error::KeyColumnNotFound { .. }
             | Error::InvalidPrimaryKey { .. }
             | Error::MissingField { .. }
+            | Error::MissingTimestampColumn { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::ConstraintNotSupported { .. }
