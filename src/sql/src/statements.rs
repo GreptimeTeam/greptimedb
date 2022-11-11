@@ -1,5 +1,5 @@
 pub mod alter;
-pub mod create_table;
+pub mod create;
 pub mod insert;
 pub mod query;
 pub mod show;
@@ -32,6 +32,11 @@ pub fn table_idents_to_full_name(obj_name: &ObjectName) -> Result<(String, Strin
             DEFAULT_SCHEMA_NAME.to_string(),
             table.value.clone(),
         )),
+        [schema, table] => Ok((
+            DEFAULT_CATALOG_NAME.to_string(),
+            schema.value.clone(),
+            table.value.clone(),
+        )),
         [catalog, schema, table] => Ok((
             catalog.value.clone(),
             schema.value.clone(),
@@ -39,7 +44,7 @@ pub fn table_idents_to_full_name(obj_name: &ObjectName) -> Result<(String, Strin
         )),
         _ => error::InvalidSqlSnafu {
             msg: format!(
-                "expect table name to be <catalog>.<schema>.<table> or <table>, actual: {}",
+                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {}",
                 obj_name
             ),
         }

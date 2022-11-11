@@ -22,7 +22,8 @@ mod show;
 #[derive(Debug)]
 pub enum SqlRequest {
     Insert(InsertRequest),
-    Create(CreateTableRequest),
+    CreateTable(CreateTableRequest),
+    CreateDatabase(CreateDatabaseRequest),
     Alter(AlterTableRequest),
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
@@ -45,7 +46,8 @@ impl SqlHandler {
     pub async fn execute(&self, request: SqlRequest) -> Result<Output> {
         match request {
             SqlRequest::Insert(req) => self.insert(req).await,
-            SqlRequest::Create(req) => self.create(req).await,
+            SqlRequest::CreateTable(req) => self.create_table(req).await,
+            SqlRequest::CreateDatabase(req) => self.create_database(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::ShowDatabases(stmt) => self.show_databases(stmt).await,
             SqlRequest::ShowTables(stmt) => self.show_tables(stmt).await,

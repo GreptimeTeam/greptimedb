@@ -22,7 +22,7 @@ use crate::error::{
     CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, SchemaNotFoundSnafu,
     SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
-use crate::error::{ReadSystemCatalogSnafu, Result};
+use crate::error::{ReadSystemCatalogSnafu, Result, SchemaExistsSnafu};
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
     decode_system_catalog, Entry, SystemCatalogTable, TableEntry, ENTRY_TYPE_INDEX, KEY_INDEX,
@@ -31,8 +31,8 @@ use crate::system::{
 use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
-    CatalogProvider, CatalogProviderRef, RegisterSystemTableRequest, RegisterTableRequest,
-    SchemaProvider,
+    CatalogProvider, CatalogProviderRef, RegisterSchemaRequest, RegisterSystemTableRequest,
+    RegisterTableRequest, SchemaProvider,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -331,6 +331,34 @@ impl CatalogManager for LocalCatalogManager {
             .await?;
 
         schema.register_table(request.table_name, request.table)?;
+        Ok(1)
+    }
+
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+        let started = self.init_lock.lock().await;
+        ensure!(
+            *started,
+            IllegalManagerStateSnafu {
+                msg: "Catalog manager not started",
+            }
+        );
+        let catalog_name = &request.catalog;
+        let schema_name = &request.schema;
+
+        let catalog = self
+            .catalogs
+            .catalog(catalog_name)?
+            .context(CatalogNotFoundSnafu { catalog_name })?;
+        if catalog.schema(schema_name)?.is_some() {
+            return SchemaExistsSnafu {
+                schema: schema_name,
+            }
+            .fail();
+        }
+        self.system
+            .register_schema(request.catalog, schema_name.clone())
+            .await?;
+        catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
         Ok(1)
     }
 

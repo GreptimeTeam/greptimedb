@@ -443,12 +443,12 @@ mod tests {
     use storage::EngineImpl;
     use store_api::manifest::Manifest;
     use store_api::storage::ReadContext;
-    use table::requests::{AddColumnRequest, AlterKind, InsertRequest};
+    use table::requests::{AddColumnRequest, AlterKind};
     use tempdir::TempDir;
 
     use super::*;
     use crate::table::test_util;
-    use crate::table::test_util::{MockRegion, TABLE_NAME};
+    use crate::table::test_util::{new_insert_request, MockRegion, TABLE_NAME};
 
     async fn setup_table_with_column_default_constraint() -> (TempDir, String, TableRef) {
         let table_name = "test_default_constraint";
@@ -518,10 +518,7 @@ mod tests {
         columns_values.insert("name".to_string(), Arc::new(names.clone()));
         columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
 
-        let insert_req = InsertRequest {
-            table_name: table_name.to_string(),
-            columns_values,
-        };
+        let insert_req = new_insert_request(table_name.to_string(), columns_values);
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
         let stream = table.scan(&None, &[], None).await.unwrap();
@@ -557,10 +554,7 @@ mod tests {
         columns_values.insert("n".to_string(), Arc::new(nums.clone()));
         columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
 
-        let insert_req = InsertRequest {
-            table_name: table_name.to_string(),
-            columns_values,
-        };
+        let insert_req = new_insert_request(table_name.to_string(), columns_values);
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
         let stream = table.scan(&None, &[], None).await.unwrap();
@@ -601,10 +595,7 @@ mod tests {
         assert_eq!(TableType::Base, table.table_type());
         assert_eq!(schema, table.schema());
 
-        let insert_req = InsertRequest {
-            table_name: "demo".to_string(),
-            columns_values: HashMap::default(),
-        };
+        let insert_req = new_insert_request("demo".to_string(), HashMap::default());
         assert_eq!(0, table.insert(insert_req).await.unwrap());
 
         let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
@@ -618,10 +609,7 @@ mod tests {
         columns_values.insert("memory".to_string(), Arc::new(memories.clone()));
         columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
 
-        let insert_req = InsertRequest {
-            table_name: "demo".to_string(),
-            columns_values,
-        };
+        let insert_req = new_insert_request("demo".to_string(), columns_values);
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
         let stream = table.scan(&None, &[], None).await.unwrap();
@@ -710,10 +698,7 @@ mod tests {
         columns_values.insert("memory".to_string(), Arc::new(memories));
         columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
 
-        let insert_req = InsertRequest {
-            table_name: "demo".to_string(),
-            columns_values,
-        };
+        let insert_req = new_insert_request("demo".to_string(), columns_values);
         assert_eq!(test_batch_size, table.insert(insert_req).await.unwrap());
 
         let stream = table.scan(&None, &[], None).await.unwrap();

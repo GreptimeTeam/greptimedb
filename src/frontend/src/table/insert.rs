@@ -130,6 +130,7 @@ mod tests {
         insert_expr::Expr,
         ColumnDataType, InsertExpr,
     };
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::{prelude::ConcreteDataType, types::StringType, vectors::VectorBuilder};
     use table::requests::InsertRequest;
 
@@ -160,6 +161,8 @@ mod tests {
         columns_values.insert("id".to_string(), builder.finish());
 
         InsertRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
         }

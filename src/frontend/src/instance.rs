@@ -22,7 +22,7 @@ use servers::query_handler::{
 };
 use snafu::prelude::*;
 use sql::ast::{ColumnDef, TableConstraint};
-use sql::statements::create_table::{CreateTable, TIME_INDEX};
+use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::statement::Statement;
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use sql::{dialect::GenericDialect, parser::ParserContext};
@@ -105,7 +105,15 @@ impl SqlQueryHandler for Instance {
                 .await
                 .and_then(|object_result| object_result.try_into()),
             Statement::Insert(insert) => {
-                let table_name = insert.table_name();
+                // TODO(dennis): respect schema_name when inserting data
+                let (_catalog_name, _schema_name, table_name) = insert
+                    .full_table_name()
+                    .context(error::ParseSqlSnafu)
+                    .map_err(BoxedError::new)
+                    .context(server_error::ExecuteInsertSnafu {
+                        msg: "Failed to get table name",
+                    })?;
+
                 let expr = InsertExpr {
                     table_name,
                     expr: Some(insert_expr::Expr::Sql(query.to_string())),
@@ -116,7 +124,7 @@ impl SqlQueryHandler for Instance {
                     .await
                     .and_then(|object_result| object_result.try_into())
             }
-            Statement::Create(create) => {
+            Statement::CreateTable(create) => {
                 let expr = create_to_expr(create)
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu { query })?;

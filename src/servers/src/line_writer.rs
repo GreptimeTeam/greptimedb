@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::writer::{to_ms_ts, Precision};
 use common_time::{timestamp::TimeUnit::Millisecond, Timestamp};
 use datatypes::{
@@ -120,6 +121,9 @@ impl LineWriter {
             .map(|(column_name, (mut builder, _))| (column_name, builder.finish()))
             .collect();
         InsertRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            // TODO(dennis): supports database
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: self.table_name,
             columns_values,
         }

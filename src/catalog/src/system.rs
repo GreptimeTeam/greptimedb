@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{
     INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID,
     SYSTEM_CATALOG_TABLE_NAME,
@@ -178,15 +179,36 @@ fn build_system_catalog_schema() -> Schema {
 }
 
 pub fn build_table_insert_request(full_table_name: String, table_id: TableId) -> InsertRequest {
+    build_insert_request(
+        EntryType::Table,
+        full_table_name.as_bytes(),
+        serde_json::to_string(&TableEntryValue { table_id })
+            .unwrap()
+            .as_bytes(),
+    )
+}
+
+pub fn build_schema_insert_request(catalog_name: String, schema_name: String) -> InsertRequest {
+    let full_schema_name = format!("{}.{}", catalog_name, schema_name);
+    build_insert_request(
+        EntryType::Schema,
+        full_schema_name.as_bytes(),
+        serde_json::to_string(&SchemaEntryValue {})
+            .unwrap()
+            .as_bytes(),
+    )
+}
+
+pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> InsertRequest {
     let mut columns_values = HashMap::with_capacity(6);
     columns_values.insert(
         "entry_type".to_string(),
-        Arc::new(UInt8Vector::from_slice(&[EntryType::Table as u8])) as _,
+        Arc::new(UInt8Vector::from_slice(&[entry_type as u8])) as _,
     );
 
     columns_values.insert(
         "key".to_string(),
-        Arc::new(BinaryVector::from_slice(&[full_table_name.as_bytes()])) as _,
+        Arc::new(BinaryVector::from_slice(&[key])) as _,
     );
 
     // Timestamp in key part is intentionally left to 0
@@ -197,11 +219,7 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
 
     columns_values.insert(
         "value".to_string(),
-        Arc::new(BinaryVector::from_slice(&[serde_json::to_string(
-            &TableEntryValue { table_id },
-        )
-        .unwrap()
-        .as_bytes()])) as _,
+        Arc::new(BinaryVector::from_slice(&[value])) as _,
     );
 
     columns_values.insert(
@@ -219,6 +237,8 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
     );
 
     InsertRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
         columns_values,
     }
@@ -323,6 +343,9 @@ pub struct SchemaEntry {
     pub catalog_name: String,
     pub schema_name: String,
 }
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchemaEntryValue;
 
 #[derive(Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub struct TableEntry {

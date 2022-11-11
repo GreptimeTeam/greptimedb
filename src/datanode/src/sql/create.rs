@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::RegisterTableRequest;
+use catalog::{RegisterSchemaRequest, RegisterTableRequest};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_telemetry::tracing::info;
 use datatypes::schema::SchemaBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::TableConstraint;
-use sql::statements::create_table::CreateTable;
+use sql::statements::create::CreateTable;
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use store_api::storage::consts::TIME_INDEX_NAME;
 use table::engine::EngineContext;
@@ -16,12 +17,28 @@ use table::requests::*;
 
 use crate::error::{
     self, ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu,
-    InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu, Result,
+    InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu, RegisterSchemaSnafu,
+    Result,
 };
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn create(&self, req: CreateTableRequest) -> Result<Output> {
+    pub(crate) async fn create_database(&self, req: CreateDatabaseRequest) -> Result<Output> {
+        let schema = req.db_name;
+        let req = RegisterSchemaRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: schema.clone(),
+        };
+        self.catalog_manager
+            .register_schema(req)
+            .await
+            .context(RegisterSchemaSnafu)?;
+
+        info!("Successfully created database: {:?}", schema);
+        Ok(Output::AffectedRows(1))
+    }
+
+    pub(crate) async fn create_table(&self, req: CreateTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
         // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
@@ -52,7 +69,7 @@ impl SqlHandler {
         Ok(Output::AffectedRows(1))
     }
 
-    /// Converts [CreateTable] to [SqlRequest::Create].
+    /// Converts [CreateTable] to [SqlRequest::CreateTable].
     pub(crate) fn create_to_request(
         &self,
         table_id: TableId,
@@ -181,7 +198,7 @@ mod tests {
         let mut res = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
         assert_eq!(1, res.len());
         match res.pop().unwrap() {
-            Statement::Create(c) => c,
+            Statement::CreateTable(c) => c,
             _ => {
                 panic!("Unexpected statement!")
             }

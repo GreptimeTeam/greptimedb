@@ -8,6 +8,7 @@ use api::v1::{
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::status_code::StatusCode;
+use common_insert::insertion_expr_to_request;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use query::plan::LogicalPlan;
@@ -17,8 +18,9 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::AddColumnRequest;
 
 use crate::error::{
-    CatalogSnafu, DecodeLogicalPlanSnafu, EmptyInsertBatchSnafu, ExecuteSqlSnafu, InsertDataSnafu,
-    InsertSnafu, Result, TableNotFoundSnafu, UnsupportedExprSnafu,
+    CatalogNotFoundSnafu, CatalogSnafu, DecodeLogicalPlanSnafu, EmptyInsertBatchSnafu,
+    ExecuteSqlSnafu, InsertDataSnafu, InsertSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
+    UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
 use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
@@ -85,7 +87,7 @@ impl Instance {
 
         let _result = self
             .sql_handler()
-            .execute(SqlRequest::Create(create_table_request))
+            .execute(SqlRequest::CreateTable(create_table_request))
             .await?;
 
         info!("Success to create table: {} automatically", table_name);
@@ -95,21 +97,19 @@ impl Instance {
 
     pub async fn execute_grpc_insert(
         &self,
+        catalog_name: &str,
+        schema_name: &str,
         table_name: &str,
         values: insert_expr::Values,
     ) -> Result<Output> {
-        // maybe infer from insert batch?
-        let catalog_name = DEFAULT_CATALOG_NAME;
-        let schema_name = DEFAULT_SCHEMA_NAME;
-
         let schema_provider = self
             .catalog_manager
             .catalog(catalog_name)
-            .unwrap()
-            .expect("default catalog must exist")
+            .context(CatalogSnafu)?
+            .context(CatalogNotFoundSnafu { name: catalog_name })?
             .schema(schema_name)
-            .expect("default schema must exist")
-            .unwrap();
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu { name: schema_name })?;
 
         let insert_batches =
             common_insert::insert_batches(values.values).context(InsertDataSnafu)?;
@@ -141,9 +141,14 @@ impl Instance {
                 .context(TableNotFoundSnafu { table_name })?
         };
 
-        let insert =
-            common_insert::insertion_expr_to_request(table_name, insert_batches, table.clone())
-                .context(InsertDataSnafu)?;
+        let insert = insertion_expr_to_request(
+            catalog_name,
+            schema_name,
+            table_name,
+            insert_batches,
+            table.clone(),
+        )
+        .context(InsertDataSnafu)?;
 
         let affected_rows = table
             .insert(insert)
@@ -153,8 +158,17 @@ impl Instance {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    async fn handle_insert(&self, table_name: &str, values: insert_expr::Values) -> ObjectResult {
-        match self.execute_grpc_insert(table_name, values).await {
+    async fn handle_insert(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        values: insert_expr::Values,
+    ) -> ObjectResult {
+        match self
+            .execute_grpc_insert(catalog_name, schema_name, table_name, values)
+            .await
+        {
             Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
                 .status_code(StatusCode::Success as u32)
                 .mutate_result(rows as u32, 0)
@@ -207,6 +221,9 @@ impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> servers::error::Result<ObjectResult> {
         let object_resp = match query.expr {
             Some(object_expr::Expr::Insert(insert_expr)) => {
+                // TODO(dennis): retrieve schema name from DatabaseRequest
+                let catalog_name = DEFAULT_CATALOG_NAME;
+                let schema_name = DEFAULT_SCHEMA_NAME;
                 let table_name = &insert_expr.table_name;
                 let expr = insert_expr
                     .expr
@@ -227,7 +244,8 @@ impl GrpcQueryHandler for Instance {
 
                 match expr {
                     insert_expr::Expr::Values(values) => {
-                        self.handle_insert(table_name, values).await
+                        self.handle_insert(catalog_name, schema_name, table_name, values)
+                            .await
                     }
                     insert_expr::Expr::Sql(sql) => {
                         let output = self.execute_sql(&sql).await;

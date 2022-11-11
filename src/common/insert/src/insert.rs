@@ -175,6 +175,8 @@ pub fn build_create_table_request(
 }
 
 pub fn insertion_expr_to_request(
+    catalog_name: &str,
+    schema_name: &str,
     table_name: &str,
     insert_batches: Vec<InsertBatch>,
     table: Arc<dyn Table>,
@@ -221,6 +223,8 @@ pub fn insertion_expr_to_request(
         .collect();
 
     Ok(InsertRequest {
+        catalog_name: catalog_name.to_string(),
+        schema_name: schema_name.to_string(),
         table_name: table_name.to_string(),
         columns_values,
     })
@@ -464,8 +468,11 @@ mod tests {
             values: mock_insert_batches(),
         };
         let insert_batches = insert_batches(values.values).unwrap();
-        let insert_req = insertion_expr_to_request("demo", insert_batches, table).unwrap();
+        let insert_req =
+            insertion_expr_to_request("greptime", "public", "demo", insert_batches, table).unwrap();
 
+        assert_eq!("greptime", insert_req.catalog_name);
+        assert_eq!("public", insert_req.schema_name);
         assert_eq!("demo", insert_req.table_name);
 
         let host = insert_req.columns_values.get("host").unwrap();

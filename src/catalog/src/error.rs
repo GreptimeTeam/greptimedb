@@ -83,6 +83,12 @@ pub enum Error {
     #[snafu(display("Table {} already exists", table))]
     TableExists { table: String, backtrace: Backtrace },
 
+    #[snafu(display("Schema {} already exists", schema))]
+    SchemaExists {
+        schema: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to register table"))]
     RegisterTable {
         #[snafu(backtrace)]
@@ -112,7 +118,7 @@ pub enum Error {
         "Failed to insert table creation record to system catalog, source: {}",
         source
     ))]
-    InsertTableRecord {
+    InsertCatalogRecord {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
@@ -215,10 +221,11 @@ impl ErrorExt for Error {
 
             Error::RegisterTable { .. } => StatusCode::Internal,
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
+            Error::SchemaExists { .. } => StatusCode::InvalidArguments,
 
             Error::OpenSystemCatalog { source, .. }
             | Error::CreateSystemCatalog { source, .. }
-            | Error::InsertTableRecord { source, .. }
+            | Error::InsertCatalogRecord { source, .. }
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. } => source.status_code(),
             Error::MetaSrv { source, .. } => source.status_code(),

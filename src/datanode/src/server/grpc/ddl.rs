@@ -20,7 +20,7 @@ impl Instance {
     pub(crate) async fn handle_create(&self, expr: CreateExpr) -> AdminResult {
         let request = self.create_expr_to_request(expr).await;
         let result = futures::future::ready(request)
-            .and_then(|request| self.sql_handler().execute(SqlRequest::Create(request)))
+            .and_then(|request| self.sql_handler().execute(SqlRequest::CreateTable(request)))
             .await;
         match result {
             Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()

@@ -133,6 +133,8 @@ fn partition_insert_request(
         }
     }
 
+    let catalog_name = &insert.catalog_name;
+    let schema_name = &insert.schema_name;
     let table_name = &insert.table_name;
     dist_insert
         .into_iter()
@@ -144,6 +146,8 @@ fn partition_insert_request(
             (
                 region_id,
                 InsertRequest {
+                    catalog_name: catalog_name.to_string(),
+                    schema_name: schema_name.to_string(),
                     table_name: table_name.to_string(),
                     columns_values,
                 },
@@ -156,6 +160,7 @@ fn partition_insert_request(
 mod tests {
     use std::{collections::HashMap, result::Result, sync::Arc};
 
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::{
         data_type::ConcreteDataType,
         types::{BooleanType, StringType},
@@ -373,6 +378,8 @@ mod tests {
         columns_values.insert("id".to_string(), builder.finish());
 
         InsertRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
         }
@@ -398,6 +405,8 @@ mod tests {
         columns_values.insert("id".to_string(), builder.finish());
 
         InsertRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
         }

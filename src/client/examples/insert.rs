@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use api::v1::{codec::InsertBatch, *};
 use client::{Client, Database};
-
 fn main() {
     tracing::subscriber::set_global_default(tracing_subscriber::FmtSubscriber::builder().finish())
         .unwrap();

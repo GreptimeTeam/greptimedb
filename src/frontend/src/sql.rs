@@ -18,7 +18,8 @@ pub(crate) fn insert_to_request(
 ) -> Result<InsertRequest> {
     let columns = stmt.columns();
     let values = stmt.values().context(error::ParseSqlSnafu)?;
-    let table_name = stmt.table_name();
+    let (catalog_name, schema_name, table_name) =
+        stmt.full_table_name().context(error::ParseSqlSnafu)?;
 
     let table = schema_provider
         .table(&table_name)
@@ -80,6 +81,8 @@ pub(crate) fn insert_to_request(
     }
 
     Ok(InsertRequest {
+        catalog_name,
+        schema_name,
         table_name,
         columns_values: columns_builders
             .into_iter()
