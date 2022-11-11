@@ -73,8 +73,11 @@ impl Services {
                     .context(error::RuntimeResourceSnafu)?,
             );
 
-            let pg_server =
-                Box::new(PostgresServer::new(instance.clone(), pg_io_runtime)) as Box<dyn Server>;
+            let pg_server = Box::new(PostgresServer::new(
+                instance.clone(),
+                opts.check_pwd,
+                pg_io_runtime,
+            )) as Box<dyn Server>;
 
             Some((pg_server, pg_addr))
         } else {
