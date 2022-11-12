@@ -688,7 +688,8 @@ impl SchemaProvider for RemoteSchemaProvider {
         info!("Register table name {}", name);
         let name_clone = name.clone();
 
-        let prev = std::thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let job = move || {
             info!("manager block on read {} start", table_key);
             let table_key_clone = table_key.clone();
             let r = common_runtime::block_on_read(async move {
@@ -717,9 +718,25 @@ impl SchemaProvider for RemoteSchemaProvider {
             info!("manager block on read {} end", table_key_clone);
 
             r
-        })
-        .join()
-        .unwrap();
+        };
+
+        std::thread::spawn(move || {
+            let res = job();
+            if tx.send(res).is_err() {
+                error!("manager failed to send res");
+            }
+        });
+
+        let prev = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("manager recv error, err is {}", e);
+                return TableExistsSnafu {
+                    table: format!("create table {} error {}", name_clone, e),
+                }
+                .fail();
+            }
+        };
 
         info!("Register table name {} done", name_clone);
 

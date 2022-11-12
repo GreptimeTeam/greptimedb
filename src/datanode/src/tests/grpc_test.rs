@@ -120,59 +120,70 @@ fn expect_data() -> (Column, Column, Column, Column) {
 async fn test_insert_and_select() {
     common_telemetry::init_default_ut_logging();
     for i in 0..10 {
-    common_telemetry::info!("run test {} begin", i);
-    let (addr, _guard, grpc_server) = setup_grpc_server("insert_and_select", 3990).await;
+        common_telemetry::info!("run test {} begin", i);
+        let (addr, _guard, grpc_server) = setup_grpc_server("insert_and_select", 3990).await;
 
-    let grpc_client = Client::with_urls(vec![addr]);
+        let grpc_client = Client::with_urls(vec![addr]);
 
-    let db = Database::new("greptime", grpc_client.clone());
-    let admin = Admin::new("greptime", grpc_client);
+        let db = Database::new("greptime", grpc_client.clone());
+        let admin = Admin::new("greptime", grpc_client);
 
-    // create
-    common_telemetry::info!("Create table start");
-    let expr = testing_create_expr();
-    let result = admin.create(expr).await.unwrap();
-    assert_matches!(
-        result.result,
-        Some(admin_result::Result::Mutate(MutateResult {
-            success: 1,
-            failure: 0
-        }))
-    );
+        // create
+        common_telemetry::info!("Create table start");
+        let expr = testing_create_expr();
+        let result = admin.create(expr).await;
+        if let Err(e) = &result {
+            common_telemetry::error!("create table return error, start sleep, err: {}", e);
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            common_telemetry::error!("create table return error, end sleep");
+        }
+        let result = result.unwrap();
+        if result.result.is_none() {
+            common_telemetry::error!("create table return None, start sleep");
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            common_telemetry::error!("create table return None, end sleep");
+        }
+        assert_matches!(
+            result.result,
+            Some(admin_result::Result::Mutate(MutateResult {
+                success: 1,
+                failure: 0
+            }))
+        );
 
-    common_telemetry::info!("Create table done");
+        common_telemetry::info!("Create table done");
 
-    //alter
-    let add_column = ColumnDef {
-        name: "test_column".to_string(),
-        datatype: ColumnDataType::Int64.into(),
-        is_nullable: true,
-        default_constraint: None,
-    };
-    let kind = Kind::AddColumn(AddColumn {
-        column_def: Some(add_column),
-    });
-    let expr = AlterExpr {
-        table_name: "test_table".to_string(),
-        catalog_name: None,
-        schema_name: None,
-        kind: Some(kind),
-    };
+        //alter
+        let add_column = ColumnDef {
+            name: "test_column".to_string(),
+            datatype: ColumnDataType::Int64.into(),
+            is_nullable: true,
+            default_constraint: None,
+        };
+        let kind = Kind::AddColumn(AddColumn {
+            column_def: Some(add_column),
+        });
+        let expr = AlterExpr {
+            table_name: "test_table".to_string(),
+            catalog_name: None,
+            schema_name: None,
+            kind: Some(kind),
+        };
 
-    common_telemetry::info!("Alter table start");
-    let result = admin.alter(expr).await.unwrap();
-    common_telemetry::info!("Alter table end");
-    assert_eq!(result.result, None);
+        common_telemetry::info!("Alter table start");
+        let result = admin.alter(expr).await.unwrap();
+        common_telemetry::info!("Alter table end");
+        assert_eq!(result.result, None);
 
-    // insert
-    common_telemetry::info!("Insert and assert");
-    insert_and_assert(&db).await;
+        // insert
+        common_telemetry::info!("Insert and assert");
+        insert_and_assert(&db).await;
 
-    common_telemetry::info!("Shutdown start");
-    grpc_server.shutdown().await.unwrap();
+        common_telemetry::info!("Shutdown start");
+        grpc_server.shutdown().await.unwrap();
 
-    common_telemetry::info!("Shutdown end");
-    common_telemetry::info!("run test {} end", i);
+        common_telemetry::info!("Shutdown end");
+        common_telemetry::info!("run test {} end", i);
     }
 }
 
