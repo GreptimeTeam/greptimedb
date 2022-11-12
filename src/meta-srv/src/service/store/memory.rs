@@ -100,8 +100,9 @@ impl KvStore for MemStore {
         );
         let mut memory = self.inner.write();
         common_telemetry::info!(
-            "memory kv store put insert, key: {}",
-            String::from_utf8_lossy(&key)
+            "memory kv store put insert, key: {}, thread: {:?}",
+            String::from_utf8_lossy(&key),
+            std::thread::current().id()
         );
         let prev_value = memory.insert(key.clone(), value);
         let prev_kv = if prev_kv {
