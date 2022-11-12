@@ -20,7 +20,7 @@ common-grpc = { path = "../common/grpc" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
-common-telemetry = { path = "../common/telemetry" }
+common-telemetry = { path = "../common/telemetry", features = [ "console" ] }
 common-time = { path = "../common/time" }
 common-insert = { path = "../common/insert" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [

@@ -41,7 +41,7 @@ pub async fn mock(
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
     let meta_srv = MetaSrv::new(opts, kv_store, selector).await;
-    let (client, server) = tokio::io::duplex(1024);
+    let (client, server) = tokio::io::duplex(1024 * 10);
     tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(HeartbeatServer::new(meta_srv.clone()))
