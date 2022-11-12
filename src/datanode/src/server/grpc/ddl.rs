@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::result::AdminResultBuilder;
 use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
+use common_telemetry::info;
 use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
@@ -17,7 +19,6 @@ use crate::error::{
     MissingFieldSnafu, Result,
 };
 use crate::instance::Instance;
-use crate::server::grpc::handler::AdminResultBuilder;
 use crate::sql::SqlRequest;
 
 impl Instance {
@@ -26,10 +27,10 @@ impl Instance {
         // Respect CreateExpr's table id and region ids if present, or allocate table id
         // from local table id provider and set region id to 0.
         let table_id = if let Some(table_id) = expr.table_id {
-            // info!(
-            //     "Creating table {}.{}.{} with table id from frontend: {}",
-            //     catalog_name, schema_name, expr.table_name, table_id
-            // );
+            info!(
+                "Creating table {:?}.{:?}.{:?} with table id from frontend: {}",
+                expr.catalog_name, expr.schema_name, expr.table_name, table_id
+            );
             table_id
         } else {
             let table_id = self

@@ -66,7 +66,7 @@ impl Services {
         let mut frontend_instance = FrontendInstanceImpl::try_new(&options)
             .await
             .context(BuildFrontendSnafu)?;
-        frontend_instance.set_catalog_list(datanode_instance.catalog_manager().clone());
+        frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
         Ok(Frontend::new(options, frontend_instance))
     }
 

@@ -1,5 +1,6 @@
 use std::ops::Deref;
 
+use api::result::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use api::v1::codec::RegionNumber;
 use api::v1::{
     admin_expr, insert_expr, object_expr, select_expr, AdminExpr, AdminResult, CreateDatabaseExpr,
@@ -23,7 +24,6 @@ use crate::error::{
     UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
-use crate::server::grpc::handler::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use crate::server::grpc::plan::PhysicalPlanner;
 use crate::server::grpc::select::to_object_result;
 

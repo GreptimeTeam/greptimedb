@@ -1,8 +1,9 @@
-use api::v1::{
+use common_error::prelude::ErrorExt;
+
+use crate::v1::{
     admin_result, codec::SelectResult, object_result, AdminResult, MutateResult, ObjectResult,
     ResultHeader, SelectResult as SelectResultRaw,
 };
-use common_error::prelude::ErrorExt;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -10,14 +11,14 @@ pub type Success = u32;
 pub type Failure = u32;
 
 #[derive(Default)]
-pub(crate) struct ObjectResultBuilder {
+pub struct ObjectResultBuilder {
     version: u32,
     code: u32,
     err_msg: Option<String>,
     result: Option<Body>,
 }
 
-pub(crate) enum Body {
+pub enum Body {
     Mutate((Success, Failure)),
     Select(SelectResult),
 }
@@ -80,7 +81,7 @@ impl ObjectResultBuilder {
     }
 }
 
-pub(crate) fn build_err_result(err: &impl ErrorExt) -> ObjectResult {
+pub fn build_err_result(err: &impl ErrorExt) -> ObjectResult {
     ObjectResultBuilder::new()
         .status_code(err.status_code() as u32)
         .err_msg(err.to_string())
@@ -88,7 +89,7 @@ pub(crate) fn build_err_result(err: &impl ErrorExt) -> ObjectResult {
 }
 
 #[derive(Debug)]
-pub(crate) struct AdminResultBuilder {
+pub struct AdminResultBuilder {
     version: u32,
     code: u32,
     err_msg: Option<String>,
@@ -144,11 +145,11 @@ impl Default for AdminResultBuilder {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{object_result, MutateResult};
     use common_error::status_code::StatusCode;
 
     use super::*;
-    use crate::error::UnsupportedExprSnafu;
+    use crate::error::UnknownColumnDataTypeSnafu;
+    use crate::v1::{object_result, MutateResult};
 
     #[test]
     fn test_object_result_builder() {
@@ -175,14 +176,13 @@ mod tests {
 
     #[test]
     fn test_build_err_result() {
-        let err = UnsupportedExprSnafu { name: "select" }.build();
+        let err = UnknownColumnDataTypeSnafu { datatype: 1 }.build();
         let err_result = build_err_result(&err);
         let header = err_result.header.unwrap();
         let result = err_result.result;
 
         assert_eq!(PROTOCOL_VERSION, header.version);
-        assert_eq!(StatusCode::Internal as u32, header.code);
-        assert_eq!("Unsupported expr type: select", header.err_msg);
+        assert_eq!(StatusCode::InvalidArguments as u32, header.code);
         assert!(result.is_none());
     }
 }

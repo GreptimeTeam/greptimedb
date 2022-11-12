@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::result::ObjectResultBuilder;
 use api::v1::alter_expr::Kind;
 use api::v1::codec::InsertBatch;
-use api::v1::insert_expr::Expr;
+use api::v1::object_expr::Expr;
 use api::v1::{
     insert_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, ColumnDataType,
     ColumnDef as GrpcColumnDef, CreateDatabaseExpr, CreateExpr, InsertExpr, ObjectExpr,
@@ -20,7 +21,7 @@ use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use client::admin::{admin_result_to_output, Admin};
 use client::{Client, Database, Select};
-use common_error::prelude::BoxedError;
+use common_error::prelude::{BoxedError, StatusCode};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
 use common_telemetry::{debug, info};
@@ -130,7 +131,7 @@ impl Instance {
         Admin::new("greptime", self.client.clone())
     }
 
-    pub fn set_catalog_list(&mut self, catalog_manager: CatalogManagerRef) {
+    pub fn set_catalog_manager(&mut self, catalog_manager: CatalogManagerRef) {
         self.catalog_manager = Some(catalog_manager);
     }
 
@@ -181,21 +182,21 @@ impl Instance {
     }
 
     /// Handle all inserts
-    pub async fn handle_insert(&self, expr: InsertExpr) -> Result<Output> {
+    pub async fn handle_insert(&self, expr: &InsertExpr) -> Result<Output> {
         let table_name = &expr.table_name;
-        let catalog_name = "todo";
-        let schema_name = "todo";
+        let catalog_name = "greptime";
+        let schema_name = "public";
 
         if let Some(exprs) = &expr.expr {
             match exprs {
-                Expr::Values(values) => {
+                api::v1::insert_expr::Expr::Values(values) => {
                     self.handle_insert_values(catalog_name, schema_name, &table_name, values)
                         .await
                 }
-                Expr::Sql(_) => {
+                api::v1::insert_expr::Expr::Sql(_) => {
                     // Frontend does not comprehend insert request that is raw SQL string
                     self.database()
-                        .insert(expr)
+                        .insert(expr.clone())
                         .await
                         .and_then(Output::try_from)
                         .context(InsertSnafu)
@@ -217,6 +218,7 @@ impl Instance {
         table_name: &str,
         values: &insert_expr::Values,
     ) -> Result<Output> {
+        info!("------- handle insert values");
         let insert_batches = common_insert::insert_batches(&values.values).unwrap();
 
         // check if table already exist:
@@ -288,13 +290,10 @@ impl Instance {
         insert_batches: &[InsertBatch],
     ) -> Result<Output> {
         // Create table automatically, build schema from data.
-        let table_id = self
-            .table_id_provider
-            .as_ref()
-            .expect("table id provider must be set")
-            .next_table_id()
-            .await
-            .context(BumpTableIdSnafu)?;
+        let table_id = match &self.table_id_provider {
+            Some(provider) => Some(provider.next_table_id().await.context(BumpTableIdSnafu)?),
+            None => None,
+        };
 
         let create_expr = common_insert::build_create_expr_from_insertion(
             catalog_name,
@@ -544,13 +543,44 @@ fn columns_to_expr(column_defs: &[ColumnDef], time_index: &str) -> Result<Vec<Gr
 #[async_trait]
 impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> server_error::Result<GrpcObjectResult> {
-        self.database()
-            .object(query.clone())
-            .await
-            .map_err(BoxedError::new)
-            .with_context(|_| server_error::ExecuteQuerySnafu {
-                query: format!("{:?}", query),
-            })
+        if let Some(expr) = &query.expr {
+            match expr {
+                Expr::Insert(insert) => {
+                    let result = self.handle_insert(&insert).await;
+                    result
+                        .map(|o| match o {
+                            Output::AffectedRows(rows) => ObjectResultBuilder::new()
+                                .status_code(StatusCode::Success as u32)
+                                .mutate_result(rows as u32, 0u32)
+                                .build(),
+                            _ => {
+                                unreachable!()
+                            }
+                        })
+                        .map_err(BoxedError::new)
+                        .with_context(|_| server_error::ExecuteQuerySnafu {
+                            query: format!("{:?}", query),
+                        })
+                }
+                _ => self
+                    .database()
+                    .object(query.clone())
+                    .await
+                    .map_err(BoxedError::new)
+                    .with_context(|_| server_error::ExecuteQuerySnafu {
+                        query: format!("{:?}", query),
+                    }),
+            }
+        } else {
+            // why?
+            self.database()
+                .object(query.clone())
+                .await
+                .map_err(BoxedError::new)
+                .with_context(|_| server_error::ExecuteQuerySnafu {
+                    query: format!("{:?}", query),
+                })
+        }
     }
 }
 

@@ -97,7 +97,7 @@ pub fn build_alter_table_request(
 pub fn build_create_expr_from_insertion(
     catalog_name: &str,
     schema_name: &str,
-    table_id: TableId,
+    table_id: Option<TableId>,
     table_name: &str,
     insert_batches: &[InsertBatch],
 ) -> Result<CreateExpr> {
@@ -161,7 +161,7 @@ pub fn build_create_expr_from_insertion(
             primary_keys,
             create_if_not_exists: true,
             table_options: Default::default(),
-            table_id: Some(table_id),
+            table_id,
             region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
         };
 
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_build_create_table_request() {
-        let table_id = 10;
+        let table_id = Some(10);
         let table_name = "test_metric";
 
         assert!(build_create_expr_from_insertion("", "", table_id, table_name, &[]).is_err());
@@ -417,7 +417,7 @@ mod tests {
             build_create_expr_from_insertion("", "", table_id, table_name, &insert_batches)
                 .unwrap();
 
-        assert_eq!(Some(table_id), create_expr.table_id);
+        assert_eq!(table_id, create_expr.table_id);
         assert_eq!(table_name, create_expr.table_name);
         assert_eq!(Some("Created on insertion".to_string()), create_expr.desc);
         assert_eq!(
