@@ -60,7 +60,7 @@ impl Default for DatanodeOptions {
 
 /// Datanode service.
 pub struct Datanode {
-    datanode_opts: DatanodeOptions,
+    opts: DatanodeOptions,
     services: Services,
     instance: InstanceRef,
 }
@@ -70,7 +70,7 @@ impl Datanode {
         let instance = Arc::new(Instance::new(&opts).await?);
         let services = Services::try_new(instance.clone(), &opts).await?;
         Ok(Self {
-            datanode_opts: opts,
+            opts,
             services,
             instance,
         })
@@ -79,7 +79,7 @@ impl Datanode {
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting datanode instance...");
         self.instance.start().await?;
-        self.services.start(&self.datanode_opts).await?;
+        self.services.start(&self.opts).await?;
         Ok(())
     }
 }

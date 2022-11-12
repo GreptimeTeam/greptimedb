@@ -43,7 +43,6 @@ impl Default for FrontendOptions {
 }
 
 impl FrontendOptions {
-    // TODO(LFC) Get Datanode address from Meta.
     pub(crate) fn datanode_grpc_addr(&self) -> String {
         self.datanode_rpc_addr.clone()
     }

@@ -66,7 +66,6 @@ impl Services {
         Ok(Frontend::new(options, frontend_instance))
     }
 
-    // TODO(LFC): make servers started on demand (not starting mysql if no needed, for example)
     pub async fn start(&mut self, opts: &DatanodeOptions) -> Result<()> {
         let grpc_addr: SocketAddr = opts.rpc_addr.parse().context(ParseAddrSnafu {
             addr: &opts.rpc_addr,

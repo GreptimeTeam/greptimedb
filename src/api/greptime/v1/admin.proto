@@ -30,6 +30,7 @@ message AdminResult {
   }
 }
 
+// TODO(hl): rename to CreateTableExpr
 message CreateExpr {
   optional string catalog_name = 1;
   optional string schema_name = 2;
@@ -56,5 +57,6 @@ message AddColumn {
 }
 
 message CreateDatabaseExpr {
+  //TODO(hl): maybe rename to schema_name?
   string database_name = 1;
 }
