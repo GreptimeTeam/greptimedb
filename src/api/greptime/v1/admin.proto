@@ -19,6 +19,7 @@ message AdminExpr {
   oneof expr {
     CreateExpr create = 2;
     AlterExpr alter = 3;
+    CreateDatabaseExpr create_database = 4;
   }
 }
 
@@ -29,6 +30,7 @@ message AdminResult {
   }
 }
 
+// TODO(hl): rename to CreateTableExpr
 message CreateExpr {
   optional string catalog_name = 1;
   optional string schema_name = 2;
@@ -52,4 +54,9 @@ message AlterExpr {
 
 message AddColumn {
   ColumnDef column_def = 1;
+}
+
+message CreateDatabaseExpr {
+  //TODO(hl): maybe rename to schema_name?
+  string database_name = 1;
 }

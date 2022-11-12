@@ -1,6 +1,7 @@
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions, Mode};
+use datanode::datanode::{Datanode, DatanodeOptions};
+use frontend::frontend::Mode;
 use snafu::ResultExt;
 
 use crate::error::{Error, MissingConfigSnafu, Result, StartDatanodeSnafu};
@@ -120,6 +121,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
 #[cfg(test)]
 mod tests {
     use datanode::datanode::ObjectStoreConfig;
+    use frontend::frontend::Mode;
 
     use super::*;
 

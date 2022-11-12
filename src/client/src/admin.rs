@@ -70,6 +70,17 @@ impl Admin {
         );
         Ok(results)
     }
+
+    pub async fn create_database(&self, expr: CreateDatabaseExpr) -> Result<AdminResult> {
+        let header = ExprHeader {
+            version: PROTOCOL_VERSION,
+        };
+        let expr = AdminExpr {
+            header: Some(header),
+            expr: Some(admin_expr::Expr::CreateDatabase(expr)),
+        };
+        Ok(self.do_requests(vec![expr]).await?.remove(0))
+    }
 }
 
 pub fn admin_result_to_output(admin_result: AdminResult) -> Result<Output> {

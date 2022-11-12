@@ -7,6 +7,7 @@ pub mod statement;
 
 use std::str::FromStr;
 
+use api::helper::ColumnDataTypeWrapper;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
@@ -20,7 +21,8 @@ use crate::ast::{
     Value as SqlValue,
 };
 use crate::error::{
-    self, ColumnTypeMismatchSnafu, ParseSqlValueSnafu, Result, UnsupportedDefaultValueSnafu,
+    self, ColumnTypeMismatchSnafu, ConvertToGrpcDataTypeSnafu, ParseSqlValueSnafu, Result,
+    SerializeColumnDefaultConstraintSnafu, UnsupportedDefaultValueSnafu,
 };
 
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when
@@ -237,6 +239,31 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
         .context(error::InvalidDefaultSnafu {
             column: &column_def.name.value,
         })
+}
+
+/// Convert `ColumnDef` in sqlparser to `ColumnDef` in gRPC proto.
+fn sql_column_def_to_grpc_column_def(col: ColumnDef) -> Result<api::v1::ColumnDef> {
+    let name = col.name.value.clone();
+    let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
+    let nullable = col
+        .options
+        .iter()
+        .any(|o| matches!(o.option, ColumnOption::Null));
+
+    let default_constraint = parse_column_default_constraint(&name, &data_type, &col.options)?
+        .map(ColumnDefaultConstraint::try_into) // serialize default constraint to bytes
+        .transpose()
+        .context(SerializeColumnDefaultConstraintSnafu)?;
+
+    let data_type = ColumnDataTypeWrapper::try_from(data_type)
+        .context(ConvertToGrpcDataTypeSnafu)?
+        .datatype() as i32;
+    Ok(api::v1::ColumnDef {
+        name,
+        datatype: data_type,
+        is_nullable: nullable,
+        default_constraint,
+    })
 }
 
 pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {

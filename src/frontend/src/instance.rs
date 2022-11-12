@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    insert_expr, AdminExpr, AdminResult, ColumnDataType, ColumnDef as GrpcColumnDef, CreateExpr,
-    InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
+    insert_expr, AdminExpr, AdminResult, AlterExpr, ColumnDataType, ColumnDef as GrpcColumnDef,
+    CreateDatabaseExpr, CreateExpr, InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
@@ -18,9 +18,9 @@ use client::{Client, Database, Select};
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
-use datanode::datanode::{MetaClientOpts, Mode};
 use datatypes::schema::ColumnSchema;
 use meta_client::client::MetaClientBuilder;
+use meta_client::MetaClientOpts;
 use servers::error as server_error;
 use servers::query_handler::{
     GrpcAdminHandler, GrpcQueryHandler, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
@@ -36,7 +36,7 @@ use sql::{dialect::GenericDialect, parser::ParserContext};
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
-use crate::frontend::FrontendOptions;
+use crate::frontend::{FrontendOptions, Mode};
 use crate::table::route::TableRoutes;
 
 #[async_trait]
@@ -51,36 +51,25 @@ pub trait FrontendInstance:
     + Sync
     + 'static
 {
-    async fn start(&mut self, opts: &FrontendOptions) -> Result<()>;
+    async fn start(&mut self) -> Result<()>;
 }
+
+pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 
 #[derive(Default)]
 pub struct Instance {
+    // TODO(hl): In standalone mode, there is only one client.
+    // But in distribute mode, frontend should fetch datanodes' addresses from metasrv.
     client: Client,
+    /// catalog manager is None in standalone mode, datanode will keep their own
     catalog_manager: Option<FrontendCatalogManager>,
 }
 
 impl Instance {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    // TODO(fys): temporarily hard code
-    pub fn database(&self) -> Database {
-        Database::new("greptime", self.client.clone())
-    }
-
-    // TODO(fys): temporarily hard code
-    pub fn admin(&self) -> Admin {
-        Admin::new("greptime", self.client.clone())
-    }
-}
-
-#[async_trait]
-impl FrontendInstance for Instance {
-    async fn start(&mut self, opts: &FrontendOptions) -> Result<()> {
+    pub async fn try_new(opts: &FrontendOptions) -> Result<Self> {
+        let mut instance = Instance::default();
         let addr = opts.datanode_grpc_addr();
-        self.client.start(vec![addr]);
+        instance.client.start(vec![addr]);
 
         let meta_client = match opts.mode {
             Mode::Standalone => None,
@@ -102,7 +91,7 @@ impl FrontendInstance for Instance {
             }
         };
 
-        self.catalog_manager = if let Some(meta_client) = meta_client {
+        instance.catalog_manager = if let Some(meta_client) = meta_client {
             let meta_backend = Arc::new(MetaKvBackend {
                 client: meta_client.clone(),
             });
@@ -114,6 +103,24 @@ impl FrontendInstance for Instance {
         } else {
             None
         };
+        Ok(instance)
+    }
+
+    // TODO(fys): temporarily hard code
+    pub fn database(&self) -> Database {
+        Database::new("greptime", self.client.clone())
+    }
+
+    // TODO(fys): temporarily hard code
+    pub fn admin(&self) -> Admin {
+        Admin::new("greptime", self.client.clone())
+    }
+}
+
+#[async_trait]
+impl FrontendInstance for Instance {
+    async fn start(&mut self) -> Result<()> {
+        // TODO(hl): Frontend init should move to here
         Ok(())
     }
 }
@@ -179,9 +186,34 @@ impl SqlQueryHandler for Instance {
                     .await
                     .and_then(admin_result_to_output)
             }
-            // TODO(LFC): Support other SQL execution,
-            // update, delete, alter, explain, etc.
-            _ => return server_error::NotSupportedSnafu { feat: query }.fail(),
+
+            Statement::ShowDatabases(_) | Statement::ShowTables(_) => self
+                .database()
+                .select(Select::Sql(query.to_string()))
+                .await
+                .and_then(|object_result| object_result.try_into()),
+
+            Statement::CreateDatabase(c) => {
+                let expr = CreateDatabaseExpr {
+                    database_name: c.name.to_string(),
+                };
+                self.admin()
+                    .create_database(expr)
+                    .await
+                    .and_then(admin_result_to_output)
+            }
+            Statement::Alter(alter_stmt) => self
+                .admin()
+                .alter(
+                    AlterExpr::try_from(alter_stmt)
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteAlterSnafu { query })?,
+                )
+                .await
+                .and_then(admin_result_to_output),
+            Statement::ShowCreateTable(_) => {
+                return server_error::NotSupportedSnafu { feat: query }.fail()
+            }
         }
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu { query })

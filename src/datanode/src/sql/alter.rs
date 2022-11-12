@@ -12,9 +12,10 @@ impl SqlHandler {
     pub(crate) async fn alter(&self, req: AlterTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
         let table_name = &req.table_name.clone();
-        if !self.table_engine.table_exists(&ctx, table_name) {
-            return error::TableNotFoundSnafu { table_name }.fail();
-        }
+        ensure!(
+            self.table_engine.table_exists(&ctx, table_name),
+            error::TableNotFoundSnafu { table_name }
+        );
         self.table_engine
             .alter_table(&ctx, req)
             .await

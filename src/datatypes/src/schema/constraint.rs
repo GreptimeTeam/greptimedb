@@ -30,11 +30,11 @@ impl TryFrom<&[u8]> for ColumnDefaultConstraint {
     }
 }
 
-impl TryInto<Vec<u8>> for ColumnDefaultConstraint {
+impl TryFrom<ColumnDefaultConstraint> for Vec<u8> {
     type Error = error::Error;
 
-    fn try_into(self) -> Result<Vec<u8>> {
-        let s = serde_json::to_string(&self).context(error::SerializeSnafu)?;
+    fn try_from(value: ColumnDefaultConstraint) -> std::result::Result<Self, Self::Error> {
+        let s = serde_json::to_string(&value).context(error::SerializeSnafu)?;
         Ok(s.into_bytes())
     }
 }

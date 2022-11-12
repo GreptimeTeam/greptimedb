@@ -119,6 +119,7 @@ name = "api"
 version = "0.1.0"
 dependencies = [
  "common-base",
+ "common-error",
  "common-time",
  "datatypes",
  "prost 0.11.0",
@@ -1727,6 +1728,7 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datatypes",
+ "frontend",
  "futures",
  "hyper",
  "log-store",
@@ -5449,6 +5451,7 @@ checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
 name = "sql"
 version = "0.1.0"
 dependencies = [
+ "api",
  "catalog",
  "common-catalog",
  "common-error",
