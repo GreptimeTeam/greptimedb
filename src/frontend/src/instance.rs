@@ -190,7 +190,7 @@ impl Instance {
         if let Some(exprs) = &expr.expr {
             match exprs {
                 api::v1::insert_expr::Expr::Values(values) => {
-                    self.handle_insert_values(catalog_name, schema_name, &table_name, values)
+                    self.handle_insert_values(catalog_name, schema_name, table_name, values)
                         .await
                 }
                 api::v1::insert_expr::Expr::Sql(_) => {
@@ -255,13 +255,8 @@ impl Instance {
                 if let Some(add_columns) =
                     common_insert::find_new_columns(&schema, &insert_batches).unwrap()
                 {
-                    self.add_new_columns_to_table(
-                        table_name,
-                        AddColumns {
-                            add_columns: add_columns,
-                        },
-                    )
-                    .await?;
+                    self.add_new_columns_to_table(table_name, add_columns)
+                        .await?;
                     info!(
                         "Successfully altered table on insertion: {}.{}.{}",
                         catalog_name, schema_name, table_name
@@ -348,10 +343,10 @@ impl FrontendInstance for Instance {
 
 #[cfg(test)]
 impl Instance {
-    pub fn with_client(client: Client) -> Self {
+    pub fn with_client_and_catalog_manager(client: Client, catalog: CatalogManagerRef) -> Self {
         Self {
             client,
-            catalog_manager: None,
+            catalog_manager: Some(catalog),
             table_id_provider: None,
         }
     }
@@ -546,7 +541,7 @@ impl GrpcQueryHandler for Instance {
         if let Some(expr) = &query.expr {
             match expr {
                 Expr::Insert(insert) => {
-                    let result = self.handle_insert(&insert).await;
+                    let result = self.handle_insert(insert).await;
                     result
                         .map(|o| match o {
                             Output::AffectedRows(rows) => ObjectResultBuilder::new()

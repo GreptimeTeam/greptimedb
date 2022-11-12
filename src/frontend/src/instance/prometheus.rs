@@ -91,11 +91,15 @@ async fn handle_remote_queries(
 impl PrometheusProtocolHandler for Instance {
     async fn write(&self, request: WriteRequest) -> ServerResult<()> {
         let exprs = prometheus::write_request_to_insert_exprs(request)?;
-
-        self.database()
-            .batch_insert(exprs)
+        let futures = exprs
+            .iter()
+            .map(|e| self.handle_insert(e))
+            .collect::<Vec<_>>();
+        let res = futures_util::future::join_all(futures)
             .await
-            .map_err(BoxedError::new)
+            .into_iter()
+            .collect::<Result<Vec<_>, crate::error::Error>>();
+        res.map_err(BoxedError::new)
             .context(error::ExecuteInsertSnafu {
                 msg: "failed to write prometheus remote request",
             })?;

@@ -25,6 +25,7 @@ datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", bran
 
 datatypes = { path = "../datatypes" }
 futures = "0.3"
+futures-util = "0.3"
 itertools = "0.10"
 meta-client = { path = "../meta-client" }
 moka = { version = "0.9", features = ["future"] }

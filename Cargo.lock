@@ -2111,6 +2111,7 @@ dependencies = [
  "datanode",
  "datatypes",
  "futures",
+ "futures-util",
  "itertools",
  "meta-client",
  "meta-srv",

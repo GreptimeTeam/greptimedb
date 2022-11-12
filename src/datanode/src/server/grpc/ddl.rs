@@ -42,10 +42,10 @@ impl Instance {
                 .await
                 .context(BumpTableIdSnafu)
                 .unwrap();
-            // info!(
-            //     "Creating table {}.{}.{} with table id from catalog manager: {}",
-            //     catalog_name, schema_name, expr.table_name, table_id
-            // );
+            info!(
+                "Creating table {:?}.{:?}.{:?} with table id from catalog manager: {}",
+                &expr.catalog_name, &expr.schema_name, expr.table_name, table_id
+            );
             table_id
         };
 

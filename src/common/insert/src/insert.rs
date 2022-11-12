@@ -8,7 +8,7 @@ use std::{
 use api::v1::{
     codec::InsertBatch,
     column::{SemanticType, Values},
-    Column,
+    AddColumns, Column,
 };
 use api::v1::{AddColumn, ColumnDef, CreateExpr};
 use common_base::BitVec;
@@ -43,7 +43,7 @@ fn build_column_def(column_name: &str, datatype: i32, nullable: bool) -> ColumnD
 pub fn find_new_columns(
     schema: &SchemaRef,
     insert_batches: &[InsertBatch],
-) -> Result<Option<Vec<AddColumn>>> {
+) -> Result<Option<AddColumns>> {
     let mut columns_to_add = Vec::default();
     let mut new_columns: HashSet<String> = HashSet::default();
 
@@ -75,7 +75,9 @@ pub fn find_new_columns(
     if columns_to_add.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(columns_to_add))
+        Ok(Some(AddColumns {
+            add_columns: columns_to_add,
+        }))
     }
 }
 
@@ -228,7 +230,7 @@ pub fn insertion_expr_to_request(
 }
 
 #[inline]
-pub fn insert_batches(bytes_vec: &Vec<Vec<u8>>) -> Result<Vec<InsertBatch>> {
+pub fn insert_batches(bytes_vec: &[Vec<u8>]) -> Result<Vec<InsertBatch>> {
     bytes_vec
         .iter()
         .map(|bytes| bytes.deref().try_into().context(DecodeInsertSnafu))
@@ -502,10 +504,10 @@ mod tests {
 
         let mock_insert_bytes = mock_insert_batches();
         let insert_batches = insert_batches(&mock_insert_bytes).unwrap();
-        let new_columns = find_new_columns(&schema, &insert_batches).unwrap().unwrap();
+        let add_columns = find_new_columns(&schema, &insert_batches).unwrap().unwrap();
 
-        assert_eq!(2, new_columns.len());
-        let host_column = &new_columns[0];
+        assert_eq!(2, add_columns.add_columns.len());
+        let host_column = &add_columns.add_columns[0];
         assert!(host_column.is_key);
 
         assert_eq!(
@@ -516,7 +518,7 @@ mod tests {
             )
         );
 
-        let memory_column = &new_columns[1];
+        let memory_column = &add_columns.add_columns[1];
         assert!(!memory_column.is_key);
 
         assert_eq!(
