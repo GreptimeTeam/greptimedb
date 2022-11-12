@@ -125,17 +125,24 @@ impl Instance {
 
     fn alter_expr_to_request(&self, expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
         match expr.kind {
-            Some(Kind::AddColumn(add_column)) => {
-                let column_def = add_column.column_def.context(MissingFieldSnafu {
-                    field: "column_def",
-                })?;
+            Some(Kind::AddColumns(add_columns)) => {
+                let mut add_column_requests = vec![];
+                for add_column_expr in add_columns.add_columns {
+                    let column_def = add_column_expr.column_def.context(MissingFieldSnafu {
+                        field: "column_def",
+                    })?;
+
+                    let schema = create_column_schema(&column_def)?;
+                    add_column_requests.push(AddColumnRequest {
+                        column_schema: schema,
+                        is_key: add_column_expr.is_key,
+                    })
+                }
+
                 let alter_kind = AlterKind::AddColumns {
-                    columns: vec![AddColumnRequest {
-                        column_schema: create_column_schema(&column_def)?,
-                        // FIXME(dennis): supports adding key column
-                        is_key: false,
-                    }],
+                    columns: add_column_requests,
                 };
+
                 let request = AlterTableRequest {
                     catalog_name: expr.catalog_name,
                     schema_name: expr.schema_name,

@@ -50,12 +50,17 @@ message AlterExpr {
   optional string schema_name = 2;
   string table_name = 3;
   oneof kind {
-    AddColumn add_column = 4;
+    AddColumns add_columns = 4;
   }
+}
+
+message AddColumns {
+  repeated AddColumn add_columns = 1;
 }
 
 message AddColumn {
   ColumnDef column_def = 1;
+  bool is_key = 2;
 }
 
 message CreateDatabaseExpr {

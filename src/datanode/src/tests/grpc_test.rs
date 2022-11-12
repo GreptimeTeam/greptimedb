@@ -4,11 +4,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::ColumnDataType;
 use api::v1::{
     admin_result, alter_expr::Kind, codec::InsertBatch, column, column::SemanticType, insert_expr,
     AddColumn, AlterExpr, Column, ColumnDef, CreateExpr, InsertExpr, MutateResult,
 };
+use api::v1::{AddColumns, ColumnDataType};
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
 use common_catalog::consts::MIN_USER_TABLE_ID;
@@ -146,8 +146,11 @@ async fn test_insert_and_select() {
         is_nullable: true,
         default_constraint: None,
     };
-    let kind = Kind::AddColumn(AddColumn {
-        column_def: Some(add_column),
+    let kind = Kind::AddColumns(AddColumns {
+        add_columns: vec![AddColumn {
+            column_def: Some(add_column),
+            is_key: false,
+        }],
     });
     let expr = AlterExpr {
         table_name: "test_table".to_string(),
