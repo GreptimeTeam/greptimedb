@@ -13,6 +13,7 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
+use catalog::{CatalogList, CatalogProviderRef, SchemaProviderRef};
 use client::admin::{admin_result_to_output, Admin};
 use client::{Client, Database, Select};
 use common_error::prelude::BoxedError;
@@ -29,6 +30,7 @@ use servers::query_handler::{
 use snafu::prelude::*;
 use sql::ast::{ColumnDef, TableConstraint};
 use sql::statements::create::{CreateTable, TIME_INDEX};
+use sql::statements::insert::Insert;
 use sql::statements::statement::Statement;
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use sql::{dialect::GenericDialect, parser::ParserContext};
@@ -37,6 +39,7 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::frontend::{FrontendOptions, Mode};
+use crate::sql::insert_to_request;
 use crate::table::route::TableRoutes;
 
 #[async_trait]
@@ -56,13 +59,24 @@ pub trait FrontendInstance:
 
 pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 
-#[derive(Default)]
+#[derive(Clone)]
 pub struct Instance {
     // TODO(hl): In standalone mode, there is only one client.
     // But in distribute mode, frontend should fetch datanodes' addresses from metasrv.
     client: Client,
     /// catalog manager is None in standalone mode, datanode will keep their own
     catalog_manager: Option<FrontendCatalogManager>,
+    mode: Mode,
+}
+
+impl Default for Instance {
+    fn default() -> Self {
+        Self {
+            client: Client::default(),
+            catalog_manager: None,
+            mode: Mode::Standalone,
+        }
+    }
 }
 
 impl Instance {
@@ -115,6 +129,43 @@ impl Instance {
     pub fn admin(&self) -> Admin {
         Admin::new("greptime", self.client.clone())
     }
+
+    fn get_catalog(&self, catalog_name: &str) -> Result<CatalogProviderRef> {
+        self.catalog_manager
+            .as_ref()
+            .context(error::CatalogManagerSnafu)?
+            .catalog(catalog_name)
+            .context(error::CatalogSnafu)?
+            .context(error::CatalogNotFoundSnafu { catalog_name })
+    }
+
+    fn get_schema(provider: CatalogProviderRef, schema_name: &str) -> Result<SchemaProviderRef> {
+        provider
+            .schema(schema_name)
+            .context(error::CatalogSnafu)?
+            .context(error::SchemaNotFoundSnafu {
+                schema_info: schema_name,
+            })
+    }
+
+    async fn sql_dist_insert(&self, insert: Box<Insert>) -> Result<usize> {
+        let (catalog, schema, table) = insert.full_table_name().context(error::ParseSqlSnafu)?;
+
+        let catalog_provider = self.get_catalog(&catalog)?;
+        let schema_provider = Self::get_schema(catalog_provider, &schema)?;
+
+        let insert_request = insert_to_request(&schema_provider, *insert)?;
+
+        let table = schema_provider
+            .table(&table)
+            .context(error::CatalogSnafu)?
+            .context(error::TableNotFoundSnafu { table_name: &table })?;
+
+        table
+            .insert(insert_request)
+            .await
+            .context(error::TableSnafu)
+    }
 }
 
 #[async_trait]
@@ -131,6 +182,7 @@ impl Instance {
         Self {
             client,
             catalog_manager: None,
+            mode: Mode::Standalone,
         }
     }
 }
@@ -156,26 +208,44 @@ impl SqlQueryHandler for Instance {
                 .database()
                 .select(Select::Sql(query.to_string()))
                 .await
-                .and_then(|object_result| object_result.try_into()),
+                .and_then(|object_result| object_result.try_into())
+                .map_err(BoxedError::new)
+                .context(server_error::ExecuteQuerySnafu { query }),
             Statement::Insert(insert) => {
-                // TODO(dennis): respect schema_name when inserting data
-                let (_catalog_name, _schema_name, table_name) = insert
-                    .full_table_name()
-                    .context(error::ParseSqlSnafu)
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteInsertSnafu {
-                        msg: "Failed to get table name",
-                    })?;
+                match self.mode {
+                    Mode::Standalone => {
+                        // TODO(dennis): respect schema_name when inserting data
+                        let (_catalog_name, _schema_name, table_name) = insert
+                            .full_table_name()
+                            .context(error::ParseSqlSnafu)
+                            .map_err(BoxedError::new)
+                            .context(server_error::ExecuteInsertSnafu {
+                                msg: "Failed to get table name",
+                            })?;
 
-                let expr = InsertExpr {
-                    table_name,
-                    expr: Some(insert_expr::Expr::Sql(query.to_string())),
-                    options: HashMap::default(),
-                };
-                self.database()
-                    .insert(expr)
-                    .await
-                    .and_then(|object_result| object_result.try_into())
+                        let expr = InsertExpr {
+                            table_name,
+                            expr: Some(insert_expr::Expr::Sql(query.to_string())),
+                            options: HashMap::default(),
+                        };
+                        self.database()
+                            .insert(expr)
+                            .await
+                            .and_then(|object_result| object_result.try_into())
+                            .map_err(BoxedError::new)
+                            .context(server_error::ExecuteQuerySnafu { query })
+                    }
+                    Mode::Distributed => {
+                        let affected = self
+                            .sql_dist_insert(insert)
+                            .await
+                            .map_err(BoxedError::new)
+                            .context(server_error::ExecuteInsertSnafu {
+                                msg: "execute insert failed",
+                            })?;
+                        Ok(Output::AffectedRows(affected))
+                    }
+                }
             }
             Statement::CreateTable(create) => {
                 let expr = create_to_expr(create)
@@ -185,13 +255,17 @@ impl SqlQueryHandler for Instance {
                     .create(expr)
                     .await
                     .and_then(admin_result_to_output)
+                    .map_err(BoxedError::new)
+                    .context(server_error::ExecuteQuerySnafu { query })
             }
 
             Statement::ShowDatabases(_) | Statement::ShowTables(_) => self
                 .database()
                 .select(Select::Sql(query.to_string()))
                 .await
-                .and_then(|object_result| object_result.try_into()),
+                .and_then(|object_result| object_result.try_into())
+                .map_err(BoxedError::new)
+                .context(server_error::ExecuteQuerySnafu { query }),
 
             Statement::CreateDatabase(c) => {
                 let expr = CreateDatabaseExpr {
@@ -201,6 +275,8 @@ impl SqlQueryHandler for Instance {
                     .create_database(expr)
                     .await
                     .and_then(admin_result_to_output)
+                    .map_err(BoxedError::new)
+                    .context(server_error::ExecuteQuerySnafu { query })
             }
             Statement::Alter(alter_stmt) => self
                 .admin()
@@ -210,13 +286,13 @@ impl SqlQueryHandler for Instance {
                         .context(server_error::ExecuteAlterSnafu { query })?,
                 )
                 .await
-                .and_then(admin_result_to_output),
+                .and_then(admin_result_to_output)
+                .map_err(BoxedError::new)
+                .context(server_error::ExecuteQuerySnafu { query }),
             Statement::ShowCreateTable(_) => {
                 return server_error::NotSupportedSnafu { feat: query }.fail()
             }
         }
-        .map_err(BoxedError::new)
-        .context(server_error::ExecuteQuerySnafu { query })
     }
 
     async fn insert_script(&self, _name: &str, _script: &str) -> server_error::Result<()> {

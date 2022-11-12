@@ -12,6 +12,7 @@ use servers::prometheus::{self, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use snafu::{OptionExt, ResultExt};
 
+use crate::frontend::Mode;
 use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
@@ -90,15 +91,29 @@ async fn handle_remote_queries(
 #[async_trait]
 impl PrometheusProtocolHandler for Instance {
     async fn write(&self, request: WriteRequest) -> ServerResult<()> {
-        let exprs = prometheus::write_request_to_insert_exprs(request)?;
+        match self.mode {
+            Mode::Standalone => {
+                let exprs = prometheus::write_request_to_insert_exprs(request)?;
 
-        self.database()
-            .batch_insert(exprs)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteInsertSnafu {
-                msg: "failed to write prometheus remote request",
-            })?;
+                self.database()
+                    .batch_insert(exprs)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteInsertSnafu {
+                        msg: "failed to write prometheus remote request",
+                    })?;
+            }
+            Mode::Distributed => {
+                let inserts = prometheus::write_request_to_insert_reqs(request)?;
+
+                self.dist_insert(inserts)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteInsertSnafu {
+                        msg: "execute insert failed",
+                    })?;
+            }
+        }
 
         Ok(())
     }
