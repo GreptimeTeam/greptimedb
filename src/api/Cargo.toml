@@ -7,6 +7,7 @@ edition = "2021"
 [dependencies]
 common-base = { path = "../common/base" }
 common-time = { path = "../common/time" }
+common-error = { path = "../common/error" }
 datatypes = { path = "../datatypes" }
 prost = "0.11"
 snafu = { version = "0.7", features = ["backtraces"] }

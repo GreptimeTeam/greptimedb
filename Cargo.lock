@@ -119,6 +119,7 @@ name = "api"
 version = "0.1.0"
 dependencies = [
  "common-base",
+ "common-error",
  "common-time",
  "datatypes",
  "prost 0.11.0",

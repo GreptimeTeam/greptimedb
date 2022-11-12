@@ -1,7 +1,5 @@
 #![feature(assert_matches)]
 
-extern crate core;
-
 pub mod datanode;
 pub mod error;
 mod heartbeat;

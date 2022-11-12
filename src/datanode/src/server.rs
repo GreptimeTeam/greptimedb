@@ -3,6 +3,7 @@ pub mod grpc;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use common_error::prelude::BoxedError;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
 use frontend::frontend::{Frontend, FrontendOptions, Mode};
@@ -74,7 +75,11 @@ impl Services {
         try_join!(self.grpc_server.start(grpc_addr), async {
             if let Some(ref mut frontend_instance) = self.frontend {
                 info!("Starting frontend instance");
-                let _ = frontend_instance.start().await;
+                frontend_instance
+                    .start()
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(servers::error::StartFrontendSnafu)?;
             }
             Ok(())
         })

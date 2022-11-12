@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    insert_expr, AdminExpr, AdminResult, ColumnDataType, ColumnDef as GrpcColumnDef,
+    insert_expr, AdminExpr, AdminResult, AlterExpr, ColumnDataType, ColumnDef as GrpcColumnDef,
     CreateDatabaseExpr, CreateExpr, InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
@@ -202,9 +202,18 @@ impl SqlQueryHandler for Instance {
                     .await
                     .and_then(admin_result_to_output)
             }
-            // TODO(LFC): Support other SQL execution,
-            // update, delete, alter, explain, etc.
-            _ => return server_error::NotSupportedSnafu { feat: query }.fail(),
+            Statement::Alter(alter_stmt) => self
+                .admin()
+                .alter(
+                    AlterExpr::try_from(alter_stmt)
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteAlterSnafu { query })?,
+                )
+                .await
+                .and_then(admin_result_to_output),
+            Statement::ShowCreateTable(_) => {
+                return server_error::NotSupportedSnafu { feat: query }.fail()
+            }
         }
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu { query })
