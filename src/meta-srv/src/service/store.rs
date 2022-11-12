@@ -39,7 +39,11 @@ impl store_server::Store for MetaSrv {
 
     async fn batch_put(&self, req: Request<BatchPutRequest>) -> GrpcResult<BatchPutResponse> {
         let req = req.into_inner();
-        common_telemetry::info!("MetaSrv batch put req begin, req: {:?}", req);
+        common_telemetry::info!(
+            "MetaSrv batch put req begin, req: {:?}, thread: {:?}",
+            req,
+            std::thread::current().id()
+        );
         let res = self.kv_store().batch_put(req).await?;
         common_telemetry::info!("MetaSrv put req end, res: {:?}", res);
 

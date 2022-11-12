@@ -685,7 +685,11 @@ impl SchemaProvider for RemoteSchemaProvider {
         let tables = self.tables.clone();
         let table_key = self.build_regional_table_key(&name).to_string();
 
-        info!("Register table name {}", name);
+        info!(
+            "Register table name {} on thread {:?}",
+            name,
+            std::thread::current().id()
+        );
         let name_clone = name.clone();
 
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
