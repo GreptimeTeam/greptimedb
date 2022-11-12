@@ -119,6 +119,8 @@ fn expect_data() -> (Column, Column, Column, Column) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_insert_and_select() {
     common_telemetry::init_default_ut_logging();
+    for i in 0..10 {
+    common_telemetry::info!("run test {} begin", i);
     let (addr, _guard, grpc_server) = setup_grpc_server("insert_and_select", 3990).await;
 
     let grpc_client = Client::with_urls(vec![addr]);
@@ -170,6 +172,8 @@ async fn test_insert_and_select() {
     grpc_server.shutdown().await.unwrap();
 
     common_telemetry::info!("Shutdown end");
+    common_telemetry::info!("run test {} end", i);
+    }
 }
 
 async fn insert_and_assert(db: &Database) {
