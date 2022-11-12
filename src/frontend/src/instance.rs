@@ -7,9 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::alter_expr::Kind;
+use api::v1::codec::InsertBatch;
 use api::v1::{
-    insert_expr, AdminExpr, AdminResult, AlterExpr, ColumnDataType, ColumnDef as GrpcColumnDef,
-    CreateDatabaseExpr, CreateExpr, InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
+    insert_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, ColumnDataType,
+    ColumnDef as GrpcColumnDef, CreateDatabaseExpr, CreateExpr, InsertExpr, ObjectExpr,
+    ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
@@ -19,6 +22,7 @@ use client::{Client, Database, Select};
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
+use common_telemetry::{debug, info};
 use datatypes::schema::ColumnSchema;
 use meta_client::client::MetaClientBuilder;
 use meta_client::MetaClientOpts;
@@ -153,6 +157,136 @@ impl Instance {
             region_ids,
         };
         Ok(expr)
+    }
+
+    pub async fn handle_create(&self, expr: CreateExpr) {
+        self.admin().create(expr).await.unwrap();
+    }
+
+    pub async fn handle_alter(&self, expr: AlterExpr) {
+        self.admin().alter(expr).await.unwrap();
+    }
+
+    /// Handle insert requests in frontend
+    /// If insert is SQL string flavor, just forward to datanode
+    /// If insert is parsed InsertExpr, frontend should comprehend the schema and create/alter table on demand.
+    pub async fn handle_insert(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        values: insert_expr::Values,
+    ) -> Result<()> {
+        let insert_batches = common_insert::insert_batches(&values.values).unwrap();
+
+        // check if table already exist:
+        // - if table does not exist, create table by inferred CreateExpr
+        // - if table exist, check if schema matchs. If any new column found, alter table by inferred `AlterExpr`
+        match self
+            .catalog_manager
+            .as_ref()
+            .unwrap()
+            .catalog(catalog_name)
+            .unwrap()
+            .unwrap()
+            .schema(schema_name)
+            .unwrap()
+            .unwrap()
+            .table(table_name)
+            .unwrap()
+        {
+            None => {
+                self.create_table_by_insert_batches(
+                    catalog_name,
+                    schema_name,
+                    table_name,
+                    &insert_batches,
+                )
+                .await
+                .unwrap();
+            }
+            Some(table) => {
+                let schema = table.schema();
+                if let Some(add_columns) =
+                    common_insert::find_new_columns(&schema, &insert_batches).unwrap()
+                {
+                    self.add_new_columns_to_table(
+                        table_name,
+                        AddColumns {
+                            add_columns: add_columns,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        };
+
+        self.database()
+            .insert(InsertExpr {
+                table_name: table_name.to_string(),
+                options: Default::default(),
+                expr: Some(insert_expr::Expr::Values(values)),
+            })
+            .await
+            .unwrap();
+        // do real insert
+        todo!()
+    }
+
+    /// Infer create table expr from inserting data
+    async fn create_table_by_insert_batches(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        insert_batches: &[InsertBatch],
+    ) -> Result<()> {
+        // Create table automatically, build schema from data.
+        let table_id = self
+            .table_id_provider
+            .as_ref()
+            .unwrap()
+            .next_table_id()
+            .await
+            .unwrap();
+
+        let create_expr = common_insert::build_create_expr_from_insertion(
+            catalog_name,
+            schema_name,
+            table_id,
+            table_name,
+            insert_batches,
+        )
+        .unwrap();
+
+        info!(
+            "Try to create table: {} automatically with request: {:?}",
+            table_name, create_expr,
+        );
+        self.admin().create(create_expr).await.unwrap();
+        info!("Success to create table: {} automatically", table_name);
+
+        Ok(())
+    }
+
+    async fn add_new_columns_to_table(
+        &self,
+        table_name: &str,
+        add_columns: AddColumns,
+    ) -> Result<()> {
+        debug!(
+            "Adding new columns: {:?} to table: {}",
+            add_columns, table_name
+        );
+        let expr = AlterExpr {
+            table_name: table_name.to_string(),
+            schema_name: None,
+            catalog_name: None,
+            kind: Some(Kind::AddColumns(add_columns)),
+        };
+        self.admin().alter(expr).await.unwrap();
+        Ok(())
     }
 }
 

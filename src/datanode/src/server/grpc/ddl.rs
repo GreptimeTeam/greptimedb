@@ -5,11 +5,11 @@ use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
-use common_telemetry::info;
 use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use snafu::prelude::*;
+use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
 
 use crate::error::{
@@ -21,8 +21,34 @@ use crate::server::grpc::handler::AdminResultBuilder;
 use crate::sql::SqlRequest;
 
 impl Instance {
+    /// Handle gRPC create table requests.
     pub(crate) async fn handle_create(&self, expr: CreateExpr) -> AdminResult {
-        let request = self.create_expr_to_request(expr).await;
+        // Respect CreateExpr's table id and region ids if present, or allocate table id
+        // from local table id provider and set region id to 0.
+        let table_id = if let Some(table_id) = expr.table_id {
+            // info!(
+            //     "Creating table {}.{}.{} with table id from frontend: {}",
+            //     catalog_name, schema_name, expr.table_name, table_id
+            // );
+            table_id
+        } else {
+            let table_id = self
+                .table_id_provider
+                .as_ref()
+                .context(IllegalCreateRequestSnafu)
+                .unwrap()
+                .next_table_id()
+                .await
+                .context(BumpTableIdSnafu)
+                .unwrap();
+            // info!(
+            //     "Creating table {}.{}.{} with table id from catalog manager: {}",
+            //     catalog_name, schema_name, expr.table_name, table_id
+            // );
+            table_id
+        };
+
+        let request = create_expr_to_request(table_id, expr).await;
         let result = futures::future::ready(request)
             .and_then(|request| self.sql_handler().execute(SqlRequest::CreateTable(request)))
             .await;
@@ -41,7 +67,7 @@ impl Instance {
     }
 
     pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> AdminResult {
-        let request = match self.alter_expr_to_request(expr).transpose() {
+        let request = match alter_expr_to_request(expr).transpose() {
             Some(req) => req,
             None => {
                 return AdminResultBuilder::default()
@@ -66,93 +92,76 @@ impl Instance {
                 .build(),
         }
     }
+}
 
-    async fn create_expr_to_request(&self, expr: CreateExpr) -> Result<CreateTableRequest> {
-        let schema = create_table_schema(&expr)?;
-
-        let primary_key_indices = expr
-            .primary_keys
-            .iter()
-            .map(|key| {
-                schema
-                    .column_index_by_name(key)
-                    .context(error::KeyColumnNotFoundSnafu { name: key })
-            })
-            .collect::<Result<Vec<usize>>>()?;
-
-        let catalog_name = expr
-            .catalog_name
-            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-        let schema_name = expr
-            .schema_name
-            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
-
-        let table_id = if let Some(table_id) = expr.table_id {
-            info!(
-                "Creating table {}.{}.{} with table id from frontend: {}",
-                catalog_name, schema_name, expr.table_name, table_id
-            );
-            table_id
-        } else {
-            let table_id = self
-                .table_id_provider
-                .as_ref()
-                .context(IllegalCreateRequestSnafu)?
-                .next_table_id()
-                .await
-                .context(BumpTableIdSnafu)?;
-            info!(
-                "Creating table {}.{}.{} with table id from catalog manager: {}",
-                catalog_name, schema_name, expr.table_name, table_id
-            );
-            table_id
-        };
-        let region_ids = expr.region_ids;
-
-        Ok(CreateTableRequest {
-            id: table_id,
-            catalog_name,
-            schema_name,
-            table_name: expr.table_name,
-            desc: expr.desc,
-            schema,
-            region_numbers: region_ids,
-            primary_key_indices,
-            create_if_not_exists: expr.create_if_not_exists,
-            table_options: expr.table_options,
+async fn create_expr_to_request(table_id: TableId, expr: CreateExpr) -> Result<CreateTableRequest> {
+    let schema = create_table_schema(&expr)?;
+    let primary_key_indices = expr
+        .primary_keys
+        .iter()
+        .map(|key| {
+            schema
+                .column_index_by_name(key)
+                .context(error::KeyColumnNotFoundSnafu { name: key })
         })
-    }
+        .collect::<Result<Vec<usize>>>()?;
 
-    fn alter_expr_to_request(&self, expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
-        match expr.kind {
-            Some(Kind::AddColumns(add_columns)) => {
-                let mut add_column_requests = vec![];
-                for add_column_expr in add_columns.add_columns {
-                    let column_def = add_column_expr.column_def.context(MissingFieldSnafu {
-                        field: "column_def",
-                    })?;
+    let catalog_name = expr
+        .catalog_name
+        .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
+    let schema_name = expr
+        .schema_name
+        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
 
-                    let schema = create_column_schema(&column_def)?;
-                    add_column_requests.push(AddColumnRequest {
-                        column_schema: schema,
-                        is_key: add_column_expr.is_key,
-                    })
-                }
+    let region_ids = if expr.region_ids.is_empty() {
+        vec![0]
+    } else {
+        expr.region_ids
+    };
 
-                let alter_kind = AlterKind::AddColumns {
-                    columns: add_column_requests,
-                };
+    Ok(CreateTableRequest {
+        id: table_id,
+        catalog_name,
+        schema_name,
+        table_name: expr.table_name,
+        desc: expr.desc,
+        schema,
+        region_numbers: region_ids,
+        primary_key_indices,
+        create_if_not_exists: expr.create_if_not_exists,
+        table_options: expr.table_options,
+    })
+}
 
-                let request = AlterTableRequest {
-                    catalog_name: expr.catalog_name,
-                    schema_name: expr.schema_name,
-                    table_name: expr.table_name,
-                    alter_kind,
-                };
-                Ok(Some(request))
+fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
+    match expr.kind {
+        Some(Kind::AddColumns(add_columns)) => {
+            let mut add_column_requests = vec![];
+            for add_column_expr in add_columns.add_columns {
+                let column_def = add_column_expr.column_def.context(MissingFieldSnafu {
+                    field: "column_def",
+                })?;
+
+                let schema = create_column_schema(&column_def)?;
+                add_column_requests.push(AddColumnRequest {
+                    column_schema: schema,
+                    is_key: add_column_expr.is_key,
+                })
             }
-            None => Ok(None),
+
+            let alter_kind = AlterKind::AddColumns {
+                columns: add_column_requests,
+            };
+
+            let request = AlterTableRequest {
+                catalog_name: expr.catalog_name,
+                schema_name: expr.schema_name,
+                table_name: expr.table_name,
+                alter_kind,
+            };
+            Ok(Some(request))
         }
+        None => Ok(None),
     }
 }
 
@@ -226,7 +235,7 @@ mod tests {
         instance.start().await.unwrap();
 
         let expr = testing_create_expr();
-        let request = instance.create_expr_to_request(expr).await.unwrap();
+        let request = create_expr_to_request(1024, expr).await.unwrap();
         assert_eq!(request.id, common_catalog::consts::MIN_USER_TABLE_ID);
         assert_eq!(request.catalog_name, "greptime".to_string());
         assert_eq!(request.schema_name, "public".to_string());
@@ -238,7 +247,7 @@ mod tests {
 
         let mut expr = testing_create_expr();
         expr.primary_keys = vec!["host".to_string(), "not-exist-column".to_string()];
-        let result = instance.create_expr_to_request(expr).await;
+        let result = create_expr_to_request(1025, expr).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
