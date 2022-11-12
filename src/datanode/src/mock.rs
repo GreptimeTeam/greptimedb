@@ -1,11 +1,15 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use catalog::remote::MetaKvBackend;
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_srv::mocks::MockInfo;
 use query::QueryEngineFactory;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
+use table::metadata::TableId;
+use table::table::{TableIdProvider, TableIdProviderRef};
 use table_engine::config::EngineConfig as TableEngineConfig;
 
 use crate::datanode::DatanodeOptions;
@@ -53,6 +57,8 @@ impl Instance {
             "127.0.0.1:3302".to_string(),
             meta_client.as_ref().unwrap().clone(),
         ));
+
+        let table_id_provider = Some(catalog_manager.clone() as TableIdProviderRef);
         Ok(Self {
             query_engine,
             sql_handler,
@@ -61,6 +67,7 @@ impl Instance {
             script_executor,
             meta_client,
             heartbeat_task,
+            table_id_provider,
         })
     }
 
@@ -105,9 +112,29 @@ impl Instance {
             catalog_manager,
             physical_planner: PhysicalPlanner::new(query_engine),
             script_executor,
+            table_id_provider: Some(Arc::new(LocalTableIdProvider::default())),
             meta_client: Some(meta_client),
             heartbeat_task: Some(heartbeat_task),
         })
+    }
+}
+
+struct LocalTableIdProvider {
+    inner: Arc<AtomicU32>,
+}
+
+impl Default for LocalTableIdProvider {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(AtomicU32::new(MIN_USER_TABLE_ID)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TableIdProvider for LocalTableIdProvider {
+    async fn next_table_id(&self) -> table::Result<TableId> {
+        Ok(self.inner.fetch_add(1, Ordering::Relaxed))
     }
 }
 

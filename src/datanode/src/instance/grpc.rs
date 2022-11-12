@@ -67,11 +67,10 @@ impl Instance {
         insert_batches: &[InsertBatch],
     ) -> Result<()> {
         // Create table automatically, build schema from data.
-        let table_id = self
-            .catalog_manager
-            .next_table_id()
-            .await
-            .context(CatalogSnafu)?;
+
+        // TODO(hl): This create on insert logic should be moved to frontend
+        let table_id = 0;
+
         let create_table_request = common_insert::build_create_table_request(
             catalog_name,
             schema_name,

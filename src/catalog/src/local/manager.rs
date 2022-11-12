@@ -16,6 +16,7 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
+use table::table::TableIdProvider;
 use table::TableRef;
 
 use crate::error::{
@@ -279,16 +280,18 @@ impl CatalogList for LocalCatalogManager {
 }
 
 #[async_trait::async_trait]
+impl TableIdProvider for LocalCatalogManager {
+    async fn next_table_id(&self) -> table::Result<TableId> {
+        Ok(self.next_table_id.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[async_trait::async_trait]
 impl CatalogManager for LocalCatalogManager {
     /// Start [LocalCatalogManager] to load all information from system catalog table.
     /// Make sure table engine is initialized before starting [MemoryCatalogManager].
     async fn start(&self) -> Result<()> {
         self.init().await
-    }
-
-    #[inline]
-    async fn next_table_id(&self) -> Result<TableId> {
-        Ok(self.next_table_id.fetch_add(1, Ordering::Relaxed))
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {

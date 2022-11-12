@@ -8,6 +8,7 @@ use std::sync::RwLock;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use snafu::OptionExt;
 use table::metadata::TableId;
+use table::table::TableIdProvider;
 use table::TableRef;
 
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
@@ -42,14 +43,17 @@ impl Default for MemoryCatalogManager {
 }
 
 #[async_trait::async_trait]
+impl TableIdProvider for MemoryCatalogManager {
+    async fn next_table_id(&self) -> table::error::Result<TableId> {
+        Ok(self.table_id.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[async_trait::async_trait]
 impl CatalogManager for MemoryCatalogManager {
     async fn start(&self) -> Result<()> {
         self.table_id.store(MIN_USER_TABLE_ID, Ordering::Relaxed);
         Ok(())
-    }
-
-    async fn next_table_id(&self) -> Result<TableId> {
-        Ok(self.table_id.fetch_add(1, Ordering::Relaxed))
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {

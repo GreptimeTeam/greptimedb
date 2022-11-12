@@ -152,6 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prometheus_remote_write_and_read() {
+        common_telemetry::init_default_ut_logging();
         let instance = tests::create_frontend_instance().await;
 
         let write_request = WriteRequest {
@@ -159,7 +160,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(instance.write(write_request).await.is_ok());
+        instance.write(write_request).await.unwrap();
 
         let read_request = ReadRequest {
             queries: vec![

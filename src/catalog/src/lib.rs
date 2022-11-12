@@ -69,9 +69,6 @@ pub trait CatalogManager: CatalogList {
     /// Starts a catalog manager.
     async fn start(&self) -> Result<()>;
 
-    /// Returns next available table id.
-    async fn next_table_id(&self) -> Result<TableId>;
-
     /// Registers a table given given catalog/schema to catalog manager,
     /// returns table registered.
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize>;

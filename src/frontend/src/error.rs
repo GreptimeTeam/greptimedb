@@ -193,6 +193,12 @@ pub enum Error {
         table_name: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to bump table id when creating table, source: {}", source))]
+    BumpTableId {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -239,6 +245,7 @@ impl ErrorExt for Error {
             Error::ParseCatalogEntry { source, .. } => source.status_code(),
 
             Error::RequestMeta { source } => source.status_code(),
+            Error::BumpTableId { source, .. } => source.status_code(),
         }
     }
 

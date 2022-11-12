@@ -36,20 +36,23 @@ impl Services {
         );
 
         let frontend = match opts.mode {
-            Mode::Standalone => Some(Self::build_frontend(opts).await?),
+            Mode::Standalone => Some(Self::build_frontend(opts, instance.clone()).await?),
             Mode::Distributed => {
                 info!("Starting datanode in distributed mode, only gRPC server will be started.");
                 None
             }
         };
         Ok(Self {
-            grpc_server: GrpcServer::new(instance.clone(), instance.clone(), grpc_runtime),
+            grpc_server: GrpcServer::new(instance.clone(), instance, grpc_runtime),
             frontend,
         })
     }
 
     /// Build frontend instance in standalone mode
-    async fn build_frontend(opts: &DatanodeOptions) -> Result<Frontend<FrontendInstanceImpl>> {
+    async fn build_frontend(
+        opts: &DatanodeOptions,
+        datanode_instance: InstanceRef,
+    ) -> Result<Frontend<FrontendInstanceImpl>> {
         let grpc_server_addr = &opts.rpc_addr;
         info!(
             "Build frontend with datanode gRPC addr: {}",
@@ -60,9 +63,10 @@ impl Services {
             datanode_rpc_addr: grpc_server_addr.clone(),
             ..Default::default()
         };
-        let frontend_instance = FrontendInstanceImpl::try_new(&options)
+        let mut frontend_instance = FrontendInstanceImpl::try_new(&options)
             .await
             .context(BuildFrontendSnafu)?;
+        frontend_instance.set_catalog_list(datanode_instance.catalog_manager().clone());
         Ok(Frontend::new(options, frontend_instance))
     }
 

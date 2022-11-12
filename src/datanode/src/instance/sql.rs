@@ -11,7 +11,8 @@ use sql::statements::statement::Statement;
 use table::requests::CreateDatabaseRequest;
 
 use crate::error::{
-    CatalogNotFoundSnafu, CatalogSnafu, ExecuteSqlSnafu, ParseSqlSnafu, Result, SchemaNotFoundSnafu,
+    BumpTableIdSnafu, CatalogNotFoundSnafu, CatalogSnafu, ExecuteSqlSnafu,
+    IllegalCreateRequestSnafu, ParseSqlSnafu, Result, SchemaNotFoundSnafu,
 };
 use crate::instance::Instance;
 use crate::metric;
@@ -67,10 +68,12 @@ impl Instance {
 
             Statement::CreateTable(c) => {
                 let table_id = self
-                    .catalog_manager
+                    .table_id_provider
+                    .as_ref()
+                    .context(IllegalCreateRequestSnafu)?
                     .next_table_id()
                     .await
-                    .context(CatalogSnafu)?;
+                    .context(BumpTableIdSnafu)?;
                 let _engine_name = c.engine.clone();
                 // TODO(hl): Select table engine by engine_name
 

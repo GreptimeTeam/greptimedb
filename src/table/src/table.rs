@@ -11,7 +11,7 @@ use common_query::physical_plan::PhysicalPlanRef;
 use datatypes::schema::SchemaRef;
 
 use crate::error::Result;
-use crate::metadata::{FilterPushDownType, TableInfoRef, TableType};
+use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
 use crate::requests::{AlterTableRequest, InsertRequest};
 
 /// Table abstraction.
@@ -61,3 +61,10 @@ pub trait Table: Send + Sync {
 }
 
 pub type TableRef = Arc<dyn Table>;
+
+#[async_trait::async_trait]
+pub trait TableIdProvider {
+    async fn next_table_id(&self) -> Result<TableId>;
+}
+
+pub type TableIdProviderRef = Arc<dyn TableIdProvider + Send + Sync>;

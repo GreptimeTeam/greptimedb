@@ -375,11 +375,6 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    /// Remote catalog manager does not support bump table id.
-    async fn next_table_id(&self) -> Result<TableId> {
-        unreachable!("Should not request table id from RemoteCatalogManager")
-    }
-
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;

@@ -12,7 +12,10 @@ use futures::TryFutureExt;
 use snafu::prelude::*;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
 
-use crate::error::{self, CatalogSnafu, ColumnDefaultConstraintSnafu, MissingFieldSnafu, Result};
+use crate::error::{
+    self, BumpTableIdSnafu, ColumnDefaultConstraintSnafu, IllegalCreateRequestSnafu,
+    MissingFieldSnafu, Result,
+};
 use crate::instance::Instance;
 use crate::server::grpc::handler::AdminResultBuilder;
 use crate::sql::SqlRequest;
@@ -92,10 +95,12 @@ impl Instance {
             table_id
         } else {
             let table_id = self
-                .catalog_manager()
+                .table_id_provider
+                .as_ref()
+                .context(IllegalCreateRequestSnafu)?
                 .next_table_id()
                 .await
-                .context(CatalogSnafu)?;
+                .context(BumpTableIdSnafu)?;
             info!(
                 "Creating table {}.{}.{} with table id from catalog manager: {}",
                 catalog_name, schema_name, expr.table_name, table_id
