@@ -187,7 +187,7 @@ async fn insert_and_assert(db: &Database) {
         options: HashMap::default(),
     };
     let result = db.insert(expr).await;
-    assert!(result.is_ok());
+    result.unwrap();
 
     // select
     let result = db

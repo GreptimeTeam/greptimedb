@@ -134,6 +134,18 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Catalog not found: {}", catalog_name))]
+    CatalogNotFound {
+        catalog_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Schema not found: {}", schema_name))]
+    SchemaNotFound {
+        schema_name: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
@@ -199,6 +211,42 @@ pub enum Error {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
+
+    #[snafu(display("Failed to create table, source: {}", source))]
+    CreateTable {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to alter table, source: {}", source))]
+    AlterTable {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to insert values to table, source: {}", source))]
+    Insert {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to create table on insertion, source: {}", source))]
+    CreateTableOnInsertion {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to alter table on insertion, source: {}", source))]
+    AlterTableOnInsertion {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to build CreateExpr on insertion: {}", source))]
+    BuildCreateExprOnInsertion {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -246,6 +294,14 @@ impl ErrorExt for Error {
 
             Error::RequestMeta { source } => source.status_code(),
             Error::BumpTableId { source, .. } => source.status_code(),
+            Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
+            Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
+            Error::CreateTable { source, .. } => source.status_code(),
+            Error::AlterTable { source, .. } => source.status_code(),
+            Error::Insert { source, .. } => source.status_code(),
+            Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
+            Error::CreateTableOnInsertion { source, .. } => source.status_code(),
+            Error::AlterTableOnInsertion { source, .. } => source.status_code(),
         }
     }
 

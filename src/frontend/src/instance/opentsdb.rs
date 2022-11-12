@@ -1,12 +1,11 @@
 use async_trait::async_trait;
-use client::ObjectResult;
 use common_error::prelude::BoxedError;
 use servers::error as server_error;
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;
 use snafu::prelude::*;
 
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::instance::Instance;
 
 #[async_trait]
@@ -27,27 +26,7 @@ impl OpentsdbProtocolHandler for Instance {
 impl Instance {
     async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> Result<()> {
         let expr = data_point.as_grpc_insert();
-
-        let result = self.database().insert(expr.clone()).await;
-
-        let object_result = match result {
-            Ok(result) => result,
-            Err(_) => {
-                return Err(result.context(error::RequestDatanodeSnafu).unwrap_err());
-            }
-        };
-
-        match object_result {
-            ObjectResult::Mutate(mutate) => {
-                if mutate.success != 1 || mutate.failure != 0 {
-                    return error::ExecOpentsdbPutSnafu {
-                        reason: format!("illegal result: {:?}", mutate),
-                    }
-                    .fail();
-                }
-            }
-            ObjectResult::Select(_) => unreachable!(),
-        }
+        self.handle_insert(expr).await?;
         Ok(())
     }
 }

@@ -9,6 +9,7 @@ use std::time::Duration;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::codec::InsertBatch;
+use api::v1::insert_expr::Expr;
 use api::v1::{
     insert_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, ColumnDataType,
     ColumnDef as GrpcColumnDef, CreateDatabaseExpr, CreateExpr, InsertExpr, ObjectExpr,
@@ -41,7 +42,11 @@ use table::table::TableIdProviderRef;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
-use crate::error::{self, BumpTableIdSnafu, ConvertColumnDefaultConstraintSnafu, Result};
+use crate::error::{
+    self, AlterTableOnInsertionSnafu, AlterTableSnafu, BuildCreateExprOnInsertionSnafu,
+    BumpTableIdSnafu, CatalogNotFoundSnafu, CatalogSnafu, ConvertColumnDefaultConstraintSnafu,
+    CreateTableOnInsertionSnafu, CreateTableSnafu, InsertSnafu, Result, SchemaNotFoundSnafu,
+};
 use crate::frontend::{FrontendOptions, Mode};
 use crate::table::route::TableRoutes;
 
@@ -159,41 +164,76 @@ impl Instance {
         Ok(expr)
     }
 
-    pub async fn handle_create(&self, expr: CreateExpr) {
-        self.admin().create(expr).await.unwrap();
+    pub async fn handle_create(&self, expr: CreateExpr) -> Result<Output> {
+        self.admin()
+            .create(expr)
+            .await
+            .and_then(admin_result_to_output)
+            .context(CreateTableSnafu)
     }
 
-    pub async fn handle_alter(&self, expr: AlterExpr) {
-        self.admin().alter(expr).await.unwrap();
+    pub async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
+        self.admin()
+            .alter(expr)
+            .await
+            .and_then(admin_result_to_output)
+            .context(AlterTableSnafu)
+    }
+
+    /// Handle all inserts
+    pub async fn handle_insert(&self, expr: InsertExpr) -> Result<Output> {
+        let table_name = &expr.table_name;
+        let catalog_name = "todo";
+        let schema_name = "todo";
+
+        if let Some(exprs) = &expr.expr {
+            match exprs {
+                Expr::Values(values) => {
+                    self.handle_insert_values(catalog_name, schema_name, &table_name, values)
+                        .await
+                }
+                Expr::Sql(_) => {
+                    // Frontend does not comprehend insert request that is raw SQL string
+                    self.database()
+                        .insert(expr)
+                        .await
+                        .and_then(Output::try_from)
+                        .context(InsertSnafu)
+                }
+            }
+        } else {
+            // expr is empty
+            Ok(Output::AffectedRows(0))
+        }
     }
 
     /// Handle insert requests in frontend
     /// If insert is SQL string flavor, just forward to datanode
     /// If insert is parsed InsertExpr, frontend should comprehend the schema and create/alter table on demand.
-    pub async fn handle_insert(
+    pub async fn handle_insert_values(
         &self,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        values: insert_expr::Values,
-    ) -> Result<()> {
+        values: &insert_expr::Values,
+    ) -> Result<Output> {
         let insert_batches = common_insert::insert_batches(&values.values).unwrap();
 
         // check if table already exist:
         // - if table does not exist, create table by inferred CreateExpr
-        // - if table exist, check if schema matchs. If any new column found, alter table by inferred `AlterExpr`
+        // - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
         match self
             .catalog_manager
             .as_ref()
-            .unwrap()
+            .expect("catalog manager cannot be None")
             .catalog(catalog_name)
-            .unwrap()
-            .unwrap()
+            .context(CatalogSnafu)?
+            .context(CatalogNotFoundSnafu { catalog_name })?
             .schema(schema_name)
-            .unwrap()
-            .unwrap()
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu { schema_name })?
             .table(table_name)
-            .unwrap()
+            .context(CatalogSnafu)?
         {
             None => {
                 self.create_table_by_insert_batches(
@@ -202,8 +242,11 @@ impl Instance {
                     table_name,
                     &insert_batches,
                 )
-                .await
-                .unwrap();
+                .await?;
+                info!(
+                    "Successfully created table on insertion: {}.{}.{}",
+                    catalog_name, schema_name, table_name
+                );
             }
             Some(table) => {
                 let schema = table.schema();
@@ -216,8 +259,11 @@ impl Instance {
                             add_columns: add_columns,
                         },
                     )
-                    .await
-                    .unwrap();
+                    .await?;
+                    info!(
+                        "Successfully altered table on insertion: {}.{}.{}",
+                        catalog_name, schema_name, table_name
+                    );
                 }
             }
         };
@@ -226,12 +272,11 @@ impl Instance {
             .insert(InsertExpr {
                 table_name: table_name.to_string(),
                 options: Default::default(),
-                expr: Some(insert_expr::Expr::Values(values)),
+                expr: Some(insert_expr::Expr::Values(values.clone())),
             })
             .await
-            .unwrap();
-        // do real insert
-        todo!()
+            .and_then(Output::try_from)
+            .context(InsertSnafu)
     }
 
     /// Infer create table expr from inserting data
@@ -241,15 +286,15 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         insert_batches: &[InsertBatch],
-    ) -> Result<()> {
+    ) -> Result<Output> {
         // Create table automatically, build schema from data.
         let table_id = self
             .table_id_provider
             .as_ref()
-            .unwrap()
+            .expect("table id provider must be set")
             .next_table_id()
             .await
-            .unwrap();
+            .context(BumpTableIdSnafu)?;
 
         let create_expr = common_insert::build_create_expr_from_insertion(
             catalog_name,
@@ -258,23 +303,24 @@ impl Instance {
             table_name,
             insert_batches,
         )
-        .unwrap();
+        .context(BuildCreateExprOnInsertionSnafu)?;
 
         info!(
             "Try to create table: {} automatically with request: {:?}",
             table_name, create_expr,
         );
-        self.admin().create(create_expr).await.unwrap();
-        info!("Success to create table: {} automatically", table_name);
-
-        Ok(())
+        self.admin()
+            .create(create_expr)
+            .await
+            .and_then(admin_result_to_output)
+            .context(CreateTableOnInsertionSnafu)
     }
 
     async fn add_new_columns_to_table(
         &self,
         table_name: &str,
         add_columns: AddColumns,
-    ) -> Result<()> {
+    ) -> Result<Output> {
         debug!(
             "Adding new columns: {:?} to table: {}",
             add_columns, table_name
@@ -285,8 +331,11 @@ impl Instance {
             catalog_name: None,
             kind: Some(Kind::AddColumns(add_columns)),
         };
-        self.admin().alter(expr).await.unwrap();
-        Ok(())
+        self.admin()
+            .alter(expr)
+            .await
+            .and_then(admin_result_to_output)
+            .context(AlterTableOnInsertionSnafu)
     }
 }
 
@@ -349,7 +398,7 @@ impl SqlQueryHandler for Instance {
                 self.database()
                     .insert(expr)
                     .await
-                    .and_then(|object_result| object_result.try_into())
+                    .and_then(Output::try_from)
             }
             Statement::CreateTable(create) => {
                 let expr = self
