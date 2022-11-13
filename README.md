@@ -22,6 +22,23 @@
     <a href="https://www.linkedin.com/company/greptime/"><img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg"></a>
 </p>
 
+## What is GreptimeDB
+
+GreptimeDB is an open-source time-series database with special focus on
+scalability, analytical capabilities and efficiency. It's designed to work on
+infrastructure of cloud era, and benefits from its elasticity and commodity
+storage.
+
+The core developers of GreptimeDB have been building time-series data platform
+for years. Based on their best-practices, GreptimeDB is born to give you:
+
+- A standalone binary that scales to highly-available distributed cluster, with transparent experience from user's perspective
+- Columnar data layout optimised for time-series, compacted, compressed, stored on various storage backends
+- Flexible index options, tackling high cardinality issues down
+- Distributed parallel query execution, leveraging elastic computing resource
+- Native SQL, and Python scripting for advanced analytical scenarios
+- Widely adopted database protocols and APIs
+- Extensible table engine architecture for extensive workloads
 
 ## Getting Started
 
