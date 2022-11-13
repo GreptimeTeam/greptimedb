@@ -6,7 +6,7 @@ use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
@@ -53,6 +53,7 @@ impl Instance {
                             table_id
                         }
                         Err(e) => {
+                            error!(e;"Failed to create table id when creating table: {:?}.{:?}.{:?}", &expr.catalog_name, &expr.schema_name, expr.table_name);
                             return AdminResultBuilder::default()
                                 .status_code(e.status_code() as u32)
                                 .err_msg(e.to_string())

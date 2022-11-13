@@ -24,7 +24,7 @@ use client::{Client, Database, Select};
 use common_error::prelude::{BoxedError, StatusCode};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use datatypes::schema::ColumnSchema;
 use meta_client::client::MetaClientBuilder;
 use meta_client::MetaClientOpts;
@@ -193,9 +193,11 @@ impl Instance {
 
     /// Handle create expr.
     pub async fn handle_create_table(&self, expr: CreateExpr) -> Result<Output> {
-        self.admin()
-            .create(expr)
-            .await
+        let result = self.admin().create(expr.clone()).await;
+        if let Err(e) = &result {
+            error!(e; "Failed to create table by expr: {:?}", expr);
+        }
+        result
             .and_then(admin_result_to_output)
             .context(CreateTableSnafu)
     }

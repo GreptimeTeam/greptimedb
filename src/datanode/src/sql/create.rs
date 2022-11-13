@@ -5,6 +5,7 @@ use catalog::{RegisterSchemaRequest, RegisterTableRequest};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_telemetry::tracing::info;
+use common_telemetry::tracing::log::error;
 use datatypes::schema::SchemaBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::TableConstraint;
@@ -16,9 +17,9 @@ use table::metadata::TableId;
 use table::requests::*;
 
 use crate::error::{
-    self, ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu,
-    InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu, RegisterSchemaSnafu,
-    Result,
+    self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateSchemaSnafu,
+    CreateTableSnafu, InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu,
+    RegisterSchemaSnafu, Result, SchemaNotFoundSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -40,10 +41,36 @@ impl SqlHandler {
 
     pub(crate) async fn create_table(&self, req: CreateTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
+        // first check if catalog and schema exist
+        let catalog = self
+            .catalog_manager
+            .catalog(&req.catalog_name)
+            .context(CatalogSnafu)?
+            .with_context(|| {
+                error!(
+                    "Failed to create table {}.{}.{}, catalog not found",
+                    &req.catalog_name, &req.schema_name, &req.table_name
+                );
+                CatalogNotFoundSnafu {
+                    name: &req.catalog_name,
+                }
+            })?;
+        catalog
+            .schema(&req.schema_name)
+            .context(CatalogSnafu)?
+            .with_context(|| {
+                error!(
+                    "Failed to create table {}.{}.{}, schema not found",
+                    &req.catalog_name, &req.schema_name, &req.table_name
+                );
+                SchemaNotFoundSnafu {
+                    name: &req.schema_name,
+                }
+            })?;
+
         // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
         let table_id = req.id;
-
         let table = self
             .table_engine
             .create_table(&ctx, req)

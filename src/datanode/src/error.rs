@@ -285,7 +285,7 @@ pub enum Error {
     EmptyInsertBatch,
 
     #[snafu(display(
-        "Table id provider not found, annot execute SQL directly on datanode in distributed mode"
+        "Table id provider not found, cannot execute SQL directly on datanode in distributed mode"
     ))]
     TableIdProviderNotFound { backtrace: Backtrace },
 
