@@ -18,7 +18,7 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
-use catalog::CatalogManagerRef;
+use catalog::{CatalogManagerRef, CatalogProviderRef, SchemaProviderRef};
 use client::admin::{admin_result_to_output, Admin};
 use client::{Client, Database, Select};
 use common_error::prelude::{BoxedError, StatusCode};
@@ -50,6 +50,7 @@ use crate::error::{
     CreateTableOnInsertionSnafu, CreateTableSnafu, InsertSnafu, Result, SchemaNotFoundSnafu,
 };
 use crate::frontend::{FrontendOptions, Mode};
+use crate::sql::insert_to_request;
 use crate::table::route::TableRoutes;
 
 #[async_trait]
@@ -66,8 +67,6 @@ pub trait FrontendInstance:
 {
     async fn start(&mut self) -> Result<()>;
 }
-
-pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 
 pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 
@@ -92,6 +91,7 @@ impl Default for Instance {
         Self {
             client: Client::default(),
             catalog_manager: None,
+            table_id_provider: None,
             mode: Mode::Standalone,
         }
     }
@@ -250,7 +250,9 @@ impl Instance {
             .context(CatalogNotFoundSnafu { catalog_name })?
             .schema(schema_name)
             .context(CatalogSnafu)?
-            .context(SchemaNotFoundSnafu { schema_name })?
+            .context(SchemaNotFoundSnafu {
+                schema_info: schema_name,
+            })?
             .table(table_name)
             .context(CatalogSnafu)?
         {
@@ -485,38 +487,6 @@ impl SqlQueryHandler for Instance {
                 .database()
                 .select(Select::Sql(query.to_string()))
                 .await
-                .and_then(|object_result| object_result.try_into()),
-
-            Statement::CreateDatabase(c) => {
-                let expr = CreateDatabaseExpr {
-                    database_name: c.name.to_string(),
-                };
-                self.admin()
-                    .create_database(expr)
-                    .await
-                    .and_then(admin_result_to_output)
-            }
-            Statement::Alter(alter_stmt) => self
-                .admin()
-                .alter(
-                    AlterExpr::try_from(alter_stmt)
-                        .map_err(BoxedError::new)
-                        .context(server_error::ExecuteAlterSnafu { query })?,
-                )
-                .await
-                .and_then(admin_result_to_output),
-            Statement::ShowCreateTable(_) => {
-                return server_error::NotSupportedSnafu { feat: query }.fail()
-            }
-        }
-        .map_err(BoxedError::new)
-        .context(server_error::ExecuteQuerySnafu { query })
-    }
-
-            Statement::ShowDatabases(_) | Statement::ShowTables(_) => self
-                .database()
-                .select(Select::Sql(query.to_string()))
-                .await
                 .and_then(|object_result| object_result.try_into())
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
@@ -547,6 +517,8 @@ impl SqlQueryHandler for Instance {
                 return server_error::NotSupportedSnafu { feat: query }.fail()
             }
         }
+        .map_err(BoxedError::new)
+        .context(server_error::ExecuteQuerySnafu { query })
     }
 
     async fn insert_script(&self, _name: &str, _script: &str) -> server_error::Result<()> {
