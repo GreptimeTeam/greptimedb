@@ -67,3 +67,8 @@ message CreateDatabaseExpr {
   //TODO(hl): maybe rename to schema_name?
   string database_name = 1;
 }
+
+message CreateDatabaseExpr {
+  //TODO(hl): maybe rename to schema_name?
+  string database_name = 1;
+}

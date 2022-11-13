@@ -6,6 +6,7 @@ use servers::query_handler::OpentsdbProtocolHandler;
 use snafu::prelude::*;
 
 use crate::error::Result;
+use crate::frontend::Mode;
 use crate::instance::Instance;
 
 #[async_trait]
@@ -13,12 +14,25 @@ impl OpentsdbProtocolHandler for Instance {
     async fn exec(&self, data_point: &DataPoint) -> server_error::Result<()> {
         // TODO(LFC): Insert metrics in batch, then make OpentsdbLineProtocolHandler::exec received multiple data points, when
         // metric table and tags can be created upon insertion.
-        self.insert_opentsdb_metric(data_point)
-            .await
-            .map_err(BoxedError::new)
-            .with_context(|_| server_error::PutOpentsdbDataPointSnafu {
-                data_point: format!("{:?}", data_point),
-            })?;
+        match self.mode {
+            Mode::Standalone => {
+                self.insert_opentsdb_metric(data_point)
+                    .await
+                    .map_err(BoxedError::new)
+                    .with_context(|_| server_error::PutOpentsdbDataPointSnafu {
+                        data_point: format!("{:?}", data_point),
+                    })?;
+            }
+            Mode::Distributed => {
+                self.dist_insert(vec![data_point.as_insert_request()])
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(server_error::ExecuteInsertSnafu {
+                        msg: "execute insert failed",
+                    })?;
+            }
+        }
+
         Ok(())
     }
 }

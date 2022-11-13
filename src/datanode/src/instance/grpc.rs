@@ -3,8 +3,8 @@ use std::ops::Deref;
 use api::result::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use api::v1::codec::RegionNumber;
 use api::v1::{
-    admin_expr, insert_expr, object_expr, select_expr, AdminExpr, AdminResult, CreateDatabaseExpr,
-    ObjectExpr, ObjectResult, SelectExpr,
+    admin_expr, codec::InsertBatch, insert_expr, object_expr, select_expr, AdminExpr, AdminResult,
+    CreateDatabaseExpr, ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -16,7 +16,7 @@ use query::plan::LogicalPlan;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
 use snafu::prelude::*;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
-use table::requests::CreateDatabaseRequest;
+use table::requests::{AddColumnRequest, CreateDatabaseRequest};
 
 use crate::error::{
     CatalogNotFoundSnafu, CatalogSnafu, DecodeLogicalPlanSnafu, EmptyInsertBatchSnafu,
@@ -24,6 +24,7 @@ use crate::error::{
     UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
+use crate::server::grpc::handler::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use crate::server::grpc::plan::PhysicalPlanner;
 use crate::server::grpc::select::to_object_result;
 
