@@ -142,7 +142,7 @@ pub struct JsonResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<JsonOutput>,
+    output: Option<Vec<JsonOutput>>,
 }
 
 impl JsonResponse {
@@ -154,7 +154,7 @@ impl JsonResponse {
         }
     }
 
-    fn with_output(output: Option<JsonOutput>) -> Self {
+    fn with_output(output: Option<Vec<JsonOutput>>) -> Self {
         JsonResponse {
             error: None,
             code: StatusCode::Success as u32,
@@ -166,18 +166,18 @@ impl JsonResponse {
     async fn from_output(output: Result<Output>) -> Self {
         match output {
             Ok(Output::AffectedRows(rows)) => {
-                Self::with_output(Some(JsonOutput::AffectedRows(rows)))
+                Self::with_output(Some(vec![JsonOutput::AffectedRows(rows)]))
             }
             Ok(Output::Stream(stream)) => match util::collect(stream).await {
                 Ok(rows) => match HttpRecordsOutput::try_from(rows) {
-                    Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
+                    Ok(rows) => Self::with_output(Some(vec![JsonOutput::Records(rows)])),
                     Err(err) => Self::with_error(err, StatusCode::Internal),
                 },
                 Err(e) => Self::with_error(format!("Recordbatch error: {}", e), e.status_code()),
             },
             Ok(Output::RecordBatches(recordbatches)) => {
                 match HttpRecordsOutput::try_from(recordbatches.take()) {
-                    Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
+                    Ok(rows) => Self::with_output(Some(vec![JsonOutput::Records(rows)])),
                     Err(err) => Self::with_error(err, StatusCode::Internal),
                 }
             }
@@ -195,7 +195,7 @@ impl JsonResponse {
         self.error.as_ref()
     }
 
-    pub fn output(&self) -> Option<&JsonOutput> {
+    pub fn output(&self) -> Option<&Vec<JsonOutput>> {
         self.output.as_ref()
     }
 }
@@ -398,11 +398,11 @@ mod test {
 
         let json_resp = JsonResponse::from_output(Ok(Output::RecordBatches(recordbatches))).await;
 
-        let json_output = json_resp.output.unwrap();
+        let json_output = &json_resp.output.unwrap()[0];
         if let JsonOutput::Records(r) = json_output {
             assert_eq!(r.num_rows(), 4);
             assert_eq!(r.num_cols(), 2);
-            let schema = r.schema.unwrap();
+            let schema = r.schema.as_ref().unwrap();
             assert_eq!(schema.column_schemas[0].name, "numbers");
             assert_eq!(schema.column_schemas[0].data_type, "UInt32");
             assert_eq!(r.rows[0][0], serde_json::Value::from(1));
