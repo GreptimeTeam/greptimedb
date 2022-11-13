@@ -121,7 +121,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Invaild InsertRequest, reason: {}", reason))]
+    #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
     InvalidInsertRequest {
         reason: String,
         backtrace: Backtrace,
@@ -214,6 +214,12 @@ pub enum Error {
 
     #[snafu(display("Failed to insert values to table, source: {}", source))]
     Insert {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to select from table, source: {}", source))]
+    Select {
         #[snafu(backtrace)]
         source: client::Error,
     },
@@ -322,6 +328,7 @@ impl ErrorExt for Error {
             Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
             Error::CreateTableOnInsertion { source, .. } => source.status_code(),
             Error::AlterTableOnInsertion { source, .. } => source.status_code(),
+            Error::Select { source, .. } => source.status_code(),
         }
     }
 

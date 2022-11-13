@@ -48,6 +48,7 @@ use crate::error::{
     self, AlterTableOnInsertionSnafu, AlterTableSnafu, BuildCreateExprOnInsertionSnafu,
     BumpTableIdSnafu, CatalogNotFoundSnafu, CatalogSnafu, ConvertColumnDefaultConstraintSnafu,
     CreateTableOnInsertionSnafu, CreateTableSnafu, InsertSnafu, Result, SchemaNotFoundSnafu,
+    SelectSnafu,
 };
 use crate::frontend::{FrontendOptions, Mode};
 use crate::sql::insert_to_request;
@@ -152,6 +153,14 @@ impl Instance {
         self.catalog_manager = Some(catalog_manager);
     }
 
+    pub async fn handle_select(&self, expr: Select) -> Result<Output> {
+        self.database()
+            .select(expr)
+            .await
+            .and_then(Output::try_from)
+            .context(SelectSnafu)
+    }
+
     /// Convert `CreateTable` statement to `CreateExpr` gRPC request.
     async fn create_to_expr(&self, create: CreateTable) -> Result<CreateExpr> {
         let (catalog_name, schema_name, table_name) =
@@ -182,7 +191,8 @@ impl Instance {
         Ok(expr)
     }
 
-    pub async fn handle_create(&self, expr: CreateExpr) -> Result<Output> {
+    /// Handle create expr.
+    pub async fn handle_create_table(&self, expr: CreateExpr) -> Result<Output> {
         self.admin()
             .create(expr)
             .await
@@ -190,6 +200,16 @@ impl Instance {
             .context(CreateTableSnafu)
     }
 
+    /// Handle create database expr.
+    pub async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
+        self.admin()
+            .create_database(expr)
+            .await
+            .and_then(admin_result_to_output)
+            .context(CreateTableSnafu)
+    }
+
+    /// Handle alter expr
     pub async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
         self.admin()
             .alter(expr)
@@ -198,6 +218,7 @@ impl Instance {
             .context(AlterTableSnafu)
     }
 
+    /// Handle batch inserts
     pub async fn handle_inserts(&self, insert_expr: &[InsertExpr]) -> Result<Output> {
         let mut success = 0;
         for expr in insert_expr {
@@ -208,7 +229,7 @@ impl Instance {
         Ok(Output::AffectedRows(success))
     }
 
-    /// Handle all inserts
+    /// Handle insert. for 'values' insertion, create/alter the destination table on demand.
     pub async fn handle_insert(&self, insert_expr: &InsertExpr) -> Result<Output> {
         let table_name = &insert_expr.table_name;
         let catalog_name = "greptime";
@@ -276,6 +297,9 @@ impl Instance {
             .context(InsertSnafu)
     }
 
+    // check if table already exist:
+    // - if table does not exist, create table by inferred CreateExpr
+    // - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
     async fn create_or_alter_table_on_demand(
         &self,
         catalog_name: &str,
@@ -283,9 +307,6 @@ impl Instance {
         table_name: &str,
         insert_batches: &[InsertBatch],
     ) -> Result<()> {
-        // check if table already exist:
-        // - if table does not exist, create table by inferred CreateExpr
-        // - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
         match self
             .catalog_manager
             .as_ref()
@@ -473,10 +494,8 @@ impl SqlQueryHandler for Instance {
 
         match stmt {
             Statement::Query(_) => self
-                .database()
-                .select(Select::Sql(query.to_string()))
+                .handle_select(Select::Sql(query.to_string()))
                 .await
-                .and_then(|object_result| object_result.try_into())
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
             Statement::Insert(insert) => match self.mode {
@@ -497,10 +516,8 @@ impl SqlQueryHandler for Instance {
                         region_number: 0,
                         options: HashMap::default(),
                     };
-                    self.database()
-                        .insert(expr)
+                    self.handle_insert(&expr)
                         .await
-                        .and_then(Output::try_from)
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteQuerySnafu { query })
                 }
@@ -521,19 +538,15 @@ impl SqlQueryHandler for Instance {
                     .await
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu { query })?;
-                self.admin()
-                    .create(expr)
+                self.handle_create_table(expr)
                     .await
-                    .and_then(admin_result_to_output)
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu { query })
             }
 
             Statement::ShowDatabases(_) | Statement::ShowTables(_) => self
-                .database()
-                .select(Select::Sql(query.to_string()))
+                .handle_select(Select::Sql(query.to_string()))
                 .await
-                .and_then(|object_result| object_result.try_into())
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
 
@@ -541,22 +554,18 @@ impl SqlQueryHandler for Instance {
                 let expr = CreateDatabaseExpr {
                     database_name: c.name.to_string(),
                 };
-                self.admin()
-                    .create_database(expr)
+                self.handle_create_database(expr)
                     .await
-                    .and_then(admin_result_to_output)
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu { query })
             }
             Statement::Alter(alter_stmt) => self
-                .admin()
-                .alter(
+                .handle_alter(
                     AlterExpr::try_from(alter_stmt)
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteAlterSnafu { query })?,
                 )
                 .await
-                .and_then(admin_result_to_output)
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
             Statement::ShowCreateTable(_) => {
