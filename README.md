@@ -30,63 +30,41 @@ docker build --network host -f docker/Dockerfile -t greptimedb .
 
 ## Usage
 
-### Start Datanode
+### Start in standalone mode
 
 ```
-// Start datanode with default options.
-cargo run -- datanode start
+// Start datanode and frontend with default options.
+cargo run  -- --log-level=debug standalone start
 
 OR
 
-// Start datanode with `http-addr` option.
-cargo run -- datanode start --http-addr=0.0.0.0:9999
+// Start with `http-addr` option.
+cargo run  -- --log-level=debug standalone start --http-addr=0.0.0.0:9999
 
 OR
 
+// Start with `mysql-addr` option.
+cargo run  -- --log-level=debug standalone start --mysql-addr=0.0.0.0:9999
+
+OR
 // Start datanode with `log-dir` and `log-level` options.
-cargo run -- --log-dir=logs --log-level=debug datanode start
-```
-
-Start datanode with config file:
+cargo run  -- --log-dir=logs --log-level=debug standalone start --mysql-addr=0.0.0.0:4102
 
 ```
-cargo run -- --log-dir=logs --log-level=debug datanode start -c ./config/datanode.example.toml
+
+Start with config file:
+
+```
+cargo run -- --log-dir=logs --log-level=debug standalone start -c ./config/standalone.example.toml
 ```
 
-Start datanode by runing docker container:
+Start datanode by running docker container:
 
 ```
 docker run -p 3000:3000 \
 -p 3001:3001 \
 -p 3306:3306 \
 greptimedb
-```
-
-### Start Frontend
-
-Frontend should connect to Datanode, so **Datanode must have been started** at first!
-
-```
-// Connects to local Datanode at its default GRPC port: 3001
-
-// Start Frontend with default options.
-cargo run -- frontend start
-
-OR
-
-// Start Frontend with `mysql-addr` option.
-cargo run -- frontend start --mysql-addr=0.0.0.0:9999
-
-OR
-
-// Start datanode with `log-dir` and `log-level` options.
-cargo run -- --log-dir=logs --log-level=debug frontend start
-```
-
-Start datanode with config file:
-
-```
-cargo run -- --log-dir=logs --log-level=debug frontend start -c ./config/frontend.example.toml
 ```
 
 ### SQL Operations

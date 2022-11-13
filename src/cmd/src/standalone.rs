@@ -62,7 +62,6 @@ struct StartCommand {
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        info!("Datanode start command: {:#?}", self);
         let fe_opts = FrontendOptions::try_from(self)?;
         let dn_opts = DatanodeOptions::default();
 
@@ -151,10 +150,43 @@ impl TryFrom<StartCommand> for FrontendOptions {
             });
         }
 
-        opts.influxdb_options = Some(InfluxdbOptions {
-            enable: cmd.influxdb_enable,
-        });
+        if cmd.influxdb_enable {
+            opts.influxdb_options = Some(InfluxdbOptions { enable: true });
+        }
 
         Ok(opts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read_config_file() {
+        let cmd = StartCommand {
+            http_addr: None,
+            rpc_addr: None,
+            mysql_addr: None,
+            postgres_addr: None,
+            opentsdb_addr: None,
+            config_file: Some(format!(
+                "{}/../../config/standalone.example.toml",
+                std::env::current_dir().unwrap().as_path().to_str().unwrap()
+            )),
+            influxdb_enable: false,
+        };
+
+        let fe_opts = FrontendOptions::try_from(cmd).unwrap();
+        assert_eq!(Mode::Standalone, fe_opts.mode);
+        assert_eq!("127.0.0.1:3001".to_string(), fe_opts.datanode_rpc_addr);
+        assert_eq!(Some("0.0.0.0:4000".to_string()), fe_opts.http_addr);
+        assert_eq!(
+            "0.0.0.0:4001".to_string(),
+            fe_opts.grpc_options.unwrap().addr
+        );
+        assert_eq!("0.0.0.0:4003", fe_opts.mysql_options.as_ref().unwrap().addr);
+        assert_eq!(4, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
+        assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
     }
 }

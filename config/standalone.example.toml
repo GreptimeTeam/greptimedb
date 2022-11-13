@@ -1,0 +1,14 @@
+mode = 'standalone'
+datanode_rpc_addr = '127.0.0.1:3001'
+http_addr = '0.0.0.0:4000'
+
+[grpc_options]
+addr = '0.0.0.0:4001'
+runtime_size = 4
+
+[mysql_options]
+addr = '0.0.0.0:4003'
+runtime_size = 4
+
+[influxdb_options]
+enable = true
