@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use datatypes::prelude::*;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -54,8 +56,6 @@ pub struct RangePartitionRule {
 }
 
 impl RangePartitionRule {
-    // FIXME(LFC): no allow, for clippy temporarily
-    #[allow(dead_code)]
     pub(crate) fn new(
         column_name: impl Into<String>,
         bounds: Vec<Value>,
@@ -68,17 +68,26 @@ impl RangePartitionRule {
         }
     }
 
-    fn column_name(&self) -> &String {
+    pub(crate) fn column_name(&self) -> &String {
         &self.column_name
     }
 
-    fn all_regions(&self) -> &Vec<RegionNumber> {
+    pub(crate) fn all_regions(&self) -> &Vec<RegionNumber> {
         &self.regions
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bounds(&self) -> &Vec<Value> {
+        &self.bounds
     }
 }
 
 impl PartitionRule for RangePartitionRule {
     type Error = Error;
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
     fn partition_columns(&self) -> Vec<String> {
         vec![self.column_name().to_string()]

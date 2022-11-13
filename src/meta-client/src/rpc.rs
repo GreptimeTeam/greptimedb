@@ -1,4 +1,4 @@
-mod router;
+pub mod router;
 mod store;
 pub mod util;
 

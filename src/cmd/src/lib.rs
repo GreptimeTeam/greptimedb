@@ -1,3 +1,5 @@
+#![feature(assert_matches)]
+
 pub mod datanode;
 pub mod error;
 pub mod frontend;

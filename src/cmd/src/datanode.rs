@@ -84,9 +84,9 @@ impl TryFrom<StartCommand> for DatanodeOptions {
                 // Running mode is only set to Distributed when
                 // both metasrv addr and node id are set in
                 // commandline options
-                opts.meta_client_opts.metasrv_addr = meta_addr;
+                opts.meta_client_opts.metasrv_addr = meta_addr.clone();
                 opts.node_id = node_id;
-                opts.mode = Mode::Distributed;
+                opts.mode = Mode::Distributed(vec![meta_addr]);
             }
             (None, None) => {
                 opts.mode = Mode::Standalone;
@@ -110,6 +110,8 @@ impl TryFrom<StartCommand> for DatanodeOptions {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use datanode::datanode::ObjectStoreConfig;
     use frontend::frontend::Mode;
 
@@ -162,18 +164,16 @@ mod tests {
             .mode
         );
 
-        assert_eq!(
-            Mode::Distributed,
-            DatanodeOptions::try_from(StartCommand {
-                node_id: Some(42),
-                rpc_addr: None,
-                mysql_addr: None,
-                metasrv_addr: Some("127.0.0.1:3002".to_string()),
-                config_file: None
-            })
-            .unwrap()
-            .mode
-        );
+        let mode = DatanodeOptions::try_from(StartCommand {
+            node_id: Some(42),
+            rpc_addr: None,
+            mysql_addr:  None,
+            metasrv_addr: Some("127.0.0.1:3002".to_string()),
+            config_file: None,
+        })
+        .unwrap()
+        .mode;
+        assert_matches!(mode, Mode::Distributed(_));
 
         assert!(DatanodeOptions::try_from(StartCommand {
             node_id: None,

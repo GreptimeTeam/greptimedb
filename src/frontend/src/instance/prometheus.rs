@@ -107,7 +107,7 @@ impl PrometheusProtocolHandler for Instance {
                         msg: "failed to write prometheus remote request",
                     })?;
             }
-            Mode::Distributed => {
+            Mode::Distributed(_) => {
                 let inserts = prometheus::write_request_to_insert_reqs(request)?;
 
                 self.dist_insert(inserts)

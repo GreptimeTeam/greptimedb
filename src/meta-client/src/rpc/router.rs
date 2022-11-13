@@ -141,6 +141,7 @@ pub struct TableRoute {
 pub struct Table {
     pub id: u64,
     pub table_name: TableName,
+    #[serde(serialize_with = "as_utf8")]
     pub table_schema: Vec<u8>,
 }
 
@@ -190,13 +191,24 @@ impl From<PbRegion> for Region {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Partition {
-    #[serde(serialize_with = "as_utf8")]
+    #[serde(serialize_with = "as_utf8_vec")]
     pub column_list: Vec<Vec<u8>>,
-    #[serde(serialize_with = "as_utf8")]
+    #[serde(serialize_with = "as_utf8_vec")]
     pub value_list: Vec<Vec<u8>>,
 }
 
-fn as_utf8<S: Serializer>(val: &[Vec<u8>], serializer: S) -> std::result::Result<S::Ok, S::Error> {
+fn as_utf8<S: Serializer>(val: &[u8], serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(
+        String::from_utf8(val.to_vec())
+            .unwrap_or_else(|_| "<unknown-not-UTF8>".to_string())
+            .as_str(),
+    )
+}
+
+fn as_utf8_vec<S: Serializer>(
+    val: &[Vec<u8>],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
     serializer.serialize_str(
         val.iter()
             .map(|v| {

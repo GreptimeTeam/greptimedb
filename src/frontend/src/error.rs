@@ -164,16 +164,22 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed access catalog: {}", source))]
+    #[snafu(display("General catalog error: {}", source))]
     Catalog {
         #[snafu(backtrace)]
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Failed to parse catalog entry: {}", source))]
-    ParseCatalogEntry {
+    #[snafu(display("Failed to serialize or deserialize catalog entry: {}", source))]
+    CatalogEntrySerde {
         #[snafu(backtrace)]
         source: common_catalog::error::Error,
+    },
+
+    #[snafu(display("Failed to start Meta client, source: {}", source))]
+    StartMetaClient {
+        #[snafu(backtrace)]
+        source: meta_client::error::Error,
     },
 
     #[snafu(display("Failed to request Meta, source: {}", source))]
@@ -280,6 +286,63 @@ pub enum Error {
         #[snafu(backtrace)]
         source: sql::error::Error,
     },
+
+    #[snafu(display("Failed to find region routes for table {}", table_name))]
+    FindRegionRoutes {
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to serialize value to json, source: {}", source))]
+    SerializeJson {
+        source: serde_json::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to deserialize value from json, source: {}", source))]
+    DeserializeJson {
+        source: serde_json::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to find leader peer for region {} in table {}",
+        region,
+        table_name
+    ))]
+    FindLeaderPeer {
+        region: u64,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to find partition info for region {} in table {}",
+        region,
+        table_name
+    ))]
+    FindRegionPartition {
+        region: u64,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Illegal table routes data for table {}, error message: {}",
+        table_name,
+        err_msg
+    ))]
+    IllegalTableRoutesData {
+        table_name: String,
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid admin result, source: {}", source))]
+    InvalidAdminResult {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -287,8 +350,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ConnectDatanode { .. }
-            | Error::ParseAddr { .. }
+            Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::FindRegion { .. }
             | Error::FindRegions { .. }
@@ -311,12 +373,20 @@ impl ErrorExt for Error {
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::ConvertScalarValue { source, .. } => source.status_code(),
 
-            Error::RequestDatanode { source } => source.status_code(),
+            Error::ConnectDatanode { source, .. }
+            | Error::RequestDatanode { source }
+            | Error::InvalidAdminResult { source } => source.status_code(),
 
             Error::ColumnDataType { .. }
             | Error::FindDatanode { .. }
             | Error::GetCache { .. }
-            | Error::FindTableRoutes { .. } => StatusCode::Internal,
+            | Error::FindTableRoutes { .. }
+            | Error::SerializeJson { .. }
+            | Error::DeserializeJson { .. }
+            | Error::FindRegionRoutes { .. }
+            | Error::FindLeaderPeer { .. }
+            | Error::FindRegionPartition { .. }
+            | Error::IllegalTableRoutesData { .. } => StatusCode::Internal,
 
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
                 StatusCode::Unexpected
@@ -328,9 +398,11 @@ impl ErrorExt for Error {
 
             Error::JoinTask { .. } => StatusCode::Unexpected,
             Error::Catalog { source, .. } => source.status_code(),
-            Error::ParseCatalogEntry { source, .. } => source.status_code(),
+            Error::CatalogEntrySerde { source, .. } => source.status_code(),
 
-            Error::RequestMeta { source } => source.status_code(),
+            Error::StartMetaClient { source } | Error::RequestMeta { source } => {
+                source.status_code()
+            }
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
             Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,

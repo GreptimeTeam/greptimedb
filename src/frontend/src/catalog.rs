@@ -2,9 +2,7 @@ use std::any::Any;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use catalog::error::{
-    DeserializePartitionRuleSnafu, InvalidCatalogValueSnafu, InvalidSchemaInCatalogSnafu,
-};
+use catalog::error::{InvalidCatalogValueSnafu, InvalidSchemaInCatalogSnafu};
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
     CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSchemaRequest,
@@ -17,7 +15,6 @@ use snafu::prelude::*;
 use table::TableRef;
 
 use crate::datanode::DatanodeClients;
-use crate::partitioning::range::RangePartitionRule;
 use crate::table::route::TableRoutes;
 use crate::table::DistTable;
 
@@ -39,6 +36,10 @@ impl FrontendCatalogManager {
             table_routes,
             datanode_clients,
         }
+    }
+
+    pub(crate) fn backend(&self) -> KvBackendRef {
+        self.backend.clone()
     }
 }
 
@@ -249,14 +250,6 @@ impl SchemaProvider for FrontendSchemaProvider {
                 let val = TableGlobalValue::parse(String::from_utf8_lossy(&res.1))
                     .context(InvalidCatalogValueSnafu)?;
 
-                // TODO(hl): We need to deserialize string to PartitionRule trait object
-                let partition_rule: Arc<RangePartitionRule> =
-                    Arc::new(serde_json::from_str(&val.partition_rules).context(
-                        DeserializePartitionRuleSnafu {
-                            data: &val.partition_rules,
-                        },
-                    )?);
-
                 let table = Arc::new(DistTable {
                     table_name,
                     schema: Arc::new(
@@ -265,7 +258,6 @@ impl SchemaProvider for FrontendSchemaProvider {
                             .try_into()
                             .context(InvalidSchemaInCatalogSnafu)?,
                     ),
-                    partition_rule,
                     table_routes,
                     datanode_clients,
                 });

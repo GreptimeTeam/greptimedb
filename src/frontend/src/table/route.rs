@@ -53,4 +53,13 @@ impl TableRoutes {
         let route = resp.table_routes.swap_remove(0);
         Ok(Arc::new(route))
     }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_table_route(
+        &self,
+        table_name: TableName,
+        table_route: Arc<TableRoute>,
+    ) {
+        self.cache.insert(table_name, table_route).await
+    }
 }
