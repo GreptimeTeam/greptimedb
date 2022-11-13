@@ -22,7 +22,7 @@ use common_telemetry::logging::info;
 use datatypes::data_type::DataType;
 use futures::FutureExt;
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ensure;
 use snafu::ResultExt;
@@ -49,18 +49,32 @@ pub struct HttpServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub struct ColumnSchema {
     name: String,
     data_type: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+impl ColumnSchema {
+    pub fn new(name: String, data_type: String) -> ColumnSchema {
+        ColumnSchema { name, data_type }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub struct Schema {
     column_schemas: Vec<ColumnSchema>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+impl Schema {
+    pub fn new(columns: Vec<ColumnSchema>) -> Schema {
+        Schema {
+            column_schemas: columns,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub struct HttpRecordsOutput {
     schema: Option<Schema>,
     rows: Vec<Vec<Value>>,
@@ -76,6 +90,14 @@ impl HttpRecordsOutput {
             .as_ref()
             .map(|x| x.column_schemas.len())
             .unwrap_or(0)
+    }
+
+    pub fn schema(&self) -> Option<&Schema> {
+        self.schema.as_ref()
+    }
+
+    pub fn rows(&self) -> &Vec<Vec<Value>> {
+        &self.rows
     }
 }
 
@@ -129,20 +151,22 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
     }
 }
 
-#[derive(Serialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum JsonOutput {
     AffectedRows(usize),
     Records(HttpRecordsOutput),
 }
 
-#[derive(Serialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct JsonResponse {
     code: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<Vec<JsonOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_time_ms: Option<u64>,
 }
 
 impl JsonResponse {
@@ -151,6 +175,7 @@ impl JsonResponse {
             error: Some(error),
             code: error_code as u32,
             output: None,
+            execution_time_ms: None,
         }
     }
 
@@ -159,7 +184,13 @@ impl JsonResponse {
             error: None,
             code: StatusCode::Success as u32,
             output,
+            execution_time_ms: None,
         }
+    }
+
+    fn with_execution_time(mut self, execution_time: u128) -> Self {
+        self.execution_time_ms = Some(execution_time as u64);
+        self
     }
 
     /// Create a json response from query result
@@ -187,6 +218,10 @@ impl JsonResponse {
         }
     }
 
+    pub fn code(&self) -> u32 {
+        self.code
+    }
+
     pub fn success(&self) -> bool {
         self.code == (StatusCode::Success as u32)
     }
@@ -197,6 +232,10 @@ impl JsonResponse {
 
     pub fn output(&self) -> Option<&Vec<JsonOutput>> {
         self.output.as_ref()
+    }
+
+    pub fn execution_time_ms(&self) -> Option<u64> {
+        self.execution_time_ms
     }
 }
 

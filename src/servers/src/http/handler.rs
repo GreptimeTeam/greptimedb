@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, RawBody, State};
@@ -23,14 +24,17 @@ pub async fn sql(
     State(sql_handler): State<SqlQueryHandlerRef>,
     Query(params): Query<SqlQuery>,
 ) -> Json<JsonResponse> {
-    if let Some(ref sql) = params.sql {
-        Json(JsonResponse::from_output(sql_handler.do_query(sql).await).await)
+    let start = Instant::now();
+    let resp = if let Some(ref sql) = params.sql {
+        JsonResponse::from_output(sql_handler.do_query(sql).await).await
     } else {
-        Json(JsonResponse::with_error(
+        JsonResponse::with_error(
             "sql parameter is required.".to_string(),
             StatusCode::InvalidArguments,
-        ))
-    }
+        )
+    };
+
+    Json(resp.with_execution_time(start.elapsed().as_millis()))
 }
 
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
@@ -104,6 +108,7 @@ pub async fn run_script(
     State(query_handler): State<SqlQueryHandlerRef>,
     Query(params): Query<ScriptQuery>,
 ) -> Json<JsonResponse> {
+    let start = Instant::now();
     let name = params.name.as_ref();
 
     if name.is_none() || name.unwrap().is_empty() {
@@ -111,6 +116,7 @@ pub async fn run_script(
     }
 
     let output = query_handler.execute_script(name.unwrap()).await;
+    let resp = JsonResponse::from_output(output).await;
 
-    Json(JsonResponse::from_output(output).await)
+    Json(resp.with_execution_time(start.elapsed().as_millis()))
 }

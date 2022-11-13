@@ -5,7 +5,8 @@ use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
 use datatypes::prelude::ConcreteDataType;
-use servers::http::HttpServer;
+use serde_json::json;
+use servers::http::{ColumnSchema, HttpServer, JsonOutput, JsonResponse, Schema};
 use servers::server::Server;
 use test_util::TestGuard;
 
@@ -31,11 +32,11 @@ async fn test_sql_api() {
     let res = client.get("/v1/sql").send().await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = res.text().await;
-    assert_eq!(
-        body,
-        r#"{"code":1004,"error":"sql parameter is required."}"#
-    );
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    // body json: r#"{"code":1004,"error":"sql parameter is required."}"#
+    assert_eq!(body.code(), 1004);
+    assert_eq!(body.error().unwrap(), "sql parameter is required.");
+    assert!(body.execution_time_ms().is_some());
 
     let res = client
         .get("/v1/sql?sql=select * from numbers limit 10")
@@ -43,11 +44,30 @@ async fn test_sql_api() {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = res.text().await;
-    assert_eq!(
-        body,
-        r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"number","data_type":"UInt32"}]},"rows":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]]}}]}"#
-    );
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    // body json:
+    // r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"number","data_type":"UInt32"}]},"rows":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]]}}]}"#
+
+    assert!(body.success());
+    assert!(body.execution_time_ms().is_some());
+
+    let output = body.output().unwrap();
+    assert_eq!(output.len(), 1);
+    if let JsonOutput::Records(ref records) = output[0] {
+        assert_eq!(records.num_cols(), 1);
+        assert_eq!(records.num_rows(), 10);
+        assert_eq!(
+            records.schema().unwrap(),
+            &Schema::new(vec![ColumnSchema::new(
+                "number".to_owned(),
+                "UInt32".to_owned()
+            )])
+        );
+        assert_eq!(records.rows()[0][0], json!(0));
+        assert_eq!(records.rows()[9][0], json!(9));
+    } else {
+        unreachable!()
+    }
 
     // test insert and select
     let res = client
@@ -63,11 +83,31 @@ async fn test_sql_api() {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = res.text().await;
-    assert_eq!(
-        body,
-        r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"Timestamp"}]},"rows":[["host",66.6,1024.0,0]]}}]}"#
-    );
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    // body json: r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"Timestamp"}]},"rows":[["host",66.6,1024.0,0]]}}]}"#
+    assert!(body.success());
+    assert!(body.execution_time_ms().is_some());
+    let output = body.output().unwrap();
+    assert_eq!(output.len(), 1);
+    if let JsonOutput::Records(ref records) = output[0] {
+        assert_eq!(records.num_cols(), 4);
+        assert_eq!(records.num_rows(), 1);
+        assert_eq!(
+            records.schema().unwrap(),
+            &Schema::new(vec![
+                ColumnSchema::new("host".to_owned(), "String".to_owned()),
+                ColumnSchema::new("cpu".to_owned(), "Float64".to_owned()),
+                ColumnSchema::new("memory".to_owned(), "Float64".to_owned()),
+                ColumnSchema::new("ts".to_owned(), "Timestamp".to_owned())
+            ])
+        );
+        assert_eq!(
+            records.rows()[0],
+            vec![json!("host"), json!(66.6), json!(1024.0), json!(0)]
+        );
+    } else {
+        unreachable!();
+    }
 
     // select with projections
     let res = client
@@ -76,11 +116,27 @@ async fn test_sql_api() {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = res.text().await;
-    assert_eq!(
-        body,
-        r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"Timestamp"}]},"rows":[[66.6,0]]}}]}"#
-    );
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    // body json:
+    // r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"Timestamp"}]},"rows":[[66.6,0]]}}]}"#
+    assert!(body.success());
+    assert!(body.execution_time_ms().is_some());
+    let output = body.output().unwrap();
+    assert_eq!(output.len(), 1);
+    if let JsonOutput::Records(ref records) = output[0] {
+        assert_eq!(records.num_cols(), 2);
+        assert_eq!(records.num_rows(), 1);
+        assert_eq!(
+            records.schema().unwrap(),
+            &Schema::new(vec![
+                ColumnSchema::new("cpu".to_owned(), "Float64".to_owned()),
+                ColumnSchema::new("ts".to_owned(), "Timestamp".to_owned())
+            ])
+        );
+        assert_eq!(records.rows()[0], vec![json!(66.6), json!(0)]);
+    } else {
+        unreachable!()
+    }
 
     // select with column alias
     let res = client
@@ -89,11 +145,27 @@ async fn test_sql_api() {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = res.text().await;
-    assert_eq!(
-        body,
-        r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"Timestamp"}]},"rows":[[66.6,0]]}}]}"#
-    );
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    // body json:
+    // r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"Timestamp"}]},"rows":[[66.6,0]]}}]}"#
+    assert!(body.success());
+    assert!(body.execution_time_ms().is_some());
+    let output = body.output().unwrap();
+    assert_eq!(output.len(), 1);
+    if let JsonOutput::Records(ref records) = output[0] {
+        assert_eq!(records.num_cols(), 2);
+        assert_eq!(records.num_rows(), 1);
+        assert_eq!(
+            records.schema().unwrap(),
+            &Schema::new(vec![
+                ColumnSchema::new("c".to_owned(), "Float64".to_owned()),
+                ColumnSchema::new("time".to_owned(), "Timestamp".to_owned())
+            ])
+        );
+        assert_eq!(records.rows()[0], vec![json!(66.6), json!(0)]);
+    } else {
+        unreachable!()
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -135,18 +207,36 @@ def test(n):
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = res.text().await;
-    assert_eq!(body, r#"{"code":0}"#,);
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    // body json: r#"{"code":0}"#
+    assert_eq!(body.code(), 0);
+    assert!(body.output().is_none());
 
     // call script
     let res = client.post("/v1/run-script?name=test").send().await;
     assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
 
-    let body = res.text().await;
-    assert_eq!(
-        body,
-        r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}}]}"#,
-    );
+    // body json:
+    // r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}}]}"#
+    assert_eq!(body.code(), 0);
+    assert!(body.execution_time_ms().is_some());
+    let output = body.output().unwrap();
+    assert_eq!(output.len(), 1);
+    if let JsonOutput::Records(ref records) = output[0] {
+        assert_eq!(records.num_cols(), 1);
+        assert_eq!(records.num_rows(), 10);
+        assert_eq!(
+            records.schema().unwrap(),
+            &Schema::new(vec![ColumnSchema::new(
+                "n".to_owned(),
+                "Float64".to_owned()
+            )])
+        );
+        assert_eq!(records.rows()[0][0], json!(1.0));
+    } else {
+        unreachable!()
+    }
 }
 
 async fn start_test_app(addr: &str) -> (SocketAddr, TestGuard) {
