@@ -82,4 +82,8 @@ impl Datanode {
         self.services.start(&self.opts).await?;
         Ok(())
     }
+
+    pub fn get_instance(&self) -> InstanceRef {
+        self.instance.clone()
+    }
 }

@@ -11,6 +11,12 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
+    #[snafu(display("Failed to build frontend, source: {}", source))]
+    BuildFrontend {
+        #[snafu(backtrace)]
+        source: frontend::error::Error,
+    },
+
     #[snafu(display("Failed to start frontend, source: {}", source))]
     StartFrontend {
         #[snafu(backtrace)]
@@ -38,6 +44,9 @@ pub enum Error {
 
     #[snafu(display("Missing config, msg: {}", msg))]
     MissingConfig { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Illegal config: {}", msg))]
+    IllegalConfig { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -51,6 +60,8 @@ impl ErrorExt for Error {
             Error::ReadConfig { .. } | Error::ParseConfig { .. } | Error::MissingConfig { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::IllegalConfig { .. } => StatusCode::InvalidArguments,
+            Error::BuildFrontend { source, .. } => source.status_code(),
         }
     }
 

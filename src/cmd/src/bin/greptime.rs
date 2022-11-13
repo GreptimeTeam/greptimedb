@@ -1,10 +1,10 @@
 use std::fmt;
 
 use clap::Parser;
-use cmd::datanode;
 use cmd::error::Result;
 use cmd::frontend;
 use cmd::metasrv;
+use cmd::{datanode, standalone};
 use common_telemetry::logging::error;
 use common_telemetry::logging::info;
 
@@ -33,6 +33,8 @@ enum SubCommand {
     Frontend(frontend::Command),
     #[clap(name = "metasrv")]
     Metasrv(metasrv::Command),
+    #[clap(name = "standalone")]
+    Standalone(standalone::Command),
 }
 
 impl SubCommand {
@@ -41,6 +43,7 @@ impl SubCommand {
             SubCommand::Datanode(cmd) => cmd.run().await,
             SubCommand::Frontend(cmd) => cmd.run().await,
             SubCommand::Metasrv(cmd) => cmd.run().await,
+            SubCommand::Standalone(cmd) => cmd.run().await,
         }
     }
 }
@@ -51,6 +54,7 @@ impl fmt::Display for SubCommand {
             SubCommand::Datanode(..) => write!(f, "greptime-datanode"),
             SubCommand::Frontend(..) => write!(f, "greptime-frontend"),
             SubCommand::Metasrv(..) => write!(f, "greptime-metasrv"),
+            SubCommand::Standalone(..) => write!(f, "greptime-standalone"),
         }
     }
 }
