@@ -119,7 +119,6 @@ fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<
     let table_name = insert.table_name.clone();
     let insert_batch = insert_request_to_insert_batch(&insert)?;
     Ok(InsertExpr {
-        catalog_name: insert.catalog_name,
         schema_name: insert.schema_name,
         table_name,
         expr: Some(Expr::Values(insert_expr::Values {

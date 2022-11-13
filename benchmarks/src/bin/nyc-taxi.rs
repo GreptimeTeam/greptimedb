@@ -97,7 +97,6 @@ async fn write_data(
         let row_count = record_batch.num_rows();
         let insert_batch = convert_record_batch(record_batch).into();
         let insert_expr = InsertExpr {
-            catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
             table_name: TABLE_NAME.to_string(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values {

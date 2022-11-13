@@ -285,7 +285,6 @@ impl Instance {
         .await?;
         self.database()
             .insert(InsertExpr {
-                catalog_name: catalog_name.to_string(),
                 schema_name: schema_name.to_string(),
                 table_name: table_name.to_string(),
                 region_number,
@@ -500,7 +499,7 @@ impl SqlQueryHandler for Instance {
                 .context(server_error::ExecuteQuerySnafu { query }),
             Statement::Insert(insert) => match self.mode {
                 Mode::Standalone => {
-                    let (catalog_name, schema_name, table_name) = insert
+                    let (_, schema_name, table_name) = insert
                         .full_table_name()
                         .context(error::ParseSqlSnafu)
                         .map_err(BoxedError::new)
@@ -509,7 +508,6 @@ impl SqlQueryHandler for Instance {
                         })?;
 
                     let expr = InsertExpr {
-                        catalog_name,
                         schema_name,
                         table_name,
                         expr: Some(insert_expr::Expr::Sql(query.to_string())),
@@ -903,7 +901,6 @@ mod tests {
         }
         .into()];
         let insert_expr = InsertExpr {
-            catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
             table_name: "demo".to_string(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),

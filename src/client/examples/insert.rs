@@ -15,7 +15,6 @@ async fn run() {
     let db = Database::new("greptime", client);
 
     let expr = InsertExpr {
-        catalog_name: "greptime".to_string(),
         schema_name: "public".to_string(),
         table_name: "demo".to_string(),
         expr: Some(insert_expr::Expr::Values(insert_expr::Values {
